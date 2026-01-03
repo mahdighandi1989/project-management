@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 
 from .core.config import settings
 from .api.routes import debate, models, chat, settings as settings_routes
-from .api.routes import projects, diagrams
+from .api.routes import projects, diagrams, creator
 
 # تنظیم logging
 logging.basicConfig(
@@ -106,6 +106,7 @@ app.include_router(chat.router, prefix="/api")
 app.include_router(settings_routes.router, prefix="/api")
 app.include_router(projects.router, prefix="/api")
 app.include_router(diagrams.router, prefix="/api")
+app.include_router(creator.router, prefix="/api")
 
 
 # Root endpoint

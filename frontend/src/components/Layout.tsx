@@ -18,6 +18,7 @@ import {
   XMarkIcon,
   RocketLaunchIcon,
   ChartBarIcon,
+  CommandLineIcon,
 } from '@heroicons/react/24/outline';
 
 interface LayoutProps {
@@ -26,6 +27,7 @@ interface LayoutProps {
 
 const navItems = [
   { href: '/', label: 'خانه', icon: HomeIcon },
+  { href: '/creator', label: 'موتور خالق', icon: CommandLineIcon },
   { href: '/debate', label: 'مناظره', icon: ChatBubbleLeftRightIcon },
   { href: '/projects', label: 'پروژه‌ها', icon: RocketLaunchIcon },
   { href: '/diagrams', label: 'نمودارها', icon: ChartBarIcon },
