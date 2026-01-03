@@ -4,11 +4,21 @@
 
 import axios from 'axios';
 
-// Use relative URL - Next.js rewrites will proxy to backend
-// For server-side, use the full URL from env
-const API_URL = typeof window === 'undefined'
-  ? (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000')
-  : '';  // Client-side: use relative URL, Next.js rewrites will handle proxy
+// Get API URL from environment or use default
+// In production, this should be set to the backend URL
+const getApiUrl = () => {
+  // Check if we're in browser
+  if (typeof window !== 'undefined') {
+    // Try to get from window config first (for runtime config)
+    const runtimeUrl = (window as any).__NEXT_PUBLIC_API_URL__;
+    if (runtimeUrl) return runtimeUrl;
+  }
+
+  // Use environment variable or default
+  return process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+};
+
+const API_URL = getApiUrl();
 
 const api = axios.create({
   baseURL: API_URL,
