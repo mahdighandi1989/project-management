@@ -4,7 +4,7 @@
 
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useDebate } from '@/hooks/useDebate';
 import { settingsApi, modelsApi, WorkMode, Model } from '@/services/api';
@@ -17,7 +17,8 @@ import {
   ChevronDownIcon,
 } from '@heroicons/react/24/outline';
 
-export default function DebatePage() {
+// Component that uses searchParams
+function DebateContent() {
   const searchParams = useSearchParams();
   const initialMode = searchParams.get('mode') || 'auto';
 
@@ -116,7 +117,7 @@ export default function DebatePage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
-            مناظره AI 🥊
+            مناظره AI
           </h1>
           <p className="text-gray-600 dark:text-gray-400">
             سوال خود را بپرسید و مدل‌های مختلف را به چالش بکشید
@@ -347,7 +348,7 @@ export default function DebatePage() {
           {currentDebate.scores.length > 0 && (
             <div className="card">
               <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-4">
-                ⭐ امتیازات
+                امتیازات
               </h3>
               <div className="overflow-x-auto">
                 <table className="w-full">
@@ -378,7 +379,7 @@ export default function DebatePage() {
           {currentDebate.judge_result && (
             <div className="card bg-gradient-to-br from-yellow-50 to-orange-50 dark:from-yellow-900/20 dark:to-orange-900/20 border-2 border-yellow-200 dark:border-yellow-800">
               <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-4">
-                ⚖️ داوری
+                داوری
               </h3>
               <div className="space-y-3">
                 <p>
@@ -397,7 +398,7 @@ export default function DebatePage() {
           {currentDebate.summary && (
             <div className="card">
               <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-4">
-                📝 خلاصه
+                خلاصه
               </h3>
               <div className="prose dark:prose-invert max-w-none">
                 <p className="whitespace-pre-wrap">{currentDebate.summary}</p>
@@ -415,5 +416,23 @@ export default function DebatePage() {
         </div>
       )}
     </div>
+  );
+}
+
+// Loading fallback
+function DebateLoading() {
+  return (
+    <div className="flex items-center justify-center py-12">
+      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-500"></div>
+    </div>
+  );
+}
+
+// Main page component with Suspense
+export default function DebatePage() {
+  return (
+    <Suspense fallback={<DebateLoading />}>
+      <DebateContent />
+    </Suspense>
   );
 }
