@@ -63,13 +63,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS
+# CORS - تنظیم برای production و development
+origins = settings.cors_origins_list
+logger.info(f"🔧 CORS Origins: {origins}")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins_list,
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=origins if "*" not in origins else ["*"],
+    allow_credentials=True if "*" not in origins else False,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 

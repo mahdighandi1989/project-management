@@ -6,7 +6,6 @@
 from pydantic_settings import BaseSettings
 from pydantic import Field, field_validator
 from typing import Optional, Dict, List, Union
-from functools import lru_cache
 import os
 import json
 
@@ -126,11 +125,10 @@ class Settings(BaseSettings):
         return keys.get(provider)
 
 
-@lru_cache()
 def get_settings() -> Settings:
-    """Singleton برای تنظیمات"""
+    """تنظیمات - بدون cache برای خواندن fresh از environment"""
     return Settings()
 
 
-# Instance سراسری
-settings = get_settings()
+# Instance سراسری - یک بار در startup ساخته میشه
+settings = Settings()
