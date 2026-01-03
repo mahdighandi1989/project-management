@@ -68,46 +68,45 @@ async def list_models(provider: Optional[str] = None, capability: Optional[str] 
     try:
         ai_manager = get_ai_manager()
         available_providers = ai_manager.get_available_providers()
+    except Exception:
+        available_providers = []
 
-        models = []
-        for model in MODEL_REGISTRY.values():
-            # فیلتر بر اساس provider
-            if provider and model.provider.value != provider:
-                continue
+    models = []
+    for model in MODEL_REGISTRY.values():
+        # فیلتر بر اساس provider
+        if provider and model.provider.value != provider:
+            continue
 
-            # فیلتر بر اساس capability
-            if capability:
-                try:
-                    cap = ModelCapability(capability)
-                    if cap not in model.capabilities:
-                        continue
-                except ValueError:
-                    pass
+        # فیلتر بر اساس capability
+        if capability:
+            try:
+                cap = ModelCapability(capability)
+                if cap not in model.capabilities:
+                    continue
+            except ValueError:
+                pass
 
-            is_available = model.provider.value in available_providers
+        is_available = model.provider.value in available_providers
 
-            models.append(ModelInfo(
-                id=model.id,
-                provider=model.provider.value,
-                name=model.name,
-                capabilities=[c.value for c in model.capabilities],
-                max_tokens=model.max_tokens,
-                context_window=model.context_window,
-                strengths=model.strengths,
-                weaknesses=model.weaknesses,
-                cost_per_1k_tokens=model.cost_per_1k_tokens,
-                priority=model.priority,
-                enabled=model.enabled,
-                supports_images=model.supports_images,
-                supports_video=model.supports_video,
-                is_image_generator=model.is_image_generator,
-                is_available=is_available,
-            ))
+        models.append(ModelInfo(
+            id=model.id,
+            provider=model.provider.value,
+            name=model.name,
+            capabilities=[c.value for c in model.capabilities],
+            max_tokens=model.max_tokens,
+            context_window=model.context_window,
+            strengths=model.strengths,
+            weaknesses=model.weaknesses,
+            cost_per_1k_tokens=model.cost_per_1k_tokens,
+            priority=model.priority,
+            enabled=model.enabled,
+            supports_images=model.supports_images,
+            supports_video=model.supports_video,
+            is_image_generator=model.is_image_generator,
+            is_available=is_available,
+        ))
 
-        return models
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return models
 
 
 @router.get("/available", response_model=List[ModelInfo])
@@ -116,27 +115,27 @@ async def list_available_models():
     try:
         ai_manager = get_ai_manager()
         available = ai_manager.get_available_models()
+    except Exception:
+        # اگر هیچ API key ست نشده، لیست خالی برگردان
+        return []
 
-        return [ModelInfo(
-            id=m.id,
-            provider=m.provider.value,
-            name=m.name,
-            capabilities=[c.value for c in m.capabilities],
-            max_tokens=m.max_tokens,
-            context_window=m.context_window,
-            strengths=m.strengths,
-            weaknesses=m.weaknesses,
-            cost_per_1k_tokens=m.cost_per_1k_tokens,
-            priority=m.priority,
-            enabled=m.enabled,
-            supports_images=m.supports_images,
-            supports_video=m.supports_video,
-            is_image_generator=m.is_image_generator,
-            is_available=True,
-        ) for m in available]
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return [ModelInfo(
+        id=m.id,
+        provider=m.provider.value,
+        name=m.name,
+        capabilities=[c.value for c in m.capabilities],
+        max_tokens=m.max_tokens,
+        context_window=m.context_window,
+        strengths=m.strengths,
+        weaknesses=m.weaknesses,
+        cost_per_1k_tokens=m.cost_per_1k_tokens,
+        priority=m.priority,
+        enabled=m.enabled,
+        supports_images=m.supports_images,
+        supports_video=m.supports_video,
+        is_image_generator=m.is_image_generator,
+        is_available=True,
+    ) for m in available]
 
 
 @router.get("/providers", response_model=List[ProviderStatus])
@@ -145,27 +144,27 @@ async def list_providers():
     try:
         ai_manager = get_ai_manager()
         available_providers = ai_manager.get_available_providers()
+    except Exception:
+        # اگر AI manager مشکل داشت، لیست خالی برگردان
+        available_providers = []
 
-        providers = {}
-        for model in MODEL_REGISTRY.values():
-            provider = model.provider.value
-            if provider not in providers:
-                providers[provider] = {
-                    "provider": provider,
-                    "available": provider in available_providers,
-                    "models": []
-                }
-            providers[provider]["models"].append(model.id)
+    providers = {}
+    for model in MODEL_REGISTRY.values():
+        provider = model.provider.value
+        if provider not in providers:
+            providers[provider] = {
+                "provider": provider,
+                "available": provider in available_providers,
+                "models": []
+            }
+        providers[provider]["models"].append(model.id)
 
-        return [ProviderStatus(
-            provider=p["provider"],
-            available=p["available"],
-            model_count=len(p["models"]),
-            models=p["models"]
-        ) for p in providers.values()]
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return [ProviderStatus(
+        provider=p["provider"],
+        available=p["available"],
+        model_count=len(p["models"]),
+        models=p["models"]
+    ) for p in providers.values()]
 
 
 @router.get("/{model_id}", response_model=ModelInfo)
