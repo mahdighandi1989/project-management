@@ -235,3 +235,16 @@ def get_ai_manager() -> AIManager:
     if _ai_manager is None:
         _ai_manager = AIManager()
     return _ai_manager
+
+
+async def reset_ai_manager():
+    """ریست کردن AI manager برای بارگذاری مجدد API keys"""
+    global _ai_manager
+    if _ai_manager is not None:
+        try:
+            await _ai_manager.close()
+        except:
+            pass
+    _ai_manager = None
+    # ایجاد instance جدید
+    return get_ai_manager()

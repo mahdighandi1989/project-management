@@ -100,45 +100,75 @@ async def get_api_keys_status():
 
 @router.put("/api-keys")
 async def update_api_keys(request: UpdateApiKeysRequest):
-    """آپدیت API keys (ذخیره در environment)"""
+    """آپدیت API keys (ذخیره در environment و فایل .env)"""
     try:
         updated = []
+        env_updates = {}
 
         if request.openai:
             os.environ["OPENAI_API_KEY"] = request.openai
+            env_updates["OPENAI_API_KEY"] = request.openai
             updated.append("openai")
 
         if request.claude:
             os.environ["CLAUDE_API_KEY"] = request.claude
+            env_updates["CLAUDE_API_KEY"] = request.claude
             updated.append("claude")
 
         if request.gemini:
             os.environ["GEMINI_API_KEY"] = request.gemini
+            env_updates["GEMINI_API_KEY"] = request.gemini
             updated.append("gemini")
 
         if request.deepseek:
             os.environ["DEEPSEEK_API_KEY"] = request.deepseek
+            env_updates["DEEPSEEK_API_KEY"] = request.deepseek
             updated.append("deepseek")
 
         if request.openrouter:
             os.environ["OPENROUTER_API_KEY"] = request.openrouter
+            env_updates["OPENROUTER_API_KEY"] = request.openrouter
             updated.append("openrouter")
 
         if request.groq:
             os.environ["GROQ_API_KEY"] = request.groq
+            env_updates["GROQ_API_KEY"] = request.groq
             updated.append("groq")
 
+        # ذخیره در فایل .env
+        env_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), ".env")
+        try:
+            existing = {}
+            if os.path.exists(env_file):
+                with open(env_file, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and '=' in line and not line.startswith('#'):
+                            key, value = line.split('=', 1)
+                            existing[key] = value
+
+            existing.update(env_updates)
+
+            with open(env_file, 'w') as f:
+                for key, value in existing.items():
+                    f.write(f"{key}={value}\n")
+        except Exception as e:
+            print(f"Warning: Could not save to .env file: {e}")
+
+        # Reload settings
+        from ...core.config import get_settings
+        get_settings.cache_clear()
+
         # Reinitialize AI manager
-        from ...services.ai_manager import get_ai_manager, _ai_manager
-        global _ai_manager
-        if _ai_manager:
-            await _ai_manager.close()
-        _ai_manager = None
+        from ...services.ai_manager import reset_ai_manager
+        new_manager = await reset_ai_manager()
+        available = new_manager.get_available_providers()
 
         return {
             "success": True,
             "updated": updated,
-            "message": "API keys updated. Please restart for full effect."
+            "available_providers": available,
+            "message": "API keys updated successfully!"
         }
 
     except Exception as e:

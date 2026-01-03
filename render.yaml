@@ -1,0 +1,47 @@
+# Render.com Blueprint
+# Deploy both backend and frontend with one click
+
+services:
+  # Backend (FastAPI)
+  - type: web
+    name: ai-creator-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    region: frankfurt
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: false
+      - key: CORS_ORIGINS
+        value: https://ai-creator-frontend.onrender.com,http://localhost:3000
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: CLAUDE_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: DEEPSEEK_API_KEY
+        sync: false
+    disk:
+      name: storage
+      mountPath: /app/storage
+      sizeGB: 1
+
+  # Frontend (Next.js)
+  - type: web
+    name: ai-creator-frontend
+    runtime: docker
+    dockerfilePath: ./frontend/Dockerfile
+    dockerContext: ./frontend
+    region: frankfurt
+    plan: starter
+    envVars:
+      - key: NEXT_PUBLIC_API_URL
+        fromService:
+          type: web
+          name: ai-creator-backend
+          property: host
