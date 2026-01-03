@@ -4,10 +4,11 @@
 """
 
 from pydantic_settings import BaseSettings
-from pydantic import Field
-from typing import Optional, Dict, List
+from pydantic import Field, field_validator
+from typing import Optional, Dict, List, Union
 from functools import lru_cache
 import os
+import json
 
 
 class Settings(BaseSettings):
@@ -60,12 +61,26 @@ class Settings(BaseSettings):
     MAX_MODEL_TIME: int = Field(default=60, description="حداکثر زمان برای هر مدل")
 
     # ===========================================
-    # تنظیمات CORS
+    # تنظیمات CORS - به صورت string برای سازگاری با env
     # ===========================================
-    CORS_ORIGINS: List[str] = Field(
-        default=["http://localhost:3000", "http://localhost:8000", "*"],
-        description="آدرس‌های مجاز CORS"
+    CORS_ORIGINS: str = Field(
+        default="http://localhost:3000,http://localhost:8000,*",
+        description="آدرس‌های مجاز CORS (با کاما جدا شده)"
     )
+
+    @property
+    def cors_origins_list(self) -> List[str]:
+        """تبدیل CORS_ORIGINS به لیست"""
+        if not self.CORS_ORIGINS:
+            return ["*"]
+        # اگر JSON array باشه
+        if self.CORS_ORIGINS.startswith("["):
+            try:
+                return json.loads(self.CORS_ORIGINS)
+            except:
+                pass
+        # اگر با کاما جدا شده باشه
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
 
     # ===========================================
     # تنظیمات ذخیره‌سازی
