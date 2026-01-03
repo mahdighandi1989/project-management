@@ -1,0 +1,66 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environment
+.env
+.env.local
+.env.*.local
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build outputs
+.next/
+out/
+*.egg
+*.whl
+
+# Logs
+*.log
+logs/
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# Database
+*.db
+*.sqlite3
+data/
+
+# Uploads
+uploads/
+
+# Secrets
+*.pem
+*.key
+certs/
+
+# Temp
+tmp/
+temp/
+.tmp/
+
+# Docker
+.docker/
+
+# Original Google Scripts (keep for reference)
+# Code.gs
+# Index.html

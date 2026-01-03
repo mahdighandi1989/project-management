@@ -1,0 +1,121 @@
+"""
+تنظیمات مرکزی سیستم
+همه چیز از environment variables یا فایل config خوانده می‌شود
+"""
+
+from pydantic_settings import BaseSettings
+from pydantic import Field
+from typing import Optional, Dict, List
+from functools import lru_cache
+import os
+
+
+class Settings(BaseSettings):
+    """تنظیمات اصلی سیستم - همه چیز داینامیک و قابل تغییر"""
+
+    # ===========================================
+    # اطلاعات پایه
+    # ===========================================
+    APP_NAME: str = "AI Debate & Project Management System"
+    APP_VERSION: str = "2.0.0"
+    DEBUG: bool = Field(default=False, description="حالت Debug")
+    ENVIRONMENT: str = Field(default="development", description="محیط اجرا")
+
+    # ===========================================
+    # API Keys - همه از محیط خوانده می‌شود
+    # ===========================================
+    OPENAI_API_KEY: Optional[str] = Field(default=None, description="کلید OpenAI")
+    CLAUDE_API_KEY: Optional[str] = Field(default=None, description="کلید Anthropic Claude")
+    GEMINI_API_KEY: Optional[str] = Field(default=None, description="کلید Google Gemini")
+    DEEPSEEK_API_KEY: Optional[str] = Field(default=None, description="کلید DeepSeek")
+    OPENROUTER_API_KEY: Optional[str] = Field(default=None, description="کلید OpenRouter")
+    GROQ_API_KEY: Optional[str] = Field(default=None, description="کلید Groq")
+
+    # ===========================================
+    # تنظیمات سرور
+    # ===========================================
+    HOST: str = Field(default="0.0.0.0", description="آدرس سرور")
+    PORT: int = Field(default=8000, description="پورت سرور")
+    WORKERS: int = Field(default=4, description="تعداد worker ها")
+
+    # ===========================================
+    # تنظیمات دیتابیس
+    # ===========================================
+    DATABASE_URL: str = Field(
+        default="sqlite:///./data/app.db",
+        description="آدرس دیتابیس"
+    )
+
+    # ===========================================
+    # تنظیمات پردازش AI
+    # ===========================================
+    MAX_TOKENS_PER_MODEL: int = Field(default=4000, description="حداکثر توکن برای هر مدل")
+    MAX_TOKENS_FOR_SCORING: int = Field(default=1000, description="حداکثر توکن برای امتیازدهی")
+    MAX_TOKENS_FOR_JUDGE: int = Field(default=2000, description="حداکثر توکن برای داوری")
+    MAX_TOKENS_FOR_SUMMARY: int = Field(default=2500, description="حداکثر توکن برای خلاصه")
+    MAX_PROMPT_LENGTH: int = Field(default=100000, description="حداکثر طول پرامپت")
+
+    # تنظیمات timeout
+    REQUEST_TIMEOUT: int = Field(default=120, description="timeout درخواست (ثانیه)")
+    MAX_MODEL_TIME: int = Field(default=60, description="حداکثر زمان برای هر مدل")
+
+    # ===========================================
+    # تنظیمات CORS
+    # ===========================================
+    CORS_ORIGINS: List[str] = Field(
+        default=["http://localhost:3000", "http://localhost:8000", "*"],
+        description="آدرس‌های مجاز CORS"
+    )
+
+    # ===========================================
+    # تنظیمات ذخیره‌سازی
+    # ===========================================
+    UPLOAD_DIR: str = Field(default="./uploads", description="پوشه آپلود فایل‌ها")
+    MAX_UPLOAD_SIZE: int = Field(default=50 * 1024 * 1024, description="حداکثر سایز آپلود (50MB)")
+
+    # ===========================================
+    # تنظیمات JWT
+    # ===========================================
+    SECRET_KEY: str = Field(
+        default="your-secret-key-change-in-production",
+        description="کلید رمزنگاری JWT"
+    )
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=60 * 24, description="مدت اعتبار توکن")
+
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+        case_sensitive = True
+
+    def get_available_providers(self) -> Dict[str, bool]:
+        """لیست provider های فعال با API key"""
+        return {
+            "openai": bool(self.OPENAI_API_KEY),
+            "claude": bool(self.CLAUDE_API_KEY),
+            "gemini": bool(self.GEMINI_API_KEY),
+            "deepseek": bool(self.DEEPSEEK_API_KEY),
+            "openrouter": bool(self.OPENROUTER_API_KEY),
+            "groq": bool(self.GROQ_API_KEY),
+        }
+
+    def get_api_key(self, provider: str) -> Optional[str]:
+        """دریافت API key یک provider"""
+        keys = {
+            "openai": self.OPENAI_API_KEY,
+            "claude": self.CLAUDE_API_KEY,
+            "gemini": self.GEMINI_API_KEY,
+            "deepseek": self.DEEPSEEK_API_KEY,
+            "openrouter": self.OPENROUTER_API_KEY,
+            "groq": self.GROQ_API_KEY,
+        }
+        return keys.get(provider)
+
+
+@lru_cache()
+def get_settings() -> Settings:
+    """Singleton برای تنظیمات"""
+    return Settings()
+
+
+# Instance سراسری
+settings = get_settings()
