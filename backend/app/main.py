@@ -67,14 +67,33 @@ app = FastAPI(
 origins = settings.cors_origins_list
 logger.info(f"🔧 CORS Origins: {origins}")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins if "*" not in origins else ["*"],
-    allow_credentials=True if "*" not in origins else False,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=["*"],
-    expose_headers=["*"],
-)
+# Custom CORS middleware for better control
+@app.middleware("http")
+async def add_cors_headers(request: Request, call_next):
+    # Handle preflight OPTIONS request
+    if request.method == "OPTIONS":
+        response = JSONResponse(content={})
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Max-Age"] = "86400"
+        return response
+
+    # Process the request
+    response = await call_next(request)
+
+    # Add CORS headers to response
+    origin = request.headers.get("origin", "")
+    if origin in origins or "*" in origins:
+        response.headers["Access-Control-Allow-Origin"] = origin or "*"
+    else:
+        response.headers["Access-Control-Allow-Origin"] = "*"
+
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+
+    return response
 
 
 # Middleware برای logging
