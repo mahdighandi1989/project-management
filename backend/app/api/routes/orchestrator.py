@@ -214,11 +214,20 @@ def get_orchestrator():
             from ...services.ai_manager import get_ai_manager
             from ...services.project_service import get_project_service
             from ...services.creator_engine import get_creator_engine
+            from ...services.github_storage import get_github_storage as _get_github
 
             ai_manager = get_ai_manager()
             project_service = get_project_service()
             creator_engine = get_creator_engine()
             creator_engine.initialize(ai_manager)
+
+            # Initialize GitHub storage for project persistence
+            try:
+                github_storage = _get_github()
+                project_service.initialize_github(github_storage)
+                logger.info("GitHub storage initialized for project persistence")
+            except Exception as gh_error:
+                logger.warning(f"Could not initialize GitHub storage: {gh_error}")
 
             orchestrator.initialize(ai_manager, project_service, creator_engine)
         except Exception as e:

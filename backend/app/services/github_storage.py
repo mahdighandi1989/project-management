@@ -276,6 +276,29 @@ class GitHubStorageService:
 
         return files
 
+    async def get_file(self, path: str) -> Dict:
+        """دریافت محتوای یک فایل"""
+        session = await self._get_session()
+        full_path = self._get_full_path(path)
+        url = f"{self.api_base}/repos/{self.owner}/{self.repo}/contents/{full_path}"
+
+        try:
+            async with session.get(url, params={"ref": self.branch}) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return {
+                        "success": True,
+                        "path": path,
+                        "content": data.get("content", ""),  # base64 encoded
+                        "sha": data.get("sha", ""),
+                        "size": data.get("size", 0)
+                    }
+                else:
+                    return {"success": False, "error": f"HTTP {response.status}"}
+        except Exception as e:
+            logger.error(f"Error getting file: {e}")
+            return {"success": False, "error": str(e)}
+
     # =====================================
     # آپلود فایل‌های بزرگ (chunked)
     # =====================================
