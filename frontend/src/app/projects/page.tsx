@@ -122,6 +122,29 @@ const api = {
     return res.json();
   },
 
+  async startAutoBuild(projectId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/orchestrator/auto-build`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_id: projectId }),
+    });
+    return res.json();
+  },
+
+  async startWorkflow(projectId: string, autoExecute: boolean = true): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/orchestrator/start-workflow`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_id: projectId, auto_execute: autoExecute }),
+    });
+    return res.json();
+  },
+
+  async getWorkflowStatus(projectId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/orchestrator/workflow-status/${projectId}`);
+    return res.json();
+  },
+
   async getAvailableModels(): Promise<any[]> {
     const res = await fetch(`${getApiUrl()}/api/models/available`);
     const data = await res.json();
@@ -288,6 +311,30 @@ export default function ProjectsPage() {
     }
   };
 
+  const handleStartAutoBuild = async (projectId?: string) => {
+    const targetProjectId = projectId || selectedProject?.project_id;
+    if (!targetProjectId) return;
+
+    setActionLoading(true);
+    try {
+      const result = await api.startWorkflow(targetProjectId, true);
+      if (result.success) {
+        await loadProjects();
+        if (selectedProject) {
+          await selectProject(targetProjectId);
+        }
+        alert('ساخت خودکار شروع شد! سیستم در حال اجرای فازها و تولید فایل‌ها است.');
+      } else {
+        alert(`خطا: ${result.error || 'خطا در شروع ساخت خودکار'}`);
+      }
+    } catch (error) {
+      console.error('Error starting auto build:', error);
+      alert('خطا در ارتباط با سرور');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   return (
     <Layout>
       <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
@@ -438,6 +485,14 @@ export default function ProjectsPage() {
                     </div>
 
                     <div className="flex gap-2">
+                      <button
+                        onClick={() => handleStartAutoBuild()}
+                        disabled={actionLoading}
+                        className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-lg hover:from-purple-600 hover:to-pink-600 transition disabled:opacity-50 shadow-lg"
+                      >
+                        <RocketLaunchIcon className="w-5 h-5" />
+                        ساخت خودکار
+                      </button>
                       <button
                         onClick={() => setShowExecuteTask(true)}
                         className="flex items-center gap-2 px-4 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600 transition"
@@ -741,19 +796,39 @@ export default function ProjectsPage() {
                     </button>
                   </div>
                 ) : (
-                  <button
-                    onClick={() => {
-                      setShowSmartSetup(false);
-                      setSetupResult(null);
-                      setSmartRequest('');
-                      if (setupResult.project_id) {
-                        selectProject(setupResult.project_id);
-                      }
-                    }}
-                    className="w-full px-4 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600"
-                  >
-                    بستن
-                  </button>
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => {
+                        setShowSmartSetup(false);
+                        setSetupResult(null);
+                        setSmartRequest('');
+                        if (setupResult?.project_id) {
+                          selectProject(setupResult.project_id);
+                        }
+                      }}
+                      className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
+                    >
+                      بستن
+                    </button>
+                    {setupResult?.success && setupResult?.project_id && (
+                      <button
+                        onClick={() => {
+                          if (setupResult.project_id) {
+                            handleStartAutoBuild(setupResult.project_id);
+                            setShowSmartSetup(false);
+                            setSetupResult(null);
+                            setSmartRequest('');
+                            selectProject(setupResult.project_id);
+                          }
+                        }}
+                        disabled={actionLoading}
+                        className="flex-1 px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-lg hover:from-purple-600 hover:to-pink-600 disabled:opacity-50 flex items-center justify-center gap-2"
+                      >
+                        <RocketLaunchIcon className="w-5 h-5" />
+                        شروع ساخت خودکار
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
