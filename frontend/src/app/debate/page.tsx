@@ -625,9 +625,11 @@ function DebateContent() {
               <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
                 <button
                   onClick={() => {
-                    currentDebate.generated_files.forEach((file: any) => {
-                      setTimeout(() => downloadGeneratedFile(file), 100);
-                    });
+                    if (currentDebate.generated_files) {
+                      currentDebate.generated_files.forEach((file: any) => {
+                        setTimeout(() => downloadGeneratedFile(file), 100);
+                      });
+                    }
                   }}
                   className="btn btn-primary flex items-center gap-2"
                 >
