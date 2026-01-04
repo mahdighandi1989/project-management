@@ -531,11 +531,12 @@ class SupervisorModel:
         except:
             pass
 
-        # روش 2: حذف code block markers و parse
-        cleaned = text
-        cleaned = re.sub(r'^[\s]*```(?:json)?[\s]*', '', cleaned)
-        cleaned = re.sub(r'[\s]*```[\s]*$', '', cleaned)
+        # روش 2: حذف همه backticks و کلمه json - روش ساده و مطمئن
+        cleaned = text.replace('```json', '').replace('```', '').replace('`', '')
+        cleaned = re.sub(r'\bjson\b', '', cleaned, flags=re.IGNORECASE)
         cleaned = cleaned.strip()
+
+        logger.info(f"Cleaned text (first 200): {cleaned[:200] if len(cleaned) > 200 else cleaned}")
 
         try:
             return json.loads(cleaned)
@@ -1039,11 +1040,12 @@ class ProjectEngineIntegrator:
         except:
             pass
 
-        # روش 2: حذف code block markers و parse
-        cleaned = text
-        cleaned = re.sub(r'^[\s]*```(?:json)?[\s]*', '', cleaned)
-        cleaned = re.sub(r'[\s]*```[\s]*$', '', cleaned)
+        # روش 2: حذف همه backticks و کلمه json - روش ساده و مطمئن
+        cleaned = text.replace('```json', '').replace('```', '').replace('`', '')
+        cleaned = re.sub(r'\bjson\b', '', cleaned, flags=re.IGNORECASE)
         cleaned = cleaned.strip()
+
+        logger.info(f"Cleaned text (first 200): {cleaned[:200] if len(cleaned) > 200 else cleaned}")
 
         try:
             return json.loads(cleaned)
