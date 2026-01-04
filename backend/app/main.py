@@ -3,9 +3,8 @@
 FastAPI Application
 """
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 import logging
 import time
@@ -63,40 +62,23 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS - تنظیم برای production و development
-origins = settings.cors_origins_list
-logger.info(f"🔧 CORS Origins: {origins}")
+# ======================================
+# CORS Configuration - MUST BE FIRST!
+# ======================================
+logger.info(f"🔧 Setting up CORS with origins: {settings.cors_origins_list}")
 
-# Custom CORS middleware for better control
-@app.middleware("http")
-async def add_cors_headers(request: Request, call_next):
-    # Handle preflight OPTIONS request
-    if request.method == "OPTIONS":
-        response = JSONResponse(content={})
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
-        response.headers["Access-Control-Allow-Headers"] = "*"
-        response.headers["Access-Control-Max-Age"] = "86400"
-        return response
-
-    # Process the request
-    response = await call_next(request)
-
-    # Add CORS headers to response
-    origin = request.headers.get("origin", "")
-    if origin in origins or "*" in origins:
-        response.headers["Access-Control-Allow-Origin"] = origin or "*"
-    else:
-        response.headers["Access-Control-Allow-Origin"] = "*"
-
-    response.headers["Access-Control-Allow-Credentials"] = "true"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-
-    return response
+# Use wildcard for simplicity - more permissive but works
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins
+    allow_credentials=False,  # Must be False when using "*"
+    allow_methods=["*"],  # Allow all methods
+    allow_headers=["*"],  # Allow all headers
+    expose_headers=["*"],
+)
 
 
-# Middleware برای logging
+# Middleware برای logging (after CORS)
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = time.time()
@@ -118,7 +100,12 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled error: {exc}", exc_info=True)
     return JSONResponse(
         status_code=500,
-        content={"detail": "Internal server error", "error": str(exc) if settings.DEBUG else None}
+        content={"detail": "Internal server error", "error": str(exc) if settings.DEBUG else None},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "*",
+            "Access-Control-Allow-Headers": "*",
+        }
     )
 
 
@@ -175,6 +162,20 @@ async def api_info():
         },
         "docs": "/docs",
     }
+
+
+# OPTIONS handler for all routes (CORS preflight)
+@app.options("/{full_path:path}")
+async def options_handler(full_path: str):
+    return Response(
+        content="",
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Max-Age": "86400",
+        }
+    )
 
 
 if __name__ == "__main__":
