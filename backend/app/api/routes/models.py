@@ -72,51 +72,7 @@ def get_capability_value(cap) -> str:
 # Endpoints
 # ===========================================
 
-@router.get("/providers", response_model=List[ProviderStatus])
-async def list_providers():
-    """لیست provider ها و وضعیتشان"""
-    try:
-        # Import inside function to avoid circular imports
-        from ...core.models_registry import MODEL_REGISTRY
-        from ...services.ai_manager import get_ai_manager
-
-        # Get available providers
-        available_providers = []
-        try:
-            ai_manager = get_ai_manager()
-            available_providers = ai_manager.get_available_providers()
-        except Exception as e:
-            logger.warning(f"Could not get AI manager: {e}")
-
-        # Build provider list
-        providers = {}
-        for model in MODEL_REGISTRY.values():
-            try:
-                provider = get_provider_value(model.provider)
-                if provider not in providers:
-                    providers[provider] = {
-                        "provider": provider,
-                        "available": provider in available_providers,
-                        "models": []
-                    }
-                providers[provider]["models"].append(model.id)
-            except Exception as e:
-                logger.error(f"Error processing model: {e}")
-                continue
-
-        return [ProviderStatus(
-            provider=p["provider"],
-            available=p["available"],
-            model_count=len(p["models"]),
-            models=p["models"]
-        ) for p in providers.values()]
-
-    except Exception as e:
-        logger.error(f"Error in list_providers: {e}", exc_info=True)
-        # Return empty list instead of error
-        return []
-
-
+@router.get("", response_model=List[ModelInfo])
 @router.get("/", response_model=List[ModelInfo])
 async def list_models(provider: Optional[str] = None, capability: Optional[str] = None):
     """لیست همه مدل‌ها"""
@@ -174,6 +130,51 @@ async def list_models(provider: Optional[str] = None, capability: Optional[str] 
 
     except Exception as e:
         logger.error(f"Error in list_models: {e}", exc_info=True)
+        return []
+
+
+@router.get("/providers", response_model=List[ProviderStatus])
+async def list_providers():
+    """لیست provider ها و وضعیتشان"""
+    try:
+        # Import inside function to avoid circular imports
+        from ...core.models_registry import MODEL_REGISTRY
+        from ...services.ai_manager import get_ai_manager
+
+        # Get available providers
+        available_providers = []
+        try:
+            ai_manager = get_ai_manager()
+            available_providers = ai_manager.get_available_providers()
+        except Exception as e:
+            logger.warning(f"Could not get AI manager: {e}")
+
+        # Build provider list
+        providers = {}
+        for model in MODEL_REGISTRY.values():
+            try:
+                provider = get_provider_value(model.provider)
+                if provider not in providers:
+                    providers[provider] = {
+                        "provider": provider,
+                        "available": provider in available_providers,
+                        "models": []
+                    }
+                providers[provider]["models"].append(model.id)
+            except Exception as e:
+                logger.error(f"Error processing model: {e}")
+                continue
+
+        return [ProviderStatus(
+            provider=p["provider"],
+            available=p["available"],
+            model_count=len(p["models"]),
+            models=p["models"]
+        ) for p in providers.values()]
+
+    except Exception as e:
+        logger.error(f"Error in list_providers: {e}", exc_info=True)
+        # Return empty list instead of error
         return []
 
 
