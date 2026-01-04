@@ -3,7 +3,7 @@
  */
 
 import { create } from 'zustand';
-import { debateApi, DebateResponse, DebateDetail, RoundResponse } from '@/services/api';
+import { debateApi, DebateResponse, DebateDetail, RoundResponse, DebateAttachment } from '@/services/api';
 
 interface DebateState {
   // Current debate
@@ -15,7 +15,7 @@ interface DebateState {
   debates: DebateResponse[];
 
   // Actions
-  createDebate: (prompt: string, mode?: string, models?: string[]) => Promise<DebateResponse>;
+  createDebate: (prompt: string, mode?: string, models?: string[], attachments?: DebateAttachment[], needsFileOutput?: boolean) => Promise<DebateResponse>;
   loadDebate: (id: string) => Promise<void>;
   runRound: (roundNumber?: number, context?: string) => Promise<RoundResponse[]>;
   runFullDebate: () => Promise<void>;
@@ -33,10 +33,10 @@ export const useDebate = create<DebateState>((set, get) => ({
   error: null,
   debates: [],
 
-  createDebate: async (prompt: string, mode = 'auto', models?: string[]) => {
+  createDebate: async (prompt: string, mode = 'auto', models?: string[], attachments?: DebateAttachment[], needsFileOutput: boolean = false) => {
     set({ isLoading: true, error: null });
     try {
-      const response = await debateApi.create(prompt, mode, models);
+      const response = await debateApi.create(prompt, mode, models, attachments, needsFileOutput);
       const debate = response.data;
 
       // Load full details

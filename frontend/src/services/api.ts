@@ -104,10 +104,32 @@ export interface RoundResponse {
   error?: string;
 }
 
+export interface SynthesizedOutput {
+  content: string;
+  code_blocks: Array<{
+    language: string;
+    code: string;
+    filename?: string;
+  }>;
+  key_points: string[];
+  recommendations: string[];
+  synthesizer_model: string;
+}
+
+export interface GeneratedFile {
+  filename: string;
+  content: string;
+  language: string;
+  description: string;
+}
+
 export interface DebateDetail extends DebateResponse {
+  detected_mode?: string;
   rounds: RoundResponse[][];
   scores: any[];
   judge_result: any;
+  synthesized_output?: SynthesizedOutput;
+  generated_files?: GeneratedFile[];
   summary: string;
 }
 
@@ -148,10 +170,18 @@ export const modelsApi = {
   capabilities: () => api.get('/api/models/capabilities'),
 };
 
+// Attachment type for debates
+export interface DebateAttachment {
+  filename: string;
+  content: string;
+  type?: string;
+  file_category?: string;
+}
+
 // Debate
 export const debateApi = {
-  create: (prompt: string, mode: string = 'auto', models?: string[]) =>
-    api.post<DebateResponse>('/api/debate/create', { prompt, mode, models }),
+  create: (prompt: string, mode: string = 'auto', models?: string[], attachments?: DebateAttachment[], needsFileOutput: boolean = false) =>
+    api.post<DebateResponse>('/api/debate/create', { prompt, mode, models, attachments, needs_file_output: needsFileOutput }),
 
   get: (id: string) => api.get<DebateDetail>(`/api/debate/${id}`),
 

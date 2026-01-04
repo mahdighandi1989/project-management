@@ -19,6 +19,7 @@ import {
   RocketLaunchIcon,
   ChartBarIcon,
   CommandLineIcon,
+  ArchiveBoxIcon,
 } from '@heroicons/react/24/outline';
 
 interface LayoutProps {
@@ -31,6 +32,7 @@ const navItems = [
   { href: '/debate', label: 'مناظره', icon: ChatBubbleLeftRightIcon },
   { href: '/projects', label: 'پروژه‌ها', icon: RocketLaunchIcon },
   { href: '/diagrams', label: 'نمودارها', icon: ChartBarIcon },
+  { href: '/archive', label: 'آرشیو', icon: ArchiveBoxIcon },
   { href: '/models', label: 'مدل‌ها', icon: CpuChipIcon },
   { href: '/settings', label: 'تنظیمات', icon: Cog6ToothIcon },
 ];

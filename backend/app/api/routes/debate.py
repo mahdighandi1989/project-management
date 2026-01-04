@@ -30,6 +30,7 @@ class CreateDebateRequest(BaseModel):
     mode: str = "auto"
     models: Optional[List[str]] = None
     attachments: Optional[List[Dict[str, Any]]] = None
+    needs_file_output: bool = False  # آیا کاربر خروجی فایلی میخواد؟
 
 
 class DebateResponse(BaseModel):
@@ -70,13 +71,17 @@ class DebateDetailResponse(BaseModel):
     id: str
     prompt: str
     mode: str
+    detected_mode: Optional[str] = None
     status: str
     models: List[str]
     role_assignments: Dict[str, str]
     rounds: List[List[Dict]]
     scores: List[Dict]
     judge_result: Optional[Dict]
+    synthesized_output: Optional[Dict] = None  # خروجی ترکیب شده
+    generated_files: List[Dict] = []  # فایل‌های تولید شده
     summary: str
+    needs_file_output: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -108,6 +113,7 @@ async def create_debate(request: CreateDebateRequest):
             mode=mode,
             models=request.models,
             attachments=request.attachments,
+            needs_file_output=request.needs_file_output,
         )
 
         return DebateResponse.from_session(session)
@@ -232,13 +238,17 @@ async def get_debate(debate_id: str):
             id=session.id,
             prompt=session.prompt,
             mode=session.mode.value if isinstance(session.mode, WorkMode) else session.mode,
+            detected_mode=session.detected_mode.value if session.detected_mode and isinstance(session.detected_mode, WorkMode) else (session.detected_mode if session.detected_mode else None),
             status=session.status.value if isinstance(session.status, DebateStatus) else session.status,
             models=session.models,
             role_assignments={k: v.value if hasattr(v, 'value') else v for k, v in session.role_assignments.items()},
             rounds=[[r.model_dump() for r in round_resp] for round_resp in session.rounds],
             scores=[s.model_dump() for s in session.scores],
             judge_result=session.judge_result.model_dump() if session.judge_result else None,
+            synthesized_output=session.synthesized_output.model_dump() if session.synthesized_output else None,
+            generated_files=[f.model_dump() for f in session.generated_files] if session.generated_files else [],
             summary=session.summary,
+            needs_file_output=session.needs_file_output,
             created_at=session.created_at,
             updated_at=session.updated_at,
         )
