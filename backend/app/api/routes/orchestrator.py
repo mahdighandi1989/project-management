@@ -254,6 +254,124 @@ async def smart_project_setup(request: SmartSetupRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class AutoBuildRequest(BaseModel):
+    """درخواست ساخت خودکار"""
+    project_id: str
+    github_repo: Optional[str] = None
+
+
+@router.post("/auto-build")
+async def auto_build_project(request: AutoBuildRequest):
+    """
+    ساخت خودکار پروژه با نظارت مستمر
+
+    - اجرای تمام فازها به صورت خودکار
+    - تولید کد و فایل‌ها
+    - ذخیره در Creator Engine
+    - نظارت و ارزیابی مستمر
+    """
+    try:
+        orchestrator = get_orchestrator()
+        result = await orchestrator.auto_build(request.project_id, request.github_repo)
+        return result
+    except Exception as e:
+        logger.error(f"Error in auto build: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class StartWorkflowRequest(BaseModel):
+    """درخواست شروع workflow"""
+    project_id: str
+    auto_execute: bool = True  # اجرای خودکار فازها
+
+
+@router.post("/start-workflow")
+async def start_project_workflow(request: StartWorkflowRequest):
+    """
+    شروع workflow پروژه
+
+    - شروع از فاز اول
+    - اجرای خودکار تمام مراحل هر فاز
+    - گزارش پیشرفت
+    """
+    try:
+        orchestrator = get_orchestrator()
+
+        # بررسی وجود پروژه
+        project_data = orchestrator.integrator.project_service.get_project(request.project_id)
+        if not project_data.get("success"):
+            raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+        project = project_data["project"]
+        phases = project.get("phases", [])
+
+        if not phases:
+            raise HTTPException(status_code=400, detail="پروژه فازی ندارد")
+
+        # اگر workflow فعال نیست، ایجاد کن
+        if request.project_id not in orchestrator.integrator.active_workflows:
+            orchestrator.integrator.active_workflows[request.project_id] = {
+                "analysis": {
+                    "project_name": project.get("name"),
+                    "phases": phases,
+                    "goal": project.get("goal")
+                },
+                "status": "initialized",
+                "current_phase": 0,
+                "started_at": None
+            }
+
+        # اگر auto_execute فعال است، شروع ساخت خودکار
+        if request.auto_execute:
+            result = await orchestrator.auto_build(request.project_id)
+            return result
+
+        return {
+            "success": True,
+            "project_id": request.project_id,
+            "phases_count": len(phases),
+            "current_phase": 0,
+            "message": "Workflow آماده اجرا است"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error starting workflow: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/workflow-status/{project_id}")
+async def get_workflow_status(project_id: str):
+    """
+    وضعیت workflow پروژه
+    """
+    try:
+        orchestrator = get_orchestrator()
+
+        workflow = orchestrator.integrator.active_workflows.get(project_id)
+        if not workflow:
+            return {
+                "success": True,
+                "project_id": project_id,
+                "status": "not_started",
+                "message": "Workflow هنوز شروع نشده"
+            }
+
+        return {
+            "success": True,
+            "project_id": project_id,
+            "status": workflow.get("status"),
+            "current_phase": workflow.get("current_phase", 0),
+            "started_at": workflow.get("started_at"),
+            "results": workflow.get("results", [])
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting workflow status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/execute-task")
 async def execute_monitored_task(request: TaskExecuteRequest):
     """

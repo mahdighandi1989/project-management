@@ -1198,6 +1198,16 @@ class SmartOrchestrator:
             return {"success": False, "error": "سیستم مقداردهی نشده"}
         return await self.supervisor.compare_outputs(task, outputs)
 
+    async def auto_build(
+        self,
+        project_id: str,
+        github_repo: str = None
+    ) -> Dict:
+        """ساخت خودکار پروژه"""
+        if not self.initialized:
+            return {"success": False, "error": "سیستم مقداردهی نشده"}
+        return await self.integrator.auto_build_project(project_id, github_repo)
+
 
 # Singleton accessor
 def get_smart_orchestrator() -> SmartOrchestrator:
