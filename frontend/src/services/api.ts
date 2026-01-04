@@ -104,10 +104,32 @@ export interface RoundResponse {
   error?: string;
 }
 
+export interface SynthesizedOutput {
+  content: string;
+  code_blocks: Array<{
+    language: string;
+    code: string;
+    filename?: string;
+  }>;
+  key_points: string[];
+  recommendations: string[];
+  synthesizer_model: string;
+}
+
+export interface GeneratedFile {
+  filename: string;
+  content: string;
+  language: string;
+  description: string;
+}
+
 export interface DebateDetail extends DebateResponse {
+  detected_mode?: string;
   rounds: RoundResponse[][];
   scores: any[];
   judge_result: any;
+  synthesized_output?: SynthesizedOutput;
+  generated_files?: GeneratedFile[];
   summary: string;
 }
 

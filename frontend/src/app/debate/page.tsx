@@ -16,6 +16,9 @@ import {
   XMarkIcon,
   ChevronDownIcon,
   PaperClipIcon,
+  DocumentArrowDownIcon,
+  SparklesIcon,
+  BeakerIcon,
 } from '@heroicons/react/24/outline';
 import FileUpload from '@/components/FileUpload';
 
@@ -170,12 +173,44 @@ function DebateContent() {
       running: { color: 'badge-primary', text: 'در حال اجرا' },
       scoring: { color: 'badge-primary', text: 'امتیازدهی' },
       judging: { color: 'badge-primary', text: 'داوری' },
+      synthesizing: { color: 'badge-primary', text: 'ترکیب خروجی' },
+      generating: { color: 'badge-primary', text: 'تولید فایل' },
       summarizing: { color: 'badge-primary', text: 'خلاصه‌نویسی' },
       completed: { color: 'badge-success', text: 'تکمیل شده' },
       failed: { color: 'badge-danger', text: 'خطا' },
     };
     const badge = badges[status] || { color: '', text: status };
     return <span className={`badge ${badge.color}`}>{badge.text}</span>;
+  };
+
+  const getModeBadge = (mode: string) => {
+    const modes: Record<string, { color: string; text: string; icon: string }> = {
+      debate: { color: 'bg-red-100 text-red-700', text: 'مناظره', icon: '🥊' },
+      collaboration: { color: 'bg-green-100 text-green-700', text: 'همکاری', icon: '🤝' },
+      deep_research: { color: 'bg-purple-100 text-purple-700', text: 'تحقیق عمیق', icon: '🔍' },
+      quick: { color: 'bg-yellow-100 text-yellow-700', text: 'سریع', icon: '⚡' },
+      creative: { color: 'bg-pink-100 text-pink-700', text: 'خلاقانه', icon: '🎨' },
+      auto: { color: 'bg-blue-100 text-blue-700', text: 'خودکار', icon: '🤖' },
+    };
+    const modeInfo = modes[mode] || { color: 'bg-gray-100 text-gray-700', text: mode, icon: '📝' };
+    return (
+      <span className={`px-2 py-1 rounded-full text-sm ${modeInfo.color}`}>
+        {modeInfo.icon} {modeInfo.text}
+      </span>
+    );
+  };
+
+  // دانلود فایل تولید شده
+  const downloadGeneratedFile = (file: any) => {
+    const blob = new Blob([file.content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = file.filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -366,8 +401,16 @@ function DebateContent() {
                 <div className="flex items-center gap-4 mt-2 text-sm text-gray-500">
                   <span>{currentDebate.models.length} مدل</span>
                   <span>{currentDebate.rounds.length} دور</span>
+                  {getModeBadge(currentDebate.mode)}
                   {getStatusBadge(currentDebate.status)}
                 </div>
+                {/* نمایش حالت تشخیص داده شده */}
+                {currentDebate.detected_mode && currentDebate.detected_mode !== currentDebate.mode && (
+                  <div className="mt-2 text-xs text-gray-500">
+                    <BeakerIcon className="w-4 h-4 inline mr-1" />
+                    حالت تشخیص داده شده: {getModeBadge(currentDebate.detected_mode)}
+                  </div>
+                )}
               </div>
 
               {/* Action Buttons */}
@@ -496,6 +539,101 @@ function DebateContent() {
                   <span className="font-medium">دلیل:</span>{' '}
                   {currentDebate.judge_result.reasoning}
                 </p>
+              </div>
+            </div>
+          )}
+
+          {/* Synthesized Output - خروجی ترکیب شده */}
+          {currentDebate.synthesized_output && (
+            <div className="card bg-gradient-to-br from-emerald-50 to-teal-50 dark:from-emerald-900/20 dark:to-teal-900/20 border-2 border-emerald-200 dark:border-emerald-800">
+              <div className="flex items-center gap-3 mb-4">
+                <SparklesIcon className="w-6 h-6 text-emerald-600" />
+                <h3 className="text-lg font-bold text-gray-900 dark:text-white">
+                  خروجی نهایی ترکیب شده
+                </h3>
+              </div>
+              <div className="prose dark:prose-invert max-w-none">
+                <p className="whitespace-pre-wrap">{currentDebate.synthesized_output.content}</p>
+              </div>
+
+              {/* Code Blocks */}
+              {currentDebate.synthesized_output.code_blocks?.length > 0 && (
+                <div className="mt-4 space-y-3">
+                  <h4 className="font-medium text-gray-700 dark:text-gray-300">
+                    کدهای استخراج شده:
+                  </h4>
+                  {currentDebate.synthesized_output.code_blocks.map((block: any, idx: number) => (
+                    <div key={idx} className="bg-gray-900 rounded-lg overflow-hidden">
+                      <div className="flex items-center justify-between px-4 py-2 bg-gray-800">
+                        <span className="text-sm text-gray-400">{block.language}</span>
+                        <button
+                          onClick={() => downloadGeneratedFile({
+                            filename: block.filename || `code_${idx + 1}.${block.language}`,
+                            content: block.code
+                          })}
+                          className="text-xs text-emerald-400 hover:text-emerald-300"
+                        >
+                          دانلود
+                        </button>
+                      </div>
+                      <pre className="p-4 text-sm text-gray-100 overflow-x-auto">
+                        <code>{block.code}</code>
+                      </pre>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Generated Files - فایل‌های تولید شده */}
+          {currentDebate.generated_files?.length > 0 && (
+            <div className="card">
+              <div className="flex items-center gap-3 mb-4">
+                <DocumentArrowDownIcon className="w-6 h-6 text-blue-600" />
+                <h3 className="text-lg font-bold text-gray-900 dark:text-white">
+                  فایل‌های تولید شده
+                </h3>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {currentDebate.generated_files.map((file: any, idx: number) => (
+                  <div
+                    key={idx}
+                    className="p-4 bg-gray-50 dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-primary-500 transition-colors"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-gray-900 dark:text-white truncate">
+                          {file.filename}
+                        </p>
+                        <p className="text-xs text-gray-500 mt-1">
+                          {file.language} • {file.description}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => downloadGeneratedFile(file)}
+                        className="ml-2 p-2 text-primary-600 hover:bg-primary-50 dark:hover:bg-primary-900/30 rounded-lg transition-colors"
+                      >
+                        <DocumentArrowDownIcon className="w-5 h-5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* دکمه دانلود همه */}
+              <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
+                <button
+                  onClick={() => {
+                    currentDebate.generated_files.forEach((file: any) => {
+                      setTimeout(() => downloadGeneratedFile(file), 100);
+                    });
+                  }}
+                  className="btn btn-primary flex items-center gap-2"
+                >
+                  <DocumentArrowDownIcon className="w-5 h-5" />
+                  دانلود همه فایل‌ها
+                </button>
               </div>
             </div>
           )}

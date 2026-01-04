@@ -26,6 +26,8 @@ class DebateStatus(str, Enum):
     PAUSED = "paused"
     SCORING = "scoring"
     JUDGING = "judging"
+    SYNTHESIZING = "synthesizing"  # فاز ترکیب خروجی‌ها
+    GENERATING = "generating"      # تولید فایل نهایی
     SUMMARIZING = "summarizing"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -68,17 +70,37 @@ class JudgeResult(BaseModel):
     scores: Dict[str, int] = {}
 
 
+class SynthesizedOutput(BaseModel):
+    """خروجی ترکیب شده نهایی"""
+    content: str
+    code_blocks: List[Dict[str, str]] = []  # [{language, code, filename}]
+    key_points: List[str] = []
+    recommendations: List[str] = []
+    synthesizer_model: str = ""
+
+
+class GeneratedFile(BaseModel):
+    """فایل تولید شده"""
+    filename: str
+    content: str
+    language: str = ""
+    description: str = ""
+
+
 class DebateSession(BaseModel):
     """یک جلسه مناظره"""
     id: str
     prompt: str
     mode: WorkMode
+    detected_mode: Optional[WorkMode] = None  # حالت تشخیص داده شده
     status: DebateStatus = DebateStatus.PENDING
     models: List[str] = []
     role_assignments: Dict[str, RoleType] = {}
     rounds: List[List[RoundResponse]] = []
     scores: List[ScoreResult] = []
     judge_result: Optional[JudgeResult] = None
+    synthesized_output: Optional[SynthesizedOutput] = None  # خروجی ترکیب شده
+    generated_files: List[GeneratedFile] = []  # فایل‌های تولید شده
     summary: str = ""
     created_at: datetime = datetime.now()
     updated_at: datetime = datetime.now()
@@ -93,9 +115,63 @@ class DebateSession(BaseModel):
 class DebateService:
     """سرویس اصلی مناظره"""
 
+    # کلمات کلیدی برای تشخیص حالت
+    DEBATE_KEYWORDS = ['مناظره', 'بحث', 'دفاع', 'مخالف', 'موافق', 'debate', 'argue', 'versus', 'vs']
+    COLLAB_KEYWORDS = ['بررسی', 'تحلیل', 'کد', 'فایل', 'بهبود', 'اصلاح', 'review', 'analyze', 'code', 'file', 'improve', 'fix', 'create', 'write', 'generate', 'تولید', 'بنویس', 'بساز']
+    RESEARCH_KEYWORDS = ['تحقیق', 'بررسی عمیق', 'research', 'investigate', 'study']
+    QUICK_KEYWORDS = ['سریع', 'خلاصه', 'کوتاه', 'quick', 'short', 'brief', 'fast']
+
     def __init__(self, ai_manager: Optional[AIManager] = None):
         self.ai_manager = ai_manager or get_ai_manager()
         self._sessions: Dict[str, DebateSession] = {}
+
+    def _detect_optimal_mode(self, prompt: str, attachments: Optional[List[Dict]] = None) -> WorkMode:
+        """تشخیص هوشمند بهترین حالت کاری بر اساس پرامپت و فایل‌ها"""
+        prompt_lower = prompt.lower()
+        has_files = bool(attachments and len(attachments) > 0)
+        has_code_files = False
+
+        if attachments:
+            code_extensions = {'.py', '.js', '.ts', '.mq4', '.mq5', '.mqh', '.java', '.cpp', '.c', '.go', '.rs', '.cs'}
+            for att in attachments:
+                filename = att.get('filename', att.get('name', ''))
+                ext = '.' + filename.split('.')[-1].lower() if '.' in filename else ''
+                if ext in code_extensions:
+                    has_code_files = True
+                    break
+
+        # اگر فایل کد پیوست شده، حالت همکاری بهتره
+        if has_code_files:
+            return WorkMode.COLLABORATION
+
+        # بررسی کلمات کلیدی
+        debate_score = sum(1 for kw in self.DEBATE_KEYWORDS if kw in prompt_lower)
+        collab_score = sum(1 for kw in self.COLLAB_KEYWORDS if kw in prompt_lower)
+        research_score = sum(1 for kw in self.RESEARCH_KEYWORDS if kw in prompt_lower)
+        quick_score = sum(1 for kw in self.QUICK_KEYWORDS if kw in prompt_lower)
+
+        # اگر فایل داریم، همکاری ترجیح داده میشه
+        if has_files:
+            collab_score += 2
+
+        scores = {
+            WorkMode.DEBATE: debate_score,
+            WorkMode.COLLABORATION: collab_score,
+            WorkMode.DEEP_RESEARCH: research_score,
+            WorkMode.QUICK: quick_score,
+        }
+
+        max_score = max(scores.values())
+        if max_score == 0:
+            # اگر هیچ تشخیصی نیست، بر اساس طول پرامپت تصمیم بگیر
+            if len(prompt) < 50:
+                return WorkMode.QUICK
+            elif has_files:
+                return WorkMode.COLLABORATION
+            else:
+                return WorkMode.COLLABORATION  # پیش‌فرض همکاری به جای مناظره
+
+        return max(scores, key=scores.get)
 
     async def create_session(
         self,
@@ -107,9 +183,16 @@ class DebateService:
         """ایجاد یک جلسه مناظره جدید"""
         session_id = f"debate_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
-        # انتخاب مدل‌ها
+        # تشخیص هوشمند حالت کاری
+        detected_mode = None
+        actual_mode = mode
+        if mode == WorkMode.AUTO:
+            detected_mode = self._detect_optimal_mode(prompt, attachments)
+            actual_mode = detected_mode
+
+        # انتخاب مدل‌ها بر اساس حالت واقعی
+        mode_config = get_mode_config(actual_mode)
         if not models:
-            mode_config = get_mode_config(mode)
             max_models = len(mode_config.default_roles) if mode_config else 3
             selected = self.ai_manager.smart_select_models(prompt, max_models=max_models)
             models = [m.id for m in selected]
@@ -117,8 +200,7 @@ class DebateService:
         if not models:
             raise ValueError("No models available")
 
-        # تخصیص نقش‌ها
-        mode_config = get_mode_config(mode)
+        # تخصیص نقش‌ها بر اساس حالت واقعی
         role_assignments = {}
         default_roles = mode_config.default_roles if mode_config else [RoleType.RESPONDER]
 
@@ -129,12 +211,15 @@ class DebateService:
         session = DebateSession(
             id=session_id,
             prompt=prompt,
-            mode=mode,
+            mode=actual_mode,  # حالت واقعی که استفاده میشه
+            detected_mode=detected_mode,  # چه حالتی تشخیص داده شد
             models=models,
             role_assignments=role_assignments,
             attachments=attachments or [],
             metadata={
                 "attachments_count": len(attachments) if attachments else 0,
+                "original_mode": mode.value if mode else "auto",
+                "detected_mode": detected_mode.value if detected_mode else None,
             }
         )
 
@@ -550,20 +635,192 @@ class DebateService:
 
         return session.summary
 
+    async def run_synthesis(self, session: DebateSession) -> SynthesizedOutput:
+        """ترکیب خروجی‌های همه مدل‌ها به یک نتیجه یکپارچه"""
+        session.status = DebateStatus.SYNTHESIZING
+        session.updated_at = datetime.now()
+
+        # انتخاب مدل ترکیب‌کننده (قوی‌ترین مدل)
+        synth_model = session.models[0]
+        all_responses = self._build_all_responses_summary(session)
+
+        # استخراج بلوک‌های کد از پاسخ‌ها
+        import re
+        code_blocks = []
+        for round_responses in session.rounds:
+            for resp in round_responses:
+                if resp.content:
+                    # یافتن بلوک‌های کد
+                    matches = re.findall(r'```(\w+)?\n(.*?)```', resp.content, re.DOTALL)
+                    for match in matches:
+                        lang = match[0] or 'text'
+                        code = match[1].strip()
+                        if len(code) > 50:  # فقط کدهای معنادار
+                            code_blocks.append({
+                                'language': lang,
+                                'code': code,
+                                'source_model': resp.model_id
+                            })
+
+        synthesis_prompt = f"""
+شما باید تمام پاسخ‌های زیر را ترکیب کرده و یک خروجی نهایی یکپارچه تولید کنید.
+
+**درخواست اصلی:**
+{session.prompt[:1000]}
+
+**پاسخ‌های دریافتی:**
+{all_responses}
+
+**وظیفه شما:**
+1. نقاط قوت هر پاسخ را شناسایی کنید
+2. بهترین ایده‌ها و کدها را ترکیب کنید
+3. یک خروجی نهایی کامل و یکپارچه تولید کنید
+
+اگر کدی درخواست شده، کد نهایی کامل و قابل اجرا بدهید.
+اگر تحلیل درخواست شده، تحلیل جامع و ساختارمند ارائه دهید.
+
+خروجی شما باید:
+- کامل و آماده استفاده باشد
+- بهترین ایده‌های همه مدل‌ها را شامل شود
+- خطاها و کمبودها را برطرف کرده باشد
+"""
+
+        try:
+            response = await self.ai_manager.generate(
+                synth_model,
+                [Message(role="user", content=synthesis_prompt)],
+                max_tokens=8000,
+                temperature=0.3
+            )
+
+            # استخراج نکات کلیدی و توصیه‌ها
+            key_points = []
+            recommendations = []
+
+            # یافتن بلوک‌های کد در خروجی ترکیب شده
+            final_code_blocks = []
+            matches = re.findall(r'```(\w+)?\n(.*?)```', response.content, re.DOTALL)
+            for match in matches:
+                lang = match[0] or 'text'
+                code = match[1].strip()
+                if len(code) > 50:
+                    final_code_blocks.append({
+                        'language': lang,
+                        'code': code,
+                        'filename': f'output.{lang}' if lang != 'text' else 'output.txt'
+                    })
+
+            output = SynthesizedOutput(
+                content=response.content,
+                code_blocks=final_code_blocks,
+                key_points=key_points,
+                recommendations=recommendations,
+                synthesizer_model=synth_model
+            )
+
+            session.synthesized_output = output
+            session.updated_at = datetime.now()
+
+            return output
+
+        except Exception as e:
+            output = SynthesizedOutput(
+                content=f"خطا در ترکیب: {str(e)}",
+                synthesizer_model=synth_model
+            )
+            session.synthesized_output = output
+            return output
+
+    async def run_file_generation(self, session: DebateSession) -> List[GeneratedFile]:
+        """تولید فایل‌های نهایی از خروجی ترکیب شده"""
+        session.status = DebateStatus.GENERATING
+        session.updated_at = datetime.now()
+
+        generated_files = []
+
+        # اگر خروجی ترکیب شده داریم
+        if session.synthesized_output:
+            synth = session.synthesized_output
+
+            # تولید فایل‌های کد
+            for i, cb in enumerate(synth.code_blocks):
+                lang = cb.get('language', 'text')
+                code = cb.get('code', '')
+
+                # تعیین نام فایل
+                ext_map = {
+                    'python': 'py', 'py': 'py',
+                    'javascript': 'js', 'js': 'js',
+                    'typescript': 'ts', 'ts': 'ts',
+                    'mq5': 'mq5', 'mq4': 'mq4', 'mqh': 'mqh',
+                    'java': 'java', 'cpp': 'cpp', 'c': 'c',
+                    'go': 'go', 'rust': 'rs', 'csharp': 'cs',
+                    'html': 'html', 'css': 'css', 'json': 'json',
+                    'yaml': 'yaml', 'yml': 'yml', 'sql': 'sql',
+                }
+                ext = ext_map.get(lang.lower(), 'txt')
+                filename = cb.get('filename', f'output_{i+1}.{ext}')
+
+                generated_files.append(GeneratedFile(
+                    filename=filename,
+                    content=code,
+                    language=lang,
+                    description=f"کد {lang} تولید شده"
+                ))
+
+            # فایل خلاصه کامل
+            generated_files.append(GeneratedFile(
+                filename='synthesis_report.md',
+                content=synth.content,
+                language='markdown',
+                description='گزارش کامل ترکیب شده'
+            ))
+
+        # اگر فایل اصلی پیوست شده بود، نسخه اصلاح شده بساز
+        if session.attachments:
+            for att in session.attachments:
+                orig_name = att.get('filename', att.get('name', 'file'))
+                # یافتن کد مربوط به این فایل در خروجی
+                if session.synthesized_output:
+                    for cb in session.synthesized_output.code_blocks:
+                        # اگر زبان کد با فایل اصلی مطابقت داره
+                        if orig_name.endswith(('.mq5', '.mq4', '.mqh')) and cb.get('language') in ['mq5', 'mq4', 'mqh', 'cpp', 'c']:
+                            # نسخه بهبود یافته
+                            generated_files.append(GeneratedFile(
+                                filename=f'improved_{orig_name}',
+                                content=cb.get('code', ''),
+                                language=cb.get('language', ''),
+                                description=f'نسخه بهبود یافته {orig_name}'
+                            ))
+                            break
+
+        session.generated_files = generated_files
+        session.updated_at = datetime.now()
+
+        return generated_files
+
     async def run_full_debate(self, session: DebateSession) -> DebateSession:
-        """اجرای کامل یک مناظره"""
+        """اجرای کامل یک مناظره/همکاری"""
         mode_config = get_mode_config(session.mode)
 
         # اجرای دورها
-        for round_num in range(1, (mode_config.rounds if mode_config else 1) + 1):
+        num_rounds = mode_config.rounds if mode_config else 1
+        for round_num in range(1, num_rounds + 1):
             await self.run_round(session, round_num)
 
-        # امتیازدهی
-        if mode_config and mode_config.scoring:
+        # ترکیب خروجی‌ها (همیشه اجرا میشه)
+        await self.run_synthesis(session)
+
+        # تولید فایل‌های نهایی (اگر کد یا فایل درخواست شده)
+        if session.attachments or self._needs_file_generation(session):
+            await self.run_file_generation(session)
+
+        # امتیازدهی (فقط برای مناظره)
+        if mode_config and mode_config.scoring and session.mode == WorkMode.DEBATE:
             await self.run_scoring(session)
 
-        # داوری
-        if mode_config and mode_config.judge:
+        # داوری (فقط برای مناظره)
+        if mode_config and mode_config.judge and session.mode == WorkMode.DEBATE:
             await self.run_judging(session)
 
         # خلاصه
@@ -571,6 +828,12 @@ class DebateService:
             await self.run_summary(session)
 
         return session
+
+    def _needs_file_generation(self, session: DebateSession) -> bool:
+        """آیا نیاز به تولید فایل هست؟"""
+        prompt_lower = session.prompt.lower()
+        code_keywords = ['کد', 'code', 'فایل', 'file', 'تولید', 'generate', 'بنویس', 'write', 'بساز', 'create']
+        return any(kw in prompt_lower for kw in code_keywords)
 
     def _get_model_responses(self, session: DebateSession, model_id: str) -> List[RoundResponse]:
         """دریافت همه پاسخ‌های یک مدل"""
