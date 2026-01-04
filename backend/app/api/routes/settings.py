@@ -155,14 +155,17 @@ async def update_api_keys(request: UpdateApiKeysRequest):
         except Exception as e:
             print(f"Warning: Could not save to .env file: {e}")
 
-        # Reload settings
-        from ...core.config import get_settings
-        get_settings.cache_clear()
+        # Reload settings - no longer using cache
+        # Settings are read fresh from environment on each instantiation
 
         # Reinitialize AI manager
         from ...services.ai_manager import reset_ai_manager
-        new_manager = await reset_ai_manager()
-        available = new_manager.get_available_providers()
+        try:
+            new_manager = await reset_ai_manager()
+            available = new_manager.get_available_providers()
+        except Exception as e:
+            available = []
+            print(f"Warning: Could not reinitialize AI manager: {e}")
 
         return {
             "success": True,
