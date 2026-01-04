@@ -15,7 +15,9 @@ import {
   CheckIcon,
   XMarkIcon,
   ChevronDownIcon,
+  PaperClipIcon,
 } from '@heroicons/react/24/outline';
+import FileUpload from '@/components/FileUpload';
 
 // Component that uses searchParams
 function DebateContent() {
@@ -42,6 +44,8 @@ function DebateContent() {
   const [workModes, setWorkModes] = useState<WorkMode[]>([]);
   const [availableModels, setAvailableModels] = useState<Model[]>([]);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showFileUpload, setShowFileUpload] = useState(false);
+  const [uploadedFiles, setUploadedFiles] = useState<any[]>([]);
 
   useEffect(() => {
     loadInitialData();
@@ -179,6 +183,33 @@ function DebateContent() {
               className="textarea h-32"
               required
             />
+          </div>
+
+          {/* File Upload Section */}
+          <div>
+            <button
+              type="button"
+              onClick={() => setShowFileUpload(!showFileUpload)}
+              className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 hover:text-primary-500"
+            >
+              <PaperClipIcon className="w-5 h-5" />
+              پیوست فایل
+              {uploadedFiles.length > 0 && (
+                <span className="badge badge-primary text-xs">{uploadedFiles.length}</span>
+              )}
+            </button>
+
+            {showFileUpload && (
+              <div className="mt-4 p-4 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                <FileUpload
+                  entityType="debate"
+                  onFilesUploaded={(files) => setUploadedFiles(files)}
+                  maxFiles={5}
+                  maxSizeMB={25}
+                  storeInGithub={true}
+                />
+              </div>
+            )}
           </div>
 
           {/* Advanced Options */}

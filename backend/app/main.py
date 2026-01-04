@@ -12,7 +12,8 @@ from contextlib import asynccontextmanager
 
 from .core.config import settings
 from .api.routes import debate, models, chat, settings as settings_routes
-from .api.routes import projects, diagrams, creator, upload
+from .api.routes import projects, diagrams, creator, upload, orchestrator
+from .api.routes import config, external
 
 # تنظیم logging
 logging.basicConfig(
@@ -118,6 +119,9 @@ app.include_router(projects.router, prefix="/api")
 app.include_router(diagrams.router, prefix="/api")
 app.include_router(creator.router, prefix="/api")
 app.include_router(upload.router, prefix="/api")
+app.include_router(orchestrator.router, prefix="/api")
+app.include_router(config.router, prefix="/api")
+app.include_router(external.router, prefix="/api")
 
 
 # Root endpoint
@@ -159,6 +163,9 @@ async def api_info():
             "diagrams": "/api/diagrams",
             "creator": "/api/creator",
             "upload": "/api/upload",
+            "orchestrator": "/api/orchestrator",
+            "config": "/api/config",
+            "external": "/api/external",
         },
         "docs": "/docs",
     }
