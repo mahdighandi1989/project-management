@@ -688,7 +688,12 @@ class ProjectEngineIntegrator:
         راه‌اندازی هوشمند پروژه از یک درخواست ساده
         """
         # تحلیل درخواست با AI
-        analyzer_id, _ = self.model_selector.select_best_model(TaskCategory.ANALYSIS)
+        try:
+            analyzer_id, _ = self.model_selector.select_best_model(TaskCategory.ANALYSIS)
+            logger.info(f"Selected analyzer model: {analyzer_id}")
+        except Exception as e:
+            logger.error(f"Error selecting model: {e}")
+            return {"success": False, "error": f"خطا در انتخاب مدل: {str(e)}"}
 
         analysis_prompt = f"""درخواست کاربر را تحلیل کن و اطلاعات پروژه استخراج کن:
 
@@ -713,48 +718,60 @@ class ProjectEngineIntegrator:
 
         try:
             # استفاده از ai_manager از model_selector به جای مسیر پیچیده creator_engine
+            logger.info(f"Calling AI generate with model: {analyzer_id}")
             response = await self.model_selector.ai_manager.generate(
                 model_id=analyzer_id,
                 messages=[Message(role="user", content=analysis_prompt)],
                 max_tokens=2000
             )
+            logger.info(f"AI response received, has content: {bool(response.content)}, error: {response.error}")
 
-            if response.content and not response.error:
-                analysis = self._extract_json(response.content)
+            if response.error:
+                return {"success": False, "error": f"خطا از مدل AI: {response.error}"}
 
-                if analysis:
-                    # ایجاد پروژه
-                    project_result = self.project_service.create_project(
-                        name=analysis.get("project_name", "پروژه جدید"),
-                        description=analysis.get("description", ""),
-                        project_type=analysis.get("project_type", "custom"),
-                        goal=analysis.get("goal", ""),
-                        complexity=analysis.get("complexity", "medium"),
-                        custom_phases=analysis.get("phases")
-                    )
+            if not response.content:
+                return {"success": False, "error": "پاسخی از مدل AI دریافت نشد"}
 
-                    if project_result.get("success"):
-                        project_id = project_result["project_id"]
+            analysis = self._extract_json(response.content)
+            logger.info(f"JSON extraction result: {bool(analysis)}")
 
-                        # شروع workflow
-                        self.active_workflows[project_id] = {
-                            "analysis": analysis,
-                            "status": "initialized",
-                            "current_phase": 0,
-                            "started_at": datetime.now().isoformat()
-                        }
+            if not analysis:
+                # اگر JSON استخراج نشد، خود پاسخ را نشان بده
+                return {"success": False, "error": f"خطا در استخراج JSON از پاسخ AI. پاسخ دریافتی: {response.content[:500]}"}
 
-                        return {
-                            "success": True,
-                            "project_id": project_id,
-                            "analysis": analysis,
-                            "message": f"پروژه '{analysis.get('project_name')}' با موفقیت ایجاد شد"
-                        }
+            # ایجاد پروژه
+            project_result = self.project_service.create_project(
+                name=analysis.get("project_name", "پروژه جدید"),
+                description=analysis.get("description", ""),
+                project_type=analysis.get("project_type", "custom"),
+                goal=analysis.get("goal", ""),
+                complexity=analysis.get("complexity", "medium"),
+                custom_phases=analysis.get("phases")
+            )
+
+            if not project_result.get("success"):
+                return {"success": False, "error": f"خطا در ایجاد پروژه: {project_result.get('error', 'نامشخص')}"}
+
+            project_id = project_result["project_id"]
+
+            # شروع workflow
+            self.active_workflows[project_id] = {
+                "analysis": analysis,
+                "status": "initialized",
+                "current_phase": 0,
+                "started_at": datetime.now().isoformat()
+            }
+
+            return {
+                "success": True,
+                "project_id": project_id,
+                "analysis": analysis,
+                "message": f"پروژه '{analysis.get('project_name')}' با موفقیت ایجاد شد"
+            }
 
         except Exception as e:
-            logger.error(f"Error in smart project setup: {e}")
-
-        return {"success": False, "error": "خطا در تحلیل درخواست"}
+            logger.error(f"Error in smart project setup: {e}", exc_info=True)
+            return {"success": False, "error": f"خطا در تحلیل درخواست: {str(e)}"}
 
     async def execute_with_monitoring(
         self,
