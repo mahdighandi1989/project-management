@@ -517,34 +517,82 @@ class SupervisorModel:
         }
 
     def _extract_json(self, text: str) -> Optional[Dict]:
-        """استخراج JSON از متن - روش ساده و مطمئن"""
+        """استخراج JSON از متن با چند روش مختلف"""
         import re
+
+        if not text:
+            return None
+
+        logger.info(f"_extract_json called, input length: {len(text)}")
+
+        # روش 1: اول سعی کن مستقیم parse کنی
         try:
-            logger.info(f"_extract_json input length: {len(text) if text else 0}")
+            return json.loads(text)
+        except:
+            pass
 
-            # حذف همه backticks و کلمه json
-            cleaned = text.replace('`', '').replace('```', '')
-            cleaned = re.sub(r'\bjson\b', '', cleaned, flags=re.IGNORECASE)
-            cleaned = cleaned.strip()
+        # روش 2: حذف code block markers و parse
+        cleaned = text
+        cleaned = re.sub(r'^[\s]*```(?:json)?[\s]*', '', cleaned)
+        cleaned = re.sub(r'[\s]*```[\s]*$', '', cleaned)
+        cleaned = cleaned.strip()
 
-            # پیدا کردن JSON object
-            start = cleaned.find('{')
-            end = cleaned.rfind('}') + 1
+        try:
+            return json.loads(cleaned)
+        except:
+            pass
 
-            logger.info(f"JSON bounds: start={start}, end={end}, cleaned_len={len(cleaned)}")
+        # روش 3: پیدا کردن JSON با balanced braces
+        start = cleaned.find('{')
+        if start == -1:
+            logger.warning("No opening brace found")
+            return None
 
-            if start >= 0 and end > start:
-                json_str = cleaned[start:end]
+        depth = 0
+        end = -1
+        in_string = False
+        escape_next = False
+
+        for i, char in enumerate(cleaned[start:], start):
+            if escape_next:
+                escape_next = False
+                continue
+            if char == '\\':
+                escape_next = True
+                continue
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if char == '{':
+                depth += 1
+            elif char == '}':
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+
+        if end > start:
+            json_str = cleaned[start:end]
+            try:
                 result = json.loads(json_str)
-                logger.info(f"JSON parsed OK! Keys: {list(result.keys()) if isinstance(result, dict) else 'N/A'}")
+                logger.info(f"JSON parsed OK with balanced braces!")
                 return result
-            else:
-                logger.warning(f"No valid JSON bounds found")
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON decode error: {e}")
 
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error: {e}")
-        except Exception as e:
-            logger.error(f"Error in _extract_json: {e}")
+        # روش 4: آخرین تلاش با rfind
+        end2 = cleaned.rfind('}') + 1
+        if end2 > start:
+            try:
+                result = json.loads(cleaned[start:end2])
+                logger.info(f"JSON parsed OK with rfind!")
+                return result
+            except:
+                pass
+
+        logger.error(f"All JSON extraction methods failed")
         return None
 
 
@@ -977,34 +1025,82 @@ class ProjectEngineIntegrator:
         }
 
     def _extract_json(self, text: str) -> Optional[Dict]:
-        """استخراج JSON از متن - روش ساده و مطمئن"""
+        """استخراج JSON از متن با چند روش مختلف"""
         import re
+
+        if not text:
+            return None
+
+        logger.info(f"_extract_json called, input length: {len(text)}")
+
+        # روش 1: اول سعی کن مستقیم parse کنی
         try:
-            logger.info(f"_extract_json input length: {len(text) if text else 0}")
+            return json.loads(text)
+        except:
+            pass
 
-            # حذف همه backticks و کلمه json
-            cleaned = text.replace('`', '').replace('```', '')
-            cleaned = re.sub(r'\bjson\b', '', cleaned, flags=re.IGNORECASE)
-            cleaned = cleaned.strip()
+        # روش 2: حذف code block markers و parse
+        cleaned = text
+        cleaned = re.sub(r'^[\s]*```(?:json)?[\s]*', '', cleaned)
+        cleaned = re.sub(r'[\s]*```[\s]*$', '', cleaned)
+        cleaned = cleaned.strip()
 
-            # پیدا کردن JSON object
-            start = cleaned.find('{')
-            end = cleaned.rfind('}') + 1
+        try:
+            return json.loads(cleaned)
+        except:
+            pass
 
-            logger.info(f"JSON bounds: start={start}, end={end}, cleaned_len={len(cleaned)}")
+        # روش 3: پیدا کردن JSON با balanced braces
+        start = cleaned.find('{')
+        if start == -1:
+            logger.warning("No opening brace found")
+            return None
 
-            if start >= 0 and end > start:
-                json_str = cleaned[start:end]
+        depth = 0
+        end = -1
+        in_string = False
+        escape_next = False
+
+        for i, char in enumerate(cleaned[start:], start):
+            if escape_next:
+                escape_next = False
+                continue
+            if char == '\\':
+                escape_next = True
+                continue
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if char == '{':
+                depth += 1
+            elif char == '}':
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+
+        if end > start:
+            json_str = cleaned[start:end]
+            try:
                 result = json.loads(json_str)
-                logger.info(f"JSON parsed OK! Keys: {list(result.keys()) if isinstance(result, dict) else 'N/A'}")
+                logger.info(f"JSON parsed OK with balanced braces!")
                 return result
-            else:
-                logger.warning(f"No valid JSON bounds found")
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON decode error: {e}")
 
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error: {e}")
-        except Exception as e:
-            logger.error(f"Error in _extract_json: {e}")
+        # روش 4: آخرین تلاش با rfind
+        end2 = cleaned.rfind('}') + 1
+        if end2 > start:
+            try:
+                result = json.loads(cleaned[start:end2])
+                logger.info(f"JSON parsed OK with rfind!")
+                return result
+            except:
+                pass
+
+        logger.error(f"All JSON extraction methods failed")
         return None
 
 
