@@ -185,7 +185,12 @@ class ProjectService:
 
         # انتخاب فازها
         if custom_phases:
-            phases = [Phase(**p) for p in custom_phases]
+            # اضافه کردن id اتوماتیک اگر وجود نداره
+            phases = []
+            for i, p in enumerate(custom_phases):
+                if 'id' not in p:
+                    p['id'] = f"phase_{i+1}_{uuid.uuid4().hex[:8]}"
+                phases.append(Phase(**p))
         else:
             template = PHASE_TEMPLATES.get(project_type, PHASE_TEMPLATES[ProjectType.CUSTOM])
             phases = [Phase(**p.dict()) for p in template]
