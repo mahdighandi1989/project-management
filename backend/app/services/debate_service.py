@@ -83,6 +83,8 @@ class DebateSession(BaseModel):
     created_at: datetime = datetime.now()
     updated_at: datetime = datetime.now()
     metadata: Dict[str, Any] = {}
+    # فایل‌های پیوست شده - محتوا ذخیره می‌شود
+    attachments: List[Dict[str, Any]] = []
 
     class Config:
         use_enum_values = True
@@ -130,6 +132,7 @@ class DebateService:
             mode=mode,
             models=models,
             role_assignments=role_assignments,
+            attachments=attachments or [],
             metadata={
                 "attachments_count": len(attachments) if attachments else 0,
             }
@@ -213,6 +216,15 @@ class DebateService:
         if role:
             messages.append(Message(role="system", content=role.system_prompt))
 
+        # *** اضافه کردن محتوای فایل‌های پیوست شده ***
+        if session.attachments and round_number == 1:
+            attachments_content = self._build_attachments_content(session.attachments)
+            if attachments_content:
+                messages.append(Message(
+                    role="user",
+                    content=f"📎 **فایل‌های پیوست شده:**\n\n{attachments_content}"
+                ))
+
         # Context از دورهای قبلی
         if round_number > 1 and session.rounds:
             prev_context = self._build_previous_rounds_context(session, model_id)
@@ -237,19 +249,54 @@ class DebateService:
         else:
             round_instruction = f"این دور {round_number} است. ادامه دهید."
 
+        # ساخت پیام اصلی با اشاره به فایل‌ها
+        attachment_note = ""
+        if session.attachments:
+            attachment_note = f"\n\n⚠️ توجه: {len(session.attachments)} فایل پیوست شده است. لطفاً محتوای آن‌ها را در پاسخ خود لحاظ کنید."
+
         messages.append(Message(
             role="user",
             content=f"""
 {round_instruction}
 
 پرامپت اصلی:
-{session.prompt}
+{session.prompt}{attachment_note}
 
 لطفاً پاسخ کامل و دقیق بدهید.
 """
         ))
 
         return messages
+
+    def _build_attachments_content(self, attachments: List[Dict[str, Any]]) -> str:
+        """ساخت محتوای فایل‌های پیوست برای ارسال به مدل"""
+        parts = []
+
+        for i, att in enumerate(attachments, 1):
+            filename = att.get('filename', att.get('name', f'فایل {i}'))
+            content = att.get('content', '')
+            file_type = att.get('type', att.get('file_category', 'unknown'))
+
+            if content:
+                # محدود کردن سایز محتوا برای جلوگیری از overflow
+                max_content_length = 50000  # حدود 50KB متن
+                if len(content) > max_content_length:
+                    content = content[:max_content_length] + f"\n\n... [ادامه فایل - {len(content) - max_content_length} کاراکتر دیگر] ..."
+
+                parts.append(f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📄 **فایل {i}: {filename}**
+نوع: {file_type}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+```
+{content}
+```
+""")
+            else:
+                parts.append(f"📄 **فایل {i}: {filename}** (محتوا در دسترس نیست)")
+
+        return "\n".join(parts)
 
     def _build_previous_rounds_context(self, session: DebateSession, current_model: str) -> str:
         """ساخت context از دورهای قبلی"""

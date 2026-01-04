@@ -148,10 +148,18 @@ export const modelsApi = {
   capabilities: () => api.get('/api/models/capabilities'),
 };
 
+// Attachment type for debates
+export interface DebateAttachment {
+  filename: string;
+  content: string;
+  type?: string;
+  file_category?: string;
+}
+
 // Debate
 export const debateApi = {
-  create: (prompt: string, mode: string = 'auto', models?: string[]) =>
-    api.post<DebateResponse>('/api/debate/create', { prompt, mode, models }),
+  create: (prompt: string, mode: string = 'auto', models?: string[], attachments?: DebateAttachment[]) =>
+    api.post<DebateResponse>('/api/debate/create', { prompt, mode, models, attachments }),
 
   get: (id: string) => api.get<DebateDetail>(`/api/debate/${id}`),
 

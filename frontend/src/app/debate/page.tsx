@@ -7,7 +7,7 @@
 import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useDebate } from '@/hooks/useDebate';
-import { settingsApi, modelsApi, WorkMode, Model } from '@/services/api';
+import { settingsApi, modelsApi, WorkMode, Model, DebateAttachment } from '@/services/api';
 import {
   PaperAirplaneIcon,
   PlayIcon,
@@ -46,6 +46,7 @@ function DebateContent() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showFileUpload, setShowFileUpload] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState<any[]>([]);
+  const [fileAttachments, setFileAttachments] = useState<DebateAttachment[]>([]);
 
   useEffect(() => {
     loadInitialData();
@@ -72,11 +73,73 @@ function DebateContent() {
       await createDebate(
         prompt,
         selectedMode,
-        selectedModels.length > 0 ? selectedModels : undefined
+        selectedModels.length > 0 ? selectedModels : undefined,
+        fileAttachments.length > 0 ? fileAttachments : undefined
       );
     } catch (err) {
       console.error('Error creating debate:', err);
     }
+  };
+
+  // خواندن محتوای فایل‌ها وقتی فایل جدید اضافه می‌شود
+  const handleFilesSelected = async (files: any[]) => {
+    setUploadedFiles(files);
+
+    // خواندن محتوای فایل‌ها برای ارسال به مناظره
+    const attachments: DebateAttachment[] = [];
+
+    for (const fileInfo of files) {
+      if (fileInfo.file && fileInfo.status === 'pending') {
+        // خواندن محتوای فایل قبل از آپلود
+        try {
+          const content = await readFileContent(fileInfo.file);
+          attachments.push({
+            filename: fileInfo.name,
+            content: content,
+            type: fileInfo.type,
+            file_category: fileInfo.result?.optimal_settings?.file_category || 'unknown'
+          });
+        } catch (err) {
+          console.error('Error reading file:', fileInfo.name, err);
+        }
+      } else if (fileInfo.status === 'completed' && fileInfo.file) {
+        // فایل آپلود شده - محتوا رو دوباره بخون
+        try {
+          const content = await readFileContent(fileInfo.file);
+          attachments.push({
+            filename: fileInfo.name,
+            content: content,
+            type: fileInfo.type,
+            file_category: fileInfo.result?.optimal_settings?.file_category || 'unknown'
+          });
+        } catch (err) {
+          console.error('Error reading uploaded file:', fileInfo.name, err);
+        }
+      }
+    }
+
+    setFileAttachments(attachments);
+  };
+
+  // تابع خواندن محتوای فایل
+  const readFileContent = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const content = e.target?.result as string;
+        resolve(content);
+      };
+      reader.onerror = (e) => reject(e);
+
+      // برای فایل‌های متنی
+      if (file.type.startsWith('text/') ||
+          file.name.match(/\.(txt|md|json|yaml|yml|xml|csv|html|css|js|ts|py|java|cpp|c|h|go|rs|php|rb|mq4|mq5|mqh|sql|sh|bat|jsx|tsx|vue)$/i)) {
+        reader.readAsText(file);
+      } else {
+        // برای فایل‌های باینری، base64 کن
+        reader.readAsDataURL(file);
+      }
+    });
   };
 
   const handleRunFull = async () => {
@@ -203,11 +266,23 @@ function DebateContent() {
               <div className="mt-4 p-4 bg-gray-50 dark:bg-gray-800 rounded-lg">
                 <FileUpload
                   entityType="debate"
-                  onFilesUploaded={(files) => setUploadedFiles(files)}
-                  maxFiles={5}
-                  maxSizeMB={25}
-                  storeInGithub={true}
+                  onFilesUploaded={handleFilesSelected}
+                  maxFiles={10}
+                  maxSizeMB={100}
+                  storeInGithub={false}
                 />
+                {fileAttachments.length > 0 && (
+                  <div className="mt-3 p-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
+                    <p className="text-sm text-green-700 dark:text-green-300">
+                      {fileAttachments.length} فایل آماده ارسال به مناظره
+                    </p>
+                    <ul className="mt-2 text-xs text-green-600 dark:text-green-400">
+                      {fileAttachments.map((att, i) => (
+                        <li key={i}>• {att.filename} ({att.file_category})</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
             )}
           </div>
