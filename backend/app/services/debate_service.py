@@ -113,6 +113,8 @@ class DebateSession(BaseModel):
     metadata: Dict[str, Any] = {}
     # فایل‌های پیوست شده - محتوا ذخیره می‌شود
     attachments: List[Dict[str, Any]] = []
+    # آیا کاربر خروجی فایلی میخواد؟
+    needs_file_output: bool = False
 
     class Config:
         use_enum_values = True
@@ -241,6 +243,7 @@ class DebateService:
         mode: WorkMode = WorkMode.AUTO,
         models: Optional[List[str]] = None,
         attachments: Optional[List[Dict]] = None,
+        needs_file_output: bool = False,
     ) -> DebateSession:
         """ایجاد یک جلسه مناظره جدید"""
         session_id = f"debate_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
@@ -278,10 +281,12 @@ class DebateService:
             models=models,
             role_assignments=role_assignments,
             attachments=attachments or [],
+            needs_file_output=needs_file_output,  # آیا کاربر خروجی فایلی میخواد
             metadata={
                 "attachments_count": len(attachments) if attachments else 0,
                 "original_mode": mode.value if mode else "auto",
                 "detected_mode": detected_mode.value if detected_mode else None,
+                "needs_file_output": needs_file_output,
             }
         )
 
@@ -428,7 +433,7 @@ class DebateService:
 
             if content:
                 # محدود کردن سایز محتوا برای جلوگیری از overflow
-                max_content_length = 50000  # حدود 50KB متن
+                max_content_length = 200000  # حدود 200KB متن - برای فایل‌های بزرگ
                 if len(content) > max_content_length:
                     content = content[:max_content_length] + f"\n\n... [ادامه فایل - {len(content) - max_content_length} کاراکتر دیگر] ..."
 
@@ -735,7 +740,11 @@ class DebateService:
             att_parts = []
             for att in session.attachments:
                 name = att.get('filename', att.get('name', 'فایل'))
-                content = att.get('content', '')[:5000]  # حداکثر 5000 کاراکتر
+                content = att.get('content', '')
+                # *** محدودیت رو خیلی بالا ببر - 200KB متن ***
+                max_content = 200000
+                if len(content) > max_content:
+                    content = content[:max_content] + f"\n\n... [ادامه فایل - {len(content) - max_content} کاراکتر باقیمانده] ..."
                 att_parts.append(f"**فایل: {name}**\n```\n{content}\n```")
             attachments_info = f"\n\n**فایل‌های پیوست:**\n" + "\n".join(att_parts)
 
@@ -939,6 +948,9 @@ class DebateService:
 
     def _needs_file_generation(self, session: DebateSession) -> bool:
         """آیا نیاز به تولید فایل هست؟"""
+        # اگر کاربر صراحتاً خروجی فایلی خواسته
+        if session.needs_file_output:
+            return True
         prompt_lower = session.prompt.lower()
         code_keywords = ['کد', 'code', 'فایل', 'file', 'تولید', 'generate', 'بنویس', 'write', 'بساز', 'create']
         return any(kw in prompt_lower for kw in code_keywords)

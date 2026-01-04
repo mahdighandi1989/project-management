@@ -50,6 +50,7 @@ function DebateContent() {
   const [showFileUpload, setShowFileUpload] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState<any[]>([]);
   const [fileAttachments, setFileAttachments] = useState<DebateAttachment[]>([]);
+  const [needsFileOutput, setNeedsFileOutput] = useState(false);  // آیا خروجی فایلی میخواد
 
   useEffect(() => {
     loadInitialData();
@@ -77,7 +78,8 @@ function DebateContent() {
         prompt,
         selectedMode,
         selectedModels.length > 0 ? selectedModels : undefined,
-        fileAttachments.length > 0 ? fileAttachments : undefined
+        fileAttachments.length > 0 ? fileAttachments : undefined,
+        needsFileOutput
       );
     } catch (err) {
       console.error('Error creating debate:', err);
@@ -320,6 +322,25 @@ function DebateContent() {
                 )}
               </div>
             )}
+          </div>
+
+          {/* File Output Toggle */}
+          <div className="flex items-center gap-3 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+            <input
+              type="checkbox"
+              id="needsFileOutput"
+              checked={needsFileOutput}
+              onChange={(e) => setNeedsFileOutput(e.target.checked)}
+              className="w-5 h-5 text-primary-600 rounded border-gray-300 focus:ring-primary-500"
+            />
+            <label htmlFor="needsFileOutput" className="flex-1">
+              <span className="font-medium text-gray-900 dark:text-white">
+                خروجی فایلی میخوام
+              </span>
+              <p className="text-sm text-gray-600 dark:text-gray-400">
+                فعال کنید تا مدل‌ها کد/فایل نهایی قابل دانلود تولید کنند
+              </p>
+            </label>
           </div>
 
           {/* Advanced Options */}

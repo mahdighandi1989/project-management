@@ -180,8 +180,8 @@ export interface DebateAttachment {
 
 // Debate
 export const debateApi = {
-  create: (prompt: string, mode: string = 'auto', models?: string[], attachments?: DebateAttachment[]) =>
-    api.post<DebateResponse>('/api/debate/create', { prompt, mode, models, attachments }),
+  create: (prompt: string, mode: string = 'auto', models?: string[], attachments?: DebateAttachment[], needsFileOutput: boolean = false) =>
+    api.post<DebateResponse>('/api/debate/create', { prompt, mode, models, attachments, needs_file_output: needsFileOutput }),
 
   get: (id: string) => api.get<DebateDetail>(`/api/debate/${id}`),
 
