@@ -7,8 +7,11 @@ from typing import Dict, List, Optional, Any
 from pydantic import BaseModel
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 import asyncio
 import uuid
+import json
+import os
 
 from .ai_manager import get_ai_manager, AIManager
 from .ai_base import Message, AIResponse
@@ -17,6 +20,9 @@ from ..core.roles import (
     ROLES_REGISTRY, WORK_MODES, get_role, get_mode_config
 )
 from ..core.models_registry import AIModel, get_model
+
+# مسیر ذخیره‌سازی مناظرات
+DEBATES_STORAGE_PATH = Path(os.environ.get('DEBATES_STORAGE_PATH', '/app/data/debates'))
 
 
 class DebateStatus(str, Enum):
@@ -124,6 +130,62 @@ class DebateService:
     def __init__(self, ai_manager: Optional[AIManager] = None):
         self.ai_manager = ai_manager or get_ai_manager()
         self._sessions: Dict[str, DebateSession] = {}
+        self._storage_path = DEBATES_STORAGE_PATH
+        self._ensure_storage_dir()
+        self._load_all_debates()
+
+    def _ensure_storage_dir(self):
+        """ایجاد دایرکتوری ذخیره‌سازی"""
+        self._storage_path.mkdir(parents=True, exist_ok=True)
+
+    def _get_debate_file_path(self, session_id: str) -> Path:
+        """مسیر فایل یک مناظره"""
+        return self._storage_path / f"{session_id}.json"
+
+    def _save_debate(self, session: DebateSession):
+        """ذخیره یک مناظره در فایل"""
+        try:
+            file_path = self._get_debate_file_path(session.id)
+            data = session.model_dump()
+            # تبدیل datetime به string
+            if isinstance(data.get('created_at'), datetime):
+                data['created_at'] = data['created_at'].isoformat()
+            if isinstance(data.get('updated_at'), datetime):
+                data['updated_at'] = data['updated_at'].isoformat()
+            # تبدیل rounds
+            for round_list in data.get('rounds', []):
+                for resp in round_list:
+                    if isinstance(resp.get('timestamp'), datetime):
+                        resp['timestamp'] = resp['timestamp'].isoformat()
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+        except Exception as e:
+            print(f"خطا در ذخیره مناظره {session.id}: {e}")
+
+    def _load_debate(self, file_path: Path) -> Optional[DebateSession]:
+        """بارگذاری یک مناظره از فایل"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # تبدیل mode به WorkMode
+            if isinstance(data.get('mode'), str):
+                data['mode'] = WorkMode(data['mode'])
+            if data.get('detected_mode') and isinstance(data['detected_mode'], str):
+                data['detected_mode'] = WorkMode(data['detected_mode'])
+            return DebateSession(**data)
+        except Exception as e:
+            print(f"خطا در بارگذاری مناظره {file_path}: {e}")
+            return None
+
+    def _load_all_debates(self):
+        """بارگذاری همه مناظرات از دیسک"""
+        if not self._storage_path.exists():
+            return
+        for file_path in self._storage_path.glob("*.json"):
+            session = self._load_debate(file_path)
+            if session:
+                self._sessions[session.id] = session
+        print(f"بارگذاری {len(self._sessions)} مناظره از دیسک")
 
     def _detect_optimal_mode(self, prompt: str, attachments: Optional[List[Dict]] = None) -> WorkMode:
         """تشخیص هوشمند بهترین حالت کاری بر اساس پرامپت و فایل‌ها"""
@@ -224,6 +286,7 @@ class DebateService:
         )
 
         self._sessions[session_id] = session
+        self._save_debate(session)  # ذخیره در دیسک
         return session
 
     async def run_round(
@@ -283,6 +346,7 @@ class DebateService:
 
         session.rounds.append(responses)
         session.updated_at = datetime.now()
+        self._save_debate(session)  # ذخیره در دیسک
 
         return responses
 
@@ -423,6 +487,7 @@ class DebateService:
 
         session.scores = scores
         session.updated_at = datetime.now()
+        self._save_debate(session)  # ذخیره در دیسک
 
         return scores
 
@@ -589,6 +654,7 @@ class DebateService:
 
         session.judge_result = result
         session.updated_at = datetime.now()
+        self._save_debate(session)  # ذخیره در دیسک
 
         return result
 
@@ -632,6 +698,7 @@ class DebateService:
 
         session.status = DebateStatus.COMPLETED
         session.updated_at = datetime.now()
+        self._save_debate(session)  # ذخیره در دیسک
 
         return session.summary
 
@@ -662,21 +729,45 @@ class DebateService:
                                 'source_model': resp.model_id
                             })
 
+        # اگر فایل پیوست داریم، اضافه کنیم
+        attachments_info = ""
+        if session.attachments:
+            att_parts = []
+            for att in session.attachments:
+                name = att.get('filename', att.get('name', 'فایل'))
+                content = att.get('content', '')[:5000]  # حداکثر 5000 کاراکتر
+                att_parts.append(f"**فایل: {name}**\n```\n{content}\n```")
+            attachments_info = f"\n\n**فایل‌های پیوست:**\n" + "\n".join(att_parts)
+
+        # تشخیص نوع کار
+        is_code_task = any(kw in session.prompt.lower() for kw in ['کد', 'code', 'بنویس', 'بساز', 'تولید', 'generate', 'write', 'create'])
+        is_mq5_task = session.attachments and any(att.get('filename', '').endswith(('.mq5', '.mq4', '.mqh')) for att in session.attachments)
+
+        code_instruction = ""
+        if is_code_task or is_mq5_task:
+            code_instruction = """
+
+⚠️ **مهم - تولید کد نهایی:**
+شما باید کد نهایی کامل را در یک بلوک کد بنویسید.
+اگر فایل MQ5/MQ4 پیوست شده، نسخه بهبود یافته کامل آن را بنویسید.
+از نوشتن "..." یا placeholder پرهیز کنید - کد باید 100% کامل باشد!
+"""
+
         synthesis_prompt = f"""
 شما باید تمام پاسخ‌های زیر را ترکیب کرده و یک خروجی نهایی یکپارچه تولید کنید.
 
 **درخواست اصلی:**
-{session.prompt[:1000]}
+{session.prompt[:1000]}{attachments_info}
 
 **پاسخ‌های دریافتی:**
-{all_responses}
+{all_responses}{code_instruction}
 
 **وظیفه شما:**
 1. نقاط قوت هر پاسخ را شناسایی کنید
 2. بهترین ایده‌ها و کدها را ترکیب کنید
 3. یک خروجی نهایی کامل و یکپارچه تولید کنید
 
-اگر کدی درخواست شده، کد نهایی کامل و قابل اجرا بدهید.
+اگر کدی درخواست شده، کد نهایی کامل و قابل اجرا را در بلوک کد (```) بنویسید.
 اگر تحلیل درخواست شده، تحلیل جامع و ساختارمند ارائه دهید.
 
 خروجی شما باید:
@@ -704,10 +795,24 @@ class DebateService:
                 lang = match[0] or 'text'
                 code = match[1].strip()
                 if len(code) > 50:
+                    # تعیین نام و پسوند مناسب
+                    ext_map = {
+                        'mq5': 'mq5', 'mq4': 'mq4', 'mqh': 'mqh',
+                        'cpp': 'cpp', 'c': 'c', 'python': 'py', 'py': 'py',
+                        'javascript': 'js', 'js': 'js', 'typescript': 'ts', 'ts': 'ts',
+                    }
+                    ext = ext_map.get(lang.lower(), lang if lang != 'text' else 'txt')
+
+                    # اگر MQ5 پیوست شده، از نام اون استفاده کن
+                    filename = f'output.{ext}'
+                    if is_mq5_task and lang.lower() in ['mq5', 'mq4', 'mqh', 'cpp', 'c']:
+                        orig_name = session.attachments[0].get('filename', 'expert.mq5')
+                        filename = f'improved_{orig_name}'
+
                     final_code_blocks.append({
                         'language': lang,
                         'code': code,
-                        'filename': f'output.{lang}' if lang != 'text' else 'output.txt'
+                        'filename': filename
                     })
 
             output = SynthesizedOutput(
@@ -720,6 +825,7 @@ class DebateService:
 
             session.synthesized_output = output
             session.updated_at = datetime.now()
+            self._save_debate(session)  # ذخیره در دیسک
 
             return output
 
@@ -729,6 +835,7 @@ class DebateService:
                 synthesizer_model=synth_model
             )
             session.synthesized_output = output
+            self._save_debate(session)  # ذخیره در دیسک
             return output
 
     async def run_file_generation(self, session: DebateSession) -> List[GeneratedFile]:
@@ -796,6 +903,7 @@ class DebateService:
 
         session.generated_files = generated_files
         session.updated_at = datetime.now()
+        self._save_debate(session)  # ذخیره در دیسک
 
         return generated_files
 
