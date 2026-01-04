@@ -557,7 +557,7 @@ function DebateContent() {
               </div>
 
               {/* Code Blocks */}
-              {currentDebate.synthesized_output.code_blocks?.length > 0 && (
+              {currentDebate.synthesized_output.code_blocks && currentDebate.synthesized_output.code_blocks.length > 0 && (
                 <div className="mt-4 space-y-3">
                   <h4 className="font-medium text-gray-700 dark:text-gray-300">
                     کدهای استخراج شده:
@@ -587,7 +587,7 @@ function DebateContent() {
           )}
 
           {/* Generated Files - فایل‌های تولید شده */}
-          {currentDebate.generated_files?.length > 0 && (
+          {currentDebate.generated_files && currentDebate.generated_files.length > 0 && (
             <div className="card">
               <div className="flex items-center gap-3 mb-4">
                 <DocumentArrowDownIcon className="w-6 h-6 text-blue-600" />
