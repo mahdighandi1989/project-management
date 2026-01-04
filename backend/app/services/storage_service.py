@@ -53,22 +53,41 @@ class StorageService:
         └── {date}/
     """
 
-    # نوع‌های فایل مجاز
-    ALLOWED_EXTENSIONS = {
+    # نوع‌های فایل مجاز - همه فرمت‌ها قبول هستند
+    # این لیست فقط برای تشخیص خودکار نوع فایل استفاده می‌شود
+    KNOWN_EXTENSIONS = {
         # متن و کد
         'txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'html', 'css', 'js', 'ts',
         'py', 'java', 'cpp', 'c', 'h', 'go', 'rs', 'php', 'rb', 'swift', 'kt',
+        'jsx', 'tsx', 'vue', 'svelte', 'astro', 'prisma', 'graphql', 'proto',
+        # Trading/MetaTrader
+        'mq4', 'mq5', 'mqh', 'ex4', 'ex5', 'tpl', 'set',
         # اسناد
         'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp',
+        'rtf', 'tex', 'epub', 'mobi',
         # تصویر
-        'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'ico',
+        'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'ico', 'tiff', 'psd', 'ai',
+        'raw', 'cr2', 'nef', 'heic', 'heif',
         # صوت و ویدیو
-        'mp3', 'wav', 'ogg', 'mp4', 'webm', 'avi', 'mov',
+        'mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a', 'wma',
+        'mp4', 'webm', 'avi', 'mov', 'mkv', 'flv', 'wmv', 'm4v', '3gp',
         # آرشیو
-        'zip', 'tar', 'gz', 'rar', '7z',
+        'zip', 'tar', 'gz', 'rar', '7z', 'bz2', 'xz', 'tgz',
+        # داده
+        'db', 'sqlite', 'sqlite3', 'mdb', 'accdb', 'parquet', 'feather',
         # سایر
-        'log', 'sql', 'sh', 'bat', 'env', 'gitignore', 'dockerfile'
+        'log', 'sql', 'sh', 'bat', 'ps1', 'env', 'gitignore', 'dockerfile',
+        'makefile', 'cmake', 'gradle', 'pom', 'toml', 'ini', 'cfg', 'conf',
+        # باینری و اجرایی
+        'exe', 'dll', 'so', 'dylib', 'bin', 'dat', 'iso', 'img',
+        # فونت
+        'ttf', 'otf', 'woff', 'woff2', 'eot',
+        # CAD/3D
+        'dwg', 'dxf', 'stl', 'obj', 'fbx', 'blend', 'max', 'skp',
     }
+
+    # حداکثر حجم فایل: 500MB
+    MAX_FILE_SIZE = 500 * 1024 * 1024
 
     def __init__(self, base_path: str = "./storage"):
         self.base_path = Path(base_path)
@@ -114,9 +133,46 @@ class StorageService:
         return filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
 
     def _is_allowed(self, filename: str) -> bool:
-        """بررسی مجاز بودن نوع فایل"""
+        """همه فایل‌ها مجاز هستند"""
+        # پذیرش همه فرمت‌ها - بدون محدودیت
+        return True
+
+    def _get_file_category(self, filename: str) -> str:
+        """تشخیص دسته‌بندی فایل برای تنظیم خودکار"""
         ext = self._get_extension(filename)
-        return ext in self.ALLOWED_EXTENSIONS or ext == ''
+
+        # کد و برنامه‌نویسی
+        code_exts = {'py', 'js', 'ts', 'jsx', 'tsx', 'java', 'cpp', 'c', 'h', 'go', 'rs',
+                     'php', 'rb', 'swift', 'kt', 'mq4', 'mq5', 'mqh', 'sql', 'sh', 'bat'}
+        if ext in code_exts:
+            return 'code'
+
+        # اسناد متنی
+        doc_exts = {'txt', 'md', 'pdf', 'doc', 'docx', 'rtf', 'tex', 'epub'}
+        if ext in doc_exts:
+            return 'document'
+
+        # داده
+        data_exts = {'json', 'yaml', 'yml', 'xml', 'csv', 'xlsx', 'xls', 'parquet', 'db', 'sqlite'}
+        if ext in data_exts:
+            return 'data'
+
+        # تصویر
+        image_exts = {'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'psd', 'ai', 'tiff'}
+        if ext in image_exts:
+            return 'image'
+
+        # صوت/ویدیو
+        media_exts = {'mp3', 'wav', 'ogg', 'mp4', 'webm', 'avi', 'mov', 'mkv', 'flac'}
+        if ext in media_exts:
+            return 'media'
+
+        # آرشیو
+        archive_exts = {'zip', 'tar', 'gz', 'rar', '7z', 'bz2'}
+        if ext in archive_exts:
+            return 'archive'
+
+        return 'other'
 
     def _calculate_checksum(self, content: bytes) -> str:
         """محاسبه checksum فایل"""

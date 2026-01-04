@@ -16,6 +16,148 @@ router = APIRouter(prefix="/orchestrator", tags=["Smart Orchestrator"])
 
 
 # =====================================
+# Auto-Detection Helper Functions
+# =====================================
+
+def get_optimal_settings_for_file(filename: str, file_size: int) -> Dict[str, Any]:
+    """
+    تشخیص خودکار تنظیمات بهینه بر اساس نوع فایل و اندازه
+    """
+    extension = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+    size_mb = file_size / (1024 * 1024)
+
+    # تنظیمات پیش‌فرض
+    settings = {
+        "max_tokens": 4000,
+        "temperature": 0.7,
+        "timeout": 120,
+        "chunk_size": 50000,  # 50KB per chunk
+        "recommended_model": "gpt-4o-mini",
+        "analysis_type": "general",
+        "file_category": "other"
+    }
+
+    # کد و برنامه‌نویسی
+    code_extensions = {
+        'py', 'js', 'ts', 'jsx', 'tsx', 'java', 'cpp', 'c', 'h', 'go', 'rs',
+        'php', 'rb', 'swift', 'kt', 'mq4', 'mq5', 'mqh', 'sql', 'sh', 'bat',
+        'vue', 'svelte', 'astro', 'graphql', 'proto'
+    }
+    if extension in code_extensions:
+        settings.update({
+            "max_tokens": 8000,
+            "temperature": 0.2,  # کمتر برای کد
+            "timeout": 180,
+            "chunk_size": 100000,  # 100KB
+            "recommended_model": "claude-3-5-sonnet-20241022" if size_mb > 1 else "gpt-4o",
+            "analysis_type": "code_review",
+            "file_category": "code"
+        })
+
+    # Trading/MetaTrader
+    elif extension in {'mq4', 'mq5', 'mqh', 'ex4', 'ex5'}:
+        settings.update({
+            "max_tokens": 16000,  # بیشتر برای Expert Advisor ها
+            "temperature": 0.1,
+            "timeout": 300,
+            "chunk_size": 150000,
+            "recommended_model": "claude-3-5-sonnet-20241022",
+            "analysis_type": "trading_code_analysis",
+            "file_category": "trading"
+        })
+
+    # اسناد متنی
+    elif extension in {'txt', 'md', 'rtf', 'tex'}:
+        settings.update({
+            "max_tokens": 4000,
+            "temperature": 0.5,
+            "timeout": 120,
+            "recommended_model": "gpt-4o-mini",
+            "analysis_type": "text_analysis",
+            "file_category": "document"
+        })
+
+    # PDF و اسناد پیچیده
+    elif extension in {'pdf', 'doc', 'docx', 'ppt', 'pptx'}:
+        settings.update({
+            "max_tokens": 8000,
+            "temperature": 0.3,
+            "timeout": 240,
+            "recommended_model": "gpt-4o",  # برای اسناد پیچیده
+            "analysis_type": "document_analysis",
+            "file_category": "document"
+        })
+
+    # داده و JSON/YAML
+    elif extension in {'json', 'yaml', 'yml', 'xml', 'csv'}:
+        settings.update({
+            "max_tokens": 8000,
+            "temperature": 0.2,
+            "timeout": 180,
+            "recommended_model": "gpt-4o-mini",
+            "analysis_type": "data_analysis",
+            "file_category": "data"
+        })
+
+    # Excel
+    elif extension in {'xlsx', 'xls'}:
+        settings.update({
+            "max_tokens": 16000,
+            "temperature": 0.3,
+            "timeout": 300,
+            "recommended_model": "gpt-4o",
+            "analysis_type": "spreadsheet_analysis",
+            "file_category": "data"
+        })
+
+    # تصویر
+    elif extension in {'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'}:
+        settings.update({
+            "max_tokens": 4000,
+            "temperature": 0.5,
+            "timeout": 120,
+            "recommended_model": "gpt-4o",  # مدل با قابلیت vision
+            "analysis_type": "image_analysis",
+            "file_category": "image"
+        })
+
+    # صوت و ویدیو
+    elif extension in {'mp3', 'wav', 'mp4', 'webm', 'avi', 'mov', 'mkv'}:
+        settings.update({
+            "max_tokens": 4000,
+            "temperature": 0.5,
+            "timeout": 300,
+            "recommended_model": "whisper-1",  # برای صوت
+            "analysis_type": "media_transcription",
+            "file_category": "media"
+        })
+
+    # آرشیو
+    elif extension in {'zip', 'tar', 'gz', 'rar', '7z'}:
+        settings.update({
+            "max_tokens": 2000,
+            "temperature": 0.5,
+            "timeout": 60,
+            "recommended_model": "gpt-4o-mini",
+            "analysis_type": "archive_listing",
+            "file_category": "archive"
+        })
+
+    # تنظیم بر اساس حجم فایل
+    if size_mb > 10:
+        settings["timeout"] = max(settings["timeout"], 300)
+        settings["max_tokens"] = max(settings["max_tokens"], 8000)
+    if size_mb > 50:
+        settings["timeout"] = 600
+        settings["max_tokens"] = 16000
+    if size_mb > 100:
+        settings["max_tokens"] = 32000
+        settings["recommended_model"] = "claude-3-5-sonnet-20241022"
+
+    return settings
+
+
+# =====================================
 # Request/Response Models
 # =====================================
 
@@ -293,13 +435,18 @@ async def upload_file_for_analysis(
             tags=["uploaded", "for_analysis"]
         )
 
+        # تشخیص خودکار تنظیمات بهینه
+        optimal_settings = get_optimal_settings_for_file(filename, len(content))
+
         result = {
             "success": True,
             "file_id": local_meta.id,
             "filename": filename,
             "size": len(content),
+            "size_mb": round(len(content) / (1024 * 1024), 2),
             "needs_chunking": needs_chunking,
-            "local_path": local_meta.relative_path
+            "local_path": local_meta.relative_path,
+            "optimal_settings": optimal_settings
         }
 
         # ذخیره در GitHub

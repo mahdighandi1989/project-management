@@ -85,7 +85,7 @@ class Settings(BaseSettings):
     # تنظیمات ذخیره‌سازی
     # ===========================================
     UPLOAD_DIR: str = Field(default="./uploads", description="پوشه آپلود فایل‌ها")
-    MAX_UPLOAD_SIZE: int = Field(default=50 * 1024 * 1024, description="حداکثر سایز آپلود (50MB)")
+    MAX_UPLOAD_SIZE: int = Field(default=500 * 1024 * 1024, description="حداکثر سایز آپلود (500MB)")
 
     # ===========================================
     # تنظیمات JWT
