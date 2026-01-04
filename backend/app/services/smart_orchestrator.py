@@ -791,9 +791,9 @@ class ProjectEngineIntegrator:
             response = await self.model_selector.ai_manager.generate(
                 model_id=analyzer_id,
                 messages=[Message(role="user", content=analysis_prompt)],
-                max_tokens=2000
+                max_tokens=4000  # افزایش برای پاسخ‌های طولانی‌تر
             )
-            logger.info(f"AI response received, has content: {bool(response.content)}, error: {response.error}")
+            logger.info(f"AI response received, length: {len(response.content) if response.content else 0}, error: {response.error}")
 
             if response.error:
                 return {"success": False, "error": f"خطا از مدل AI: {response.error}"}
@@ -801,8 +801,11 @@ class ProjectEngineIntegrator:
             if not response.content:
                 return {"success": False, "error": "پاسخی از مدل AI دریافت نشد"}
 
+            # لاگ کامل پاسخ برای debug
+            logger.info(f"Full AI response: {response.content}")
+
             analysis = self._extract_json(response.content)
-            logger.info(f"JSON extraction result: {bool(analysis)}")
+            logger.info(f"JSON extraction result: {bool(analysis)}, type: {type(analysis)}")
 
             if not analysis:
                 # اگر JSON استخراج نشد، خود پاسخ را نشان بده
