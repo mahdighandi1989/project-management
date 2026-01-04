@@ -520,24 +520,31 @@ class SupervisorModel:
         """استخراج JSON از متن - روش ساده و مطمئن"""
         import re
         try:
-            # روش ساده: پیدا کردن اولین { و آخرین } و پارس کردن
-            # اول همه نوع backtick ها رو حذف کن
-            text = re.sub(r'[`´''\u0060\u00B4\u2018\u2019]+', '', text)
-            # حذف کلمه json اگر تنها مونده
-            text = re.sub(r'\bjson\b', '', text, flags=re.IGNORECASE)
+            logger.info(f"_extract_json input length: {len(text) if text else 0}")
+
+            # حذف همه backticks و کلمه json
+            cleaned = text.replace('`', '').replace('```', '')
+            cleaned = re.sub(r'\bjson\b', '', cleaned, flags=re.IGNORECASE)
+            cleaned = cleaned.strip()
 
             # پیدا کردن JSON object
-            start = text.find('{')
-            end = text.rfind('}') + 1
+            start = cleaned.find('{')
+            end = cleaned.rfind('}') + 1
+
+            logger.info(f"JSON bounds: start={start}, end={end}, cleaned_len={len(cleaned)}")
 
             if start >= 0 and end > start:
-                json_str = text[start:end]
-                return json.loads(json_str)
+                json_str = cleaned[start:end]
+                result = json.loads(json_str)
+                logger.info(f"JSON parsed OK! Keys: {list(result.keys()) if isinstance(result, dict) else 'N/A'}")
+                return result
+            else:
+                logger.warning(f"No valid JSON bounds found")
 
         except json.JSONDecodeError as e:
-            logger.warning(f"JSON decode error: {e}")
+            logger.error(f"JSON decode error: {e}")
         except Exception as e:
-            logger.warning(f"Error extracting JSON: {e}")
+            logger.error(f"Error in _extract_json: {e}")
         return None
 
 
@@ -973,24 +980,31 @@ class ProjectEngineIntegrator:
         """استخراج JSON از متن - روش ساده و مطمئن"""
         import re
         try:
-            # روش ساده: پیدا کردن اولین { و آخرین } و پارس کردن
-            # اول همه نوع backtick ها رو حذف کن
-            text = re.sub(r'[`´''\u0060\u00B4\u2018\u2019]+', '', text)
-            # حذف کلمه json اگر تنها مونده
-            text = re.sub(r'\bjson\b', '', text, flags=re.IGNORECASE)
+            logger.info(f"_extract_json input length: {len(text) if text else 0}")
+
+            # حذف همه backticks و کلمه json
+            cleaned = text.replace('`', '').replace('```', '')
+            cleaned = re.sub(r'\bjson\b', '', cleaned, flags=re.IGNORECASE)
+            cleaned = cleaned.strip()
 
             # پیدا کردن JSON object
-            start = text.find('{')
-            end = text.rfind('}') + 1
+            start = cleaned.find('{')
+            end = cleaned.rfind('}') + 1
+
+            logger.info(f"JSON bounds: start={start}, end={end}, cleaned_len={len(cleaned)}")
 
             if start >= 0 and end > start:
-                json_str = text[start:end]
-                return json.loads(json_str)
+                json_str = cleaned[start:end]
+                result = json.loads(json_str)
+                logger.info(f"JSON parsed OK! Keys: {list(result.keys()) if isinstance(result, dict) else 'N/A'}")
+                return result
+            else:
+                logger.warning(f"No valid JSON bounds found")
 
         except json.JSONDecodeError as e:
-            logger.warning(f"JSON decode error: {e}")
+            logger.error(f"JSON decode error: {e}")
         except Exception as e:
-            logger.warning(f"Error extracting JSON: {e}")
+            logger.error(f"Error in _extract_json: {e}")
         return None
 
 
