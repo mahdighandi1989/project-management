@@ -117,8 +117,24 @@ class ProjectService:
     def __init__(self, storage_path: str = "./data/projects"):
         self.storage_path = storage_path
         self.projects: Dict[str, ProjectContext] = {}
+        self.github_storage = None
         self._ensure_storage()
         self._load_projects()
+        # بارگذاری از GitHub به صورت async در startup انجام میشه
+
+    def initialize_github(self, github_storage):
+        """Initialize با GitHub storage"""
+        self.github_storage = github_storage
+        # بارگذاری پروژه‌ها از GitHub
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(self._load_from_github())
+            else:
+                loop.run_until_complete(self._load_from_github())
+        except Exception as e:
+            print(f"Could not load from GitHub: {e}")
 
     def _ensure_storage(self):
         """ایجاد پوشه ذخیره‌سازی"""
@@ -136,6 +152,43 @@ class ProjectService:
         except Exception as e:
             print(f"Error loading projects: {e}")
 
+    async def _load_from_github(self):
+        """بارگذاری پروژه‌ها از GitHub"""
+        if not self.github_storage:
+            return
+
+        try:
+            # لیست پوشه projects
+            files = await self.github_storage.list_folder("projects")
+            for folder in files:
+                if folder.type == "dir":
+                    project_id = folder.name
+                    if project_id not in self.projects:
+                        # دریافت metadata.json
+                        await self._load_project_from_github(project_id)
+        except Exception as e:
+            print(f"Error loading from GitHub: {e}")
+
+    async def _load_project_from_github(self, project_id: str):
+        """بارگذاری یک پروژه از GitHub"""
+        if not self.github_storage:
+            return
+
+        try:
+            # دریافت فایل metadata
+            result = await self.github_storage.get_file(f"projects/{project_id}/metadata.json")
+            if result.get("success") and result.get("content"):
+                import base64
+                content = base64.b64decode(result["content"]).decode('utf-8')
+                data = json.loads(content)
+                project = ProjectContext(**data)
+                self.projects[project_id] = project
+                # ذخیره لوکال هم
+                self._save_project_local(project)
+                print(f"Loaded project {project_id} from GitHub")
+        except Exception as e:
+            print(f"Error loading project {project_id} from GitHub: {e}")
+
     def _load_project(self, project_id: str) -> Optional[ProjectContext]:
         """بارگذاری یک پروژه"""
         try:
@@ -151,14 +204,49 @@ class ProjectService:
         return None
 
     def _save_project(self, project: ProjectContext):
-        """ذخیره پروژه در دیسک"""
+        """ذخیره پروژه در دیسک و GitHub"""
+        # ذخیره لوکال
+        self._save_project_local(project)
+
+        # ذخیره در GitHub (async)
+        if self.github_storage:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(self._save_project_to_github(project))
+                else:
+                    loop.run_until_complete(self._save_project_to_github(project))
+            except Exception as e:
+                print(f"Could not save to GitHub: {e}")
+
+    def _save_project_local(self, project: ProjectContext):
+        """ذخیره پروژه فقط در دیسک لوکال"""
         try:
             path = os.path.join(self.storage_path, f"{project.project_id}.json")
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(project.dict(), f, ensure_ascii=False, indent=2)
             self._update_registry()
         except Exception as e:
-            print(f"Error saving project: {e}")
+            print(f"Error saving project locally: {e}")
+
+    async def _save_project_to_github(self, project: ProjectContext):
+        """ذخیره پروژه در GitHub"""
+        if not self.github_storage:
+            return
+
+        try:
+            # ذخیره metadata.json
+            content = json.dumps(project.dict(), ensure_ascii=False, indent=2)
+            await self.github_storage.save_project_file(
+                project.project_id,
+                content.encode('utf-8'),
+                "metadata.json",
+                "source"  # ذخیره در پوشه source
+            )
+            print(f"Project {project.project_id} saved to GitHub")
+        except Exception as e:
+            print(f"Error saving project {project.project_id} to GitHub: {e}")
 
     def _update_registry(self):
         """بروزرسانی فهرست پروژه‌ها"""

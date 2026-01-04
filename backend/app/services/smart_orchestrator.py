@@ -971,50 +971,79 @@ class ProjectEngineIntegrator:
         """
         workflow = self.active_workflows.get(project_id)
         if not workflow:
-            return {"success": False, "error": "Workflow یافت نشد"}
+            return {"success": False, "error": "Workflow یافت نشد. ابتدا پروژه را با smart_project_setup ایجاد کنید."}
 
         analysis = workflow["analysis"]
         results = []
+        engine_project_id = None
 
-        # ایجاد پروژه در Creator Engine
-        engine_result = await self.creator_engine.project_creator.create_project(
-            name=analysis.get("project_name", "project"),
-            description=analysis.get("description", ""),
-            project_type=analysis.get("project_type", "custom"),
-            technologies=analysis.get("technologies", []),
-            features=analysis.get("features", [])
-        )
-
-        if not engine_result.success:
-            return {"success": False, "error": "خطا در ایجاد پروژه"}
-
-        engine_project_id = engine_result.output.get("project_id")
+        # ایجاد پروژه در Creator Engine (اگر موجود باشد)
+        if self.creator_engine and self.creator_engine.project_creator:
+            try:
+                engine_result = await self.creator_engine.project_creator.create_project(
+                    name=analysis.get("project_name", "project"),
+                    description=analysis.get("description", ""),
+                    project_type=analysis.get("project_type", "custom"),
+                    technologies=analysis.get("technologies", []),
+                    features=analysis.get("features", [])
+                )
+                if engine_result.success:
+                    engine_project_id = engine_result.output.get("project_id")
+            except Exception as e:
+                logger.warning(f"Could not create project in Creator Engine: {e}")
+        else:
+            logger.warning("Creator Engine project_creator not initialized, skipping engine project creation")
 
         # تولید فایل‌های اصلی
-        for file_path in analysis.get("estimated_files", []):
-            file_result = await self.execute_with_monitoring(
-                project_id,
-                f"فایل {file_path} را برای پروژه بنویس",
-                TaskCategory.CODE_GENERATION
-            )
+        estimated_files = analysis.get("estimated_files", [])
 
-            if file_result.get("success"):
-                # ذخیره فایل
-                output = file_result.get("revised_output") or file_result.get("output", "")
-                await self.creator_engine.project_creator.file_manager.write_file(
-                    file_path,
-                    output
+        if not estimated_files:
+            # اگر فایلی مشخص نشده، بر اساس فازها تولید کن
+            workflow["status"] = "ready"
+            return {
+                "success": True,
+                "project_id": project_id,
+                "engine_project_id": engine_project_id,
+                "message": "پروژه آماده است. فایل‌های مشخصی برای تولید خودکار وجود ندارد.",
+                "phases": analysis.get("phases", [])
+            }
+
+        for file_path in estimated_files:
+            try:
+                file_result = await self.execute_with_monitoring(
+                    project_id,
+                    f"فایل {file_path} را برای پروژه '{analysis.get('project_name', 'project')}' بنویس. توضیحات پروژه: {analysis.get('description', '')}",
+                    TaskCategory.CODE_GENERATION
                 )
-                results.append({
-                    "file": file_path,
-                    "status": "created",
-                    "score": file_result["evaluation"]["score"]
-                })
-            else:
+
+                if file_result.get("success"):
+                    output = file_result.get("revised_output") or file_result.get("output", "")
+
+                    # ذخیره فایل (اگر Creator Engine موجود باشد)
+                    if self.creator_engine and self.creator_engine.file_manager:
+                        try:
+                            await self.creator_engine.file_manager.write_file(file_path, output)
+                        except Exception as e:
+                            logger.warning(f"Could not write file to Creator Engine: {e}")
+
+                    results.append({
+                        "file": file_path,
+                        "status": "created",
+                        "score": file_result.get("evaluation", {}).get("score", 0),
+                        "content_preview": output[:200] if output else ""
+                    })
+                else:
+                    results.append({
+                        "file": file_path,
+                        "status": "failed",
+                        "error": file_result.get("error", "Unknown error")
+                    })
+            except Exception as e:
+                logger.error(f"Error creating file {file_path}: {e}")
                 results.append({
                     "file": file_path,
                     "status": "failed",
-                    "error": file_result.get("error")
+                    "error": str(e)
                 })
 
         workflow["status"] = "building"
@@ -1025,6 +1054,7 @@ class ProjectEngineIntegrator:
             "project_id": project_id,
             "engine_project_id": engine_project_id,
             "files_created": len([r for r in results if r["status"] == "created"]),
+            "files_failed": len([r for r in results if r["status"] == "failed"]),
             "results": results
         }
 

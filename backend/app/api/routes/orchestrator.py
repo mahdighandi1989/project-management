@@ -214,11 +214,20 @@ def get_orchestrator():
             from ...services.ai_manager import get_ai_manager
             from ...services.project_service import get_project_service
             from ...services.creator_engine import get_creator_engine
+            from ...services.github_storage import get_github_storage as _get_github
 
             ai_manager = get_ai_manager()
             project_service = get_project_service()
             creator_engine = get_creator_engine()
             creator_engine.initialize(ai_manager)
+
+            # Initialize GitHub storage for project persistence
+            try:
+                github_storage = _get_github()
+                project_service.initialize_github(github_storage)
+                logger.info("GitHub storage initialized for project persistence")
+            except Exception as gh_error:
+                logger.warning(f"Could not initialize GitHub storage: {gh_error}")
 
             orchestrator.initialize(ai_manager, project_service, creator_engine)
         except Exception as e:
@@ -308,13 +317,37 @@ async def start_project_workflow(request: StartWorkflowRequest):
         if not phases:
             raise HTTPException(status_code=400, detail="پروژه فازی ندارد")
 
+        # تولید estimated_files از فازها
+        estimated_files = []
+        for phase in phases:
+            if isinstance(phase, dict):
+                for step in phase.get("steps", []):
+                    # اگر step شامل نام فایل باشه
+                    if any(ext in step.lower() for ext in ['.py', '.js', '.ts', '.tsx', '.json', '.md', '.html', '.css']):
+                        estimated_files.append(step)
+
+        # اگر فایلی پیدا نشد، فایل‌های پیش‌فرض بر اساس نوع پروژه
+        if not estimated_files:
+            project_type = project.get("project_type", "custom")
+            if project_type == "web_app":
+                estimated_files = ["README.md", "main.py", "requirements.txt", "app.py"]
+            elif project_type == "api_service":
+                estimated_files = ["README.md", "main.py", "requirements.txt", "routes.py"]
+            else:
+                estimated_files = ["README.md", "main.py", "requirements.txt"]
+
         # اگر workflow فعال نیست، ایجاد کن
         if request.project_id not in orchestrator.integrator.active_workflows:
             orchestrator.integrator.active_workflows[request.project_id] = {
                 "analysis": {
                     "project_name": project.get("name"),
+                    "description": project.get("description", ""),
+                    "project_type": project.get("project_type", "custom"),
+                    "goal": project.get("goal", ""),
                     "phases": phases,
-                    "goal": project.get("goal")
+                    "technologies": [],  # TODO: extract from project
+                    "features": [],
+                    "estimated_files": estimated_files
                 },
                 "status": "initialized",
                 "current_phase": 0,
@@ -337,7 +370,7 @@ async def start_project_workflow(request: StartWorkflowRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error starting workflow: {e}")
+        logger.error(f"Error starting workflow: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
