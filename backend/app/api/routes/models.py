@@ -5,16 +5,9 @@ API routes برای مدیریت مدل‌ها
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
+import logging
 
-from ...services.ai_manager import get_ai_manager
-from ...core.models_registry import (
-    MODEL_REGISTRY, MODEL_ALIASES,
-    get_model, get_enabled_models,
-    get_models_by_capability, get_image_generator_models,
-    get_vision_models,
-    ModelCapability
-)
-from ...core.config import settings
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/models", tags=["Models"])
 
@@ -59,130 +52,210 @@ class SmartSelectRequest(BaseModel):
 
 
 # ===========================================
+# Helper function to safely get provider value
+# ===========================================
+def get_provider_value(provider) -> str:
+    """Safely get provider value as string"""
+    if hasattr(provider, 'value'):
+        return provider.value
+    return str(provider)
+
+
+def get_capability_value(cap) -> str:
+    """Safely get capability value as string"""
+    if hasattr(cap, 'value'):
+        return cap.value
+    return str(cap)
+
+
+# ===========================================
 # Endpoints
 # ===========================================
 
+@router.get("", response_model=List[ModelInfo])
 @router.get("/", response_model=List[ModelInfo])
 async def list_models(provider: Optional[str] = None, capability: Optional[str] = None):
     """لیست همه مدل‌ها"""
     try:
-        ai_manager = get_ai_manager()
-        available_providers = ai_manager.get_available_providers()
-    except Exception:
+        from ...core.models_registry import MODEL_REGISTRY, ModelCapability
+        from ...services.ai_manager import get_ai_manager
+
+        # Get available providers
         available_providers = []
+        try:
+            ai_manager = get_ai_manager()
+            available_providers = ai_manager.get_available_providers()
+        except Exception as e:
+            logger.warning(f"Could not get AI manager: {e}")
 
-    models = []
-    for model in MODEL_REGISTRY.values():
-        # فیلتر بر اساس provider
-        if provider and model.provider.value != provider:
-            continue
-
-        # فیلتر بر اساس capability
-        if capability:
+        models = []
+        for model in MODEL_REGISTRY.values():
             try:
-                cap = ModelCapability(capability)
-                if cap not in model.capabilities:
+                model_provider = get_provider_value(model.provider)
+
+                # فیلتر بر اساس provider
+                if provider and model_provider != provider:
                     continue
-            except ValueError:
-                pass
 
-        is_available = model.provider.value in available_providers
+                # فیلتر بر اساس capability
+                if capability:
+                    model_caps = [get_capability_value(c) for c in model.capabilities]
+                    if capability not in model_caps:
+                        continue
 
-        models.append(ModelInfo(
-            id=model.id,
-            provider=model.provider.value,
-            name=model.name,
-            capabilities=[c.value for c in model.capabilities],
-            max_tokens=model.max_tokens,
-            context_window=model.context_window,
-            strengths=model.strengths,
-            weaknesses=model.weaknesses,
-            cost_per_1k_tokens=model.cost_per_1k_tokens,
-            priority=model.priority,
-            enabled=model.enabled,
-            supports_images=model.supports_images,
-            supports_video=model.supports_video,
-            is_image_generator=model.is_image_generator,
-            is_available=is_available,
-        ))
+                is_available = model_provider in available_providers
 
-    return models
+                models.append(ModelInfo(
+                    id=model.id,
+                    provider=model_provider,
+                    name=model.name,
+                    capabilities=[get_capability_value(c) for c in model.capabilities],
+                    max_tokens=model.max_tokens,
+                    context_window=model.context_window,
+                    strengths=model.strengths,
+                    weaknesses=model.weaknesses,
+                    cost_per_1k_tokens=model.cost_per_1k_tokens,
+                    priority=model.priority,
+                    enabled=model.enabled,
+                    supports_images=model.supports_images,
+                    supports_video=model.supports_video,
+                    is_image_generator=model.is_image_generator,
+                    is_available=is_available,
+                ))
+            except Exception as e:
+                logger.error(f"Error processing model {model.id}: {e}")
+                continue
 
+        return models
 
-@router.get("/available", response_model=List[ModelInfo])
-async def list_available_models():
-    """لیست مدل‌های قابل استفاده (با API key)"""
-    try:
-        ai_manager = get_ai_manager()
-        available = ai_manager.get_available_models()
-    except Exception:
-        # اگر هیچ API key ست نشده، لیست خالی برگردان
+    except Exception as e:
+        logger.error(f"Error in list_models: {e}", exc_info=True)
         return []
-
-    return [ModelInfo(
-        id=m.id,
-        provider=m.provider.value,
-        name=m.name,
-        capabilities=[c.value for c in m.capabilities],
-        max_tokens=m.max_tokens,
-        context_window=m.context_window,
-        strengths=m.strengths,
-        weaknesses=m.weaknesses,
-        cost_per_1k_tokens=m.cost_per_1k_tokens,
-        priority=m.priority,
-        enabled=m.enabled,
-        supports_images=m.supports_images,
-        supports_video=m.supports_video,
-        is_image_generator=m.is_image_generator,
-        is_available=True,
-    ) for m in available]
 
 
 @router.get("/providers", response_model=List[ProviderStatus])
 async def list_providers():
     """لیست provider ها و وضعیتشان"""
     try:
-        ai_manager = get_ai_manager()
-        available_providers = ai_manager.get_available_providers()
-    except Exception:
-        # اگر AI manager مشکل داشت، لیست خالی برگردان
+        # Import inside function to avoid circular imports
+        from ...core.models_registry import MODEL_REGISTRY
+        from ...services.ai_manager import get_ai_manager
+
+        # Get available providers
         available_providers = []
+        try:
+            ai_manager = get_ai_manager()
+            available_providers = ai_manager.get_available_providers()
+        except Exception as e:
+            logger.warning(f"Could not get AI manager: {e}")
 
-    providers = {}
-    for model in MODEL_REGISTRY.values():
-        provider = model.provider.value
-        if provider not in providers:
-            providers[provider] = {
-                "provider": provider,
-                "available": provider in available_providers,
-                "models": []
-            }
-        providers[provider]["models"].append(model.id)
+        # Build provider list
+        providers = {}
+        for model in MODEL_REGISTRY.values():
+            try:
+                provider = get_provider_value(model.provider)
+                if provider not in providers:
+                    providers[provider] = {
+                        "provider": provider,
+                        "available": provider in available_providers,
+                        "models": []
+                    }
+                providers[provider]["models"].append(model.id)
+            except Exception as e:
+                logger.error(f"Error processing model: {e}")
+                continue
 
-    return [ProviderStatus(
-        provider=p["provider"],
-        available=p["available"],
-        model_count=len(p["models"]),
-        models=p["models"]
-    ) for p in providers.values()]
+        return [ProviderStatus(
+            provider=p["provider"],
+            available=p["available"],
+            model_count=len(p["models"]),
+            models=p["models"]
+        ) for p in providers.values()]
+
+    except Exception as e:
+        logger.error(f"Error in list_providers: {e}", exc_info=True)
+        # Return empty list instead of error
+        return []
+
+
+@router.get("/available", response_model=List[ModelInfo])
+async def list_available_models():
+    """لیست مدل‌های قابل استفاده (با API key)"""
+    try:
+        from ...services.ai_manager import get_ai_manager
+
+        ai_manager = get_ai_manager()
+        available = ai_manager.get_available_models()
+
+        return [ModelInfo(
+            id=m.id,
+            provider=get_provider_value(m.provider),
+            name=m.name,
+            capabilities=[get_capability_value(c) for c in m.capabilities],
+            max_tokens=m.max_tokens,
+            context_window=m.context_window,
+            strengths=m.strengths,
+            weaknesses=m.weaknesses,
+            cost_per_1k_tokens=m.cost_per_1k_tokens,
+            priority=m.priority,
+            enabled=m.enabled,
+            supports_images=m.supports_images,
+            supports_video=m.supports_video,
+            is_image_generator=m.is_image_generator,
+            is_available=True,
+        ) for m in available]
+
+    except Exception as e:
+        logger.warning(f"Error in list_available_models: {e}")
+        return []
+
+
+@router.get("/capabilities")
+async def get_capabilities():
+    """لیست همه قابلیت‌ها"""
+    try:
+        from ...core.models_registry import ModelCapability
+        return [{"id": c.value, "name": c.name} for c in ModelCapability]
+    except Exception as e:
+        logger.error(f"Error getting capabilities: {e}")
+        return []
+
+
+@router.get("/aliases")
+async def get_aliases():
+    """لیست alias های مدل‌ها"""
+    try:
+        from ...core.models_registry import MODEL_ALIASES
+        return MODEL_ALIASES
+    except Exception as e:
+        logger.error(f"Error getting aliases: {e}")
+        return {}
 
 
 @router.get("/{model_id}", response_model=ModelInfo)
 async def get_model_info(model_id: str):
     """دریافت اطلاعات یک مدل"""
     try:
+        from ...core.models_registry import get_model
+        from ...services.ai_manager import get_ai_manager
+
         model = get_model(model_id)
         if not model:
             raise HTTPException(status_code=404, detail="Model not found")
 
-        ai_manager = get_ai_manager()
-        is_available = model.provider.value in ai_manager.get_available_providers()
+        # Check if available
+        is_available = False
+        try:
+            ai_manager = get_ai_manager()
+            is_available = get_provider_value(model.provider) in ai_manager.get_available_providers()
+        except:
+            pass
 
         return ModelInfo(
             id=model.id,
-            provider=model.provider.value,
+            provider=get_provider_value(model.provider),
             name=model.name,
-            capabilities=[c.value for c in model.capabilities],
+            capabilities=[get_capability_value(c) for c in model.capabilities],
             max_tokens=model.max_tokens,
             context_window=model.context_window,
             strengths=model.strengths,
@@ -199,6 +272,7 @@ async def get_model_info(model_id: str):
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Error getting model {model_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -206,6 +280,9 @@ async def get_model_info(model_id: str):
 async def smart_select_models(request: SmartSelectRequest):
     """انتخاب هوشمند مدل‌ها"""
     try:
+        from ...services.ai_manager import get_ai_manager
+        from ...core.models_registry import ModelCapability, ModelProvider
+
         ai_manager = get_ai_manager()
 
         # تبدیل capabilities
@@ -219,7 +296,6 @@ async def smart_select_models(request: SmartSelectRequest):
                     pass
 
         # تبدیل providers
-        from ...core.models_registry import ModelProvider
         providers = None
         if request.prefer_providers:
             providers = []
@@ -238,9 +314,9 @@ async def smart_select_models(request: SmartSelectRequest):
 
         return [ModelInfo(
             id=m.id,
-            provider=m.provider.value,
+            provider=get_provider_value(m.provider),
             name=m.name,
-            capabilities=[c.value for c in m.capabilities],
+            capabilities=[get_capability_value(c) for c in m.capabilities],
             max_tokens=m.max_tokens,
             context_window=m.context_window,
             strengths=m.strengths,
@@ -255,16 +331,5 @@ async def smart_select_models(request: SmartSelectRequest):
         ) for m in selected]
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/aliases", response_model=Dict[str, str])
-async def get_aliases():
-    """لیست alias های مدل‌ها"""
-    return MODEL_ALIASES
-
-
-@router.get("/capabilities")
-async def get_capabilities():
-    """لیست همه قابلیت‌ها"""
-    return [{"id": c.value, "name": c.name} for c in ModelCapability]
+        logger.error(f"Error in smart_select: {e}")
+        return []
