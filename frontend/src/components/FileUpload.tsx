@@ -19,6 +19,15 @@ import {
 } from '@heroicons/react/24/outline';
 
 // Types
+interface OptimalSettings {
+  max_tokens: number;
+  temperature: number;
+  timeout: number;
+  recommended_model: string;
+  analysis_type: string;
+  file_category: string;
+}
+
 interface UploadedFile {
   id: string;
   file: File;
@@ -34,6 +43,7 @@ interface UploadedFile {
     github?: {
       url?: string;
     };
+    optimal_settings?: OptimalSettings;
   };
 }
 
@@ -77,8 +87,8 @@ export default function FileUpload({
   entityType,
   entityId,
   onFilesUploaded,
-  maxFiles = 10,
-  maxSizeMB = 50,
+  maxFiles = 50,
+  maxSizeMB = 500,
   acceptedTypes,
   storeInGithub = true,
 }: FileUploadProps) {
@@ -199,6 +209,7 @@ export default function FileUpload({
           file_id: result.file_id,
           path: result.local_path,
           github: result.github,
+          optimal_settings: result.optimal_settings,
         },
       };
     } catch (error: any) {
@@ -348,6 +359,19 @@ export default function FileUpload({
                         />
                       </div>
                     )}
+                    {file.status === 'completed' && file.result?.optimal_settings && (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        <span className="text-xs px-1.5 py-0.5 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded">
+                          {file.result.optimal_settings.file_category}
+                        </span>
+                        <span className="text-xs px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded">
+                          توکن: {file.result.optimal_settings.max_tokens}
+                        </span>
+                        <span className="text-xs px-1.5 py-0.5 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 rounded">
+                          {file.result.optimal_settings.recommended_model}
+                        </span>
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-2">
@@ -373,7 +397,10 @@ export default function FileUpload({
 
       {/* Supported formats */}
       <p className="text-xs text-gray-400 text-center">
-        فرمت‌های پشتیبانی: متن، کد، تصویر، PDF، ویدیو، صوت و ...
+        همه فرمت‌ها پشتیبانی می‌شوند: کد (py, js, mq5, ...)، اسناد (pdf, docx, ...)، تصویر، ویدیو، صوت، آرشیو و ...
+      </p>
+      <p className="text-xs text-green-500 text-center mt-1">
+        تنظیمات توکن و پردازش بر اساس نوع فایل به صورت خودکار تنظیم می‌شود
       </p>
     </div>
   );
