@@ -4,7 +4,7 @@
 """
 
 from typing import Dict, List, Optional, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from enum import Enum
 
 
@@ -50,8 +50,7 @@ class AIModel(BaseModel):
     supports_video: bool = False
     is_image_generator: bool = False
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 # ===========================================
