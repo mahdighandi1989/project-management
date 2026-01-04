@@ -204,7 +204,7 @@ export default function ArchivePage() {
   });
 
   // Get unique categories
-  const categories = ['all', ...new Set(files.map(f => f.category))];
+  const categories = ['all', ...Array.from(new Set(files.map(f => f.category)))];
 
   if (loading) {
     return (
