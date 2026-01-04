@@ -748,6 +748,146 @@ class ProjectEngineIntegrator:
         self.model_selector = model_selector
         self.supervisor = supervisor
         self.active_workflows: Dict[str, Dict] = {}
+        self.github_storage = None  # Will be set by orchestrator
+
+    def set_github_storage(self, github_storage):
+        """Set GitHub storage for saving generated files"""
+        self.github_storage = github_storage
+
+    async def generate_with_competition(
+        self,
+        task_description: str,
+        task_category: TaskCategory = TaskCategory.CODE_GENERATION,
+        num_models: int = 3
+    ) -> Dict:
+        """
+        تولید با رقابت چند مدل
+
+        - انتخاب چند مدل متنوع
+        - اجرای موازی
+        - ارزیابی و مقایسه
+        - انتخاب بهترین
+        """
+        import asyncio
+
+        # انتخاب مدل‌های متنوع
+        models = self.model_selector.select_multiple_models(
+            task_category,
+            count=num_models,
+            diversity=True
+        )
+
+        if not models:
+            return {"success": False, "error": "مدلی در دسترس نیست"}
+
+        logger.info(f"🏁 Starting competition with {len(models)} models: {[m[0] for m in models]}")
+
+        # اجرای موازی روی همه مدل‌ها
+        async def run_model(model_id: str, confidence: float) -> Dict:
+            try:
+                start_time = datetime.now()
+                response = await self.model_selector.ai_manager.generate(
+                    model_id=model_id,
+                    messages=[Message(role="user", content=task_description)],
+                    max_tokens=4000
+                )
+                end_time = datetime.now()
+                duration_ms = (end_time - start_time).total_seconds() * 1000
+
+                if response.content and not response.error:
+                    return {
+                        "model_id": model_id,
+                        "success": True,
+                        "output": response.content,
+                        "confidence": confidence,
+                        "duration_ms": duration_ms
+                    }
+                else:
+                    return {
+                        "model_id": model_id,
+                        "success": False,
+                        "error": response.error or "خروجی خالی",
+                        "duration_ms": duration_ms
+                    }
+            except Exception as e:
+                logger.error(f"Error running model {model_id}: {e}")
+                return {
+                    "model_id": model_id,
+                    "success": False,
+                    "error": str(e),
+                    "duration_ms": 0
+                }
+
+        # اجرای همزمان
+        tasks = [run_model(model_id, confidence) for model_id, confidence in models]
+        results = await asyncio.gather(*tasks)
+
+        # فیلتر نتایج موفق
+        successful_results = [r for r in results if r["success"]]
+
+        if not successful_results:
+            return {
+                "success": False,
+                "error": "هیچ مدلی موفق نشد",
+                "all_results": results
+            }
+
+        if len(successful_results) == 1:
+            # فقط یک مدل موفق شد
+            winner = successful_results[0]
+            return {
+                "success": True,
+                "winner": winner["model_id"],
+                "output": winner["output"],
+                "score": 75,  # امتیاز پیش‌فرض
+                "competition": {
+                    "participants": len(models),
+                    "successful": 1,
+                    "results": results
+                }
+            }
+
+        # مقایسه خروجی‌ها توسط مدل ناظر
+        outputs = {r["model_id"]: r["output"] for r in successful_results}
+        comparison = await self.supervisor.compare_outputs(task_description, outputs)
+
+        best_model = comparison.get("best_model")
+        best_score = comparison.get("best_score", 0)
+
+        # پیدا کردن خروجی برنده
+        winner_output = outputs.get(best_model, successful_results[0]["output"])
+
+        # بروزرسانی عملکرد مدل‌ها
+        for model_id, eval_data in comparison.get("evaluations", {}).items():
+            self.model_selector.update_performance(
+                model_id,
+                task_category,
+                eval_data.get("overall", 50)
+            )
+
+        logger.info(f"🏆 Competition winner: {best_model} with score {best_score}")
+
+        return {
+            "success": True,
+            "winner": best_model,
+            "output": winner_output,
+            "score": best_score,
+            "competition": {
+                "participants": len(models),
+                "successful": len(successful_results),
+                "rankings": comparison.get("rankings", []),
+                "all_results": [
+                    {
+                        "model_id": r["model_id"],
+                        "success": r["success"],
+                        "duration_ms": r.get("duration_ms", 0),
+                        "score": comparison.get("evaluations", {}).get(r["model_id"], {}).get("overall", 0) if r["success"] else 0,
+                        "error": r.get("error")
+                    }
+                    for r in results
+                ]
+            }
+        }
 
     async def smart_project_setup(
         self,
@@ -964,10 +1104,18 @@ class ProjectEngineIntegrator:
     async def auto_build_project(
         self,
         project_id: str,
-        github_repo: str = None
+        github_repo: str = None,
+        use_competition: bool = True,
+        num_models: int = 3
     ) -> Dict:
         """
-        ساخت خودکار پروژه با نظارت مستمر
+        ساخت خودکار پروژه با رقابت چند مدل
+
+        Args:
+            project_id: شناسه پروژه
+            github_repo: مخزن GitHub (اختیاری)
+            use_competition: استفاده از حالت رقابتی (پیش‌فرض: True)
+            num_models: تعداد مدل‌ها در رقابت (پیش‌فرض: 3)
         """
         workflow = self.active_workflows.get(project_id)
         if not workflow:
@@ -983,6 +1131,8 @@ class ProjectEngineIntegrator:
         workflow["current_step"] = "initializing"
         workflow["progress"] = 0
         workflow["results"] = []
+        workflow["competition_mode"] = use_competition
+        workflow["num_models"] = num_models
 
         # ایجاد پروژه در Creator Engine (اگر موجود باشد)
         workflow["current_step"] = "creating_engine_project"
@@ -1026,31 +1176,81 @@ class ProjectEngineIntegrator:
             # Update progress
             workflow["current_file"] = file_path
             workflow["current_file_index"] = idx + 1
-            workflow["current_step"] = f"generating_{file_path}"
+            workflow["current_step"] = f"🏁 رقابت مدل‌ها برای {file_path}" if use_competition else f"generating_{file_path}"
             workflow["progress"] = int((idx / total_files) * 100)
 
             try:
-                file_result = await self.execute_with_monitoring(
-                    project_id,
-                    f"فایل {file_path} را برای پروژه '{analysis.get('project_name', 'project')}' بنویس. توضیحات پروژه: {analysis.get('description', '')}",
-                    TaskCategory.CODE_GENERATION
-                )
+                task_description = f"""فایل {file_path} را برای پروژه '{analysis.get('project_name', 'project')}' بنویس.
+
+توضیحات پروژه: {analysis.get('description', '')}
+
+هدف: {analysis.get('goal', '')}
+
+تکنولوژی‌ها: {', '.join(analysis.get('technologies', []))}
+
+فقط کد را بنویس، بدون توضیح اضافی."""
+
+                if use_competition:
+                    # حالت رقابتی - چند مدل با هم رقابت می‌کنند
+                    file_result = await self.generate_with_competition(
+                        task_description,
+                        TaskCategory.CODE_GENERATION,
+                        num_models=num_models
+                    )
+                else:
+                    # حالت عادی
+                    file_result = await self.execute_with_monitoring(
+                        project_id,
+                        task_description,
+                        TaskCategory.CODE_GENERATION
+                    )
 
                 if file_result.get("success"):
                     output = file_result.get("revised_output") or file_result.get("output", "")
 
-                    # ذخیره فایل (اگر Creator Engine موجود باشد)
+                    # ذخیره فایل در GitHub
+                    github_saved = False
+                    if self.github_storage:
+                        try:
+                            content_bytes = output.encode('utf-8')
+                            gh_result = await self.github_storage.save_project_file(
+                                project_id,
+                                content_bytes,
+                                file_path,
+                                "generated"
+                            )
+                            github_saved = gh_result.get("success", False)
+                            logger.info(f"GitHub save result for {file_path}: {github_saved}")
+                        except Exception as e:
+                            logger.warning(f"Could not save file to GitHub: {e}")
+
+                    # ذخیره فایل در Creator Engine (اگر موجود باشد)
                     if self.creator_engine and self.creator_engine.file_manager:
                         try:
                             await self.creator_engine.file_manager.write_file(file_path, output)
                         except Exception as e:
                             logger.warning(f"Could not write file to Creator Engine: {e}")
 
+                    # استخراج اطلاعات رقابت
+                    competition_data = file_result.get("competition", {})
+                    winner_model = file_result.get("winner", "unknown")
+                    score = file_result.get("score", file_result.get("evaluation", {}).get("score", 0))
+
                     file_info = {
                         "file": file_path,
                         "status": "created",
-                        "score": file_result.get("evaluation", {}).get("score", 0),
-                        "content_preview": output[:200] if output else ""
+                        "score": score,
+                        "content_preview": output[:200] if output else "",
+                        "content": output,
+                        "github_saved": github_saved,
+                        # اطلاعات رقابت
+                        "winner_model": winner_model,
+                        "competition": {
+                            "participants": competition_data.get("participants", 1),
+                            "successful": competition_data.get("successful", 1),
+                            "rankings": competition_data.get("rankings", []),
+                            "all_results": competition_data.get("all_results", [])
+                        } if use_competition else None
                     }
                     results.append(file_info)
                     workflow["results"].append(file_info)

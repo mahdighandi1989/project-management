@@ -222,6 +222,7 @@ def get_orchestrator():
             creator_engine.initialize(ai_manager)
 
             # Initialize GitHub storage for project persistence
+            github_storage = None
             try:
                 github_storage = _get_github()
                 project_service.initialize_github(github_storage)
@@ -230,6 +231,11 @@ def get_orchestrator():
                 logger.warning(f"Could not initialize GitHub storage: {gh_error}")
 
             orchestrator.initialize(ai_manager, project_service, creator_engine)
+
+            # Pass GitHub storage to integrator for saving generated files
+            if github_storage and orchestrator.integrator:
+                orchestrator.integrator.set_github_storage(github_storage)
+                logger.info("GitHub storage set for integrator")
         except Exception as e:
             logger.error(f"Failed to initialize orchestrator: {e}")
             raise HTTPException(status_code=500, detail=f"خطا در مقداردهی سیستم: {str(e)}")
@@ -292,16 +298,19 @@ class StartWorkflowRequest(BaseModel):
     """درخواست شروع workflow"""
     project_id: str
     auto_execute: bool = True  # اجرای خودکار فازها
+    use_competition: bool = True  # حالت رقابتی چند مدل
+    num_models: int = 3  # تعداد مدل‌ها در رقابت
 
 
 @router.post("/start-workflow")
 async def start_project_workflow(request: StartWorkflowRequest):
     """
-    شروع workflow پروژه
+    شروع workflow پروژه با رقابت چند مدل
 
-    - شروع از فاز اول
-    - اجرای خودکار تمام مراحل هر فاز
-    - گزارش پیشرفت
+    - انتخاب بهترین مدل‌ها
+    - اجرای موازی و رقابت
+    - انتخاب بهترین خروجی
+    - گزارش پیشرفت و نتایج رقابت
     """
     try:
         orchestrator = get_orchestrator()
@@ -354,9 +363,13 @@ async def start_project_workflow(request: StartWorkflowRequest):
                 "started_at": None
             }
 
-        # اگر auto_execute فعال است، شروع ساخت خودکار
+        # اگر auto_execute فعال است، شروع ساخت خودکار با رقابت
         if request.auto_execute:
-            result = await orchestrator.auto_build(request.project_id)
+            result = await orchestrator.integrator.auto_build_project(
+                request.project_id,
+                use_competition=request.use_competition,
+                num_models=request.num_models
+            )
             return result
 
         return {
@@ -409,6 +422,81 @@ async def get_workflow_status(project_id: str):
 
     except Exception as e:
         logger.error(f"Error getting workflow status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/generated-files/{project_id}")
+async def get_generated_files(project_id: str):
+    """
+    دریافت لیست فایل‌های تولید شده پروژه
+    """
+    try:
+        orchestrator = get_orchestrator()
+
+        workflow = orchestrator.integrator.active_workflows.get(project_id)
+        if not workflow:
+            return {
+                "success": False,
+                "error": "Workflow یافت نشد"
+            }
+
+        results = workflow.get("results", [])
+        files = []
+        for r in results:
+            if r.get("status") == "created":
+                files.append({
+                    "file": r.get("file"),
+                    "score": r.get("score", 0),
+                    "github_saved": r.get("github_saved", False),
+                    "has_content": bool(r.get("content")),
+                    "content_preview": r.get("content_preview", "")
+                })
+
+        return {
+            "success": True,
+            "project_id": project_id,
+            "files_count": len(files),
+            "files": files
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting generated files: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/file-content/{project_id}/{file_path:path}")
+async def get_file_content(project_id: str, file_path: str):
+    """
+    دریافت محتوای یک فایل تولید شده
+    """
+    try:
+        orchestrator = get_orchestrator()
+
+        workflow = orchestrator.integrator.active_workflows.get(project_id)
+        if not workflow:
+            return {
+                "success": False,
+                "error": "Workflow یافت نشد"
+            }
+
+        results = workflow.get("results", [])
+        for r in results:
+            if r.get("file") == file_path and r.get("status") == "created":
+                return {
+                    "success": True,
+                    "file": file_path,
+                    "content": r.get("content", ""),
+                    "score": r.get("score", 0),
+                    "github_saved": r.get("github_saved", False)
+                }
+
+        return {
+            "success": False,
+            "error": "فایل یافت نشد"
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting file content: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
