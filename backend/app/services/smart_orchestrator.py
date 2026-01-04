@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 import logging
 
+from .ai_base import Message  # اضافه شد
+
 logger = logging.getLogger(__name__)
 
 
@@ -384,12 +386,12 @@ class SupervisorModel:
         try:
             response = await self.ai_manager.generate(
                 model_id=evaluator_id,
-                prompt=prompt,
+                messages=[Message(role="user", content=prompt)],
                 max_tokens=1500
             )
 
-            if response.get("success"):
-                content = response.get("content", "")
+            if response.content and not response.error:
+                content = response.content
                 # استخراج JSON
                 result = self._extract_json(content)
 
@@ -451,12 +453,12 @@ class SupervisorModel:
         try:
             response = await self.ai_manager.generate(
                 model_id=evaluator_id,
-                prompt=prompt,
+                messages=[Message(role="user", content=prompt)],
                 max_tokens=1000
             )
 
-            if response.get("success"):
-                result = self._extract_json(response.get("content", ""))
+            if response.content and not response.error:
+                result = self._extract_json(response.content)
                 if result:
                     return result
 
@@ -712,12 +714,12 @@ class ProjectEngineIntegrator:
         try:
             response = await self.creator_engine.ai_orchestrator.ai_manager.generate(
                 model_id=analyzer_id,
-                prompt=analysis_prompt,
+                messages=[Message(role="user", content=analysis_prompt)],
                 max_tokens=2000
             )
 
-            if response.get("success"):
-                analysis = self._extract_json(response.get("content", ""))
+            if response.content and not response.error:
+                analysis = self._extract_json(response.content)
 
                 if analysis:
                     # ایجاد پروژه
@@ -776,12 +778,12 @@ class ProjectEngineIntegrator:
         try:
             response = await self.creator_engine.ai_orchestrator.ai_manager.generate(
                 model_id=model_id,
-                prompt=task_description,
+                messages=[Message(role="user", content=task_description)],
                 max_tokens=4000
             )
 
-            if response.get("success"):
-                output = response.get("content", "")
+            if response.content and not response.error:
+                output = response.content
 
                 # ارزیابی توسط ناظر
                 evaluation = await self.supervisor.evaluate_output(
@@ -838,9 +840,7 @@ class ProjectEngineIntegrator:
                         exclude_models=[model_id]
                     )
 
-                    revised_response = await self.creator_engine.ai_orchestrator.ai_manager.generate(
-                        model_id=alt_model_id,
-                        prompt=f"""وظیفه اصلی:
+                    revision_prompt = f"""وظیفه اصلی:
 {task_description}
 
 پاسخ قبلی مشکلات زیر را داشت:
@@ -849,12 +849,16 @@ class ProjectEngineIntegrator:
 پیشنهادات:
 {chr(10).join(evaluation.suggestions)}
 
-لطفاً با رفع این مشکلات پاسخ بهتری ارائه بده.""",
+لطفاً با رفع این مشکلات پاسخ بهتری ارائه بده."""
+
+                    revised_response = await self.creator_engine.ai_orchestrator.ai_manager.generate(
+                        model_id=alt_model_id,
+                        messages=[Message(role="user", content=revision_prompt)],
                         max_tokens=4000
                     )
 
-                    if revised_response.get("success"):
-                        result["revised_output"] = revised_response.get("content", "")
+                    if revised_response.content and not revised_response.error:
+                        result["revised_output"] = revised_response.content
                         result["revised_by"] = alt_model_id
 
                 return result

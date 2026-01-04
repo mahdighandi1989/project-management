@@ -559,22 +559,23 @@ async def analyze_uploaded_file(
             model_id, _ = orchestrator.select_model(category)
 
             from ...services.ai_manager import get_ai_manager
+            from ...services.ai_base import Message
             ai_manager = get_ai_manager()
 
             response = await ai_manager.generate(
                 model_id=model_id,
-                prompt=prompt,
+                messages=[Message(role="user", content=prompt)],
                 max_tokens=4000
             )
 
-            if response.get("success"):
+            if response.content and not response.error:
                 result = {
                     "success": True,
-                    "analysis": response.get("content"),
+                    "analysis": response.content,
                     "model_used": model_id
                 }
             else:
-                result = {"success": False, "error": response.get("error")}
+                result = {"success": False, "error": response.error or "خطا در تحلیل"}
 
         return {
             "success": True,
