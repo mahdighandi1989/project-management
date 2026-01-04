@@ -1,0 +1,2 @@
+# This file ensures the debates storage directory is tracked by git
+# Debate JSON files will be saved here for persistence

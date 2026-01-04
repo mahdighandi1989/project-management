@@ -21,8 +21,19 @@ from ..core.roles import (
 )
 from ..core.models_registry import AIModel, get_model
 
-# مسیر ذخیره‌سازی مناظرات
-DEBATES_STORAGE_PATH = Path(os.environ.get('DEBATES_STORAGE_PATH', '/app/data/debates'))
+# مسیر ذخیره‌سازی مناظرات - در دایرکتوری پروژه برای ماندگاری
+# در محیط توسعه از backend/storage/debates استفاده میکنیم
+# در محیط production از متغیر محیطی DEBATES_STORAGE_PATH
+def _get_storage_path():
+    """تعیین مسیر ذخیره‌سازی مناظرات"""
+    env_path = os.environ.get('DEBATES_STORAGE_PATH')
+    if env_path:
+        return Path(env_path)
+    # مسیر پیش‌فرض در دایرکتوری پروژه
+    current_dir = Path(__file__).resolve().parent.parent.parent  # backend/
+    return current_dir / 'storage' / 'debates'
+
+DEBATES_STORAGE_PATH = _get_storage_path()
 
 
 class DebateStatus(str, Enum):
@@ -316,10 +327,11 @@ class DebateService:
             )
 
             try:
+                # *** افزایش max_tokens برای پاسخ‌های بزرگتر ***
                 response = await self.ai_manager.generate(
                     model_id,
                     messages,
-                    max_tokens=4000,
+                    max_tokens=8000,
                     temperature=0.7
                 )
 
@@ -431,21 +443,34 @@ class DebateService:
             content = att.get('content', '')
             file_type = att.get('type', att.get('file_category', 'unknown'))
 
+            # محاسبه تعداد خطوط
+            line_count = content.count('\n') + 1 if content else 0
+
             if content:
-                # محدود کردن سایز محتوا برای جلوگیری از overflow
-                max_content_length = 200000  # حدود 200KB متن - برای فایل‌های بزرگ
+                # *** محدودیت خیلی بالا - 500KB برای فایل‌های بزرگ کد ***
+                # 5000 خط × 100 کاراکتر = 500KB
+                max_content_length = 500000  # 500KB متن
+                truncated = False
+                original_length = len(content)
+
                 if len(content) > max_content_length:
-                    content = content[:max_content_length] + f"\n\n... [ادامه فایل - {len(content) - max_content_length} کاراکتر دیگر] ..."
+                    content = content[:max_content_length]
+                    truncated = True
+
+                truncation_note = ""
+                if truncated:
+                    truncation_note = f"\n\n⚠️ [هشدار: فایل از {original_length} کاراکتر به {max_content_length} کاراکتر کوتاه شد]"
 
                 parts.append(f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📄 **فایل {i}: {filename}**
 نوع: {file_type}
+تعداد خطوط: {line_count}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ```
 {content}
-```
+```{truncation_note}
 """)
             else:
                 parts.append(f"📄 **فایل {i}: {filename}** (محتوا در دسترس نیست)")
@@ -459,10 +484,11 @@ class DebateService:
         for round_responses in session.rounds:
             for resp in round_responses:
                 if resp.model_id != current_model and resp.content:
+                    # *** افزایش محدودیت به 10000 کاراکتر ***
+                    max_context = 10000
+                    content = resp.content[:max_context] + "..." if len(resp.content) > max_context else resp.content
                     context_parts.append(
-                        f"**{resp.role_icon} {resp.model_name} ({resp.role_name}):**\n{resp.content[:2000]}..."
-                        if len(resp.content) > 2000 else
-                        f"**{resp.role_icon} {resp.model_name} ({resp.role_name}):**\n{resp.content}"
+                        f"**{resp.role_icon} {resp.model_name} ({resp.role_name}):**\n{content}"
                     )
 
         return "\n\n---\n\n".join(context_parts)
@@ -714,7 +740,7 @@ class DebateService:
 
         # انتخاب مدل ترکیب‌کننده (قوی‌ترین مدل)
         synth_model = session.models[0]
-        all_responses = self._build_all_responses_summary(session)
+        all_responses = self._build_all_responses_summary(session, max_per_response=10000)
 
         # استخراج بلوک‌های کد از پاسخ‌ها
         import re
@@ -734,39 +760,86 @@ class DebateService:
                                 'source_model': resp.model_id
                             })
 
-        # اگر فایل پیوست داریم، اضافه کنیم
-        attachments_info = ""
+        # تشخیص نوع فایل پیوست
+        is_mq5_task = False
+        original_mq5_filename = None
+        original_mq5_content = ""
+        original_mq5_line_count = 0
+
         if session.attachments:
-            att_parts = []
             for att in session.attachments:
-                name = att.get('filename', att.get('name', 'فایل'))
-                content = att.get('content', '')
-                # *** محدودیت رو خیلی بالا ببر - 200KB متن ***
-                max_content = 200000
-                if len(content) > max_content:
-                    content = content[:max_content] + f"\n\n... [ادامه فایل - {len(content) - max_content} کاراکتر باقیمانده] ..."
-                att_parts.append(f"**فایل: {name}**\n```\n{content}\n```")
-            attachments_info = f"\n\n**فایل‌های پیوست:**\n" + "\n".join(att_parts)
+                fname = att.get('filename', '')
+                if fname.endswith(('.mq5', '.mq4', '.mqh')):
+                    is_mq5_task = True
+                    original_mq5_filename = fname
+                    original_mq5_content = att.get('content', '')
+                    original_mq5_line_count = original_mq5_content.count('\n') + 1
+                    break
 
         # تشخیص نوع کار
         is_code_task = any(kw in session.prompt.lower() for kw in ['کد', 'code', 'بنویس', 'بساز', 'تولید', 'generate', 'write', 'create'])
-        is_mq5_task = session.attachments and any(att.get('filename', '').endswith(('.mq5', '.mq4', '.mqh')) for att in session.attachments)
 
-        code_instruction = ""
-        if is_code_task or is_mq5_task:
-            code_instruction = """
+        # *** اگر MQ5 پیوست شده، پرامپت خاصی بساز ***
+        if is_mq5_task and session.needs_file_output:
+            synthesis_prompt = f"""
+🎯 **وظیفه اصلی: تولید فایل MQ5 کامل**
+
+یک فایل {original_mq5_filename} با {original_mq5_line_count} خط کد به شما داده شده است.
+بر اساس تحلیل‌ها و پیشنهادات مدل‌های دیگر، یک نسخه بهبود یافته کامل تولید کنید.
+
+**درخواست کاربر:**
+{session.prompt}
+
+**نکات مهم از تحلیل مدل‌ها:**
+{all_responses[:20000]}
+
+**⚠️ قوانین حیاتی:**
+1. کد خروجی باید 100% کامل باشد - هیچ "..." یا placeholder نباشد
+2. تمام {original_mq5_line_count} خط فایل اصلی باید در خروجی باشد (با بهبودها)
+3. خروجی فقط یک بلوک کد ```mq5 باشد
+4. اگر تغییراتی ندارید، فایل اصلی را کامل کپی کنید
+5. کامنت‌های فارسی/انگلیسی برای توضیح تغییرات اضافه کنید
+
+**فایل اصلی (کامل):**
+```mq5
+{original_mq5_content}
+```
+
+**خروجی مورد انتظار:**
+فقط یک بلوک کد MQ5 کامل. بدون توضیحات اضافی قبل یا بعد از کد.
+"""
+            max_output_tokens = 32000  # برای فایل‌های بزرگ
+        else:
+            # پرامپت عمومی
+            attachments_info = ""
+            if session.attachments:
+                att_parts = []
+                for att in session.attachments:
+                    name = att.get('filename', att.get('name', 'فایل'))
+                    content = att.get('content', '')
+                    line_count = content.count('\n') + 1 if content else 0
+                    # *** محدودیت 500KB برای فایل‌های بزرگ ***
+                    max_content = 500000
+                    if len(content) > max_content:
+                        content = content[:max_content] + f"\n\n... [هشدار: فایل از {len(content)} به {max_content} کاراکتر کوتاه شد]"
+                    att_parts.append(f"**فایل: {name}** ({line_count} خط)\n```\n{content}\n```")
+                attachments_info = f"\n\n**فایل‌های پیوست:**\n" + "\n".join(att_parts)
+
+            code_instruction = ""
+            if is_code_task or session.needs_file_output:
+                code_instruction = """
 
 ⚠️ **مهم - تولید کد نهایی:**
 شما باید کد نهایی کامل را در یک بلوک کد بنویسید.
-اگر فایل MQ5/MQ4 پیوست شده، نسخه بهبود یافته کامل آن را بنویسید.
 از نوشتن "..." یا placeholder پرهیز کنید - کد باید 100% کامل باشد!
+اگر فایل پیوست شده، نسخه کامل بهبود یافته آن را بنویسید.
 """
 
-        synthesis_prompt = f"""
+            synthesis_prompt = f"""
 شما باید تمام پاسخ‌های زیر را ترکیب کرده و یک خروجی نهایی یکپارچه تولید کنید.
 
 **درخواست اصلی:**
-{session.prompt[:1000]}{attachments_info}
+{session.prompt}{attachments_info}
 
 **پاسخ‌های دریافتی:**
 {all_responses}{code_instruction}
@@ -784,12 +857,13 @@ class DebateService:
 - بهترین ایده‌های همه مدل‌ها را شامل شود
 - خطاها و کمبودها را برطرف کرده باشد
 """
+            max_output_tokens = 16000  # برای خروجی عمومی
 
         try:
             response = await self.ai_manager.generate(
                 synth_model,
                 [Message(role="user", content=synthesis_prompt)],
-                max_tokens=8000,
+                max_tokens=max_output_tokens,
                 temperature=0.3
             )
 
@@ -964,14 +1038,15 @@ class DebateService:
                     responses.append(resp)
         return responses
 
-    def _build_all_responses_summary(self, session: DebateSession) -> str:
+    def _build_all_responses_summary(self, session: DebateSession, max_per_response: int = 5000) -> str:
         """ساخت خلاصه همه پاسخ‌ها"""
         parts = []
         for round_num, round_responses in enumerate(session.rounds, 1):
             parts.append(f"\n=== دور {round_num} ===")
             for resp in round_responses:
                 if resp.content:
-                    content_preview = resp.content[:1000] + "..." if len(resp.content) > 1000 else resp.content
+                    # *** افزایش محدودیت پیش‌فرض به 5000 کاراکتر ***
+                    content_preview = resp.content[:max_per_response] + "..." if len(resp.content) > max_per_response else resp.content
                     parts.append(f"\n{resp.role_icon} **{resp.model_name}** ({resp.role_name}):\n{content_preview}")
         return "\n".join(parts)
 

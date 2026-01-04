@@ -43,7 +43,9 @@ htmlcov/
 # Database
 *.db
 *.sqlite3
-data/
+
+# Data directory (except backend/storage which we want to keep)
+/data/
 
 # Uploads
 uploads/
