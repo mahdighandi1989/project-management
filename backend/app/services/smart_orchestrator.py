@@ -517,14 +517,26 @@ class SupervisorModel:
         }
 
     def _extract_json(self, text: str) -> Optional[Dict]:
-        """استخراج JSON از متن"""
+        """استخراج JSON از متن - پشتیبانی از markdown code blocks"""
+        import re
         try:
+            # اول سعی کن markdown code block رو حذف کنی
+            # الگوی ```json ... ``` یا ``` ... ```
+            code_block_pattern = r'```(?:json)?\s*([\s\S]*?)```'
+            code_match = re.search(code_block_pattern, text)
+            if code_match:
+                text = code_match.group(1).strip()
+
+            # پیدا کردن JSON object
             start = text.find('{')
             end = text.rfind('}') + 1
             if start >= 0 and end > start:
-                return json.loads(text[start:end])
-        except:
-            pass
+                json_str = text[start:end]
+                return json.loads(json_str)
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON decode error: {e}")
+        except Exception as e:
+            logger.warning(f"Error extracting JSON: {e}")
         return None
 
 
@@ -957,14 +969,26 @@ class ProjectEngineIntegrator:
         }
 
     def _extract_json(self, text: str) -> Optional[Dict]:
-        """استخراج JSON از متن"""
+        """استخراج JSON از متن - پشتیبانی از markdown code blocks"""
+        import re
         try:
+            # اول سعی کن markdown code block رو حذف کنی
+            # الگوی ```json ... ``` یا ``` ... ```
+            code_block_pattern = r'```(?:json)?\s*([\s\S]*?)```'
+            code_match = re.search(code_block_pattern, text)
+            if code_match:
+                text = code_match.group(1).strip()
+
+            # پیدا کردن JSON object
             start = text.find('{')
             end = text.rfind('}') + 1
             if start >= 0 and end > start:
-                return json.loads(text[start:end])
-        except:
-            pass
+                json_str = text[start:end]
+                return json.loads(json_str)
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON decode error: {e}")
+        except Exception as e:
+            logger.warning(f"Error extracting JSON: {e}")
         return None
 
 
