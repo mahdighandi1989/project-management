@@ -395,7 +395,8 @@ async def get_workflow_status(project_id: str):
     try:
         orchestrator = get_orchestrator()
 
-        workflow = orchestrator.integrator.active_workflows.get(project_id)
+        # اول از memory چک کن، اگه نبود از GitHub بارگذاری کن
+        workflow = await orchestrator.integrator.get_workflow_with_fallback(project_id)
         if not workflow:
             return {
                 "success": True,
@@ -433,7 +434,8 @@ async def get_generated_files(project_id: str):
     try:
         orchestrator = get_orchestrator()
 
-        workflow = orchestrator.integrator.active_workflows.get(project_id)
+        # اول از memory، بعد از GitHub
+        workflow = await orchestrator.integrator.get_workflow_with_fallback(project_id)
         if not workflow:
             return {
                 "success": False,
@@ -472,23 +474,42 @@ async def get_file_content(project_id: str, file_path: str):
     try:
         orchestrator = get_orchestrator()
 
+        # اول از memory چک کن
         workflow = orchestrator.integrator.active_workflows.get(project_id)
-        if not workflow:
-            return {
-                "success": False,
-                "error": "Workflow یافت نشد"
-            }
+        if workflow:
+            results = workflow.get("results", [])
+            for r in results:
+                if r.get("file") == file_path and r.get("status") == "created":
+                    content = r.get("content")
+                    if content:
+                        return {
+                            "success": True,
+                            "file": file_path,
+                            "content": content,
+                            "score": r.get("score", 0),
+                            "github_saved": r.get("github_saved", False),
+                            "winner_model": r.get("winner_model"),
+                            "source": "memory"
+                        }
 
-        results = workflow.get("results", [])
-        for r in results:
-            if r.get("file") == file_path and r.get("status") == "created":
-                return {
-                    "success": True,
-                    "file": file_path,
-                    "content": r.get("content", ""),
-                    "score": r.get("score", 0),
-                    "github_saved": r.get("github_saved", False)
-                }
+        # اگه در memory نبود یا محتوا نداشت، از GitHub بخون
+        github_storage = get_github_storage()
+        if github_storage:
+            try:
+                import base64
+                result = await github_storage.get_file(f"projects/{project_id}/generated/{file_path}")
+                if result.get("success") and result.get("content"):
+                    content = base64.b64decode(result["content"]).decode('utf-8')
+                    return {
+                        "success": True,
+                        "file": file_path,
+                        "content": content,
+                        "score": 0,
+                        "github_saved": True,
+                        "source": "github"
+                    }
+            except Exception as e:
+                logger.warning(f"Could not load file from GitHub: {e}")
 
         return {
             "success": False,

@@ -754,6 +754,52 @@ class ProjectEngineIntegrator:
         """Set GitHub storage for saving generated files"""
         self.github_storage = github_storage
 
+    async def load_workflow_from_github(self, project_id: str) -> Optional[Dict]:
+        """
+        بارگذاری نتایج workflow از GitHub
+        """
+        if not self.github_storage:
+            return None
+
+        try:
+            result = await self.github_storage.get_file(f"projects/{project_id}/generated/workflow_results.json")
+            if result.get("success") and result.get("content"):
+                import base64
+                content = base64.b64decode(result["content"]).decode('utf-8')
+                workflow_data = json.loads(content)
+
+                # بازسازی workflow در memory
+                self.active_workflows[project_id] = {
+                    "analysis": workflow_data.get("analysis", {}),
+                    "status": workflow_data.get("status", "completed"),
+                    "started_at": workflow_data.get("started_at"),
+                    "completed_at": workflow_data.get("completed_at"),
+                    "progress": 100,
+                    "current_step": "done",
+                    "total_files": workflow_data.get("total_files", 0),
+                    "competition_mode": workflow_data.get("competition_mode", False),
+                    "num_models": workflow_data.get("num_models", 1),
+                    "results": workflow_data.get("files", [])
+                }
+
+                logger.info(f"Loaded workflow from GitHub for project {project_id}")
+                return self.active_workflows[project_id]
+        except Exception as e:
+            logger.warning(f"Could not load workflow from GitHub: {e}")
+
+        return None
+
+    async def get_workflow_with_fallback(self, project_id: str) -> Optional[Dict]:
+        """
+        دریافت workflow - اول از memory، بعد از GitHub
+        """
+        # اول چک کن در memory هست
+        if project_id in self.active_workflows:
+            return self.active_workflows[project_id]
+
+        # اگه نبود از GitHub بارگذاری کن
+        return await self.load_workflow_from_github(project_id)
+
     async def generate_with_competition(
         self,
         task_description: str,
@@ -1276,6 +1322,43 @@ class ProjectEngineIntegrator:
         workflow["progress"] = 100
         workflow["current_step"] = "done"
         workflow["completed_at"] = datetime.now().isoformat()
+
+        # ذخیره نتایج workflow در GitHub برای ماندگاری
+        if self.github_storage:
+            try:
+                # ذخیره خلاصه workflow (بدون محتوای کامل فایل‌ها برای کاهش حجم)
+                workflow_summary = {
+                    "project_id": project_id,
+                    "status": workflow["status"],
+                    "started_at": workflow.get("started_at"),
+                    "completed_at": workflow["completed_at"],
+                    "competition_mode": use_competition,
+                    "num_models": num_models,
+                    "total_files": workflow.get("total_files", 0),
+                    "analysis": workflow.get("analysis", {}),
+                    "files": [
+                        {
+                            "file": r.get("file"),
+                            "status": r.get("status"),
+                            "score": r.get("score", 0),
+                            "winner_model": r.get("winner_model"),
+                            "github_saved": r.get("github_saved", False),
+                            "competition": r.get("competition"),
+                            "error": r.get("error")
+                        }
+                        for r in results
+                    ]
+                }
+                workflow_json = json.dumps(workflow_summary, ensure_ascii=False, indent=2)
+                await self.github_storage.save_project_file(
+                    project_id,
+                    workflow_json.encode('utf-8'),
+                    "workflow_results.json",
+                    "generated"
+                )
+                logger.info(f"Workflow results saved to GitHub for project {project_id}")
+            except Exception as e:
+                logger.warning(f"Could not save workflow results to GitHub: {e}")
 
         return {
             "success": True,
