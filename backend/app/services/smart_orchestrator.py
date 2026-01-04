@@ -712,7 +712,8 @@ class ProjectEngineIntegrator:
 }}"""
 
         try:
-            response = await self.creator_engine.ai_orchestrator.ai_manager.generate(
+            # استفاده از ai_manager از model_selector به جای مسیر پیچیده creator_engine
+            response = await self.model_selector.ai_manager.generate(
                 model_id=analyzer_id,
                 messages=[Message(role="user", content=analysis_prompt)],
                 max_tokens=2000
@@ -776,7 +777,8 @@ class ProjectEngineIntegrator:
 
         # اجرای وظیفه
         try:
-            response = await self.creator_engine.ai_orchestrator.ai_manager.generate(
+            # استفاده از ai_manager از model_selector
+            response = await self.model_selector.ai_manager.generate(
                 model_id=model_id,
                 messages=[Message(role="user", content=task_description)],
                 max_tokens=4000
@@ -851,7 +853,8 @@ class ProjectEngineIntegrator:
 
 لطفاً با رفع این مشکلات پاسخ بهتری ارائه بده."""
 
-                    revised_response = await self.creator_engine.ai_orchestrator.ai_manager.generate(
+                    # استفاده از ai_manager از model_selector
+                    revised_response = await self.model_selector.ai_manager.generate(
                         model_id=alt_model_id,
                         messages=[Message(role="user", content=revision_prompt)],
                         max_tokens=4000
