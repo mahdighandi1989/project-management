@@ -748,6 +748,11 @@ class ProjectEngineIntegrator:
         self.model_selector = model_selector
         self.supervisor = supervisor
         self.active_workflows: Dict[str, Dict] = {}
+        self.github_storage = None  # Will be set by orchestrator
+
+    def set_github_storage(self, github_storage):
+        """Set GitHub storage for saving generated files"""
+        self.github_storage = github_storage
 
     async def smart_project_setup(
         self,
@@ -1039,7 +1044,23 @@ class ProjectEngineIntegrator:
                 if file_result.get("success"):
                     output = file_result.get("revised_output") or file_result.get("output", "")
 
-                    # ذخیره فایل (اگر Creator Engine موجود باشد)
+                    # ذخیره فایل در GitHub
+                    github_saved = False
+                    if self.github_storage:
+                        try:
+                            content_bytes = output.encode('utf-8')
+                            gh_result = await self.github_storage.save_project_file(
+                                project_id,
+                                content_bytes,
+                                file_path,
+                                "generated"
+                            )
+                            github_saved = gh_result.get("success", False)
+                            logger.info(f"GitHub save result for {file_path}: {github_saved}")
+                        except Exception as e:
+                            logger.warning(f"Could not save file to GitHub: {e}")
+
+                    # ذخیره فایل در Creator Engine (اگر موجود باشد)
                     if self.creator_engine and self.creator_engine.file_manager:
                         try:
                             await self.creator_engine.file_manager.write_file(file_path, output)
@@ -1050,7 +1071,9 @@ class ProjectEngineIntegrator:
                         "file": file_path,
                         "status": "created",
                         "score": file_result.get("evaluation", {}).get("score", 0),
-                        "content_preview": output[:200] if output else ""
+                        "content_preview": output[:200] if output else "",
+                        "content": output,  # ذخیره محتوای کامل
+                        "github_saved": github_saved
                     }
                     results.append(file_info)
                     workflow["results"].append(file_info)

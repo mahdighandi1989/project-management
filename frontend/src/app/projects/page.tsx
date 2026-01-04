@@ -145,6 +145,16 @@ const api = {
     return res.json();
   },
 
+  async getGeneratedFiles(projectId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/orchestrator/generated-files/${projectId}`);
+    return res.json();
+  },
+
+  async getFileContent(projectId: string, filePath: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/orchestrator/file-content/${projectId}/${encodeURIComponent(filePath)}`);
+    return res.json();
+  },
+
   async getAvailableModels(): Promise<any[]> {
     const res = await fetch(`${getApiUrl()}/api/models/available`);
     const data = await res.json();
@@ -208,6 +218,13 @@ export default function ProjectsPage() {
     results: any[];
   } | null>(null);
   const [buildingProjectId, setBuildingProjectId] = useState<string | null>(null);
+
+  // File viewer state
+  const [viewingFile, setViewingFile] = useState<{
+    name: string;
+    content: string;
+    score: number;
+  } | null>(null);
 
   // Load data
   useEffect(() => {
@@ -1038,6 +1055,51 @@ export default function ProjectsPage() {
           </div>
         )}
 
+        {/* File Viewer Modal */}
+        {viewingFile && (
+          <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[60] p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-hidden">
+              <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
+                <div className="flex items-center gap-3">
+                  <DocumentTextIcon className="w-6 h-6 text-purple-500" />
+                  <h3 className="font-bold text-gray-900 dark:text-white font-mono">{viewingFile.name}</h3>
+                  <span className="text-xs px-2 py-0.5 bg-green-100 dark:bg-green-800 text-green-700 dark:text-green-300 rounded-full">
+                    امتیاز: {viewingFile.score}
+                  </span>
+                </div>
+                <button
+                  onClick={() => setViewingFile(null)}
+                  className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg"
+                >
+                  <XMarkIcon className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="overflow-auto max-h-[70vh] bg-gray-900">
+                <pre className="p-4 text-sm text-gray-100 font-mono whitespace-pre-wrap">
+                  <code>{viewingFile.content}</code>
+                </pre>
+              </div>
+              <div className="p-4 border-t border-gray-200 dark:border-gray-700 flex gap-3">
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(viewingFile.content);
+                    alert('کد کپی شد!');
+                  }}
+                  className="flex-1 px-4 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600"
+                >
+                  کپی کد
+                </button>
+                <button
+                  onClick={() => setViewingFile(null)}
+                  className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg"
+                >
+                  بستن
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Build Progress Modal */}
         {showBuildProgress && buildProgress && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -1165,6 +1227,28 @@ export default function ProjectsPage() {
                             <span className="text-xs px-2 py-0.5 bg-green-100 dark:bg-green-800 text-green-700 dark:text-green-300 rounded-full">
                               امتیاز: {result.score}
                             </span>
+                          )}
+                          {result.github_saved && (
+                            <span className="text-xs px-2 py-0.5 bg-blue-100 dark:bg-blue-800 text-blue-700 dark:text-blue-300 rounded-full">
+                              GitHub ✓
+                            </span>
+                          )}
+                          {result.status === 'created' && buildingProjectId && (
+                            <button
+                              onClick={async () => {
+                                const fileData = await api.getFileContent(buildingProjectId, result.file);
+                                if (fileData.success) {
+                                  setViewingFile({
+                                    name: result.file,
+                                    content: fileData.content,
+                                    score: fileData.score
+                                  });
+                                }
+                              }}
+                              className="text-xs px-2 py-1 bg-purple-100 dark:bg-purple-800 text-purple-700 dark:text-purple-300 rounded hover:bg-purple-200 dark:hover:bg-purple-700"
+                            >
+                              مشاهده کد
+                            </button>
                           )}
                           {result.error && (
                             <span className="text-xs text-red-600 dark:text-red-400 max-w-[150px] truncate">
