@@ -520,12 +520,23 @@ class SupervisorModel:
         """استخراج JSON از متن - پشتیبانی از markdown code blocks"""
         import re
         try:
-            # اول سعی کن markdown code block رو حذف کنی
-            # الگوی ```json ... ``` یا ``` ... ```
+            original_text = text
+
+            # روش 1: حذف markdown code block با closing backticks
             code_block_pattern = r'```(?:json)?\s*([\s\S]*?)```'
             code_match = re.search(code_block_pattern, text)
             if code_match:
                 text = code_match.group(1).strip()
+            else:
+                # روش 2: اگر فقط opening backticks باشد (بدون closing)
+                # مثلا: ```json { "key": "value" ...
+                opening_pattern = r'```(?:json)?\s*([\s\S]*)'
+                opening_match = re.search(opening_pattern, text)
+                if opening_match:
+                    text = opening_match.group(1).strip()
+
+            # حذف هرگونه backticks باقی مانده
+            text = text.replace('```', '')
 
             # پیدا کردن JSON object
             start = text.find('{')
@@ -533,6 +544,14 @@ class SupervisorModel:
             if start >= 0 and end > start:
                 json_str = text[start:end]
                 return json.loads(json_str)
+
+            # اگر هنوز نتیجه نداشت، روی متن اصلی امتحان کن
+            start = original_text.find('{')
+            end = original_text.rfind('}') + 1
+            if start >= 0 and end > start:
+                json_str = original_text[start:end]
+                return json.loads(json_str)
+
         except json.JSONDecodeError as e:
             logger.warning(f"JSON decode error: {e}")
         except Exception as e:
@@ -972,12 +991,23 @@ class ProjectEngineIntegrator:
         """استخراج JSON از متن - پشتیبانی از markdown code blocks"""
         import re
         try:
-            # اول سعی کن markdown code block رو حذف کنی
-            # الگوی ```json ... ``` یا ``` ... ```
+            original_text = text
+
+            # روش 1: حذف markdown code block با closing backticks
             code_block_pattern = r'```(?:json)?\s*([\s\S]*?)```'
             code_match = re.search(code_block_pattern, text)
             if code_match:
                 text = code_match.group(1).strip()
+            else:
+                # روش 2: اگر فقط opening backticks باشد (بدون closing)
+                # مثلا: ```json { "key": "value" ...
+                opening_pattern = r'```(?:json)?\s*([\s\S]*)'
+                opening_match = re.search(opening_pattern, text)
+                if opening_match:
+                    text = opening_match.group(1).strip()
+
+            # حذف هرگونه backticks باقی مانده
+            text = text.replace('```', '')
 
             # پیدا کردن JSON object
             start = text.find('{')
@@ -985,6 +1015,14 @@ class ProjectEngineIntegrator:
             if start >= 0 and end > start:
                 json_str = text[start:end]
                 return json.loads(json_str)
+
+            # اگر هنوز نتیجه نداشت، روی متن اصلی امتحان کن
+            start = original_text.find('{')
+            end = original_text.rfind('}') + 1
+            if start >= 0 and end > start:
+                json_str = original_text[start:end]
+                return json.loads(json_str)
+
         except json.JSONDecodeError as e:
             logger.warning(f"JSON decode error: {e}")
         except Exception as e:
