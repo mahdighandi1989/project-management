@@ -377,7 +377,7 @@ async def start_project_workflow(request: StartWorkflowRequest):
 @router.get("/workflow-status/{project_id}")
 async def get_workflow_status(project_id: str):
     """
-    وضعیت workflow پروژه
+    وضعیت workflow پروژه با جزئیات پیشرفت
     """
     try:
         orchestrator = get_orchestrator()
@@ -397,7 +397,14 @@ async def get_workflow_status(project_id: str):
             "status": workflow.get("status"),
             "current_phase": workflow.get("current_phase", 0),
             "started_at": workflow.get("started_at"),
-            "results": workflow.get("results", [])
+            "completed_at": workflow.get("completed_at"),
+            "progress": workflow.get("progress", 0),
+            "current_step": workflow.get("current_step", ""),
+            "current_file": workflow.get("current_file", ""),
+            "current_file_index": workflow.get("current_file_index", 0),
+            "total_files": workflow.get("total_files", 0),
+            "results": workflow.get("results", []),
+            "analysis": workflow.get("analysis", {})
         }
 
     except Exception as e:

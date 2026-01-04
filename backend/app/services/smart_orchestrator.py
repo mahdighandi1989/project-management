@@ -977,7 +977,15 @@ class ProjectEngineIntegrator:
         results = []
         engine_project_id = None
 
+        # Update workflow status
+        workflow["status"] = "starting"
+        workflow["started_at"] = datetime.now().isoformat()
+        workflow["current_step"] = "initializing"
+        workflow["progress"] = 0
+        workflow["results"] = []
+
         # ایجاد پروژه در Creator Engine (اگر موجود باشد)
+        workflow["current_step"] = "creating_engine_project"
         if self.creator_engine and self.creator_engine.project_creator:
             try:
                 engine_result = await self.creator_engine.project_creator.create_project(
@@ -999,7 +1007,9 @@ class ProjectEngineIntegrator:
 
         if not estimated_files:
             # اگر فایلی مشخص نشده، بر اساس فازها تولید کن
-            workflow["status"] = "ready"
+            workflow["status"] = "completed"
+            workflow["progress"] = 100
+            workflow["current_step"] = "done"
             return {
                 "success": True,
                 "project_id": project_id,
@@ -1008,7 +1018,17 @@ class ProjectEngineIntegrator:
                 "phases": analysis.get("phases", [])
             }
 
-        for file_path in estimated_files:
+        total_files = len(estimated_files)
+        workflow["total_files"] = total_files
+        workflow["status"] = "building"
+
+        for idx, file_path in enumerate(estimated_files):
+            # Update progress
+            workflow["current_file"] = file_path
+            workflow["current_file_index"] = idx + 1
+            workflow["current_step"] = f"generating_{file_path}"
+            workflow["progress"] = int((idx / total_files) * 100)
+
             try:
                 file_result = await self.execute_with_monitoring(
                     project_id,
@@ -1026,28 +1046,36 @@ class ProjectEngineIntegrator:
                         except Exception as e:
                             logger.warning(f"Could not write file to Creator Engine: {e}")
 
-                    results.append({
+                    file_info = {
                         "file": file_path,
                         "status": "created",
                         "score": file_result.get("evaluation", {}).get("score", 0),
                         "content_preview": output[:200] if output else ""
-                    })
+                    }
+                    results.append(file_info)
+                    workflow["results"].append(file_info)
                 else:
-                    results.append({
+                    file_info = {
                         "file": file_path,
                         "status": "failed",
                         "error": file_result.get("error", "Unknown error")
-                    })
+                    }
+                    results.append(file_info)
+                    workflow["results"].append(file_info)
             except Exception as e:
                 logger.error(f"Error creating file {file_path}: {e}")
-                results.append({
+                file_info = {
                     "file": file_path,
                     "status": "failed",
                     "error": str(e)
-                })
+                }
+                results.append(file_info)
+                workflow["results"].append(file_info)
 
-        workflow["status"] = "building"
-        workflow["results"] = results
+        workflow["status"] = "completed"
+        workflow["progress"] = 100
+        workflow["current_step"] = "done"
+        workflow["completed_at"] = datetime.now().isoformat()
 
         return {
             "success": True,

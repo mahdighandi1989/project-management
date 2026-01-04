@@ -196,11 +196,63 @@ export default function ProjectsPage() {
   const [taskCategory, setTaskCategory] = useState('code_generation');
   const [taskResult, setTaskResult] = useState<any>(null);
 
+  // Auto-build progress state
+  const [showBuildProgress, setShowBuildProgress] = useState(false);
+  const [buildProgress, setBuildProgress] = useState<{
+    status: string;
+    progress: number;
+    currentStep: string;
+    currentFile: string;
+    currentFileIndex: number;
+    totalFiles: number;
+    results: any[];
+  } | null>(null);
+  const [buildingProjectId, setBuildingProjectId] = useState<string | null>(null);
+
   // Load data
   useEffect(() => {
     loadProjects();
     loadModels();
   }, []);
+
+  // Polling for build progress
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null;
+
+    if (buildingProjectId && showBuildProgress) {
+      interval = setInterval(async () => {
+        try {
+          const status = await api.getWorkflowStatus(buildingProjectId);
+          if (status.success) {
+            setBuildProgress({
+              status: status.status,
+              progress: status.progress || 0,
+              currentStep: status.current_step || '',
+              currentFile: status.current_file || '',
+              currentFileIndex: status.current_file_index || 0,
+              totalFiles: status.total_files || 0,
+              results: status.results || [],
+            });
+
+            // Stop polling when completed
+            if (status.status === 'completed' || status.status === 'failed') {
+              if (interval) clearInterval(interval);
+              await loadProjects();
+              if (selectedProject) {
+                await selectProject(buildingProjectId);
+              }
+            }
+          }
+        } catch (error) {
+          console.error('Error polling build status:', error);
+        }
+      }, 2000); // Poll every 2 seconds
+    }
+
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [buildingProjectId, showBuildProgress]);
 
   const loadProjects = async () => {
     setLoading(true);
@@ -315,23 +367,36 @@ export default function ProjectsPage() {
     const targetProjectId = projectId || selectedProject?.project_id;
     if (!targetProjectId) return;
 
-    setActionLoading(true);
+    // Show progress modal
+    setBuildingProjectId(targetProjectId);
+    setBuildProgress({
+      status: 'starting',
+      progress: 0,
+      currentStep: 'شروع فرآیند...',
+      currentFile: '',
+      currentFileIndex: 0,
+      totalFiles: 0,
+      results: [],
+    });
+    setShowBuildProgress(true);
+
     try {
+      // Start the build process (this runs async on the server)
       const result = await api.startWorkflow(targetProjectId, true);
-      if (result.success) {
-        await loadProjects();
-        if (selectedProject) {
-          await selectProject(targetProjectId);
-        }
-        alert('ساخت خودکار شروع شد! سیستم در حال اجرای فازها و تولید فایل‌ها است.');
-      } else {
-        alert(`خطا: ${result.error || 'خطا در شروع ساخت خودکار'}`);
+      if (!result.success) {
+        setBuildProgress(prev => prev ? {
+          ...prev,
+          status: 'failed',
+          currentStep: result.error || 'خطا در شروع ساخت خودکار'
+        } : null);
       }
     } catch (error) {
       console.error('Error starting auto build:', error);
-      alert('خطا در ارتباط با سرور');
-    } finally {
-      setActionLoading(false);
+      setBuildProgress(prev => prev ? {
+        ...prev,
+        status: 'failed',
+        currentStep: 'خطا در ارتباط با سرور'
+      } : null);
     }
   };
 
@@ -969,6 +1034,188 @@ export default function ProjectsPage() {
                   </button>
                 </div>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Build Progress Modal */}
+        {showBuildProgress && buildProgress && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] overflow-hidden">
+              <div className="p-6 border-b border-gray-200 dark:border-gray-700">
+                <div className="flex justify-between items-center">
+                  <h2 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                    <RocketLaunchIcon className="w-6 h-6 text-purple-500" />
+                    ساخت خودکار پروژه
+                  </h2>
+                  {buildProgress.status === 'completed' || buildProgress.status === 'failed' ? (
+                    <button
+                      onClick={() => {
+                        setShowBuildProgress(false);
+                        setBuildingProjectId(null);
+                        setBuildProgress(null);
+                      }}
+                      className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg"
+                    >
+                      <XMarkIcon className="w-5 h-5" />
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="p-6 overflow-y-auto max-h-[60vh]">
+                {/* Status */}
+                <div className={`rounded-xl p-4 mb-4 ${
+                  buildProgress.status === 'completed'
+                    ? 'bg-green-50 dark:bg-green-900/20'
+                    : buildProgress.status === 'failed'
+                    ? 'bg-red-50 dark:bg-red-900/20'
+                    : 'bg-blue-50 dark:bg-blue-900/20'
+                }`}>
+                  <div className="flex items-center gap-3">
+                    {buildProgress.status === 'completed' ? (
+                      <CheckCircleIcon className="w-8 h-8 text-green-500" />
+                    ) : buildProgress.status === 'failed' ? (
+                      <ExclamationTriangleIcon className="w-8 h-8 text-red-500" />
+                    ) : (
+                      <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                    )}
+                    <div>
+                      <h3 className={`font-bold ${
+                        buildProgress.status === 'completed'
+                          ? 'text-green-700 dark:text-green-300'
+                          : buildProgress.status === 'failed'
+                          ? 'text-red-700 dark:text-red-300'
+                          : 'text-blue-700 dark:text-blue-300'
+                      }`}>
+                        {buildProgress.status === 'completed'
+                          ? 'ساخت کامل شد!'
+                          : buildProgress.status === 'failed'
+                          ? 'خطا در ساخت'
+                          : buildProgress.status === 'building'
+                          ? 'در حال ساخت...'
+                          : 'شروع فرآیند...'}
+                      </h3>
+                      <p className="text-sm text-gray-600 dark:text-gray-400">
+                        {buildProgress.currentStep || buildProgress.currentFile || 'در انتظار...'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Progress bar */}
+                <div className="mb-6">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm font-medium text-gray-700 dark:text-gray-300">پیشرفت</span>
+                    <span className="text-sm font-bold text-primary-500">{buildProgress.progress}%</span>
+                  </div>
+                  <div className="w-full bg-gray-200 dark:bg-gray-600 rounded-full h-4">
+                    <div
+                      className={`h-4 rounded-full transition-all duration-500 ${
+                        buildProgress.status === 'completed'
+                          ? 'bg-gradient-to-r from-green-400 to-green-600'
+                          : buildProgress.status === 'failed'
+                          ? 'bg-gradient-to-r from-red-400 to-red-600'
+                          : 'bg-gradient-to-r from-blue-400 to-purple-600'
+                      }`}
+                      style={{ width: `${buildProgress.progress}%` }}
+                    />
+                  </div>
+                  {buildProgress.totalFiles > 0 && (
+                    <p className="text-sm text-gray-500 mt-1">
+                      فایل {buildProgress.currentFileIndex} از {buildProgress.totalFiles}
+                    </p>
+                  )}
+                </div>
+
+                {/* Current file */}
+                {buildProgress.currentFile && buildProgress.status !== 'completed' && (
+                  <div className="mb-4 p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                    <div className="flex items-center gap-2">
+                      <DocumentTextIcon className="w-5 h-5 text-blue-500 animate-pulse" />
+                      <span className="text-sm font-medium">در حال تولید:</span>
+                      <span className="text-sm text-gray-600 dark:text-gray-400 font-mono">
+                        {buildProgress.currentFile}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Results */}
+                {buildProgress.results && buildProgress.results.length > 0 && (
+                  <div className="space-y-2">
+                    <h4 className="font-medium text-gray-700 dark:text-gray-300 mb-2">فایل‌های تولید شده:</h4>
+                    <div className="max-h-48 overflow-y-auto space-y-2">
+                      {buildProgress.results.map((result, idx) => (
+                        <div
+                          key={idx}
+                          className={`p-3 rounded-lg flex items-center gap-2 ${
+                            result.status === 'created'
+                              ? 'bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800'
+                              : 'bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800'
+                          }`}
+                        >
+                          {result.status === 'created' ? (
+                            <CheckCircleIcon className="w-5 h-5 text-green-500 flex-shrink-0" />
+                          ) : (
+                            <ExclamationTriangleIcon className="w-5 h-5 text-red-500 flex-shrink-0" />
+                          )}
+                          <span className="font-mono text-sm flex-1">{result.file}</span>
+                          {result.score && (
+                            <span className="text-xs px-2 py-0.5 bg-green-100 dark:bg-green-800 text-green-700 dark:text-green-300 rounded-full">
+                              امتیاز: {result.score}
+                            </span>
+                          )}
+                          {result.error && (
+                            <span className="text-xs text-red-600 dark:text-red-400 max-w-[150px] truncate">
+                              {result.error}
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              {(buildProgress.status === 'completed' || buildProgress.status === 'failed') && (
+                <div className="p-6 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-700/50">
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => {
+                        setShowBuildProgress(false);
+                        setBuildingProjectId(null);
+                        setBuildProgress(null);
+                      }}
+                      className="flex-1 px-4 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600"
+                    >
+                      بستن
+                    </button>
+                    {buildProgress.status === 'failed' && (
+                      <button
+                        onClick={() => {
+                          if (buildingProjectId) {
+                            setBuildProgress({
+                              status: 'starting',
+                              progress: 0,
+                              currentStep: 'شروع مجدد...',
+                              currentFile: '',
+                              currentFileIndex: 0,
+                              totalFiles: 0,
+                              results: [],
+                            });
+                            api.startWorkflow(buildingProjectId, true);
+                          }
+                        }}
+                        className="flex-1 px-4 py-2 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600"
+                      >
+                        تلاش مجدد
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
