@@ -131,11 +131,21 @@ const api = {
     return res.json();
   },
 
-  async startWorkflow(projectId: string, autoExecute: boolean = true): Promise<any> {
+  async startWorkflow(
+    projectId: string,
+    autoExecute: boolean = true,
+    useCompetition: boolean = true,
+    numModels: number = 3
+  ): Promise<any> {
     const res = await fetch(`${getApiUrl()}/api/orchestrator/start-workflow`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project_id: projectId, auto_execute: autoExecute }),
+      body: JSON.stringify({
+        project_id: projectId,
+        auto_execute: autoExecute,
+        use_competition: useCompetition,
+        num_models: numModels
+      }),
     });
     return res.json();
   },
@@ -1223,9 +1233,19 @@ export default function ProjectsPage() {
                             <ExclamationTriangleIcon className="w-5 h-5 text-red-500 flex-shrink-0" />
                           )}
                           <span className="font-mono text-sm flex-1">{result.file}</span>
+                          {result.winner_model && (
+                            <span className="text-xs px-2 py-0.5 bg-purple-100 dark:bg-purple-800 text-purple-700 dark:text-purple-300 rounded-full">
+                              🏆 {result.winner_model.split('-')[0]}
+                            </span>
+                          )}
                           {result.score && (
                             <span className="text-xs px-2 py-0.5 bg-green-100 dark:bg-green-800 text-green-700 dark:text-green-300 rounded-full">
                               امتیاز: {result.score}
+                            </span>
+                          )}
+                          {result.competition && result.competition.participants > 1 && (
+                            <span className="text-xs px-2 py-0.5 bg-yellow-100 dark:bg-yellow-800 text-yellow-700 dark:text-yellow-300 rounded-full">
+                              🏁 {result.competition.successful}/{result.competition.participants}
                             </span>
                           )}
                           {result.github_saved && (

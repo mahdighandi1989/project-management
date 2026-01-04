@@ -298,16 +298,19 @@ class StartWorkflowRequest(BaseModel):
     """درخواست شروع workflow"""
     project_id: str
     auto_execute: bool = True  # اجرای خودکار فازها
+    use_competition: bool = True  # حالت رقابتی چند مدل
+    num_models: int = 3  # تعداد مدل‌ها در رقابت
 
 
 @router.post("/start-workflow")
 async def start_project_workflow(request: StartWorkflowRequest):
     """
-    شروع workflow پروژه
+    شروع workflow پروژه با رقابت چند مدل
 
-    - شروع از فاز اول
-    - اجرای خودکار تمام مراحل هر فاز
-    - گزارش پیشرفت
+    - انتخاب بهترین مدل‌ها
+    - اجرای موازی و رقابت
+    - انتخاب بهترین خروجی
+    - گزارش پیشرفت و نتایج رقابت
     """
     try:
         orchestrator = get_orchestrator()
@@ -360,9 +363,13 @@ async def start_project_workflow(request: StartWorkflowRequest):
                 "started_at": None
             }
 
-        # اگر auto_execute فعال است، شروع ساخت خودکار
+        # اگر auto_execute فعال است، شروع ساخت خودکار با رقابت
         if request.auto_execute:
-            result = await orchestrator.auto_build(request.project_id)
+            result = await orchestrator.integrator.auto_build_project(
+                request.project_id,
+                use_competition=request.use_competition,
+                num_models=request.num_models
+            )
             return result
 
         return {
