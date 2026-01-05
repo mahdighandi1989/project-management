@@ -1243,3 +1243,69 @@ async def smart_build_project(
     except Exception as e:
         logger.error(f"Error in smart build: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/github-status")
+async def get_github_status():
+    """بررسی وضعیت اتصال به GitHub"""
+    try:
+        github_storage = get_github_storage()
+
+        status = {
+            "token_set": bool(github_storage.token),
+            "owner": github_storage.owner or "NOT SET",
+            "repo": github_storage.repo or "NOT SET",
+            "branch": github_storage.branch,
+            "base_path": github_storage.base_path
+        }
+
+        if github_storage.token and github_storage.owner and github_storage.repo:
+            connection = await github_storage.check_connection()
+            status["connected"] = connection.get("success", False)
+            status["connection_error"] = connection.get("error")
+            status["repo_info"] = connection.get("repo")
+
+            # بررسی فایل‌های موجود
+            try:
+                folders = await github_storage.list_folder("projects")
+                status["project_folders"] = [f.name for f in folders if f.type == "dir"]
+            except Exception as e:
+                status["list_error"] = str(e)
+        else:
+            status["connected"] = False
+            status["connection_error"] = "GitHub credentials not configured"
+
+        return status
+
+    except Exception as e:
+        logger.error(f"Error checking GitHub status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/reload-from-github")
+async def reload_from_github():
+    """بارگذاری مجدد داده‌ها از GitHub"""
+    try:
+        from ...main import load_projects_from_github, load_workflows_from_github
+        from ...services.project_service import get_project_service
+
+        github_storage = get_github_storage()
+        project_service = get_project_service()
+        project_service.github_storage = github_storage
+
+        # بارگذاری پروژه‌ها
+        await load_projects_from_github(github_storage, project_service)
+
+        # بارگذاری workflows
+        orchestrator = get_orchestrator()
+        await load_workflows_from_github(github_storage, orchestrator)
+
+        return {
+            "success": True,
+            "projects_loaded": len(project_service.projects),
+            "workflows_loaded": len(orchestrator.integrator.active_workflows)
+        }
+
+    except Exception as e:
+        logger.error(f"Error reloading from GitHub: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
