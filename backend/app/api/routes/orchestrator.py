@@ -1172,3 +1172,74 @@ async def stop_auto_sync():
     except Exception as e:
         logger.error(f"Error stopping auto sync: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# =====================================
+# Project State & Self-Awareness
+# =====================================
+
+@router.get("/project-state/{project_id}")
+async def get_project_state(project_id: str):
+    """
+    تحلیل وضعیت پروژه - خودآگاهی کامل
+
+    Returns:
+        - existing_files: فایل‌های موجود
+        - missing_files: فایل‌هایی که هنوز ساخته نشده‌اند
+        - current_phase: فاز فعلی
+        - overall_progress: درصد پیشرفت
+        - recommendations: پیشنهادات
+        - ready_for_next_phase: آیا آماده فاز بعدی است
+    """
+    try:
+        orchestrator = get_orchestrator()
+        state = await orchestrator.integrator.analyze_project_state(project_id)
+        return state
+
+    except Exception as e:
+        logger.error(f"Error getting project state: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/smart-build/{project_id}")
+async def smart_build_project(
+    project_id: str,
+    force_rebuild: bool = Query(default=False, description="بازسازی اجباری همه فایل‌ها")
+):
+    """
+    ساخت هوشمند پروژه
+
+    - فقط فایل‌های ناقص یا missing را می‌سازد
+    - فایل‌های موجود را skip می‌کند
+    - پیشرفت را به صورت خودکار بروزرسانی می‌کند
+    """
+    try:
+        orchestrator = get_orchestrator()
+
+        # اول وضعیت را بررسی کن
+        state = await orchestrator.integrator.analyze_project_state(project_id)
+
+        if not state.get("success", True):
+            return state
+
+        # اگر نیازی به ساخت نیست
+        if not state.get("needs_building") and not force_rebuild:
+            return {
+                "success": True,
+                "message": "همه فایل‌ها قبلاً ساخته شده‌اند!",
+                "state": state
+            }
+
+        # شروع ساخت
+        result = await orchestrator.integrator.auto_build_project(
+            project_id,
+            use_competition=True,
+            num_models=3,
+            force_rebuild=force_rebuild
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error in smart build: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

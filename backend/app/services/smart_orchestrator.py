@@ -1147,25 +1147,159 @@ class ProjectEngineIntegrator:
 
         return {"success": False, "error": "خطا در اجرا"}
 
+    async def analyze_project_state(self, project_id: str) -> Dict:
+        """
+        تحلیل وضعیت فعلی پروژه - خودآگاهی کامل
+
+        Returns:
+            - existing_files: فایل‌های موجود
+            - missing_files: فایل‌های مورد نیاز که وجود ندارند
+            - current_phase: فاز فعلی
+            - overall_progress: پیشرفت کلی
+            - recommendations: پیشنهادات
+        """
+        state = {
+            "project_id": project_id,
+            "existing_files": [],
+            "missing_files": [],
+            "current_phase": None,
+            "current_phase_index": 0,
+            "total_phases": 0,
+            "overall_progress": 0,
+            "phase_progress": {},
+            "recommendations": [],
+            "ready_for_next_phase": False,
+            "needs_building": False
+        }
+
+        try:
+            # دریافت اطلاعات پروژه
+            project_data = self.project_service.get_project(project_id)
+            if not project_data.get("success"):
+                return {"success": False, "error": "پروژه یافت نشد"}
+
+            project = project_data["project"]
+            phases = project.get("phases", [])
+            state["total_phases"] = len(phases)
+            state["current_phase_index"] = project.get("current_phase_index", 0)
+
+            if phases and state["current_phase_index"] < len(phases):
+                state["current_phase"] = phases[state["current_phase_index"]]
+
+            # بررسی فایل‌های موجود در GitHub
+            if self.github_storage:
+                try:
+                    project_files = await self.github_storage.get_project_files(project_id)
+                    for folder_type, files in project_files.get("files", {}).items():
+                        for file_info in files:
+                            if file_info.get("name") and file_info["name"] != ".gitkeep":
+                                state["existing_files"].append({
+                                    "path": f"{folder_type}/{file_info['name']}",
+                                    "name": file_info["name"],
+                                    "folder": folder_type,
+                                    "size": file_info.get("size", 0)
+                                })
+                except Exception as e:
+                    logger.warning(f"Could not get project files from GitHub: {e}")
+
+            # بررسی workflow برای فایل‌های مورد نیاز
+            workflow = self.active_workflows.get(project_id)
+            if workflow:
+                analysis = workflow.get("analysis", {})
+                estimated_files = analysis.get("estimated_files", [])
+
+                existing_paths = [f["name"] for f in state["existing_files"]]
+
+                for file_path in estimated_files:
+                    file_name = file_path.rsplit("/", 1)[-1] if "/" in file_path else file_path
+                    if file_name not in existing_paths and file_path not in existing_paths:
+                        state["missing_files"].append(file_path)
+
+                # محاسبه پیشرفت
+                if estimated_files:
+                    built_count = len(estimated_files) - len(state["missing_files"])
+                    state["overall_progress"] = int((built_count / len(estimated_files)) * 100)
+
+            # پیشنهادات
+            if not state["existing_files"]:
+                state["recommendations"].append("هنوز هیچ فایلی ساخته نشده. از 'ساخت خودکار' استفاده کنید.")
+                state["needs_building"] = True
+            elif state["missing_files"]:
+                state["recommendations"].append(f"{len(state['missing_files'])} فایل هنوز ساخته نشده.")
+                state["needs_building"] = True
+            else:
+                state["recommendations"].append("همه فایل‌ها ساخته شده‌اند!")
+                state["ready_for_next_phase"] = True
+
+            # بررسی آمادگی برای فاز بعدی
+            if state["current_phase"]:
+                phase_files_built = sum(1 for f in state["existing_files"]
+                                       if any(tech in f["name"].lower() for tech in ["backend", "api", "server"])
+                                       if state["current_phase"].get("name", "").lower() in ["backend", "توسعه backend"])
+
+            state["success"] = True
+            return state
+
+        except Exception as e:
+            logger.error(f"Error analyzing project state: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def _update_project_progress_auto(self, project_id: str, progress: int):
+        """
+        بروزرسانی خودکار پیشرفت پروژه بر اساس فایل‌های ساخته شده
+        """
+        try:
+            project_data = self.project_service.get_project(project_id)
+            if not project_data.get("success"):
+                return
+
+            project = project_data["project"]
+            phases = project.get("phases", [])
+            current_phase_index = project.get("current_phase_index", 0)
+
+            if phases and current_phase_index < len(phases):
+                # بروزرسانی پیشرفت فاز فعلی
+                self.project_service.update_phase_progress(project_id, progress)
+                logger.info(f"📊 Auto-updated project {project_id} progress to {progress}%")
+
+                # اگر پیشرفت 100% شد، به فاز بعدی برو
+                if progress >= 100 and current_phase_index < len(phases) - 1:
+                    self.project_service.start_next_phase(project_id)
+                    logger.info(f"🚀 Auto-advanced to next phase for project {project_id}")
+
+        except Exception as e:
+            logger.warning(f"Could not auto-update project progress: {e}")
+
     async def auto_build_project(
         self,
         project_id: str,
         github_repo: str = None,
         use_competition: bool = True,
-        num_models: int = 3
+        num_models: int = 3,
+        force_rebuild: bool = False
     ) -> Dict:
         """
-        ساخت خودکار پروژه با رقابت چند مدل
+        ساخت خودکار پروژه با رقابت چند مدل - نسخه هوشمند
 
         Args:
             project_id: شناسه پروژه
             github_repo: مخزن GitHub (اختیاری)
             use_competition: استفاده از حالت رقابتی (پیش‌فرض: True)
             num_models: تعداد مدل‌ها در رقابت (پیش‌فرض: 3)
+            force_rebuild: بازسازی اجباری همه فایل‌ها (پیش‌فرض: False)
         """
         workflow = self.active_workflows.get(project_id)
         if not workflow:
             return {"success": False, "error": "Workflow یافت نشد. ابتدا پروژه را با smart_project_setup ایجاد کنید."}
+
+        # 🧠 خودآگاهی: بررسی وضعیت فعلی پروژه
+        workflow["status"] = "analyzing"
+        workflow["current_step"] = "🔍 تحلیل وضعیت پروژه..."
+
+        project_state = await self.analyze_project_state(project_id)
+        existing_file_names = [f["name"] for f in project_state.get("existing_files", [])]
+
+        logger.info(f"🧠 Project state: {len(existing_file_names)} existing files, {len(project_state.get('missing_files', []))} missing")
 
         analysis = workflow["analysis"]
         results = []
@@ -1179,6 +1313,7 @@ class ProjectEngineIntegrator:
         workflow["results"] = []
         workflow["competition_mode"] = use_competition
         workflow["num_models"] = num_models
+        workflow["skipped_files"] = []  # فایل‌هایی که skip شدند
 
         # ایجاد پروژه در Creator Engine (اگر موجود باشد)
         workflow["current_step"] = "creating_engine_project"
@@ -1200,6 +1335,44 @@ class ProjectEngineIntegrator:
 
         # تولید فایل‌های اصلی
         estimated_files = analysis.get("estimated_files", [])
+
+        # 🧠 هوشمند: فقط فایل‌هایی که وجود ندارند را بساز
+        if not force_rebuild:
+            files_to_build = []
+            for file_path in estimated_files:
+                file_name = file_path.rsplit("/", 1)[-1] if "/" in file_path else file_path
+                if file_name not in existing_file_names:
+                    files_to_build.append(file_path)
+                else:
+                    workflow["skipped_files"].append({
+                        "path": file_path,
+                        "reason": "already_exists"
+                    })
+                    logger.info(f"⏭️ Skipping {file_path} - already exists")
+        else:
+            files_to_build = estimated_files
+            logger.info(f"🔄 Force rebuild mode - rebuilding all {len(files_to_build)} files")
+
+        # اگر همه فایل‌ها قبلاً ساخته شده‌اند
+        if not files_to_build:
+            workflow["status"] = "completed"
+            workflow["progress"] = 100
+            workflow["current_step"] = "✅ همه فایل‌ها قبلاً ساخته شده‌اند"
+            workflow["completed_at"] = datetime.now().isoformat()
+
+            # بروزرسانی پیشرفت پروژه
+            await self._update_project_progress_auto(project_id, 100)
+
+            return {
+                "success": True,
+                "project_id": project_id,
+                "message": "همه فایل‌ها قبلاً ساخته شده‌اند! نیازی به ساخت مجدد نیست.",
+                "existing_files": len(existing_file_names),
+                "skipped_files": workflow["skipped_files"]
+            }
+
+        # جایگزینی estimated_files با files_to_build
+        estimated_files = files_to_build
 
         if not estimated_files:
             # اگر فایلی مشخص نشده، بر اساس فازها تولید کن
@@ -1322,6 +1495,13 @@ class ProjectEngineIntegrator:
         workflow["progress"] = 100
         workflow["current_step"] = "done"
         workflow["completed_at"] = datetime.now().isoformat()
+
+        # 🧠 بروزرسانی خودکار پیشرفت پروژه
+        success_count = len([r for r in results if r.get("status") == "created"])
+        total_count = len(estimated_files) + len(workflow.get("skipped_files", []))
+        if total_count > 0:
+            auto_progress = int((success_count + len(workflow.get("skipped_files", []))) / total_count * 100)
+            await self._update_project_progress_auto(project_id, auto_progress)
 
         # ذخیره نتایج workflow در GitHub برای ماندگاری
         if self.github_storage:
