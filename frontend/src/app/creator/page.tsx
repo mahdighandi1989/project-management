@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import Layout from '@/components/Layout';
+// Layout is already provided by app/layout.tsx - DO NOT use here
 
 // Tabs
 const TABS = [
@@ -485,7 +485,7 @@ export default function CreatorPage() {
   };
 
   return (
-    <Layout>
+    <>
       <div className="p-4 md:p-6 min-h-screen">
         {/* Header */}
         <div className="mb-6">
@@ -984,6 +984,6 @@ export default function CreatorPage() {
           )}
         </div>
       </div>
-    </Layout>
+    </>
   );
 }

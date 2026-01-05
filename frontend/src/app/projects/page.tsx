@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import Layout from '@/components/Layout';
+// Layout is already provided by app/layout.tsx - DO NOT use here
 import {
   PlusIcon,
   TrashIcon,
@@ -617,7 +617,7 @@ export default function ProjectsPage() {
   };
 
   return (
-    <Layout>
+    <>
       <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
         {/* Header */}
         <div className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-6 py-4">
@@ -1959,6 +1959,6 @@ export default function ProjectsPage() {
           </div>
         )}
       </div>
-    </Layout>
+    </>
   );
 }

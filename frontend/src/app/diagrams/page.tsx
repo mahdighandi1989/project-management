@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import Layout from '@/components/Layout';
+// Layout is already provided by app/layout.tsx - DO NOT use here
 
 const DIAGRAM_TYPES = [
   { id: 'flowchart', name: 'نمودار جریان', icon: '📊', description: 'فرآیندها و تصمیم‌گیری' },
@@ -85,7 +85,7 @@ export default function DiagramsPage() {
   };
 
   return (
-    <Layout>
+    <>
       <div className="p-6">
         {/* هدر */}
         <div className="mb-6">
@@ -273,6 +273,6 @@ export default function DiagramsPage() {
           </div>
         </div>
       </div>
-    </Layout>
+    </>
   );
 }
