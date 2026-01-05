@@ -56,8 +56,24 @@ async def initialize_persistent_data():
         from .services.ai_manager import get_ai_manager
         from .services.creator_engine import get_creator_engine
 
+        logger.info("🔄 Initializing persistent data...")
+
         # اول GitHub storage را بررسی کن
         github_storage = get_github_storage()
+
+        # بررسی تنظیمات GitHub
+        if not github_storage.token:
+            logger.warning("⚠️ GITHUB_TOKEN not set - persistence disabled")
+            return
+        if not github_storage.owner:
+            logger.warning("⚠️ GITHUB_OWNER not set - persistence disabled")
+            return
+        if not github_storage.repo:
+            logger.warning("⚠️ GITHUB_REPO not set - persistence disabled")
+            return
+
+        logger.info(f"🔗 GitHub config: {github_storage.owner}/{github_storage.repo}")
+
         connection = await github_storage.check_connection()
 
         if not connection.get("success"):
