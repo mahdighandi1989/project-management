@@ -749,10 +749,50 @@ class ProjectEngineIntegrator:
         self.supervisor = supervisor
         self.active_workflows: Dict[str, Dict] = {}
         self.github_storage = None  # Will be set by orchestrator
+        # 🚀 کش محلی فایل‌ها برای سرعت بیشتر
+        self._files_cache: Dict[str, Dict] = {}  # project_id -> {files: [...], cached_at: timestamp}
 
     def set_github_storage(self, github_storage):
         """Set GitHub storage for saving generated files"""
         self.github_storage = github_storage
+
+    # =====================================
+    # 🚀 مدیریت کش فایل‌ها برای سرعت بیشتر
+    # =====================================
+
+    def _get_cached_files(self, project_id: str) -> Optional[List[Dict]]:
+        """دریافت فایل‌ها از کش - سریع!"""
+        cache = self._files_cache.get(project_id)
+        if cache:
+            # کش تا 5 دقیقه معتبر است
+            from datetime import datetime
+            cached_at = datetime.fromisoformat(cache["cached_at"])
+            if (datetime.now() - cached_at).seconds < 300:
+                return cache["files"]
+        return None
+
+    def _update_file_cache(self, project_id: str, files: List[Dict]):
+        """بروزرسانی کش فایل‌ها"""
+        from datetime import datetime
+        self._files_cache[project_id] = {
+            "files": files,
+            "cached_at": datetime.now().isoformat()
+        }
+
+    def _add_file_to_cache(self, project_id: str, file_info: Dict):
+        """اضافه کردن یک فایل به کش - بعد از ساخت"""
+        if project_id not in self._files_cache:
+            self._files_cache[project_id] = {
+                "files": [],
+                "cached_at": datetime.now().isoformat()
+            }
+        self._files_cache[project_id]["files"].append(file_info)
+        self._files_cache[project_id]["cached_at"] = datetime.now().isoformat()
+
+    def _invalidate_cache(self, project_id: str):
+        """پاک کردن کش"""
+        if project_id in self._files_cache:
+            del self._files_cache[project_id]
 
     async def load_workflow_from_github(self, project_id: str) -> Optional[Dict]:
         """
@@ -1147,9 +1187,9 @@ class ProjectEngineIntegrator:
 
         return {"success": False, "error": "خطا در اجرا"}
 
-    async def analyze_project_state(self, project_id: str) -> Dict:
+    async def analyze_project_state(self, project_id: str, force_refresh: bool = False) -> Dict:
         """
-        تحلیل وضعیت فعلی پروژه - خودآگاهی کامل
+        تحلیل وضعیت فعلی پروژه - خودآگاهی کامل با کش سریع
 
         Returns:
             - existing_files: فایل‌های موجود
@@ -1157,6 +1197,7 @@ class ProjectEngineIntegrator:
             - current_phase: فاز فعلی
             - overall_progress: پیشرفت کلی
             - recommendations: پیشنهادات
+            - next_steps: قدم‌های بعدی واضح
         """
         state = {
             "project_id": project_id,
@@ -1168,8 +1209,11 @@ class ProjectEngineIntegrator:
             "overall_progress": 0,
             "phase_progress": {},
             "recommendations": [],
+            "next_steps": [],  # 🆕 قدم‌های بعدی واضح
             "ready_for_next_phase": False,
-            "needs_building": False
+            "needs_building": False,
+            "project_completed": False,
+            "deployment_ready": False
         }
 
         try:
@@ -1186,8 +1230,14 @@ class ProjectEngineIntegrator:
             if phases and state["current_phase_index"] < len(phases):
                 state["current_phase"] = phases[state["current_phase_index"]]
 
-            # بررسی فایل‌های موجود در GitHub
-            if self.github_storage:
+            # 🚀 بررسی کش اول - سریع!
+            cached_files = None if force_refresh else self._get_cached_files(project_id)
+
+            if cached_files is not None:
+                state["existing_files"] = cached_files
+                logger.info(f"⚡ Using cached files for {project_id}: {len(cached_files)} files")
+            elif self.github_storage:
+                # اگر کش نبود، از GitHub بگیر
                 try:
                     project_files = await self.github_storage.get_project_files(project_id)
                     for folder_type, files in project_files.get("files", {}).items():
@@ -1199,26 +1249,32 @@ class ProjectEngineIntegrator:
                                     "folder": folder_type,
                                     "size": file_info.get("size", 0)
                                 })
+                    # ذخیره در کش
+                    self._update_file_cache(project_id, state["existing_files"])
+                    logger.info(f"📥 Loaded {len(state['existing_files'])} files from GitHub and cached")
                 except Exception as e:
                     logger.warning(f"Could not get project files from GitHub: {e}")
 
             # بررسی workflow برای فایل‌های مورد نیاز
-            workflow = self.active_workflows.get(project_id)
+            workflow = await self.get_workflow_with_fallback(project_id)
             if workflow:
                 analysis = workflow.get("analysis", {})
                 estimated_files = analysis.get("estimated_files", [])
 
-                existing_paths = [f["name"] for f in state["existing_files"]]
+                existing_names = [f["name"] for f in state["existing_files"]]
 
                 for file_path in estimated_files:
                     file_name = file_path.rsplit("/", 1)[-1] if "/" in file_path else file_path
-                    if file_name not in existing_paths and file_path not in existing_paths:
+                    if file_name not in existing_names and file_path not in existing_names:
                         state["missing_files"].append(file_path)
 
                 # محاسبه پیشرفت
                 if estimated_files:
                     built_count = len(estimated_files) - len(state["missing_files"])
                     state["overall_progress"] = int((built_count / len(estimated_files)) * 100)
+
+            # 🆕 محاسبه قدم‌های بعدی واضح
+            state["next_steps"] = self._calculate_next_steps(state, phases)
 
             # پیشنهادات
             if not state["existing_files"]:
@@ -1231,11 +1287,10 @@ class ProjectEngineIntegrator:
                 state["recommendations"].append("همه فایل‌ها ساخته شده‌اند!")
                 state["ready_for_next_phase"] = True
 
-            # بررسی آمادگی برای فاز بعدی
-            if state["current_phase"]:
-                phase_files_built = sum(1 for f in state["existing_files"]
-                                       if any(tech in f["name"].lower() for tech in ["backend", "api", "server"])
-                                       if state["current_phase"].get("name", "").lower() in ["backend", "توسعه backend"])
+                # آیا همه فازها تمام شده؟
+                if state["current_phase_index"] >= len(phases) - 1:
+                    state["project_completed"] = True
+                    state["deployment_ready"] = True
 
             state["success"] = True
             return state
@@ -1243,6 +1298,75 @@ class ProjectEngineIntegrator:
         except Exception as e:
             logger.error(f"Error analyzing project state: {e}")
             return {"success": False, "error": str(e)}
+
+    def _calculate_next_steps(self, state: Dict, phases: List) -> List[Dict]:
+        """محاسبه قدم‌های بعدی واضح برای کاربر"""
+        next_steps = []
+
+        # اگر فایل‌های ناقص داریم
+        if state.get("missing_files"):
+            next_steps.append({
+                "step": 1,
+                "action": "build",
+                "title": "ساخت فایل‌های باقیمانده",
+                "description": f"{len(state['missing_files'])} فایل باید ساخته شود",
+                "button": "ساخت خودکار",
+                "api": "/api/orchestrator/auto-build"
+            })
+        # اگر همه فایل‌ها ساخته شده
+        elif state.get("existing_files"):
+            current_idx = state.get("current_phase_index", 0)
+            total = len(phases)
+
+            if current_idx < total - 1:
+                # فاز بعدی
+                next_phase = phases[current_idx + 1] if current_idx + 1 < total else None
+                next_steps.append({
+                    "step": 1,
+                    "action": "next_phase",
+                    "title": f"رفتن به فاز بعدی: {next_phase.get('name', '')}" if next_phase else "فاز بعدی",
+                    "description": "فایل‌های این فاز تکمیل شده، به فاز بعد بروید",
+                    "button": "فاز بعدی",
+                    "api": f"/api/projects/{state['project_id']}/next-phase"
+                })
+            else:
+                # پروژه تمام شده - راهنمای اجرا
+                next_steps.append({
+                    "step": 1,
+                    "action": "review",
+                    "title": "بررسی فایل‌های تولید شده",
+                    "description": "فایل‌ها را بررسی و در صورت نیاز ویرایش کنید",
+                    "button": "مشاهده فایل‌ها",
+                    "api": None
+                })
+                next_steps.append({
+                    "step": 2,
+                    "action": "download",
+                    "title": "دانلود پروژه",
+                    "description": "فایل‌ها را از GitHub دانلود کنید",
+                    "button": "دانلود از GitHub",
+                    "api": None
+                })
+                next_steps.append({
+                    "step": 3,
+                    "action": "deploy",
+                    "title": "اجرای پروژه",
+                    "description": "پروژه را در محیط توسعه یا سرور اجرا کنید",
+                    "button": "راهنمای استقرار",
+                    "api": None
+                })
+        else:
+            # هیچ فایلی ساخته نشده
+            next_steps.append({
+                "step": 1,
+                "action": "build",
+                "title": "شروع ساخت خودکار",
+                "description": "با کلیک روی دکمه زیر، AI شروع به ساخت فایل‌ها می‌کند",
+                "button": "ساخت خودکار",
+                "api": "/api/orchestrator/auto-build"
+            })
+
+        return next_steps
 
     async def _update_project_progress_auto(self, project_id: str, progress: int):
         """
@@ -1440,6 +1564,16 @@ class ProjectEngineIntegrator:
                             )
                             github_saved = gh_result.get("success", False)
                             logger.info(f"GitHub save result for {file_path}: {github_saved}")
+
+                            # 🚀 اضافه کردن به کش محلی
+                            if github_saved:
+                                file_name = file_path.rsplit("/", 1)[-1] if "/" in file_path else file_path
+                                self._add_file_to_cache(project_id, {
+                                    "path": f"generated/{file_name}",
+                                    "name": file_name,
+                                    "folder": "generated",
+                                    "size": len(content_bytes)
+                                })
                         except Exception as e:
                             logger.warning(f"Could not save file to GitHub: {e}")
 

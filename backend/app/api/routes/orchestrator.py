@@ -1282,6 +1282,178 @@ async def get_github_status():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/deployment-guide/{project_id}")
+async def get_deployment_guide(project_id: str):
+    """
+    راهنمای استقرار و اجرای پروژه
+
+    Returns:
+        - project_type: نوع پروژه
+        - steps: مراحل اجرا
+        - commands: دستورات مورد نیاز
+        - requirements: پیش‌نیازها
+    """
+    try:
+        from ..dependencies import get_project_service
+        project_service = get_project_service()
+        project_data = project_service.get_project(project_id)
+
+        if not project_data.get("success"):
+            raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+        project = project_data["project"]
+        project_type = project.get("type", "custom")
+
+        # راهنمای بر اساس نوع پروژه
+        guides = {
+            "web_app": {
+                "title": "راهنمای اجرای اپلیکیشن وب",
+                "requirements": [
+                    "Node.js نسخه 18 یا بالاتر",
+                    "npm یا yarn",
+                    "Git"
+                ],
+                "steps": [
+                    {
+                        "step": 1,
+                        "title": "کلون کردن از GitHub",
+                        "command": f"git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git",
+                        "description": "فایل‌های پروژه را از GitHub دانلود کنید"
+                    },
+                    {
+                        "step": 2,
+                        "title": "نصب وابستگی‌ها",
+                        "command": "npm install",
+                        "description": "وابستگی‌های پروژه را نصب کنید"
+                    },
+                    {
+                        "step": 3,
+                        "title": "اجرای محلی",
+                        "command": "npm run dev",
+                        "description": "پروژه را در محیط توسعه اجرا کنید"
+                    },
+                    {
+                        "step": 4,
+                        "title": "ساخت نسخه Production",
+                        "command": "npm run build",
+                        "description": "نسخه نهایی را بسازید"
+                    }
+                ],
+                "deployment_options": [
+                    {"name": "Vercel", "url": "https://vercel.com", "description": "استقرار رایگان و سریع"},
+                    {"name": "Netlify", "url": "https://netlify.com", "description": "CI/CD خودکار"},
+                    {"name": "Railway", "url": "https://railway.app", "description": "استقرار ساده"}
+                ]
+            },
+            "api_service": {
+                "title": "راهنمای اجرای سرویس API",
+                "requirements": [
+                    "Python 3.9 یا بالاتر",
+                    "pip یا Poetry",
+                    "Git"
+                ],
+                "steps": [
+                    {
+                        "step": 1,
+                        "title": "کلون کردن از GitHub",
+                        "command": f"git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git",
+                        "description": "فایل‌های پروژه را از GitHub دانلود کنید"
+                    },
+                    {
+                        "step": 2,
+                        "title": "ایجاد محیط مجازی",
+                        "command": "python -m venv venv && source venv/bin/activate",
+                        "description": "محیط مجازی پایتون بسازید"
+                    },
+                    {
+                        "step": 3,
+                        "title": "نصب وابستگی‌ها",
+                        "command": "pip install -r requirements.txt",
+                        "description": "وابستگی‌های پروژه را نصب کنید"
+                    },
+                    {
+                        "step": 4,
+                        "title": "اجرای سرور",
+                        "command": "uvicorn main:app --reload",
+                        "description": "سرور API را اجرا کنید"
+                    }
+                ],
+                "deployment_options": [
+                    {"name": "Render", "url": "https://render.com", "description": "استقرار رایگان"},
+                    {"name": "Railway", "url": "https://railway.app", "description": "استقرار ساده"},
+                    {"name": "Fly.io", "url": "https://fly.io", "description": "استقرار سریع"}
+                ]
+            },
+            "mobile_app": {
+                "title": "راهنمای اجرای اپلیکیشن موبایل",
+                "requirements": [
+                    "Node.js نسخه 18 یا بالاتر",
+                    "React Native CLI یا Expo",
+                    "Android Studio یا Xcode"
+                ],
+                "steps": [
+                    {
+                        "step": 1,
+                        "title": "کلون و نصب",
+                        "command": "git clone ... && cd project && npm install",
+                        "description": "فایل‌ها را دانلود و وابستگی‌ها را نصب کنید"
+                    },
+                    {
+                        "step": 2,
+                        "title": "اجرا روی اندروید",
+                        "command": "npx react-native run-android",
+                        "description": "اپ را روی شبیه‌ساز اندروید اجرا کنید"
+                    },
+                    {
+                        "step": 3,
+                        "title": "اجرا روی iOS",
+                        "command": "npx react-native run-ios",
+                        "description": "اپ را روی شبیه‌ساز iOS اجرا کنید"
+                    }
+                ],
+                "deployment_options": [
+                    {"name": "Expo", "url": "https://expo.dev", "description": "استقرار سریع"},
+                    {"name": "App Store", "url": "https://developer.apple.com", "description": "انتشار در اپ استور"},
+                    {"name": "Google Play", "url": "https://play.google.com/console", "description": "انتشار در گوگل پلی"}
+                ]
+            }
+        }
+
+        # راهنمای پیش‌فرض
+        default_guide = {
+            "title": "راهنمای اجرای پروژه",
+            "requirements": ["بررسی فایل README.md پروژه"],
+            "steps": [
+                {
+                    "step": 1,
+                    "title": "دانلود فایل‌ها",
+                    "command": "git clone ...",
+                    "description": "فایل‌ها را از GitHub دانلود کنید"
+                },
+                {
+                    "step": 2,
+                    "title": "بررسی README",
+                    "command": "cat README.md",
+                    "description": "راهنمای پروژه را بخوانید"
+                }
+            ],
+            "deployment_options": []
+        }
+
+        guide = guides.get(project_type, default_guide)
+        guide["project_id"] = project_id
+        guide["project_name"] = project.get("name", "")
+        guide["project_type"] = project_type
+
+        return {"success": True, "guide": guide}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting deployment guide: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/reload-from-github")
 async def reload_from_github():
     """بارگذاری مجدد داده‌ها از GitHub"""

@@ -225,6 +225,16 @@ const api = {
     });
     return res.json();
   },
+
+  async getProjectState(projectId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/orchestrator/project-state/${projectId}`);
+    return res.json();
+  },
+
+  async getDeploymentGuide(projectId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/orchestrator/deployment-guide/${projectId}`);
+    return res.json();
+  },
 };
 
 // Status helpers
@@ -306,6 +316,12 @@ export default function ProjectsPage() {
   const [importResult, setImportResult] = useState<any>(null);
   const [syncLoading, setSyncLoading] = useState(false);
 
+  // 🆕 Project state & next steps
+  const [projectState, setProjectState] = useState<any>(null);
+  const [loadingState, setLoadingState] = useState(false);
+  const [showDeployGuide, setShowDeployGuide] = useState(false);
+  const [deployGuide, setDeployGuide] = useState<any>(null);
+
   // Load data
   useEffect(() => {
     loadProjects();
@@ -375,15 +391,67 @@ export default function ProjectsPage() {
   const selectProject = async (id: string) => {
     setActionLoading(true);
     setGeneratedFiles([]); // Reset files when switching projects
+    setProjectState(null); // Reset project state
     try {
       const project = await api.getProject(id);
       setSelectedProject(project);
       // Load generated files for this project
       loadGeneratedFiles(id);
+      // 🆕 Load project state with next steps
+      loadProjectState(id);
     } catch (error) {
       console.error('Error loading project:', error);
     } finally {
       setActionLoading(false);
+    }
+  };
+
+  // 🆕 Load project state with next steps
+  const loadProjectState = async (projectId: string) => {
+    setLoadingState(true);
+    try {
+      const state = await api.getProjectState(projectId);
+      setProjectState(state);
+    } catch (error) {
+      console.error('Error loading project state:', error);
+    } finally {
+      setLoadingState(false);
+    }
+  };
+
+  // 🆕 Load deployment guide
+  const loadDeployGuide = async (projectId: string) => {
+    try {
+      const guide = await api.getDeploymentGuide(projectId);
+      if (guide.success) {
+        setDeployGuide(guide.guide);
+        setShowDeployGuide(true);
+      }
+    } catch (error) {
+      console.error('Error loading deployment guide:', error);
+    }
+  };
+
+  // 🆕 Handle next step action
+  const handleNextStep = async (step: any) => {
+    if (!selectedProject) return;
+
+    switch (step.action) {
+      case 'build':
+        handleStartAutoBuild(selectedProject.project_id);
+        break;
+      case 'next_phase':
+        handleNextPhase(selectedProject.project_id);
+        break;
+      case 'deploy':
+        loadDeployGuide(selectedProject.project_id);
+        break;
+      case 'review':
+        // Scroll to files section
+        break;
+      case 'download':
+        // Open GitHub repo
+        break;
     }
   };
 
@@ -446,14 +514,15 @@ export default function ProjectsPage() {
     }
   };
 
-  const handleNextPhase = async () => {
-    if (!selectedProject) return;
+  const handleNextPhase = async (projectId?: string) => {
+    const id = projectId || selectedProject?.project_id;
+    if (!id) return;
 
     setActionLoading(true);
     try {
-      const result = await api.startNextPhase(selectedProject.project_id);
+      const result = await api.startNextPhase(id);
       if (result.success) {
-        await selectProject(selectedProject.project_id);
+        await selectProject(id);
         await loadProjects();
       }
     } catch (error) {
@@ -953,6 +1022,73 @@ export default function ProjectsPage() {
                   </div>
                 )}
 
+                {/* 🆕 Next Steps Section */}
+                {projectState?.next_steps && projectState.next_steps.length > 0 && (
+                  <div className="bg-gradient-to-r from-indigo-500 to-purple-600 rounded-xl shadow-lg p-6 mt-6 text-white">
+                    <h3 className="text-lg font-bold flex items-center gap-2 mb-4">
+                      <RocketLaunchIcon className="w-6 h-6" />
+                      قدم بعدی چیه؟
+                    </h3>
+                    <div className="space-y-3">
+                      {projectState.next_steps.map((step: any, idx: number) => (
+                        <div
+                          key={idx}
+                          className="bg-white/10 backdrop-blur rounded-lg p-4 flex items-center justify-between"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 bg-white/20 rounded-full flex items-center justify-center font-bold">
+                              {step.step}
+                            </div>
+                            <div>
+                              <div className="font-medium">{step.title}</div>
+                              <div className="text-sm text-white/80">{step.description}</div>
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => handleNextStep(step)}
+                            className="px-4 py-2 bg-white text-indigo-600 font-medium rounded-lg hover:bg-white/90 transition flex items-center gap-2"
+                          >
+                            {step.action === 'build' && <SparklesIcon className="w-4 h-4" />}
+                            {step.action === 'next_phase' && <ChevronRightIcon className="w-4 h-4" />}
+                            {step.action === 'deploy' && <RocketLaunchIcon className="w-4 h-4" />}
+                            {step.button}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Progress indicator */}
+                    {projectState.overall_progress !== undefined && (
+                      <div className="mt-4 pt-4 border-t border-white/20">
+                        <div className="flex justify-between text-sm mb-2">
+                          <span>پیشرفت کلی</span>
+                          <span>{projectState.overall_progress}%</span>
+                        </div>
+                        <div className="h-2 bg-white/20 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-white transition-all duration-500"
+                            style={{ width: `${projectState.overall_progress}%` }}
+                          />
+                        </div>
+                        {projectState.project_completed && (
+                          <div className="mt-2 text-center text-white/90 text-sm">
+                            پروژه کامل شده! آماده استقرار است.
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Loading state for project state */}
+                {loadingState && (
+                  <div className="bg-gray-100 dark:bg-gray-800 rounded-xl p-6 mt-6 animate-pulse">
+                    <div className="h-6 bg-gray-300 dark:bg-gray-600 rounded w-1/3 mb-4"></div>
+                    <div className="h-16 bg-gray-200 dark:bg-gray-700 rounded mb-3"></div>
+                    <div className="h-16 bg-gray-200 dark:bg-gray-700 rounded"></div>
+                  </div>
+                )}
+
                 {/* Generated Files Section */}
                 <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 mt-6">
                   <div className="flex justify-between items-center mb-4">
@@ -1427,9 +1563,10 @@ export default function ProjectsPage() {
                     <button
                       onClick={() => {
                         setShowBuildProgress(false);
-                        // Refresh files list after closing
+                        // Refresh files list and project state after closing
                         if (buildingProjectId) {
                           loadGeneratedFiles(buildingProjectId);
+                          loadProjectState(buildingProjectId); // 🆕 Refresh next steps
                         }
                         setBuildingProjectId(null);
                         setBuildProgress(null);
@@ -1596,9 +1733,10 @@ export default function ProjectsPage() {
                     <button
                       onClick={() => {
                         setShowBuildProgress(false);
-                        // Refresh files list after closing
+                        // Refresh files list and project state after closing
                         if (buildingProjectId) {
                           loadGeneratedFiles(buildingProjectId);
+                          loadProjectState(buildingProjectId); // 🆕 Refresh next steps
                         }
                         setBuildingProjectId(null);
                         setBuildProgress(null);
@@ -1954,6 +2092,122 @@ export default function ProjectsPage() {
                     </button>
                   </div>
                 )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 🆕 Deployment Guide Modal */}
+        {showDeployGuide && deployGuide && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+            <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-hidden">
+              {/* Header */}
+              <div className="p-6 bg-gradient-to-r from-green-500 to-emerald-600 text-white">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-2xl font-bold flex items-center gap-3">
+                    <RocketLaunchIcon className="w-8 h-8" />
+                    {deployGuide.title}
+                  </h2>
+                  <button
+                    onClick={() => setShowDeployGuide(false)}
+                    className="p-2 hover:bg-white/20 rounded-lg transition"
+                  >
+                    <XMarkIcon className="w-6 h-6" />
+                  </button>
+                </div>
+                <p className="mt-2 text-white/80">
+                  پروژه: {deployGuide.project_name}
+                </p>
+              </div>
+
+              {/* Content */}
+              <div className="p-6 overflow-y-auto max-h-[60vh]">
+                {/* Requirements */}
+                {deployGuide.requirements && deployGuide.requirements.length > 0 && (
+                  <div className="mb-6">
+                    <h3 className="font-bold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
+                      <CheckCircleIcon className="w-5 h-5 text-green-500" />
+                      پیش‌نیازها
+                    </h3>
+                    <ul className="space-y-2">
+                      {deployGuide.requirements.map((req: string, idx: number) => (
+                        <li key={idx} className="flex items-center gap-2 text-gray-600 dark:text-gray-300">
+                          <div className="w-2 h-2 bg-green-500 rounded-full" />
+                          {req}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Steps */}
+                {deployGuide.steps && deployGuide.steps.length > 0 && (
+                  <div className="mb-6">
+                    <h3 className="font-bold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
+                      <Cog6ToothIcon className="w-5 h-5 text-blue-500" />
+                      مراحل اجرا
+                    </h3>
+                    <div className="space-y-4">
+                      {deployGuide.steps.map((step: any) => (
+                        <div key={step.step} className="bg-gray-50 dark:bg-gray-700 rounded-xl p-4">
+                          <div className="flex items-center gap-3 mb-2">
+                            <div className="w-8 h-8 bg-blue-500 text-white rounded-full flex items-center justify-center font-bold">
+                              {step.step}
+                            </div>
+                            <div className="font-medium text-gray-900 dark:text-white">{step.title}</div>
+                          </div>
+                          <p className="text-sm text-gray-600 dark:text-gray-300 mb-2">{step.description}</p>
+                          {step.command && (
+                            <div className="bg-gray-900 text-green-400 rounded-lg p-3 font-mono text-sm flex items-center justify-between">
+                              <code dir="ltr">{step.command}</code>
+                              <button
+                                onClick={() => navigator.clipboard.writeText(step.command)}
+                                className="text-gray-400 hover:text-white p-1"
+                                title="کپی"
+                              >
+                                <ClipboardDocumentIcon className="w-5 h-5" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Deployment Options */}
+                {deployGuide.deployment_options && deployGuide.deployment_options.length > 0 && (
+                  <div>
+                    <h3 className="font-bold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
+                      <RocketLaunchIcon className="w-5 h-5 text-purple-500" />
+                      گزینه‌های استقرار
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      {deployGuide.deployment_options.map((option: any, idx: number) => (
+                        <a
+                          key={idx}
+                          href={option.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="bg-gradient-to-br from-purple-50 to-indigo-50 dark:from-purple-900/20 dark:to-indigo-900/20 rounded-xl p-4 hover:shadow-lg transition border border-purple-200 dark:border-purple-800"
+                        >
+                          <div className="font-medium text-purple-700 dark:text-purple-300">{option.name}</div>
+                          <div className="text-sm text-gray-600 dark:text-gray-400">{option.description}</div>
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="p-6 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-700/50">
+                <button
+                  onClick={() => setShowDeployGuide(false)}
+                  className="w-full px-4 py-3 bg-gradient-to-r from-green-500 to-emerald-600 text-white font-medium rounded-lg hover:from-green-600 hover:to-emerald-700 transition"
+                >
+                  متوجه شدم
+                </button>
               </div>
             </div>
           </div>
