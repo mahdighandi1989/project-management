@@ -213,6 +213,18 @@ const api = {
     });
     return res.json();
   },
+
+  async getGitHubStatus(): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/orchestrator/github-status`);
+    return res.json();
+  },
+
+  async reloadFromGitHub(): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/orchestrator/reload-from-github`, {
+      method: 'POST',
+    });
+    return res.json();
+  },
 };
 
 // Status helpers
@@ -563,6 +575,47 @@ export default function ProjectsPage() {
     }
   };
 
+  const handleCheckGitHubStatus = async () => {
+    try {
+      const status = await api.getGitHubStatus();
+      let message = `🔗 وضعیت GitHub:\n\n`;
+      message += `Token تنظیم شده: ${status.token_set ? '✅ بله' : '❌ خیر'}\n`;
+      message += `Owner: ${status.owner}\n`;
+      message += `Repo: ${status.repo}\n`;
+      message += `Branch: ${status.branch}\n`;
+      message += `متصل: ${status.connected ? '✅ بله' : '❌ خیر'}\n`;
+
+      if (status.connection_error) {
+        message += `\n⚠️ خطا: ${status.connection_error}\n`;
+      }
+
+      if (status.project_folders && status.project_folders.length > 0) {
+        message += `\n📁 پروژه‌ها در GitHub: ${status.project_folders.length}\n`;
+        message += status.project_folders.join(', ');
+      }
+
+      alert(message);
+    } catch (error) {
+      alert('خطا در بررسی وضعیت GitHub');
+      console.error(error);
+    }
+  };
+
+  const handleReloadFromGitHub = async () => {
+    try {
+      const result = await api.reloadFromGitHub();
+      if (result.success) {
+        alert(`✅ بارگذاری موفق!\n\nپروژه‌ها: ${result.projects_loaded}\nWorkflows: ${result.workflows_loaded}`);
+        loadProjects(); // Refresh the list
+      } else {
+        alert('خطا در بارگذاری از GitHub');
+      }
+    } catch (error) {
+      alert('خطا در ارتباط با سرور');
+      console.error(error);
+    }
+  };
+
   return (
     <Layout>
       <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
@@ -579,6 +632,22 @@ export default function ProjectsPage() {
               </p>
             </div>
             <div className="flex gap-3">
+              <button
+                onClick={handleCheckGitHubStatus}
+                className="flex items-center gap-2 px-3 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition text-sm"
+                title="بررسی وضعیت GitHub"
+              >
+                <Cog6ToothIcon className="w-4 h-4" />
+                وضعیت GitHub
+              </button>
+              <button
+                onClick={handleReloadFromGitHub}
+                className="flex items-center gap-2 px-3 py-2 bg-blue-100 dark:bg-blue-800 text-blue-700 dark:text-blue-300 rounded-lg hover:bg-blue-200 dark:hover:bg-blue-700 transition text-sm"
+                title="بارگذاری مجدد از GitHub"
+              >
+                <ArrowPathIcon className="w-4 h-4" />
+                بارگذاری از GitHub
+              </button>
               <button
                 onClick={() => setShowSmartSetup(true)}
                 className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-lg hover:from-purple-600 hover:to-pink-600 transition shadow-lg"
