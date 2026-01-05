@@ -1005,3 +1005,170 @@ async def get_orchestrator_stats():
     except Exception as e:
         logger.error(f"Error getting stats: {e}")
         return {"success": False, "error": str(e)}
+
+
+# =====================================
+# Smart Import Endpoints
+# =====================================
+
+def get_smart_import():
+    """دریافت سرویس Smart Import"""
+    from ...services.smart_import import get_smart_import_service
+    service = get_smart_import_service()
+
+    if not service.is_initialized():
+        from ...services.ai_manager import get_ai_manager
+        from ...services.project_service import get_project_service
+
+        ai_manager = get_ai_manager()
+        project_service = get_project_service()
+        github_storage = get_github_storage()
+
+        orchestrator = get_orchestrator()
+
+        service.initialize(
+            ai_manager=ai_manager,
+            project_service=project_service,
+            github_storage=github_storage,
+            orchestrator=orchestrator
+        )
+
+    return service
+
+
+@router.post("/smart-import/{project_id}")
+async def smart_import_file(
+    project_id: str,
+    file: UploadFile = File(...),
+    user_prompt: Optional[str] = Form(default=None),
+    auto_apply: bool = Form(default=True)
+):
+    """
+    وارد کردن هوشمند فایل به پروژه
+
+    - تحلیل توسط چند مدل نخبه
+    - تشخیص ارتباط با فازها
+    - اعتبارسنجی و اصلاح خودکار
+    - انتقال به پوشه مناسب
+    """
+    try:
+        service = get_smart_import()
+
+        content = await file.read()
+
+        result = await service.analyze_and_import_file(
+            project_id=project_id,
+            file_content=content,
+            file_name=file.filename,
+            user_prompt=user_prompt,
+            auto_apply=auto_apply
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error in smart import: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/smart-import-text/{project_id}")
+async def smart_import_text(
+    project_id: str,
+    content: str = Form(...),
+    file_name: str = Form(...),
+    user_prompt: Optional[str] = Form(default=None),
+    auto_apply: bool = Form(default=True)
+):
+    """
+    وارد کردن هوشمند کد/متن به پروژه
+    (برای paste کردن کد بدون آپلود فایل)
+    """
+    try:
+        service = get_smart_import()
+
+        result = await service.analyze_and_import_file(
+            project_id=project_id,
+            file_content=content.encode('utf-8'),
+            file_name=file_name,
+            user_prompt=user_prompt,
+            auto_apply=auto_apply
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error in smart import text: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sync-project/{project_id}")
+async def sync_project_files(project_id: str):
+    """
+    سینک کردن پروژه با GitHub
+    بررسی فایل‌های جدید و پردازش خودکار
+    """
+    try:
+        service = get_smart_import()
+        result = await service.sync_project(project_id)
+        return {"success": True, "project_id": project_id, **result}
+
+    except Exception as e:
+        logger.error(f"Error syncing project: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/process-github-file/{project_id}")
+async def process_github_file(
+    project_id: str,
+    file_path: str = Form(...),
+    user_prompt: Optional[str] = Form(default=None)
+):
+    """
+    پردازش یک فایل مشخص از GitHub
+    """
+    try:
+        service = get_smart_import()
+
+        result = await service.process_file_from_github(
+            project_id=project_id,
+            file_path=file_path,
+            user_prompt=user_prompt
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error processing GitHub file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/start-auto-sync")
+async def start_auto_sync(interval: int = Query(default=300, ge=60, le=3600)):
+    """
+    شروع sync خودکار با GitHub
+    (هر X ثانیه بررسی فایل‌های جدید)
+    """
+    try:
+        service = get_smart_import()
+        await service.start_github_sync(interval)
+        return {
+            "success": True,
+            "message": f"Auto sync started with interval {interval}s"
+        }
+
+    except Exception as e:
+        logger.error(f"Error starting auto sync: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/stop-auto-sync")
+async def stop_auto_sync():
+    """توقف sync خودکار"""
+    try:
+        service = get_smart_import()
+        await service.stop_github_sync()
+        return {"success": True, "message": "Auto sync stopped"}
+
+    except Exception as e:
+        logger.error(f"Error stopping auto sync: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
