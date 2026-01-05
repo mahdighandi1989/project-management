@@ -429,36 +429,54 @@ async def get_workflow_status(project_id: str):
 @router.get("/generated-files/{project_id}")
 async def get_generated_files(project_id: str):
     """
-    دریافت لیست فایل‌های تولید شده پروژه
+    دریافت لیست فایل‌های تولید شده پروژه - مستقیم از GitHub
     """
     try:
-        orchestrator = get_orchestrator()
-
-        # اول از memory، بعد از GitHub
-        workflow = await orchestrator.integrator.get_workflow_with_fallback(project_id)
-        if not workflow:
-            return {
-                "success": False,
-                "error": "Workflow یافت نشد"
-            }
-
-        results = workflow.get("results", [])
+        github_storage = get_github_storage()
         files = []
-        for r in results:
-            if r.get("status") == "created":
-                files.append({
-                    "file": r.get("file"),
-                    "score": r.get("score", 0),
-                    "github_saved": r.get("github_saved", False),
-                    "has_content": bool(r.get("content")),
-                    "content_preview": r.get("content_preview", "")
-                })
+
+        # 🆕 مستقیم از GitHub بخون
+        if github_storage and github_storage.token:
+            try:
+                project_files = await github_storage.get_project_files(project_id)
+                for folder_type, folder_files in project_files.get("files", {}).items():
+                    for f in folder_files:
+                        if f.get("name") and f["name"] != ".gitkeep":
+                            files.append({
+                                "file": f["name"],
+                                "folder": folder_type,
+                                "path": f"{folder_type}/{f['name']}",
+                                "size": f.get("size", 0),
+                                "url": f.get("url", ""),
+                                "download_url": f.get("download_url", ""),
+                                "github_saved": True,
+                                "has_content": True
+                            })
+            except Exception as e:
+                logger.warning(f"Could not load files from GitHub: {e}")
+
+        # اگر از GitHub خالی بود، از workflow بخون
+        if not files:
+            orchestrator = get_orchestrator()
+            workflow = await orchestrator.integrator.get_workflow_with_fallback(project_id)
+            if workflow:
+                results = workflow.get("results", [])
+                for r in results:
+                    if r.get("status") == "created":
+                        files.append({
+                            "file": r.get("file"),
+                            "score": r.get("score", 0),
+                            "github_saved": r.get("github_saved", False),
+                            "has_content": bool(r.get("content")),
+                            "content_preview": r.get("content_preview", "")
+                        })
 
         return {
             "success": True,
             "project_id": project_id,
             "files_count": len(files),
-            "files": files
+            "files": files,
+            "source": "github" if files and files[0].get("download_url") else "workflow"
         }
 
     except Exception as e:
@@ -518,6 +536,238 @@ async def get_file_content(project_id: str, file_path: str):
 
     except Exception as e:
         logger.error(f"Error getting file content: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/download-project/{project_id}")
+async def download_project(project_id: str):
+    """
+    دانلود کل پروژه به صورت ZIP
+
+    Returns:
+        - Zip file containing all generated files
+        - OR a JSON with download links to GitHub
+    """
+    import zipfile
+    import base64
+
+    try:
+        github_storage = get_github_storage()
+
+        if not github_storage or not github_storage.token:
+            raise HTTPException(status_code=400, detail="GitHub storage not configured")
+
+        # دریافت اطلاعات پروژه
+        from ..dependencies import get_project_service
+        project_service = get_project_service()
+        project_data = project_service.get_project(project_id)
+
+        if not project_data.get("success"):
+            raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+        project = project_data["project"]
+        project_name = project.get("name", project_id).replace(" ", "_")
+
+        # دریافت فایل‌ها از GitHub
+        project_files = await github_storage.get_project_files(project_id)
+        all_files = []
+
+        for folder_type, folder_files in project_files.get("files", {}).items():
+            for f in folder_files:
+                if f.get("name") and f["name"] != ".gitkeep":
+                    all_files.append({
+                        "folder": folder_type,
+                        "name": f["name"],
+                        "download_url": f.get("download_url", "")
+                    })
+
+        if not all_files:
+            return {
+                "success": False,
+                "error": "هیچ فایلی برای دانلود وجود ندارد"
+            }
+
+        # ایجاد ZIP در حافظه
+        zip_buffer = io.BytesIO()
+
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            # اضافه کردن README
+            readme_content = f"""# {project.get('name', 'پروژه')}
+
+{project.get('description', '')}
+
+## نوع پروژه
+{project.get('type', 'نامشخص')}
+
+## فازها
+"""
+            for phase in project.get('phases', []):
+                status_emoji = "✅" if phase.get('status') == 'completed' else "⏳"
+                readme_content += f"- {status_emoji} {phase.get('name', '')}\n"
+
+            readme_content += f"""
+## راهنمای اجرا
+
+### پیش‌نیازها
+- Node.js 18+ (برای پروژه‌های وب)
+- Python 3.9+ (برای پروژه‌های API)
+- Git
+
+### مراحل اجرا
+1. فایل‌ها را extract کنید
+2. دستورات زیر را اجرا کنید:
+
+```bash
+# برای پروژه Node.js:
+npm install
+npm run dev
+
+# برای پروژه Python:
+pip install -r requirements.txt
+python main.py
+```
+
+## تولید شده توسط
+AI Creator Engine - {project.get('created_at', '')}
+"""
+            zip_file.writestr("README.md", readme_content.encode('utf-8'))
+
+            # دانلود و اضافه کردن هر فایل
+            for file_info in all_files:
+                try:
+                    # خواندن محتوای فایل از GitHub
+                    file_path = f"projects/{project_id}/{file_info['folder']}/{file_info['name']}"
+                    result = await github_storage.get_file(file_path)
+
+                    if result.get("success") and result.get("content"):
+                        content = base64.b64decode(result["content"])
+                        # ذخیره در پوشه مناسب
+                        zip_path = f"{file_info['folder']}/{file_info['name']}"
+                        zip_file.writestr(zip_path, content)
+                except Exception as e:
+                    logger.warning(f"Could not add file {file_info['name']}: {e}")
+
+        zip_buffer.seek(0)
+
+        # برگرداندن ZIP
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f"attachment; filename={project_name}.zip"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error downloading project: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/project-summary/{project_id}")
+async def get_project_summary(project_id: str):
+    """
+    خلاصه کامل پروژه - وضعیت، فایل‌ها، و راهنمای اجرا
+    """
+    try:
+        from ..dependencies import get_project_service
+        project_service = get_project_service()
+        github_storage = get_github_storage()
+
+        project_data = project_service.get_project(project_id)
+        if not project_data.get("success"):
+            raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+        project = project_data["project"]
+        phases = project.get("phases", [])
+
+        # شمارش فازها
+        completed_phases = sum(1 for p in phases if p.get("status") == "completed")
+        total_phases = len(phases)
+
+        # دریافت فایل‌ها
+        files = []
+        github_repo_url = None
+
+        if github_storage and github_storage.token:
+            try:
+                project_files = await github_storage.get_project_files(project_id)
+                for folder_type, folder_files in project_files.get("files", {}).items():
+                    for f in folder_files:
+                        if f.get("name") and f["name"] != ".gitkeep":
+                            files.append({
+                                "name": f["name"],
+                                "folder": folder_type,
+                                "size": f.get("size", 0)
+                            })
+
+                # لینک به GitHub repo
+                github_repo_url = f"https://github.com/{github_storage.owner}/{github_storage.repo}/tree/{github_storage.branch}/{github_storage.base_path}/projects/{project_id}"
+            except Exception as e:
+                logger.warning(f"Could not load files: {e}")
+
+        # تشخیص وضعیت پروژه
+        if completed_phases == 0:
+            status = "not_started"
+            status_text = "هنوز شروع نشده"
+            next_action = "ابتدا روی 'ساخت خودکار' کلیک کنید"
+        elif completed_phases < total_phases:
+            status = "in_progress"
+            status_text = f"در حال پیشرفت ({completed_phases}/{total_phases} فاز)"
+            next_action = "روی 'ساخت خودکار' کلیک کنید تا فایل‌های فاز بعدی ساخته شود"
+        else:
+            status = "completed"
+            status_text = "تکمیل شده - آماده دانلود و اجرا"
+            next_action = "پروژه را دانلود کرده و در محیط توسعه اجرا کنید"
+
+        return {
+            "success": True,
+            "project": {
+                "id": project_id,
+                "name": project.get("name"),
+                "description": project.get("description"),
+                "type": project.get("type"),
+                "status": status,
+                "status_text": status_text,
+                "progress": int((completed_phases / total_phases) * 100) if total_phases > 0 else 0
+            },
+            "phases": {
+                "total": total_phases,
+                "completed": completed_phases,
+                "current": phases[completed_phases] if completed_phases < total_phases else None
+            },
+            "files": {
+                "count": len(files),
+                "list": files
+            },
+            "github": {
+                "url": github_repo_url,
+                "connected": bool(github_storage and github_storage.token)
+            },
+            "next_action": next_action,
+            "can_download": len(files) > 0,
+            "download_url": f"/api/orchestrator/download-project/{project_id}" if files else None,
+
+            # راهنمای اجرا
+            "run_instructions": {
+                "title": "چطور پروژه رو اجرا کنم؟",
+                "steps": [
+                    "۱. پروژه را دانلود کنید (دکمه دانلود)",
+                    "۲. فایل ZIP را extract کنید",
+                    "۳. ترمینال باز کنید و به پوشه پروژه بروید",
+                    "۴. وابستگی‌ها را نصب کنید (npm install یا pip install)",
+                    "۵. پروژه را اجرا کنید (npm run dev یا python main.py)",
+                    "۶. در مرورگر localhost:3000 یا localhost:8000 را باز کنید"
+                ],
+                "note": "این پروژه فقط کدهای تولید شده است. برای اجرا باید روی کامپیوتر خودتان یا یک سرور نصب شود."
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting project summary: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -20,6 +20,7 @@ import {
   XMarkIcon,
   RocketLaunchIcon,
   ArrowUpTrayIcon,
+  ArrowDownTrayIcon,
   CodeBracketIcon,
   DocumentArrowUpIcon,
   ArchiveBoxIcon,
@@ -235,6 +236,15 @@ const api = {
     const res = await fetch(`${getApiUrl()}/api/orchestrator/deployment-guide/${projectId}`);
     return res.json();
   },
+
+  async getProjectSummary(projectId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/orchestrator/project-summary/${projectId}`);
+    return res.json();
+  },
+
+  getDownloadUrl(projectId: string): string {
+    return `${getApiUrl()}/api/orchestrator/download-project/${projectId}`;
+  },
 };
 
 // Status helpers
@@ -448,11 +458,22 @@ export default function ProjectsPage() {
         break;
       case 'review':
         // Scroll to files section
+        const filesSection = document.getElementById('generated-files-section');
+        if (filesSection) filesSection.scrollIntoView({ behavior: 'smooth' });
         break;
       case 'download':
-        // Open GitHub repo
+        // Download project as ZIP
+        const downloadUrl = api.getDownloadUrl(selectedProject.project_id);
+        window.open(downloadUrl, '_blank');
         break;
     }
+  };
+
+  // 🆕 Download project
+  const handleDownloadProject = () => {
+    if (!selectedProject) return;
+    const downloadUrl = api.getDownloadUrl(selectedProject.project_id);
+    window.open(downloadUrl, '_blank');
   };
 
   const deleteProject = async (id: string) => {
@@ -1090,7 +1111,7 @@ export default function ProjectsPage() {
                 )}
 
                 {/* Generated Files Section */}
-                <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 mt-6">
+                <div id="generated-files-section" className="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 mt-6">
                   <div className="flex justify-between items-center mb-4">
                     <h3 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
                       <DocumentTextIcon className="w-5 h-5 text-purple-500" />
@@ -1101,14 +1122,25 @@ export default function ProjectsPage() {
                         </span>
                       )}
                     </h3>
-                    <button
-                      onClick={() => loadGeneratedFiles(selectedProject.project_id)}
-                      disabled={loadingFiles}
-                      className="flex items-center gap-2 px-3 py-1.5 bg-blue-100 dark:bg-blue-800 text-blue-700 dark:text-blue-300 rounded-lg hover:bg-blue-200 dark:hover:bg-blue-700 transition disabled:opacity-50 text-sm"
-                    >
-                      <ArrowPathIcon className={`w-4 h-4 ${loadingFiles ? 'animate-spin' : ''}`} />
-                      {loadingFiles ? 'در حال بارگذاری...' : 'بارگذاری از GitHub'}
-                    </button>
+                    <div className="flex gap-2">
+                      {generatedFiles.length > 0 && (
+                        <button
+                          onClick={handleDownloadProject}
+                          className="flex items-center gap-2 px-3 py-1.5 bg-green-500 text-white rounded-lg hover:bg-green-600 transition text-sm"
+                        >
+                          <ArrowDownTrayIcon className="w-4 h-4" />
+                          دانلود ZIP
+                        </button>
+                      )}
+                      <button
+                        onClick={() => loadGeneratedFiles(selectedProject.project_id)}
+                        disabled={loadingFiles}
+                        className="flex items-center gap-2 px-3 py-1.5 bg-blue-100 dark:bg-blue-800 text-blue-700 dark:text-blue-300 rounded-lg hover:bg-blue-200 dark:hover:bg-blue-700 transition disabled:opacity-50 text-sm"
+                      >
+                        <ArrowPathIcon className={`w-4 h-4 ${loadingFiles ? 'animate-spin' : ''}`} />
+                        {loadingFiles ? 'در حال بارگذاری...' : 'بارگذاری از GitHub'}
+                      </button>
+                    </div>
                   </div>
 
                   {loadingFiles ? (
