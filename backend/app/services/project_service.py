@@ -236,14 +236,24 @@ class ProjectService:
             return
 
         try:
-            # ذخیره metadata.json
+            # ذخیره metadata.json در هر دو محل (برای سازگاری)
             content = json.dumps(project.dict(), ensure_ascii=False, indent=2)
+
+            # ذخیره در source/metadata.json
             await self.github_storage.save_project_file(
                 project.project_id,
                 content.encode('utf-8'),
                 "metadata.json",
-                "source"  # ذخیره در پوشه source
+                "source"
             )
+
+            # ذخیره در root هم برای دسترسی راحت‌تر
+            await self.github_storage.upload_file(
+                content.encode('utf-8'),
+                f"projects/{project.project_id}/metadata.json",
+                f"Update project metadata for {project.project_id}"
+            )
+
             print(f"Project {project.project_id} saved to GitHub")
         except Exception as e:
             print(f"Error saving project {project.project_id} to GitHub: {e}")

@@ -35,6 +35,9 @@ async def lifespan(app: FastAPI):
     available = [k for k, v in providers.items() if v]
     logger.info(f"✅ Available providers: {', '.join(available) or 'None'}")
 
+    # بارگذاری داده‌ها از GitHub (مهم برای persistence)
+    await initialize_persistent_data()
+
     yield
 
     # Shutdown
@@ -42,6 +45,122 @@ async def lifespan(app: FastAPI):
     from .services.ai_manager import get_ai_manager
     ai_manager = get_ai_manager()
     await ai_manager.close()
+
+
+async def initialize_persistent_data():
+    """بارگذاری داده‌های ذخیره شده از GitHub در startup"""
+    try:
+        from .services.github_storage import get_github_storage
+        from .services.project_service import get_project_service
+        from .services.smart_orchestrator import get_smart_orchestrator
+        from .services.ai_manager import get_ai_manager
+        from .services.creator_engine import get_creator_engine
+
+        # اول GitHub storage را بررسی کن
+        github_storage = get_github_storage()
+        connection = await github_storage.check_connection()
+
+        if not connection.get("success"):
+            logger.warning(f"⚠️ GitHub not connected: {connection.get('error')}")
+            return
+
+        logger.info("📂 GitHub connected, loading persisted data...")
+
+        # بارگذاری پروژه‌ها از GitHub
+        project_service = get_project_service()
+        project_service.github_storage = github_storage
+        await load_projects_from_github(github_storage, project_service)
+
+        # Initialize orchestrator و بارگذاری workflow ها
+        orchestrator = get_smart_orchestrator()
+        if not orchestrator.is_initialized():
+            ai_manager = get_ai_manager()
+            creator_engine = get_creator_engine()
+            creator_engine.initialize(ai_manager)
+            orchestrator.initialize(ai_manager, project_service, creator_engine)
+            orchestrator.integrator.set_github_storage(github_storage)
+
+        # بارگذاری workflow های ذخیره شده
+        await load_workflows_from_github(github_storage, orchestrator)
+
+        logger.info("✅ Persistent data loaded successfully")
+
+    except Exception as e:
+        logger.error(f"❌ Error loading persistent data: {e}", exc_info=True)
+
+
+async def load_projects_from_github(github_storage, project_service):
+    """بارگذاری همه پروژه‌ها از GitHub"""
+    try:
+        import base64
+        import json
+        from .services.project_service import ProjectContext
+
+        # لیست پوشه projects
+        folders = await github_storage.list_folder("projects")
+        loaded_count = 0
+
+        for folder in folders:
+            if folder.type == "dir" and folder.name.startswith("proj_"):
+                project_id = folder.name
+
+                # اگه قبلا لود نشده
+                if project_id not in project_service.projects:
+                    # اول source/metadata.json رو چک کن
+                    result = await github_storage.get_file(f"projects/{project_id}/source/metadata.json")
+                    if not result.get("success"):
+                        # اگه نبود، metadata.json رو چک کن
+                        result = await github_storage.get_file(f"projects/{project_id}/metadata.json")
+
+                    if result.get("success") and result.get("content"):
+                        try:
+                            content = base64.b64decode(result["content"]).decode('utf-8')
+                            data = json.loads(content)
+                            project = ProjectContext(**data)
+                            project_service.projects[project_id] = project
+                            loaded_count += 1
+                            logger.info(f"  📁 Loaded project: {project.name}")
+                        except Exception as e:
+                            logger.warning(f"  ⚠️ Could not load project {project_id}: {e}")
+
+        logger.info(f"📊 Loaded {loaded_count} projects from GitHub")
+
+    except Exception as e:
+        logger.error(f"Error loading projects from GitHub: {e}")
+
+
+async def load_workflows_from_github(github_storage, orchestrator):
+    """بارگذاری workflow results از GitHub"""
+    try:
+        import base64
+        import json
+
+        # لیست پوشه projects
+        folders = await github_storage.list_folder("projects")
+        loaded_count = 0
+
+        for folder in folders:
+            if folder.type == "dir" and folder.name.startswith("proj_"):
+                project_id = folder.name
+
+                # اگه workflow قبلا در memory نیست
+                if project_id not in orchestrator.integrator.active_workflows:
+                    # workflow_results.json رو بخون
+                    result = await github_storage.get_file(f"projects/{project_id}/generated/workflow_results.json")
+                    if result.get("success") and result.get("content"):
+                        try:
+                            content = base64.b64decode(result["content"]).decode('utf-8')
+                            workflow_data = json.loads(content)
+                            orchestrator.integrator.active_workflows[project_id] = workflow_data
+                            loaded_count += 1
+                            logger.info(f"  🔄 Loaded workflow for: {project_id}")
+                        except Exception as e:
+                            logger.warning(f"  ⚠️ Could not load workflow {project_id}: {e}")
+
+        logger.info(f"🔄 Loaded {loaded_count} workflows from GitHub")
+
+    except Exception as e:
+        logger.error(f"Error loading workflows from GitHub: {e}")
 
 
 # ایجاد FastAPI app
