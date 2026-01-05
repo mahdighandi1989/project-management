@@ -19,6 +19,11 @@ import {
   EyeIcon,
   XMarkIcon,
   RocketLaunchIcon,
+  ArrowUpTrayIcon,
+  CodeBracketIcon,
+  DocumentArrowUpIcon,
+  ArchiveBoxIcon,
+  ClipboardDocumentIcon,
 } from '@heroicons/react/24/outline';
 
 // Types
@@ -170,6 +175,44 @@ const api = {
     const data = await res.json();
     return data || [];
   },
+
+  async smartImportFile(projectId: string, file: File, userPrompt?: string): Promise<any> {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (userPrompt) {
+      formData.append('user_prompt', userPrompt);
+    }
+    formData.append('auto_apply', 'true');
+
+    const res = await fetch(`${getApiUrl()}/api/orchestrator/smart-import/${projectId}`, {
+      method: 'POST',
+      body: formData,
+    });
+    return res.json();
+  },
+
+  async smartImportText(projectId: string, content: string, fileName: string, userPrompt?: string): Promise<any> {
+    const formData = new FormData();
+    formData.append('content', content);
+    formData.append('file_name', fileName);
+    if (userPrompt) {
+      formData.append('user_prompt', userPrompt);
+    }
+    formData.append('auto_apply', 'true');
+
+    const res = await fetch(`${getApiUrl()}/api/orchestrator/smart-import-text/${projectId}`, {
+      method: 'POST',
+      body: formData,
+    });
+    return res.json();
+  },
+
+  async syncProject(projectId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/orchestrator/sync-project/${projectId}`, {
+      method: 'POST',
+    });
+    return res.json();
+  },
 };
 
 // Status helpers
@@ -239,6 +282,17 @@ export default function ProjectsPage() {
   // Generated files state
   const [generatedFiles, setGeneratedFiles] = useState<any[]>([]);
   const [loadingFiles, setLoadingFiles] = useState(false);
+
+  // Smart import state
+  const [showSmartImport, setShowSmartImport] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importCode, setImportCode] = useState('');
+  const [importFileName, setImportFileName] = useState('');
+  const [importPrompt, setImportPrompt] = useState('');
+  const [importMode, setImportMode] = useState<'file' | 'code'>('code');
+  const [importLoading, setImportLoading] = useState(false);
+  const [importResult, setImportResult] = useState<any>(null);
+  const [syncLoading, setSyncLoading] = useState(false);
 
   // Load data
   useEffect(() => {
@@ -451,6 +505,64 @@ export default function ProjectsPage() {
     }
   };
 
+  const handleSmartImport = async () => {
+    if (!selectedProject) return;
+
+    setImportLoading(true);
+    setImportResult(null);
+
+    try {
+      let result;
+      if (importMode === 'file' && importFile) {
+        result = await api.smartImportFile(
+          selectedProject.project_id,
+          importFile,
+          importPrompt || undefined
+        );
+      } else if (importMode === 'code' && importCode.trim()) {
+        const fileName = importFileName.trim() || 'imported_code.txt';
+        result = await api.smartImportText(
+          selectedProject.project_id,
+          importCode,
+          fileName,
+          importPrompt || undefined
+        );
+      } else {
+        setImportLoading(false);
+        return;
+      }
+
+      setImportResult(result);
+
+      // اگه موفق بود، لیست فایل‌ها رو رفرش کن
+      if (result.success && result.applied?.success) {
+        loadGeneratedFiles(selectedProject.project_id);
+      }
+    } catch (error) {
+      console.error('Error in smart import:', error);
+      setImportResult({ success: false, error: 'خطا در ارتباط با سرور' });
+    } finally {
+      setImportLoading(false);
+    }
+  };
+
+  const handleSyncProject = async () => {
+    if (!selectedProject) return;
+
+    setSyncLoading(true);
+    try {
+      const result = await api.syncProject(selectedProject.project_id);
+      if (result.success) {
+        loadGeneratedFiles(selectedProject.project_id);
+        alert(`سینک انجام شد! ${result.new_files_found || 0} فایل جدید پیدا شد.`);
+      }
+    } catch (error) {
+      console.error('Error syncing project:', error);
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
   return (
     <Layout>
       <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
@@ -600,7 +712,14 @@ export default function ProjectsPage() {
                       </div>
                     </div>
 
-                    <div className="flex gap-2">
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={() => setShowSmartImport(true)}
+                        className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-lg hover:from-cyan-600 hover:to-blue-600 transition shadow-lg"
+                      >
+                        <ArrowUpTrayIcon className="w-5 h-5" />
+                        وارد کردن کد
+                      </button>
                       <button
                         onClick={() => handleStartAutoBuild()}
                         disabled={actionLoading}
@@ -608,6 +727,14 @@ export default function ProjectsPage() {
                       >
                         <RocketLaunchIcon className="w-5 h-5" />
                         ساخت خودکار
+                      </button>
+                      <button
+                        onClick={handleSyncProject}
+                        disabled={syncLoading}
+                        className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-teal-500 to-emerald-500 text-white rounded-lg hover:from-teal-600 hover:to-emerald-600 transition disabled:opacity-50"
+                      >
+                        <ArrowPathIcon className={`w-5 h-5 ${syncLoading ? 'animate-spin' : ''}`} />
+                        سینک GitHub
                       </button>
                       <button
                         onClick={() => setShowExecuteTask(true)}
@@ -1435,6 +1562,330 @@ export default function ProjectsPage() {
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+        )}
+
+        {/* Smart Import Modal */}
+        {showSmartImport && selectedProject && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-hidden">
+              <div className="p-6 border-b border-gray-200 dark:border-gray-700">
+                <div className="flex justify-between items-center">
+                  <h2 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                    <ArrowUpTrayIcon className="w-6 h-6 text-cyan-500" />
+                    وارد کردن هوشمند کد/فایل
+                  </h2>
+                  <button
+                    onClick={() => {
+                      setShowSmartImport(false);
+                      setImportResult(null);
+                      setImportCode('');
+                      setImportFileName('');
+                      setImportPrompt('');
+                      setImportFile(null);
+                    }}
+                    className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg"
+                  >
+                    <XMarkIcon className="w-5 h-5" />
+                  </button>
+                </div>
+                <p className="text-gray-600 dark:text-gray-400 text-sm mt-2">
+                  کد یا فایل را وارد کنید. مدل‌های نخبه AI تحلیل می‌کنند، ارتباط با پروژه را تشخیص می‌دهند و به پوشه مناسب منتقل می‌کنند.
+                </p>
+              </div>
+
+              <div className="p-6 overflow-y-auto max-h-[60vh]">
+                {!importResult ? (
+                  <div className="space-y-4">
+                    {/* Mode Selector */}
+                    <div className="flex gap-2 p-1 bg-gray-100 dark:bg-gray-700 rounded-lg">
+                      <button
+                        onClick={() => setImportMode('code')}
+                        className={`flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg transition ${
+                          importMode === 'code'
+                            ? 'bg-white dark:bg-gray-600 shadow text-cyan-600 dark:text-cyan-400'
+                            : 'text-gray-600 dark:text-gray-400'
+                        }`}
+                      >
+                        <CodeBracketIcon className="w-5 h-5" />
+                        پیست کردن کد
+                      </button>
+                      <button
+                        onClick={() => setImportMode('file')}
+                        className={`flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg transition ${
+                          importMode === 'file'
+                            ? 'bg-white dark:bg-gray-600 shadow text-cyan-600 dark:text-cyan-400'
+                            : 'text-gray-600 dark:text-gray-400'
+                        }`}
+                      >
+                        <DocumentArrowUpIcon className="w-5 h-5" />
+                        آپلود فایل
+                      </button>
+                    </div>
+
+                    {importMode === 'code' ? (
+                      <>
+                        {/* File Name */}
+                        <div>
+                          <label className="block text-sm font-medium mb-2">نام فایل (اختیاری)</label>
+                          <input
+                            type="text"
+                            value={importFileName}
+                            onChange={(e) => setImportFileName(e.target.value)}
+                            placeholder="مثال: auth_service.py یا Button.tsx"
+                            className="w-full p-3 border rounded-xl dark:bg-gray-700 dark:border-gray-600 font-mono text-sm"
+                          />
+                        </div>
+
+                        {/* Code Input */}
+                        <div>
+                          <label className="block text-sm font-medium mb-2">کد یا محتوا</label>
+                          <textarea
+                            value={importCode}
+                            onChange={(e) => setImportCode(e.target.value)}
+                            placeholder="کد خود را اینجا پیست کنید..."
+                            className="w-full h-64 p-4 border rounded-xl dark:bg-gray-700 dark:border-gray-600 font-mono text-sm resize-none"
+                            dir="ltr"
+                          />
+                        </div>
+                      </>
+                    ) : (
+                      <div>
+                        <label className="block text-sm font-medium mb-2">انتخاب فایل</label>
+                        <div className="border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-xl p-8 text-center">
+                          <input
+                            type="file"
+                            onChange={(e) => setImportFile(e.target.files?.[0] || null)}
+                            className="hidden"
+                            id="import-file"
+                          />
+                          <label htmlFor="import-file" className="cursor-pointer">
+                            <DocumentArrowUpIcon className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+                            <p className="text-gray-600 dark:text-gray-400 mb-2">
+                              فایل را بکشید و رها کنید یا کلیک کنید
+                            </p>
+                            {importFile && (
+                              <div className="mt-4 p-3 bg-cyan-50 dark:bg-cyan-900/20 rounded-lg inline-flex items-center gap-2">
+                                <DocumentTextIcon className="w-5 h-5 text-cyan-500" />
+                                <span className="font-mono text-sm">{importFile.name}</span>
+                                <span className="text-xs text-gray-500">
+                                  ({(importFile.size / 1024).toFixed(1)} KB)
+                                </span>
+                              </div>
+                            )}
+                          </label>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* User Prompt */}
+                    <div>
+                      <label className="block text-sm font-medium mb-2">
+                        توضیحات اضافی (اختیاری)
+                      </label>
+                      <textarea
+                        value={importPrompt}
+                        onChange={(e) => setImportPrompt(e.target.value)}
+                        placeholder="اگر نکته خاصی هست بنویسید... مثلا: این کد باید جایگزین فایل قبلی شود یا این کامپوننت برای صفحه لاگین است..."
+                        className="w-full h-24 p-4 border rounded-xl dark:bg-gray-700 dark:border-gray-600 resize-none"
+                      />
+                    </div>
+
+                    {/* Info Box */}
+                    <div className="bg-cyan-50 dark:bg-cyan-900/20 rounded-xl p-4">
+                      <h4 className="font-medium text-cyan-800 dark:text-cyan-300 mb-2 flex items-center gap-2">
+                        <SparklesIcon className="w-5 h-5" />
+                        مدل‌های نخبه AI این کارها را انجام می‌دهند:
+                      </h4>
+                      <ul className="text-sm text-cyan-700 dark:text-cyan-400 space-y-1">
+                        <li>✓ تشخیص نوع فایل و زبان برنامه‌نویسی</li>
+                        <li>✓ بررسی ارتباط با فازهای پروژه</li>
+                        <li>✓ اعتبارسنجی کیفیت کد</li>
+                        <li>✓ اصلاح خودکار در صورت نیاز</li>
+                        <li>✓ انتقال به پوشه مناسب</li>
+                        <li>✓ بروزرسانی پیشرفت پروژه</li>
+                      </ul>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {/* Result Display */}
+                    {importResult.success ? (
+                      <>
+                        <div className={`rounded-xl p-4 ${
+                          importResult.analysis?.decision === 'integrate' || importResult.analysis?.decision === 'modify_and_integrate'
+                            ? 'bg-green-50 dark:bg-green-900/20'
+                            : importResult.analysis?.decision === 'archive'
+                            ? 'bg-yellow-50 dark:bg-yellow-900/20'
+                            : 'bg-blue-50 dark:bg-blue-900/20'
+                        }`}>
+                          <div className="flex items-center gap-3 mb-3">
+                            {importResult.analysis?.decision === 'integrate' || importResult.analysis?.decision === 'modify_and_integrate' ? (
+                              <CheckCircleIcon className="w-8 h-8 text-green-500" />
+                            ) : importResult.analysis?.decision === 'archive' ? (
+                              <ArchiveBoxIcon className="w-8 h-8 text-yellow-500" />
+                            ) : (
+                              <ExclamationTriangleIcon className="w-8 h-8 text-blue-500" />
+                            )}
+                            <div>
+                              <h3 className="font-bold text-lg">
+                                {importResult.analysis?.decision === 'integrate' && 'ادغام در پروژه'}
+                                {importResult.analysis?.decision === 'modify_and_integrate' && 'اصلاح و ادغام'}
+                                {importResult.analysis?.decision === 'archive' && 'بایگانی شد'}
+                                {importResult.analysis?.decision === 'needs_review' && 'نیاز به بررسی'}
+                              </h3>
+                              <p className="text-sm text-gray-600 dark:text-gray-400">
+                                امتیاز ارتباط: {importResult.analysis?.relevance_score}%
+                              </p>
+                            </div>
+                          </div>
+
+                          {importResult.analysis?.analysis_summary && (
+                            <p className="text-sm mb-3">{importResult.analysis.analysis_summary}</p>
+                          )}
+
+                          {importResult.analysis?.target_phase && (
+                            <div className="flex items-center gap-2 text-sm">
+                              <span className="font-medium">فاز مرتبط:</span>
+                              <span className="px-2 py-0.5 bg-purple-100 dark:bg-purple-900 text-purple-700 dark:text-purple-300 rounded-full">
+                                {importResult.analysis.target_phase}
+                              </span>
+                            </div>
+                          )}
+
+                          {importResult.applied?.saved_path && (
+                            <div className="mt-3 p-2 bg-white dark:bg-gray-800 rounded-lg flex items-center gap-2">
+                              <FolderIcon className="w-5 h-5 text-green-500" />
+                              <span className="font-mono text-sm">{importResult.applied.saved_path}</span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Model Votes */}
+                        {importResult.analysis?.model_votes && Object.keys(importResult.analysis.model_votes).length > 0 && (
+                          <div className="bg-gray-50 dark:bg-gray-700 rounded-xl p-4">
+                            <h4 className="font-medium mb-3 flex items-center gap-2">
+                              <CpuChipIcon className="w-5 h-5" />
+                              نظر مدل‌ها
+                            </h4>
+                            <div className="space-y-2">
+                              {Object.entries(importResult.analysis.model_votes).map(([modelId, vote]: [string, any]) => (
+                                <div key={modelId} className="flex items-center justify-between p-2 bg-white dark:bg-gray-800 rounded-lg">
+                                  <span className="text-sm font-medium">{modelId.split('-')[0]}</span>
+                                  <span className={`text-xs px-2 py-0.5 rounded-full ${
+                                    vote.decision === 'integrate' || vote.decision === 'modify_and_integrate'
+                                      ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'
+                                      : vote.decision === 'archive'
+                                      ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300'
+                                      : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'
+                                  }`}>
+                                    {vote.decision} ({vote.relevance_score}%)
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                            {importResult.analysis.consensus && (
+                              <div className="mt-2 text-xs text-green-600 dark:text-green-400 flex items-center gap-1">
+                                <CheckCircleIcon className="w-4 h-4" />
+                                مدل‌ها به اجماع رسیدند
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Modifications */}
+                        {importResult.analysis?.modifications_needed?.length > 0 && (
+                          <div className="bg-blue-50 dark:bg-blue-900/20 rounded-xl p-4">
+                            <h4 className="font-medium mb-2 text-blue-800 dark:text-blue-300">اصلاحات انجام شده:</h4>
+                            <ul className="text-sm text-blue-700 dark:text-blue-400 space-y-1">
+                              {importResult.analysis.modifications_needed.map((mod: string, i: number) => (
+                                <li key={i}>• {mod}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {/* Warnings */}
+                        {importResult.analysis?.warnings?.length > 0 && (
+                          <div className="bg-yellow-50 dark:bg-yellow-900/20 rounded-xl p-4">
+                            <h4 className="font-medium mb-2 text-yellow-800 dark:text-yellow-300">هشدارها:</h4>
+                            <ul className="text-sm text-yellow-700 dark:text-yellow-400 space-y-1">
+                              {importResult.analysis.warnings.map((warn: string, i: number) => (
+                                <li key={i}>⚠️ {warn}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="bg-red-50 dark:bg-red-900/20 rounded-xl p-4">
+                        <div className="flex items-center gap-2 text-red-700 dark:text-red-300">
+                          <ExclamationTriangleIcon className="w-5 h-5" />
+                          <span>{importResult.error || 'خطا در تحلیل فایل'}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="p-6 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-700/50">
+                {!importResult ? (
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => setShowSmartImport(false)}
+                      className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
+                    >
+                      انصراف
+                    </button>
+                    <button
+                      onClick={handleSmartImport}
+                      disabled={importLoading || (importMode === 'code' ? !importCode.trim() : !importFile)}
+                      className="flex-1 px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-lg hover:from-cyan-600 hover:to-blue-600 disabled:opacity-50 flex items-center justify-center gap-2"
+                    >
+                      {importLoading ? (
+                        <>
+                          <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                          در حال تحلیل...
+                        </>
+                      ) : (
+                        <>
+                          <SparklesIcon className="w-5 h-5" />
+                          تحلیل و وارد کردن
+                        </>
+                      )}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => {
+                        setImportResult(null);
+                        setImportCode('');
+                        setImportFileName('');
+                        setImportFile(null);
+                      }}
+                      className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
+                    >
+                      وارد کردن فایل دیگر
+                    </button>
+                    <button
+                      onClick={() => {
+                        setShowSmartImport(false);
+                        setImportResult(null);
+                        setImportCode('');
+                        setImportFileName('');
+                        setImportPrompt('');
+                        setImportFile(null);
+                      }}
+                      className="flex-1 px-4 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600"
+                    >
+                      بستن
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
