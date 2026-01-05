@@ -236,6 +236,10 @@ export default function ProjectsPage() {
     score: number;
   } | null>(null);
 
+  // Generated files state
+  const [generatedFiles, setGeneratedFiles] = useState<any[]>([]);
+  const [loadingFiles, setLoadingFiles] = useState(false);
+
   // Load data
   useEffect(() => {
     loadProjects();
@@ -304,9 +308,12 @@ export default function ProjectsPage() {
 
   const selectProject = async (id: string) => {
     setActionLoading(true);
+    setGeneratedFiles([]); // Reset files when switching projects
     try {
       const project = await api.getProject(id);
       setSelectedProject(project);
+      // Load generated files for this project
+      loadGeneratedFiles(id);
     } catch (error) {
       console.error('Error loading project:', error);
     } finally {
@@ -387,6 +394,23 @@ export default function ProjectsPage() {
       console.error('Error starting next phase:', error);
     } finally {
       setActionLoading(false);
+    }
+  };
+
+  const loadGeneratedFiles = async (projectId: string) => {
+    setLoadingFiles(true);
+    try {
+      const result = await api.getGeneratedFiles(projectId);
+      if (result.success && result.files) {
+        setGeneratedFiles(result.files);
+      } else {
+        setGeneratedFiles([]);
+      }
+    } catch (error) {
+      console.error('Error loading generated files:', error);
+      setGeneratedFiles([]);
+    } finally {
+      setLoadingFiles(false);
     }
   };
 
@@ -732,6 +756,89 @@ export default function ProjectsPage() {
                     </div>
                   </div>
                 )}
+
+                {/* Generated Files Section */}
+                <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 mt-6">
+                  <div className="flex justify-between items-center mb-4">
+                    <h3 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                      <DocumentTextIcon className="w-5 h-5 text-purple-500" />
+                      فایل‌های تولید شده
+                      {generatedFiles.length > 0 && (
+                        <span className="text-sm font-normal bg-purple-100 dark:bg-purple-800 text-purple-700 dark:text-purple-300 px-2 py-0.5 rounded-full">
+                          {generatedFiles.length} فایل
+                        </span>
+                      )}
+                    </h3>
+                    <button
+                      onClick={() => loadGeneratedFiles(selectedProject.project_id)}
+                      disabled={loadingFiles}
+                      className="flex items-center gap-2 px-3 py-1.5 bg-blue-100 dark:bg-blue-800 text-blue-700 dark:text-blue-300 rounded-lg hover:bg-blue-200 dark:hover:bg-blue-700 transition disabled:opacity-50 text-sm"
+                    >
+                      <ArrowPathIcon className={`w-4 h-4 ${loadingFiles ? 'animate-spin' : ''}`} />
+                      {loadingFiles ? 'در حال بارگذاری...' : 'بارگذاری از GitHub'}
+                    </button>
+                  </div>
+
+                  {loadingFiles ? (
+                    <div className="flex justify-center py-8">
+                      <div className="animate-spin w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full" />
+                    </div>
+                  ) : generatedFiles.length > 0 ? (
+                    <div className="space-y-2 max-h-96 overflow-y-auto">
+                      {generatedFiles.map((file, idx) => (
+                        <div
+                          key={idx}
+                          className="p-3 bg-gray-50 dark:bg-gray-700 rounded-lg flex items-center justify-between hover:bg-gray-100 dark:hover:bg-gray-600 transition"
+                        >
+                          <div className="flex items-center gap-3">
+                            <DocumentTextIcon className="w-5 h-5 text-green-500" />
+                            <div>
+                              <span className="font-mono text-sm text-gray-900 dark:text-white">
+                                {file.path || file.file}
+                              </span>
+                              {file.winner_model && (
+                                <span className="ml-2 text-xs px-2 py-0.5 bg-purple-100 dark:bg-purple-900 text-purple-700 dark:text-purple-300 rounded-full">
+                                  🏆 {file.winner_model.split('-')[0]}
+                                </span>
+                              )}
+                              {file.score && (
+                                <span className="ml-2 text-xs px-2 py-0.5 bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 rounded-full">
+                                  امتیاز: {file.score}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <button
+                            onClick={async () => {
+                              const fileData = await api.getFileContent(selectedProject.project_id, file.path || file.file);
+                              if (fileData.success) {
+                                setViewingFile({
+                                  name: file.path || file.file,
+                                  content: fileData.content,
+                                  score: file.score || fileData.score || 0
+                                });
+                              }
+                            }}
+                            className="flex items-center gap-1 px-3 py-1.5 bg-purple-500 text-white rounded-lg hover:bg-purple-600 transition text-sm"
+                          >
+                            <EyeIcon className="w-4 h-4" />
+                            مشاهده کد
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-center py-8">
+                      <FolderIcon className="w-16 h-16 text-gray-300 mx-auto mb-4" />
+                      <p className="text-gray-500 mb-2">فایلی تولید نشده است</p>
+                      <p className="text-sm text-gray-400">
+                        از دکمه "ساخت خودکار" برای تولید فایل‌های پروژه استفاده کنید
+                        <br />
+                        یا دکمه "بارگذاری از GitHub" را بزنید
+                      </p>
+                    </div>
+                  )}
+                </div>
               </div>
             ) : (
               <div className="flex items-center justify-center h-full">
@@ -1124,6 +1231,10 @@ export default function ProjectsPage() {
                     <button
                       onClick={() => {
                         setShowBuildProgress(false);
+                        // Refresh files list after closing
+                        if (buildingProjectId) {
+                          loadGeneratedFiles(buildingProjectId);
+                        }
                         setBuildingProjectId(null);
                         setBuildProgress(null);
                       }}
@@ -1289,6 +1400,10 @@ export default function ProjectsPage() {
                     <button
                       onClick={() => {
                         setShowBuildProgress(false);
+                        // Refresh files list after closing
+                        if (buildingProjectId) {
+                          loadGeneratedFiles(buildingProjectId);
+                        }
                         setBuildingProjectId(null);
                         setBuildProgress(null);
                       }}
