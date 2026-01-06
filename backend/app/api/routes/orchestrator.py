@@ -273,6 +273,7 @@ class AutoBuildRequest(BaseModel):
     """درخواست ساخت خودکار"""
     project_id: str
     github_repo: Optional[str] = None
+    check_runtime: bool = True  # بررسی قابلیت اجرا
 
 
 @router.post("/auto-build")
@@ -284,14 +285,125 @@ async def auto_build_project(request: AutoBuildRequest):
     - تولید کد و فایل‌ها
     - ذخیره در Creator Engine
     - نظارت و ارزیابی مستمر
+    - 🆕 بررسی قابلیت اجرا و ایجاد نیازمندی‌ها
     """
     try:
         orchestrator = get_orchestrator()
         result = await orchestrator.auto_build(request.project_id, request.github_repo)
+
+        # 🆕 بررسی قابلیت اجرا برای پروژه‌های تکمیل شده
+        if request.check_runtime and result.get("success"):
+            runtime_check = await check_and_prepare_runtime(request.project_id)
+            result["runtime"] = runtime_check
+
         return result
     except Exception as e:
         logger.error(f"Error in auto build: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def check_and_prepare_runtime(project_id: str) -> Dict[str, Any]:
+    """بررسی و آماده‌سازی محیط اجرا برای پروژه"""
+    try:
+        from ...services.capability_detector import get_capability_detector
+        from ...services.runtime_executor import get_runtime_executor
+        from ...services.project_service import get_project_service
+
+        # دریافت اطلاعات پروژه
+        project_service = get_project_service()
+        project_data = project_service.get_project(project_id)
+
+        if not project_data.get("success"):
+            return {"checked": False, "error": "پروژه یافت نشد"}
+
+        project = project_data["project"]
+        project_type = project.get("type", "custom")
+
+        # دریافت فایل‌های پروژه
+        github_storage = get_github_storage()
+        files = []
+
+        if github_storage and github_storage.token:
+            try:
+                import base64
+                project_files = await github_storage.get_project_files(project_id)
+                for folder_type, folder_files in project_files.get("files", {}).items():
+                    for f in folder_files:
+                        if f.get("name") and f["name"] != ".gitkeep":
+                            # خواندن محتوا
+                            file_path = f"projects/{project_id}/{folder_type}/{f['name']}"
+                            result = await github_storage.get_file(file_path)
+                            content = ""
+                            if result.get("success") and result.get("content"):
+                                content = base64.b64decode(result["content"]).decode('utf-8', errors='replace')
+                            files.append({
+                                "name": f["name"],
+                                "folder": folder_type,
+                                "content": content
+                            })
+            except Exception as e:
+                logger.warning(f"Could not load files for runtime check: {e}")
+
+        if not files:
+            return {"checked": False, "error": "فایلی برای بررسی وجود ندارد"}
+
+        # تحلیل نیازمندی‌ها
+        detector = get_capability_detector()
+        if not detector._initialized:
+            detector.initialize(github_storage)
+
+        requirements = await detector.analyze_project_requirements(
+            project_id, project_type, files
+        )
+
+        # نتیجه بررسی
+        result = {
+            "checked": True,
+            "can_run": requirements.can_run,
+            "can_run_with_docker": requirements.can_run_with_docker,
+            "missing_capabilities": [
+                {"name": cap.name, "type": cap.type.value, "docker_image": cap.docker_image}
+                for cap in requirements.missing_capabilities
+            ],
+            "notes": requirements.notes
+        }
+
+        # اگر نیاز به ارتقا داره و Docker موجوده، image ها رو pull کن
+        executor = get_runtime_executor()
+        if not executor._initialized:
+            executor.initialize(github_storage)
+
+        if requirements.missing_capabilities and executor.is_docker_available():
+            pulled_images = []
+            for cap in requirements.missing_capabilities:
+                if cap.docker_image:
+                    try:
+                        import asyncio
+                        process = await asyncio.create_subprocess_exec(
+                            "docker", "pull", cap.docker_image,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                        await asyncio.wait_for(process.communicate(), timeout=300)
+                        if process.returncode == 0:
+                            pulled_images.append(cap.docker_image)
+                            logger.info(f"Pulled Docker image: {cap.docker_image}")
+                    except Exception as e:
+                        logger.warning(f"Could not pull {cap.docker_image}: {e}")
+
+            result["pulled_images"] = pulled_images
+            result["can_run_with_docker"] = len(pulled_images) == len(requirements.missing_capabilities)
+
+        # ذخیره نیازمندی‌ها برای ارتقای بعدی
+        if requirements.missing_capabilities and not result.get("can_run_with_docker"):
+            await detector.save_upgrade_requirements(project_id, requirements)
+            result["upgrade_requested"] = True
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error checking runtime: {e}")
+        return {"checked": False, "error": str(e)}
 
 
 class StartWorkflowRequest(BaseModel):
@@ -1734,3 +1846,235 @@ async def reload_from_github():
     except Exception as e:
         logger.error(f"Error reloading from GitHub: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/check-runtime/{project_id}")
+async def check_project_runtime(project_id: str):
+    """
+    بررسی قابلیت اجرای یک پروژه و آماده‌سازی محیط
+
+    - بررسی نیازمندی‌ها
+    - Pull کردن Docker images مورد نیاز
+    - ذخیره درخواست ارتقا در صورت نیاز
+    """
+    try:
+        result = await check_and_prepare_runtime(project_id)
+        return {"success": True, **result}
+    except Exception as e:
+        logger.error(f"Error checking runtime: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/update-all-projects")
+async def update_all_projects_runtime():
+    """
+    بررسی و به‌روزرسانی همه پروژه‌های موجود
+
+    برای هر پروژه:
+    - بررسی قابلیت اجرا
+    - Pull کردن Docker images
+    - آماده‌سازی محیط
+    """
+    try:
+        from ...services.project_service import get_project_service
+
+        project_service = get_project_service()
+        results = {
+            "total": 0,
+            "updated": 0,
+            "can_run": 0,
+            "need_upgrade": 0,
+            "projects": []
+        }
+
+        for project_id, project in project_service.projects.items():
+            results["total"] += 1
+
+            # بررسی قابلیت اجرا
+            runtime_result = await check_and_prepare_runtime(project_id)
+
+            project_result = {
+                "project_id": project_id,
+                "name": project.name if hasattr(project, 'name') else project.get('name', ''),
+                "runtime": runtime_result
+            }
+
+            if runtime_result.get("checked"):
+                results["updated"] += 1
+                if runtime_result.get("can_run") or runtime_result.get("can_run_with_docker"):
+                    results["can_run"] += 1
+                else:
+                    results["need_upgrade"] += 1
+
+            results["projects"].append(project_result)
+
+        return {
+            "success": True,
+            **results,
+            "message": f"بررسی {results['total']} پروژه انجام شد. {results['can_run']} پروژه آماده اجرا."
+        }
+
+    except Exception as e:
+        logger.error(f"Error updating all projects: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/prepare-runtime/{project_id}")
+async def prepare_project_for_runtime(project_id: str, force_pull: bool = False):
+    """
+    آماده‌سازی کامل یک پروژه برای اجرا
+
+    - Pull کردن همه Docker images
+    - ایجاد Dockerfile اگر وجود ندارد
+    - بررسی و رفع مشکلات
+    """
+    try:
+        from ...services.runtime_executor import get_runtime_executor, RUNTIME_CONFIGS
+        from ...services.capability_detector import get_capability_detector
+        from ...services.project_service import get_project_service
+        import base64
+
+        github_storage = get_github_storage()
+        project_service = get_project_service()
+        executor = get_runtime_executor()
+        detector = get_capability_detector()
+
+        if not executor._initialized:
+            executor.initialize(github_storage)
+        if not detector._initialized:
+            detector.initialize(github_storage)
+
+        # دریافت پروژه
+        project_data = project_service.get_project(project_id)
+        if not project_data.get("success"):
+            raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+        project = project_data["project"]
+        project_type = project.get("type", "custom")
+
+        # دریافت فایل‌ها
+        files = []
+        if github_storage and github_storage.token:
+            project_files = await github_storage.get_project_files(project_id)
+            for folder_type, folder_files in project_files.get("files", {}).items():
+                for f in folder_files:
+                    if f.get("name") and f["name"] != ".gitkeep":
+                        file_path = f"projects/{project_id}/{folder_type}/{f['name']}"
+                        result = await github_storage.get_file(file_path)
+                        content = ""
+                        if result.get("success") and result.get("content"):
+                            content = base64.b64decode(result["content"]).decode('utf-8', errors='replace')
+                        files.append({
+                            "name": f["name"],
+                            "folder": folder_type,
+                            "content": content
+                        })
+
+        if not files:
+            raise HTTPException(status_code=400, detail="فایلی برای آماده‌سازی وجود ندارد")
+
+        # تشخیص نوع runtime
+        runtime_type = await executor.detect_runtime_type(project_id, files)
+
+        # Pull کردن image اصلی
+        config = RUNTIME_CONFIGS.get(runtime_type, RUNTIME_CONFIGS.get(executor.RuntimeType.STATIC))
+        pulled_images = []
+
+        if config.get("image") and executor.is_docker_available():
+            import asyncio
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    "docker", "pull", config["image"],
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                await asyncio.wait_for(process.communicate(), timeout=300)
+                if process.returncode == 0:
+                    pulled_images.append(config["image"])
+            except Exception as e:
+                logger.warning(f"Could not pull {config['image']}: {e}")
+
+        # بررسی Dockerfile
+        has_dockerfile = any(f["name"].lower() == "dockerfile" for f in files)
+
+        # اگر Dockerfile نداره، یکی بساز و ذخیره کن
+        dockerfile_created = False
+        if not has_dockerfile and github_storage:
+            dockerfile_content = await generate_dockerfile_content(runtime_type, config)
+            if dockerfile_content:
+                try:
+                    await github_storage.save_project_file(
+                        project_id,
+                        dockerfile_content.encode('utf-8'),
+                        "Dockerfile",
+                        "generated"
+                    )
+                    dockerfile_created = True
+                    logger.info(f"Created Dockerfile for {project_id}")
+                except Exception as e:
+                    logger.warning(f"Could not save Dockerfile: {e}")
+
+        return {
+            "success": True,
+            "project_id": project_id,
+            "runtime_type": runtime_type.value,
+            "pulled_images": pulled_images,
+            "dockerfile_existed": has_dockerfile,
+            "dockerfile_created": dockerfile_created,
+            "ready_to_run": len(pulled_images) > 0 or has_dockerfile,
+            "config": {
+                "port": config.get("port"),
+                "memory": config.get("memory"),
+                "build_cmd": config.get("build_cmd"),
+                "start_cmd": config.get("start_cmd")
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error preparing runtime: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def generate_dockerfile_content(runtime_type, config: Dict) -> Optional[str]:
+    """تولید محتوای Dockerfile بر اساس نوع runtime"""
+    from ...services.runtime_executor import RuntimeType
+    import json
+
+    if runtime_type in [RuntimeType.NODEJS, RuntimeType.REACT, RuntimeType.VUE]:
+        return f"""FROM {config['image']}
+WORKDIR /app
+COPY package*.json ./
+RUN {config['build_cmd']}
+COPY . .
+EXPOSE {config['port']}
+CMD {json.dumps(config['start_cmd'].split())}
+"""
+    elif runtime_type == RuntimeType.NEXTJS:
+        return f"""FROM {config['image']}
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+RUN npm run build
+EXPOSE {config['port']}
+CMD ["npm", "run", "start"]
+"""
+    elif runtime_type in [RuntimeType.PYTHON, RuntimeType.FASTAPI]:
+        start_cmd_parts = config['start_cmd'].split()
+        return f"""FROM {config['image']}
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+EXPOSE {config['port']}
+CMD {json.dumps(start_cmd_parts)}
+"""
+    elif runtime_type == RuntimeType.STATIC:
+        return """FROM nginx:alpine
+COPY . /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+"""
+    return None
