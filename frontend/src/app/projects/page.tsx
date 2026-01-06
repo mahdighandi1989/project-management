@@ -566,6 +566,331 @@ export default function ProjectsPage() {
     window.open(downloadUrl, '_blank');
   };
 
+  // 🆕 Open in StackBlitz (browser-based execution)
+  const handleOpenInStackBlitz = async () => {
+    if (!selectedProject) return;
+
+    setRuntimeLoading(true);
+    setShowRuntimePanel(true);
+    setRuntimeLogs(['🚀 آماده‌سازی برای StackBlitz...']);
+
+    try {
+      // Get project files
+      const filesData = await api.getProjectFiles(selectedProject.project_id);
+
+      if (!filesData.success || !filesData.files) {
+        setRuntimeLogs(prev => [...prev, '❌ فایلی یافت نشد']);
+        setRuntimeLoading(false);
+        return;
+      }
+
+      // Convert files to StackBlitz format
+      const stackblitzFiles: Record<string, string> = {};
+      let hasPackageJson = false;
+      let hasIndexHtml = false;
+      let projectTemplate = 'node';
+
+      for (const [folder, files] of Object.entries(filesData.files)) {
+        for (const file of (files as any[])) {
+          if (file.name && file.name !== '.gitkeep') {
+            // Fetch file content
+            const apiPath = `${folder}/${file.name}`;
+            const fileResult = await api.getFileContent(selectedProject.project_id, apiPath);
+            if (fileResult.success && fileResult.content) {
+              // For StackBlitz, put src files in root
+              const stackblitzPath = folder === 'src' ? file.name : `${folder}/${file.name}`;
+              stackblitzFiles[stackblitzPath] = fileResult.content;
+
+              if (file.name === 'package.json') hasPackageJson = true;
+              if (file.name === 'index.html') hasIndexHtml = true;
+            }
+          }
+        }
+      }
+
+      // Determine template
+      if (hasIndexHtml && !hasPackageJson) {
+        projectTemplate = 'html';
+      } else if (stackblitzFiles['package.json']?.includes('react')) {
+        projectTemplate = 'create-react-app';
+      } else if (stackblitzFiles['package.json']?.includes('vue')) {
+        projectTemplate = 'vue';
+      } else if (stackblitzFiles['package.json']?.includes('next')) {
+        projectTemplate = 'next';
+      }
+
+      // Add default package.json if missing
+      if (!hasPackageJson && projectTemplate === 'node') {
+        stackblitzFiles['package.json'] = JSON.stringify({
+          name: selectedProject.name || 'project',
+          version: '1.0.0',
+          scripts: { start: 'node index.js' }
+        }, null, 2);
+      }
+
+      setRuntimeLogs(prev => [...prev, `📦 ${Object.keys(stackblitzFiles).length} فایل آماده شد`, '🌐 در حال باز کردن StackBlitz...']);
+
+      // Create form and submit to StackBlitz
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = 'https://stackblitz.com/run';
+      form.target = '_blank';
+
+      // Add project definition
+      const projectInput = document.createElement('input');
+      projectInput.type = 'hidden';
+      projectInput.name = 'project[title]';
+      projectInput.value = selectedProject.name || 'AI Creator Project';
+      form.appendChild(projectInput);
+
+      const templateInput = document.createElement('input');
+      templateInput.type = 'hidden';
+      templateInput.name = 'project[template]';
+      templateInput.value = projectTemplate;
+      form.appendChild(templateInput);
+
+      // Add files
+      for (const [path, content] of Object.entries(stackblitzFiles)) {
+        const fileInput = document.createElement('input');
+        fileInput.type = 'hidden';
+        fileInput.name = `project[files][${path}]`;
+        fileInput.value = content;
+        form.appendChild(fileInput);
+      }
+
+      document.body.appendChild(form);
+      form.submit();
+      document.body.removeChild(form);
+
+      setRuntimeLogs(prev => [...prev, '✅ StackBlitz باز شد!', '💡 پروژه در تب جدید در حال اجراست']);
+
+    } catch (error: any) {
+      setRuntimeLogs(prev => [...prev, `❌ خطا: ${error.message}`]);
+    } finally {
+      setRuntimeLoading(false);
+    }
+  };
+
+  // 🆕 Open in Replit (for Python projects)
+  const handleOpenInReplit = async () => {
+    if (!selectedProject) return;
+
+    setRuntimeLoading(true);
+    setShowRuntimePanel(true);
+    setRuntimeLogs(['🐍 آماده‌سازی برای Replit...']);
+
+    try {
+      const filesData = await api.getProjectFiles(selectedProject.project_id);
+
+      if (!filesData.success || !filesData.files) {
+        setRuntimeLogs(prev => [...prev, '❌ فایلی یافت نشد']);
+        setRuntimeLoading(false);
+        return;
+      }
+
+      // Collect Python files
+      const pythonFiles: Record<string, string> = {};
+      let mainFile = '';
+
+      for (const [folder, files] of Object.entries(filesData.files)) {
+        for (const file of (files as any[])) {
+          if (file.name && file.name !== '.gitkeep') {
+            const apiPath = `${folder}/${file.name}`;
+            const fileResult = await api.getFileContent(selectedProject.project_id, apiPath);
+            if (fileResult.success && fileResult.content) {
+              const fileName = folder === 'src' ? file.name : `${folder}/${file.name}`;
+              pythonFiles[fileName] = fileResult.content;
+
+              if (file.name === 'main.py' || file.name === 'app.py') {
+                mainFile = fileName;
+              }
+            }
+          }
+        }
+      }
+
+      setRuntimeLogs(prev => [...prev, `📦 ${Object.keys(pythonFiles).length} فایل پیدا شد`]);
+
+      // Create Replit import URL with files encoded
+      // Replit supports importing via URL with base64 encoded files
+      const replitData = {
+        files: pythonFiles,
+        main: mainFile || Object.keys(pythonFiles).find(f => f.endsWith('.py')) || 'main.py'
+      };
+
+      // Create a form to POST to Replit
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = 'https://replit.com/languages/python3';
+      form.target = '_blank';
+
+      // For Replit, we'll use their new repl creation with code
+      // Open Replit with the main file content as a starting point
+      const mainContent = pythonFiles[replitData.main] || Object.values(pythonFiles)[0] || '# Your code here';
+
+      // Replit doesn't have a direct POST API like StackBlitz, so we'll open it and copy code
+      // Alternative: Create a GitHub Gist and import from there
+
+      setRuntimeLogs(prev => [...prev, '🌐 در حال باز کردن Replit...']);
+
+      // Open Replit with Python template
+      const replitUrl = 'https://replit.com/languages/python3';
+      window.open(replitUrl, '_blank');
+
+      // Copy the main file content to clipboard for easy paste
+      if (navigator.clipboard && mainContent) {
+        await navigator.clipboard.writeText(mainContent);
+        setRuntimeLogs(prev => [...prev,
+          '✅ Replit باز شد!',
+          '📋 کد اصلی در clipboard کپی شد',
+          '💡 در Replit، Ctrl+V بزنید تا کد paste بشه'
+        ]);
+      } else {
+        setRuntimeLogs(prev => [...prev, '✅ Replit باز شد!', '💡 کد را از بخش فایل‌ها کپی کنید']);
+      }
+
+    } catch (error: any) {
+      setRuntimeLogs(prev => [...prev, `❌ خطا: ${error.message}`]);
+    } finally {
+      setRuntimeLoading(false);
+    }
+  };
+
+  // 🆕 Open in Google Colab (for Python/Data Science)
+  const handleOpenInColab = async () => {
+    if (!selectedProject) return;
+
+    setRuntimeLoading(true);
+    setShowRuntimePanel(true);
+    setRuntimeLogs(['📓 ایجاد Notebook برای Colab...']);
+
+    try {
+      const filesData = await api.getProjectFiles(selectedProject.project_id);
+
+      if (!filesData.success || !filesData.files) {
+        setRuntimeLogs(prev => [...prev, '❌ فایلی یافت نشد']);
+        setRuntimeLoading(false);
+        return;
+      }
+
+      // Collect all Python files
+      const pythonFiles: { name: string; content: string }[] = [];
+
+      for (const [folder, files] of Object.entries(filesData.files)) {
+        for (const file of (files as any[])) {
+          if (file.name && file.name !== '.gitkeep' &&
+              (file.name.endsWith('.py') || file.name.endsWith('.ipynb'))) {
+            const apiPath = `${folder}/${file.name}`;
+            const fileResult = await api.getFileContent(selectedProject.project_id, apiPath);
+            if (fileResult.success && fileResult.content) {
+              pythonFiles.push({
+                name: file.name,
+                content: fileResult.content
+              });
+            }
+          }
+        }
+      }
+
+      setRuntimeLogs(prev => [...prev, `📦 ${pythonFiles.length} فایل Python پیدا شد`]);
+
+      // Create Jupyter notebook structure
+      const notebookCells: any[] = [
+        {
+          cell_type: 'markdown',
+          metadata: {},
+          source: [`# ${selectedProject.name || 'Project'}\n`, `> Generated by AI Creator Engine`]
+        }
+      ];
+
+      // Add each Python file as a code cell
+      for (const file of pythonFiles) {
+        if (file.name.endsWith('.ipynb')) {
+          // If it's already a notebook, try to parse it
+          try {
+            const existingNotebook = JSON.parse(file.content);
+            if (existingNotebook.cells) {
+              notebookCells.push(...existingNotebook.cells);
+            }
+          } catch {
+            // If parsing fails, add as code
+            notebookCells.push({
+              cell_type: 'code',
+              metadata: {},
+              source: file.content.split('\n'),
+              execution_count: null,
+              outputs: []
+            });
+          }
+        } else {
+          // Add markdown header for file
+          notebookCells.push({
+            cell_type: 'markdown',
+            metadata: {},
+            source: [`## 📄 ${file.name}`]
+          });
+          // Add code cell
+          notebookCells.push({
+            cell_type: 'code',
+            metadata: {},
+            source: file.content.split('\n').map((line, i, arr) =>
+              i < arr.length - 1 ? line + '\n' : line
+            ),
+            execution_count: null,
+            outputs: []
+          });
+        }
+      }
+
+      // Create notebook JSON
+      const notebook = {
+        nbformat: 4,
+        nbformat_minor: 5,
+        metadata: {
+          kernelspec: {
+            display_name: 'Python 3',
+            language: 'python',
+            name: 'python3'
+          },
+          language_info: {
+            name: 'python',
+            version: '3.9.0'
+          }
+        },
+        cells: notebookCells
+      };
+
+      // Create blob and download, then open Colab upload page
+      const notebookBlob = new Blob([JSON.stringify(notebook, null, 2)], { type: 'application/json' });
+      const notebookUrl = URL.createObjectURL(notebookBlob);
+
+      // Download the notebook
+      const downloadLink = document.createElement('a');
+      downloadLink.href = notebookUrl;
+      downloadLink.download = `${selectedProject.name || 'project'}.ipynb`;
+      document.body.appendChild(downloadLink);
+      downloadLink.click();
+      document.body.removeChild(downloadLink);
+
+      setRuntimeLogs(prev => [...prev, '📥 Notebook دانلود شد']);
+
+      // Open Colab upload page
+      setTimeout(() => {
+        window.open('https://colab.research.google.com/#create=true', '_blank');
+        setRuntimeLogs(prev => [...prev,
+          '✅ Google Colab باز شد!',
+          '💡 روی File > Upload notebook کلیک کنید',
+          '📓 فایل دانلود شده را آپلود کنید'
+        ]);
+      }, 500);
+
+    } catch (error: any) {
+      setRuntimeLogs(prev => [...prev, `❌ خطا: ${error.message}`]);
+    } finally {
+      setRuntimeLoading(false);
+    }
+  };
+
   // 🆕 Runtime functions
   const checkCanRunProject = async (projectId: string) => {
     try {
@@ -1517,6 +1842,33 @@ export default function ProjectsPage() {
                             <ArrowDownTrayIcon className="w-4 h-4" />
                             دانلود ZIP
                           </button>
+                          {/* StackBlitz Button */}
+                          <button
+                            onClick={handleOpenInStackBlitz}
+                            disabled={runtimeLoading}
+                            className="flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-lg hover:from-blue-600 hover:to-indigo-700 transition text-sm disabled:opacity-50"
+                          >
+                            <RocketLaunchIcon className="w-4 h-4" />
+                            اجرا در StackBlitz
+                          </button>
+                          {/* Replit Button (Python) */}
+                          <button
+                            onClick={handleOpenInReplit}
+                            disabled={runtimeLoading}
+                            className="flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-lg hover:from-orange-600 hover:to-red-600 transition text-sm disabled:opacity-50"
+                          >
+                            <CodeBracketIcon className="w-4 h-4" />
+                            Replit
+                          </button>
+                          {/* Google Colab Button */}
+                          <button
+                            onClick={handleOpenInColab}
+                            disabled={runtimeLoading}
+                            className="flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-yellow-500 to-orange-500 text-white rounded-lg hover:from-yellow-600 hover:to-orange-600 transition text-sm disabled:opacity-50"
+                          >
+                            <DocumentTextIcon className="w-4 h-4" />
+                            Colab
+                          </button>
                         </>
                       )}
                       <button
@@ -1728,6 +2080,34 @@ export default function ProjectsPage() {
                           توقف
                         </button>
                       )}
+                      {/* Cloud IDE buttons - always available */}
+                      <button
+                        onClick={handleOpenInStackBlitz}
+                        disabled={runtimeLoading}
+                        className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-lg hover:from-blue-600 hover:to-indigo-700 transition disabled:opacity-50"
+                        title="برای پروژه‌های JavaScript/Node.js"
+                      >
+                        <RocketLaunchIcon className="w-4 h-4" />
+                        StackBlitz
+                      </button>
+                      <button
+                        onClick={handleOpenInReplit}
+                        disabled={runtimeLoading}
+                        className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-lg hover:from-orange-600 hover:to-red-600 transition disabled:opacity-50"
+                        title="برای پروژه‌های Python"
+                      >
+                        <CodeBracketIcon className="w-4 h-4" />
+                        Replit
+                      </button>
+                      <button
+                        onClick={handleOpenInColab}
+                        disabled={runtimeLoading}
+                        className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-yellow-500 to-orange-500 text-white rounded-lg hover:from-yellow-600 hover:to-orange-600 transition disabled:opacity-50"
+                        title="برای Notebook و Data Science"
+                      >
+                        <DocumentTextIcon className="w-4 h-4" />
+                        Colab
+                      </button>
                     </div>
                   </div>
                 )}
