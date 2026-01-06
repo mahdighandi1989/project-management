@@ -896,12 +896,23 @@ export default function ProjectsPage() {
           // Clean content: remove markdown code block syntax if present
           let cleanContent = file.content;
 
-          // Remove ```python or ```py at the start
-          cleanContent = cleanContent.replace(/^```(?:python|py)?\s*\n?/gm, '');
-          // Remove closing ```
-          cleanContent = cleanContent.replace(/\n?```\s*$/gm, '');
-          // Also handle inline code blocks
-          cleanContent = cleanContent.replace(/^```\s*\n?/gm, '');
+          // Split into lines for more precise cleaning
+          let lines = cleanContent.split('\n');
+
+          // Remove first line if it's a code block start (```, ```python, ```py, etc.)
+          if (lines.length > 0 && /^```\w*\s*$/.test(lines[0].trim())) {
+            lines.shift();
+          }
+
+          // Remove last line if it's a code block end (```)
+          if (lines.length > 0 && /^```\s*$/.test(lines[lines.length - 1].trim())) {
+            lines.pop();
+          }
+
+          // Also check for ``` anywhere in the content and remove those lines
+          lines = lines.filter(line => !/^```\w*\s*$/.test(line.trim()));
+
+          cleanContent = lines.join('\n');
 
           // Skip empty content
           if (!cleanContent.trim()) continue;
