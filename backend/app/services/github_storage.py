@@ -248,8 +248,8 @@ class GitHubStorageService:
             "base_path": self._get_full_path(base)
         }
 
-    async def list_folder(self, path: str) -> List[GitHubFile]:
-        """لیست فایل‌های یک پوشه"""
+    async def list_folder(self, path: str, recursive: bool = True) -> List[GitHubFile]:
+        """لیست فایل‌های یک پوشه (با پشتیبانی از recursive)"""
         session = await self._get_session()
         full_path = self._get_full_path(path)
         url = f"{self.api_base}/repos/{self.owner}/{self.repo}/contents/{full_path}"
@@ -261,15 +261,30 @@ class GitHubStorageService:
                     data = await response.json()
                     if isinstance(data, list):
                         for item in data:
-                            files.append(GitHubFile(
-                                path=item.get("path", ""),
-                                name=item.get("name", ""),
-                                sha=item.get("sha", ""),
-                                size=item.get("size", 0),
-                                url=item.get("html_url", ""),
-                                download_url=item.get("download_url", ""),
-                                type=item.get("type", "file")
-                            ))
+                            item_type = item.get("type", "file")
+
+                            if item_type == "file":
+                                # Extract relative path from full path
+                                item_path = item.get("path", "")
+                                # Get name relative to the base folder for nested files
+                                relative_name = item_path.replace(full_path + "/", "") if full_path in item_path else item.get("name", "")
+
+                                files.append(GitHubFile(
+                                    path=item_path,
+                                    name=relative_name,  # Include relative path in name
+                                    sha=item.get("sha", ""),
+                                    size=item.get("size", 0),
+                                    url=item.get("html_url", ""),
+                                    download_url=item.get("download_url", ""),
+                                    type=item_type
+                                ))
+                            elif item_type == "dir" and recursive:
+                                # Recursively list subdirectory
+                                subdir_path = item.get("path", "")
+                                # Convert back to relative path for recursive call
+                                relative_subdir = subdir_path.replace(self._get_full_path("") + "/", "") if self._get_full_path("") else subdir_path
+                                subfiles = await self.list_folder(relative_subdir, recursive=True)
+                                files.extend(subfiles)
 
         except Exception as e:
             logger.error(f"Error listing folder: {e}")
