@@ -605,6 +605,42 @@ async def get_generated_files(project_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/project-files/{project_id}")
+async def get_project_files_for_export(project_id: str):
+    """
+    دریافت ساختار فایل‌های پروژه برای export به StackBlitz/Replit/Colab
+    Returns files grouped by folder with metadata
+    """
+    try:
+        github_storage = get_github_storage()
+        files_by_folder: Dict[str, List] = {}
+
+        if github_storage and github_storage.token:
+            try:
+                project_files = await github_storage.get_project_files(project_id)
+                for folder_type, folder_files in project_files.get("files", {}).items():
+                    files_by_folder[folder_type] = []
+                    for f in folder_files:
+                        if f.get("name") and f["name"] != ".gitkeep":
+                            files_by_folder[folder_type].append({
+                                "name": f["name"],
+                                "size": f.get("size", 0),
+                                "path": f"{folder_type}/{f['name']}"
+                            })
+            except Exception as e:
+                logger.warning(f"Could not load project files from GitHub: {e}")
+
+        return {
+            "success": True,
+            "project_id": project_id,
+            "files": files_by_folder
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting project files: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/file-content/{project_id}/{file_path:path}")
 async def get_file_content(project_id: str, file_path: str):
     """
