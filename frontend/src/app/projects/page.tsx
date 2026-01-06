@@ -25,6 +25,10 @@ import {
   DocumentArrowUpIcon,
   ArchiveBoxIcon,
   ClipboardDocumentIcon,
+  StopIcon,
+  ComputerDesktopIcon,
+  CommandLineIcon,
+  SignalIcon,
 } from '@heroicons/react/24/outline';
 
 // Types
@@ -245,6 +249,57 @@ const api = {
   getDownloadUrl(projectId: string): string {
     return `${getApiUrl()}/api/orchestrator/download-project/${projectId}`;
   },
+
+  // Runtime APIs
+  async getSystemCapabilities(): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/runtime/capabilities`);
+    return res.json();
+  },
+
+  async checkCanRunProject(projectId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/runtime/can-run/${projectId}`);
+    return res.json();
+  },
+
+  async runProject(projectId: string, customPort?: number): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/runtime/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_id: projectId, custom_port: customPort }),
+    });
+    return res.json();
+  },
+
+  async stopProject(projectId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/runtime/stop`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_id: projectId }),
+    });
+    return res.json();
+  },
+
+  async getRuntimeStatus(projectId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/runtime/status/${projectId}`);
+    return res.json();
+  },
+
+  async getProjectLogs(projectId: string, lines: number = 100): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/runtime/logs/${projectId}?lines=${lines}`);
+    return res.json();
+  },
+
+  async requestUpgrade(projectId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/runtime/request-upgrade/${projectId}`, {
+      method: 'POST',
+    });
+    return res.json();
+  },
+
+  async getRunningProjects(): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/runtime/running`);
+    return res.json();
+  },
 };
 
 // Status helpers
@@ -331,6 +386,14 @@ export default function ProjectsPage() {
   const [loadingState, setLoadingState] = useState(false);
   const [showDeployGuide, setShowDeployGuide] = useState(false);
   const [deployGuide, setDeployGuide] = useState<any>(null);
+
+  // 🆕 Runtime state
+  const [runtimeStatus, setRuntimeStatus] = useState<any>(null);
+  const [runtimeLogs, setRuntimeLogs] = useState<string[]>([]);
+  const [showRuntimePanel, setShowRuntimePanel] = useState(false);
+  const [runtimeLoading, setRuntimeLoading] = useState(false);
+  const [canRunInfo, setCanRunInfo] = useState<any>(null);
+  const [systemCapabilities, setSystemCapabilities] = useState<any>(null);
 
   // Load data
   useEffect(() => {
@@ -474,6 +537,121 @@ export default function ProjectsPage() {
     if (!selectedProject) return;
     const downloadUrl = api.getDownloadUrl(selectedProject.project_id);
     window.open(downloadUrl, '_blank');
+  };
+
+  // 🆕 Runtime functions
+  const checkCanRunProject = async (projectId: string) => {
+    try {
+      const result = await api.checkCanRunProject(projectId);
+      setCanRunInfo(result);
+      return result;
+    } catch (error) {
+      console.error('Error checking if can run:', error);
+      return null;
+    }
+  };
+
+  const loadSystemCapabilities = async () => {
+    try {
+      const caps = await api.getSystemCapabilities();
+      setSystemCapabilities(caps);
+    } catch (error) {
+      console.error('Error loading system capabilities:', error);
+    }
+  };
+
+  const handleRunProject = async () => {
+    if (!selectedProject) return;
+
+    setRuntimeLoading(true);
+    setShowRuntimePanel(true);
+    setRuntimeLogs(['شروع اجرای پروژه...']);
+
+    try {
+      // First check if can run
+      const canRun = await checkCanRunProject(selectedProject.project_id);
+
+      if (!canRun?.can_run && !canRun?.can_run_with_docker) {
+        setRuntimeLogs(prev => [...prev, '❌ این پروژه قابل اجرا نیست', ...canRun?.notes || []]);
+        setRuntimeStatus({ status: 'error', error: 'نیازمندی‌های لازم موجود نیست' });
+        setRuntimeLoading(false);
+        return;
+      }
+
+      // Run the project
+      const result = await api.runProject(selectedProject.project_id);
+
+      if (result.success) {
+        setRuntimeStatus(result);
+        setRuntimeLogs(prev => [...prev, '✅ پروژه در حال اجرا است', `🌐 آدرس: ${result.url}`, ...(result.logs || [])]);
+
+        // Start polling for logs
+        startLogPolling(selectedProject.project_id);
+      } else {
+        setRuntimeLogs(prev => [...prev, `❌ خطا: ${result.error || 'خطای ناشناخته'}`]);
+        setRuntimeStatus({ status: 'error', error: result.error });
+      }
+    } catch (error: any) {
+      setRuntimeLogs(prev => [...prev, `❌ خطا: ${error.message}`]);
+      setRuntimeStatus({ status: 'error', error: error.message });
+    } finally {
+      setRuntimeLoading(false);
+    }
+  };
+
+  const handleStopProject = async () => {
+    if (!selectedProject) return;
+
+    setRuntimeLoading(true);
+    try {
+      const result = await api.stopProject(selectedProject.project_id);
+      if (result.success) {
+        setRuntimeStatus({ status: 'stopped' });
+        setRuntimeLogs(prev => [...prev, '⏹️ پروژه متوقف شد']);
+      }
+    } catch (error: any) {
+      setRuntimeLogs(prev => [...prev, `❌ خطا در توقف: ${error.message}`]);
+    } finally {
+      setRuntimeLoading(false);
+    }
+  };
+
+  const startLogPolling = (projectId: string) => {
+    const interval = setInterval(async () => {
+      try {
+        const logsResult = await api.getProjectLogs(projectId, 50);
+        if (logsResult.success && logsResult.logs) {
+          setRuntimeLogs(logsResult.logs);
+        }
+
+        // Check status
+        const statusResult = await api.getRuntimeStatus(projectId);
+        if (statusResult.success) {
+          setRuntimeStatus(statusResult);
+          if (statusResult.status === 'stopped' || statusResult.status === 'error') {
+            clearInterval(interval);
+          }
+        }
+      } catch (error) {
+        // Ignore polling errors
+      }
+    }, 3000);
+
+    // Stop polling after 1 hour
+    setTimeout(() => clearInterval(interval), 3600000);
+  };
+
+  const handleRequestUpgrade = async () => {
+    if (!selectedProject) return;
+
+    try {
+      const result = await api.requestUpgrade(selectedProject.project_id);
+      if (result.success) {
+        setRuntimeLogs(prev => [...prev, '📦 درخواست ارتقا ثبت شد', result.message]);
+      }
+    } catch (error: any) {
+      setRuntimeLogs(prev => [...prev, `❌ خطا: ${error.message}`]);
+    }
   };
 
   const deleteProject = async (id: string) => {
@@ -1124,13 +1302,40 @@ export default function ProjectsPage() {
                     </h3>
                     <div className="flex gap-2">
                       {generatedFiles.length > 0 && (
-                        <button
-                          onClick={handleDownloadProject}
-                          className="flex items-center gap-2 px-3 py-1.5 bg-green-500 text-white rounded-lg hover:bg-green-600 transition text-sm"
-                        >
-                          <ArrowDownTrayIcon className="w-4 h-4" />
-                          دانلود ZIP
-                        </button>
+                        <>
+                          {/* Run Project Button */}
+                          <button
+                            onClick={handleRunProject}
+                            disabled={runtimeLoading}
+                            className="flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-emerald-500 to-teal-600 text-white rounded-lg hover:from-emerald-600 hover:to-teal-700 transition text-sm disabled:opacity-50"
+                          >
+                            {runtimeLoading ? (
+                              <ArrowPathIcon className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <PlayIcon className="w-4 h-4" />
+                            )}
+                            {runtimeStatus?.status === 'running' ? 'در حال اجرا' : 'اجرای پروژه'}
+                          </button>
+                          {/* Stop Button */}
+                          {runtimeStatus?.status === 'running' && (
+                            <button
+                              onClick={handleStopProject}
+                              disabled={runtimeLoading}
+                              className="flex items-center gap-2 px-3 py-1.5 bg-red-500 text-white rounded-lg hover:bg-red-600 transition text-sm disabled:opacity-50"
+                            >
+                              <StopIcon className="w-4 h-4" />
+                              توقف
+                            </button>
+                          )}
+                          {/* Download Button */}
+                          <button
+                            onClick={handleDownloadProject}
+                            className="flex items-center gap-2 px-3 py-1.5 bg-green-500 text-white rounded-lg hover:bg-green-600 transition text-sm"
+                          >
+                            <ArrowDownTrayIcon className="w-4 h-4" />
+                            دانلود ZIP
+                          </button>
+                        </>
                       )}
                       <button
                         onClick={() => loadGeneratedFiles(selectedProject.project_id)}
@@ -1203,6 +1408,147 @@ export default function ProjectsPage() {
                     </div>
                   )}
                 </div>
+
+                {/* 🆕 Runtime Panel */}
+                {showRuntimePanel && (
+                  <div className="bg-gray-900 rounded-xl shadow-lg p-6 mt-6 text-white">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-lg font-bold flex items-center gap-2">
+                        <ComputerDesktopIcon className="w-6 h-6 text-emerald-400" />
+                        اجرای پروژه
+                      </h3>
+                      <div className="flex items-center gap-2">
+                        {runtimeStatus?.status === 'running' && (
+                          <a
+                            href={runtimeStatus.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center gap-2 px-3 py-1.5 bg-emerald-500 text-white rounded-lg hover:bg-emerald-600 transition text-sm"
+                          >
+                            <SignalIcon className="w-4 h-4" />
+                            باز کردن ({runtimeStatus.url})
+                          </a>
+                        )}
+                        <button
+                          onClick={() => setShowRuntimePanel(false)}
+                          className="p-1 hover:bg-gray-700 rounded"
+                        >
+                          <XMarkIcon className="w-5 h-5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Status Badge */}
+                    <div className="mb-4 flex items-center gap-3">
+                      <span className="text-gray-400">وضعیت:</span>
+                      <span className={`px-3 py-1 rounded-full text-sm font-medium ${
+                        runtimeStatus?.status === 'running' ? 'bg-emerald-500/20 text-emerald-400' :
+                        runtimeStatus?.status === 'building' ? 'bg-yellow-500/20 text-yellow-400' :
+                        runtimeStatus?.status === 'error' ? 'bg-red-500/20 text-red-400' :
+                        runtimeStatus?.status === 'stopped' ? 'bg-gray-500/20 text-gray-400' :
+                        'bg-blue-500/20 text-blue-400'
+                      }`}>
+                        {runtimeStatus?.status === 'running' ? '🟢 در حال اجرا' :
+                         runtimeStatus?.status === 'building' ? '🔨 در حال ساخت...' :
+                         runtimeStatus?.status === 'starting' ? '🚀 در حال شروع...' :
+                         runtimeStatus?.status === 'error' ? '❌ خطا' :
+                         runtimeStatus?.status === 'stopped' ? '⏹️ متوقف' :
+                         '⏳ آماده'}
+                      </span>
+                      {runtimeStatus?.port && (
+                        <span className="text-gray-400 text-sm">
+                          پورت: {runtimeStatus.port}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Error Message */}
+                    {runtimeStatus?.error && (
+                      <div className="mb-4 p-3 bg-red-900/30 border border-red-500/30 rounded-lg text-red-300 text-sm">
+                        {runtimeStatus.error}
+                      </div>
+                    )}
+
+                    {/* Can't Run Info */}
+                    {canRunInfo && !canRunInfo.can_run && !canRunInfo.can_run_with_docker && (
+                      <div className="mb-4 p-4 bg-yellow-900/30 border border-yellow-500/30 rounded-lg">
+                        <h4 className="text-yellow-300 font-medium mb-2">⚠️ نیاز به ارتقای سیستم</h4>
+                        <p className="text-yellow-200/80 text-sm mb-3">
+                          برای اجرای این پروژه، نیازمندی‌های زیر باید نصب شوند:
+                        </p>
+                        <ul className="text-sm text-yellow-200/70 space-y-1 mb-3">
+                          {canRunInfo.missing_capabilities?.map((cap: any, idx: number) => (
+                            <li key={idx}>• {cap.name} ({cap.type})</li>
+                          ))}
+                        </ul>
+                        <button
+                          onClick={handleRequestUpgrade}
+                          className="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg text-sm transition"
+                        >
+                          📦 درخواست ارتقای خودکار
+                        </button>
+                        <p className="text-xs text-yellow-200/50 mt-2">
+                          این درخواست در GitHub ذخیره می‌شود و در دیپلوی بعدی اعمال خواهد شد.
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Logs Console */}
+                    <div className="bg-black rounded-lg p-4 font-mono text-sm max-h-64 overflow-y-auto">
+                      <div className="flex items-center gap-2 text-gray-500 mb-2">
+                        <CommandLineIcon className="w-4 h-4" />
+                        <span>Console</span>
+                      </div>
+                      {runtimeLogs.length > 0 ? (
+                        runtimeLogs.map((log, idx) => (
+                          <div
+                            key={idx}
+                            className={`${
+                              log.startsWith('❌') ? 'text-red-400' :
+                              log.startsWith('✅') ? 'text-green-400' :
+                              log.startsWith('🌐') ? 'text-blue-400' :
+                              log.startsWith('⏹️') ? 'text-yellow-400' :
+                              log.startsWith('📦') ? 'text-purple-400' :
+                              'text-gray-300'
+                            }`}
+                          >
+                            {log}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="text-gray-500">در انتظار لاگ...</div>
+                      )}
+                    </div>
+
+                    {/* Action Buttons */}
+                    <div className="mt-4 flex gap-2">
+                      {runtimeStatus?.status !== 'running' && (
+                        <button
+                          onClick={handleRunProject}
+                          disabled={runtimeLoading}
+                          className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition disabled:opacity-50"
+                        >
+                          {runtimeLoading ? (
+                            <ArrowPathIcon className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <PlayIcon className="w-4 h-4" />
+                          )}
+                          اجرای مجدد
+                        </button>
+                      )}
+                      {runtimeStatus?.status === 'running' && (
+                        <button
+                          onClick={handleStopProject}
+                          disabled={runtimeLoading}
+                          className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition disabled:opacity-50"
+                        >
+                          <StopIcon className="w-4 h-4" />
+                          توقف
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="flex items-center justify-center h-full">
