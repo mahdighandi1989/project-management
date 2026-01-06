@@ -356,22 +356,31 @@ async def check_and_prepare_runtime(project_id: str) -> Dict[str, Any]:
             project_id, project_type, files
         )
 
+        # بررسی در دسترس بودن Docker
+        executor = get_runtime_executor()
+        if not executor._initialized:
+            executor.initialize(github_storage)
+
+        docker_available = executor.is_docker_available()
+
         # نتیجه بررسی
         result = {
             "checked": True,
             "can_run": requirements.can_run,
             "can_run_with_docker": requirements.can_run_with_docker,
+            "docker_available": docker_available,
             "missing_capabilities": [
                 {"name": cap.name, "type": cap.type.value, "docker_image": cap.docker_image}
                 for cap in requirements.missing_capabilities
             ],
-            "notes": requirements.notes
+            "notes": requirements.notes,
+            "message": None
         }
 
+        if not docker_available:
+            result["message"] = "⚠️ Docker در این سرور در دسترس نیست. پروژه‌ها فقط در محیط محلی با Docker قابل اجرا هستند."
+
         # اگر نیاز به ارتقا داره و Docker موجوده، image ها رو pull کن
-        executor = get_runtime_executor()
-        if not executor._initialized:
-            executor.initialize(github_storage)
 
         if requirements.missing_capabilities and executor.is_docker_available():
             pulled_images = []
@@ -1929,7 +1938,7 @@ async def prepare_project_for_runtime(project_id: str, force_pull: bool = False)
     - بررسی و رفع مشکلات
     """
     try:
-        from ...services.runtime_executor import get_runtime_executor, RUNTIME_CONFIGS
+        from ...services.runtime_executor import get_runtime_executor, RUNTIME_CONFIGS, RuntimeType
         from ...services.capability_detector import get_capability_detector
         from ...services.project_service import get_project_service
         import base64
@@ -1977,7 +1986,7 @@ async def prepare_project_for_runtime(project_id: str, force_pull: bool = False)
         runtime_type = await executor.detect_runtime_type(project_id, files)
 
         # Pull کردن image اصلی
-        config = RUNTIME_CONFIGS.get(runtime_type, RUNTIME_CONFIGS.get(executor.RuntimeType.STATIC))
+        config = RUNTIME_CONFIGS.get(runtime_type, RUNTIME_CONFIGS.get(RuntimeType.STATIC))
         pulled_images = []
 
         if config.get("image") and executor.is_docker_available():
@@ -2014,6 +2023,8 @@ async def prepare_project_for_runtime(project_id: str, force_pull: bool = False)
                 except Exception as e:
                     logger.warning(f"Could not save Dockerfile: {e}")
 
+        docker_available = executor.is_docker_available()
+
         return {
             "success": True,
             "project_id": project_id,
@@ -2022,6 +2033,8 @@ async def prepare_project_for_runtime(project_id: str, force_pull: bool = False)
             "dockerfile_existed": has_dockerfile,
             "dockerfile_created": dockerfile_created,
             "ready_to_run": len(pulled_images) > 0 or has_dockerfile,
+            "docker_available": docker_available,
+            "message": "آماده برای اجرا" if docker_available else "⚠️ Docker در این سرور در دسترس نیست. پروژه‌ها فقط در محیط محلی با Docker قابل اجرا هستند.",
             "config": {
                 "port": config.get("port"),
                 "memory": config.get("memory"),

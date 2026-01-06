@@ -688,6 +688,11 @@ export default function ProjectsPage() {
       const result = await api.checkProjectRuntime(selectedProject.project_id);
 
       if (result.success) {
+        // نمایش وضعیت Docker
+        if (result.docker_available === false && result.message) {
+          setRuntimeLogs(prev => [...prev, result.message]);
+        }
+
         if (result.can_run || result.can_run_with_docker) {
           setRuntimeLogs(prev => [...prev, '✅ پروژه آماده اجرا است']);
           if (result.pulled_images?.length > 0) {
@@ -724,13 +729,19 @@ export default function ProjectsPage() {
 
       if (result.success) {
         setRuntimeLogs(prev => [...prev, `✅ نوع runtime: ${result.runtime_type}`]);
+
+        // نمایش وضعیت Docker
+        if (result.docker_available === false && result.message) {
+          setRuntimeLogs(prev => [...prev, result.message]);
+        }
+
         if (result.pulled_images?.length > 0) {
           setRuntimeLogs(prev => [...prev, `📦 Images: ${result.pulled_images.join(', ')}`]);
         }
         if (result.dockerfile_created) {
           setRuntimeLogs(prev => [...prev, '📄 Dockerfile ایجاد شد']);
         }
-        if (result.ready_to_run) {
+        if (result.ready_to_run && result.docker_available !== false) {
           setRuntimeLogs(prev => [...prev, '✅ پروژه آماده اجرا است!']);
         }
       } else {
