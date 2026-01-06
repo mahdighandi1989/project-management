@@ -843,13 +843,13 @@ export default function ProjectsPage() {
         return;
       }
 
-      // Collect all Python files
+      // Collect only .py files (NOT .ipynb to avoid duplicating previously generated notebooks)
       const pythonFiles: { name: string; content: string }[] = [];
 
       for (const [folder, files] of Object.entries(filesData.files)) {
         for (const file of (files as any[])) {
-          if (file.name && file.name !== '.gitkeep' &&
-              (file.name.endsWith('.py') || file.name.endsWith('.ipynb'))) {
+          // Only include .py files, skip .ipynb to prevent accumulation
+          if (file.name && file.name !== '.gitkeep' && file.name.endsWith('.py')) {
             const apiPath = `${folder}/${file.name}`;
             const fileResult = await api.getFileContent(selectedProject.project_id, apiPath);
             if (fileResult.success && fileResult.content) {
@@ -902,21 +902,30 @@ export default function ProjectsPage() {
           // Split into lines for more precise cleaning
           let lines = cleanContent.split('\n');
 
-          // Remove first line if it starts with ``` (code block start)
-          while (lines.length > 0 && lines[0].trim().startsWith('```')) {
+          // Function to check if a line is a code block marker
+          const isCodeBlockMarker = (line: string): boolean => {
+            const trimmed = line.trim();
+            // Check for ``` with optional language identifier
+            if (trimmed.startsWith('```')) return true;
+            // Check for ~~~ (alternative markdown code block)
+            if (trimmed.startsWith('~~~')) return true;
+            // Check for just backticks (various counts)
+            if (/^`{3,}\w*$/.test(trimmed)) return true;
+            return false;
+          };
+
+          // Remove first lines if they are code block markers
+          while (lines.length > 0 && isCodeBlockMarker(lines[0])) {
             lines.shift();
           }
 
-          // Remove last line if it's just ``` (code block end)
-          while (lines.length > 0 && lines[lines.length - 1].trim().startsWith('```')) {
+          // Remove last lines if they are code block markers
+          while (lines.length > 0 && isCodeBlockMarker(lines[lines.length - 1])) {
             lines.pop();
           }
 
-          // Filter out any remaining lines that are just code block markers
-          lines = lines.filter(line => {
-            const trimmed = line.trim();
-            return !trimmed.startsWith('```');
-          });
+          // Filter out any remaining code block markers in the middle
+          lines = lines.filter(line => !isCodeBlockMarker(line));
 
           cleanContent = lines.join('\n');
 
