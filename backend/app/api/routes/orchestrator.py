@@ -672,17 +672,24 @@ async def get_file_content(project_id: str, file_path: str):
         if github_storage:
             try:
                 import base64
-                result = await github_storage.get_file(f"projects/{project_id}/generated/{file_path}")
-                if result.get("success") and result.get("content"):
-                    content = base64.b64decode(result["content"]).decode('utf-8')
-                    return {
-                        "success": True,
-                        "file": file_path,
-                        "content": content,
-                        "score": 0,
-                        "github_saved": True,
-                        "source": "github"
-                    }
+                # Try different paths - first the direct path, then generated folder
+                paths_to_try = [
+                    f"projects/{project_id}/{file_path}",  # Direct: projects/proj_xxx/src/file.py
+                    f"projects/{project_id}/generated/{file_path}",  # Legacy: projects/proj_xxx/generated/file.py
+                ]
+
+                for github_path in paths_to_try:
+                    result = await github_storage.get_file(github_path)
+                    if result.get("success") and result.get("content"):
+                        content = base64.b64decode(result["content"]).decode('utf-8', errors='replace')
+                        return {
+                            "success": True,
+                            "file": file_path,
+                            "content": content,
+                            "score": 0,
+                            "github_saved": True,
+                            "source": "github"
+                        }
             except Exception as e:
                 logger.warning(f"Could not load file from GitHub: {e}")
 
