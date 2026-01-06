@@ -170,8 +170,11 @@ const api = {
     return res.json();
   },
 
-  async getProjectFiles(projectId: string): Promise<any> {
-    const res = await fetch(`${getApiUrl()}/api/orchestrator/project-files/${projectId}`);
+  async getProjectFiles(projectId: string, recursive: boolean = false): Promise<any> {
+    const url = recursive
+      ? `${getApiUrl()}/api/orchestrator/project-files/${projectId}?recursive=true`
+      : `${getApiUrl()}/api/orchestrator/project-files/${projectId}`;
+    const res = await fetch(url);
     return res.json();
   },
 
@@ -835,7 +838,8 @@ export default function ProjectsPage() {
     setRuntimeLogs(['📓 ایجاد Notebook برای Colab...']);
 
     try {
-      const filesData = await api.getProjectFiles(selectedProject.project_id);
+      // Use recursive=true to get all files including subdirectories
+      const filesData = await api.getProjectFiles(selectedProject.project_id, true);
 
       if (!filesData.success || !filesData.files) {
         setRuntimeLogs(prev => [...prev, '❌ فایلی یافت نشد']);

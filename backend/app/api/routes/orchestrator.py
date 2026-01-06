@@ -606,10 +606,11 @@ async def get_generated_files(project_id: str):
 
 
 @router.get("/project-files/{project_id}")
-async def get_project_files_for_export(project_id: str):
+async def get_project_files_for_export(project_id: str, recursive: bool = False):
     """
     دریافت ساختار فایل‌های پروژه برای export به StackBlitz/Replit/Colab
     Returns files grouped by folder with metadata
+    recursive=True برای دریافت همه فایل‌ها شامل زیرپوشه‌ها
     """
     try:
         github_storage = get_github_storage()
@@ -617,7 +618,10 @@ async def get_project_files_for_export(project_id: str):
 
         if github_storage and github_storage.token:
             try:
-                project_files = await github_storage.get_project_files(project_id)
+                if recursive:
+                    project_files = await github_storage.get_project_files_recursive(project_id)
+                else:
+                    project_files = await github_storage.get_project_files(project_id)
                 for folder_type, folder_files in project_files.get("files", {}).items():
                     files_by_folder[folder_type] = []
                     for f in folder_files:
