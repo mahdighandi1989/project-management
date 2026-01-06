@@ -924,7 +924,7 @@ export default function ProjectsPage() {
       });
 
       // 3. Create project directory structure
-      const folders = [...new Set(projectFiles.map(f => f.folder))];
+      const folders = Array.from(new Set(projectFiles.map(f => f.folder)));
       const createDirsCode = folders
         .filter(f => f && f !== '.')
         .map(f => `os.makedirs('${f}', exist_ok=True)`)
