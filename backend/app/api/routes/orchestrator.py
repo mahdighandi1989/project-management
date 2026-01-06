@@ -738,10 +738,9 @@ async def save_generated_file(request: SaveFileRequest):
         )
 
         if result.get("success"):
-            # استخراج اطلاعات repo
-            repo_info = github_storage.repo.split('/')
-            owner = repo_info[0] if len(repo_info) > 1 else github_storage.repo
-            repo = repo_info[1] if len(repo_info) > 1 else github_storage.repo
+            # استخراج اطلاعات repo - مستقیم از github_storage
+            owner = github_storage.owner
+            repo = github_storage.repo
 
             return {
                 "success": True,
