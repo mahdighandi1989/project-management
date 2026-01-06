@@ -896,21 +896,27 @@ export default function ProjectsPage() {
           // Clean content: remove markdown code block syntax if present
           let cleanContent = file.content;
 
+          // Normalize line endings (Windows \r\n to \n)
+          cleanContent = cleanContent.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
           // Split into lines for more precise cleaning
           let lines = cleanContent.split('\n');
 
-          // Remove first line if it's a code block start (```, ```python, ```py, etc.)
-          if (lines.length > 0 && /^```\w*\s*$/.test(lines[0].trim())) {
+          // Remove first line if it starts with ``` (code block start)
+          while (lines.length > 0 && lines[0].trim().startsWith('```')) {
             lines.shift();
           }
 
-          // Remove last line if it's a code block end (```)
-          if (lines.length > 0 && /^```\s*$/.test(lines[lines.length - 1].trim())) {
+          // Remove last line if it's just ``` (code block end)
+          while (lines.length > 0 && lines[lines.length - 1].trim().startsWith('```')) {
             lines.pop();
           }
 
-          // Also check for ``` anywhere in the content and remove those lines
-          lines = lines.filter(line => !/^```\w*\s*$/.test(line.trim()));
+          // Filter out any remaining lines that are just code block markers
+          lines = lines.filter(line => {
+            const trimmed = line.trim();
+            return !trimmed.startsWith('```');
+          });
 
           cleanContent = lines.join('\n');
 
