@@ -170,6 +170,11 @@ const api = {
     return res.json();
   },
 
+  async getProjectFiles(projectId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/orchestrator/project-files/${projectId}`);
+    return res.json();
+  },
+
   async getFileContent(projectId: string, filePath: string): Promise<any> {
     const res = await fetch(`${getApiUrl()}/api/orchestrator/file-content/${projectId}/${encodeURIComponent(filePath)}`);
     return res.json();
