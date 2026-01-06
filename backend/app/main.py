@@ -42,6 +42,16 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("👋 Shutting down...")
+
+    # Stop all running project containers
+    try:
+        from .services.runtime_executor import get_runtime_executor
+        executor = get_runtime_executor()
+        await executor.cleanup_all()
+        logger.info("🐳 Stopped all running project containers")
+    except Exception as e:
+        logger.error(f"Error stopping containers: {e}")
+
     from .services.ai_manager import get_ai_manager
     ai_manager = get_ai_manager()
     await ai_manager.close()
@@ -100,6 +110,9 @@ async def initialize_persistent_data():
         await load_workflows_from_github(github_storage, orchestrator)
 
         logger.info("✅ Persistent data loaded successfully")
+
+        # Initialize runtime executor and check for pending upgrades
+        await initialize_runtime_services(github_storage)
 
     except Exception as e:
         logger.error(f"❌ Error loading persistent data: {e}", exc_info=True)
@@ -177,6 +190,48 @@ async def load_workflows_from_github(github_storage, orchestrator):
 
     except Exception as e:
         logger.error(f"Error loading workflows from GitHub: {e}")
+
+
+async def initialize_runtime_services(github_storage):
+    """Initialize runtime executor and apply pending upgrades"""
+    try:
+        from .services.runtime_executor import get_runtime_executor
+        from .services.capability_detector import get_capability_detector
+
+        logger.info("🐳 Initializing runtime services...")
+
+        # Initialize runtime executor
+        executor = get_runtime_executor()
+        executor.initialize(github_storage)
+
+        if executor.is_docker_available():
+            logger.info("✅ Docker is available for project execution")
+        else:
+            logger.warning("⚠️ Docker not available - project execution disabled")
+
+        # Initialize capability detector
+        detector = get_capability_detector()
+        detector.initialize(github_storage)
+
+        # Log system capabilities
+        caps = detector.get_capability_summary()
+        logger.info(f"📊 System: {caps.get('system', {}).get('os', 'Unknown')}")
+        logger.info(f"🔧 Runtimes: {list(caps.get('runtimes', {}).keys())}")
+        logger.info(f"🗄️ Databases: {list(caps.get('databases', {}).keys())}")
+
+        # Apply pending upgrades (pull Docker images)
+        if github_storage and executor.is_docker_available():
+            logger.info("🔄 Checking for pending upgrades...")
+            results = await detector.check_and_apply_upgrades()
+            if results.get("applied", 0) > 0:
+                logger.info(f"✅ Applied {results['applied']} upgrades")
+            if results.get("failed", 0) > 0:
+                logger.warning(f"⚠️ Failed {results['failed']} upgrades")
+
+        logger.info("✅ Runtime services initialized")
+
+    except Exception as e:
+        logger.error(f"❌ Error initializing runtime services: {e}", exc_info=True)
 
 
 # ایجاد FastAPI app

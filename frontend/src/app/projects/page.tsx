@@ -300,6 +300,28 @@ const api = {
     const res = await fetch(`${getApiUrl()}/api/runtime/running`);
     return res.json();
   },
+
+  // 🆕 Project update APIs
+  async checkProjectRuntime(projectId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/orchestrator/check-runtime/${projectId}`, {
+      method: 'POST',
+    });
+    return res.json();
+  },
+
+  async updateAllProjects(): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/orchestrator/update-all-projects`, {
+      method: 'POST',
+    });
+    return res.json();
+  },
+
+  async prepareRuntime(projectId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/orchestrator/prepare-runtime/${projectId}`, {
+      method: 'POST',
+    });
+    return res.json();
+  },
 };
 
 // Status helpers
@@ -654,6 +676,102 @@ export default function ProjectsPage() {
     }
   };
 
+  // 🆕 Check and prepare project runtime
+  const handleCheckRuntime = async () => {
+    if (!selectedProject) return;
+
+    setRuntimeLoading(true);
+    setShowRuntimePanel(true);
+    setRuntimeLogs(['🔍 بررسی قابلیت اجرا...']);
+
+    try {
+      const result = await api.checkProjectRuntime(selectedProject.project_id);
+
+      if (result.success) {
+        // نمایش وضعیت Docker
+        if (result.docker_available === false && result.message) {
+          setRuntimeLogs(prev => [...prev, result.message]);
+        }
+
+        if (result.can_run || result.can_run_with_docker) {
+          setRuntimeLogs(prev => [...prev, '✅ پروژه آماده اجرا است']);
+          if (result.pulled_images?.length > 0) {
+            setRuntimeLogs(prev => [...prev, `📦 Docker images دانلود شد: ${result.pulled_images.join(', ')}`]);
+          }
+          setCanRunInfo(result);
+        } else {
+          setRuntimeLogs(prev => [...prev, '⚠️ نیازمندی‌های بیشتری لازم است', ...result.notes || []]);
+          if (result.upgrade_requested) {
+            setRuntimeLogs(prev => [...prev, '📝 درخواست ارتقا ثبت شد']);
+          }
+          setCanRunInfo(result);
+        }
+      } else {
+        setRuntimeLogs(prev => [...prev, `❌ خطا: ${result.error}`]);
+      }
+    } catch (error: any) {
+      setRuntimeLogs(prev => [...prev, `❌ خطا: ${error.message}`]);
+    } finally {
+      setRuntimeLoading(false);
+    }
+  };
+
+  // 🆕 Prepare runtime (pull images, create Dockerfile)
+  const handlePrepareRuntime = async () => {
+    if (!selectedProject) return;
+
+    setRuntimeLoading(true);
+    setShowRuntimePanel(true);
+    setRuntimeLogs(['🔧 آماده‌سازی محیط اجرا...']);
+
+    try {
+      const result = await api.prepareRuntime(selectedProject.project_id);
+
+      if (result.success) {
+        setRuntimeLogs(prev => [...prev, `✅ نوع runtime: ${result.runtime_type}`]);
+
+        // نمایش وضعیت Docker
+        if (result.docker_available === false && result.message) {
+          setRuntimeLogs(prev => [...prev, result.message]);
+        }
+
+        if (result.pulled_images?.length > 0) {
+          setRuntimeLogs(prev => [...prev, `📦 Images: ${result.pulled_images.join(', ')}`]);
+        }
+        if (result.dockerfile_created) {
+          setRuntimeLogs(prev => [...prev, '📄 Dockerfile ایجاد شد']);
+        }
+        if (result.ready_to_run && result.docker_available !== false) {
+          setRuntimeLogs(prev => [...prev, '✅ پروژه آماده اجرا است!']);
+        }
+      } else {
+        setRuntimeLogs(prev => [...prev, `❌ خطا: ${result.error}`]);
+      }
+    } catch (error: any) {
+      setRuntimeLogs(prev => [...prev, `❌ خطا: ${error.message}`]);
+    } finally {
+      setRuntimeLoading(false);
+    }
+  };
+
+  // 🆕 Update all projects
+  const [updatingAll, setUpdatingAll] = useState(false);
+  const [updateAllResult, setUpdateAllResult] = useState<any>(null);
+
+  const handleUpdateAllProjects = async () => {
+    setUpdatingAll(true);
+    setUpdateAllResult(null);
+
+    try {
+      const result = await api.updateAllProjects();
+      setUpdateAllResult(result);
+    } catch (error: any) {
+      setUpdateAllResult({ success: false, error: error.message });
+    } finally {
+      setUpdatingAll(false);
+    }
+  };
+
   const deleteProject = async (id: string) => {
     setActionLoading(true);
     try {
@@ -916,6 +1034,16 @@ export default function ProjectsPage() {
                 <ArrowPathIcon className="w-4 h-4" />
                 بارگذاری از GitHub
               </button>
+              {/* 🆕 Update All Projects Button */}
+              <button
+                onClick={handleUpdateAllProjects}
+                disabled={updatingAll}
+                className="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-lg hover:from-amber-600 hover:to-orange-600 transition text-sm disabled:opacity-50"
+                title="بررسی و به‌روزرسانی همه پروژه‌ها"
+              >
+                <Cog6ToothIcon className={`w-4 h-4 ${updatingAll ? 'animate-spin' : ''}`} />
+                {updatingAll ? 'در حال به‌روزرسانی...' : 'به‌روزرسانی همه'}
+              </button>
               <button
                 onClick={() => setShowSmartSetup(true)}
                 className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-lg hover:from-purple-600 hover:to-pink-600 transition shadow-lg"
@@ -924,6 +1052,30 @@ export default function ProjectsPage() {
                 راه‌اندازی هوشمند
               </button>
             </div>
+
+            {/* 🆕 Update All Result */}
+            {updateAllResult && (
+              <div className={`mt-2 p-3 rounded-lg text-sm ${
+                updateAllResult.success
+                  ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300'
+                  : 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300'
+              }`}>
+                {updateAllResult.success ? (
+                  <div className="flex items-center gap-2">
+                    <CheckCircleIcon className="w-5 h-5" />
+                    <span>{updateAllResult.message}</span>
+                    <span className="text-xs">
+                      (آماده: {updateAllResult.can_run} | نیاز به ارتقا: {updateAllResult.need_upgrade})
+                    </span>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <ExclamationTriangleIcon className="w-5 h-5" />
+                    <span>خطا: {updateAllResult.error}</span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -1087,6 +1239,23 @@ export default function ProjectsPage() {
                       >
                         <PlayIcon className="w-5 h-5" />
                         فاز بعدی
+                      </button>
+                      {/* 🆕 Check & Prepare Runtime Button */}
+                      <button
+                        onClick={handleCheckRuntime}
+                        disabled={runtimeLoading}
+                        className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-lg hover:from-cyan-600 hover:to-blue-600 transition disabled:opacity-50"
+                      >
+                        <Cog6ToothIcon className={`w-5 h-5 ${runtimeLoading ? 'animate-spin' : ''}`} />
+                        بررسی اجرا
+                      </button>
+                      <button
+                        onClick={handlePrepareRuntime}
+                        disabled={runtimeLoading}
+                        className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-orange-500 to-amber-500 text-white rounded-lg hover:from-orange-600 hover:to-amber-600 transition disabled:opacity-50"
+                      >
+                        <ComputerDesktopIcon className="w-5 h-5" />
+                        آماده‌سازی
                       </button>
                     </div>
                   </div>
