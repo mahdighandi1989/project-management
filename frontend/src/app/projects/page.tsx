@@ -427,6 +427,9 @@ export default function ProjectsPage() {
   const [canRunInfo, setCanRunInfo] = useState<any>(null);
   const [systemCapabilities, setSystemCapabilities] = useState<any>(null);
 
+  // 🆕 Project type detection for runtime recommendations
+  const [detectedProjectType, setDetectedProjectType] = useState<'javascript' | 'python' | 'unknown'>('unknown');
+
   // Load data
   useEffect(() => {
     loadProjects();
@@ -497,6 +500,7 @@ export default function ProjectsPage() {
     setActionLoading(true);
     setGeneratedFiles([]); // Reset files when switching projects
     setProjectState(null); // Reset project state
+    setDetectedProjectType('unknown'); // Reset project type
     try {
       const project = await api.getProject(id);
       setSelectedProject(project);
@@ -504,10 +508,62 @@ export default function ProjectsPage() {
       loadGeneratedFiles(id);
       // 🆕 Load project state with next steps
       loadProjectState(id);
+      // 🆕 Detect project type for runtime recommendations
+      detectProjectType(id, project);
     } catch (error) {
       console.error('Error loading project:', error);
     } finally {
       setActionLoading(false);
+    }
+  };
+
+  // 🆕 Detect project type for runtime recommendations
+  const detectProjectType = async (projectId: string, project: any) => {
+    try {
+      const filesData = await api.getProjectFiles(projectId);
+      if (!filesData.success || !filesData.files) {
+        // Fallback to project type field
+        const projectType = project?.type?.toLowerCase() || '';
+        if (projectType.includes('python') || projectType.includes('fastapi') || projectType.includes('django') || projectType.includes('flask')) {
+          setDetectedProjectType('python');
+        } else if (projectType.includes('react') || projectType.includes('vue') || projectType.includes('next') || projectType.includes('node') || projectType.includes('javascript') || projectType.includes('typescript')) {
+          setDetectedProjectType('javascript');
+        }
+        return;
+      }
+
+      // Check files to determine type
+      let hasPythonFiles = false;
+      let hasJsFiles = false;
+      let hasPackageJson = false;
+      let hasRequirementsTxt = false;
+
+      for (const [folder, files] of Object.entries(filesData.files)) {
+        for (const file of (files as any[])) {
+          const name = file.name?.toLowerCase() || '';
+          if (name.endsWith('.py') || name === 'requirements.txt' || name === 'pyproject.toml') {
+            hasPythonFiles = true;
+          }
+          if (name === 'requirements.txt') hasRequirementsTxt = true;
+          if (name.endsWith('.js') || name.endsWith('.ts') || name.endsWith('.jsx') || name.endsWith('.tsx')) {
+            hasJsFiles = true;
+          }
+          if (name === 'package.json') hasPackageJson = true;
+        }
+      }
+
+      // Determine project type
+      if (hasRequirementsTxt || (hasPythonFiles && !hasPackageJson)) {
+        setDetectedProjectType('python');
+      } else if (hasPackageJson || hasJsFiles) {
+        setDetectedProjectType('javascript');
+      } else if (hasPythonFiles) {
+        setDetectedProjectType('python');
+      } else {
+        setDetectedProjectType('unknown');
+      }
+    } catch (error) {
+      console.error('Error detecting project type:', error);
     }
   };
 
@@ -1847,32 +1903,56 @@ export default function ProjectsPage() {
                             <ArrowDownTrayIcon className="w-4 h-4" />
                             دانلود ZIP
                           </button>
-                          {/* StackBlitz Button */}
+                          {/* StackBlitz Button - highlighted for JS */}
                           <button
                             onClick={handleOpenInStackBlitz}
                             disabled={runtimeLoading}
-                            className="flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-lg hover:from-blue-600 hover:to-indigo-700 transition text-sm disabled:opacity-50"
+                            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition text-sm disabled:opacity-50 ${
+                              detectedProjectType === 'javascript'
+                                ? 'bg-gradient-to-r from-blue-500 to-indigo-600 text-white ring-2 ring-blue-300 hover:from-blue-600 hover:to-indigo-700'
+                                : detectedProjectType === 'python'
+                                ? 'bg-gray-400 text-gray-600 opacity-60'
+                                : 'bg-gradient-to-r from-blue-500 to-indigo-600 text-white hover:from-blue-600 hover:to-indigo-700'
+                            }`}
+                            title={detectedProjectType === 'python' ? '⚠️ این پروژه Python است - از Replit استفاده کن' : 'برای پروژه‌های JavaScript/Node.js'}
                           >
                             <RocketLaunchIcon className="w-4 h-4" />
-                            اجرا در StackBlitz
+                            StackBlitz
+                            {detectedProjectType === 'javascript' && <span className="text-xs">✓</span>}
                           </button>
-                          {/* Replit Button (Python) */}
+                          {/* Replit Button - highlighted for Python */}
                           <button
                             onClick={handleOpenInReplit}
                             disabled={runtimeLoading}
-                            className="flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-lg hover:from-orange-600 hover:to-red-600 transition text-sm disabled:opacity-50"
+                            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition text-sm disabled:opacity-50 ${
+                              detectedProjectType === 'python'
+                                ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white ring-2 ring-orange-300 hover:from-orange-600 hover:to-red-600'
+                                : detectedProjectType === 'javascript'
+                                ? 'bg-gray-400 text-gray-600 opacity-60'
+                                : 'bg-gradient-to-r from-orange-500 to-red-500 text-white hover:from-orange-600 hover:to-red-600'
+                            }`}
+                            title={detectedProjectType === 'javascript' ? '⚠️ این پروژه JavaScript است - از StackBlitz استفاده کن' : 'برای پروژه‌های Python'}
                           >
                             <CodeBracketIcon className="w-4 h-4" />
                             Replit
+                            {detectedProjectType === 'python' && <span className="text-xs">✓</span>}
                           </button>
-                          {/* Google Colab Button */}
+                          {/* Google Colab Button - highlighted for Python */}
                           <button
                             onClick={handleOpenInColab}
                             disabled={runtimeLoading}
-                            className="flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-yellow-500 to-orange-500 text-white rounded-lg hover:from-yellow-600 hover:to-orange-600 transition text-sm disabled:opacity-50"
+                            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition text-sm disabled:opacity-50 ${
+                              detectedProjectType === 'python'
+                                ? 'bg-gradient-to-r from-yellow-500 to-orange-500 text-white ring-2 ring-yellow-300 hover:from-yellow-600 hover:to-orange-600'
+                                : detectedProjectType === 'javascript'
+                                ? 'bg-gray-400 text-gray-600 opacity-60'
+                                : 'bg-gradient-to-r from-yellow-500 to-orange-500 text-white hover:from-yellow-600 hover:to-orange-600'
+                            }`}
+                            title={detectedProjectType === 'javascript' ? '⚠️ این پروژه JavaScript است' : 'برای Python و Data Science'}
                           >
                             <DocumentTextIcon className="w-4 h-4" />
                             Colab
+                            {detectedProjectType === 'python' && <span className="text-xs">✓</span>}
                           </button>
                         </>
                       )}
@@ -2085,29 +2165,52 @@ export default function ProjectsPage() {
                           توقف
                         </button>
                       )}
-                      {/* Cloud IDE buttons - always available */}
+                      {/* Cloud IDE buttons - with recommendations */}
+                      {detectedProjectType !== 'unknown' && (
+                        <div className="w-full mb-2 text-xs text-center">
+                          {detectedProjectType === 'python' ? (
+                            <span className="text-orange-400">🐍 پروژه Python - از Replit یا Colab استفاده کن</span>
+                          ) : (
+                            <span className="text-blue-400">⚡ پروژه JavaScript - از StackBlitz استفاده کن</span>
+                          )}
+                        </div>
+                      )}
                       <button
                         onClick={handleOpenInStackBlitz}
                         disabled={runtimeLoading}
-                        className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-lg hover:from-blue-600 hover:to-indigo-700 transition disabled:opacity-50"
+                        className={`flex items-center gap-2 px-4 py-2 rounded-lg transition disabled:opacity-50 ${
+                          detectedProjectType === 'javascript'
+                            ? 'bg-gradient-to-r from-blue-500 to-indigo-600 text-white ring-2 ring-blue-300 ring-offset-2 ring-offset-gray-900 hover:from-blue-600 hover:to-indigo-700'
+                            : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
+                        }`}
                         title="برای پروژه‌های JavaScript/Node.js"
                       >
                         <RocketLaunchIcon className="w-4 h-4" />
                         StackBlitz
+                        {detectedProjectType === 'javascript' && <span className="text-xs bg-white/20 px-1 rounded">پیشنهادی</span>}
                       </button>
                       <button
                         onClick={handleOpenInReplit}
                         disabled={runtimeLoading}
-                        className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-lg hover:from-orange-600 hover:to-red-600 transition disabled:opacity-50"
+                        className={`flex items-center gap-2 px-4 py-2 rounded-lg transition disabled:opacity-50 ${
+                          detectedProjectType === 'python'
+                            ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white ring-2 ring-orange-300 ring-offset-2 ring-offset-gray-900 hover:from-orange-600 hover:to-red-600'
+                            : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
+                        }`}
                         title="برای پروژه‌های Python"
                       >
                         <CodeBracketIcon className="w-4 h-4" />
                         Replit
+                        {detectedProjectType === 'python' && <span className="text-xs bg-white/20 px-1 rounded">پیشنهادی</span>}
                       </button>
                       <button
                         onClick={handleOpenInColab}
                         disabled={runtimeLoading}
-                        className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-yellow-500 to-orange-500 text-white rounded-lg hover:from-yellow-600 hover:to-orange-600 transition disabled:opacity-50"
+                        className={`flex items-center gap-2 px-4 py-2 rounded-lg transition disabled:opacity-50 ${
+                          detectedProjectType === 'python'
+                            ? 'bg-gradient-to-r from-yellow-500 to-orange-500 text-white ring-2 ring-yellow-300 ring-offset-2 ring-offset-gray-900 hover:from-yellow-600 hover:to-orange-600'
+                            : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
+                        }`}
                         title="برای Notebook و Data Science"
                       >
                         <DocumentTextIcon className="w-4 h-4" />
