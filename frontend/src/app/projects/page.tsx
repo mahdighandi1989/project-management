@@ -971,7 +971,7 @@ export default function ProjectsPage() {
         });
       }
 
-      // 5. Run main.py cell
+      // 5. Setup Python path and run
       const mainPyFile = projectFiles.find(f => f.name === 'main.py');
       if (mainPyFile) {
         const projectFolder = mainPyFile.folder && mainPyFile.folder !== '.' ? mainPyFile.folder : null;
@@ -982,15 +982,42 @@ export default function ProjectsPage() {
           source: [`## ▶️ اجرای پروژه`]
         });
 
-        // Change to project directory and run
-        const runCommand = projectFolder
-          ? `%cd ${projectFolder}\n!python main.py`
-          : `!python main.py`;
+        // First add sys.path setup and create __init__.py files
+        const setupCode = projectFolder ? `import os
+import sys
+
+# Change to project directory
+os.chdir('${projectFolder}')
+
+# Add current directory to Python path
+sys.path.insert(0, os.getcwd())
+
+# Create __init__.py in all subdirectories to make them packages
+for root, dirs, files in os.walk('.'):
+    for d in dirs:
+        init_file = os.path.join(root, d, '__init__.py')
+        if not os.path.exists(init_file):
+            open(init_file, 'w').close()
+            print(f'Created {init_file}')
+
+print(f'Working directory: {os.getcwd()}')
+print(f'Python path: {sys.path[:3]}')
+print(f'Files: {os.listdir(".")}')` : `import sys
+sys.path.insert(0, '.')`;
 
         notebookCells.push({
           cell_type: 'code',
           metadata: {},
-          source: [runCommand],
+          source: [setupCode],
+          execution_count: null,
+          outputs: []
+        });
+
+        // Then run main.py
+        notebookCells.push({
+          cell_type: 'code',
+          metadata: {},
+          source: [`!python main.py`],
           execution_count: null,
           outputs: []
         });
