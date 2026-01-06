@@ -248,7 +248,7 @@ class GitHubStorageService:
             "base_path": self._get_full_path(base)
         }
 
-    async def list_folder(self, path: str, recursive: bool = True) -> List[GitHubFile]:
+    async def list_folder(self, path: str, recursive: bool = False) -> List[GitHubFile]:
         """لیست فایل‌های یک پوشه (با پشتیبانی از recursive)"""
         session = await self._get_session()
         full_path = self._get_full_path(path)
@@ -478,11 +478,28 @@ class GitHubStorageService:
         }
 
     async def get_project_files(self, project_id: str) -> Dict:
-        """لیست فایل‌های یک پروژه"""
+        """لیست فایل‌های یک پروژه (فقط سطح اول)"""
         files = {
-            "source": await self.list_folder(f"projects/{project_id}/source"),
-            "generated": await self.list_folder(f"projects/{project_id}/generated"),
-            "outputs": await self.list_folder(f"projects/{project_id}/outputs")
+            "source": await self.list_folder(f"projects/{project_id}/source", recursive=False),
+            "generated": await self.list_folder(f"projects/{project_id}/generated", recursive=False),
+            "outputs": await self.list_folder(f"projects/{project_id}/outputs", recursive=False)
+        }
+        return {
+            "success": True,
+            "project_id": project_id,
+            "files": {
+                k: [{"name": f.name, "size": f.size, "url": f.download_url}
+                    for f in v if f.name != ".gitkeep"]
+                for k, v in files.items()
+            }
+        }
+
+    async def get_project_files_recursive(self, project_id: str) -> Dict:
+        """لیست همه فایل‌های یک پروژه شامل زیرپوشه‌ها (برای Colab export)"""
+        files = {
+            "source": await self.list_folder(f"projects/{project_id}/source", recursive=True),
+            "generated": await self.list_folder(f"projects/{project_id}/generated", recursive=True),
+            "outputs": await self.list_folder(f"projects/{project_id}/outputs", recursive=True)
         }
         return {
             "success": True,
