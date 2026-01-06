@@ -893,17 +893,30 @@ export default function ProjectsPage() {
             });
           }
         } else {
+          // Clean content: remove markdown code block syntax if present
+          let cleanContent = file.content;
+
+          // Remove ```python or ```py at the start
+          cleanContent = cleanContent.replace(/^```(?:python|py)?\s*\n?/gm, '');
+          // Remove closing ```
+          cleanContent = cleanContent.replace(/\n?```\s*$/gm, '');
+          // Also handle inline code blocks
+          cleanContent = cleanContent.replace(/^```\s*\n?/gm, '');
+
+          // Skip empty content
+          if (!cleanContent.trim()) continue;
+
           // Add markdown header for file
           notebookCells.push({
             cell_type: 'markdown',
             metadata: {},
             source: [`## 📄 ${file.name}`]
           });
-          // Add code cell
+          // Add code cell with cleaned content
           notebookCells.push({
             cell_type: 'code',
             metadata: {},
-            source: file.content.split('\n').map((line, i, arr) =>
+            source: cleanContent.split('\n').map((line, i, arr) =>
               i < arr.length - 1 ? line + '\n' : line
             ),
             execution_count: null,
