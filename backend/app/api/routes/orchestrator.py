@@ -558,7 +558,7 @@ async def download_project(project_id: str):
             raise HTTPException(status_code=400, detail="GitHub storage not configured")
 
         # دریافت اطلاعات پروژه
-        from ..dependencies import get_project_service
+        from app.services.project_service import get_project_service
         project_service = get_project_service()
         project_data = project_service.get_project(project_id)
 
@@ -671,7 +671,7 @@ async def get_project_summary(project_id: str):
     خلاصه کامل پروژه - وضعیت، فایل‌ها، و راهنمای اجرا
     """
     try:
-        from ..dependencies import get_project_service
+        from app.services.project_service import get_project_service
         project_service = get_project_service()
         github_storage = get_github_storage()
 
@@ -1544,7 +1544,7 @@ async def get_deployment_guide(project_id: str):
         - requirements: پیش‌نیازها
     """
     try:
-        from ..dependencies import get_project_service
+        from app.services.project_service import get_project_service
         project_service = get_project_service()
         project_data = project_service.get_project(project_id)
 

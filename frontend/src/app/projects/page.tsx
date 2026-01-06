@@ -903,7 +903,7 @@ export default function ProjectsPage() {
                         اجرای وظیفه
                       </button>
                       <button
-                        onClick={handleNextPhase}
+                        onClick={() => handleNextPhase()}
                         disabled={actionLoading}
                         className="flex items-center gap-2 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition disabled:opacity-50"
                       >
