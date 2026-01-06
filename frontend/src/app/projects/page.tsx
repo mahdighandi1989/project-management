@@ -972,8 +972,12 @@ export default function ProjectsPage() {
       }
 
       // 5. Run main.py cell
-      const hasMainPy = projectFiles.some(f => f.name === 'main.py');
-      if (hasMainPy) {
+      const mainPyFile = projectFiles.find(f => f.name === 'main.py');
+      if (mainPyFile) {
+        const mainPyPath = mainPyFile.folder && mainPyFile.folder !== '.'
+          ? `${mainPyFile.folder}/main.py`
+          : 'main.py';
+
         notebookCells.push({
           cell_type: 'markdown',
           metadata: {},
@@ -982,7 +986,7 @@ export default function ProjectsPage() {
         notebookCells.push({
           cell_type: 'code',
           metadata: {},
-          source: [`!python main.py`],
+          source: [`!python ${mainPyPath}`],
           execution_count: null,
           outputs: []
         });
