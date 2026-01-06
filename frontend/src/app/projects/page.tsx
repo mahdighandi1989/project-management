@@ -974,19 +974,23 @@ export default function ProjectsPage() {
       // 5. Run main.py cell
       const mainPyFile = projectFiles.find(f => f.name === 'main.py');
       if (mainPyFile) {
-        const mainPyPath = mainPyFile.folder && mainPyFile.folder !== '.'
-          ? `${mainPyFile.folder}/main.py`
-          : 'main.py';
+        const projectFolder = mainPyFile.folder && mainPyFile.folder !== '.' ? mainPyFile.folder : null;
 
         notebookCells.push({
           cell_type: 'markdown',
           metadata: {},
           source: [`## ▶️ اجرای پروژه`]
         });
+
+        // Change to project directory and run
+        const runCommand = projectFolder
+          ? `%cd ${projectFolder}\n!python main.py`
+          : `!python main.py`;
+
         notebookCells.push({
           cell_type: 'code',
           metadata: {},
-          source: [`!python ${mainPyPath}`],
+          source: [runCommand],
           execution_count: null,
           outputs: []
         });
