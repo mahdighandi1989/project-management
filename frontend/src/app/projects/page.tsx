@@ -931,43 +931,25 @@ export default function ProjectsPage() {
       };
 
       const notebookJson = JSON.stringify(notebook, null, 2);
-      const notebookFileName = `${selectedProject.name || 'project'}_notebook.ipynb`;
+      const notebookFileName = `${(selectedProject.name || 'project').replace(/[^a-zA-Z0-9_-]/g, '_')}_notebook.ipynb`;
 
+      // Save to GitHub for backup
       setRuntimeLogs(prev => [...prev, '💾 ذخیره Notebook در GitHub...']);
-
-      // Try to save to GitHub first for direct Colab access
       try {
-        const saveResult = await api.saveGeneratedFile(
+        await api.saveGeneratedFile(
           selectedProject.project_id,
           notebookFileName,
           notebookJson,
           'generated'
         );
-
-        if (saveResult.success && saveResult.github_url) {
-          // Open directly in Colab from GitHub
-          // Format: https://colab.research.google.com/github/{owner}/{repo}/blob/{branch}/projects/{id}/generated/{file}
-          const githubPath = saveResult.github_path || `projects/${selectedProject.project_id}/generated/${notebookFileName}`;
-          const colabUrl = `https://colab.research.google.com/github/${saveResult.owner}/${saveResult.repo}/blob/main/${githubPath}`;
-
-          setRuntimeLogs(prev => [...prev, '✅ Notebook در GitHub ذخیره شد!', '🌐 در حال باز کردن Colab...']);
-
-          window.open(colabUrl, '_blank');
-
-          setRuntimeLogs(prev => [...prev,
-            '✅ Google Colab باز شد!',
-            '🚀 Notebook مستقیم از GitHub بارگذاری میشه'
-          ]);
-          return;
-        }
+        setRuntimeLogs(prev => [...prev, '✅ Notebook در GitHub ذخیره شد']);
       } catch (e) {
-        console.log('Could not save to GitHub, falling back to download:', e);
+        setRuntimeLogs(prev => [...prev, '⚠️ ذخیره در GitHub انجام نشد']);
       }
 
-      // Fallback: Download and manual upload
-      setRuntimeLogs(prev => [...prev, '📥 دانلود Notebook (آپلود دستی)...']);
-
-      const notebookBlob = new Blob([notebookJson], { type: 'application/json' });
+      // Download notebook
+      setRuntimeLogs(prev => [...prev, '📥 دانلود Notebook...']);
+      const notebookBlob = new Blob([notebookJson], { type: 'application/x-ipynb+json' });
       const notebookUrl = URL.createObjectURL(notebookBlob);
 
       const downloadLink = document.createElement('a');
@@ -977,14 +959,19 @@ export default function ProjectsPage() {
       downloadLink.click();
       document.body.removeChild(downloadLink);
 
+      // Open Colab with upload instructions
+      setRuntimeLogs(prev => [...prev, '🌐 در حال باز کردن Colab...']);
+
       setTimeout(() => {
-        window.open('https://colab.research.google.com/#create=true', '_blank');
+        window.open('https://colab.research.google.com/notebooks/intro.ipynb', '_blank');
         setRuntimeLogs(prev => [...prev,
           '✅ Google Colab باز شد!',
-          '💡 روی File > Upload notebook کلیک کنید',
-          '📓 فایل دانلود شده را آپلود کنید'
+          '📋 مراحل:',
+          '   1️⃣ File > Upload notebook',
+          '   2️⃣ فایل دانلود شده رو انتخاب کن',
+          `   📄 ${notebookFileName}`
         ]);
-      }, 500);
+      }, 300);
 
     } catch (error: any) {
       setRuntimeLogs(prev => [...prev, `❌ خطا: ${error.message}`]);
