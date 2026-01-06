@@ -566,6 +566,111 @@ export default function ProjectsPage() {
     window.open(downloadUrl, '_blank');
   };
 
+  // 🆕 Open in StackBlitz (browser-based execution)
+  const handleOpenInStackBlitz = async () => {
+    if (!selectedProject) return;
+
+    setRuntimeLoading(true);
+    setShowRuntimePanel(true);
+    setRuntimeLogs(['🚀 آماده‌سازی برای StackBlitz...']);
+
+    try {
+      // Get project files
+      const filesData = await api.getProjectFiles(selectedProject.project_id);
+
+      if (!filesData.success || !filesData.files) {
+        setRuntimeLogs(prev => [...prev, '❌ فایلی یافت نشد']);
+        setRuntimeLoading(false);
+        return;
+      }
+
+      // Convert files to StackBlitz format
+      const stackblitzFiles: Record<string, string> = {};
+      let hasPackageJson = false;
+      let hasIndexHtml = false;
+      let projectTemplate = 'node';
+
+      for (const [folder, files] of Object.entries(filesData.files)) {
+        for (const file of (files as any[])) {
+          if (file.name && file.name !== '.gitkeep') {
+            // Fetch file content
+            const apiPath = `${folder}/${file.name}`;
+            const fileResult = await api.getFileContent(selectedProject.project_id, apiPath);
+            if (fileResult.success && fileResult.content) {
+              // For StackBlitz, put src files in root
+              const stackblitzPath = folder === 'src' ? file.name : `${folder}/${file.name}`;
+              stackblitzFiles[stackblitzPath] = fileResult.content;
+
+              if (file.name === 'package.json') hasPackageJson = true;
+              if (file.name === 'index.html') hasIndexHtml = true;
+            }
+          }
+        }
+      }
+
+      // Determine template
+      if (hasIndexHtml && !hasPackageJson) {
+        projectTemplate = 'html';
+      } else if (stackblitzFiles['package.json']?.includes('react')) {
+        projectTemplate = 'create-react-app';
+      } else if (stackblitzFiles['package.json']?.includes('vue')) {
+        projectTemplate = 'vue';
+      } else if (stackblitzFiles['package.json']?.includes('next')) {
+        projectTemplate = 'next';
+      }
+
+      // Add default package.json if missing
+      if (!hasPackageJson && projectTemplate === 'node') {
+        stackblitzFiles['package.json'] = JSON.stringify({
+          name: selectedProject.name || 'project',
+          version: '1.0.0',
+          scripts: { start: 'node index.js' }
+        }, null, 2);
+      }
+
+      setRuntimeLogs(prev => [...prev, `📦 ${Object.keys(stackblitzFiles).length} فایل آماده شد`, '🌐 در حال باز کردن StackBlitz...']);
+
+      // Create form and submit to StackBlitz
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = 'https://stackblitz.com/run';
+      form.target = '_blank';
+
+      // Add project definition
+      const projectInput = document.createElement('input');
+      projectInput.type = 'hidden';
+      projectInput.name = 'project[title]';
+      projectInput.value = selectedProject.name || 'AI Creator Project';
+      form.appendChild(projectInput);
+
+      const templateInput = document.createElement('input');
+      templateInput.type = 'hidden';
+      templateInput.name = 'project[template]';
+      templateInput.value = projectTemplate;
+      form.appendChild(templateInput);
+
+      // Add files
+      for (const [path, content] of Object.entries(stackblitzFiles)) {
+        const fileInput = document.createElement('input');
+        fileInput.type = 'hidden';
+        fileInput.name = `project[files][${path}]`;
+        fileInput.value = content;
+        form.appendChild(fileInput);
+      }
+
+      document.body.appendChild(form);
+      form.submit();
+      document.body.removeChild(form);
+
+      setRuntimeLogs(prev => [...prev, '✅ StackBlitz باز شد!', '💡 پروژه در تب جدید در حال اجراست']);
+
+    } catch (error: any) {
+      setRuntimeLogs(prev => [...prev, `❌ خطا: ${error.message}`]);
+    } finally {
+      setRuntimeLoading(false);
+    }
+  };
+
   // 🆕 Runtime functions
   const checkCanRunProject = async (projectId: string) => {
     try {
@@ -1517,6 +1622,15 @@ export default function ProjectsPage() {
                             <ArrowDownTrayIcon className="w-4 h-4" />
                             دانلود ZIP
                           </button>
+                          {/* StackBlitz Button */}
+                          <button
+                            onClick={handleOpenInStackBlitz}
+                            disabled={runtimeLoading}
+                            className="flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-lg hover:from-blue-600 hover:to-indigo-700 transition text-sm disabled:opacity-50"
+                          >
+                            <RocketLaunchIcon className="w-4 h-4" />
+                            اجرا در StackBlitz
+                          </button>
                         </>
                       )}
                       <button
@@ -1728,6 +1842,15 @@ export default function ProjectsPage() {
                           توقف
                         </button>
                       )}
+                      {/* StackBlitz button - always available */}
+                      <button
+                        onClick={handleOpenInStackBlitz}
+                        disabled={runtimeLoading}
+                        className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-lg hover:from-blue-600 hover:to-indigo-700 transition disabled:opacity-50"
+                      >
+                        <RocketLaunchIcon className="w-4 h-4" />
+                        StackBlitz
+                      </button>
                     </div>
                   </div>
                 )}
