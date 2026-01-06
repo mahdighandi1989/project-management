@@ -6,33 +6,42 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: ai-debate-backend
+    container_name: ai-creator-backend
     ports:
       - "8000:8000"
+      # Port range for running projects (10000-10099)
+      - "10000-10099:10000-10099"
     environment:
       - DEBUG=false
       - ENVIRONMENT=production
       - HOST=0.0.0.0
       - PORT=8000
+      - DOCKER_HOST=unix:///var/run/docker.sock
     env_file:
       - ./backend/.env
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads
       - ./storage:/app/storage
+      # Mount Docker socket for container management
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Runtime workspace for building projects
+      - runtime_workspace:/tmp/runtime_workspace
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+    # Required for Docker-in-Docker
+    privileged: true
 
   # Frontend
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: ai-debate-frontend
+    container_name: ai-creator-frontend
     ports:
       - "3000:3000"
     environment:
@@ -44,7 +53,7 @@ services:
   # Nginx Reverse Proxy (Optional)
   nginx:
     image: nginx:alpine
-    container_name: ai-debate-nginx
+    container_name: ai-creator-nginx
     ports:
       - "80:80"
       - "443:443"
@@ -61,3 +70,5 @@ services:
 volumes:
   data:
   uploads:
+  runtime_workspace:
+    driver: local

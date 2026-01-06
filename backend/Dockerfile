@@ -4,11 +4,18 @@ FROM python:3.11-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies including Docker CLI
 RUN apt-get update && apt-get install -y \
     gcc \
     curl \
+    gnupg \
+    lsb-release \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Docker CLI (for runtime execution)
+RUN curl -fsSL https://get.docker.com -o get-docker.sh && \
+    sh get-docker.sh && \
+    rm get-docker.sh
 
 # Copy requirements first for caching
 COPY requirements.txt .
@@ -20,7 +27,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Create necessary directories
-RUN mkdir -p /app/data /app/uploads /app/storage
+RUN mkdir -p /app/data /app/uploads /app/storage /tmp/runtime_workspace
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
