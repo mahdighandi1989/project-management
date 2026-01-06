@@ -867,7 +867,7 @@ export default function ProjectsPage() {
               };
               while (lines.length > 0 && isCodeBlockMarker(lines[0])) lines.shift();
               while (lines.length > 0 && isCodeBlockMarker(lines[lines.length - 1])) lines.pop();
-              lines = lines.filter(line => !isCodeBlockMarker(line));
+              lines = lines.filter((line: string) => !isCodeBlockMarker(line));
               cleanContent = lines.join('\n');
 
               if (cleanContent.trim()) {
