@@ -157,12 +157,17 @@ async def check_can_run_project(project_id: str):
             project_id, project_type, files
         )
 
+        # بررسی Docker
+        executor = get_runtime_executor()
+        docker_available = executor.is_docker_available()
+
         return {
             "success": True,
             "project_id": project_id,
             "project_type": project_type,
             "can_run": requirements.can_run,
-            "can_run_with_docker": requirements.can_run_with_docker,
+            "can_run_with_docker": requirements.can_run_with_docker and docker_available,
+            "docker_available": docker_available,
             "upgrade_needed": requirements.upgrade_needed,
             "required_capabilities": [
                 {
@@ -182,7 +187,8 @@ async def check_can_run_project(project_id: str):
                 }
                 for cap in requirements.missing_capabilities
             ],
-            "notes": requirements.notes
+            "notes": requirements.notes,
+            "message": None if docker_available else "⚠️ Docker در این سرور در دسترس نیست. پروژه‌ها فقط در محیط محلی با Docker قابل اجرا هستند."
         }
 
     except HTTPException:

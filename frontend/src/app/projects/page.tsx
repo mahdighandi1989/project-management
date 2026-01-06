@@ -267,7 +267,12 @@ const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ project_id: projectId, custom_port: customPort }),
     });
-    return res.json();
+    const data = await res.json();
+    // Handle error responses from FastAPI
+    if (!res.ok) {
+      return { success: false, error: data.detail || 'خطای سرور' };
+    }
+    return data;
   },
 
   async stopProject(projectId: string): Promise<any> {
@@ -592,6 +597,14 @@ export default function ProjectsPage() {
     try {
       // First check if can run
       const canRun = await checkCanRunProject(selectedProject.project_id);
+
+      // Check Docker availability first
+      if (canRun?.docker_available === false) {
+        setRuntimeLogs(prev => [...prev, canRun.message || '⚠️ Docker در این سرور در دسترس نیست', '💡 پروژه‌ها فقط در محیط محلی با Docker قابل اجرا هستند']);
+        setRuntimeStatus({ status: 'error', error: 'Docker در دسترس نیست' });
+        setRuntimeLoading(false);
+        return;
+      }
 
       if (!canRun?.can_run && !canRun?.can_run_with_docker) {
         setRuntimeLogs(prev => [...prev, '❌ این پروژه قابل اجرا نیست', ...canRun?.notes || []]);
