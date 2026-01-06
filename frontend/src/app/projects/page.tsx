@@ -332,6 +332,15 @@ const api = {
     });
     return res.json();
   },
+
+  async saveGeneratedFile(projectId: string, fileName: string, content: string, folder: string = 'generated'): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/orchestrator/save-file`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_id: projectId, file_name: fileName, content, folder }),
+    });
+    return res.json();
+  },
 };
 
 // Status helpers
@@ -921,21 +930,53 @@ export default function ProjectsPage() {
         cells: notebookCells
       };
 
-      // Create blob and download, then open Colab upload page
-      const notebookBlob = new Blob([JSON.stringify(notebook, null, 2)], { type: 'application/json' });
+      const notebookJson = JSON.stringify(notebook, null, 2);
+      const notebookFileName = `${selectedProject.name || 'project'}_notebook.ipynb`;
+
+      setRuntimeLogs(prev => [...prev, '💾 ذخیره Notebook در GitHub...']);
+
+      // Try to save to GitHub first for direct Colab access
+      try {
+        const saveResult = await api.saveGeneratedFile(
+          selectedProject.project_id,
+          notebookFileName,
+          notebookJson,
+          'generated'
+        );
+
+        if (saveResult.success && saveResult.github_url) {
+          // Open directly in Colab from GitHub
+          // Format: https://colab.research.google.com/github/{owner}/{repo}/blob/{branch}/projects/{id}/generated/{file}
+          const githubPath = saveResult.github_path || `projects/${selectedProject.project_id}/generated/${notebookFileName}`;
+          const colabUrl = `https://colab.research.google.com/github/${saveResult.owner}/${saveResult.repo}/blob/main/${githubPath}`;
+
+          setRuntimeLogs(prev => [...prev, '✅ Notebook در GitHub ذخیره شد!', '🌐 در حال باز کردن Colab...']);
+
+          window.open(colabUrl, '_blank');
+
+          setRuntimeLogs(prev => [...prev,
+            '✅ Google Colab باز شد!',
+            '🚀 Notebook مستقیم از GitHub بارگذاری میشه'
+          ]);
+          return;
+        }
+      } catch (e) {
+        console.log('Could not save to GitHub, falling back to download:', e);
+      }
+
+      // Fallback: Download and manual upload
+      setRuntimeLogs(prev => [...prev, '📥 دانلود Notebook (آپلود دستی)...']);
+
+      const notebookBlob = new Blob([notebookJson], { type: 'application/json' });
       const notebookUrl = URL.createObjectURL(notebookBlob);
 
-      // Download the notebook
       const downloadLink = document.createElement('a');
       downloadLink.href = notebookUrl;
-      downloadLink.download = `${selectedProject.name || 'project'}.ipynb`;
+      downloadLink.download = notebookFileName;
       document.body.appendChild(downloadLink);
       downloadLink.click();
       document.body.removeChild(downloadLink);
 
-      setRuntimeLogs(prev => [...prev, '📥 Notebook دانلود شد']);
-
-      // Open Colab upload page
       setTimeout(() => {
         window.open('https://colab.research.google.com/#create=true', '_blank');
         setRuntimeLogs(prev => [...prev,

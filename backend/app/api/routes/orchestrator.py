@@ -703,6 +703,64 @@ async def get_file_content(project_id: str, file_path: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class SaveFileRequest(BaseModel):
+    """درخواست ذخیره فایل"""
+    project_id: str
+    file_name: str
+    content: str
+    folder: str = "generated"
+
+
+@router.post("/save-file")
+async def save_generated_file(request: SaveFileRequest):
+    """
+    ذخیره یک فایل در پروژه (برای Colab notebook و غیره)
+
+    Returns:
+        - success: آیا ذخیره شد
+        - github_url: آدرس فایل در GitHub
+        - github_path: مسیر فایل
+        - owner: صاحب repo
+        - repo: نام repo
+    """
+    try:
+        github_storage = get_github_storage()
+        if not github_storage or not github_storage.token:
+            raise HTTPException(status_code=400, detail="GitHub storage not configured")
+
+        # ذخیره فایل
+        file_path = f"projects/{request.project_id}/{request.folder}/{request.file_name}"
+        result = await github_storage.save_project_file(
+            request.project_id,
+            request.content.encode('utf-8'),
+            request.file_name,
+            request.folder
+        )
+
+        if result.get("success"):
+            # استخراج اطلاعات repo
+            repo_info = github_storage.repo.split('/')
+            owner = repo_info[0] if len(repo_info) > 1 else github_storage.repo
+            repo = repo_info[1] if len(repo_info) > 1 else github_storage.repo
+
+            return {
+                "success": True,
+                "github_url": result.get("url"),
+                "github_path": file_path,
+                "owner": owner,
+                "repo": repo,
+                "file_name": request.file_name
+            }
+        else:
+            return {"success": False, "error": result.get("error", "Unknown error")}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error saving file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/download-project/{project_id}")
 async def download_project(project_id: str):
     """
