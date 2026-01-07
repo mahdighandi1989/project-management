@@ -206,6 +206,49 @@ async def get_project_diagram(project_id: str, diagram_type: str = "flowchart"):
 # قالب‌ها
 # =====================================
 
+# =====================================
+# 🔄 سینک هوشمند
+# =====================================
+
+@router.post("/sync/github")
+async def smart_sync_from_github():
+    """سینک هوشمند از GitHub - بارگذاری پروژه‌های جدید و تشخیص تکراری‌ها"""
+    service = get_project_service()
+    return await service.smart_sync_from_github()
+
+
+@router.get("/duplicates")
+async def detect_duplicate_projects():
+    """شناسایی پروژه‌های تکراری/مشابه"""
+    service = get_project_service()
+    return service.detect_duplicates()
+
+
+@router.post("/merge")
+async def merge_projects(keep_id: str, delete_id: str):
+    """
+    ادغام دو پروژه
+    - keep_id: پروژه‌ای که نگه داشته میشه
+    - delete_id: پروژه‌ای که حذف میشه (داده‌هاش منتقل میشه)
+    """
+    service = get_project_service()
+    result = service.merge_projects(keep_id, delete_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    return result
+
+
+@router.get("/active")
+async def get_active_project():
+    """تشخیص پروژه فعال (آخرین پروژه بروزرسانی شده)"""
+    service = get_project_service()
+    return service.get_active_project()
+
+
+# =====================================
+# قالب‌ها
+# =====================================
+
 @router.get("/templates/types")
 async def get_project_types():
     """لیست انواع پروژه"""
