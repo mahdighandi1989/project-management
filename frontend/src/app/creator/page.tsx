@@ -14,11 +14,26 @@ interface Project {
   created_at?: string;
 }
 
+interface AIModel {
+  id: string;
+  name: string;
+  provider: string;
+  capabilities: string[];
+  is_available: boolean;
+  priority?: number;
+  strengths?: string[];
+}
+
 export default function CreatorPage() {
   // State
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
+
+  // AI Models
+  const [models, setModels] = useState<AIModel[]>([]);
+  const [selectedModel, setSelectedModel] = useState<string>('auto');
+  const [modelsLoading, setModelsLoading] = useState(false);
 
   // Create project
   const [newProjectName, setNewProjectName] = useState('');
@@ -36,9 +51,13 @@ export default function CreatorPage() {
   const [diagrams, setDiagrams] = useState<any[]>([]);
   const [selectedDiagram, setSelectedDiagram] = useState<string>('');
 
-  // Load projects on mount
+  // Settings panel
+  const [showSettings, setShowSettings] = useState(false);
+
+  // Load on mount
   useEffect(() => {
     loadProjects();
+    loadModels();
     checkRenderStatus();
   }, []);
 
@@ -46,6 +65,27 @@ export default function CreatorPage() {
   const showMessage = (type: 'success' | 'error' | 'info', text: string) => {
     setMessage({ type, text });
     setTimeout(() => setMessage(null), 5000);
+  };
+
+  // Load AI models
+  const loadModels = async () => {
+    setModelsLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/models/available`);
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        setModels(data);
+        // Auto-select best model
+        const best = data.find((m: AIModel) => m.is_available && m.priority === 1);
+        if (best) {
+          setSelectedModel(best.id);
+        }
+      }
+    } catch (error) {
+      console.error('Error loading models:', error);
+    } finally {
+      setModelsLoading(false);
+    }
   };
 
   // Load all projects
@@ -61,6 +101,29 @@ export default function CreatorPage() {
     }
   };
 
+  // Get best model for task type
+  const getBestModelForTask = (taskType: string): string => {
+    const availableModels = models.filter(m => m.is_available);
+
+    if (taskType === 'code') {
+      const codeModel = availableModels.find(m =>
+        m.capabilities?.includes('code') || m.id.includes('claude') || m.id.includes('gpt-4')
+      );
+      return codeModel?.id || selectedModel;
+    }
+
+    if (taskType === 'creative') {
+      const creativeModel = availableModels.find(m =>
+        m.capabilities?.includes('creative') || m.id.includes('claude')
+      );
+      return creativeModel?.id || selectedModel;
+    }
+
+    // Default: highest priority available
+    const sorted = availableModels.sort((a, b) => (a.priority || 99) - (b.priority || 99));
+    return sorted[0]?.id || selectedModel;
+  };
+
   // Create new project
   const createProject = async () => {
     if (!newProjectName.trim()) {
@@ -69,6 +132,8 @@ export default function CreatorPage() {
     }
 
     setLoading(true);
+    const modelToUse = selectedModel === 'auto' ? getBestModelForTask('code') : selectedModel;
+
     try {
       const res = await fetch(`${API_BASE}/api/projects`, {
         method: 'POST',
@@ -77,6 +142,7 @@ export default function CreatorPage() {
           name: newProjectName,
           description: newProjectDesc || `پروژه ${newProjectName}`,
           project_type: 'web',
+          model: modelToUse,
         }),
       });
       const data = await res.json();
@@ -149,6 +215,7 @@ export default function CreatorPage() {
       const res = await fetch(`${API_BASE}/api/unified/projects/${project.id}/deploy/render`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
       });
       const data = await res.json();
       if (data.success) {
@@ -224,16 +291,43 @@ export default function CreatorPage() {
     return names[type] || type;
   };
 
+  const getProviderColor = (provider: string) => {
+    const colors: Record<string, string> = {
+      'anthropic': 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400',
+      'openai': 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400',
+      'google': 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
+      'deepseek': 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400',
+    };
+    return colors[provider?.toLowerCase()] || 'bg-gray-100 text-gray-700';
+  };
+
+  const availableModels = models.filter(m => m.is_available);
+  const unavailableModels = models.filter(m => !m.is_available);
+
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900 p-6" dir="rtl">
       {/* Header */}
       <div className="max-w-6xl mx-auto mb-8">
-        <h1 className="text-3xl font-bold text-gray-800 dark:text-white mb-2">
-          🚀 موتور خالق هوشمند
-        </h1>
-        <p className="text-gray-600 dark:text-gray-400">
-          پروژه بساز، یک کلیک دیپلوی کن، نمودارها رو ببین
-        </p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-800 dark:text-white mb-2">
+              🚀 موتور خالق هوشمند
+            </h1>
+            <p className="text-gray-600 dark:text-gray-400">
+              پروژه بساز، یک کلیک دیپلوی کن، نمودارها رو ببین
+            </p>
+          </div>
+          <button
+            onClick={() => setShowSettings(!showSettings)}
+            className={`p-3 rounded-xl transition ${
+              showSettings
+                ? 'bg-blue-500 text-white'
+                : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-100'
+            }`}
+          >
+            ⚙️ تنظیمات
+          </button>
+        </div>
       </div>
 
       {/* Message Toast */}
@@ -244,6 +338,97 @@ export default function CreatorPage() {
           'bg-blue-500 text-white'
         }`}>
           {message.text}
+        </div>
+      )}
+
+      {/* Settings Panel */}
+      {showSettings && (
+        <div className="max-w-6xl mx-auto mb-6">
+          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-6">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-xl font-bold">⚙️ تنظیمات و مدل‌های AI</h2>
+              <button
+                onClick={loadModels}
+                disabled={modelsLoading}
+                className="px-4 py-2 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-lg text-sm hover:bg-blue-200"
+              >
+                {modelsLoading ? '⏳' : '🔄 بروزرسانی مدل‌ها'}
+              </button>
+            </div>
+
+            {/* Available Models */}
+            <div className="mb-6">
+              <h3 className="font-bold mb-3 text-green-600 dark:text-green-400">
+                ✅ مدل‌های فعال ({availableModels.length})
+              </h3>
+              {availableModels.length === 0 ? (
+                <p className="text-gray-500 text-sm">هیچ مدلی فعال نیست. به تنظیمات بروید و API Key وارد کنید.</p>
+              ) : (
+                <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {availableModels.map((model) => (
+                    <div
+                      key={model.id}
+                      onClick={() => setSelectedModel(model.id)}
+                      className={`p-4 rounded-xl cursor-pointer transition border-2 ${
+                        selectedModel === model.id
+                          ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
+                          : 'border-transparent bg-gray-50 dark:bg-gray-700 hover:bg-gray-100'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-medium">{model.name}</span>
+                        {selectedModel === model.id && <span className="text-blue-500">✓</span>}
+                      </div>
+                      <span className={`text-xs px-2 py-1 rounded ${getProviderColor(model.provider)}`}>
+                        {model.provider}
+                      </span>
+                      {model.capabilities && model.capabilities.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-2">
+                          {model.capabilities.slice(0, 3).map((cap) => (
+                            <span key={cap} className="text-xs bg-gray-200 dark:bg-gray-600 px-2 py-0.5 rounded">
+                              {cap}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Unavailable Models */}
+            {unavailableModels.length > 0 && (
+              <div>
+                <h3 className="font-bold mb-3 text-gray-400">
+                  ❌ مدل‌های غیرفعال ({unavailableModels.length})
+                </h3>
+                <div className="flex flex-wrap gap-2">
+                  {unavailableModels.map((model) => (
+                    <span
+                      key={model.id}
+                      className="text-sm px-3 py-1 bg-gray-100 dark:bg-gray-700 text-gray-400 rounded-lg"
+                    >
+                      {model.name}
+                    </span>
+                  ))}
+                </div>
+                <p className="text-xs text-gray-400 mt-2">
+                  برای فعال‌سازی، به صفحه تنظیمات بروید و API Key‌ها را وارد کنید
+                </p>
+              </div>
+            )}
+
+            {/* Link to Settings */}
+            <div className="mt-6 pt-4 border-t dark:border-gray-700">
+              <a
+                href="/settings"
+                className="inline-flex items-center gap-2 px-4 py-2 bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-gray-200 transition"
+              >
+                ⚙️ رفتن به تنظیمات کامل
+              </a>
+            </div>
+          </div>
         </div>
       )}
 
@@ -456,13 +641,44 @@ export default function CreatorPage() {
                 />
               </div>
 
+              {/* Model Selection */}
+              <div>
+                <label className="block text-sm font-medium mb-2 text-gray-700 dark:text-gray-300">
+                  🤖 مدل AI
+                </label>
+                <select
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.target.value)}
+                  className="w-full p-3 border dark:border-gray-600 rounded-xl dark:bg-gray-700 focus:ring-2 focus:ring-blue-500 outline-none"
+                >
+                  <option value="auto">🎯 انتخاب هوشمند (پیشنهادی)</option>
+                  {availableModels.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.name} ({model.provider})
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-gray-500 mt-1">
+                  {selectedModel === 'auto'
+                    ? '✨ بهترین مدل برای کار شما انتخاب می‌شود'
+                    : `مدل انتخابی: ${models.find(m => m.id === selectedModel)?.name}`
+                  }
+                </p>
+              </div>
+
               <button
                 onClick={createProject}
-                disabled={loading || !newProjectName.trim()}
+                disabled={loading || !newProjectName.trim() || availableModels.length === 0}
                 className="w-full py-3 bg-gradient-to-r from-green-500 to-emerald-500 text-white rounded-xl font-bold hover:from-green-600 hover:to-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed transition"
               >
                 {loading ? '⏳ در حال ساخت...' : '🎉 ساخت پروژه'}
               </button>
+
+              {availableModels.length === 0 && (
+                <p className="text-sm text-orange-500 text-center">
+                  ⚠️ ابتدا یک مدل AI فعال کنید
+                </p>
+              )}
             </div>
           </div>
 
@@ -534,6 +750,23 @@ export default function CreatorPage() {
               </div>
             </div>
           </div>
+
+          {/* Active Model Indicator */}
+          {availableModels.length > 0 && (
+            <div className="bg-white dark:bg-gray-800 rounded-2xl shadow p-4">
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-500">مدل فعال:</span>
+                <span className={`text-sm px-3 py-1 rounded-lg ${getProviderColor(
+                  models.find(m => m.id === selectedModel)?.provider || ''
+                )}`}>
+                  {selectedModel === 'auto'
+                    ? '🎯 هوشمند'
+                    : models.find(m => m.id === selectedModel)?.name || selectedModel
+                  }
+                </span>
+              </div>
+            </div>
+          )}
 
         </div>
       </div>

@@ -339,7 +339,7 @@ async def prepare_for_deploy(project_id: str):
 
 
 @router.post("/projects/{project_id}/deploy/render")
-async def deploy_to_render(project_id: str, request: DeployRequest):
+async def deploy_to_render(project_id: str, request: DeployRequest = DeployRequest()):
     """Deploy یک‌کلیکه به Render"""
     storage = get_unified_storage()
     manager = get_deploy_manager()
