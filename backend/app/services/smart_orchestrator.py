@@ -1234,19 +1234,77 @@ class ProjectEngineIntegrator:
         try:
             import re
 
-            # الگوی استخراج فایل‌ها
+            logger.info(f"🔍 Analyzing AI output for file extraction, length: {len(ai_output)}")
+            logger.info(f"🔍 AI output preview: {ai_output[:500]}...")
+
+            matches = []
+
+            # الگوی 1: فرمت استاندارد با backticks
             file_pattern = r'---FILE_PATH---\s*\n(.+?)\n---FILE_CONTENT---\s*\n```\w*\n(.*?)```\s*\n---END_FILE---'
             matches = re.findall(file_pattern, ai_output, re.DOTALL)
+            if matches:
+                logger.info(f"✅ Pattern 1 (standard) matched: {len(matches)} files")
 
+            # الگوی 2: بدون backticks
             if not matches:
-                # الگوی جایگزین برای فرمت‌های دیگر
+                no_backtick_pattern = r'---FILE_PATH---\s*\n(.+?)\n---FILE_CONTENT---\s*\n(.*?)---END_FILE---'
+                matches = re.findall(no_backtick_pattern, ai_output, re.DOTALL)
+                if matches:
+                    logger.info(f"✅ Pattern 2 (no backticks) matched: {len(matches)} files")
+
+            # الگوی 3: با فاصله‌های مختلف و backticks
+            if not matches:
+                flexible_pattern = r'---FILE_PATH---\s*[\n\r]+\s*(.+?)\s*[\n\r]+---FILE_CONTENT---\s*[\n\r]+```[\w]*[\n\r]+(.*?)```\s*[\n\r]+---END_FILE---'
+                matches = re.findall(flexible_pattern, ai_output, re.DOTALL)
+                if matches:
+                    logger.info(f"✅ Pattern 3 (flexible) matched: {len(matches)} files")
+
+            # الگوی 4: بدون END_FILE
+            if not matches:
+                no_end_pattern = r'---FILE_PATH---\s*[\n\r]+\s*(.+?)\s*[\n\r]+---FILE_CONTENT---\s*[\n\r]+```[\w]*[\n\r]+(.*?)```'
+                matches = re.findall(no_end_pattern, ai_output, re.DOTALL)
+                if matches:
+                    logger.info(f"✅ Pattern 4 (no END_FILE) matched: {len(matches)} files")
+
+            # الگوی 5: فرمت فایل: path با backticks
+            if not matches:
                 alt_pattern = r'(?:فایل|File):\s*[`\'"]?([^\s`\'"]+)[`\'"]?\s*\n```\w*\n(.*?)```'
                 matches = re.findall(alt_pattern, ai_output, re.DOTALL)
+                if matches:
+                    logger.info(f"✅ Pattern 5 (File: format) matched: {len(matches)} files")
+
+            # الگوی 6: path/to/file.py: با backticks
+            if not matches:
+                simple_pattern = r'([a-zA-Z_][\w/]*\.\w+)\s*:\s*\n```\w*\n(.*?)```'
+                matches = re.findall(simple_pattern, ai_output, re.DOTALL)
+                if matches:
+                    logger.info(f"✅ Pattern 6 (path:) matched: {len(matches)} files")
+
+            # الگوی 7: هر بلاک کد با کامنت مسیر فایل
+            if not matches:
+                comment_pattern = r'#\s*(?:فایل|file|path):\s*([^\n]+)\n(.*?)(?=\n#\s*(?:فایل|file|path)|$)'
+                matches = re.findall(comment_pattern, ai_output, re.DOTALL | re.IGNORECASE)
+                if matches:
+                    logger.info(f"✅ Pattern 7 (comment path) matched: {len(matches)} files")
+
+            # الگوی 8: فقط نام فایل .py و کد بعدش
+            if not matches:
+                very_simple = r'([a-zA-Z_][\w/]*\.py)\s*\n```python\n(.*?)```'
+                matches = re.findall(very_simple, ai_output, re.DOTALL)
+                if matches:
+                    logger.info(f"✅ Pattern 8 (simple .py) matched: {len(matches)} files")
 
             if not matches:
-                # الگوی ساده‌تر
-                simple_pattern = r'(\w+(?:/\w+)*\.\w+)\s*:\s*\n```\w*\n(.*?)```'
-                matches = re.findall(simple_pattern, ai_output, re.DOTALL)
+                logger.warning(f"⚠️ No patterns matched! Looking for FILE_PATH markers...")
+                # چک کن که آیا اصلاً این markers وجود دارند
+                if '---FILE_PATH---' in ai_output:
+                    logger.warning(f"⚠️ FILE_PATH marker found but no match. Output snippet around it:")
+                    idx = ai_output.find('---FILE_PATH---')
+                    logger.warning(f"⚠️ {ai_output[idx:idx+300]}")
+                else:
+                    logger.warning(f"⚠️ No FILE_PATH markers found in output")
+
+            logger.info(f"🔍 Total files found to save: {len(matches)}")
 
             for file_path, file_content in matches:
                 file_path = file_path.strip()
