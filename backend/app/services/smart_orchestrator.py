@@ -990,52 +990,112 @@ class ProjectEngineIntegrator:
             logger.error(f"Error selecting model: {e}")
             return {"success": False, "error": f"خطا در انتخاب مدل: {str(e)}"}
 
-        analysis_prompt = f"""درخواست کاربر را تحلیل کن و اطلاعات پروژه استخراج کن:
+        analysis_prompt = f"""تو یک معمار نرم‌افزار حرفه‌ای هستی. درخواست کاربر را تحلیل کن و یک طرح کامل پروژه ارائه بده.
 
-درخواست: {user_request}
+🎯 درخواست کاربر:
+{user_request}
 
-خروجی JSON:
+📋 وظیفه تو:
+1. درخواست را کامل تحلیل کن
+2. ساختار پروژه را طراحی کن
+3. فایل‌های مورد نیاز را مشخص کن
+
+⚠️ مهم: فقط و فقط JSON برگردان. هیچ توضیح اضافه‌ای ننویس.
+
+خروجی (فقط JSON خالص):
 {{
-    "project_name": "نام پیشنهادی",
-    "project_type": "web_app/api_service/mobile_app/ml_project/data_pipeline/custom",
-    "description": "توضیح کامل",
-    "goal": "هدف اصلی",
-    "complexity": "simple/medium/complex",
-    "technologies": ["تکنولوژی 1", "تکنولوژی 2"],
+    "project_name": "نام پروژه (انگلیسی، snake_case)",
+    "project_type": "web_app یا api_service یا mobile_app یا ml_project یا data_pipeline یا custom",
+    "description": "توضیح کامل پروژه به فارسی",
+    "goal": "هدف اصلی پروژه",
+    "complexity": "simple یا medium یا complex",
+    "technologies": ["Python", "FastAPI", "..."],
     "features": ["قابلیت 1", "قابلیت 2"],
     "phases": [
-        {{"name": "نام فاز", "description": "توضیح", "steps": ["گام 1", "گام 2"]}}
+        {{
+            "name": "نام فاز",
+            "description": "توضیح فاز",
+            "steps": ["گام 1", "گام 2"],
+            "files_to_create": ["path/to/file1.py", "path/to/file2.py"]
+        }}
     ],
-    "estimated_files": ["فایل 1", "فایل 2"],
-    "risks": ["ریسک 1"],
-    "success_criteria": ["معیار 1"]
-}}"""
+    "estimated_files": [
+        "main.py",
+        "config/settings.py",
+        "config/__init__.py",
+        "models/__init__.py",
+        "models/user.py",
+        "services/__init__.py",
+        "requirements.txt"
+    ],
+    "directory_structure": [
+        "config",
+        "models",
+        "services",
+        "tests"
+    ],
+    "risks": ["ریسک احتمالی"],
+    "success_criteria": ["معیار موفقیت"]
+}}
+
+🔴 فقط JSON برگردان. بدون markdown، بدون توضیح، بدون ```."""
 
         try:
-            # استفاده از ai_manager از model_selector به جای مسیر پیچیده creator_engine
-            logger.info(f"Calling AI generate with model: {analyzer_id}")
-            response = await self.model_selector.ai_manager.generate(
-                model_id=analyzer_id,
-                messages=[Message(role="user", content=analysis_prompt)],
-                max_tokens=4000  # افزایش برای پاسخ‌های طولانی‌تر
-            )
-            logger.info(f"AI response received, length: {len(response.content) if response.content else 0}, error: {response.error}")
+            # 🔄 تلاش با حداکثر 3 مدل مختلف
+            tried_models = []
+            analysis = None
+            last_error = None
 
-            if response.error:
-                return {"success": False, "error": f"خطا از مدل AI: {response.error}"}
+            for attempt in range(3):
+                # انتخاب مدل (در تلاش‌های بعدی، مدل‌های قبلی exclude میشن)
+                current_model, _ = self.model_selector.select_best_model(
+                    TaskCategory.ANALYSIS,
+                    exclude_models=tried_models
+                )
+                tried_models.append(current_model)
 
-            if not response.content:
-                return {"success": False, "error": "پاسخی از مدل AI دریافت نشد"}
+                logger.info(f"🤖 Attempt {attempt + 1}: Using model {current_model}")
 
-            # لاگ کامل پاسخ برای debug
-            logger.info(f"Full AI response: {response.content}")
+                try:
+                    response = await self.model_selector.ai_manager.generate(
+                        model_id=current_model,
+                        messages=[Message(role="user", content=analysis_prompt)],
+                        max_tokens=4000
+                    )
 
-            analysis = self._extract_json(response.content)
-            logger.info(f"JSON extraction result: {bool(analysis)}, type: {type(analysis)}")
+                    if response.error:
+                        logger.warning(f"Model {current_model} error: {response.error}")
+                        last_error = response.error
+                        continue
+
+                    if not response.content:
+                        logger.warning(f"Model {current_model} returned empty content")
+                        continue
+
+                    logger.info(f"AI response from {current_model}, length: {len(response.content)}")
+                    logger.debug(f"Full response: {response.content[:1000]}")
+
+                    # استخراج JSON با تابع بهبود یافته
+                    analysis = self._extract_json_robust(response.content)
+
+                    if analysis:
+                        logger.info(f"✅ JSON extracted successfully with model {current_model}")
+                        break
+                    else:
+                        logger.warning(f"❌ JSON extraction failed for model {current_model}")
+                        last_error = f"فرمت پاسخ {current_model} قابل پردازش نبود"
+
+                except Exception as model_error:
+                    logger.error(f"Error with model {current_model}: {model_error}")
+                    last_error = str(model_error)
+                    continue
 
             if not analysis:
-                # اگر JSON استخراج نشد، خود پاسخ را نشان بده
-                return {"success": False, "error": f"خطا در استخراج JSON از پاسخ AI. پاسخ دریافتی: {response.content[:500]}"}
+                return {
+                    "success": False,
+                    "error": f"پس از 3 تلاش با مدل‌های مختلف، JSON استخراج نشد. آخرین خطا: {last_error}",
+                    "tried_models": tried_models
+                }
 
             # ایجاد پروژه
             project_result = self.project_service.create_project(
@@ -1079,6 +1139,7 @@ class ProjectEngineIntegrator:
     ) -> Dict:
         """
         اجرای وظیفه با نظارت و بازخورد
+        برای debugging: فایل‌ها را واقعاً اصلاح و ذخیره می‌کند
         """
         project_data = self.project_service.get_project(project_id)
         if not project_data.get("success"):
@@ -1090,17 +1151,59 @@ class ProjectEngineIntegrator:
         # انتخاب مدل
         model_id, confidence = self.model_selector.select_best_model(task_category)
 
+        # 🆕 برای debugging، پرامپت خاص بساز
+        if task_category == TaskCategory.DEBUGGING:
+            enhanced_prompt = f"""🔧 شما یک متخصص رفع باگ Python هستید.
+
+📋 گزارش خطا:
+{task_description}
+
+📦 پروژه: {project.get('name', 'نامشخص')}
+🎯 هدف پروژه: {project_goal}
+
+🛠️ وظیفه شما:
+1. علت خطا را تحلیل کنید
+2. فایل‌های نیاز به اصلاح را مشخص کنید
+3. کد اصلاح شده کامل را ارائه دهید
+
+⚠️ فرمت پاسخ - دقیقاً به این شکل:
+
+---FILE_PATH---
+config/settings.py
+---FILE_CONTENT---
+```python
+# کد کامل فایل اصلاح شده
+# باید قابل اجرا باشد
+```
+---END_FILE---
+
+📌 نکات مهم:
+- برای هر فایل، این ساختار را تکرار کنید
+- کد کامل فایل را بدهید، نه فقط بخش تغییر یافته
+- از import های صحیح استفاده کنید
+- مطمئن شوید فایل __init__.py برای پکیج‌ها وجود دارد
+
+در انتها یک خط توضیح کوتاه از تغییرات بدهید."""
+            task_to_send = enhanced_prompt
+        else:
+            task_to_send = task_description
+
         # اجرای وظیفه
         try:
             # استفاده از ai_manager از model_selector
             response = await self.model_selector.ai_manager.generate(
                 model_id=model_id,
-                messages=[Message(role="user", content=task_description)],
-                max_tokens=4000
+                messages=[Message(role="user", content=task_to_send)],
+                max_tokens=8000 if task_category == TaskCategory.DEBUGGING else 4000
             )
 
             if response.content and not response.error:
                 output = response.content
+
+                # 🆕 برای debugging، فایل‌ها را استخراج و ذخیره کن
+                saved_files = []
+                if task_category == TaskCategory.DEBUGGING:
+                    saved_files = await self._extract_and_save_debug_files(project_id, output)
 
                 # ارزیابی توسط ناظر
                 evaluation = await self.supervisor.evaluate_output(
@@ -1135,7 +1238,8 @@ class ProjectEngineIntegrator:
                         "suggestions": evaluation.suggestions
                     },
                     "deviation": deviation,
-                    "needs_revision": needs_revision
+                    "needs_revision": needs_revision,
+                    "saved_files": saved_files  # 🆕 فایل‌های ذخیره شده
                 }
 
                 # ذخیره مکالمه
@@ -1179,6 +1283,11 @@ class ProjectEngineIntegrator:
                         result["revised_output"] = revised_response.content
                         result["revised_by"] = alt_model_id
 
+                        # 🆕 برای debugging، فایل‌های بازنگری شده را هم ذخیره کن
+                        if task_category == TaskCategory.DEBUGGING:
+                            revised_files = await self._extract_and_save_debug_files(project_id, revised_response.content)
+                            result["saved_files"].extend(revised_files)
+
                 return result
 
         except Exception as e:
@@ -1186,6 +1295,142 @@ class ProjectEngineIntegrator:
             return {"success": False, "error": str(e)}
 
         return {"success": False, "error": "خطا در اجرا"}
+
+    async def _extract_and_save_debug_files(self, project_id: str, ai_output: str) -> List[Dict]:
+        """
+        استخراج فایل‌های اصلاح شده از خروجی AI و ذخیره در GitHub
+        """
+        saved_files = []
+
+        try:
+            import re
+
+            logger.info(f"🔍 Analyzing AI output for file extraction, length: {len(ai_output)}")
+            logger.info(f"🔍 AI output preview: {ai_output[:500]}...")
+
+            matches = []
+
+            # الگوی 1: فرمت استاندارد با backticks
+            file_pattern = r'---FILE_PATH---\s*\n(.+?)\n---FILE_CONTENT---\s*\n```\w*\n(.*?)```\s*\n---END_FILE---'
+            matches = re.findall(file_pattern, ai_output, re.DOTALL)
+            if matches:
+                logger.info(f"✅ Pattern 1 (standard) matched: {len(matches)} files")
+
+            # الگوی 2: بدون backticks
+            if not matches:
+                no_backtick_pattern = r'---FILE_PATH---\s*\n(.+?)\n---FILE_CONTENT---\s*\n(.*?)---END_FILE---'
+                matches = re.findall(no_backtick_pattern, ai_output, re.DOTALL)
+                if matches:
+                    logger.info(f"✅ Pattern 2 (no backticks) matched: {len(matches)} files")
+
+            # الگوی 3: با فاصله‌های مختلف و backticks
+            if not matches:
+                flexible_pattern = r'---FILE_PATH---\s*[\n\r]+\s*(.+?)\s*[\n\r]+---FILE_CONTENT---\s*[\n\r]+```[\w]*[\n\r]+(.*?)```\s*[\n\r]+---END_FILE---'
+                matches = re.findall(flexible_pattern, ai_output, re.DOTALL)
+                if matches:
+                    logger.info(f"✅ Pattern 3 (flexible) matched: {len(matches)} files")
+
+            # الگوی 4: بدون END_FILE
+            if not matches:
+                no_end_pattern = r'---FILE_PATH---\s*[\n\r]+\s*(.+?)\s*[\n\r]+---FILE_CONTENT---\s*[\n\r]+```[\w]*[\n\r]+(.*?)```'
+                matches = re.findall(no_end_pattern, ai_output, re.DOTALL)
+                if matches:
+                    logger.info(f"✅ Pattern 4 (no END_FILE) matched: {len(matches)} files")
+
+            # الگوی 5: فرمت فایل: path با backticks
+            if not matches:
+                alt_pattern = r'(?:فایل|File):\s*[`\'"]?([^\s`\'"]+)[`\'"]?\s*\n```\w*\n(.*?)```'
+                matches = re.findall(alt_pattern, ai_output, re.DOTALL)
+                if matches:
+                    logger.info(f"✅ Pattern 5 (File: format) matched: {len(matches)} files")
+
+            # الگوی 6: path/to/file.py: با backticks
+            if not matches:
+                simple_pattern = r'([a-zA-Z_][\w/]*\.\w+)\s*:\s*\n```\w*\n(.*?)```'
+                matches = re.findall(simple_pattern, ai_output, re.DOTALL)
+                if matches:
+                    logger.info(f"✅ Pattern 6 (path:) matched: {len(matches)} files")
+
+            # الگوی 7: هر بلاک کد با کامنت مسیر فایل
+            if not matches:
+                comment_pattern = r'#\s*(?:فایل|file|path):\s*([^\n]+)\n(.*?)(?=\n#\s*(?:فایل|file|path)|$)'
+                matches = re.findall(comment_pattern, ai_output, re.DOTALL | re.IGNORECASE)
+                if matches:
+                    logger.info(f"✅ Pattern 7 (comment path) matched: {len(matches)} files")
+
+            # الگوی 8: فقط نام فایل .py و کد بعدش
+            if not matches:
+                very_simple = r'([a-zA-Z_][\w/]*\.py)\s*\n```python\n(.*?)```'
+                matches = re.findall(very_simple, ai_output, re.DOTALL)
+                if matches:
+                    logger.info(f"✅ Pattern 8 (simple .py) matched: {len(matches)} files")
+
+            if not matches:
+                logger.warning(f"⚠️ No patterns matched! Looking for FILE_PATH markers...")
+                # چک کن که آیا اصلاً این markers وجود دارند
+                if '---FILE_PATH---' in ai_output:
+                    logger.warning(f"⚠️ FILE_PATH marker found but no match. Output snippet around it:")
+                    idx = ai_output.find('---FILE_PATH---')
+                    logger.warning(f"⚠️ {ai_output[idx:idx+300]}")
+                else:
+                    logger.warning(f"⚠️ No FILE_PATH markers found in output")
+
+            logger.info(f"🔍 Total files found to save: {len(matches)}")
+
+            for file_path, file_content in matches:
+                file_path = file_path.strip()
+                file_content = file_content.strip()
+
+                if not file_path or not file_content:
+                    continue
+
+                # ذخیره در GitHub
+                if self.github_storage:
+                    try:
+                        content_bytes = file_content.encode('utf-8')
+                        gh_result = await self.github_storage.save_project_file(
+                            project_id,
+                            content_bytes,
+                            file_path,
+                            "generated"
+                        )
+
+                        if gh_result.get("success"):
+                            saved_files.append({
+                                "file": file_path,
+                                "status": "fixed",
+                                "github_saved": True,
+                                "size": len(content_bytes)
+                            })
+                            logger.info(f"✅ Bug fix saved: {file_path}")
+
+                            # اضافه به کش
+                            self._add_file_to_cache(project_id, {
+                                "path": f"generated/{file_path}",
+                                "name": file_path,
+                                "folder": "generated",
+                                "size": len(content_bytes)
+                            })
+                        else:
+                            saved_files.append({
+                                "file": file_path,
+                                "status": "error",
+                                "github_saved": False,
+                                "error": gh_result.get("error", "Unknown error")
+                            })
+                    except Exception as e:
+                        logger.error(f"Error saving debug file {file_path}: {e}")
+                        saved_files.append({
+                            "file": file_path,
+                            "status": "error",
+                            "github_saved": False,
+                            "error": str(e)
+                        })
+
+        except Exception as e:
+            logger.error(f"Error extracting debug files: {e}")
+
+        return saved_files
 
     async def analyze_project_state(self, project_id: str, force_refresh: bool = False) -> Dict:
         """
@@ -1523,15 +1768,51 @@ class ProjectEngineIntegrator:
             workflow["progress"] = int((idx / total_files) * 100)
 
             try:
-                task_description = f"""فایل {file_path} را برای پروژه '{analysis.get('project_name', 'project')}' بنویس.
+                # تعیین نوع فایل و زبان برنامه‌نویسی
+                file_ext = file_path.split('.')[-1] if '.' in file_path else ''
+                lang_map = {
+                    'py': 'Python',
+                    'js': 'JavaScript',
+                    'ts': 'TypeScript',
+                    'tsx': 'TypeScript React',
+                    'jsx': 'JavaScript React',
+                    'json': 'JSON',
+                    'yaml': 'YAML',
+                    'yml': 'YAML',
+                    'md': 'Markdown',
+                    'txt': 'Text',
+                    'html': 'HTML',
+                    'css': 'CSS',
+                    'sql': 'SQL',
+                }
+                file_lang = lang_map.get(file_ext, 'Code')
 
-توضیحات پروژه: {analysis.get('description', '')}
+                # ساخت لیست فایل‌های دیگر برای context
+                other_files = [f for f in estimated_files if f != file_path][:10]
+                other_files_str = '\n'.join(f"- {f}" for f in other_files) if other_files else 'هیچ فایل دیگری نیست'
 
-هدف: {analysis.get('goal', '')}
+                task_description = f"""تو یک برنامه‌نویس حرفه‌ای هستی. فایل {file_path} را برای پروژه بنویس.
 
-تکنولوژی‌ها: {', '.join(analysis.get('technologies', []))}
+📦 پروژه: {analysis.get('project_name', 'project')}
+📝 توضیحات: {analysis.get('description', '')}
+🎯 هدف: {analysis.get('goal', '')}
+🛠️ تکنولوژی‌ها: {', '.join(analysis.get('technologies', []))}
 
-فقط کد را بنویس، بدون توضیح اضافی."""
+📂 فایل‌های دیگر پروژه:
+{other_files_str}
+
+📋 وظیفه تو:
+فایل {file_path} را با زبان {file_lang} بنویس.
+
+⚠️ قوانین مهم:
+1. فقط کد خالص بنویس - بدون توضیح، بدون markdown
+2. کد باید کامل و قابل اجرا باشه
+3. اگر فایل __init__.py هست، import های لازم رو بنویس
+4. اگر فایل config یا settings هست، متغیرهای محیطی با مقادیر پیش‌فرض بنویس
+5. اگر فایل requirements.txt یا package.json هست، وابستگی‌های لازم رو لیست کن
+6. از type hints و docstring های فارسی استفاده کن
+
+🔴 مهم: فقط کد را برگردان. بدون ``` و بدون توضیح اضافی."""
 
                 if use_competition:
                     # حالت رقابتی - چند مدل با هم رقابت می‌کنند
@@ -1683,85 +1964,124 @@ class ProjectEngineIntegrator:
             "results": results
         }
 
-    def _extract_json(self, text: str) -> Optional[Dict]:
-        """استخراج JSON از متن با چند روش مختلف"""
+    def _extract_json_robust(self, text: str) -> Optional[Dict]:
+        """
+        استخراج JSON از متن با روش‌های متعدد و قوی
+        این تابع برای مقابله با فرمت‌های مختلف پاسخ AI طراحی شده
+        """
         import re
 
         if not text:
             return None
 
-        logger.info(f"_extract_json called, input length: {len(text)}")
+        logger.info(f"🔍 _extract_json_robust called, input length: {len(text)}")
 
-        # روش 1: اول سعی کن مستقیم parse کنی
+        # روش 1: پارس مستقیم
         try:
-            return json.loads(text)
+            result = json.loads(text.strip())
+            logger.info("✅ Method 1: Direct parse succeeded")
+            return result
         except:
             pass
 
-        # روش 2: حذف همه backticks و کلمه json - روش ساده و مطمئن
-        cleaned = text.replace('```json', '').replace('```', '').replace('`', '')
-        cleaned = re.sub(r'\bjson\b', '', cleaned, flags=re.IGNORECASE)
+        # روش 2: حذف markdown code blocks
+        cleaned = text
+        patterns_to_remove = [
+            r'```json\s*\n?',
+            r'```javascript\s*\n?',
+            r'```\s*\n?',
+            r'`',
+        ]
+        for pattern in patterns_to_remove:
+            cleaned = re.sub(pattern, '', cleaned)
         cleaned = cleaned.strip()
 
-        logger.info(f"Cleaned text (first 200): {cleaned[:200] if len(cleaned) > 200 else cleaned}")
-
         try:
-            return json.loads(cleaned)
+            result = json.loads(cleaned)
+            logger.info("✅ Method 2: After removing markdown succeeded")
+            return result
         except:
             pass
 
-        # روش 3: پیدا کردن JSON با balanced braces
-        start = cleaned.find('{')
-        if start == -1:
-            logger.warning("No opening brace found")
-            return None
-
-        depth = 0
-        end = -1
-        in_string = False
-        escape_next = False
-
-        for i, char in enumerate(cleaned[start:], start):
-            if escape_next:
-                escape_next = False
-                continue
-            if char == '\\':
-                escape_next = True
-                continue
-            if char == '"' and not escape_next:
-                in_string = not in_string
-                continue
-            if in_string:
-                continue
-            if char == '{':
-                depth += 1
-            elif char == '}':
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-
-        if end > start:
-            json_str = cleaned[start:end]
+        # روش 3: پیدا کردن اولین { تا آخرین }
+        first_brace = cleaned.find('{')
+        last_brace = cleaned.rfind('}')
+        if first_brace != -1 and last_brace > first_brace:
+            json_str = cleaned[first_brace:last_brace + 1]
             try:
                 result = json.loads(json_str)
-                logger.info(f"JSON parsed OK with balanced braces!")
-                return result
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON decode error: {e}")
-
-        # روش 4: آخرین تلاش با rfind
-        end2 = cleaned.rfind('}') + 1
-        if end2 > start:
-            try:
-                result = json.loads(cleaned[start:end2])
-                logger.info(f"JSON parsed OK with rfind!")
+                logger.info("✅ Method 3: Brace extraction succeeded")
                 return result
             except:
                 pass
 
-        logger.error(f"All JSON extraction methods failed")
+        # روش 4: Balanced braces با state machine
+        if first_brace != -1:
+            depth = 0
+            end = -1
+            in_string = False
+            escape_next = False
+
+            for i, char in enumerate(cleaned[first_brace:], first_brace):
+                if escape_next:
+                    escape_next = False
+                    continue
+                if char == '\\':
+                    escape_next = True
+                    continue
+                if char == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if char == '{':
+                    depth += 1
+                elif char == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+
+            if end > first_brace:
+                json_str = cleaned[first_brace:end]
+                try:
+                    result = json.loads(json_str)
+                    logger.info("✅ Method 4: Balanced braces succeeded")
+                    return result
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Method 4 failed: {e}")
+
+        # روش 5: اصلاح مشکلات رایج JSON
+        if first_brace != -1 and last_brace > first_brace:
+            json_str = cleaned[first_brace:last_brace + 1]
+            json_str = re.sub(r',\s*}', '}', json_str)
+            json_str = re.sub(r',\s*]', ']', json_str)
+            try:
+                result = json.loads(json_str)
+                logger.info("✅ Method 5: After fixing common issues succeeded")
+                return result
+            except:
+                pass
+
+        # روش 6: استفاده از regex برای استخراج ساختار
+        json_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
+        matches = re.findall(json_pattern, cleaned, re.DOTALL)
+        for match in matches:
+            try:
+                result = json.loads(match)
+                if isinstance(result, dict) and len(result) > 2:
+                    logger.info("✅ Method 6: Regex extraction succeeded")
+                    return result
+            except:
+                continue
+
+        logger.error(f"❌ All JSON extraction methods failed")
+        logger.error(f"First 500 chars: {cleaned[:500]}")
         return None
+
+    def _extract_json(self, text: str) -> Optional[Dict]:
+        """استخراج JSON از متن - نسخه قدیمی برای سازگاری"""
+        return self._extract_json_robust(text)
 
 
 # =====================================

@@ -523,6 +523,263 @@ class ProjectService:
             return {"success": True, "message": "پروژه حذف شد"}
         return {"success": False, "error": "پروژه یافت نشد"}
 
+    # =====================================
+    # 🔄 سینک هوشمند و مدیریت پروژه‌ها
+    # =====================================
+
+    async def smart_sync_from_github(self) -> Dict:
+        """
+        سینک هوشمند از GitHub
+        - بارگذاری پروژه‌های جدید
+        - تشخیص پروژه‌های تکراری
+        - ادغام پروژه‌های مشابه
+        """
+        if not self.github_storage:
+            return {"success": False, "error": "GitHub storage متصل نیست"}
+
+        results = {
+            "loaded": [],
+            "skipped": [],
+            "duplicates": [],
+            "merged": [],
+            "errors": []
+        }
+
+        try:
+            # لیست پوشه‌های projects
+            folders = await self.github_storage.list_folder("projects")
+
+            for folder in folders:
+                if folder.type != "dir":
+                    continue
+
+                project_id = folder.name
+
+                # اگر قبلاً وجود دارد
+                if project_id in self.projects:
+                    results["skipped"].append({
+                        "id": project_id,
+                        "reason": "already_exists"
+                    })
+                    continue
+
+                # دریافت metadata
+                try:
+                    meta_result = await self.github_storage.get_file(
+                        f"projects/{project_id}/metadata.json"
+                    )
+
+                    if meta_result.get("success") and meta_result.get("content"):
+                        import base64
+                        content = base64.b64decode(meta_result["content"]).decode('utf-8')
+                        data = json.loads(content)
+
+                        # چک تکراری بودن بر اساس نام
+                        duplicate = self._find_duplicate_project(data.get("name", ""))
+                        if duplicate:
+                            results["duplicates"].append({
+                                "new_id": project_id,
+                                "existing_id": duplicate.project_id,
+                                "name": data.get("name")
+                            })
+                            continue
+
+                        # بارگذاری
+                        project = ProjectContext(**data)
+                        self.projects[project_id] = project
+                        self._save_project_local(project)
+                        results["loaded"].append({
+                            "id": project_id,
+                            "name": project.name
+                        })
+                except Exception as e:
+                    results["errors"].append({
+                        "id": project_id,
+                        "error": str(e)
+                    })
+
+            self._update_registry()
+
+        except Exception as e:
+            return {"success": False, "error": str(e), "results": results}
+
+        return {
+            "success": True,
+            "results": results,
+            "total_projects": len(self.projects)
+        }
+
+    def _find_duplicate_project(self, name: str) -> Optional[ProjectContext]:
+        """پیدا کردن پروژه تکراری بر اساس نام"""
+        if not name:
+            return None
+
+        name_lower = name.lower().strip()
+
+        for project in self.projects.values():
+            if project.name.lower().strip() == name_lower:
+                return project
+
+        return None
+
+    def detect_duplicates(self) -> Dict:
+        """
+        شناسایی پروژه‌های تکراری/مشابه
+        """
+        duplicates = []
+        checked = set()
+
+        projects_list = list(self.projects.values())
+
+        for i, p1 in enumerate(projects_list):
+            if p1.project_id in checked:
+                continue
+
+            for p2 in projects_list[i+1:]:
+                if p2.project_id in checked:
+                    continue
+
+                similarity = self._calculate_similarity(p1, p2)
+                if similarity > 0.7:  # بیش از 70% مشابه
+                    duplicates.append({
+                        "project1": {
+                            "id": p1.project_id,
+                            "name": p1.name,
+                            "created_at": p1.created_at
+                        },
+                        "project2": {
+                            "id": p2.project_id,
+                            "name": p2.name,
+                            "created_at": p2.created_at
+                        },
+                        "similarity": round(similarity * 100)
+                    })
+                    checked.add(p2.project_id)
+
+        return {
+            "success": True,
+            "duplicates": duplicates,
+            "count": len(duplicates)
+        }
+
+    def _calculate_similarity(self, p1: ProjectContext, p2: ProjectContext) -> float:
+        """محاسبه شباهت دو پروژه"""
+        score = 0.0
+        weights = {
+            "name": 0.4,
+            "description": 0.2,
+            "type": 0.2,
+            "goal": 0.2
+        }
+
+        # مقایسه نام
+        if p1.name.lower() == p2.name.lower():
+            score += weights["name"]
+        elif p1.name.lower() in p2.name.lower() or p2.name.lower() in p1.name.lower():
+            score += weights["name"] * 0.7
+
+        # مقایسه نوع
+        if p1.project_type == p2.project_type:
+            score += weights["type"]
+
+        # مقایسه توضیحات
+        if p1.description and p2.description:
+            common_words = set(p1.description.lower().split()) & set(p2.description.lower().split())
+            if len(common_words) > 5:
+                score += weights["description"]
+
+        # مقایسه هدف
+        if p1.goal and p2.goal:
+            if p1.goal.lower() == p2.goal.lower():
+                score += weights["goal"]
+
+        return score
+
+    def merge_projects(self, keep_id: str, delete_id: str) -> Dict:
+        """
+        ادغام دو پروژه - نگه‌داشتن یکی و حذف دیگری
+
+        Args:
+            keep_id: پروژه‌ای که نگه داشته میشود
+            delete_id: پروژه‌ای که حذف میشود (فایل‌هایش به پروژه اول منتقل میشن)
+        """
+        keep_project = self.projects.get(keep_id)
+        delete_project = self.projects.get(delete_id)
+
+        if not keep_project:
+            return {"success": False, "error": f"پروژه {keep_id} یافت نشد"}
+        if not delete_project:
+            return {"success": False, "error": f"پروژه {delete_id} یافت نشد"}
+
+        # انتقال فایل‌ها
+        existing_paths = {f.get("path") for f in keep_project.files}
+        for file in delete_project.files:
+            if file.get("path") not in existing_paths:
+                keep_project.files.append(file)
+
+        # انتقال مکالمات
+        keep_project.conversations.extend(delete_project.conversations)
+
+        # انتقال knowledge base
+        keep_project.knowledge_base.extend(delete_project.knowledge_base)
+
+        # ادغام امتیازات مدل‌ها
+        for model_id, scores in delete_project.model_scores.items():
+            if model_id not in keep_project.model_scores:
+                keep_project.model_scores[model_id] = scores
+            else:
+                keep_project.model_scores[model_id]["total"] += scores.get("total", 0)
+                keep_project.model_scores[model_id]["count"] += scores.get("count", 0)
+                if keep_project.model_scores[model_id]["count"] > 0:
+                    keep_project.model_scores[model_id]["average"] = round(
+                        keep_project.model_scores[model_id]["total"] /
+                        keep_project.model_scores[model_id]["count"]
+                    )
+
+        # بروزرسانی توضیحات اگه لازمه
+        if delete_project.description and not keep_project.description:
+            keep_project.description = delete_project.description
+
+        keep_project.updated_at = datetime.now().isoformat()
+
+        # ذخیره و حذف
+        self._save_project(keep_project)
+        self.delete_project(delete_id)
+
+        return {
+            "success": True,
+            "message": f"پروژه {delete_id} با {keep_id} ادغام شد",
+            "merged_files": len(delete_project.files),
+            "merged_conversations": len(delete_project.conversations)
+        }
+
+    def get_active_project(self) -> Dict:
+        """
+        تشخیص پروژه فعال (آخرین پروژه بروزرسانی شده)
+        """
+        if not self.projects:
+            return {"success": False, "error": "هیچ پروژه‌ای وجود ندارد"}
+
+        # مرتب‌سازی بر اساس updated_at
+        sorted_projects = sorted(
+            self.projects.values(),
+            key=lambda p: p.updated_at,
+            reverse=True
+        )
+
+        active = sorted_projects[0]
+
+        return {
+            "success": True,
+            "active_project": {
+                "id": active.project_id,
+                "name": active.name,
+                "status": active.status,
+                "progress": self._calculate_progress(active),
+                "updated_at": active.updated_at
+            }
+        }
+
 
 # سرویس سینگلتون
 _project_service: Optional[ProjectService] = None
