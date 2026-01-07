@@ -1,492 +1,185 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
-// Layout is already provided by app/layout.tsx - DO NOT use here
+import { useState, useEffect } from 'react';
 
-// Tabs
-const TABS = [
-  { id: 'terminal', name: 'ترمینال', icon: '💻' },
-  { id: 'files', name: 'فایل‌ها', icon: '📁' },
-  { id: 'git', name: 'Git', icon: '🔀' },
-  { id: 'services', name: 'سرویس‌ها', icon: '🌐' },
-  { id: 'agents', name: 'AI Agents', icon: '🤖' },
-  { id: 'projects', name: 'پروژه‌ها', icon: '🏗️' },
-  { id: 'deploy', name: 'دیپلوی', icon: '🚀' },
-  { id: 'diagrams', name: 'نمودارها', icon: '📊' },
-];
-
-interface CommandResult {
-  success: boolean;
-  output: string;
-  error?: string;
-  duration_ms?: number;
-}
-
-interface FileItem {
-  path: string;
-  name: string;
-  is_dir: boolean;
-  size: number;
-}
-
-interface Service {
-  id: string;
-  name: string;
-  base_url: string;
-  status: string;
-  endpoints_count: number;
-}
-
-interface Agent {
-  id: string;
-  role: string;
-  model: string;
-  created_at: string;
-  messages_count: number;
-}
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 interface Project {
   id: string;
   name: string;
-  path: string;
-  type: string;
-  status: string;
-  created_at: string;
+  description?: string;
+  type?: string;
+  status?: string;
+  progress?: number;
+  created_at?: string;
+}
+
+interface AIModel {
+  id: string;
+  name: string;
+  provider: string;
+  capabilities: string[];
+  is_available: boolean;
+  priority?: number;
+  strengths?: string[];
 }
 
 export default function CreatorPage() {
-  const [activeTab, setActiveTab] = useState('terminal');
-  const [loading, setLoading] = useState(false);
-
-  // Terminal state
-  const [terminalHistory, setTerminalHistory] = useState<Array<{ type: 'input' | 'output' | 'error'; content: string }>>([]);
-  const [command, setCommand] = useState('');
-  const terminalRef = useRef<HTMLDivElement>(null);
-
-  // Files state
-  const [currentPath, setCurrentPath] = useState('.');
-  const [files, setFiles] = useState<FileItem[]>([]);
-  const [fileContent, setFileContent] = useState('');
-  const [selectedFile, setSelectedFile] = useState('');
-  const [fileTree, setFileTree] = useState<any>(null);
-
-  // Git state
-  const [gitPath, setGitPath] = useState('.');
-  const [gitOutput, setGitOutput] = useState('');
-  const [commitMessage, setCommitMessage] = useState('');
-
-  // Services state
-  const [services, setServices] = useState<Service[]>([]);
-  const [newService, setNewService] = useState({ name: '', base_url: '', auth_type: 'none' });
-  const [selectedService, setSelectedService] = useState('');
-  const [serviceResponse, setServiceResponse] = useState<any>(null);
-
-  // Agents state
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [newAgentRole, setNewAgentRole] = useState('coder');
-  const [selectedAgent, setSelectedAgent] = useState('');
-  const [agentMessage, setAgentMessage] = useState('');
-  const [agentResponse, setAgentResponse] = useState('');
-  const [collaborativeTask, setCollaborativeTask] = useState('');
-  const [collaborativeResult, setCollaborativeResult] = useState<any>(null);
-
-  // Projects state
+  // State
   const [projects, setProjects] = useState<Project[]>([]);
-  const [newProject, setNewProject] = useState({
-    name: '',
-    description: '',
-    project_type: 'python',
-    technologies: '',
-    features: ''
-  });
-  const [selectedProject, setSelectedProject] = useState('');
-  const [generateFileDesc, setGenerateFileDesc] = useState('');
-  const [generateFilePath, setGenerateFilePath] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
 
-  // 🚀 Deploy state
+  // AI Models
+  const [models, setModels] = useState<AIModel[]>([]);
+  const [selectedModel, setSelectedModel] = useState<string>('auto');
+  const [modelsLoading, setModelsLoading] = useState(false);
+
+  // Create project
+  const [newProjectName, setNewProjectName] = useState('');
+  const [newProjectDesc, setNewProjectDesc] = useState('');
+
+  // Selected project for actions
+  const [selectedProject, setSelectedProject] = useState<Project | null>(null);
+
+  // Render deploy
   const [renderApiKey, setRenderApiKey] = useState('');
-  const [renderConfigured, setRenderConfigured] = useState(false);
-  const [deployStatus, setDeployStatus] = useState<any>(null);
-  const [deployLoading, setDeployLoading] = useState(false);
-  const [renderServices, setRenderServices] = useState<any[]>([]);
+  const [renderConnected, setRenderConnected] = useState(false);
 
-  // 📊 Diagrams state
+  // Diagrams
+  const [showDiagrams, setShowDiagrams] = useState(false);
   const [diagrams, setDiagrams] = useState<any[]>([]);
   const [selectedDiagram, setSelectedDiagram] = useState<string>('');
-  const [diagramContent, setDiagramContent] = useState('');
-  const [diagramsLoading, setDiagramsLoading] = useState(false);
 
-  // Workspace info
-  const [workspaceInfo, setWorkspaceInfo] = useState<any>(null);
+  // Settings panel
+  const [showSettings, setShowSettings] = useState(false);
 
-  // Load workspace info on mount
+  // Load on mount
   useEffect(() => {
-    fetchWorkspaceInfo();
+    loadProjects();
+    loadModels();
+    checkRenderStatus();
   }, []);
 
-  // Auto scroll terminal
-  useEffect(() => {
-    if (terminalRef.current) {
-      terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
-    }
-  }, [terminalHistory]);
+  // Show message and auto-hide
+  const showMessage = (type: 'success' | 'error' | 'info', text: string) => {
+    setMessage({ type, text });
+    setTimeout(() => setMessage(null), 5000);
+  };
 
-  const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-
-  const fetchWorkspaceInfo = async () => {
+  // Load AI models
+  const loadModels = async () => {
+    setModelsLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/creator/workspace/info`);
+      const res = await fetch(`${API_BASE}/api/models/available`);
       const data = await res.json();
-      if (data.success) {
-        setWorkspaceInfo(data);
+      if (Array.isArray(data)) {
+        setModels(data);
+        // Auto-select best model
+        const best = data.find((m: AIModel) => m.is_available && m.priority === 1);
+        if (best) {
+          setSelectedModel(best.id);
+        }
       }
     } catch (error) {
-      console.error('Error fetching workspace info:', error);
-    }
-  };
-
-  // =====================================
-  // Terminal Functions
-  // =====================================
-
-  const executeCommand = async () => {
-    if (!command.trim()) return;
-
-    setTerminalHistory(prev => [...prev, { type: 'input', content: `$ ${command}` }]);
-    setLoading(true);
-
-    try {
-      const res = await fetch(`${API_BASE}/api/creator/execute`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command }),
-      });
-      const data: CommandResult = await res.json();
-
-      if (data.success) {
-        setTerminalHistory(prev => [...prev, { type: 'output', content: data.output || '(no output)' }]);
-      } else {
-        setTerminalHistory(prev => [...prev, { type: 'error', content: data.error || 'Error' }]);
-      }
-    } catch (error) {
-      setTerminalHistory(prev => [...prev, { type: 'error', content: String(error) }]);
+      console.error('Error loading models:', error);
     } finally {
-      setCommand('');
-      setLoading(false);
+      setModelsLoading(false);
     }
   };
 
-  // =====================================
-  // File Functions
-  // =====================================
-
-  const loadFiles = async (path: string = currentPath) => {
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/creator/files`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operation: 'list', path, pattern: '*', recursive: false }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setFiles(data.output || []);
-        setCurrentPath(path);
-      }
-    } catch (error) {
-      console.error('Error loading files:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadFileTree = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/creator/files/tree?path=.&max_depth=3`);
-      const data = await res.json();
-      if (data.success) {
-        setFileTree(data.tree);
-      }
-    } catch (error) {
-      console.error('Error loading file tree:', error);
-    }
-  };
-
-  const readFile = async (path: string) => {
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/creator/files`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operation: 'read', path }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setFileContent(data.output || '');
-        setSelectedFile(path);
-      }
-    } catch (error) {
-      console.error('Error reading file:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const saveFile = async () => {
-    if (!selectedFile) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/creator/files`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operation: 'write', path: selectedFile, content: fileContent }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        alert('فایل ذخیره شد!');
-      }
-    } catch (error) {
-      console.error('Error saving file:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // =====================================
-  // Git Functions
-  // =====================================
-
-  const gitOperation = async (operation: string, extra: any = {}) => {
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/creator/git`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operation, path: gitPath, ...extra }),
-      });
-      const data = await res.json();
-      setGitOutput(data.success ? (data.output || 'Success') : (data.error || 'Error'));
-    } catch (error) {
-      setGitOutput(String(error));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // =====================================
-  // Services Functions
-  // =====================================
-
-  const loadServices = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/creator/services`);
-      const data = await res.json();
-      if (data.success) {
-        setServices(data.services || []);
-      }
-    } catch (error) {
-      console.error('Error loading services:', error);
-    }
-  };
-
-  const registerService = async () => {
-    if (!newService.name || !newService.base_url) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/creator/services`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newService),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setNewService({ name: '', base_url: '', auth_type: 'none' });
-        loadServices();
-      }
-    } catch (error) {
-      console.error('Error registering service:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const discoverService = async (serviceId: string) => {
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/creator/services/${serviceId}/discover`, {
-        method: 'POST',
-      });
-      const data = await res.json();
-      setServiceResponse(data);
-      loadServices();
-    } catch (error) {
-      console.error('Error discovering service:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // =====================================
-  // Agents Functions
-  // =====================================
-
-  const loadAgents = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/creator/agents`);
-      const data = await res.json();
-      if (data.success) {
-        setAgents(data.agents || []);
-      }
-    } catch (error) {
-      console.error('Error loading agents:', error);
-    }
-  };
-
-  const createAgent = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/creator/agents`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: newAgentRole }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        loadAgents();
-        setSelectedAgent(data.agent_id);
-      }
-    } catch (error) {
-      console.error('Error creating agent:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const queryAgent = async () => {
-    if (!selectedAgent || !agentMessage.trim()) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/creator/agents/${selectedAgent}/query`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: agentMessage }),
-      });
-      const data = await res.json();
-      setAgentResponse(data.success ? data.response : data.error);
-      loadAgents();
-    } catch (error) {
-      setAgentResponse(String(error));
-    } finally {
-      setLoading(false);
-      setAgentMessage('');
-    }
-  };
-
-  const runCollaborativeTask = async () => {
-    if (!collaborativeTask.trim()) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/creator/agents/collaborative`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          description: collaborativeTask,
-          roles: ['architect', 'coder', 'reviewer'],
-          iterations: 2
-        }),
-      });
-      const data = await res.json();
-      setCollaborativeResult(data);
-    } catch (error) {
-      console.error('Error running collaborative task:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // =====================================
-  // Projects Functions
-  // =====================================
-
+  // Load all projects
   const loadProjects = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/creator/projects/active`);
+      const res = await fetch(`${API_BASE}/api/projects`);
       const data = await res.json();
-      if (data.success) {
-        setProjects(data.projects || []);
+      if (data.projects) {
+        setProjects(data.projects);
       }
     } catch (error) {
       console.error('Error loading projects:', error);
     }
   };
 
+  // Get best model for task type
+  const getBestModelForTask = (taskType: string): string => {
+    const availableModels = models.filter(m => m.is_available);
+
+    if (taskType === 'code') {
+      const codeModel = availableModels.find(m =>
+        m.capabilities?.includes('code') || m.id.includes('claude') || m.id.includes('gpt-4')
+      );
+      return codeModel?.id || selectedModel;
+    }
+
+    if (taskType === 'creative') {
+      const creativeModel = availableModels.find(m =>
+        m.capabilities?.includes('creative') || m.id.includes('claude')
+      );
+      return creativeModel?.id || selectedModel;
+    }
+
+    // Default: highest priority available
+    const sorted = availableModels.sort((a, b) => (a.priority || 99) - (b.priority || 99));
+    return sorted[0]?.id || selectedModel;
+  };
+
+  // Create new project
   const createProject = async () => {
-    if (!newProject.name || !newProject.description) return;
+    if (!newProjectName.trim()) {
+      showMessage('error', 'لطفاً نام پروژه را وارد کنید');
+      return;
+    }
+
     setLoading(true);
+    const modelToUse = selectedModel === 'auto' ? getBestModelForTask('code') : selectedModel;
+
     try {
-      const res = await fetch(`${API_BASE}/api/creator/projects/create`, {
+      const res = await fetch(`${API_BASE}/api/projects`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...newProject,
-          technologies: newProject.technologies.split(',').map(t => t.trim()).filter(Boolean),
-          features: newProject.features.split(',').map(f => f.trim()).filter(Boolean),
+          name: newProjectName,
+          description: newProjectDesc || `پروژه ${newProjectName}`,
+          project_type: 'web',
+          model: modelToUse,
         }),
       });
       const data = await res.json();
-      if (data.success) {
+      if (data.success || data.project) {
+        showMessage('success', '✅ پروژه با موفقیت ساخته شد!');
+        setNewProjectName('');
+        setNewProjectDesc('');
         loadProjects();
-        setNewProject({ name: '', description: '', project_type: 'python', technologies: '', features: '' });
+      } else {
+        showMessage('error', data.error || 'خطا در ساخت پروژه');
       }
     } catch (error) {
-      console.error('Error creating project:', error);
+      showMessage('error', 'خطا در ارتباط با سرور');
     } finally {
       setLoading(false);
     }
   };
 
-  const generateFile = async () => {
-    if (!selectedProject || !generateFilePath || !generateFileDesc) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/creator/projects/${selectedProject}/generate-file`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file_path: generateFilePath, description: generateFileDesc }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        alert('فایل تولید شد!');
-        setGenerateFilePath('');
-        setGenerateFileDesc('');
-      }
-    } catch (error) {
-      console.error('Error generating file:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // =====================================
-  // 🚀 Deploy Functions
-  // =====================================
-
+  // Check Render connection status
   const checkRenderStatus = async () => {
     try {
       const res = await fetch(`${API_BASE}/api/unified/deploy/render/status`);
       const data = await res.json();
-      setRenderConfigured(data.configured || false);
-      if (data.configured) {
-        loadRenderServices();
-      }
+      setRenderConnected(data.configured || false);
     } catch (error) {
       console.error('Error checking Render status:', error);
     }
   };
 
-  const configureRender = async () => {
-    if (!renderApiKey) return;
-    setDeployLoading(true);
+  // Connect to Render
+  const connectRender = async () => {
+    if (!renderApiKey.trim()) {
+      showMessage('error', 'لطفاً API Key رندر را وارد کنید');
+      return;
+    }
+
+    setLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/unified/deploy/configure/render`, {
         method: 'POST',
@@ -495,934 +188,588 @@ export default function CreatorPage() {
       });
       const data = await res.json();
       if (data.success) {
-        setRenderConfigured(true);
+        setRenderConnected(true);
         setRenderApiKey('');
-        loadRenderServices();
+        showMessage('success', '✅ به رندر متصل شدید!');
+      } else {
+        showMessage('error', data.error || 'خطا در اتصال');
       }
     } catch (error) {
-      console.error('Error configuring Render:', error);
+      showMessage('error', 'خطا در ارتباط با سرور');
     } finally {
-      setDeployLoading(false);
+      setLoading(false);
     }
   };
 
-  const loadRenderServices = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/unified/deploy/render/services`);
-      const data = await res.json();
-      if (data.success) {
-        setRenderServices(data.services || []);
-      }
-    } catch (error) {
-      console.error('Error loading Render services:', error);
+  // Deploy project to Render
+  const deployToRender = async (project: Project) => {
+    if (!renderConnected) {
+      showMessage('error', 'ابتدا به رندر متصل شوید');
+      return;
     }
-  };
 
-  const deployProject = async (projectId: string) => {
-    setDeployLoading(true);
-    setDeployStatus(null);
+    setLoading(true);
+    showMessage('info', `🚀 در حال دیپلوی ${project.name}...`);
+
     try {
-      const res = await fetch(`${API_BASE}/api/unified/projects/${projectId}/deploy/render`, {
+      const res = await fetch(`${API_BASE}/api/unified/projects/${project.id}/deploy/render`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
       });
       const data = await res.json();
-      setDeployStatus(data);
       if (data.success) {
-        loadRenderServices();
-      }
-    } catch (error: any) {
-      setDeployStatus({ success: false, error: error.message });
-    } finally {
-      setDeployLoading(false);
-    }
-  };
-
-  const getProjectDeployStatus = async (projectId: string) => {
-    try {
-      const res = await fetch(`${API_BASE}/api/unified/projects/${projectId}/deploy/status`);
-      const data = await res.json();
-      return data;
-    } catch (error) {
-      console.error('Error getting deploy status:', error);
-      return null;
-    }
-  };
-
-  // =====================================
-  // 📊 Diagrams Functions
-  // =====================================
-
-  const loadProjectDiagrams = async (projectId: string, regenerate: boolean = false) => {
-    setDiagramsLoading(true);
-    try {
-      const url = `${API_BASE}/api/unified/projects/${projectId}/diagrams${regenerate ? '?regenerate=true' : ''}`;
-      const res = await fetch(url);
-      const data = await res.json();
-      if (data.success) {
-        setDiagrams(data.diagrams || []);
-        if (data.diagrams?.length > 0) {
-          setSelectedDiagram(data.diagrams[0].type);
-          setDiagramContent(data.diagrams[0].content);
+        showMessage('success', `✅ ${project.name} با موفقیت دیپلوی شد!`);
+        if (data.deployment?.url) {
+          window.open(data.deployment.url, '_blank');
         }
+      } else {
+        showMessage('error', data.error || 'خطا در دیپلوی');
       }
     } catch (error) {
-      console.error('Error loading diagrams:', error);
+      showMessage('error', 'خطا در ارتباط با سرور');
     } finally {
-      setDiagramsLoading(false);
+      setLoading(false);
     }
   };
 
-  const selectDiagram = (diagramType: string) => {
-    const diagram = diagrams.find(d => d.type === diagramType);
-    if (diagram) {
-      setSelectedDiagram(diagramType);
-      setDiagramContent(diagram.content);
-    }
-  };
+  // Load diagrams for a project
+  const loadDiagrams = async (project: Project) => {
+    setSelectedProject(project);
+    setShowDiagrams(true);
+    setLoading(true);
 
-  const regenerateDiagram = async (projectId: string, diagramType: string) => {
-    setDiagramsLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/unified/projects/${projectId}/diagrams/${diagramType}?regenerate=true`);
+      const res = await fetch(`${API_BASE}/api/unified/projects/${project.id}/diagrams`);
+      const data = await res.json();
+      if (data.success && data.diagrams?.length > 0) {
+        setDiagrams(data.diagrams);
+        setSelectedDiagram(data.diagrams[0].type);
+      } else {
+        setDiagrams([]);
+        showMessage('info', 'نموداری برای این پروژه وجود ندارد');
+      }
+    } catch (error) {
+      showMessage('error', 'خطا در بارگذاری نمودارها');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Delete project
+  const deleteProject = async (project: Project) => {
+    if (!confirm(`آیا از حذف "${project.name}" مطمئن هستید؟`)) return;
+
+    setLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${project.id}`, {
+        method: 'DELETE',
+      });
       const data = await res.json();
       if (data.success) {
-        setDiagramContent(data.diagram.content);
-        // Update in list
-        setDiagrams(prev => prev.map(d =>
-          d.type === diagramType ? { ...d, content: data.diagram.content } : d
-        ));
+        showMessage('success', '✅ پروژه حذف شد');
+        loadProjects();
+      } else {
+        showMessage('error', data.error || 'خطا در حذف');
       }
     } catch (error) {
-      console.error('Error regenerating diagram:', error);
+      showMessage('error', 'خطا در ارتباط با سرور');
     } finally {
-      setDiagramsLoading(false);
+      setLoading(false);
     }
   };
 
-  const openInMermaidLive = (content: string) => {
-    const encoded = btoa(unescape(encodeURIComponent(content)));
-    window.open(`https://mermaid.live/edit#base64:${encoded}`, '_blank');
+  const getDiagramName = (type: string) => {
+    const names: Record<string, string> = {
+      'class': '🏛️ ساختار کلاس‌ها',
+      'flowchart': '📊 فلوچارت',
+      'sequence': '📋 نمودار توالی',
+      'er': '🗄️ دیتابیس',
+      'mindmap': '🧠 نقشه ذهنی',
+      'state': '🔄 حالت‌ها',
+    };
+    return names[type] || type;
   };
 
-  // Load data when tab changes
-  useEffect(() => {
-    if (activeTab === 'files') {
-      loadFiles();
-      loadFileTree();
-    } else if (activeTab === 'services') {
-      loadServices();
-    } else if (activeTab === 'agents') {
-      loadAgents();
-    } else if (activeTab === 'projects') {
-      loadProjects();
-    } else if (activeTab === 'deploy') {
-      checkRenderStatus();
-      loadProjects();
-    } else if (activeTab === 'diagrams') {
-      loadProjects();
-    }
-  }, [activeTab]);
-
-  // =====================================
-  // Render
-  // =====================================
-
-  const renderTreeNode = (node: any, depth: number = 0) => {
-    if (!node) return null;
-    return (
-      <div style={{ paddingRight: depth * 16 }} className="text-sm">
-        <span className={node.type === 'directory' ? 'text-blue-500' : 'text-gray-600'}>
-          {node.type === 'directory' ? '📁' : '📄'} {node.name}
-        </span>
-        {node.children?.map((child: any, i: number) => (
-          <div key={i}>{renderTreeNode(child, depth + 1)}</div>
-        ))}
-      </div>
-    );
+  const getProviderColor = (provider: string) => {
+    const colors: Record<string, string> = {
+      'anthropic': 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400',
+      'openai': 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400',
+      'google': 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
+      'deepseek': 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400',
+    };
+    return colors[provider?.toLowerCase()] || 'bg-gray-100 text-gray-700';
   };
+
+  const availableModels = models.filter(m => m.is_available);
+  const unavailableModels = models.filter(m => !m.is_available);
 
   return (
-    <>
-      <div className="p-4 md:p-6 min-h-screen">
-        {/* Header */}
-        <div className="mb-6">
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            🚀 AI Creator Engine
-          </h1>
-          <p className="text-gray-600 dark:text-gray-400">
-            موتور خالق هوشمند - ایجاد پروژه، مدیریت فایل، Git، اتصال به سرویس‌ها و همکاری با AI
-          </p>
-        </div>
-
-        {/* Workspace Info */}
-        {workspaceInfo && (
-          <div className="mb-6 grid grid-cols-2 md:grid-cols-5 gap-4">
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
-              <div className="text-2xl font-bold text-primary">{workspaceInfo.active_projects || 0}</div>
-              <div className="text-sm text-gray-500">پروژه فعال</div>
-            </div>
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
-              <div className="text-2xl font-bold text-green-500">{workspaceInfo.active_agents || 0}</div>
-              <div className="text-sm text-gray-500">AI Agent</div>
-            </div>
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
-              <div className="text-2xl font-bold text-blue-500">{workspaceInfo.active_services || 0}</div>
-              <div className="text-sm text-gray-500">سرویس متصل</div>
-            </div>
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
-              <div className="text-2xl font-bold text-purple-500">{workspaceInfo.command_history_count || 0}</div>
-              <div className="text-sm text-gray-500">دستور اجرا شده</div>
-            </div>
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
-              <div className="text-2xl font-bold text-orange-500">{workspaceInfo.tasks_count || 0}</div>
-              <div className="text-sm text-gray-500">تسک</div>
-            </div>
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 p-6" dir="rtl">
+      {/* Header */}
+      <div className="max-w-6xl mx-auto mb-8">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-800 dark:text-white mb-2">
+              🚀 موتور خالق هوشمند
+            </h1>
+            <p className="text-gray-600 dark:text-gray-400">
+              پروژه بساز، یک کلیک دیپلوی کن، نمودارها رو ببین
+            </p>
           </div>
-        )}
-
-        {/* Tabs */}
-        <div className="flex flex-wrap gap-2 mb-6">
-          {TABS.map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`px-4 py-2 rounded-lg font-medium transition ${
-                activeTab === tab.id
-                  ? 'bg-primary text-white'
-                  : 'bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600'
-              }`}
-            >
-              {tab.icon} {tab.name}
-            </button>
-          ))}
+          <button
+            onClick={() => setShowSettings(!showSettings)}
+            className={`p-3 rounded-xl transition ${
+              showSettings
+                ? 'bg-blue-500 text-white'
+                : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-100'
+            }`}
+          >
+            ⚙️ تنظیمات
+          </button>
         </div>
+      </div>
 
-        {/* Tab Content */}
-        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6">
-          {/* Terminal Tab */}
-          {activeTab === 'terminal' && (
-            <div>
-              <h2 className="text-lg font-semibold mb-4">💻 ترمینال</h2>
-              <div
-                ref={terminalRef}
-                className="bg-gray-900 text-green-400 font-mono text-sm p-4 rounded-lg h-80 overflow-auto mb-4"
-                dir="ltr"
+      {/* Message Toast */}
+      {message && (
+        <div className={`fixed top-4 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-lg shadow-lg ${
+          message.type === 'success' ? 'bg-green-500 text-white' :
+          message.type === 'error' ? 'bg-red-500 text-white' :
+          'bg-blue-500 text-white'
+        }`}>
+          {message.text}
+        </div>
+      )}
+
+      {/* Settings Panel */}
+      {showSettings && (
+        <div className="max-w-6xl mx-auto mb-6">
+          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-6">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-xl font-bold">⚙️ تنظیمات و مدل‌های AI</h2>
+              <button
+                onClick={loadModels}
+                disabled={modelsLoading}
+                className="px-4 py-2 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-lg text-sm hover:bg-blue-200"
               >
-                {terminalHistory.map((item, i) => (
-                  <div
-                    key={i}
-                    className={`mb-1 ${
-                      item.type === 'error' ? 'text-red-400' : item.type === 'input' ? 'text-white' : ''
-                    }`}
-                  >
-                    {item.content}
-                  </div>
-                ))}
-                {loading && <div className="animate-pulse">...</div>}
-              </div>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={command}
-                  onChange={(e) => setCommand(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && executeCommand()}
-                  className="flex-1 p-3 border rounded-lg font-mono dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="دستور را وارد کنید..."
-                  dir="ltr"
-                />
-                <button
-                  onClick={executeCommand}
-                  disabled={loading}
-                  className="px-6 py-3 bg-primary text-white rounded-lg hover:bg-primary-dark disabled:opacity-50"
-                >
-                  اجرا
-                </button>
-              </div>
+                {modelsLoading ? '⏳' : '🔄 بروزرسانی مدل‌ها'}
+              </button>
             </div>
-          )}
 
-          {/* Files Tab */}
-          {activeTab === 'files' && (
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              <div>
-                <h3 className="font-semibold mb-4">📁 ساختار فایل‌ها</h3>
-                <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4 max-h-96 overflow-auto">
-                  {fileTree ? renderTreeNode(fileTree) : <p>در حال بارگذاری...</p>}
-                </div>
-                <div className="mt-4">
-                  <h4 className="font-medium mb-2">فایل‌ها در: {currentPath}</h4>
-                  <div className="space-y-1 max-h-48 overflow-auto">
-                    {files.map((file, i) => (
-                      <button
-                        key={i}
-                        onClick={() => file.is_dir ? loadFiles(file.path) : readFile(file.path)}
-                        className="w-full text-right p-2 hover:bg-gray-100 dark:hover:bg-gray-600 rounded flex items-center gap-2"
-                      >
-                        <span>{file.is_dir ? '📁' : '📄'}</span>
-                        <span className="flex-1">{file.name}</span>
-                        {!file.is_dir && <span className="text-xs text-gray-500">{file.size}B</span>}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-              <div className="lg:col-span-2">
-                <div className="flex justify-between items-center mb-4">
-                  <h3 className="font-semibold">
-                    {selectedFile ? `📝 ${selectedFile}` : 'انتخاب فایل'}
-                  </h3>
-                  {selectedFile && (
-                    <button
-                      onClick={saveFile}
-                      className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600"
-                    >
-                      💾 ذخیره
-                    </button>
-                  )}
-                </div>
-                <textarea
-                  value={fileContent}
-                  onChange={(e) => setFileContent(e.target.value)}
-                  className="w-full h-96 p-4 font-mono text-sm border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="محتوای فایل..."
-                  dir="ltr"
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Git Tab */}
-          {activeTab === 'git' && (
-            <div>
-              <h2 className="text-lg font-semibold mb-4">🔀 عملیات Git</h2>
-              <div className="mb-4">
-                <label className="block text-sm font-medium mb-2">مسیر Repository</label>
-                <input
-                  type="text"
-                  value={gitPath}
-                  onChange={(e) => setGitPath(e.target.value)}
-                  className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  dir="ltr"
-                />
-              </div>
-              <div className="flex flex-wrap gap-2 mb-4">
-                <button onClick={() => gitOperation('status')} className="px-4 py-2 bg-blue-500 text-white rounded-lg">Status</button>
-                <button onClick={() => gitOperation('log')} className="px-4 py-2 bg-purple-500 text-white rounded-lg">Log</button>
-                <button onClick={() => gitOperation('diff')} className="px-4 py-2 bg-yellow-500 text-white rounded-lg">Diff</button>
-                <button onClick={() => gitOperation('add', { files: '.' })} className="px-4 py-2 bg-green-500 text-white rounded-lg">Add All</button>
-                <button onClick={() => gitOperation('pull')} className="px-4 py-2 bg-cyan-500 text-white rounded-lg">Pull</button>
-                <button onClick={() => gitOperation('push')} className="px-4 py-2 bg-orange-500 text-white rounded-lg">Push</button>
-              </div>
-              <div className="flex gap-2 mb-4">
-                <input
-                  type="text"
-                  value={commitMessage}
-                  onChange={(e) => setCommitMessage(e.target.value)}
-                  className="flex-1 p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="پیام commit..."
-                />
-                <button
-                  onClick={() => gitOperation('commit', { message: commitMessage })}
-                  disabled={!commitMessage}
-                  className="px-6 py-3 bg-primary text-white rounded-lg disabled:opacity-50"
-                >
-                  Commit
-                </button>
-              </div>
-              <div className="bg-gray-900 text-green-400 font-mono text-sm p-4 rounded-lg h-64 overflow-auto" dir="ltr">
-                {gitOutput || 'خروجی Git اینجا نمایش داده می‌شود...'}
-              </div>
-            </div>
-          )}
-
-          {/* Services Tab */}
-          {activeTab === 'services' && (
-            <div>
-              <h2 className="text-lg font-semibold mb-4">🌐 سرویس‌های خارجی</h2>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <div>
-                  <h3 className="font-medium mb-3">افزودن سرویس جدید</h3>
-                  <div className="space-y-3">
-                    <input
-                      type="text"
-                      value={newService.name}
-                      onChange={(e) => setNewService({ ...newService, name: e.target.value })}
-                      className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                      placeholder="نام سرویس"
-                    />
-                    <input
-                      type="text"
-                      value={newService.base_url}
-                      onChange={(e) => setNewService({ ...newService, base_url: e.target.value })}
-                      className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                      placeholder="URL پایه (مثال: https://api.example.com)"
-                      dir="ltr"
-                    />
-                    <select
-                      value={newService.auth_type}
-                      onChange={(e) => setNewService({ ...newService, auth_type: e.target.value })}
-                      className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                    >
-                      <option value="none">بدون احراز هویت</option>
-                      <option value="api_key">API Key</option>
-                      <option value="bearer">Bearer Token</option>
-                      <option value="basic">Basic Auth</option>
-                    </select>
-                    <button
-                      onClick={registerService}
-                      className="w-full py-3 bg-primary text-white rounded-lg hover:bg-primary-dark"
-                    >
-                      ثبت سرویس
-                    </button>
-                  </div>
-                </div>
-                <div>
-                  <h3 className="font-medium mb-3">سرویس‌های متصل ({services.length})</h3>
-                  <div className="space-y-2 max-h-64 overflow-auto">
-                    {services.map((service) => (
-                      <div
-                        key={service.id}
-                        className="p-3 bg-gray-50 dark:bg-gray-700 rounded-lg flex justify-between items-center"
-                      >
-                        <div>
-                          <div className="font-medium">{service.name}</div>
-                          <div className="text-xs text-gray-500" dir="ltr">{service.base_url}</div>
-                        </div>
-                        <div className="flex gap-2">
-                          <span className={`px-2 py-1 text-xs rounded ${
-                            service.status === 'connected' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'
-                          }`}>
-                            {service.status}
-                          </span>
-                          <button
-                            onClick={() => discoverService(service.id)}
-                            className="px-3 py-1 text-sm bg-blue-500 text-white rounded"
-                          >
-                            کشف API
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                    {services.length === 0 && (
-                      <p className="text-gray-500 text-center py-4">هیچ سرویسی ثبت نشده</p>
-                    )}
-                  </div>
-                  {serviceResponse && (
-                    <div className="mt-4 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
-                      <h4 className="font-medium mb-2">نتیجه:</h4>
-                      <pre className="text-xs overflow-auto" dir="ltr">
-                        {JSON.stringify(serviceResponse, null, 2)}
-                      </pre>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Agents Tab */}
-          {activeTab === 'agents' && (
-            <div>
-              <h2 className="text-lg font-semibold mb-4">🤖 AI Agents</h2>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Create Agent */}
-                <div>
-                  <h3 className="font-medium mb-3">ایجاد Agent جدید</h3>
-                  <div className="flex gap-2 mb-4">
-                    <select
-                      value={newAgentRole}
-                      onChange={(e) => setNewAgentRole(e.target.value)}
-                      className="flex-1 p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                    >
-                      <option value="architect">🏛️ معمار (Architect)</option>
-                      <option value="coder">💻 کدنویس (Coder)</option>
-                      <option value="reviewer">🔍 بازبین (Reviewer)</option>
-                      <option value="tester">🧪 تستر (Tester)</option>
-                      <option value="analyzer">📊 تحلیلگر (Analyzer)</option>
-                      <option value="orchestrator">🎭 هماهنگ‌کننده (Orchestrator)</option>
-                    </select>
-                    <button
-                      onClick={createAgent}
-                      className="px-6 py-3 bg-primary text-white rounded-lg"
-                    >
-                      ایجاد
-                    </button>
-                  </div>
-
-                  {/* Active Agents */}
-                  <h3 className="font-medium mb-3">Agents فعال ({agents.length})</h3>
-                  <div className="space-y-2 max-h-48 overflow-auto">
-                    {agents.map((agent) => (
-                      <button
-                        key={agent.id}
-                        onClick={() => setSelectedAgent(agent.id)}
-                        className={`w-full p-3 rounded-lg text-right ${
-                          selectedAgent === agent.id
-                            ? 'bg-primary text-white'
-                            : 'bg-gray-50 dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-600'
-                        }`}
-                      >
-                        <div className="font-medium">{agent.role}</div>
-                        <div className="text-xs opacity-75">{agent.model} | {agent.messages_count} پیام</div>
-                      </button>
-                    ))}
-                  </div>
-
-                  {/* Collaborative Task */}
-                  <div className="mt-6 p-4 bg-gradient-to-r from-purple-50 to-blue-50 dark:from-purple-900/20 dark:to-blue-900/20 rounded-lg">
-                    <h3 className="font-medium mb-3">🎭 تسک همکارانه</h3>
-                    <textarea
-                      value={collaborativeTask}
-                      onChange={(e) => setCollaborativeTask(e.target.value)}
-                      className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600 h-24"
-                      placeholder="توضیح تسک برای همکاری چند AI..."
-                    />
-                    <button
-                      onClick={runCollaborativeTask}
-                      disabled={!collaborativeTask.trim() || loading}
-                      className="w-full mt-2 py-3 bg-gradient-to-r from-purple-500 to-blue-500 text-white rounded-lg disabled:opacity-50"
-                    >
-                      {loading ? 'در حال پردازش...' : 'شروع همکاری'}
-                    </button>
-                  </div>
-                </div>
-
-                {/* Chat with Agent */}
-                <div>
-                  <h3 className="font-medium mb-3">
-                    گفتگو با Agent
-                    {selectedAgent && <span className="text-primary mr-2">({selectedAgent})</span>}
-                  </h3>
-                  <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4 h-64 overflow-auto mb-4">
-                    {agentResponse ? (
-                      <div className="whitespace-pre-wrap text-sm">{agentResponse}</div>
-                    ) : collaborativeResult ? (
-                      <pre className="text-xs overflow-auto" dir="ltr">
-                        {JSON.stringify(collaborativeResult, null, 2)}
-                      </pre>
-                    ) : (
-                      <p className="text-gray-500 text-center">پاسخ Agent اینجا نمایش داده می‌شود...</p>
-                    )}
-                  </div>
-                  <div className="flex gap-2">
-                    <textarea
-                      value={agentMessage}
-                      onChange={(e) => setAgentMessage(e.target.value)}
-                      className="flex-1 p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                      placeholder="پیام خود را بنویسید..."
-                      rows={2}
-                    />
-                    <button
-                      onClick={queryAgent}
-                      disabled={!selectedAgent || !agentMessage.trim() || loading}
-                      className="px-6 bg-primary text-white rounded-lg disabled:opacity-50"
-                    >
-                      ارسال
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Projects Tab */}
-          {activeTab === 'projects' && (
-            <div>
-              <h2 className="text-lg font-semibold mb-4">🏗️ ایجاد پروژه</h2>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Create Project */}
-                <div>
-                  <h3 className="font-medium mb-3">پروژه جدید</h3>
-                  <div className="space-y-3">
-                    <input
-                      type="text"
-                      value={newProject.name}
-                      onChange={(e) => setNewProject({ ...newProject, name: e.target.value })}
-                      className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                      placeholder="نام پروژه"
-                    />
-                    <textarea
-                      value={newProject.description}
-                      onChange={(e) => setNewProject({ ...newProject, description: e.target.value })}
-                      className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600 h-24"
-                      placeholder="توضیحات پروژه..."
-                    />
-                    <select
-                      value={newProject.project_type}
-                      onChange={(e) => setNewProject({ ...newProject, project_type: e.target.value })}
-                      className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                    >
-                      <option value="python">Python</option>
-                      <option value="fastapi">FastAPI</option>
-                      <option value="flask">Flask</option>
-                      <option value="django">Django</option>
-                      <option value="node">Node.js</option>
-                      <option value="react">React</option>
-                      <option value="nextjs">Next.js</option>
-                      <option value="vue">Vue.js</option>
-                    </select>
-                    <input
-                      type="text"
-                      value={newProject.technologies}
-                      onChange={(e) => setNewProject({ ...newProject, technologies: e.target.value })}
-                      className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                      placeholder="تکنولوژی‌ها (با کاما جدا کنید)"
-                    />
-                    <input
-                      type="text"
-                      value={newProject.features}
-                      onChange={(e) => setNewProject({ ...newProject, features: e.target.value })}
-                      className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                      placeholder="قابلیت‌ها (با کاما جدا کنید)"
-                    />
-                    <button
-                      onClick={createProject}
-                      disabled={!newProject.name || !newProject.description || loading}
-                      className="w-full py-3 bg-primary text-white rounded-lg disabled:opacity-50"
-                    >
-                      {loading ? 'در حال ایجاد...' : '🚀 ایجاد پروژه'}
-                    </button>
-                  </div>
-                </div>
-
-                {/* Active Projects */}
-                <div>
-                  <h3 className="font-medium mb-3">پروژه‌های فعال ({projects.length})</h3>
-                  <div className="space-y-2 max-h-48 overflow-auto mb-6">
-                    {projects.map((project: any) => (
-                      <button
-                        key={project.id}
-                        onClick={() => setSelectedProject(project.id)}
-                        className={`w-full p-3 rounded-lg text-right ${
-                          selectedProject === project.id
-                            ? 'bg-primary text-white'
-                            : 'bg-gray-50 dark:bg-gray-700 hover:bg-gray-100'
-                        }`}
-                      >
-                        <div className="font-medium">{project.name}</div>
-                        <div className="text-xs opacity-75">{project.type} | {project.status}</div>
-                      </button>
-                    ))}
-                    {projects.length === 0 && (
-                      <p className="text-gray-500 text-center py-4">هیچ پروژه‌ای ایجاد نشده</p>
-                    )}
-                  </div>
-
-                  {/* Generate File */}
-                  {selectedProject && (
-                    <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
-                      <h3 className="font-medium mb-3">📄 تولید فایل با AI</h3>
-                      <input
-                        type="text"
-                        value={generateFilePath}
-                        onChange={(e) => setGenerateFilePath(e.target.value)}
-                        className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600 mb-2"
-                        placeholder="مسیر فایل (مثال: src/main.py)"
-                        dir="ltr"
-                      />
-                      <textarea
-                        value={generateFileDesc}
-                        onChange={(e) => setGenerateFileDesc(e.target.value)}
-                        className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600 h-20 mb-2"
-                        placeholder="توضیحات فایل..."
-                      />
-                      <button
-                        onClick={generateFile}
-                        disabled={!generateFilePath || !generateFileDesc || loading}
-                        className="w-full py-2 bg-blue-500 text-white rounded-lg disabled:opacity-50"
-                      >
-                        تولید فایل
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* 🚀 Deploy Tab */}
-          {activeTab === 'deploy' && (
-            <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
-              <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
-                🚀 دیپلوی یک‌کلیکه به Render
-              </h2>
-
-              {/* Render Configuration */}
-              {!renderConfigured ? (
-                <div className="mb-6 p-6 bg-gradient-to-r from-purple-50 to-blue-50 dark:from-purple-900/20 dark:to-blue-900/20 rounded-xl">
-                  <h3 className="font-bold text-lg mb-4">⚙️ تنظیم Render</h3>
-                  <p className="text-gray-600 dark:text-gray-400 mb-4">
-                    برای Deploy خودکار، API key رندر خود را وارد کنید.
-                    <br />
-                    <a
-                      href="https://dashboard.render.com/account/api-keys"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-blue-500 hover:underline"
-                    >
-                      دریافت API Key از Render Dashboard
-                    </a>
-                  </p>
-                  <div className="flex gap-2">
-                    <input
-                      type="password"
-                      value={renderApiKey}
-                      onChange={(e) => setRenderApiKey(e.target.value)}
-                      className="flex-1 p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600 font-mono"
-                      placeholder="rnd_xxxxxxxxxxxx"
-                      dir="ltr"
-                    />
-                    <button
-                      onClick={configureRender}
-                      disabled={!renderApiKey || deployLoading}
-                      className="px-6 py-3 bg-purple-500 text-white rounded-lg hover:bg-purple-600 disabled:opacity-50"
-                    >
-                      {deployLoading ? '...' : 'ذخیره'}
-                    </button>
-                  </div>
-                </div>
+            {/* Available Models */}
+            <div className="mb-6">
+              <h3 className="font-bold mb-3 text-green-600 dark:text-green-400">
+                ✅ مدل‌های فعال ({availableModels.length})
+              </h3>
+              {availableModels.length === 0 ? (
+                <p className="text-gray-500 text-sm">هیچ مدلی فعال نیست. به تنظیمات بروید و API Key وارد کنید.</p>
               ) : (
-                <div className="mb-6 p-4 bg-green-50 dark:bg-green-900/20 rounded-lg flex items-center gap-2">
-                  <span className="text-green-500 text-xl">✅</span>
-                  <span>Render متصل شده</span>
-                </div>
-              )}
-
-              {/* Deploy Status */}
-              {deployStatus && (
-                <div className={`mb-6 p-4 rounded-lg ${
-                  deployStatus.success
-                    ? 'bg-green-50 dark:bg-green-900/20 text-green-700'
-                    : 'bg-red-50 dark:bg-red-900/20 text-red-700'
-                }`}>
-                  {deployStatus.success ? (
-                    <div>
-                      <div className="font-bold mb-2">✅ Deploy شروع شد!</div>
-                      {deployStatus.deployment?.url && (
-                        <a
-                          href={deployStatus.deployment.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-blue-500 hover:underline"
-                        >
-                          {deployStatus.deployment.url}
-                        </a>
+                <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {availableModels.map((model) => (
+                    <div
+                      key={model.id}
+                      onClick={() => setSelectedModel(model.id)}
+                      className={`p-4 rounded-xl cursor-pointer transition border-2 ${
+                        selectedModel === model.id
+                          ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
+                          : 'border-transparent bg-gray-50 dark:bg-gray-700 hover:bg-gray-100'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-medium">{model.name}</span>
+                        {selectedModel === model.id && <span className="text-blue-500">✓</span>}
+                      </div>
+                      <span className={`text-xs px-2 py-1 rounded ${getProviderColor(model.provider)}`}>
+                        {model.provider}
+                      </span>
+                      {model.capabilities && model.capabilities.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-2">
+                          {model.capabilities.slice(0, 3).map((cap) => (
+                            <span key={cap} className="text-xs bg-gray-200 dark:bg-gray-600 px-2 py-0.5 rounded">
+                              {cap}
+                            </span>
+                          ))}
+                        </div>
                       )}
                     </div>
-                  ) : (
-                    <div>❌ خطا: {deployStatus.error || deployStatus.deployment?.error}</div>
-                  )}
+                  ))}
                 </div>
               )}
-
-              {/* Projects List for Deploy */}
-              <div className="grid md:grid-cols-2 gap-6">
-                <div>
-                  <h3 className="font-bold mb-4">پروژه‌ها</h3>
-                  <div className="space-y-2 max-h-96 overflow-auto">
-                    {projects.map((project: any) => (
-                      <div
-                        key={project.id}
-                        className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg"
-                      >
-                        <div className="flex items-center justify-between mb-2">
-                          <div>
-                            <div className="font-medium">{project.name}</div>
-                            <div className="text-xs text-gray-500">{project.type}</div>
-                          </div>
-                          <button
-                            onClick={() => deployProject(project.id)}
-                            disabled={!renderConfigured || deployLoading}
-                            className="px-4 py-2 bg-gradient-to-r from-purple-500 to-blue-500 text-white rounded-lg text-sm hover:from-purple-600 hover:to-blue-600 disabled:opacity-50"
-                          >
-                            {deployLoading ? '⏳' : '🚀 Deploy'}
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                    {projects.length === 0 && (
-                      <p className="text-gray-500 text-center py-8">هیچ پروژه‌ای وجود ندارد</p>
-                    )}
-                  </div>
-                </div>
-
-                {/* Render Services */}
-                <div>
-                  <h3 className="font-bold mb-4">سرویس‌های Deploy شده</h3>
-                  <div className="space-y-2 max-h-96 overflow-auto">
-                    {renderServices.map((service: any, idx: number) => (
-                      <div
-                        key={idx}
-                        className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg"
-                      >
-                        <div className="font-medium">{service.name || service.service?.name}</div>
-                        <div className="text-xs text-gray-500 mt-1">
-                          {service.serviceDetails?.url || service.service?.serviceDetails?.url || 'URL نامشخص'}
-                        </div>
-                        <div className="text-xs mt-1">
-                          وضعیت: {service.suspended === 'not_suspended' ? '🟢 فعال' : '🔴 متوقف'}
-                        </div>
-                      </div>
-                    ))}
-                    {renderServices.length === 0 && (
-                      <p className="text-gray-500 text-center py-8">هیچ سرویسی Deploy نشده</p>
-                    )}
-                  </div>
-                </div>
-              </div>
             </div>
-          )}
 
-          {/* 📊 Diagrams Tab */}
-          {activeTab === 'diagrams' && (
-            <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
-              <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
-                📊 نمودارهای داینامیک پروژه
-              </h2>
-
-              {/* Project Selection */}
-              <div className="mb-6">
-                <label className="block text-sm font-medium mb-2">انتخاب پروژه</label>
-                <div className="flex gap-2">
-                  <select
-                    value={selectedProject}
-                    onChange={(e) => {
-                      setSelectedProject(e.target.value);
-                      if (e.target.value) {
-                        loadProjectDiagrams(e.target.value);
-                      }
-                    }}
-                    className="flex-1 p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  >
-                    <option value="">انتخاب کنید...</option>
-                    {projects.map((project: any) => (
-                      <option key={project.id} value={project.id}>
-                        {project.name}
-                      </option>
-                    ))}
-                  </select>
-                  {selectedProject && (
-                    <button
-                      onClick={() => loadProjectDiagrams(selectedProject, true)}
-                      disabled={diagramsLoading}
-                      className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50"
+            {/* Unavailable Models */}
+            {unavailableModels.length > 0 && (
+              <div>
+                <h3 className="font-bold mb-3 text-gray-400">
+                  ❌ مدل‌های غیرفعال ({unavailableModels.length})
+                </h3>
+                <div className="flex flex-wrap gap-2">
+                  {unavailableModels.map((model) => (
+                    <span
+                      key={model.id}
+                      className="text-sm px-3 py-1 bg-gray-100 dark:bg-gray-700 text-gray-400 rounded-lg"
                     >
-                      {diagramsLoading ? '⏳' : '🔄 بازسازی'}
-                    </button>
-                  )}
+                      {model.name}
+                    </span>
+                  ))}
                 </div>
+                <p className="text-xs text-gray-400 mt-2">
+                  برای فعال‌سازی، به صفحه تنظیمات بروید و API Key‌ها را وارد کنید
+                </p>
+              </div>
+            )}
+
+            {/* Link to Settings */}
+            <div className="mt-6 pt-4 border-t dark:border-gray-700">
+              <a
+                href="/settings"
+                className="inline-flex items-center gap-2 px-4 py-2 bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-gray-200 transition"
+              >
+                ⚙️ رفتن به تنظیمات کامل
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="max-w-6xl mx-auto grid lg:grid-cols-3 gap-6">
+
+        {/* Right Column - Projects List */}
+        <div className="lg:col-span-2 space-y-6">
+
+          {/* My Projects */}
+          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-6">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-xl font-bold flex items-center gap-2">
+                📁 پروژه‌های من
+                <span className="text-sm font-normal text-gray-500">({projects.length})</span>
+              </h2>
+              <button
+                onClick={loadProjects}
+                className="text-gray-400 hover:text-gray-600 p-2"
+                title="بروزرسانی"
+              >
+                🔄
+              </button>
+            </div>
+
+            {projects.length === 0 ? (
+              <div className="text-center py-12 text-gray-500">
+                <div className="text-5xl mb-4">📭</div>
+                <p>هنوز پروژه‌ای نساختید</p>
+                <p className="text-sm mt-2">از بخش کناری یک پروژه جدید بسازید</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {projects.map((project) => (
+                  <div
+                    key={project.id}
+                    className="border dark:border-gray-700 rounded-xl p-4 hover:shadow-md transition"
+                  >
+                    <div className="flex items-start justify-between mb-3">
+                      <div>
+                        <h3 className="font-bold text-lg">{project.name}</h3>
+                        {project.description && (
+                          <p className="text-sm text-gray-500 mt-1">{project.description}</p>
+                        )}
+                        <div className="flex items-center gap-2 mt-2 text-xs text-gray-400">
+                          <span className="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">
+                            {project.type || 'web'}
+                          </span>
+                          {project.progress !== undefined && (
+                            <span className={`px-2 py-1 rounded ${
+                              project.progress === 100
+                                ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                                : 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+                            }`}>
+                              {project.progress}%
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Action Buttons */}
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={() => deployToRender(project)}
+                        disabled={loading || !renderConnected}
+                        className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-purple-500 to-blue-500 text-white rounded-lg text-sm hover:from-purple-600 hover:to-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        🚀 دیپلوی به رندر
+                      </button>
+
+                      <button
+                        onClick={() => loadDiagrams(project)}
+                        disabled={loading}
+                        className="flex items-center gap-2 px-4 py-2 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-lg text-sm hover:bg-blue-200"
+                      >
+                        📊 نمودارها
+                      </button>
+
+                      <button
+                        onClick={() => window.open(`/projects?id=${project.id}`, '_self')}
+                        className="flex items-center gap-2 px-4 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg text-sm hover:bg-gray-200"
+                      >
+                        📝 جزئیات
+                      </button>
+
+                      <button
+                        onClick={() => deleteProject(project)}
+                        disabled={loading}
+                        className="flex items-center gap-2 px-3 py-2 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg text-sm"
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Diagrams Modal/Section */}
+          {showDiagrams && selectedProject && (
+            <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-xl font-bold">
+                  📊 نمودارهای {selectedProject.name}
+                </h2>
+                <button
+                  onClick={() => setShowDiagrams(false)}
+                  className="text-gray-400 hover:text-gray-600 text-2xl"
+                >
+                  ✕
+                </button>
               </div>
 
-              {selectedProject && diagrams.length > 0 && (
-                <div className="grid md:grid-cols-4 gap-6">
-                  {/* Diagram Type Selector */}
-                  <div className="md:col-span-1">
-                    <h3 className="font-bold mb-3">نوع نمودار</h3>
-                    <div className="space-y-2">
-                      {diagrams.map((diagram: any) => (
-                        <button
-                          key={diagram.type}
-                          onClick={() => selectDiagram(diagram.type)}
-                          className={`w-full p-3 rounded-lg text-right transition ${
-                            selectedDiagram === diagram.type
-                              ? 'bg-primary text-white'
-                              : 'bg-gray-50 dark:bg-gray-700 hover:bg-gray-100'
-                          }`}
-                        >
-                          <div className="font-medium">
-                            {diagram.type === 'class' && '🏛️ کلاس'}
-                            {diagram.type === 'flowchart' && '📊 فلوچارت'}
-                            {diagram.type === 'sequence' && '📋 توالی'}
-                            {diagram.type === 'er' && '🗄️ ER'}
-                            {diagram.type === 'mindmap' && '🧠 نقشه ذهنی'}
-                            {diagram.type === 'state' && '🔄 وضعیت'}
-                          </div>
-                        </button>
-                      ))}
-                    </div>
+              {diagrams.length === 0 ? (
+                <div className="text-center py-8 text-gray-500">
+                  <p>نموداری یافت نشد</p>
+                  <p className="text-sm mt-2">پروژه باید فایل‌های کد داشته باشد</p>
+                </div>
+              ) : (
+                <div>
+                  {/* Diagram Type Buttons */}
+                  <div className="flex flex-wrap gap-2 mb-4">
+                    {diagrams.map((d) => (
+                      <button
+                        key={d.type}
+                        onClick={() => setSelectedDiagram(d.type)}
+                        className={`px-4 py-2 rounded-lg text-sm transition ${
+                          selectedDiagram === d.type
+                            ? 'bg-blue-500 text-white'
+                            : 'bg-gray-100 dark:bg-gray-700 hover:bg-gray-200'
+                        }`}
+                      >
+                        {getDiagramName(d.type)}
+                      </button>
+                    ))}
                   </div>
 
                   {/* Diagram Preview */}
-                  <div className="md:col-span-3">
-                    <div className="flex items-center justify-between mb-3">
-                      <h3 className="font-bold">پیش‌نمایش</h3>
-                      <div className="flex gap-2">
+                  {selectedDiagram && (
+                    <div className="border dark:border-gray-700 rounded-xl p-4">
+                      <div className="flex justify-end mb-2">
                         <button
-                          onClick={() => openInMermaidLive(diagramContent)}
-                          className="px-3 py-1 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 rounded text-sm"
+                          onClick={() => {
+                            const content = diagrams.find(d => d.type === selectedDiagram)?.content;
+                            if (content) {
+                              const encoded = btoa(unescape(encodeURIComponent(content)));
+                              window.open(`https://mermaid.live/edit#base64:${encoded}`, '_blank');
+                            }
+                          }}
+                          className="px-3 py-1 bg-green-100 text-green-700 rounded text-sm hover:bg-green-200"
                         >
                           🌐 باز کردن در Mermaid Live
                         </button>
-                        <button
-                          onClick={() => {
-                            navigator.clipboard.writeText(diagramContent);
-                            alert('کپی شد!');
+                      </div>
+                      <div className="bg-gray-50 dark:bg-gray-900 rounded-lg p-4 overflow-auto max-h-96">
+                        <img
+                          src={`https://mermaid.ink/img/${btoa(diagrams.find(d => d.type === selectedDiagram)?.content || '')}`}
+                          alt="Diagram"
+                          className="max-w-full mx-auto"
+                          onError={(e) => {
+                            (e.target as HTMLImageElement).style.display = 'none';
                           }}
-                          className="px-3 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm"
-                        >
-                          📋 کپی
-                        </button>
+                        />
+                        <pre className="text-xs text-gray-600 dark:text-gray-400 mt-4 whitespace-pre-wrap">
+                          {diagrams.find(d => d.type === selectedDiagram)?.content}
+                        </pre>
                       </div>
                     </div>
-
-                    {/* Mermaid Code */}
-                    <div className="bg-gray-900 rounded-lg p-4 overflow-auto max-h-96">
-                      <pre className="text-green-400 text-sm font-mono whitespace-pre-wrap" dir="ltr">
-                        {diagramContent}
-                      </pre>
-                    </div>
-
-                    {/* Mermaid Render (using img with mermaid.ink) */}
-                    <div className="mt-4 p-4 bg-white dark:bg-gray-900 rounded-lg border">
-                      <h4 className="font-medium mb-2 text-sm text-gray-600">نمایش گرافیکی</h4>
-                      {diagramContent && (
-                        <div className="flex justify-center">
-                          <img
-                            src={`https://mermaid.ink/img/${btoa(unescape(encodeURIComponent(diagramContent)))}`}
-                            alt="Diagram"
-                            className="max-w-full"
-                            onError={(e) => {
-                              (e.target as HTMLImageElement).style.display = 'none';
-                            }}
-                          />
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {selectedProject && diagrams.length === 0 && !diagramsLoading && (
-                <div className="text-center py-12 text-gray-500">
-                  <div className="text-4xl mb-4">📊</div>
-                  <p>نموداری برای این پروژه وجود ندارد</p>
-                  <button
-                    onClick={() => loadProjectDiagrams(selectedProject, true)}
-                    className="mt-4 px-4 py-2 bg-blue-500 text-white rounded-lg"
-                  >
-                    تولید نمودارها
-                  </button>
-                </div>
-              )}
-
-              {diagramsLoading && (
-                <div className="flex justify-center py-12">
-                  <div className="animate-spin w-8 h-8 border-4 border-primary border-t-transparent rounded-full" />
-                </div>
-              )}
-
-              {!selectedProject && (
-                <div className="text-center py-12 text-gray-500">
-                  <div className="text-4xl mb-4">👆</div>
-                  <p>یک پروژه انتخاب کنید</p>
+                  )}
                 </div>
               )}
             </div>
           )}
         </div>
+
+        {/* Left Column - Actions */}
+        <div className="space-y-6">
+
+          {/* Create New Project */}
+          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-6">
+            <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
+              ✨ پروژه جدید
+            </h2>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium mb-2 text-gray-700 dark:text-gray-300">
+                  نام پروژه
+                </label>
+                <input
+                  type="text"
+                  value={newProjectName}
+                  onChange={(e) => setNewProjectName(e.target.value)}
+                  placeholder="مثال: فروشگاه آنلاین"
+                  className="w-full p-3 border dark:border-gray-600 rounded-xl dark:bg-gray-700 focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2 text-gray-700 dark:text-gray-300">
+                  توضیحات (اختیاری)
+                </label>
+                <textarea
+                  value={newProjectDesc}
+                  onChange={(e) => setNewProjectDesc(e.target.value)}
+                  placeholder="چه چیزی می‌خواهید بسازید؟"
+                  rows={3}
+                  className="w-full p-3 border dark:border-gray-600 rounded-xl dark:bg-gray-700 focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                />
+              </div>
+
+              {/* Model Selection */}
+              <div>
+                <label className="block text-sm font-medium mb-2 text-gray-700 dark:text-gray-300">
+                  🤖 مدل AI
+                </label>
+                <select
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.target.value)}
+                  className="w-full p-3 border dark:border-gray-600 rounded-xl dark:bg-gray-700 focus:ring-2 focus:ring-blue-500 outline-none"
+                >
+                  <option value="auto">🎯 انتخاب هوشمند (پیشنهادی)</option>
+                  {availableModels.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.name} ({model.provider})
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-gray-500 mt-1">
+                  {selectedModel === 'auto'
+                    ? '✨ بهترین مدل برای کار شما انتخاب می‌شود'
+                    : `مدل انتخابی: ${models.find(m => m.id === selectedModel)?.name}`
+                  }
+                </p>
+              </div>
+
+              <button
+                onClick={createProject}
+                disabled={loading || !newProjectName.trim() || availableModels.length === 0}
+                className="w-full py-3 bg-gradient-to-r from-green-500 to-emerald-500 text-white rounded-xl font-bold hover:from-green-600 hover:to-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed transition"
+              >
+                {loading ? '⏳ در حال ساخت...' : '🎉 ساخت پروژه'}
+              </button>
+
+              {availableModels.length === 0 && (
+                <p className="text-sm text-orange-500 text-center">
+                  ⚠️ ابتدا یک مدل AI فعال کنید
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* Render Connection */}
+          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-6">
+            <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
+              ☁️ اتصال به رندر
+            </h2>
+
+            {renderConnected ? (
+              <div className="text-center py-4">
+                <div className="text-4xl mb-2">✅</div>
+                <p className="text-green-600 dark:text-green-400 font-medium">متصل شده</p>
+                <p className="text-sm text-gray-500 mt-2">می‌توانید پروژه‌ها را دیپلوی کنید</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <p className="text-sm text-gray-500">
+                  برای دیپلوی خودکار، API Key رندر را وارد کنید
+                </p>
+                <input
+                  type="password"
+                  value={renderApiKey}
+                  onChange={(e) => setRenderApiKey(e.target.value)}
+                  placeholder="rnd_xxxxxxxxxxxx"
+                  className="w-full p-3 border dark:border-gray-600 rounded-xl dark:bg-gray-700 focus:ring-2 focus:ring-purple-500 outline-none font-mono text-sm"
+                  dir="ltr"
+                />
+                <button
+                  onClick={connectRender}
+                  disabled={loading || !renderApiKey.trim()}
+                  className="w-full py-3 bg-gradient-to-r from-purple-500 to-indigo-500 text-white rounded-xl font-bold hover:from-purple-600 hover:to-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                >
+                  {loading ? '⏳ در حال اتصال...' : '🔗 اتصال به رندر'}
+                </button>
+                <a
+                  href="https://dashboard.render.com/u/settings/api-keys"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="block text-center text-sm text-blue-500 hover:underline"
+                >
+                  📖 راهنمای دریافت API Key
+                </a>
+              </div>
+            )}
+          </div>
+
+          {/* Quick Help */}
+          <div className="bg-gradient-to-br from-blue-50 to-purple-50 dark:from-blue-900/20 dark:to-purple-900/20 rounded-2xl p-6">
+            <h3 className="font-bold mb-3 flex items-center gap-2">
+              💡 راهنمای سریع
+            </h3>
+            <div className="space-y-3 text-sm text-gray-600 dark:text-gray-400">
+              <div className="flex items-start gap-2">
+                <span className="text-lg">1️⃣</span>
+                <span>یک پروژه جدید بسازید</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="text-lg">2️⃣</span>
+                <span>به رندر متصل شوید (یکبار کافیه)</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="text-lg">3️⃣</span>
+                <span>روی "دیپلوی به رندر" کلیک کنید</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="text-lg">✨</span>
+                <span>تمام! پروژه شما آنلاین شد</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Active Model Indicator */}
+          {availableModels.length > 0 && (
+            <div className="bg-white dark:bg-gray-800 rounded-2xl shadow p-4">
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-500">مدل فعال:</span>
+                <span className={`text-sm px-3 py-1 rounded-lg ${getProviderColor(
+                  models.find(m => m.id === selectedModel)?.provider || ''
+                )}`}>
+                  {selectedModel === 'auto'
+                    ? '🎯 هوشمند'
+                    : models.find(m => m.id === selectedModel)?.name || selectedModel
+                  }
+                </span>
+              </div>
+            </div>
+          )}
+
+        </div>
       </div>
-    </>
+    </div>
   );
 }
