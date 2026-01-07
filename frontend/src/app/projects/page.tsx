@@ -927,11 +927,31 @@ export default function ProjectsPage() {
         outputs: []
       });
 
-      // 3. Create project directory structure
-      const folders = Array.from(new Set(projectFiles.map(f => f.folder)));
-      const createDirsCode = folders
-        .filter(f => f && f !== '.')
-        .map(f => `os.makedirs('${f}', exist_ok=True)`)
+      // 3. Create project directory structure (including nested directories from file paths)
+      const allDirs = new Set<string>();
+      for (const file of projectFiles) {
+        // Get full path
+        const fullPath = file.folder && file.folder !== '.'
+          ? `${file.folder}/${file.name}`
+          : file.name;
+
+        // Extract directory from path (everything except the filename)
+        const lastSlash = fullPath.lastIndexOf('/');
+        if (lastSlash > 0) {
+          const dir = fullPath.substring(0, lastSlash);
+          // Add this dir and all parent dirs
+          const parts = dir.split('/');
+          let current = '';
+          for (const part of parts) {
+            current = current ? `${current}/${part}` : part;
+            allDirs.add(current);
+          }
+        }
+      }
+
+      const createDirsCode = Array.from(allDirs)
+        .sort()
+        .map(d => `os.makedirs('${d}', exist_ok=True)`)
         .join('\n');
 
       if (createDirsCode) {
