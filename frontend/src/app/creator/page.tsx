@@ -11,6 +11,8 @@ const TABS = [
   { id: 'services', name: 'سرویس‌ها', icon: '🌐' },
   { id: 'agents', name: 'AI Agents', icon: '🤖' },
   { id: 'projects', name: 'پروژه‌ها', icon: '🏗️' },
+  { id: 'deploy', name: 'دیپلوی', icon: '🚀' },
+  { id: 'diagrams', name: 'نمودارها', icon: '📊' },
 ];
 
 interface CommandResult {
@@ -100,6 +102,19 @@ export default function CreatorPage() {
   const [selectedProject, setSelectedProject] = useState('');
   const [generateFileDesc, setGenerateFileDesc] = useState('');
   const [generateFilePath, setGenerateFilePath] = useState('');
+
+  // 🚀 Deploy state
+  const [renderApiKey, setRenderApiKey] = useState('');
+  const [renderConfigured, setRenderConfigured] = useState(false);
+  const [deployStatus, setDeployStatus] = useState<any>(null);
+  const [deployLoading, setDeployLoading] = useState(false);
+  const [renderServices, setRenderServices] = useState<any[]>([]);
+
+  // 📊 Diagrams state
+  const [diagrams, setDiagrams] = useState<any[]>([]);
+  const [selectedDiagram, setSelectedDiagram] = useState<string>('');
+  const [diagramContent, setDiagramContent] = useState('');
+  const [diagramsLoading, setDiagramsLoading] = useState(false);
 
   // Workspace info
   const [workspaceInfo, setWorkspaceInfo] = useState<any>(null);
@@ -452,6 +467,145 @@ export default function CreatorPage() {
     }
   };
 
+  // =====================================
+  // 🚀 Deploy Functions
+  // =====================================
+
+  const checkRenderStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/unified/deploy/render/status`);
+      const data = await res.json();
+      setRenderConfigured(data.configured || false);
+      if (data.configured) {
+        loadRenderServices();
+      }
+    } catch (error) {
+      console.error('Error checking Render status:', error);
+    }
+  };
+
+  const configureRender = async () => {
+    if (!renderApiKey) return;
+    setDeployLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/unified/deploy/configure/render`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: renderApiKey }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setRenderConfigured(true);
+        setRenderApiKey('');
+        loadRenderServices();
+      }
+    } catch (error) {
+      console.error('Error configuring Render:', error);
+    } finally {
+      setDeployLoading(false);
+    }
+  };
+
+  const loadRenderServices = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/unified/deploy/render/services`);
+      const data = await res.json();
+      if (data.success) {
+        setRenderServices(data.services || []);
+      }
+    } catch (error) {
+      console.error('Error loading Render services:', error);
+    }
+  };
+
+  const deployProject = async (projectId: string) => {
+    setDeployLoading(true);
+    setDeployStatus(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/unified/projects/${projectId}/deploy/render`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      setDeployStatus(data);
+      if (data.success) {
+        loadRenderServices();
+      }
+    } catch (error: any) {
+      setDeployStatus({ success: false, error: error.message });
+    } finally {
+      setDeployLoading(false);
+    }
+  };
+
+  const getProjectDeployStatus = async (projectId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/unified/projects/${projectId}/deploy/status`);
+      const data = await res.json();
+      return data;
+    } catch (error) {
+      console.error('Error getting deploy status:', error);
+      return null;
+    }
+  };
+
+  // =====================================
+  // 📊 Diagrams Functions
+  // =====================================
+
+  const loadProjectDiagrams = async (projectId: string, regenerate: boolean = false) => {
+    setDiagramsLoading(true);
+    try {
+      const url = `${API_BASE}/api/unified/projects/${projectId}/diagrams${regenerate ? '?regenerate=true' : ''}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.success) {
+        setDiagrams(data.diagrams || []);
+        if (data.diagrams?.length > 0) {
+          setSelectedDiagram(data.diagrams[0].type);
+          setDiagramContent(data.diagrams[0].content);
+        }
+      }
+    } catch (error) {
+      console.error('Error loading diagrams:', error);
+    } finally {
+      setDiagramsLoading(false);
+    }
+  };
+
+  const selectDiagram = (diagramType: string) => {
+    const diagram = diagrams.find(d => d.type === diagramType);
+    if (diagram) {
+      setSelectedDiagram(diagramType);
+      setDiagramContent(diagram.content);
+    }
+  };
+
+  const regenerateDiagram = async (projectId: string, diagramType: string) => {
+    setDiagramsLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/unified/projects/${projectId}/diagrams/${diagramType}?regenerate=true`);
+      const data = await res.json();
+      if (data.success) {
+        setDiagramContent(data.diagram.content);
+        // Update in list
+        setDiagrams(prev => prev.map(d =>
+          d.type === diagramType ? { ...d, content: data.diagram.content } : d
+        ));
+      }
+    } catch (error) {
+      console.error('Error regenerating diagram:', error);
+    } finally {
+      setDiagramsLoading(false);
+    }
+  };
+
+  const openInMermaidLive = (content: string) => {
+    const encoded = btoa(unescape(encodeURIComponent(content)));
+    window.open(`https://mermaid.live/edit#base64:${encoded}`, '_blank');
+  };
+
   // Load data when tab changes
   useEffect(() => {
     if (activeTab === 'files') {
@@ -462,6 +616,11 @@ export default function CreatorPage() {
     } else if (activeTab === 'agents') {
       loadAgents();
     } else if (activeTab === 'projects') {
+      loadProjects();
+    } else if (activeTab === 'deploy') {
+      checkRenderStatus();
+      loadProjects();
+    } else if (activeTab === 'diagrams') {
       loadProjects();
     }
   }, [activeTab]);
@@ -980,6 +1139,286 @@ export default function CreatorPage() {
                   )}
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* 🚀 Deploy Tab */}
+          {activeTab === 'deploy' && (
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
+              <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
+                🚀 دیپلوی یک‌کلیکه به Render
+              </h2>
+
+              {/* Render Configuration */}
+              {!renderConfigured ? (
+                <div className="mb-6 p-6 bg-gradient-to-r from-purple-50 to-blue-50 dark:from-purple-900/20 dark:to-blue-900/20 rounded-xl">
+                  <h3 className="font-bold text-lg mb-4">⚙️ تنظیم Render</h3>
+                  <p className="text-gray-600 dark:text-gray-400 mb-4">
+                    برای Deploy خودکار، API key رندر خود را وارد کنید.
+                    <br />
+                    <a
+                      href="https://dashboard.render.com/account/api-keys"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-blue-500 hover:underline"
+                    >
+                      دریافت API Key از Render Dashboard
+                    </a>
+                  </p>
+                  <div className="flex gap-2">
+                    <input
+                      type="password"
+                      value={renderApiKey}
+                      onChange={(e) => setRenderApiKey(e.target.value)}
+                      className="flex-1 p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600 font-mono"
+                      placeholder="rnd_xxxxxxxxxxxx"
+                      dir="ltr"
+                    />
+                    <button
+                      onClick={configureRender}
+                      disabled={!renderApiKey || deployLoading}
+                      className="px-6 py-3 bg-purple-500 text-white rounded-lg hover:bg-purple-600 disabled:opacity-50"
+                    >
+                      {deployLoading ? '...' : 'ذخیره'}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="mb-6 p-4 bg-green-50 dark:bg-green-900/20 rounded-lg flex items-center gap-2">
+                  <span className="text-green-500 text-xl">✅</span>
+                  <span>Render متصل شده</span>
+                </div>
+              )}
+
+              {/* Deploy Status */}
+              {deployStatus && (
+                <div className={`mb-6 p-4 rounded-lg ${
+                  deployStatus.success
+                    ? 'bg-green-50 dark:bg-green-900/20 text-green-700'
+                    : 'bg-red-50 dark:bg-red-900/20 text-red-700'
+                }`}>
+                  {deployStatus.success ? (
+                    <div>
+                      <div className="font-bold mb-2">✅ Deploy شروع شد!</div>
+                      {deployStatus.deployment?.url && (
+                        <a
+                          href={deployStatus.deployment.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-500 hover:underline"
+                        >
+                          {deployStatus.deployment.url}
+                        </a>
+                      )}
+                    </div>
+                  ) : (
+                    <div>❌ خطا: {deployStatus.error || deployStatus.deployment?.error}</div>
+                  )}
+                </div>
+              )}
+
+              {/* Projects List for Deploy */}
+              <div className="grid md:grid-cols-2 gap-6">
+                <div>
+                  <h3 className="font-bold mb-4">پروژه‌ها</h3>
+                  <div className="space-y-2 max-h-96 overflow-auto">
+                    {projects.map((project: any) => (
+                      <div
+                        key={project.id}
+                        className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg"
+                      >
+                        <div className="flex items-center justify-between mb-2">
+                          <div>
+                            <div className="font-medium">{project.name}</div>
+                            <div className="text-xs text-gray-500">{project.type}</div>
+                          </div>
+                          <button
+                            onClick={() => deployProject(project.id)}
+                            disabled={!renderConfigured || deployLoading}
+                            className="px-4 py-2 bg-gradient-to-r from-purple-500 to-blue-500 text-white rounded-lg text-sm hover:from-purple-600 hover:to-blue-600 disabled:opacity-50"
+                          >
+                            {deployLoading ? '⏳' : '🚀 Deploy'}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    {projects.length === 0 && (
+                      <p className="text-gray-500 text-center py-8">هیچ پروژه‌ای وجود ندارد</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Render Services */}
+                <div>
+                  <h3 className="font-bold mb-4">سرویس‌های Deploy شده</h3>
+                  <div className="space-y-2 max-h-96 overflow-auto">
+                    {renderServices.map((service: any, idx: number) => (
+                      <div
+                        key={idx}
+                        className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg"
+                      >
+                        <div className="font-medium">{service.name || service.service?.name}</div>
+                        <div className="text-xs text-gray-500 mt-1">
+                          {service.serviceDetails?.url || service.service?.serviceDetails?.url || 'URL نامشخص'}
+                        </div>
+                        <div className="text-xs mt-1">
+                          وضعیت: {service.suspended === 'not_suspended' ? '🟢 فعال' : '🔴 متوقف'}
+                        </div>
+                      </div>
+                    ))}
+                    {renderServices.length === 0 && (
+                      <p className="text-gray-500 text-center py-8">هیچ سرویسی Deploy نشده</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 📊 Diagrams Tab */}
+          {activeTab === 'diagrams' && (
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
+              <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
+                📊 نمودارهای داینامیک پروژه
+              </h2>
+
+              {/* Project Selection */}
+              <div className="mb-6">
+                <label className="block text-sm font-medium mb-2">انتخاب پروژه</label>
+                <div className="flex gap-2">
+                  <select
+                    value={selectedProject}
+                    onChange={(e) => {
+                      setSelectedProject(e.target.value);
+                      if (e.target.value) {
+                        loadProjectDiagrams(e.target.value);
+                      }
+                    }}
+                    className="flex-1 p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
+                  >
+                    <option value="">انتخاب کنید...</option>
+                    {projects.map((project: any) => (
+                      <option key={project.id} value={project.id}>
+                        {project.name}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedProject && (
+                    <button
+                      onClick={() => loadProjectDiagrams(selectedProject, true)}
+                      disabled={diagramsLoading}
+                      className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50"
+                    >
+                      {diagramsLoading ? '⏳' : '🔄 بازسازی'}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {selectedProject && diagrams.length > 0 && (
+                <div className="grid md:grid-cols-4 gap-6">
+                  {/* Diagram Type Selector */}
+                  <div className="md:col-span-1">
+                    <h3 className="font-bold mb-3">نوع نمودار</h3>
+                    <div className="space-y-2">
+                      {diagrams.map((diagram: any) => (
+                        <button
+                          key={diagram.type}
+                          onClick={() => selectDiagram(diagram.type)}
+                          className={`w-full p-3 rounded-lg text-right transition ${
+                            selectedDiagram === diagram.type
+                              ? 'bg-primary text-white'
+                              : 'bg-gray-50 dark:bg-gray-700 hover:bg-gray-100'
+                          }`}
+                        >
+                          <div className="font-medium">
+                            {diagram.type === 'class' && '🏛️ کلاس'}
+                            {diagram.type === 'flowchart' && '📊 فلوچارت'}
+                            {diagram.type === 'sequence' && '📋 توالی'}
+                            {diagram.type === 'er' && '🗄️ ER'}
+                            {diagram.type === 'mindmap' && '🧠 نقشه ذهنی'}
+                            {diagram.type === 'state' && '🔄 وضعیت'}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Diagram Preview */}
+                  <div className="md:col-span-3">
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="font-bold">پیش‌نمایش</h3>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => openInMermaidLive(diagramContent)}
+                          className="px-3 py-1 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 rounded text-sm"
+                        >
+                          🌐 باز کردن در Mermaid Live
+                        </button>
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(diagramContent);
+                            alert('کپی شد!');
+                          }}
+                          className="px-3 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm"
+                        >
+                          📋 کپی
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Mermaid Code */}
+                    <div className="bg-gray-900 rounded-lg p-4 overflow-auto max-h-96">
+                      <pre className="text-green-400 text-sm font-mono whitespace-pre-wrap" dir="ltr">
+                        {diagramContent}
+                      </pre>
+                    </div>
+
+                    {/* Mermaid Render (using img with mermaid.ink) */}
+                    <div className="mt-4 p-4 bg-white dark:bg-gray-900 rounded-lg border">
+                      <h4 className="font-medium mb-2 text-sm text-gray-600">نمایش گرافیکی</h4>
+                      {diagramContent && (
+                        <div className="flex justify-center">
+                          <img
+                            src={`https://mermaid.ink/img/${btoa(unescape(encodeURIComponent(diagramContent)))}`}
+                            alt="Diagram"
+                            className="max-w-full"
+                            onError={(e) => {
+                              (e.target as HTMLImageElement).style.display = 'none';
+                            }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {selectedProject && diagrams.length === 0 && !diagramsLoading && (
+                <div className="text-center py-12 text-gray-500">
+                  <div className="text-4xl mb-4">📊</div>
+                  <p>نموداری برای این پروژه وجود ندارد</p>
+                  <button
+                    onClick={() => loadProjectDiagrams(selectedProject, true)}
+                    className="mt-4 px-4 py-2 bg-blue-500 text-white rounded-lg"
+                  >
+                    تولید نمودارها
+                  </button>
+                </div>
+              )}
+
+              {diagramsLoading && (
+                <div className="flex justify-center py-12">
+                  <div className="animate-spin w-8 h-8 border-4 border-primary border-t-transparent rounded-full" />
+                </div>
+              )}
+
+              {!selectedProject && (
+                <div className="text-center py-12 text-gray-500">
+                  <div className="text-4xl mb-4">👆</div>
+                  <p>یک پروژه انتخاب کنید</p>
+                </div>
+              )}
             </div>
           )}
         </div>

@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from .core.config import settings
 from .api.routes import debate, models, chat, settings as settings_routes
 from .api.routes import projects, diagrams, creator, upload, orchestrator
-from .api.routes import config, external, runtime, external_projects
+from .api.routes import config, external, runtime, external_projects, unified_api
 
 # تنظیم logging
 logging.basicConfig(
@@ -314,6 +314,7 @@ app.include_router(config.router, prefix="/api")
 app.include_router(external.router, prefix="/api")
 app.include_router(runtime.router, prefix="/api")
 app.include_router(external_projects.router)
+app.include_router(unified_api.router)  # 🆕 Unified API
 
 
 # Root endpoint
