@@ -1079,6 +1079,7 @@ class ProjectEngineIntegrator:
     ) -> Dict:
         """
         اجرای وظیفه با نظارت و بازخورد
+        برای debugging: فایل‌ها را واقعاً اصلاح و ذخیره می‌کند
         """
         project_data = self.project_service.get_project(project_id)
         if not project_data.get("success"):
@@ -1090,17 +1091,48 @@ class ProjectEngineIntegrator:
         # انتخاب مدل
         model_id, confidence = self.model_selector.select_best_model(task_category)
 
+        # 🆕 برای debugging، پرامپت خاص بساز
+        if task_category == TaskCategory.DEBUGGING:
+            enhanced_prompt = f"""شما یک متخصص رفع باگ هستید. خطای زیر گزارش شده:
+
+{task_description}
+
+لطفاً:
+1. علت خطا را تحلیل کنید
+2. فایل(های) نیاز به اصلاح را مشخص کنید
+3. کد اصلاح شده را ارائه دهید
+
+پاسخ را به این فرمت بدهید:
+---FILE_PATH---
+مسیر/فایل.py
+---FILE_CONTENT---
+```python
+کد کامل فایل اصلاح شده
+```
+---END_FILE---
+
+اگر چند فایل نیاز به اصلاح دارند، برای هر کدام این ساختار را تکرار کنید.
+در انتها توضیح کوتاهی از تغییرات بدهید."""
+            task_to_send = enhanced_prompt
+        else:
+            task_to_send = task_description
+
         # اجرای وظیفه
         try:
             # استفاده از ai_manager از model_selector
             response = await self.model_selector.ai_manager.generate(
                 model_id=model_id,
-                messages=[Message(role="user", content=task_description)],
-                max_tokens=4000
+                messages=[Message(role="user", content=task_to_send)],
+                max_tokens=8000 if task_category == TaskCategory.DEBUGGING else 4000
             )
 
             if response.content and not response.error:
                 output = response.content
+
+                # 🆕 برای debugging، فایل‌ها را استخراج و ذخیره کن
+                saved_files = []
+                if task_category == TaskCategory.DEBUGGING:
+                    saved_files = await self._extract_and_save_debug_files(project_id, output)
 
                 # ارزیابی توسط ناظر
                 evaluation = await self.supervisor.evaluate_output(
@@ -1135,7 +1167,8 @@ class ProjectEngineIntegrator:
                         "suggestions": evaluation.suggestions
                     },
                     "deviation": deviation,
-                    "needs_revision": needs_revision
+                    "needs_revision": needs_revision,
+                    "saved_files": saved_files  # 🆕 فایل‌های ذخیره شده
                 }
 
                 # ذخیره مکالمه
@@ -1179,6 +1212,11 @@ class ProjectEngineIntegrator:
                         result["revised_output"] = revised_response.content
                         result["revised_by"] = alt_model_id
 
+                        # 🆕 برای debugging، فایل‌های بازنگری شده را هم ذخیره کن
+                        if task_category == TaskCategory.DEBUGGING:
+                            revised_files = await self._extract_and_save_debug_files(project_id, revised_response.content)
+                            result["saved_files"].extend(revised_files)
+
                 return result
 
         except Exception as e:
@@ -1186,6 +1224,84 @@ class ProjectEngineIntegrator:
             return {"success": False, "error": str(e)}
 
         return {"success": False, "error": "خطا در اجرا"}
+
+    async def _extract_and_save_debug_files(self, project_id: str, ai_output: str) -> List[Dict]:
+        """
+        استخراج فایل‌های اصلاح شده از خروجی AI و ذخیره در GitHub
+        """
+        saved_files = []
+
+        try:
+            import re
+
+            # الگوی استخراج فایل‌ها
+            file_pattern = r'---FILE_PATH---\s*\n(.+?)\n---FILE_CONTENT---\s*\n```\w*\n(.*?)```\s*\n---END_FILE---'
+            matches = re.findall(file_pattern, ai_output, re.DOTALL)
+
+            if not matches:
+                # الگوی جایگزین برای فرمت‌های دیگر
+                alt_pattern = r'(?:فایل|File):\s*[`\'"]?([^\s`\'"]+)[`\'"]?\s*\n```\w*\n(.*?)```'
+                matches = re.findall(alt_pattern, ai_output, re.DOTALL)
+
+            if not matches:
+                # الگوی ساده‌تر
+                simple_pattern = r'(\w+(?:/\w+)*\.\w+)\s*:\s*\n```\w*\n(.*?)```'
+                matches = re.findall(simple_pattern, ai_output, re.DOTALL)
+
+            for file_path, file_content in matches:
+                file_path = file_path.strip()
+                file_content = file_content.strip()
+
+                if not file_path or not file_content:
+                    continue
+
+                # ذخیره در GitHub
+                if self.github_storage:
+                    try:
+                        content_bytes = file_content.encode('utf-8')
+                        gh_result = await self.github_storage.save_project_file(
+                            project_id,
+                            content_bytes,
+                            file_path,
+                            "generated"
+                        )
+
+                        if gh_result.get("success"):
+                            saved_files.append({
+                                "file": file_path,
+                                "status": "fixed",
+                                "github_saved": True,
+                                "size": len(content_bytes)
+                            })
+                            logger.info(f"✅ Bug fix saved: {file_path}")
+
+                            # اضافه به کش
+                            self._add_file_to_cache(project_id, {
+                                "path": f"generated/{file_path}",
+                                "name": file_path,
+                                "folder": "generated",
+                                "size": len(content_bytes)
+                            })
+                        else:
+                            saved_files.append({
+                                "file": file_path,
+                                "status": "error",
+                                "github_saved": False,
+                                "error": gh_result.get("error", "Unknown error")
+                            })
+                    except Exception as e:
+                        logger.error(f"Error saving debug file {file_path}: {e}")
+                        saved_files.append({
+                            "file": file_path,
+                            "status": "error",
+                            "github_saved": False,
+                            "error": str(e)
+                        })
+
+        except Exception as e:
+            logger.error(f"Error extracting debug files: {e}")
+
+        return saved_files
 
     async def analyze_project_state(self, project_id: str, force_refresh: bool = False) -> Dict:
         """

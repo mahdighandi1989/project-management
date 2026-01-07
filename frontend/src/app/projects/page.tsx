@@ -2640,6 +2640,26 @@ sys.path.insert(0, '.')`;
                               <span className="font-bold text-green-600">{taskResult.evaluation.score}/100</span>
                             </div>
                           )}
+
+                          {/* 🆕 نمایش فایل‌های اصلاح شده (برای رفع باگ) */}
+                          {taskResult.saved_files && taskResult.saved_files.length > 0 && (
+                            <div className="bg-blue-50 dark:bg-blue-900/30 rounded-lg p-3 mt-2">
+                              <h5 className="font-medium text-blue-700 dark:text-blue-300 mb-2">
+                                ✅ فایل‌های اصلاح و ذخیره شده:
+                              </h5>
+                              <ul className="space-y-1">
+                                {taskResult.saved_files.map((file: any, idx: number) => (
+                                  <li key={idx} className={`flex items-center gap-2 text-xs ${file.github_saved ? 'text-green-600' : 'text-red-600'}`}>
+                                    {file.github_saved ? '✓' : '✗'}
+                                    <span className="font-mono">{file.file}</span>
+                                    {file.github_saved && <span className="text-gray-500">({Math.round(file.size / 1024)}KB)</span>}
+                                    {file.error && <span className="text-red-500">- {file.error}</span>}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+
                           <div className="bg-white dark:bg-gray-800 rounded p-3 max-h-40 overflow-y-auto">
                             <pre className="whitespace-pre-wrap text-xs">{taskResult.output?.slice(0, 500)}...</pre>
                           </div>
