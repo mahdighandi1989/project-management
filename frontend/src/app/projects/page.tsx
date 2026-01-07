@@ -2642,7 +2642,7 @@ sys.path.insert(0, '.')`;
                           )}
 
                           {/* 🆕 نمایش فایل‌های اصلاح شده (برای رفع باگ) */}
-                          {taskResult.saved_files && taskResult.saved_files.length > 0 && (
+                          {taskResult.saved_files && taskResult.saved_files.length > 0 ? (
                             <div className="bg-blue-50 dark:bg-blue-900/30 rounded-lg p-3 mt-2">
                               <h5 className="font-medium text-blue-700 dark:text-blue-300 mb-2">
                                 ✅ فایل‌های اصلاح و ذخیره شده:
@@ -2658,10 +2658,16 @@ sys.path.insert(0, '.')`;
                                 ))}
                               </ul>
                             </div>
+                          ) : taskCategory === 'debugging' && (
+                            <div className="bg-yellow-50 dark:bg-yellow-900/30 rounded-lg p-3 mt-2">
+                              <p className="text-yellow-700 dark:text-yellow-300 text-xs">
+                                ⚠️ هیچ فایلی برای ذخیره یافت نشد. AI باید کد اصلاح شده را در فرمت مشخص ارائه دهد.
+                              </p>
+                            </div>
                           )}
 
-                          <div className="bg-white dark:bg-gray-800 rounded p-3 max-h-40 overflow-y-auto">
-                            <pre className="whitespace-pre-wrap text-xs">{taskResult.output?.slice(0, 500)}...</pre>
+                          <div className="bg-white dark:bg-gray-800 rounded p-3 max-h-60 overflow-y-auto">
+                            <pre className="whitespace-pre-wrap text-xs">{taskResult.output?.slice(0, 2000)}{taskResult.output?.length > 2000 ? '...' : ''}</pre>
                           </div>
                         </div>
                       ) : (
