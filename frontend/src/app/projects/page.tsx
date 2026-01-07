@@ -344,6 +344,88 @@ const api = {
     });
     return res.json();
   },
+
+  // 🔗 External Projects APIs
+  async connectGitHub(repoUrl: string, token?: string, branch: string = 'main'): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/external-projects/connect/github`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo_url: repoUrl, token, branch }),
+    });
+    return res.json();
+  },
+
+  async connectRender(serviceUrl: string, apiKey?: string, serviceId?: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/external-projects/connect/render`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service_url: serviceUrl, api_key: apiKey, service_id: serviceId }),
+    });
+    return res.json();
+  },
+
+  async listExternalProjects(): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/external-projects/`);
+    return res.json();
+  },
+
+  async getExternalProject(projectId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/external-projects/${projectId}`);
+    return res.json();
+  },
+
+  async disconnectExternalProject(projectId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/external-projects/${projectId}`, {
+      method: 'DELETE',
+    });
+    return res.json();
+  },
+
+  async syncExternalProject(projectId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/external-projects/${projectId}/sync`, {
+      method: 'POST',
+    });
+    return res.json();
+  },
+
+  async getExternalProjectFiles(projectId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/external-projects/${projectId}/files`);
+    return res.json();
+  },
+
+  async analyzeExternalProject(projectId: string, analysisType: string = 'overview'): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/external-projects/${projectId}/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ analysis_type: analysisType }),
+    });
+    return res.json();
+  },
+
+  // 🔄 Smart Sync APIs
+  async smartSyncFromGitHub(): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/projects/sync/github`, {
+      method: 'POST',
+    });
+    return res.json();
+  },
+
+  async detectDuplicates(): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/projects/duplicates`);
+    return res.json();
+  },
+
+  async mergeProjects(keepId: string, deleteId: string): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/projects/merge?keep_id=${keepId}&delete_id=${deleteId}`, {
+      method: 'POST',
+    });
+    return res.json();
+  },
+
+  async getActiveProject(): Promise<any> {
+    const res = await fetch(`${getApiUrl()}/api/projects/active`);
+    return res.json();
+  },
 };
 
 // Status helpers
@@ -442,10 +524,35 @@ export default function ProjectsPage() {
   // 🆕 Project type detection for runtime recommendations
   const [detectedProjectType, setDetectedProjectType] = useState<'javascript' | 'python' | 'unknown'>('unknown');
 
+  // 🔗 External Projects state
+  const [showExternalConnect, setShowExternalConnect] = useState(false);
+  const [externalProjects, setExternalProjects] = useState<any[]>([]);
+  const [connectType, setConnectType] = useState<'github' | 'render'>('github');
+  const [githubUrl, setGithubUrl] = useState('');
+  const [githubToken, setGithubToken] = useState('');
+  const [githubBranch, setGithubBranch] = useState('main');
+  const [renderUrl, setRenderUrl] = useState('');
+  const [renderApiKey, setRenderApiKey] = useState('');
+  const [connectLoading, setConnectLoading] = useState(false);
+  const [connectResult, setConnectResult] = useState<any>(null);
+  const [selectedExternalProject, setSelectedExternalProject] = useState<any>(null);
+  const [externalFiles, setExternalFiles] = useState<any[]>([]);
+  const [analysisResult, setAnalysisResult] = useState<any>(null);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+
+  // 🔄 Smart Sync state
+  const [showSyncPanel, setShowSyncPanel] = useState(false);
+  const [syncResult, setSyncResult] = useState<any>(null);
+  const [duplicates, setDuplicates] = useState<any[]>([]);
+  const [duplicatesLoading, setDuplicatesLoading] = useState(false);
+  const [mergeLoading, setMergeLoading] = useState(false);
+  const [activeProject, setActiveProject] = useState<any>(null);
+
   // Load data
   useEffect(() => {
     loadProjects();
     loadModels();
+    loadExternalProjects();
   }, []);
 
   // Polling for build progress
@@ -505,6 +612,157 @@ export default function ProjectsPage() {
       setAvailableModels(data);
     } catch (error) {
       console.error('Error loading models:', error);
+    }
+  };
+
+  // 🔗 Load external projects
+  const loadExternalProjects = async () => {
+    try {
+      const data = await api.listExternalProjects();
+      if (data.success) {
+        setExternalProjects(data.projects || []);
+      }
+    } catch (error) {
+      console.error('Error loading external projects:', error);
+    }
+  };
+
+  // 🔗 Connect to GitHub
+  const handleConnectGitHub = async () => {
+    if (!githubUrl) return;
+    setConnectLoading(true);
+    setConnectResult(null);
+    try {
+      const result = await api.connectGitHub(githubUrl, githubToken || undefined, githubBranch);
+      setConnectResult(result);
+      if (result.success) {
+        loadExternalProjects();
+        setGithubUrl('');
+        setGithubToken('');
+        setGithubBranch('main');
+      }
+    } catch (error: any) {
+      setConnectResult({ success: false, error: error.message });
+    } finally {
+      setConnectLoading(false);
+    }
+  };
+
+  // 🔗 Connect to Render
+  const handleConnectRender = async () => {
+    if (!renderUrl) return;
+    setConnectLoading(true);
+    setConnectResult(null);
+    try {
+      const result = await api.connectRender(renderUrl, renderApiKey || undefined);
+      setConnectResult(result);
+      if (result.success) {
+        loadExternalProjects();
+        setRenderUrl('');
+        setRenderApiKey('');
+      }
+    } catch (error: any) {
+      setConnectResult({ success: false, error: error.message });
+    } finally {
+      setConnectLoading(false);
+    }
+  };
+
+  // 🔗 View external project details
+  const handleViewExternalProject = async (project: any) => {
+    setSelectedExternalProject(project);
+    try {
+      const filesData = await api.getExternalProjectFiles(project.id);
+      if (filesData.success) {
+        setExternalFiles(filesData.files || []);
+      }
+    } catch (error) {
+      console.error('Error loading external files:', error);
+    }
+  };
+
+  // 🔗 Analyze external project
+  const handleAnalyzeExternalProject = async (projectId: string, analysisType: string) => {
+    setAnalysisLoading(true);
+    setAnalysisResult(null);
+    try {
+      const result = await api.analyzeExternalProject(projectId, analysisType);
+      setAnalysisResult(result);
+    } catch (error: any) {
+      setAnalysisResult({ success: false, error: error.message });
+    } finally {
+      setAnalysisLoading(false);
+    }
+  };
+
+  // 🔗 Disconnect external project
+  const handleDisconnectExternalProject = async (projectId: string) => {
+    try {
+      await api.disconnectExternalProject(projectId);
+      loadExternalProjects();
+      setSelectedExternalProject(null);
+    } catch (error) {
+      console.error('Error disconnecting project:', error);
+    }
+  };
+
+  // 🔄 Smart sync from GitHub
+  const handleSmartSync = async () => {
+    setSyncLoading(true);
+    setSyncResult(null);
+    try {
+      const result = await api.smartSyncFromGitHub();
+      setSyncResult(result);
+      if (result.success) {
+        loadProjects();
+      }
+    } catch (error: any) {
+      setSyncResult({ success: false, error: error.message });
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
+  // 🔄 Detect duplicates
+  const handleDetectDuplicates = async () => {
+    setDuplicatesLoading(true);
+    try {
+      const result = await api.detectDuplicates();
+      if (result.success) {
+        setDuplicates(result.duplicates || []);
+      }
+    } catch (error) {
+      console.error('Error detecting duplicates:', error);
+    } finally {
+      setDuplicatesLoading(false);
+    }
+  };
+
+  // 🔄 Merge projects
+  const handleMergeProjects = async (keepId: string, deleteId: string) => {
+    setMergeLoading(true);
+    try {
+      const result = await api.mergeProjects(keepId, deleteId);
+      if (result.success) {
+        loadProjects();
+        handleDetectDuplicates();
+      }
+    } catch (error) {
+      console.error('Error merging projects:', error);
+    } finally {
+      setMergeLoading(false);
+    }
+  };
+
+  // 🔄 Get active project
+  const handleGetActiveProject = async () => {
+    try {
+      const result = await api.getActiveProject();
+      if (result.success) {
+        setActiveProject(result.active_project);
+      }
+    } catch (error) {
+      console.error('Error getting active project:', error);
     }
   };
 
@@ -1612,6 +1870,28 @@ sys.path.insert(0, '.')`;
               >
                 <SparklesIcon className="w-5 h-5" />
                 راه‌اندازی هوشمند
+              </button>
+              {/* 🔗 External Connect Button */}
+              <button
+                onClick={() => setShowExternalConnect(true)}
+                className="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-lg hover:from-cyan-600 hover:to-blue-600 transition text-sm"
+                title="اتصال به پروژه خارجی (GitHub/Render)"
+              >
+                <SignalIcon className="w-4 h-4" />
+                اتصال خارجی
+              </button>
+              {/* 🔄 Smart Sync Button */}
+              <button
+                onClick={() => {
+                  setShowSyncPanel(true);
+                  handleDetectDuplicates();
+                  handleGetActiveProject();
+                }}
+                className="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-emerald-500 to-teal-500 text-white rounded-lg hover:from-emerald-600 hover:to-teal-600 transition text-sm"
+                title="سینک هوشمند و تشخیص تکراری"
+              >
+                <ArrowPathIcon className="w-4 h-4" />
+                سینک هوشمند
               </button>
             </div>
 
@@ -3445,6 +3725,497 @@ sys.path.insert(0, '.')`;
                 >
                   متوجه شدم
                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 🔗 External Connect Modal */}
+        {showExternalConnect && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden">
+              {/* Header */}
+              <div className="p-6 bg-gradient-to-r from-cyan-500 to-blue-600 text-white">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-2xl font-bold flex items-center gap-3">
+                    <SignalIcon className="w-8 h-8" />
+                    اتصال به پروژه خارجی
+                  </h2>
+                  <button
+                    onClick={() => {
+                      setShowExternalConnect(false);
+                      setConnectResult(null);
+                      setSelectedExternalProject(null);
+                    }}
+                    className="p-2 hover:bg-white/20 rounded-lg transition"
+                  >
+                    <XMarkIcon className="w-6 h-6" />
+                  </button>
+                </div>
+                <p className="mt-2 text-white/80">
+                  اتصال به پروژه‌های GitHub یا سرویس‌های دیپلوی شده
+                </p>
+              </div>
+
+              <div className="p-6 overflow-y-auto max-h-[60vh]">
+                {!selectedExternalProject ? (
+                  <>
+                    {/* Connection Type Selector */}
+                    <div className="flex gap-2 p-1 bg-gray-100 dark:bg-gray-700 rounded-lg mb-6">
+                      <button
+                        onClick={() => setConnectType('github')}
+                        className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg transition ${
+                          connectType === 'github'
+                            ? 'bg-white dark:bg-gray-600 shadow text-cyan-600 dark:text-cyan-400'
+                            : 'text-gray-600 dark:text-gray-400'
+                        }`}
+                      >
+                        <CodeBracketIcon className="w-5 h-5" />
+                        GitHub
+                      </button>
+                      <button
+                        onClick={() => setConnectType('render')}
+                        className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg transition ${
+                          connectType === 'render'
+                            ? 'bg-white dark:bg-gray-600 shadow text-cyan-600 dark:text-cyan-400'
+                            : 'text-gray-600 dark:text-gray-400'
+                        }`}
+                      >
+                        <RocketLaunchIcon className="w-5 h-5" />
+                        Render
+                      </button>
+                    </div>
+
+                    {/* GitHub Connection */}
+                    {connectType === 'github' && (
+                      <div className="space-y-4">
+                        <div>
+                          <label className="block text-sm font-medium mb-2">آدرس ریپو</label>
+                          <input
+                            type="text"
+                            value={githubUrl}
+                            onChange={(e) => setGithubUrl(e.target.value)}
+                            placeholder="https://github.com/username/repo"
+                            className="w-full p-3 border rounded-xl dark:bg-gray-700 dark:border-gray-600 font-mono text-sm"
+                            dir="ltr"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium mb-2">
+                            توکن دسترسی (برای ریپوهای خصوصی)
+                          </label>
+                          <input
+                            type="password"
+                            value={githubToken}
+                            onChange={(e) => setGithubToken(e.target.value)}
+                            placeholder="ghp_xxxxxxxxxxxx"
+                            className="w-full p-3 border rounded-xl dark:bg-gray-700 dark:border-gray-600 font-mono text-sm"
+                            dir="ltr"
+                          />
+                          <p className="text-xs text-gray-500 mt-1">
+                            برای ریپوهای خصوصی، یک Personal Access Token از GitHub Settings بگیرید
+                          </p>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium mb-2">شاخه (Branch)</label>
+                          <input
+                            type="text"
+                            value={githubBranch}
+                            onChange={(e) => setGithubBranch(e.target.value)}
+                            placeholder="main"
+                            className="w-full p-3 border rounded-xl dark:bg-gray-700 dark:border-gray-600 font-mono text-sm"
+                            dir="ltr"
+                          />
+                        </div>
+                        <button
+                          onClick={handleConnectGitHub}
+                          disabled={connectLoading || !githubUrl}
+                          className="w-full px-4 py-3 bg-gradient-to-r from-cyan-500 to-blue-600 text-white rounded-lg hover:from-cyan-600 hover:to-blue-700 disabled:opacity-50 flex items-center justify-center gap-2"
+                        >
+                          {connectLoading ? (
+                            <>
+                              <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                              در حال اتصال...
+                            </>
+                          ) : (
+                            <>
+                              <SignalIcon className="w-5 h-5" />
+                              اتصال به GitHub
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Render Connection */}
+                    {connectType === 'render' && (
+                      <div className="space-y-4">
+                        <div>
+                          <label className="block text-sm font-medium mb-2">آدرس سرویس</label>
+                          <input
+                            type="text"
+                            value={renderUrl}
+                            onChange={(e) => setRenderUrl(e.target.value)}
+                            placeholder="https://your-app.onrender.com"
+                            className="w-full p-3 border rounded-xl dark:bg-gray-700 dark:border-gray-600 font-mono text-sm"
+                            dir="ltr"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium mb-2">
+                            API Key رندر (اختیاری)
+                          </label>
+                          <input
+                            type="password"
+                            value={renderApiKey}
+                            onChange={(e) => setRenderApiKey(e.target.value)}
+                            placeholder="rnd_xxxxxxxxxxxx"
+                            className="w-full p-3 border rounded-xl dark:bg-gray-700 dark:border-gray-600 font-mono text-sm"
+                            dir="ltr"
+                          />
+                        </div>
+                        <button
+                          onClick={handleConnectRender}
+                          disabled={connectLoading || !renderUrl}
+                          className="w-full px-4 py-3 bg-gradient-to-r from-purple-500 to-pink-600 text-white rounded-lg hover:from-purple-600 hover:to-pink-700 disabled:opacity-50 flex items-center justify-center gap-2"
+                        >
+                          {connectLoading ? (
+                            <>
+                              <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                              در حال اتصال...
+                            </>
+                          ) : (
+                            <>
+                              <RocketLaunchIcon className="w-5 h-5" />
+                              اتصال به Render
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Connection Result */}
+                    {connectResult && (
+                      <div className={`mt-4 p-4 rounded-xl ${
+                        connectResult.success
+                          ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300'
+                          : 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300'
+                      }`}>
+                        <div className="flex items-center gap-2">
+                          {connectResult.success ? (
+                            <CheckCircleIcon className="w-6 h-6" />
+                          ) : (
+                            <ExclamationTriangleIcon className="w-6 h-6" />
+                          )}
+                          <span>
+                            {connectResult.success
+                              ? `✅ ${connectResult.project?.name || 'پروژه'} با موفقیت متصل شد!`
+                              : `❌ خطا: ${connectResult.error || connectResult.detail || 'اتصال ناموفق'}`}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Connected Projects List */}
+                    {externalProjects.length > 0 && (
+                      <div className="mt-6">
+                        <h3 className="font-bold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
+                          <FolderIcon className="w-5 h-5 text-cyan-500" />
+                          پروژه‌های متصل ({externalProjects.length})
+                        </h3>
+                        <div className="space-y-2 max-h-48 overflow-y-auto">
+                          {externalProjects.map((project: any) => (
+                            <div
+                              key={project.id}
+                              className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition cursor-pointer"
+                              onClick={() => handleViewExternalProject(project)}
+                            >
+                              <div className="flex items-center gap-3">
+                                {project.type === 'github' ? (
+                                  <CodeBracketIcon className="w-5 h-5 text-cyan-500" />
+                                ) : (
+                                  <RocketLaunchIcon className="w-5 h-5 text-purple-500" />
+                                )}
+                                <div>
+                                  <div className="font-medium">{project.name}</div>
+                                  <div className="text-xs text-gray-500">{project.url}</div>
+                                </div>
+                              </div>
+                              <ChevronRightIcon className="w-5 h-5 text-gray-400" />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  /* Selected External Project Details */
+                  <div>
+                    <button
+                      onClick={() => {
+                        setSelectedExternalProject(null);
+                        setExternalFiles([]);
+                        setAnalysisResult(null);
+                      }}
+                      className="flex items-center gap-2 text-gray-600 dark:text-gray-400 mb-4 hover:text-gray-900 dark:hover:text-white"
+                    >
+                      <ChevronRightIcon className="w-5 h-5 rotate-180" />
+                      بازگشت
+                    </button>
+
+                    <div className="bg-gradient-to-r from-cyan-50 to-blue-50 dark:from-cyan-900/20 dark:to-blue-900/20 rounded-xl p-4 mb-4">
+                      <div className="flex items-center gap-3">
+                        {selectedExternalProject.type === 'github' ? (
+                          <CodeBracketIcon className="w-8 h-8 text-cyan-500" />
+                        ) : (
+                          <RocketLaunchIcon className="w-8 h-8 text-purple-500" />
+                        )}
+                        <div>
+                          <h3 className="font-bold text-lg">{selectedExternalProject.name}</h3>
+                          <p className="text-sm text-gray-600 dark:text-gray-400">{selectedExternalProject.url}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Analysis Buttons */}
+                    <div className="flex gap-2 mb-4">
+                      <button
+                        onClick={() => handleAnalyzeExternalProject(selectedExternalProject.id, 'overview')}
+                        disabled={analysisLoading}
+                        className="flex-1 px-3 py-2 bg-cyan-100 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-300 rounded-lg hover:bg-cyan-200 dark:hover:bg-cyan-800/30 text-sm"
+                      >
+                        بررسی کلی
+                      </button>
+                      <button
+                        onClick={() => handleAnalyzeExternalProject(selectedExternalProject.id, 'issues')}
+                        disabled={analysisLoading}
+                        className="flex-1 px-3 py-2 bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300 rounded-lg hover:bg-yellow-200 dark:hover:bg-yellow-800/30 text-sm"
+                      >
+                        مشکلات
+                      </button>
+                      <button
+                        onClick={() => handleAnalyzeExternalProject(selectedExternalProject.id, 'suggestions')}
+                        disabled={analysisLoading}
+                        className="flex-1 px-3 py-2 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 rounded-lg hover:bg-green-200 dark:hover:bg-green-800/30 text-sm"
+                      >
+                        پیشنهادات
+                      </button>
+                    </div>
+
+                    {/* Analysis Result */}
+                    {analysisLoading && (
+                      <div className="flex items-center justify-center py-8">
+                        <div className="w-8 h-8 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin" />
+                        <span className="mr-3">در حال تحلیل با AI...</span>
+                      </div>
+                    )}
+                    {analysisResult && (
+                      <div className="bg-gray-50 dark:bg-gray-700 rounded-xl p-4 mb-4">
+                        <h4 className="font-bold mb-2 flex items-center gap-2">
+                          <SparklesIcon className="w-5 h-5 text-purple-500" />
+                          نتیجه تحلیل AI
+                        </h4>
+                        <div className="text-sm whitespace-pre-wrap">
+                          {analysisResult.success
+                            ? analysisResult.analysis
+                            : `خطا: ${analysisResult.error}`}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Files List */}
+                    <div className="border-t border-gray-200 dark:border-gray-600 pt-4">
+                      <h4 className="font-bold mb-3 flex items-center gap-2">
+                        <DocumentTextIcon className="w-5 h-5 text-blue-500" />
+                        فایل‌ها ({externalFiles.length})
+                      </h4>
+                      <div className="space-y-1 max-h-48 overflow-y-auto">
+                        {externalFiles.map((file: string, idx: number) => (
+                          <div
+                            key={idx}
+                            className="flex items-center gap-2 p-2 bg-gray-100 dark:bg-gray-600 rounded text-sm font-mono"
+                          >
+                            <DocumentTextIcon className="w-4 h-4 text-gray-500" />
+                            {file}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Disconnect Button */}
+                    <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-600">
+                      <button
+                        onClick={() => handleDisconnectExternalProject(selectedExternalProject.id)}
+                        className="w-full px-4 py-2 bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 rounded-lg hover:bg-red-200 dark:hover:bg-red-800/30"
+                      >
+                        قطع اتصال
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 🔄 Smart Sync Modal */}
+        {showSyncPanel && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden">
+              {/* Header */}
+              <div className="p-6 bg-gradient-to-r from-emerald-500 to-teal-600 text-white">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-2xl font-bold flex items-center gap-3">
+                    <ArrowPathIcon className="w-8 h-8" />
+                    سینک هوشمند
+                  </h2>
+                  <button
+                    onClick={() => {
+                      setShowSyncPanel(false);
+                      setSyncResult(null);
+                    }}
+                    className="p-2 hover:bg-white/20 rounded-lg transition"
+                  >
+                    <XMarkIcon className="w-6 h-6" />
+                  </button>
+                </div>
+                <p className="mt-2 text-white/80">
+                  سینک از GitHub، تشخیص تکراری و ادغام پروژه‌ها
+                </p>
+              </div>
+
+              <div className="p-6 overflow-y-auto max-h-[60vh]">
+                {/* Active Project */}
+                {activeProject && (
+                  <div className="bg-emerald-50 dark:bg-emerald-900/20 rounded-xl p-4 mb-4">
+                    <h3 className="font-bold text-emerald-700 dark:text-emerald-300 mb-2 flex items-center gap-2">
+                      <CheckCircleIcon className="w-5 h-5" />
+                      پروژه فعال
+                    </h3>
+                    <div className="flex items-center gap-3">
+                      <FolderIcon className="w-6 h-6 text-emerald-500" />
+                      <div>
+                        <div className="font-medium">{activeProject.name}</div>
+                        <div className="text-sm text-gray-600 dark:text-gray-400">
+                          آخرین بروزرسانی: {new Date(activeProject.updated_at).toLocaleDateString('fa-IR')}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Sync Button */}
+                <div className="flex gap-3 mb-6">
+                  <button
+                    onClick={handleSmartSync}
+                    disabled={syncLoading}
+                    className="flex-1 px-4 py-3 bg-gradient-to-r from-emerald-500 to-teal-600 text-white rounded-lg hover:from-emerald-600 hover:to-teal-700 disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    {syncLoading ? (
+                      <>
+                        <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        در حال سینک...
+                      </>
+                    ) : (
+                      <>
+                        <ArrowPathIcon className="w-5 h-5" />
+                        سینک هوشمند از GitHub
+                      </>
+                    )}
+                  </button>
+                  <button
+                    onClick={handleDetectDuplicates}
+                    disabled={duplicatesLoading}
+                    className="px-4 py-3 bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300 rounded-lg hover:bg-yellow-200 dark:hover:bg-yellow-800/30 flex items-center gap-2"
+                  >
+                    {duplicatesLoading ? (
+                      <div className="w-5 h-5 border-2 border-yellow-500 border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <EyeIcon className="w-5 h-5" />
+                    )}
+                    تشخیص تکراری
+                  </button>
+                </div>
+
+                {/* Sync Result */}
+                {syncResult && (
+                  <div className={`mb-4 p-4 rounded-xl ${
+                    syncResult.success
+                      ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300'
+                      : 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300'
+                  }`}>
+                    <div className="flex items-center gap-2 mb-2">
+                      {syncResult.success ? (
+                        <CheckCircleIcon className="w-6 h-6" />
+                      ) : (
+                        <ExclamationTriangleIcon className="w-6 h-6" />
+                      )}
+                      <span className="font-bold">
+                        {syncResult.success ? 'سینک موفق!' : 'خطا در سینک'}
+                      </span>
+                    </div>
+                    {syncResult.success && (
+                      <div className="text-sm space-y-1">
+                        <p>پروژه‌های لود شده: {syncResult.projects_loaded || 0}</p>
+                        {syncResult.duplicates_found > 0 && (
+                          <p className="text-yellow-600 dark:text-yellow-400">
+                            تکراری‌های یافت شده: {syncResult.duplicates_found}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Duplicates List */}
+                {duplicates.length > 0 && (
+                  <div className="border-t border-gray-200 dark:border-gray-600 pt-4">
+                    <h3 className="font-bold text-yellow-700 dark:text-yellow-300 mb-3 flex items-center gap-2">
+                      <ExclamationTriangleIcon className="w-5 h-5" />
+                      پروژه‌های تکراری ({duplicates.length})
+                    </h3>
+                    <div className="space-y-3">
+                      {duplicates.map((dup: any, idx: number) => (
+                        <div key={idx} className="bg-yellow-50 dark:bg-yellow-900/20 rounded-xl p-4">
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="flex items-center gap-2">
+                              <FolderIcon className="w-5 h-5 text-yellow-500" />
+                              <span className="font-medium">{dup.project1?.name}</span>
+                              <span className="text-gray-400">↔</span>
+                              <span className="font-medium">{dup.project2?.name}</span>
+                            </div>
+                            <span className="text-sm bg-yellow-200 dark:bg-yellow-800 px-2 py-1 rounded-full">
+                              {Math.round(dup.similarity * 100)}% شباهت
+                            </span>
+                          </div>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => handleMergeProjects(dup.project1?.project_id, dup.project2?.project_id)}
+                              disabled={mergeLoading}
+                              className="flex-1 px-3 py-2 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded-lg text-sm hover:bg-emerald-200"
+                            >
+                              نگه داشتن {dup.project1?.name}
+                            </button>
+                            <button
+                              onClick={() => handleMergeProjects(dup.project2?.project_id, dup.project1?.project_id)}
+                              disabled={mergeLoading}
+                              className="flex-1 px-3 py-2 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-lg text-sm hover:bg-blue-200"
+                            >
+                              نگه داشتن {dup.project2?.name}
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {duplicates.length === 0 && !duplicatesLoading && (
+                  <div className="text-center py-8 text-gray-500">
+                    <CheckCircleIcon className="w-12 h-12 mx-auto mb-2 text-green-500" />
+                    <p>پروژه تکراری یافت نشد!</p>
+                  </div>
+                )}
               </div>
             </div>
           </div>
