@@ -249,7 +249,7 @@ class GitHubStorageService:
         }
 
     async def list_folder(self, path: str, recursive: bool = False) -> List[GitHubFile]:
-        """لیست فایل‌های یک پوشه (با پشتیبانی از recursive)"""
+        """لیست فایل‌های یک پوشه"""
         session = await self._get_session()
         full_path = self._get_full_path(path)
         url = f"{self.api_base}/repos/{self.owner}/{self.repo}/contents/{full_path}"
@@ -263,21 +263,21 @@ class GitHubStorageService:
                         for item in data:
                             item_type = item.get("type", "file")
 
-                            if item_type == "file":
-                                files.append(GitHubFile(
-                                    path=item.get("path", ""),
-                                    name=item.get("name", ""),
-                                    sha=item.get("sha", ""),
-                                    size=item.get("size", 0),
-                                    url=item.get("html_url", ""),
-                                    download_url=item.get("download_url", ""),
-                                    type=item_type
-                                ))
-                            elif item_type == "dir" and recursive:
-                                # Recursively list subdirectory
+                            # Always add files (original behavior)
+                            files.append(GitHubFile(
+                                path=item.get("path", ""),
+                                name=item.get("name", ""),
+                                sha=item.get("sha", ""),
+                                size=item.get("size", 0),
+                                url=item.get("html_url", ""),
+                                download_url=item.get("download_url", ""),
+                                type=item_type
+                            ))
+
+                            # If recursive and this is a directory, also get contents
+                            if item_type == "dir" and recursive:
                                 subdir_name = item.get("name", "")
                                 subfiles = await self.list_folder(f"{path}/{subdir_name}", recursive=True)
-                                # Prepend subdirectory name to file names
                                 for sf in subfiles:
                                     sf.name = f"{subdir_name}/{sf.name}"
                                 files.extend(subfiles)
