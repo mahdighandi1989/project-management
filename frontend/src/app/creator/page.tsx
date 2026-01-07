@@ -410,10 +410,20 @@ export default function CreatorPage() {
 
   const loadProjects = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/creator/projects/active`);
+      // Load from main projects API (same as Projects page)
+      const res = await fetch(`${API_BASE}/api/projects`);
       const data = await res.json();
-      if (data.success) {
-        setProjects(data.projects || []);
+      if (data.projects) {
+        // Transform to match our interface
+        const transformed = data.projects.map((p: any) => ({
+          id: p.id,
+          name: p.name,
+          path: p.path || `/storage/projects/${p.id}`,
+          type: p.type || p.project_type || 'python',
+          status: p.status || 'active',
+          created_at: p.created_at || new Date().toISOString(),
+        }));
+        setProjects(transformed);
       }
     } catch (error) {
       console.error('Error loading projects:', error);
