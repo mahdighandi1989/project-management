@@ -7,6 +7,7 @@ import os
 import json
 import uuid
 import asyncio
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Any
@@ -202,8 +203,8 @@ class SimpleProjectCreator:
             end = text.rfind('}') + 1
             if start >= 0 and end > start:
                 return json.loads(text[start:end])
-        except:
-            pass
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            print(f"Error parsing JSON structure: {e}")
 
         # ساختار پیش‌فرض
         return self._get_default_structure(project_type)
@@ -370,7 +371,8 @@ class SimpleProjectCreator:
         try:
             async with aiofiles.open(project_path, 'r') as f:
                 return await f.read()
-        except:
+        except (IOError, OSError, UnicodeDecodeError) as e:
+            print(f"Error reading file {project_path}: {e}")
             return None
 
     def delete_project(self, project_id: str) -> bool:
@@ -388,13 +390,19 @@ class SimpleProjectCreator:
 
 
 # ================================
-# Singleton
+# Singleton (thread-safe)
 # ================================
 
 _creator: Optional[SimpleProjectCreator] = None
+_creator_lock = threading.Lock()
+
 
 def get_simple_creator() -> SimpleProjectCreator:
+    """دریافت instance سازنده پروژه (thread-safe)"""
     global _creator
     if _creator is None:
-        _creator = SimpleProjectCreator("./projects")
+        with _creator_lock:
+            # Double-check locking pattern
+            if _creator is None:
+                _creator = SimpleProjectCreator("./projects")
     return _creator

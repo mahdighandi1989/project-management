@@ -103,7 +103,7 @@ class ClaudeService(AIServiceBase):
                 try:
                     error_data = response.json()
                     error_msg = error_data.get("error", {}).get("message", "Unknown error")
-                except:
+                except (ValueError, KeyError, TypeError):
                     error_msg = response.text
                 raise AIServiceError(error_msg, "claude", model_id, response.status_code)
 

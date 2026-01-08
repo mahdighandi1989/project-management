@@ -76,8 +76,8 @@ class Settings(BaseSettings):
         if self.CORS_ORIGINS.startswith("["):
             try:
                 return json.loads(self.CORS_ORIGINS)
-            except:
-                pass
+            except (json.JSONDecodeError, ValueError):
+                pass  # Fall through to comma-separated parsing
         # اگر با کاما جدا شده باشه
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
 

@@ -202,8 +202,8 @@ class CommandExecutor:
         # پاکسازی
         try:
             os.remove(script_path)
-        except:
-            pass
+        except (OSError, IOError):
+            pass  # Ignore cleanup errors
 
         return result
 
@@ -555,7 +555,7 @@ class ExternalConnector:
             ) as response:
                 try:
                     body = await response.json()
-                except:
+                except (json.JSONDecodeError, aiohttp.ContentTypeError, ValueError):
                     body = await response.text()
 
                 return TaskResult(
@@ -983,7 +983,8 @@ class ProjectCreator:
                 structure = json.loads(output[start:end])
             else:
                 structure = {"structure": {"directories": ["src"], "files": []}, "dependencies": {}}
-        except:
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            logger.warning(f"Could not parse project structure JSON: {e}")
             structure = {"structure": {"directories": ["src"], "files": []}, "dependencies": {}}
 
         # ایجاد دایرکتوری‌ها

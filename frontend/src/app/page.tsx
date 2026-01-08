@@ -21,7 +21,8 @@ export default function HomePage() {
         setProviders(data || []);
       }
     } catch (e) {
-      console.error(e);
+      console.error('Error loading providers:', e);
+      // Continue silently - providers are optional
     } finally {
       setLoading(false);
     }

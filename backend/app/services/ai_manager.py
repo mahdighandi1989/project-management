@@ -6,6 +6,7 @@
 from typing import Dict, List, Optional, Any, Type
 from datetime import datetime
 import asyncio
+import threading
 
 from .ai_base import AIServiceBase, Message, AIResponse, AIServiceError
 from .openai_service import OpenAIService
@@ -225,15 +226,19 @@ class AIManager:
             await service.close()
 
 
-# Singleton instance
+# Singleton instance with thread-safety
 _ai_manager: Optional[AIManager] = None
+_ai_manager_lock = threading.Lock()
 
 
 def get_ai_manager() -> AIManager:
-    """دریافت instance مدیر AI"""
+    """دریافت instance مدیر AI (thread-safe)"""
     global _ai_manager
     if _ai_manager is None:
-        _ai_manager = AIManager()
+        with _ai_manager_lock:
+            # Double-check locking pattern
+            if _ai_manager is None:
+                _ai_manager = AIManager()
     return _ai_manager
 
 
@@ -243,8 +248,10 @@ async def reset_ai_manager():
     if _ai_manager is not None:
         try:
             await _ai_manager.close()
-        except:
-            pass
+        except Exception as e:
+            # Log the error but continue with reset
+            import logging
+            logging.getLogger(__name__).warning(f"Error closing AI manager during reset: {e}")
     _ai_manager = None
     # ایجاد instance جدید
     return get_ai_manager()

@@ -78,7 +78,8 @@ export default function CreatorPage() {
         setModels(data.models || []);
       }
     } catch (e) {
-      console.error(e);
+      console.error('Error checking status:', e);
+      // AI status check failed - will show as unavailable
     } finally {
       setLoading(false);
     }
@@ -92,7 +93,8 @@ export default function CreatorPage() {
         setProjects(data.projects || []);
       }
     } catch (e) {
-      console.error(e);
+      console.error('Error loading projects:', e);
+      // Continue silently - will show empty project list
     }
   };
 

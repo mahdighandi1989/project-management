@@ -184,10 +184,18 @@ async def delete_project(project_id: str):
     }
 
 
+class GenerateMoreRequest(BaseModel):
+    """درخواست تولید فایل‌های بیشتر"""
+    file_paths: List[str] = []
+    descriptions: dict = {}  # path -> description
+
+
 @router.post("/projects/{project_id}/generate-more")
-async def generate_more_files(project_id: str, file_paths: List[str] = None):
-    """تولید فایل‌های بیشتر"""
+async def generate_more_files(project_id: str, request: GenerateMoreRequest = None):
+    """تولید فایل‌های بیشتر برای پروژه"""
     from ...services.simple_creator import get_simple_creator
+    import aiofiles
+    from pathlib import Path
 
     creator = get_simple_creator()
     project = creator.get_project(project_id)
@@ -195,18 +203,83 @@ async def generate_more_files(project_id: str, file_paths: List[str] = None):
     if not project:
         raise HTTPException(status_code=404, detail="پروژه پیدا نشد")
 
-    # TODO: تولید فایل‌های بیشتر
+    file_paths = request.file_paths if request else []
+    descriptions = request.descriptions if request else {}
+
+    if not file_paths:
+        raise HTTPException(status_code=400, detail="لیست فایل‌ها خالی است")
+
+    generated_files = []
+    errors = []
+    project_path = creator.workspace / project_id
+
+    for file_path in file_paths:
+        try:
+            # توضیح فایل
+            file_desc = descriptions.get(file_path, f"فایل {file_path} برای پروژه")
+
+            # تولید محتوای فایل با AI
+            content = await creator._generate_file(
+                project_name=project.name,
+                project_desc=project.description,
+                project_type=project.project_type,
+                file_path=file_path,
+                file_desc=file_desc,
+                ai_generate=ai_generate
+            )
+
+            # ذخیره فایل در دیسک
+            full_path = project_path / file_path
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+
+            async with aiofiles.open(full_path, 'w') as f:
+                await f.write(content)
+
+            # اضافه کردن به لیست فایل‌های پروژه
+            from ...services.simple_creator import ProjectFile
+            new_file = ProjectFile(
+                path=file_path,
+                content=content,
+                language=creator._detect_language(file_path)
+            )
+            project.files.append(new_file)
+
+            generated_files.append({
+                "path": file_path,
+                "size": len(content),
+                "language": new_file.language
+            })
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            errors.append({"path": file_path, "error": str(e)})
+
+    # ذخیره metadata پروژه
+    await creator._save_project_meta(project)
 
     return {
-        "success": True,
-        "message": "فایل‌ها تولید شدند"
+        "success": len(errors) == 0,
+        "project_id": project_id,
+        "generated": generated_files,
+        "errors": errors,
+        "message": f"{len(generated_files)} فایل تولید شد" + (f" ({len(errors)} خطا)" if errors else "")
     }
 
 
+class DeployRequest(BaseModel):
+    """درخواست Deploy"""
+    github_repo_url: Optional[str] = None
+    github_branch: str = "main"
+    env_vars: dict = {}
+
+
 @router.post("/projects/{project_id}/deploy")
-async def deploy_project(project_id: str):
+async def deploy_project(project_id: str, request: DeployRequest = None):
     """Deploy پروژه به Render"""
     from ...services.simple_creator import get_simple_creator
+    from ...services.deploy_service import get_deploy_manager
+    from ...services.github_storage import get_github_storage
     import os
 
     creator = get_simple_creator()
@@ -219,21 +292,68 @@ async def deploy_project(project_id: str):
     if not render_key:
         raise HTTPException(status_code=400, detail="کلید Render تنظیم نشده. از صفحه تنظیمات کلید رو وارد کن.")
 
-    # TODO: پیاده‌سازی واقعی Deploy به Render
-    # فعلا یه پیام موفقیت برمیگردونیم
+    # دریافت deploy manager
+    deploy_manager = get_deploy_manager()
+    deploy_manager.configure_render(render_key)
 
-    return {
-        "success": True,
-        "message": "Deploy آماده است. فایل‌ها رو میتونی دانلود کنی یا به GitHub push کنی.",
-        "project_id": project_id,
-        "instructions": [
-            "۱. فایل‌های پروژه رو دانلود کن",
-            "۲. یه repo جدید در GitHub بساز",
-            "۳. فایل‌ها رو push کن",
-            "۴. از Render.com به repo متصل شو",
-            "۵. Deploy اتوماتیک انجام میشه"
-        ]
-    }
+    # بررسی GitHub repo
+    github_repo_url = None
+    if request and request.github_repo_url:
+        github_repo_url = request.github_repo_url
+    else:
+        # سعی کن از GitHub storage اطلاعات رو بگیر
+        github_storage = get_github_storage()
+        if github_storage.token and github_storage.owner and github_storage.repo:
+            github_repo_url = f"https://github.com/{github_storage.owner}/{github_storage.repo}"
+
+    if not github_repo_url:
+        # اگر GitHub repo نداریم، راهنمای دستی بده
+        return {
+            "success": True,
+            "deployed": False,
+            "message": "برای Deploy خودکار، اول پروژه رو به GitHub push کن.",
+            "project_id": project_id,
+            "instructions": [
+                "۱. فایل‌های پروژه رو دانلود کن",
+                "۲. یه repo جدید در GitHub بساز",
+                "۳. فایل‌ها رو push کن",
+                "۴. برگرد و دوباره Deploy رو بزن با آدرس repo"
+            ]
+        }
+
+    try:
+        # Deploy به Render
+        deployment = await deploy_manager.quick_deploy(
+            project_id=project_id,
+            project_name=project.name,
+            project_type=project.project_type,
+            github_repo_url=github_repo_url,
+            github_branch=request.github_branch if request else "main",
+            root_dir=f"ai-workspace/projects/{project_id}/generated",
+            env_vars=request.env_vars if request else {}
+        )
+
+        if deployment.error:
+            return {
+                "success": False,
+                "error": deployment.error,
+                "project_id": project_id
+            }
+
+        return {
+            "success": True,
+            "deployed": True,
+            "message": f"پروژه در حال Deploy شدن به Render است!",
+            "project_id": project_id,
+            "deployment_id": deployment.id,
+            "service_id": deployment.service_id,
+            "status": deployment.status.value,
+            "url": deployment.url,
+            "dashboard_url": f"https://dashboard.render.com/web/{deployment.service_id}" if deployment.service_id else None
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"خطا در Deploy: {str(e)}")
 
 
 @router.get("/status")

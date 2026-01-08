@@ -248,8 +248,8 @@ async def get_model_info(model_id: str):
         try:
             ai_manager = get_ai_manager()
             is_available = get_provider_value(model.provider) in ai_manager.get_available_providers()
-        except:
-            pass
+        except Exception:
+            pass  # If AI manager not available, mark as unavailable
 
         return ModelInfo(
             id=model.id,

@@ -243,8 +243,8 @@ class DynamicConfigService:
         try:
             with open(self.history_file, 'w', encoding='utf-8') as f:
                 json.dump(self._history, f, ensure_ascii=False, indent=2)
-        except:
-            pass
+        except (IOError, OSError, TypeError) as e:
+            logger.warning(f"Could not save config history: {e}")
 
     # =====================================
     # دریافت تنظیمات
