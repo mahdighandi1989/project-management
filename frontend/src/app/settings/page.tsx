@@ -5,26 +5,36 @@ import Link from 'next/link';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
+// تعریف providers
 const PROVIDERS = [
-  { id: 'openai', name: 'OpenAI', key: 'OPENAI_API_KEY' },
-  { id: 'anthropic', name: 'Claude', key: 'ANTHROPIC_API_KEY' },
-  { id: 'google', name: 'Gemini', key: 'GOOGLE_API_KEY' },
-  { id: 'deepseek', name: 'DeepSeek', key: 'DEEPSEEK_API_KEY' },
-  { id: 'openrouter', name: 'OpenRouter', key: 'OPENROUTER_API_KEY' },
-  { id: 'groq', name: 'Groq', key: 'GROQ_API_KEY' },
+  { id: 'openai', name: 'OpenAI', icon: '🤖', env: 'OPENAI_API_KEY' },
+  { id: 'claude', name: 'Claude', icon: '🟣', env: 'CLAUDE_API_KEY' },
+  { id: 'gemini', name: 'Gemini', icon: '💎', env: 'GEMINI_API_KEY' },
+  { id: 'deepseek', name: 'DeepSeek', icon: '🔍', env: 'DEEPSEEK_API_KEY' },
+  { id: 'openrouter', name: 'OpenRouter', icon: '🌐', env: 'OPENROUTER_API_KEY' },
+  { id: 'groq', name: 'Groq', icon: '⚡', env: 'GROQ_API_KEY' },
+];
+
+// سرویس‌های Deploy
+const DEPLOY_SERVICES = [
+  { id: 'render', name: 'Render', icon: '🚀', desc: 'برای Deploy خودکار پروژه‌ها' },
+  { id: 'github', name: 'GitHub Token', icon: '🐙', desc: 'برای Push به ریپازیتوری' },
 ];
 
 export default function SettingsPage() {
-  const [tab, setTab] = useState<'keys' | 'config'>('keys');
+  const [activeTab, setActiveTab] = useState<'api' | 'deploy' | 'config'>('api');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
-  // API Keys
+  // کلیدهای API
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const [keysStatus, setKeysStatus] = useState<Record<string, boolean>>({});
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
+
+  // کلیدهای Deploy
+  const [deployKeys, setDeployKeys] = useState<Record<string, string>>({});
 
   // Config
   const [config, setConfig] = useState({
@@ -79,20 +89,70 @@ export default function SettingsPage() {
   };
 
   const saveApiKeys = async () => {
+    // فقط کلیدهایی که مقدار دارن رو بفرست
+    const keysToSave: Record<string, string> = {};
+    for (const [key, value] of Object.entries(apiKeys)) {
+      if (value && value.trim()) {
+        keysToSave[key] = value.trim();
+      }
+    }
+
+    if (Object.keys(keysToSave).length === 0) {
+      showError('هیچ کلیدی وارد نشده');
+      return;
+    }
+
     setSaving(true);
     try {
       const res = await fetch(`${API_BASE}/api/settings/api-keys`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(apiKeys),
+        body: JSON.stringify(keysToSave),
       });
 
-      if (res.ok) {
-        showSuccess('کلیدها ذخیره شدند');
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showSuccess(`${data.updated?.length || 0} کلید AI ذخیره شد`);
         setApiKeys({});
         loadData();
       } else {
-        showError('خطا در ذخیره');
+        showError(data.detail || 'خطا در ذخیره');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveDeployKeys = async () => {
+    // ذخیره کلیدهای Deploy
+    const keysToSave: Record<string, string> = {};
+    for (const [key, value] of Object.entries(deployKeys)) {
+      if (value && value.trim()) {
+        keysToSave[key] = value.trim();
+      }
+    }
+
+    if (Object.keys(keysToSave).length === 0) {
+      showError('هیچ کلیدی وارد نشده');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/settings/deploy-keys`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(keysToSave),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showSuccess('کلیدهای Deploy ذخیره شدند');
+        setDeployKeys({});
+      } else {
+        showError(data.detail || 'خطا در ذخیره');
       }
     } catch (e) {
       showError('خطا در ارتباط');
@@ -122,7 +182,8 @@ export default function SettingsPage() {
     }
   };
 
-  const hasChanges = Object.keys(apiKeys).some((k) => apiKeys[k]?.trim());
+  const hasApiChanges = Object.keys(apiKeys).some((k) => apiKeys[k]?.trim());
+  const hasDeployChanges = Object.keys(deployKeys).some((k) => deployKeys[k]?.trim());
 
   return (
     <div className="min-h-screen bg-gray-100 dark:bg-gray-900" dir="rtl">
@@ -138,12 +199,12 @@ export default function SettingsPage() {
         </div>
       )}
 
-      <div className="max-w-3xl mx-auto p-6">
+      <div className="max-w-4xl mx-auto p-6">
         {/* هدر */}
         <div className="flex items-center justify-between mb-6">
           <div>
             <h1 className="text-2xl font-bold">تنظیمات</h1>
-            <p className="text-gray-500 text-sm">پیکربندی API و سیستم</p>
+            <p className="text-gray-500 text-sm">کلیدهای API، Deploy و پیکربندی</p>
           </div>
           <Link
             href="/"
@@ -156,24 +217,34 @@ export default function SettingsPage() {
         {/* تب‌ها */}
         <div className="flex gap-2 mb-6">
           <button
-            onClick={() => setTab('keys')}
-            className={`px-4 py-2 rounded-lg ${
-              tab === 'keys'
+            onClick={() => setActiveTab('api')}
+            className={`px-4 py-2 rounded-lg font-medium transition ${
+              activeTab === 'api'
                 ? 'bg-blue-500 text-white'
                 : 'bg-white dark:bg-gray-800 hover:bg-gray-100'
             }`}
           >
-            کلیدهای API
+            🤖 کلیدهای AI
           </button>
           <button
-            onClick={() => setTab('config')}
-            className={`px-4 py-2 rounded-lg ${
-              tab === 'config'
-                ? 'bg-blue-500 text-white'
+            onClick={() => setActiveTab('deploy')}
+            className={`px-4 py-2 rounded-lg font-medium transition ${
+              activeTab === 'deploy'
+                ? 'bg-green-500 text-white'
                 : 'bg-white dark:bg-gray-800 hover:bg-gray-100'
             }`}
           >
-            پیکربندی
+            🚀 Deploy
+          </button>
+          <button
+            onClick={() => setActiveTab('config')}
+            className={`px-4 py-2 rounded-lg font-medium transition ${
+              activeTab === 'config'
+                ? 'bg-purple-500 text-white'
+                : 'bg-white dark:bg-gray-800 hover:bg-gray-100'
+            }`}
+          >
+            ⚙️ پیکربندی
           </button>
         </div>
 
@@ -181,38 +252,41 @@ export default function SettingsPage() {
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
             <p className="text-gray-400 text-center">در حال بارگذاری...</p>
           </div>
-        ) : tab === 'keys' ? (
-          // کلیدهای API
+        ) : activeTab === 'api' ? (
+          // کلیدهای AI
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
-            <h2 className="font-bold mb-4">کلیدهای API</h2>
+            <h2 className="font-bold text-lg mb-2">کلیدهای API مدل‌های AI</h2>
             <p className="text-sm text-gray-500 mb-6">
-              برای استفاده از مدل‌ها، کلید API هر سرویس را وارد کنید
+              برای استفاده از موتور خالق، حداقل یک کلید API وارد کنید
             </p>
 
             <div className="space-y-4">
               {PROVIDERS.map((provider) => (
-                <div key={provider.id}>
+                <div key={provider.id} className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
                   <div className="flex items-center justify-between mb-2">
-                    <label className="font-medium">{provider.name}</label>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xl">{provider.icon}</span>
+                      <span className="font-medium">{provider.name}</span>
+                    </div>
                     <span
-                      className={`text-xs px-2 py-0.5 rounded ${
+                      className={`text-xs px-2 py-1 rounded ${
                         keysStatus[provider.id]
                           ? 'bg-green-100 text-green-700'
-                          : 'bg-gray-100 text-gray-500'
+                          : 'bg-gray-200 text-gray-500'
                       }`}
                     >
-                      {keysStatus[provider.id] ? 'فعال' : 'غیرفعال'}
+                      {keysStatus[provider.id] ? '✓ فعال' : 'غیرفعال'}
                     </span>
                   </div>
                   <div className="relative">
                     <input
                       type={showKeys[provider.id] ? 'text' : 'password'}
-                      placeholder={`${provider.key}...`}
+                      placeholder={`کلید ${provider.name} را وارد کنید...`}
                       value={apiKeys[provider.id] || ''}
                       onChange={(e) =>
                         setApiKeys({ ...apiKeys, [provider.id]: e.target.value })
                       }
-                      className="w-full p-3 pr-12 border rounded-lg dark:bg-gray-700 dark:border-gray-600 font-mono text-sm"
+                      className="w-full p-3 pr-12 border rounded-lg dark:bg-gray-600 dark:border-gray-500 font-mono text-sm"
                       dir="ltr"
                     />
                     <button
@@ -231,38 +305,114 @@ export default function SettingsPage() {
 
             <button
               onClick={saveApiKeys}
-              disabled={saving || !hasChanges}
+              disabled={saving || !hasApiChanges}
               className="w-full mt-6 py-3 bg-blue-500 text-white rounded-lg font-bold hover:bg-blue-600 disabled:opacity-50"
             >
-              {saving ? 'در حال ذخیره...' : 'ذخیره کلیدها'}
+              {saving ? 'در حال ذخیره...' : '💾 ذخیره کلیدهای AI'}
             </button>
+          </div>
+        ) : activeTab === 'deploy' ? (
+          // کلیدهای Deploy
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
+            <h2 className="font-bold text-lg mb-2">کلیدهای Deploy</h2>
+            <p className="text-sm text-gray-500 mb-6">
+              برای Deploy یک کلیکی پروژه‌ها به Render و Push به GitHub
+            </p>
+
+            <div className="space-y-4">
+              {DEPLOY_SERVICES.map((service) => (
+                <div key={service.id} className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xl">{service.icon}</span>
+                      <div>
+                        <span className="font-medium">{service.name}</span>
+                        <p className="text-xs text-gray-500">{service.desc}</p>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="relative">
+                    <input
+                      type={showKeys[service.id] ? 'text' : 'password'}
+                      placeholder={`کلید ${service.name} را وارد کنید...`}
+                      value={deployKeys[service.id] || ''}
+                      onChange={(e) =>
+                        setDeployKeys({ ...deployKeys, [service.id]: e.target.value })
+                      }
+                      className="w-full p-3 pr-12 border rounded-lg dark:bg-gray-600 dark:border-gray-500 font-mono text-sm"
+                      dir="ltr"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setShowKeys({ ...showKeys, [service.id]: !showKeys[service.id] })
+                      }
+                      className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                    >
+                      {showKeys[service.id] ? '🙈' : '👁️'}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <button
+              onClick={saveDeployKeys}
+              disabled={saving || !hasDeployChanges}
+              className="w-full mt-6 py-3 bg-green-500 text-white rounded-lg font-bold hover:bg-green-600 disabled:opacity-50"
+            >
+              {saving ? 'در حال ذخیره...' : '💾 ذخیره کلیدهای Deploy'}
+            </button>
+
+            {/* راهنما */}
+            <div className="mt-6 p-4 bg-blue-50 dark:bg-blue-900/30 rounded-lg">
+              <h3 className="font-medium mb-2">📌 راهنمای دریافت کلید:</h3>
+              <ul className="text-sm text-gray-600 dark:text-gray-300 space-y-2">
+                <li>
+                  <strong>🚀 Render:</strong>
+                  <br />
+                  Dashboard &rarr; Account Settings &rarr; API Keys &rarr; Create API Key
+                </li>
+                <li>
+                  <strong>🐙 GitHub:</strong>
+                  <br />
+                  Settings &rarr; Developer Settings &rarr; Personal Access Tokens &rarr; Generate
+                </li>
+              </ul>
+            </div>
           </div>
         ) : (
           // پیکربندی
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
-            <h2 className="font-bold mb-4">پیکربندی سیستم</h2>
+            <h2 className="font-bold text-lg mb-4">پیکربندی سیستم</h2>
 
-            <div className="space-y-4">
+            <div className="space-y-6">
+              {/* Max Tokens */}
               <div>
                 <label className="block text-sm font-medium mb-2">
-                  حداکثر توکن ({config.max_tokens})
+                  حداکثر توکن: <span className="text-blue-500">{config.max_tokens}</span>
                 </label>
                 <input
                   type="range"
-                  min="100"
-                  max="128000"
-                  step="100"
+                  min="1000"
+                  max="32000"
+                  step="1000"
                   value={config.max_tokens}
                   onChange={(e) =>
                     setConfig({ ...config, max_tokens: parseInt(e.target.value) })
                   }
                   className="w-full"
                 />
+                <div className="flex justify-between text-xs text-gray-500 mt-1">
+                  <span>1,000</span>
+                  <span>32,000</span>
+                </div>
               </div>
 
+              {/* Temperature */}
               <div>
                 <label className="block text-sm font-medium mb-2">
-                  دما ({config.temperature})
+                  دما (خلاقیت): <span className="text-blue-500">{config.temperature}</span>
                 </label>
                 <input
                   type="range"
@@ -275,50 +425,76 @@ export default function SettingsPage() {
                   }
                   className="w-full"
                 />
+                <div className="flex justify-between text-xs text-gray-500 mt-1">
+                  <span>دقیق (0)</span>
+                  <span>خلاق (2)</span>
+                </div>
               </div>
 
+              {/* Timeout */}
               <div>
                 <label className="block text-sm font-medium mb-2">
-                  تایم‌اوت درخواست (ثانیه)
+                  تایم‌اوت (ثانیه): <span className="text-blue-500">{config.request_timeout}</span>
                 </label>
                 <input
-                  type="number"
-                  min="10"
-                  max="600"
+                  type="range"
+                  min="30"
+                  max="300"
+                  step="30"
                   value={config.request_timeout}
                   onChange={(e) =>
                     setConfig({ ...config, request_timeout: parseInt(e.target.value) })
                   }
-                  className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
+                  className="w-full"
                 />
+                <div className="flex justify-between text-xs text-gray-500 mt-1">
+                  <span>30s</span>
+                  <span>300s</span>
+                </div>
               </div>
 
+              {/* Retries */}
               <div>
                 <label className="block text-sm font-medium mb-2">
-                  تعداد تلاش مجدد
+                  تلاش مجدد: <span className="text-blue-500">{config.max_retries}</span>
                 </label>
                 <input
-                  type="number"
+                  type="range"
                   min="0"
-                  max="10"
+                  max="5"
+                  step="1"
                   value={config.max_retries}
                   onChange={(e) =>
                     setConfig({ ...config, max_retries: parseInt(e.target.value) })
                   }
-                  className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
+                  className="w-full"
                 />
+                <div className="flex justify-between text-xs text-gray-500 mt-1">
+                  <span>0</span>
+                  <span>5</span>
+                </div>
               </div>
             </div>
 
             <button
               onClick={saveConfig}
               disabled={saving}
-              className="w-full mt-6 py-3 bg-blue-500 text-white rounded-lg font-bold hover:bg-blue-600 disabled:opacity-50"
+              className="w-full mt-6 py-3 bg-purple-500 text-white rounded-lg font-bold hover:bg-purple-600 disabled:opacity-50"
             >
-              {saving ? 'در حال ذخیره...' : 'ذخیره تنظیمات'}
+              {saving ? 'در حال ذخیره...' : '💾 ذخیره تنظیمات'}
             </button>
           </div>
         )}
+
+        {/* لینک‌ها */}
+        <div className="mt-6 flex justify-center gap-4 text-sm">
+          <Link href="/creator" className="text-blue-500 hover:underline">
+            موتور خالق
+          </Link>
+          <Link href="/projects" className="text-blue-500 hover:underline">
+            پروژه‌ها
+          </Link>
+        </div>
       </div>
     </div>
   );

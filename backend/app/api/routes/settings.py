@@ -219,3 +219,65 @@ async def get_config():
         "max_model_time": settings.MAX_MODEL_TIME,
         "cors_origins": settings.CORS_ORIGINS,
     }
+
+
+class UpdateDeployKeysRequest(BaseModel):
+    """درخواست آپدیت کلیدهای Deploy"""
+    render: Optional[str] = None
+    github: Optional[str] = None
+
+
+@router.put("/deploy-keys")
+async def update_deploy_keys(request: UpdateDeployKeysRequest):
+    """آپدیت کلیدهای Deploy (Render, GitHub)"""
+    try:
+        updated = []
+        env_updates = {}
+
+        if request.render:
+            os.environ["RENDER_API_KEY"] = request.render
+            env_updates["RENDER_API_KEY"] = request.render
+            updated.append("render")
+
+        if request.github:
+            os.environ["GITHUB_TOKEN"] = request.github
+            env_updates["GITHUB_TOKEN"] = request.github
+            updated.append("github")
+
+        # ذخیره در فایل .env
+        env_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), ".env")
+        try:
+            existing = {}
+            if os.path.exists(env_file):
+                with open(env_file, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and '=' in line and not line.startswith('#'):
+                            key, value = line.split('=', 1)
+                            existing[key] = value
+
+            existing.update(env_updates)
+
+            with open(env_file, 'w') as f:
+                for key, value in existing.items():
+                    f.write(f"{key}={value}\n")
+        except Exception as e:
+            print(f"Warning: Could not save to .env file: {e}")
+
+        return {
+            "success": True,
+            "updated": updated,
+            "message": "Deploy keys updated successfully!"
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/deploy-keys/status")
+async def get_deploy_keys_status():
+    """وضعیت کلیدهای Deploy"""
+    return {
+        "render": bool(os.environ.get("RENDER_API_KEY")),
+        "github": bool(os.environ.get("GITHUB_TOKEN")),
+    }
