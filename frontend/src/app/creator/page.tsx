@@ -8,43 +8,55 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 // انواع پروژه
 const PROJECT_TYPES = [
-  { id: 'python', name: 'Python', icon: '🐍' },
-  { id: 'fastapi', name: 'FastAPI', icon: '⚡' },
-  { id: 'nextjs', name: 'Next.js', icon: '▲' },
-  { id: 'react', name: 'React', icon: '⚛️' },
-  { id: 'node', name: 'Node.js', icon: '🟢' },
-  { id: 'flask', name: 'Flask', icon: '🌶️' },
-  { id: 'django', name: 'Django', icon: '🎸' },
-  { id: 'express', name: 'Express', icon: '🚀' },
+  { id: 'python', name: 'Python', icon: '🐍', desc: 'اسکریپت یا CLI' },
+  { id: 'fastapi', name: 'FastAPI', icon: '⚡', desc: 'API سرور' },
+  { id: 'nextjs', name: 'Next.js', icon: '▲', desc: 'وب اپلیکیشن' },
+  { id: 'react', name: 'React', icon: '⚛️', desc: 'فرانت‌اند' },
+  { id: 'flask', name: 'Flask', icon: '🌶️', desc: 'وب ساده' },
+  { id: 'node', name: 'Node.js', icon: '🟢', desc: 'بک‌اند JS' },
 ];
+
+interface AIModel {
+  id: string;
+  name: string;
+  provider: string;
+}
+
+interface Project {
+  id: string;
+  name: string;
+  description: string;
+  project_type: string;
+  status: string;
+  files: any[];
+}
 
 export default function CreatorPage() {
   const router = useRouter();
 
-  // لیست پروژه‌های ساخته شده
-  const [projects, setProjects] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
+  // وضعیت سیستم
+  const [aiReady, setAiReady] = useState(false);
+  const [models, setModels] = useState<AIModel[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  // فرم ساخت پروژه
-  const [projectName, setProjectName] = useState('');
-  const [projectDesc, setProjectDesc] = useState('');
-  const [projectType, setProjectType] = useState('python');
+  // فرم
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [projectType, setProjectType] = useState('fastapi');
   const [technologies, setTechnologies] = useState('');
-  const [features, setFeatures] = useState('');
+
+  // حالت ساخت
   const [creating, setCreating] = useState(false);
   const [progress, setProgress] = useState('');
 
-  // پروژه انتخاب شده
-  const [selectedProject, setSelectedProject] = useState<any>(null);
-
-  // مدل‌های AI موجود
-  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  // پیام‌ها
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
 
   useEffect(() => {
+    checkStatus();
     loadProjects();
-    loadModels();
   }, []);
 
   const showError = (msg: string) => {
@@ -57,65 +69,44 @@ export default function CreatorPage() {
     setTimeout(() => setSuccess(''), 5000);
   };
 
-  const loadModels = async () => {
+  const checkStatus = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/models/available`);
+      const res = await fetch(`${API_BASE}/api/simple/status`);
       if (res.ok) {
         const data = await res.json();
-        // API آرایه مستقیم برمیگردونه، نه object با models
-        const models = Array.isArray(data) ? data : (data.models || data || []);
-        setAvailableModels(models.map((m: any) => m.id || m.name || m));
+        setAiReady(data.ai_ready);
+        setModels(data.models || []);
       }
     } catch (e) {
-      console.error('خطا در بارگذاری مدل‌ها');
+      console.error(e);
+    } finally {
+      setLoading(false);
     }
   };
 
   const loadProjects = async () => {
     try {
-      // از هر دو منبع بارگذاری کن
-      const [basicRes, creatorRes] = await Promise.all([
-        fetch(`${API_BASE}/api/projects`),
-        fetch(`${API_BASE}/api/creator/projects/active`)
-      ]);
-
-      let allProjects: any[] = [];
-
-      if (basicRes.ok) {
-        const data = await basicRes.json();
-        allProjects = data.projects || [];
+      const res = await fetch(`${API_BASE}/api/simple/projects`);
+      if (res.ok) {
+        const data = await res.json();
+        setProjects(data.projects || []);
       }
-
-      if (creatorRes.ok) {
-        const data = await creatorRes.json();
-        const creatorProjects = data.projects || [];
-        // اضافه کردن پروژه‌های creator که تکراری نیستن
-        for (const p of creatorProjects) {
-          if (!allProjects.find((x: any) => x.id === p.id)) {
-            allProjects.push(p);
-          }
-        }
-      }
-
-      setProjects(allProjects);
     } catch (e) {
       console.error(e);
     }
   };
 
   const createProject = async () => {
-    if (!projectName.trim()) {
-      showError('نام پروژه را وارد کنید');
+    if (!name.trim()) {
+      showError('نام پروژه رو وارد کن');
       return;
     }
-
-    if (!projectDesc.trim()) {
-      showError('توضیحات پروژه را وارد کنید - این برای AI مهمه!');
+    if (!description.trim()) {
+      showError('توضیحات رو وارد کن - این برای AI مهمه!');
       return;
     }
-
-    if (availableModels.length === 0) {
-      showError('هیچ مدل AI فعالی نیست! ابتدا از تنظیمات کلید API وارد کنید');
+    if (!aiReady) {
+      showError('اول از تنظیمات کلید API وارد کن');
       return;
     }
 
@@ -123,355 +114,241 @@ export default function CreatorPage() {
     setProgress('در حال آماده‌سازی...');
 
     try {
-      // استفاده از Creator Engine واقعی
-      setProgress('در حال تولید ساختار پروژه با AI...');
+      setProgress('در حال تولید ساختار با AI...');
 
-      const res = await fetch(`${API_BASE}/api/creator/projects/create`, {
+      const res = await fetch(`${API_BASE}/api/simple/projects/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          name: projectName,
-          description: projectDesc,
+          name: name.trim(),
+          description: description.trim(),
           project_type: projectType,
           technologies: technologies.split(',').map(t => t.trim()).filter(t => t),
-          features: features.split(',').map(f => f.trim()).filter(f => f),
         }),
       });
 
       const data = await res.json();
 
       if (res.ok && data.success) {
-        setProgress('پروژه با موفقیت ساخته شد! در حال انتقال...');
-        showSuccess(`پروژه "${projectName}" با AI ساخته شد!`);
+        setProgress('پروژه ساخته شد!');
+        showSuccess(data.message || 'پروژه ساخته شد!');
 
         // پاکسازی فرم
-        setProjectName('');
-        setProjectDesc('');
+        setName('');
+        setDescription('');
         setTechnologies('');
-        setFeatures('');
 
-        // انتقال به صفحه پروژه
-        const projectId = data.project?.id;
-        if (projectId) {
-          setTimeout(() => {
-            router.push(`/projects/${projectId}`);
-          }, 1500);
-        } else {
-          loadProjects();
-          setSelectedProject(data.project);
-        }
+        // رفتن به صفحه پروژه
+        setTimeout(() => {
+          router.push(`/project/${data.project.id}`);
+        }, 1000);
+
       } else {
-        // Fallback به روش ساده
-        setProgress('در حال ذخیره پروژه...');
-
-        const fallbackRes = await fetch(`${API_BASE}/api/projects`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: projectName,
-            description: projectDesc,
-            project_type: projectType,
-          }),
-        });
-
-        if (fallbackRes.ok) {
-          showSuccess('پروژه ذخیره شد (بدون تولید کد)');
-          setProjectName('');
-          setProjectDesc('');
-          loadProjects();
-        } else {
-          showError(data.error || 'خطا در ساخت پروژه');
-        }
+        showError(data.detail || data.error || 'خطا در ساخت پروژه');
       }
-    } catch (e) {
-      showError('خطا در ارتباط با سرور');
+
+    } catch (e: any) {
+      showError(e.message || 'خطا در ارتباط');
     } finally {
       setCreating(false);
       setProgress('');
     }
   };
 
-  const deleteProject = async (id: string) => {
-    if (!confirm('آیا مطمئنید؟')) return;
-
-    try {
-      const res = await fetch(`${API_BASE}/api/projects/${id}`, {
-        method: 'DELETE',
-      });
-      if (res.ok) {
-        showSuccess('حذف شد');
-        if (selectedProject?.id === id) setSelectedProject(null);
-        loadProjects();
-      }
-    } catch (e) {
-      showError('خطا در حذف');
-    }
-  };
-
-  const generateFile = async (filePath: string, description: string) => {
-    if (!selectedProject) return;
-
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/creator/projects/${selectedProject.id}/generate-file`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          file_path: filePath,
-          description: description,
-        }),
-      });
-
-      const data = await res.json();
-      if (data.success) {
-        showSuccess(`فایل ${filePath} ساخته شد`);
-        // بروزرسانی اطلاعات پروژه
-        const projectRes = await fetch(`${API_BASE}/api/creator/projects/${selectedProject.id}`);
-        if (projectRes.ok) {
-          const projectData = await projectRes.json();
-          setSelectedProject(projectData.project);
-        }
-      } else {
-        showError(data.error || 'خطا در ساخت فایل');
-      }
-    } catch (e) {
-      showError('خطا در ارتباط');
-    } finally {
-      setLoading(false);
-    }
-  };
-
   return (
-    <div className="min-h-screen bg-gray-100 dark:bg-gray-900" dir="rtl">
+    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-blue-900 to-gray-900 text-white" dir="rtl">
       {/* پیام‌ها */}
       {error && (
-        <div className="fixed top-4 right-4 bg-red-500 text-white px-4 py-2 rounded-lg shadow-lg z-50 max-w-md">
+        <div className="fixed top-4 right-4 bg-red-500 text-white px-6 py-3 rounded-lg shadow-lg z-50 animate-pulse">
           {error}
         </div>
       )}
       {success && (
-        <div className="fixed top-4 right-4 bg-green-500 text-white px-4 py-2 rounded-lg shadow-lg z-50 max-w-md">
+        <div className="fixed top-4 right-4 bg-green-500 text-white px-6 py-3 rounded-lg shadow-lg z-50">
           {success}
         </div>
       )}
 
-      <div className="max-w-7xl mx-auto p-6">
+      <div className="max-w-6xl mx-auto p-6">
         {/* هدر */}
-        <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center justify-between mb-8">
           <div>
-            <h1 className="text-2xl font-bold">موتور خالق</h1>
-            <p className="text-gray-500 text-sm">
-              با AI پروژه بساز - {availableModels.length > 0
-                ? `${availableModels.length} مدل فعال`
-                : '⚠️ مدل فعالی نیست'}
+            <h1 className="text-3xl font-bold mb-2">موتور خالق</h1>
+            <p className="text-gray-400">
+              با AI پروژه بساز - توضیح بده، کد بگیر
             </p>
           </div>
-          <div className="flex gap-2">
-            <Link href="/settings" className="px-4 py-2 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600">
-              تنظیمات API
+          <div className="flex gap-3">
+            <Link
+              href="/settings"
+              className="px-4 py-2 bg-yellow-500/20 text-yellow-400 rounded-lg hover:bg-yellow-500/30 border border-yellow-500/50"
+            >
+              تنظیمات
             </Link>
-            <Link href="/" className="px-4 py-2 bg-gray-200 dark:bg-gray-700 rounded-lg hover:bg-gray-300">
+            <Link
+              href="/"
+              className="px-4 py-2 bg-white/10 rounded-lg hover:bg-white/20"
+            >
               خانه
             </Link>
           </div>
         </div>
 
+        {/* وضعیت AI */}
+        <div className={`mb-6 p-4 rounded-xl ${aiReady ? 'bg-green-500/20 border border-green-500/50' : 'bg-red-500/20 border border-red-500/50'}`}>
+          {loading ? (
+            <p className="text-center">در حال بررسی...</p>
+          ) : aiReady ? (
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">+</span>
+                <div>
+                  <p className="font-medium">AI آماده است!</p>
+                  <p className="text-sm text-gray-400">
+                    {models.length} مدل فعال: {models.map(m => m.name).join(', ')}
+                  </p>
+                </div>
+              </div>
+              <button onClick={checkStatus} className="text-sm text-blue-400 hover:underline">
+                بروزرسانی
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">!</span>
+                <div>
+                  <p className="font-medium">AI فعال نیست!</p>
+                  <p className="text-sm text-gray-400">
+                    برو به تنظیمات و کلید API وارد کن
+                  </p>
+                </div>
+              </div>
+              <Link href="/settings" className="px-4 py-2 bg-yellow-500 text-black rounded-lg font-medium">
+                تنظیم کلید
+              </Link>
+            </div>
+          )}
+        </div>
+
         <div className="grid lg:grid-cols-3 gap-6">
-          {/* فرم ساخت پروژه */}
+          {/* فرم ساخت */}
           <div className="lg:col-span-2">
-            <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6 mb-6">
-              <h2 className="text-lg font-bold mb-4">ساخت پروژه جدید</h2>
+            <div className="bg-white/10 backdrop-blur rounded-2xl p-6">
+              <h2 className="text-xl font-bold mb-6">ساخت پروژه جدید</h2>
 
               {/* نام */}
               <div className="mb-4">
-                <label className="block text-sm font-medium mb-1">نام پروژه *</label>
+                <label className="block text-sm font-medium mb-2">نام پروژه *</label>
                 <input
                   type="text"
                   placeholder="مثال: فروشگاه آنلاین"
-                  value={projectName}
-                  onChange={(e) => setProjectName(e.target.value)}
-                  className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="w-full p-4 bg-white/5 border border-white/20 rounded-xl focus:border-blue-500 focus:outline-none"
                 />
               </div>
 
               {/* توضیحات */}
               <div className="mb-4">
-                <label className="block text-sm font-medium mb-1">توضیحات (مهم برای AI) *</label>
+                <label className="block text-sm font-medium mb-2">
+                  توضیحات پروژه * <span className="text-gray-400">(هر چی دقیق‌تر، بهتر)</span>
+                </label>
                 <textarea
-                  placeholder="دقیق بنویس چی میخوای... مثال: یک فروشگاه آنلاین با سبد خرید، پرداخت آنلاین، پنل مدیریت محصولات"
-                  value={projectDesc}
-                  onChange={(e) => setProjectDesc(e.target.value)}
-                  rows={3}
-                  className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
+                  placeholder="دقیق بنویس چی میخوای..."
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  rows={5}
+                  className="w-full p-4 bg-white/5 border border-white/20 rounded-xl focus:border-blue-500 focus:outline-none resize-none"
                 />
               </div>
 
               {/* نوع پروژه */}
               <div className="mb-4">
                 <label className="block text-sm font-medium mb-2">نوع پروژه</label>
-                <div className="grid grid-cols-4 gap-2">
+                <div className="grid grid-cols-3 gap-3">
                   {PROJECT_TYPES.map((type) => (
                     <button
                       key={type.id}
                       onClick={() => setProjectType(type.id)}
-                      className={`p-3 rounded-lg border text-center transition ${
+                      className={`p-4 rounded-xl border text-center transition-all ${
                         projectType === type.id
-                          ? 'bg-blue-50 dark:bg-blue-900/30 border-blue-500'
-                          : 'bg-gray-50 dark:bg-gray-700 hover:bg-gray-100'
+                          ? 'bg-blue-500/30 border-blue-500'
+                          : 'bg-white/5 border-white/20 hover:bg-white/10'
                       }`}
                     >
                       <div className="text-2xl mb-1">{type.icon}</div>
-                      <div className="text-xs">{type.name}</div>
+                      <div className="font-medium">{type.name}</div>
+                      <div className="text-xs text-gray-400">{type.desc}</div>
                     </button>
                   ))}
                 </div>
               </div>
 
               {/* تکنولوژی‌ها */}
-              <div className="mb-4">
-                <label className="block text-sm font-medium mb-1">تکنولوژی‌ها (اختیاری)</label>
+              <div className="mb-6">
+                <label className="block text-sm font-medium mb-2">
+                  تکنولوژی‌های اضافی <span className="text-gray-400">(اختیاری)</span>
+                </label>
                 <input
                   type="text"
-                  placeholder="با کاما جدا کن... مثال: PostgreSQL, Redis, Docker"
+                  placeholder="با کاما جدا کن... مثال: PostgreSQL, Redis, JWT"
                   value={technologies}
                   onChange={(e) => setTechnologies(e.target.value)}
-                  className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                />
-              </div>
-
-              {/* قابلیت‌ها */}
-              <div className="mb-4">
-                <label className="block text-sm font-medium mb-1">قابلیت‌ها (اختیاری)</label>
-                <input
-                  type="text"
-                  placeholder="با کاما جدا کن... مثال: احراز هویت, پرداخت, جستجو"
-                  value={features}
-                  onChange={(e) => setFeatures(e.target.value)}
-                  className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
+                  className="w-full p-4 bg-white/5 border border-white/20 rounded-xl focus:border-blue-500 focus:outline-none"
                 />
               </div>
 
               {/* دکمه ساخت */}
               <button
                 onClick={createProject}
-                disabled={creating || availableModels.length === 0}
-                className="w-full py-3 bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded-lg font-bold hover:from-blue-600 hover:to-purple-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={creating || !aiReady}
+                className="w-full py-4 bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded-xl font-bold text-lg hover:from-blue-600 hover:to-purple-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
               >
                 {creating ? (
-                  <span className="flex items-center justify-center gap-2">
-                    <span className="animate-spin">⏳</span>
-                    {progress || 'در حال ساخت...'}
+                  <span className="flex items-center justify-center gap-3">
+                    <span className="animate-spin">*</span>
+                    {progress}
                   </span>
                 ) : (
-                  '🚀 ساخت پروژه با AI'
+                  'ساخت پروژه با AI'
                 )}
               </button>
-
-              {availableModels.length === 0 && (
-                <p className="text-center text-yellow-600 mt-2 text-sm">
-                  ⚠️ ابتدا از صفحه تنظیمات کلید API وارد کنید
-                </p>
-              )}
             </div>
-
-            {/* نمایش پروژه انتخاب شده */}
-            {selectedProject && (
-              <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-lg font-bold">{selectedProject.name}</h2>
-                  <span className={`px-3 py-1 rounded text-sm ${
-                    selectedProject.status === 'created' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'
-                  }`}>
-                    {selectedProject.status || 'نامشخص'}
-                  </span>
-                </div>
-
-                <p className="text-gray-500 mb-4">{selectedProject.description}</p>
-
-                {/* ساختار پروژه */}
-                {selectedProject.structure && (
-                  <div className="mb-4">
-                    <h3 className="font-medium mb-2">ساختار پروژه:</h3>
-                    <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4 text-sm font-mono">
-                      {selectedProject.structure.directories?.map((dir: string, i: number) => (
-                        <div key={i} className="text-blue-600">📁 {dir}</div>
-                      ))}
-                      {selectedProject.structure.files?.map((file: any, i: number) => (
-                        <div key={i} className="text-gray-600">
-                          📄 {typeof file === 'string' ? file : file.path}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* فایل‌های تولید شده */}
-                {selectedProject.files && selectedProject.files.length > 0 && (
-                  <div className="mb-4">
-                    <h3 className="font-medium mb-2">فایل‌های تولید شده:</h3>
-                    <div className="space-y-1">
-                      {selectedProject.files.map((file: string, i: number) => (
-                        <div key={i} className="text-sm bg-gray-50 dark:bg-gray-700 px-3 py-2 rounded">
-                          ✅ {file}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* مسیر پروژه */}
-                {selectedProject.path && (
-                  <div className="text-sm text-gray-500">
-                    📂 مسیر: <code className="bg-gray-100 px-2 py-1 rounded">{selectedProject.path}</code>
-                  </div>
-                )}
-              </div>
-            )}
           </div>
 
           {/* لیست پروژه‌ها */}
           <div className="lg:col-span-1">
-            <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-4">
+            <div className="bg-white/10 backdrop-blur rounded-2xl p-6">
               <div className="flex items-center justify-between mb-4">
-                <h2 className="font-bold">پروژه‌ها ({projects.length})</h2>
-                <button onClick={loadProjects} className="text-blue-500 text-sm hover:underline">
+                <h2 className="font-bold">پروژه‌های من</h2>
+                <button onClick={loadProjects} className="text-sm text-blue-400 hover:underline">
                   بروزرسانی
                 </button>
               </div>
 
               {projects.length === 0 ? (
-                <p className="text-center text-gray-400 py-8">پروژه‌ای نیست</p>
+                <div className="text-center py-8 text-gray-400">
+                  <div className="text-4xl mb-2">-</div>
+                  <p>هنوز پروژه‌ای نساختی</p>
+                </div>
               ) : (
-                <div className="space-y-2 max-h-[70vh] overflow-auto">
+                <div className="space-y-3 max-h-[60vh] overflow-auto">
                   {projects.map((p) => (
-                    <div
+                    <Link
                       key={p.id}
-                      onClick={() => setSelectedProject(p)}
-                      className={`p-3 rounded-lg cursor-pointer transition ${
-                        selectedProject?.id === p.id
-                          ? 'bg-blue-50 dark:bg-blue-900/30 border-2 border-blue-500'
-                          : 'bg-gray-50 dark:bg-gray-700 hover:bg-gray-100'
-                      }`}
+                      href={`/project/${p.id}`}
+                      className="block p-4 bg-white/5 rounded-xl hover:bg-white/10 transition-all"
                     >
                       <div className="font-medium truncate">{p.name}</div>
-                      <div className="text-xs text-gray-500 mt-1 flex items-center gap-2">
-                        <span>{p.type || p.project_type || 'custom'}</span>
+                      <div className="flex items-center gap-2 mt-1 text-sm text-gray-400">
+                        <span>{PROJECT_TYPES.find(t => t.id === p.project_type)?.icon || '*'}</span>
+                        <span>{p.project_type}</span>
                         {p.files?.length > 0 && (
-                          <span className="text-green-600">{p.files.length} فایل</span>
+                          <span className="text-green-400">- {p.files.length} فایل</span>
                         )}
                       </div>
-                      <div className="flex gap-2 mt-2">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            deleteProject(p.id);
-                          }}
-                          className="text-xs px-2 py-1 bg-red-100 text-red-600 rounded hover:bg-red-200"
-                        >
-                          حذف
-                        </button>
-                      </div>
-                    </div>
+                    </Link>
                   ))}
                 </div>
               )}
