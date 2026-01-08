@@ -14,6 +14,7 @@ from .core.config import settings
 from .api.routes import debate, models, chat, settings as settings_routes
 from .api.routes import projects, diagrams, creator, upload, orchestrator
 from .api.routes import config, external, runtime, external_projects, unified_api
+from .api.routes import simple_projects  # 🆕 API ساده
 
 # تنظیم logging
 logging.basicConfig(
@@ -321,6 +322,7 @@ app.include_router(external.router, prefix="/api")
 app.include_router(runtime.router, prefix="/api")
 app.include_router(external_projects.router)
 app.include_router(unified_api.router)  # 🆕 Unified API
+app.include_router(simple_projects.router)  # 🆕 API ساده و کارآمد
 
 
 # Root endpoint
