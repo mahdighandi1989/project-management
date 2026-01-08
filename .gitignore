@@ -63,6 +63,5 @@ temp/
 # Docker
 .docker/
 
-# Original Google Scripts (keep for reference)
-# Code.gs
-# Index.html
+# Archive folder (old files)
+archive/
