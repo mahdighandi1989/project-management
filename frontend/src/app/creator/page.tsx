@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -18,6 +19,8 @@ const PROJECT_TYPES = [
 ];
 
 export default function CreatorPage() {
+  const router = useRouter();
+
   // لیست پروژه‌های ساخته شده
   const [projects, setProjects] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -138,11 +141,8 @@ export default function CreatorPage() {
       const data = await res.json();
 
       if (res.ok && data.success) {
-        setProgress('پروژه با موفقیت ساخته شد!');
+        setProgress('پروژه با موفقیت ساخته شد! در حال انتقال...');
         showSuccess(`پروژه "${projectName}" با AI ساخته شد!`);
-
-        // نمایش پروژه ساخته شده
-        setSelectedProject(data.project);
 
         // پاکسازی فرم
         setProjectName('');
@@ -150,7 +150,16 @@ export default function CreatorPage() {
         setTechnologies('');
         setFeatures('');
 
-        loadProjects();
+        // انتقال به صفحه پروژه
+        const projectId = data.project?.id;
+        if (projectId) {
+          setTimeout(() => {
+            router.push(`/projects/${projectId}`);
+          }, 1500);
+        } else {
+          loadProjects();
+          setSelectedProject(data.project);
+        }
       } else {
         // Fallback به روش ساده
         setProgress('در حال ذخیره پروژه...');

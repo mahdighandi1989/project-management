@@ -225,12 +225,20 @@ function ProjectsContent() {
                         <p className="text-gray-500 mt-1">{selected.description}</p>
                       )}
                     </div>
-                    <button
-                      onClick={() => deleteProject(selected.id)}
-                      className="px-3 py-1 bg-red-100 text-red-600 rounded text-sm hover:bg-red-200"
-                    >
-                      حذف
-                    </button>
+                    <div className="flex gap-2">
+                      <Link
+                        href={`/projects/${selected.id}`}
+                        className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+                      >
+                        📂 باز کردن
+                      </Link>
+                      <button
+                        onClick={() => deleteProject(selected.id)}
+                        className="px-3 py-1 bg-red-100 text-red-600 rounded text-sm hover:bg-red-200"
+                      >
+                        حذف
+                      </button>
+                    </div>
                   </div>
 
                   {/* اطلاعات */}
