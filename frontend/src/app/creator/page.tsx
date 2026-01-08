@@ -59,7 +59,9 @@ export default function CreatorPage() {
       const res = await fetch(`${API_BASE}/api/models/available`);
       if (res.ok) {
         const data = await res.json();
-        setAvailableModels(data.models?.map((m: any) => m.id || m.name) || []);
+        // API آرایه مستقیم برمیگردونه، نه object با models
+        const models = Array.isArray(data) ? data : (data.models || data || []);
+        setAvailableModels(models.map((m: any) => m.id || m.name || m));
       }
     } catch (e) {
       console.error('خطا در بارگذاری مدل‌ها');
