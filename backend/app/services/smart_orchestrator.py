@@ -528,7 +528,7 @@ class SupervisorModel:
         # روش 1: اول سعی کن مستقیم parse کنی
         try:
             return json.loads(text)
-        except:
+        except (json.JSONDecodeError, ValueError, TypeError):
             pass
 
         # روش 2: حذف همه backticks و کلمه json - روش ساده و مطمئن
@@ -540,7 +540,7 @@ class SupervisorModel:
 
         try:
             return json.loads(cleaned)
-        except:
+        except (json.JSONDecodeError, ValueError, TypeError):
             pass
 
         # روش 3: پیدا کردن JSON با balanced braces
@@ -590,7 +590,7 @@ class SupervisorModel:
                 result = json.loads(cleaned[start:end2])
                 logger.info(f"JSON parsed OK with rfind!")
                 return result
-            except:
+            except (json.JSONDecodeError, ValueError, TypeError):
                 pass
 
         logger.error(f"All JSON extraction methods failed")
@@ -1981,7 +1981,7 @@ config/settings.py
             result = json.loads(text.strip())
             logger.info("✅ Method 1: Direct parse succeeded")
             return result
-        except:
+        except (json.JSONDecodeError, ValueError, TypeError):
             pass
 
         # روش 2: حذف markdown code blocks
@@ -2000,7 +2000,7 @@ config/settings.py
             result = json.loads(cleaned)
             logger.info("✅ Method 2: After removing markdown succeeded")
             return result
-        except:
+        except (json.JSONDecodeError, ValueError, TypeError):
             pass
 
         # روش 3: پیدا کردن اولین { تا آخرین }
@@ -2012,7 +2012,7 @@ config/settings.py
                 result = json.loads(json_str)
                 logger.info("✅ Method 3: Brace extraction succeeded")
                 return result
-            except:
+            except (json.JSONDecodeError, ValueError, TypeError):
                 pass
 
         # روش 4: Balanced braces با state machine
@@ -2060,7 +2060,7 @@ config/settings.py
                 result = json.loads(json_str)
                 logger.info("✅ Method 5: After fixing common issues succeeded")
                 return result
-            except:
+            except (json.JSONDecodeError, ValueError, TypeError):
                 pass
 
         # روش 6: استفاده از regex برای استخراج ساختار
@@ -2072,7 +2072,7 @@ config/settings.py
                 if isinstance(result, dict) and len(result) > 2:
                     logger.info("✅ Method 6: Regex extraction succeeded")
                     return result
-            except:
+            except (json.JSONDecodeError, ValueError, TypeError):
                 continue
 
         logger.error(f"❌ All JSON extraction methods failed")

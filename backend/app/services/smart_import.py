@@ -105,7 +105,7 @@ class SmartImportService:
         # تبدیل محتوا به متن
         try:
             content_text = file_content.decode('utf-8')
-        except:
+        except UnicodeDecodeError:
             content_text = file_content.decode('latin-1', errors='replace')
 
         # تحلیل با چند مدل نخبه
@@ -273,7 +273,7 @@ class SmartImportService:
         try:
             # اول سعی کن مستقیم parse کنی
             return json.loads(cleaned)
-        except:
+        except (json.JSONDecodeError, ValueError, TypeError):
             pass
 
         # پیدا کردن با regex
@@ -281,7 +281,7 @@ class SmartImportService:
         if match:
             try:
                 return json.loads(match.group())
-            except:
+            except (json.JSONDecodeError, ValueError, TypeError):
                 pass
 
         return None

@@ -7,6 +7,7 @@ import json
 import base64
 import asyncio
 import aiohttp
+import threading
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
@@ -201,8 +202,8 @@ class GitHubStorageService:
                 if response.status == 200:
                     data = await response.json()
                     return data.get("sha")
-        except:
-            pass
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.debug(f"Could not get SHA for {path}: {e}")
 
         return None
 
@@ -399,7 +400,8 @@ class GitHubStorageService:
 
         try:
             manifest = json.loads(manifest_data.decode())
-        except:
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            logger.error(f"Error parsing manifest: {e}")
             return None
 
         # دانلود و ترکیب chunks
@@ -561,14 +563,19 @@ class GitHubStorageService:
             }
 
 
-# Singleton
+# Singleton (thread-safe)
 _github_storage: Optional[GitHubStorageService] = None
+_github_storage_lock = threading.Lock()
 
 
 def get_github_storage() -> GitHubStorageService:
+    """دریافت GitHub Storage (thread-safe)"""
     global _github_storage
     if _github_storage is None:
-        _github_storage = GitHubStorageService()
+        with _github_storage_lock:
+            # Double-check locking pattern
+            if _github_storage is None:
+                _github_storage = GitHubStorageService()
     return _github_storage
 
 

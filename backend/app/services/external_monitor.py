@@ -330,8 +330,8 @@ class ExternalSystemMonitor:
                                 last_response_time=elapsed,
                                 last_status_code=response.status
                             ))
-                except:
-                    pass
+                except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:
+                    logger.debug(f"Probe failed for {method} {path}: {e}")
 
         system.endpoints = discovered_endpoints
         system.updated_at = datetime.now().isoformat()
@@ -620,7 +620,7 @@ class ExternalSystemMonitor:
                             "system_id": system_id,
                             "analysis": analysis
                         }
-                except:
+                except (json.JSONDecodeError, ValueError, TypeError):
                     pass
 
                 return {
@@ -668,7 +668,7 @@ class ExternalSystemMonitor:
 
                 try:
                     body = await response.json()
-                except:
+                except (json.JSONDecodeError, aiohttp.ContentTypeError, ValueError):
                     body = await response.text()
 
                 return {

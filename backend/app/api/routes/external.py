@@ -53,7 +53,7 @@ def get_monitor():
     try:
         ai_manager = get_ai_manager()
         return get_external_monitor(ai_manager)
-    except:
+    except Exception:
         return get_external_monitor()
 
 
@@ -395,7 +395,7 @@ async def quick_health_check(
 
                     try:
                         body = await response.json()
-                    except:
+                    except (json.JSONDecodeError, aiohttp.ContentTypeError, ValueError):
                         body = await response.text()
 
                     return {

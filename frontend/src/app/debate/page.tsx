@@ -59,7 +59,8 @@ export default function DebatePage() {
         setDebates(Array.isArray(data) ? data.slice(0, 5) : []);
       }
     } catch (e) {
-      console.error(e);
+      console.error('Error loading debates data:', e);
+      // Continue silently - debates list will be empty
     } finally {
       setLoading(false);
     }

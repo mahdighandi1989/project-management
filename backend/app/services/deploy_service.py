@@ -8,6 +8,7 @@ import json
 import asyncio
 import aiohttp
 import base64
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Any
@@ -559,15 +560,19 @@ class DeployManager:
         return {"success": False, "error": "Unsupported provider"}
 
 
-# سینگلتون
+# سینگلتون (thread-safe)
 _deploy_manager: Optional[DeployManager] = None
+_deploy_manager_lock = threading.Lock()
 
 
 def get_deploy_manager() -> DeployManager:
-    """دریافت Deploy Manager"""
+    """دریافت Deploy Manager (thread-safe)"""
     global _deploy_manager
     if _deploy_manager is None:
-        _deploy_manager = DeployManager()
+        with _deploy_manager_lock:
+            # Double-check locking pattern
+            if _deploy_manager is None:
+                _deploy_manager = DeployManager()
     return _deploy_manager
 
 

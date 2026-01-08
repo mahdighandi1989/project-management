@@ -82,7 +82,8 @@ export default function SettingsPage() {
         }
       }
     } catch (e) {
-      console.error(e);
+      console.error('Error loading settings:', e);
+      // Settings load failed - will use defaults
     } finally {
       setLoading(false);
     }
