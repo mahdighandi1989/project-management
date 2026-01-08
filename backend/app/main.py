@@ -66,9 +66,18 @@ async def initialize_persistent_data():
         from .services.ai_manager import get_ai_manager
         from .services.creator_engine import get_creator_engine
 
-        logger.info("🔄 Initializing persistent data...")
+        logger.info("🔄 Initializing services...")
 
-        # اول GitHub storage را بررسی کن
+        # ✅ ALWAYS initialize AI manager and creator engine first
+        ai_manager = get_ai_manager()
+        creator_engine = get_creator_engine()
+
+        # Initialize creator engine (required for project creation!)
+        if not creator_engine.ai_orchestrator:
+            creator_engine.initialize(ai_manager)
+            logger.info("✅ Creator Engine initialized")
+
+        # بعد GitHub storage رو بررسی کن (optional)
         github_storage = get_github_storage()
 
         # بررسی تنظیمات GitHub
@@ -100,9 +109,6 @@ async def initialize_persistent_data():
         # Initialize orchestrator و بارگذاری workflow ها
         orchestrator = get_smart_orchestrator()
         if not orchestrator.is_initialized():
-            ai_manager = get_ai_manager()
-            creator_engine = get_creator_engine()
-            creator_engine.initialize(ai_manager)
             orchestrator.initialize(ai_manager, project_service, creator_engine)
             orchestrator.integrator.set_github_storage(github_storage)
 

@@ -1,11 +1,15 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
-export default function ProjectsPage() {
+function ProjectsContent() {
+  const searchParams = useSearchParams();
+  const projectId = searchParams.get('id');
+
   const [projects, setProjects] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -23,6 +27,16 @@ export default function ProjectsPage() {
   useEffect(() => {
     loadProjects();
   }, []);
+
+  // وقتی پروژه‌ها لود شدن و id داریم، پروژه رو انتخاب کن
+  useEffect(() => {
+    if (projectId && projects.length > 0 && !selected) {
+      const found = projects.find((p) => p.id === projectId);
+      if (found) {
+        setSelected(found);
+      }
+    }
+  }, [projectId, projects]);
 
   const showError = (msg: string) => {
     setError(msg);
@@ -300,5 +314,14 @@ export default function ProjectsPage() {
         </div>
       )}
     </div>
+  );
+}
+
+// Wrapper با Suspense برای useSearchParams
+export default function ProjectsPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-gray-100 dark:bg-gray-900 flex items-center justify-center" dir="rtl"><p>در حال بارگذاری...</p></div>}>
+      <ProjectsContent />
+    </Suspense>
   );
 }

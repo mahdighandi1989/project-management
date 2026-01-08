@@ -102,25 +102,25 @@ class Settings(BaseSettings):
         case_sensitive = True
 
     def get_available_providers(self) -> Dict[str, bool]:
-        """لیست provider های فعال با API key"""
+        """لیست provider های فعال با API key - مستقیم از environment میخونه"""
         return {
-            "openai": bool(self.OPENAI_API_KEY),
-            "claude": bool(self.CLAUDE_API_KEY),
-            "gemini": bool(self.GEMINI_API_KEY),
-            "deepseek": bool(self.DEEPSEEK_API_KEY),
-            "openrouter": bool(self.OPENROUTER_API_KEY),
-            "groq": bool(self.GROQ_API_KEY),
+            "openai": bool(os.environ.get("OPENAI_API_KEY")),
+            "claude": bool(os.environ.get("CLAUDE_API_KEY")),
+            "gemini": bool(os.environ.get("GEMINI_API_KEY")),
+            "deepseek": bool(os.environ.get("DEEPSEEK_API_KEY")),
+            "openrouter": bool(os.environ.get("OPENROUTER_API_KEY")),
+            "groq": bool(os.environ.get("GROQ_API_KEY")),
         }
 
     def get_api_key(self, provider: str) -> Optional[str]:
-        """دریافت API key یک provider"""
+        """دریافت API key یک provider - مستقیم از environment میخونه"""
         keys = {
-            "openai": self.OPENAI_API_KEY,
-            "claude": self.CLAUDE_API_KEY,
-            "gemini": self.GEMINI_API_KEY,
-            "deepseek": self.DEEPSEEK_API_KEY,
-            "openrouter": self.OPENROUTER_API_KEY,
-            "groq": self.GROQ_API_KEY,
+            "openai": os.environ.get("OPENAI_API_KEY"),
+            "claude": os.environ.get("CLAUDE_API_KEY"),
+            "gemini": os.environ.get("GEMINI_API_KEY"),
+            "deepseek": os.environ.get("DEEPSEEK_API_KEY"),
+            "openrouter": os.environ.get("OPENROUTER_API_KEY"),
+            "groq": os.environ.get("GROQ_API_KEY"),
         }
         return keys.get(provider)
 
