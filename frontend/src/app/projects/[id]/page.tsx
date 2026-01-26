@@ -691,7 +691,7 @@ export default function ProjectDetailPage() {
       if (data.success) {
         showSuccess(`راه‌اندازی خودکار انجام شد! نوع تشخیص داده شده: ${data.detected_type || 'عمومی'}`);
         // بارگذاری مجدد اطلاعات حافظه
-        loadProjectMemory();
+        loadMemory();
       } else {
         showError(data.detail || 'خطا در راه‌اندازی خودکار');
       }
