@@ -280,6 +280,15 @@ async def delete_imported_project(project_id: str, db: Session = Depends(get_db)
         if not project:
             raise HTTPException(status_code=404, detail="پروژه یافت نشد")
 
+        # حذف داده‌های مرتبط با ژورنال
+        try:
+            from .project_journal import ActivityLog, Report, ReportTrigger
+            db.query(ActivityLog).filter(ActivityLog.project_id == project_id).delete()
+            db.query(Report).filter(Report.project_id == project_id).delete()
+            db.query(ReportTrigger).filter(ReportTrigger.project_id == project_id).delete()
+        except Exception:
+            pass  # جداول ممکنه هنوز وجود نداشته باشند
+
         # حذف فایل‌ها
         db.query(ProjectFile).filter(ProjectFile.project_id == project_id).delete()
 
