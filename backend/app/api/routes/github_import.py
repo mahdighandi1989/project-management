@@ -127,6 +127,33 @@ async def import_repository(request: ImportRepoRequest):
         result["saved"] = True
         result["db_project_id"] = save_result.get("project_id")
 
+        # 🆕 راه‌اندازی خودکار حافظه و فیلدهای پویا
+        try:
+            from ...services.project_auto_setup import auto_setup_project_memory
+            from ...core.database import SessionLocal
+
+            db_session = SessionLocal()
+            try:
+                auto_result = await auto_setup_project_memory(
+                    project_id=save_result["project_id"],
+                    project_name=result.get("name", "پروژه"),
+                    project_description=result.get("description", ""),
+                    project_type="github_import",
+                    files=result.get("files", []),
+                    use_ai=True,
+                    db_session=db_session
+                )
+                result["auto_setup"] = {
+                    "success": auto_result.get("success", False),
+                    "detected_type": auto_result.get("detected_type"),
+                    "ai_insights": auto_result.get("ai_insights"),
+                    "fields_created": len(auto_result.get("dynamic_fields", []))
+                }
+            finally:
+                db_session.close()
+        except Exception as e:
+            result["auto_setup"] = {"success": False, "error": str(e)}
+
     return result
 
 
