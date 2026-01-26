@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     DEEPSEEK_API_KEY: Optional[str] = Field(default=None, description="کلید DeepSeek")
     OPENROUTER_API_KEY: Optional[str] = Field(default=None, description="کلید OpenRouter")
     GROQ_API_KEY: Optional[str] = Field(default=None, description="کلید Groq")
+    PERPLEXITY_API_KEY: Optional[str] = Field(default=None, description="کلید Perplexity AI")  # 🆕
 
     # ===========================================
     # تنظیمات سرور
@@ -110,6 +111,7 @@ class Settings(BaseSettings):
             "deepseek": bool(os.environ.get("DEEPSEEK_API_KEY")),
             "openrouter": bool(os.environ.get("OPENROUTER_API_KEY")),
             "groq": bool(os.environ.get("GROQ_API_KEY")),
+            "perplexity": bool(os.environ.get("PERPLEXITY_API_KEY")),  # 🆕
         }
 
     def get_api_key(self, provider: str) -> Optional[str]:
@@ -121,6 +123,7 @@ class Settings(BaseSettings):
             "deepseek": os.environ.get("DEEPSEEK_API_KEY"),
             "openrouter": os.environ.get("OPENROUTER_API_KEY"),
             "groq": os.environ.get("GROQ_API_KEY"),
+            "perplexity": os.environ.get("PERPLEXITY_API_KEY"),  # 🆕
         }
         return keys.get(provider)
 

@@ -64,6 +64,7 @@ AVAILABLE_MODELS = [
     {"id": "deepseek", "name": "DeepSeek", "icon": "🔷"},
     {"id": "openrouter", "name": "OpenRouter", "icon": "🔶"},
     {"id": "groq", "name": "Groq", "icon": "⚡"},
+    {"id": "perplexity", "name": "Perplexity AI", "icon": "🔍"},  # 🆕
 ]
 
 # گزینه‌های بازه زمانی برای تریگرها

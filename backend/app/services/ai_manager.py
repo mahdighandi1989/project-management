@@ -13,6 +13,7 @@ from .openai_service import OpenAIService
 from .claude_service import ClaudeService
 from .gemini_service import GeminiService
 from .deepseek_service import DeepSeekService
+from .perplexity_service import PerplexityService  # 🆕 Perplexity
 from ..core.config import settings
 from ..core.models_registry import (
     ModelProvider, AIModel, ModelCapability,
@@ -53,6 +54,12 @@ class AIManager:
         if available.get("deepseek"):
             try:
                 self._services[ModelProvider.DEEPSEEK] = DeepSeekService()
+            except AIServiceError:
+                pass
+
+        if available.get("perplexity"):  # 🆕 Perplexity
+            try:
+                self._services[ModelProvider.PERPLEXITY] = PerplexityService()
             except AIServiceError:
                 pass
 
