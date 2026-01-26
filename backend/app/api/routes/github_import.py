@@ -233,7 +233,7 @@ async def refresh_imported_project(
             raise HTTPException(status_code=404, detail="پروژه یافت نشد")
 
         import json
-        metadata = json.loads(project.metadata) if project.metadata else {}
+        metadata = json.loads(project.extra_data) if project.extra_data else {}
 
         if metadata.get("source") != "github":
             raise HTTPException(status_code=400, detail="این پروژه از GitHub نیست")
