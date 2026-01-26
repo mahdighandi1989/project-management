@@ -13,6 +13,7 @@ const PROVIDERS = [
   { id: 'deepseek', name: 'DeepSeek', icon: '🔍', env: 'DEEPSEEK_API_KEY' },
   { id: 'openrouter', name: 'OpenRouter', icon: '🌐', env: 'OPENROUTER_API_KEY' },
   { id: 'groq', name: 'Groq', icon: '⚡', env: 'GROQ_API_KEY' },
+  { id: 'perplexity', name: 'Perplexity AI', icon: '🔮', env: 'PERPLEXITY_API_KEY' },  // 🆕
 ];
 
 // سرویس‌های Deploy
