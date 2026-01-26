@@ -1,15 +1,19 @@
 """
 سیستم مدیریت پروژه پایدار
 Persistent Project Management System
+با پشتیبانی از SQLite + GitHub ترکیبی
 """
 
 import os
 import json
 import uuid
+import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel
 from enum import Enum
+
+logger = logging.getLogger(__name__)
 
 # =====================================
 # مدل‌های داده
@@ -118,9 +122,30 @@ class ProjectService:
         self.storage_path = storage_path
         self.projects: Dict[str, ProjectContext] = {}
         self.github_storage = None
+        self._db_service = None
+        self._use_sqlite = True  # فعال‌سازی SQLite
         self._ensure_storage()
         self._load_projects()
         # بارگذاری از GitHub به صورت async در startup انجام میشه
+
+    def _get_db_service(self):
+        """دریافت سرویس پایگاه داده"""
+        if self._db_service is None:
+            try:
+                from .db_service import get_db_service
+                self._db_service = get_db_service()
+            except ImportError:
+                logger.warning("Database service not available")
+                self._use_sqlite = False
+        return self._db_service
+
+    def _get_db_session(self):
+        """دریافت session پایگاه داده"""
+        try:
+            from ..core.database import SessionLocal
+            return SessionLocal()
+        except ImportError:
+            return None
 
     def initialize_github(self, github_storage):
         """Initialize با GitHub storage"""
@@ -134,7 +159,7 @@ class ProjectService:
             else:
                 loop.run_until_complete(self._load_from_github())
         except Exception as e:
-            print(f"Could not load from GitHub: {e}")
+            logger.error(f"Could not load from GitHub: {e}")
 
     def _ensure_storage(self):
         """ایجاد پوشه ذخیره‌سازی"""
@@ -204,9 +229,12 @@ class ProjectService:
         return None
 
     def _save_project(self, project: ProjectContext):
-        """ذخیره پروژه در دیسک و GitHub"""
+        """ذخیره پروژه در دیسک، SQLite و GitHub"""
         # ذخیره لوکال
         self._save_project_local(project)
+
+        # 🆕 ذخیره در SQLite
+        self._save_to_sqlite(project)
 
         # ذخیره در GitHub (async)
         if self.github_storage:
@@ -218,7 +246,7 @@ class ProjectService:
                 else:
                     loop.run_until_complete(self._save_project_to_github(project))
             except Exception as e:
-                print(f"Could not save to GitHub: {e}")
+                logger.error(f"Could not save to GitHub: {e}")
 
     def _save_project_local(self, project: ProjectContext):
         """ذخیره پروژه فقط در دیسک لوکال"""
@@ -306,7 +334,7 @@ class ProjectService:
         )
 
         self.projects[project_id] = project
-        self._save_project(project)
+        self._save_project(project)  # این متد خودش به SQLite هم ذخیره می‌کند
 
         return {
             "success": True,
@@ -315,6 +343,70 @@ class ProjectService:
             "phases_count": len(phases),
             "created_at": now
         }
+
+    def _save_to_sqlite(self, project: ProjectContext):
+        """ذخیره پروژه در SQLite"""
+        if not self._use_sqlite:
+            return
+
+        try:
+            db_service = self._get_db_service()
+            db = self._get_db_session()
+            if not db_service or not db:
+                return
+
+            try:
+                # تبدیل ProjectContext به فرمت مناسب SQLite
+                from ..models.project import Project as DBProject
+
+                # چک کن آیا وجود دارد
+                existing = db.query(DBProject).filter(DBProject.id == project.project_id).first()
+
+                # آماده‌سازی داده‌ها
+                technologies = []
+                features = []
+                structure = {"phases": [p.dict() for p in project.phases]}
+                metadata = {
+                    "goal": project.goal,
+                    "complexity": project.complexity,
+                    "model_scores": project.model_scores,
+                    "conversations_count": len(project.conversations),
+                    "knowledge_entries": len(project.knowledge_base),
+                }
+
+                if existing:
+                    # بروزرسانی
+                    existing.name = project.name
+                    existing.description = project.description
+                    existing.project_type = project.project_type.value if hasattr(project.project_type, 'value') else str(project.project_type)
+                    existing.status = project.status
+                    existing.technologies = json.dumps(technologies, ensure_ascii=False)
+                    existing.features = json.dumps(features, ensure_ascii=False)
+                    existing.structure = json.dumps(structure, ensure_ascii=False)
+                    existing.metadata = json.dumps(metadata, ensure_ascii=False)
+                else:
+                    # ایجاد جدید
+                    db_project = DBProject(
+                        id=project.project_id,
+                        name=project.name,
+                        description=project.description,
+                        project_type=project.project_type.value if hasattr(project.project_type, 'value') else str(project.project_type),
+                        status=project.status,
+                        technologies=json.dumps(technologies, ensure_ascii=False),
+                        features=json.dumps(features, ensure_ascii=False),
+                        structure=json.dumps(structure, ensure_ascii=False),
+                        metadata=json.dumps(metadata, ensure_ascii=False),
+                    )
+                    db.add(db_project)
+
+                db.commit()
+                logger.debug(f"Project {project.project_id} saved to SQLite")
+
+            finally:
+                db.close()
+
+        except Exception as e:
+            logger.error(f"Error saving project to SQLite: {e}")
 
     def get_project(self, project_id: str) -> Optional[Dict]:
         """دریافت اطلاعات پروژه"""
@@ -520,8 +612,122 @@ class ProjectService:
             if os.path.exists(path):
                 os.remove(path)
             self._update_registry()
+
+            # 🆕 حذف از SQLite
+            self._delete_from_sqlite(project_id)
+
             return {"success": True, "message": "پروژه حذف شد"}
         return {"success": False, "error": "پروژه یافت نشد"}
+
+    def _delete_from_sqlite(self, project_id: str):
+        """حذف پروژه از SQLite"""
+        if not self._use_sqlite:
+            return
+
+        try:
+            db = self._get_db_session()
+            if not db:
+                return
+
+            try:
+                from ..models.project import Project as DBProject, ProjectFile as DBProjectFile
+
+                # حذف فایل‌های مرتبط
+                db.query(DBProjectFile).filter(DBProjectFile.project_id == project_id).delete()
+
+                # حذف پروژه
+                db.query(DBProject).filter(DBProject.id == project_id).delete()
+                db.commit()
+                logger.debug(f"Project {project_id} deleted from SQLite")
+
+            finally:
+                db.close()
+
+        except Exception as e:
+            logger.error(f"Error deleting project from SQLite: {e}")
+
+    def sync_all_to_sqlite(self) -> Dict:
+        """
+        سینک همه پروژه‌های موجود به SQLite
+        برای مایگریشن از سیستم قبلی
+        """
+        if not self._use_sqlite:
+            return {"success": False, "error": "SQLite disabled"}
+
+        synced = 0
+        errors = []
+
+        for project_id, project in self.projects.items():
+            try:
+                self._save_to_sqlite(project)
+                synced += 1
+            except Exception as e:
+                errors.append({"id": project_id, "error": str(e)})
+
+        return {
+            "success": True,
+            "synced": synced,
+            "errors": errors,
+            "total": len(self.projects)
+        }
+
+    def load_from_sqlite(self) -> Dict:
+        """
+        بارگذاری پروژه‌ها از SQLite
+        """
+        if not self._use_sqlite:
+            return {"success": False, "error": "SQLite disabled"}
+
+        try:
+            db = self._get_db_session()
+            if not db:
+                return {"success": False, "error": "Database not available"}
+
+            try:
+                from ..models.project import Project as DBProject
+
+                db_projects = db.query(DBProject).all()
+                loaded = 0
+
+                for db_proj in db_projects:
+                    if db_proj.id not in self.projects:
+                        # تبدیل به ProjectContext
+                        try:
+                            structure = json.loads(db_proj.structure) if db_proj.structure else {}
+                            metadata = json.loads(db_proj.metadata) if db_proj.metadata else {}
+
+                            phases = []
+                            if structure.get("phases"):
+                                for p in structure["phases"]:
+                                    phases.append(Phase(**p))
+
+                            project = ProjectContext(
+                                project_id=db_proj.id,
+                                name=db_proj.name,
+                                description=db_proj.description or "",
+                                project_type=ProjectType(db_proj.project_type) if db_proj.project_type else ProjectType.CUSTOM,
+                                goal=metadata.get("goal", ""),
+                                complexity=metadata.get("complexity", "medium"),
+                                created_at=db_proj.created_at.isoformat() if db_proj.created_at else datetime.now().isoformat(),
+                                updated_at=db_proj.updated_at.isoformat() if db_proj.updated_at else datetime.now().isoformat(),
+                                phases=phases,
+                                status=db_proj.status or "active",
+                                model_scores=metadata.get("model_scores", {}),
+                            )
+                            self.projects[db_proj.id] = project
+                            loaded += 1
+
+                        except Exception as e:
+                            logger.warning(f"Could not load project {db_proj.id} from SQLite: {e}")
+
+                return {"success": True, "loaded": loaded, "total": len(db_projects)}
+
+            finally:
+                db.close()
+
+        except Exception as e:
+            logger.error(f"Error loading from SQLite: {e}")
+            return {"success": False, "error": str(e)}
 
     # =====================================
     # 🔄 سینک هوشمند و مدیریت پروژه‌ها

@@ -1,14 +1,18 @@
 """
 API routes برای تنظیمات سیستم
+با پشتیبانی SQLite
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
+from sqlalchemy.orm import Session
 import os
 
 from ...core.config import settings
 from ...core.roles import WORK_MODES, ROLES_REGISTRY, WorkMode, RoleType
+from ...core.database import get_db
+from ...models.setting import Setting
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 
@@ -281,3 +285,204 @@ async def get_deploy_keys_status():
         "render": bool(os.environ.get("RENDER_API_KEY")),
         "github": bool(os.environ.get("GITHUB_TOKEN")),
     }
+
+
+# ===========================================
+# 🆕 Database-backed Settings (SQLite)
+# ===========================================
+
+class SettingValue(BaseModel):
+    """یک تنظیم"""
+    key: str
+    value: Any
+    value_type: str = "string"
+    category: str = "general"
+    description: Optional[str] = None
+    is_secret: bool = False
+
+
+class SettingsUpdateRequest(BaseModel):
+    """درخواست بروزرسانی چند تنظیم"""
+    settings: List[SettingValue]
+
+
+@router.get("/db/all")
+async def get_all_db_settings(db: Session = Depends(get_db)):
+    """
+    دریافت همه تنظیمات از دیتابیس
+    تنظیمات حساس فقط چند کاراکتر آخر نشون داده میشن
+    """
+    try:
+        all_settings = db.query(Setting).all()
+        return {
+            "success": True,
+            "settings": [s.to_dict(hide_secrets=True) for s in all_settings],
+            "count": len(all_settings)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/db/category/{category}")
+async def get_settings_by_category(category: str, db: Session = Depends(get_db)):
+    """دریافت تنظیمات یک دسته"""
+    try:
+        category_settings = db.query(Setting).filter(Setting.category == category).all()
+        return {
+            "success": True,
+            "category": category,
+            "settings": [s.to_dict(hide_secrets=True) for s in category_settings],
+            "count": len(category_settings)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/db/{key}")
+async def get_db_setting(key: str, db: Session = Depends(get_db)):
+    """دریافت یک تنظیم خاص"""
+    try:
+        value = Setting.get_value(db, key)
+        setting = db.query(Setting).filter(Setting.key == key).first()
+
+        if setting is None:
+            return {"success": False, "error": "تنظیم یافت نشد"}
+
+        return {
+            "success": True,
+            "key": key,
+            "value": value if not setting.is_secret else "***hidden***",
+            "value_type": setting.value_type,
+            "category": setting.category,
+            "is_secret": setting.is_secret
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/db/{key}")
+async def set_db_setting(key: str, data: SettingValue, db: Session = Depends(get_db)):
+    """تنظیم یا بروزرسانی یک مقدار"""
+    try:
+        setting = Setting.set_value(
+            db=db,
+            key=key,
+            value=data.value,
+            value_type=data.value_type,
+            category=data.category,
+            description=data.description,
+            is_secret=data.is_secret
+        )
+        return {
+            "success": True,
+            "message": f"تنظیم '{key}' ذخیره شد",
+            "setting": setting.to_dict(hide_secrets=True)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/db/bulk")
+async def set_bulk_settings(request: SettingsUpdateRequest, db: Session = Depends(get_db)):
+    """بروزرسانی چندین تنظیم همزمان"""
+    try:
+        updated = []
+        for setting_data in request.settings:
+            Setting.set_value(
+                db=db,
+                key=setting_data.key,
+                value=setting_data.value,
+                value_type=setting_data.value_type,
+                category=setting_data.category,
+                description=setting_data.description,
+                is_secret=setting_data.is_secret
+            )
+            updated.append(setting_data.key)
+
+        return {
+            "success": True,
+            "updated": updated,
+            "count": len(updated)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/db/{key}")
+async def delete_db_setting(key: str, db: Session = Depends(get_db)):
+    """حذف یک تنظیم"""
+    try:
+        setting = db.query(Setting).filter(Setting.key == key).first()
+        if not setting:
+            return {"success": False, "error": "تنظیم یافت نشد"}
+
+        db.delete(setting)
+        db.commit()
+
+        return {"success": True, "message": f"تنظیم '{key}' حذف شد"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/db/sync-env")
+async def sync_env_to_db(db: Session = Depends(get_db)):
+    """
+    سینک متغیرهای محیطی به دیتابیس
+    API keyها رو به صورت is_secret=True ذخیره می‌کنه
+    """
+    try:
+        synced = []
+
+        # API Keys
+        api_keys = {
+            "OPENAI_API_KEY": "openai",
+            "CLAUDE_API_KEY": "claude",
+            "GEMINI_API_KEY": "gemini",
+            "DEEPSEEK_API_KEY": "deepseek",
+            "OPENROUTER_API_KEY": "openrouter",
+            "GROQ_API_KEY": "groq",
+            "RENDER_API_KEY": "render",
+            "GITHUB_TOKEN": "github",
+        }
+
+        for env_key, name in api_keys.items():
+            value = os.environ.get(env_key)
+            if value:
+                Setting.set_value(
+                    db=db,
+                    key=f"api_key_{name}",
+                    value=value,
+                    value_type="encrypted",
+                    category="api_keys",
+                    description=f"API Key for {name}",
+                    is_secret=True
+                )
+                synced.append(f"api_key_{name}")
+
+        # GitHub settings
+        github_settings = {
+            "GITHUB_OWNER": "github_owner",
+            "GITHUB_REPO": "github_repo",
+        }
+
+        for env_key, db_key in github_settings.items():
+            value = os.environ.get(env_key)
+            if value:
+                Setting.set_value(
+                    db=db,
+                    key=db_key,
+                    value=value,
+                    value_type="string",
+                    category="storage",
+                    description=f"GitHub {db_key.replace('github_', '')}"
+                )
+                synced.append(db_key)
+
+        return {
+            "success": True,
+            "synced": synced,
+            "count": len(synced),
+            "message": "تنظیمات محیطی به دیتابیس سینک شدند"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

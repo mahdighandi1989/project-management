@@ -11,6 +11,7 @@ import time
 from contextlib import asynccontextmanager
 
 from .core.config import settings
+from .core.database import init_db, get_db_info
 from .api.routes import debate, models, chat, settings as settings_routes
 from .api.routes import projects, diagrams, creator, upload, orchestrator
 from .api.routes import config, external, runtime, external_projects, unified_api
@@ -30,6 +31,15 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info(f"🚀 Starting {settings.APP_NAME} v{settings.APP_VERSION}")
     logger.info(f"📍 Environment: {settings.ENVIRONMENT}")
+
+    # 🆕 Initialize SQLite Database
+    logger.info("🗄️ Initializing SQLite database...")
+    init_db()
+    db_info = get_db_info()
+    logger.info(f"📊 Database: {db_info.get('path')} ({db_info.get('size_mb', 0)} MB)")
+    if db_info.get('record_counts'):
+        for table, count in db_info['record_counts'].items():
+            logger.info(f"  📋 {table}: {count} records")
 
     # بررسی API keys
     providers = settings.get_available_providers()
@@ -342,11 +352,20 @@ async def health_check():
     from .services.ai_manager import get_ai_manager
     ai_manager = get_ai_manager()
 
+    # Get database info
+    db_info = get_db_info()
+
     return {
         "status": "healthy",
         "version": settings.APP_VERSION,
         "providers": ai_manager.get_available_providers(),
         "models_count": len(ai_manager.get_available_models()),
+        "database": {
+            "exists": db_info.get("exists", False),
+            "size_mb": db_info.get("size_mb", 0),
+            "tables": db_info.get("tables", []),
+            "record_counts": db_info.get("record_counts", {}),
+        }
     }
 
 
