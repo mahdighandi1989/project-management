@@ -17,6 +17,7 @@ from .api.routes import projects, diagrams, creator, upload, orchestrator
 from .api.routes import config, external, runtime, external_projects, unified_api
 from .api.routes import simple_projects  # 🆕 API ساده
 from .api.routes import github_import  # 🆕 GitHub Import
+from .api.routes import project_memory  # 🆕 Project Memory (باکس حافظه)
 
 # تنظیم logging
 logging.basicConfig(
@@ -335,6 +336,7 @@ app.include_router(external_projects.router)
 app.include_router(unified_api.router)  # 🆕 Unified API
 app.include_router(simple_projects.router)  # 🆕 API ساده و کارآمد
 app.include_router(github_import.router, prefix="/api")  # 🆕 GitHub Import
+app.include_router(project_memory.router, prefix="/api")  # 🆕 Project Memory (باکس حافظه)
 
 
 # Root endpoint

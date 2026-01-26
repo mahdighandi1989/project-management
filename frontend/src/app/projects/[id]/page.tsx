@@ -44,6 +44,24 @@ interface Project {
   technologies?: string[];
 }
 
+interface MemoryInstructions {
+  content: string;
+  target_models: string[];
+}
+
+interface DynamicField {
+  id: string;
+  name: string;
+  value: string;
+  target_models: string[];
+}
+
+interface AIModel {
+  id: string;
+  name: string;
+  icon: string;
+}
+
 export default function ProjectDetailPage() {
   const params = useParams();
   const projectId = params.id as string;
@@ -56,9 +74,31 @@ export default function ProjectDetailPage() {
   const [success, setSuccess] = useState('');
   const [deploying, setDeploying] = useState(false);
 
+  // تب فعال
+  const [activeTab, setActiveTab] = useState<'files' | 'memory'>('files');
+
+  // Memory Box State
+  const [memoryInstructions, setMemoryInstructions] = useState<MemoryInstructions>({
+    content: '',
+    target_models: ['all']
+  });
+  const [dynamicFields, setDynamicFields] = useState<DynamicField[]>([]);
+  const [availableModels, setAvailableModels] = useState<AIModel[]>([]);
+  const [savingMemory, setSavingMemory] = useState(false);
+
+  // New Field Form
+  const [showNewFieldForm, setShowNewFieldForm] = useState(false);
+  const [newFieldName, setNewFieldName] = useState('');
+  const [newFieldValue, setNewFieldValue] = useState('');
+  const [newFieldModels, setNewFieldModels] = useState<string[]>(['all']);
+
+  // Edit Field
+  const [editingField, setEditingField] = useState<string | null>(null);
+
   useEffect(() => {
     if (projectId) {
       loadProject();
+      loadMemory();
     }
   }, [projectId]);
 
@@ -146,10 +186,134 @@ export default function ProjectDetailPage() {
     }
   };
 
+  const loadMemory = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setMemoryInstructions(data.memory_instructions || { content: '', target_models: ['all'] });
+          setDynamicFields(data.dynamic_fields || []);
+          setAvailableModels(data.available_models || []);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading memory:', e);
+    }
+  };
+
+  const saveMemoryInstructions = async () => {
+    setSavingMemory(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/instructions`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(memoryInstructions),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess('باکس حافظه ذخیره شد');
+      } else {
+        showError(data.detail || 'خطا در ذخیره');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    } finally {
+      setSavingMemory(false);
+    }
+  };
+
+  const addDynamicField = async () => {
+    if (!newFieldName.trim() || !newFieldValue.trim()) {
+      showError('نام و مقدار فیلد الزامی است');
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newFieldName,
+          value: newFieldValue,
+          target_models: newFieldModels,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess('فیلد جدید اضافه شد');
+        setNewFieldName('');
+        setNewFieldValue('');
+        setNewFieldModels(['all']);
+        setShowNewFieldForm(false);
+        loadMemory();
+      } else {
+        showError(data.detail || 'خطا');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    }
+  };
+
+  const updateDynamicField = async (field: DynamicField) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields/${field.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(field),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess('فیلد بروزرسانی شد');
+        setEditingField(null);
+        loadMemory();
+      } else {
+        showError(data.detail || 'خطا');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    }
+  };
+
+  const deleteDynamicField = async (fieldId: string) => {
+    if (!confirm('حذف شود؟')) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields/${fieldId}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess('فیلد حذف شد');
+        loadMemory();
+      } else {
+        showError(data.detail || 'خطا');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    }
+  };
+
+  const toggleModel = (modelId: string, currentModels: string[], setModels: (m: string[]) => void) => {
+    if (modelId === 'all') {
+      setModels(['all']);
+    } else {
+      let newModels = currentModels.filter(m => m !== 'all');
+      if (newModels.includes(modelId)) {
+        newModels = newModels.filter(m => m !== modelId);
+      } else {
+        newModels.push(modelId);
+      }
+      if (newModels.length === 0) {
+        newModels = ['all'];
+      }
+      setModels(newModels);
+    }
+  };
+
   const loadFileContent = async (filePath: string) => {
     try {
       let res;
-      // برای پروژه‌های GitHub از API مخصوص استفاده کن
       if (projectId.startsWith('gh_')) {
         res = await fetch(`${API_BASE}/api/github/imported/${projectId}/file?path=${encodeURIComponent(filePath)}`);
       } else {
@@ -208,6 +372,26 @@ export default function ProjectDetailPage() {
       showError('خطا');
     }
   };
+
+  // Model selector component
+  const ModelSelector = ({ selectedModels, onChange }: { selectedModels: string[], onChange: (models: string[]) => void }) => (
+    <div className="flex flex-wrap gap-2 mt-2">
+      {availableModels.map(model => (
+        <button
+          key={model.id}
+          onClick={() => toggleModel(model.id, selectedModels, onChange)}
+          className={`px-3 py-1 rounded-full text-xs flex items-center gap-1 transition ${
+            selectedModels.includes(model.id) || (selectedModels.includes('all') && model.id === 'all')
+              ? 'bg-blue-500 text-white'
+              : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200'
+          }`}
+        >
+          <span>{model.icon}</span>
+          <span>{model.name}</span>
+        </button>
+      ))}
+    </div>
+  );
 
   if (loading) {
     return (
@@ -280,9 +464,6 @@ export default function ProjectDetailPage() {
                 rel="noopener noreferrer"
                 className="px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-900 flex items-center gap-2"
               >
-                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
-                </svg>
                 مشاهده در GitHub
               </a>
             )}
@@ -299,7 +480,7 @@ export default function ProjectDetailPage() {
                   disabled={deploying}
                   className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50"
                 >
-                  {deploying ? '⏳ در حال Deploy...' : '🚀 Deploy به Render'}
+                  {deploying ? '⏳ در حال Deploy...' : '🚀 Deploy'}
                 </button>
               </>
             )}
@@ -312,157 +493,345 @@ export default function ProjectDetailPage() {
           </div>
         </div>
 
-        {/* اطلاعات پروژه - GitHub */}
-        {project.project_type === 'github_import' && project.metadata && (
-          <div className="grid grid-cols-5 gap-4 mb-6">
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4 text-center">
-              <div className="text-2xl mb-1">⭐</div>
-              <div className="font-bold">{project.metadata.stats?.stars || 0}</div>
-              <div className="text-xs text-gray-500">ستاره</div>
-            </div>
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4 text-center">
-              <div className="text-2xl mb-1">🍴</div>
-              <div className="font-bold">{project.metadata.stats?.forks || 0}</div>
-              <div className="text-xs text-gray-500">فورک</div>
-            </div>
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4 text-center">
-              <div className="text-2xl mb-1">📄</div>
-              <div className="font-bold">{files.length}</div>
-              <div className="text-xs text-gray-500">فایل</div>
-            </div>
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4 text-center">
-              <div className="text-2xl mb-1">💻</div>
-              <div className="font-bold text-sm">{project.metadata.primary_language || '-'}</div>
-              <div className="text-xs text-gray-500">زبان</div>
-            </div>
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4 text-center">
-              <div className="text-2xl mb-1">{project.metadata.private ? '🔒' : '🌐'}</div>
-              <div className="font-bold text-sm">{project.metadata.private ? 'خصوصی' : 'عمومی'}</div>
-              <div className="text-xs text-gray-500">دسترسی</div>
-            </div>
-          </div>
-        )}
+        {/* تب‌ها */}
+        <div className="flex border-b mb-6">
+          <button
+            onClick={() => setActiveTab('files')}
+            className={`px-6 py-3 font-medium ${
+              activeTab === 'files'
+                ? 'border-b-2 border-blue-500 text-blue-600'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            📁 فایل‌ها
+          </button>
+          <button
+            onClick={() => setActiveTab('memory')}
+            className={`px-6 py-3 font-medium ${
+              activeTab === 'memory'
+                ? 'border-b-2 border-purple-500 text-purple-600'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            🧠 حافظه و دستورات AI
+          </button>
+        </div>
 
-        {/* اطلاعات پروژه - عادی */}
-        {project.project_type !== 'github_import' && (
-          <div className="grid grid-cols-4 gap-4 mb-6">
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4">
-              <div className="text-sm text-gray-500">نوع</div>
-              <div className="font-medium">{project.type || project.project_type || 'نامشخص'}</div>
-            </div>
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4">
-              <div className="text-sm text-gray-500">وضعیت</div>
-              <div className="font-medium">{project.status || 'ایجاد شده'}</div>
-            </div>
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4">
-              <div className="text-sm text-gray-500">تعداد فایل</div>
-              <div className="font-medium">{files.length}</div>
-            </div>
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4">
-              <div className="text-sm text-gray-500">شناسه</div>
-              <div className="font-mono text-xs truncate">{project.id}</div>
-            </div>
-          </div>
-        )}
-
-        <div className="grid lg:grid-cols-3 gap-6">
-          {/* لیست فایل‌ها */}
-          <div className="lg:col-span-1">
-            <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-4">
-              <h2 className="font-bold mb-4">📁 فایل‌های پروژه</h2>
-
-              {files.length === 0 ? (
-                <div className="text-center py-8 text-gray-400">
-                  <div className="text-4xl mb-2">📭</div>
-                  <p>{project.project_type === 'github_import' ? 'فایلی import نشده' : 'هنوز فایلی تولید نشده'}</p>
-                  {project.project_type !== 'github_import' && (
-                    <button
-                      onClick={generateMoreFiles}
-                      className="mt-4 px-4 py-2 bg-blue-500 text-white rounded-lg text-sm"
-                    >
-                      تولید فایل‌ها
-                    </button>
-                  )}
+        {/* محتوای تب فایل‌ها */}
+        {activeTab === 'files' && (
+          <>
+            {/* اطلاعات پروژه - GitHub */}
+            {project.project_type === 'github_import' && project.metadata && (
+              <div className="grid grid-cols-5 gap-4 mb-6">
+                <div className="bg-white dark:bg-gray-800 rounded-lg p-4 text-center">
+                  <div className="text-2xl mb-1">⭐</div>
+                  <div className="font-bold">{project.metadata.stats?.stars || 0}</div>
+                  <div className="text-xs text-gray-500">ستاره</div>
                 </div>
-              ) : (
-                <div className="space-y-1 max-h-[60vh] overflow-auto">
-                  {files.map((file, idx) => {
-                    const fileName = file.path.split('/').pop() || file.path;
-                    const isSelected = selectedFile?.path === file.path;
-                    return (
-                      <div
-                        key={idx}
-                        onClick={() => loadFileContent(file.path)}
-                        className={`p-2 rounded cursor-pointer text-sm ${
-                          isSelected
-                            ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-600'
-                            : 'hover:bg-gray-100 dark:hover:bg-gray-700'
-                        }`}
-                      >
-                        <div className="flex items-center gap-2">
-                          <span>{file.path.endsWith('/') ? '📁' : '📄'}</span>
-                          <span className="truncate font-mono text-xs" title={file.path}>{file.path}</span>
-                        </div>
-                        {file.size && (
-                          <div className="text-xs text-gray-400 mr-5">
-                            {file.size > 1024 ? `${(file.size / 1024).toFixed(1)} KB` : `${file.size} B`}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
+                <div className="bg-white dark:bg-gray-800 rounded-lg p-4 text-center">
+                  <div className="text-2xl mb-1">🍴</div>
+                  <div className="font-bold">{project.metadata.stats?.forks || 0}</div>
+                  <div className="text-xs text-gray-500">فورک</div>
                 </div>
-              )}
-            </div>
-
-            {/* ساختار پروژه */}
-            {project.structure && (
-              <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-4 mt-4">
-                <h2 className="font-bold mb-4">🗂️ ساختار</h2>
-                <div className="text-sm font-mono space-y-1">
-                  {project.structure.directories?.map((dir, idx) => (
-                    <div key={idx} className="text-blue-600">📁 {dir}</div>
-                  ))}
+                <div className="bg-white dark:bg-gray-800 rounded-lg p-4 text-center">
+                  <div className="text-2xl mb-1">📄</div>
+                  <div className="font-bold">{files.length}</div>
+                  <div className="text-xs text-gray-500">فایل</div>
+                </div>
+                <div className="bg-white dark:bg-gray-800 rounded-lg p-4 text-center">
+                  <div className="text-2xl mb-1">💻</div>
+                  <div className="font-bold text-sm">{project.metadata.primary_language || '-'}</div>
+                  <div className="text-xs text-gray-500">زبان</div>
+                </div>
+                <div className="bg-white dark:bg-gray-800 rounded-lg p-4 text-center">
+                  <div className="text-2xl mb-1">{project.metadata.private ? '🔒' : '🌐'}</div>
+                  <div className="font-bold text-sm">{project.metadata.private ? 'خصوصی' : 'عمومی'}</div>
+                  <div className="text-xs text-gray-500">دسترسی</div>
                 </div>
               </div>
             )}
-          </div>
 
-          {/* محتوای فایل */}
-          <div className="lg:col-span-2">
-            <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-4">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="font-bold">
-                  {selectedFile ? `📄 ${selectedFile.path}` : '📝 محتوای فایل'}
-                </h2>
-                {selectedFile?.github_url && (
-                  <a
-                    href={selectedFile.github_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-sm text-blue-500 hover:underline flex items-center gap-1"
-                  >
-                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                      <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
-                    </svg>
-                    مشاهده در GitHub
-                  </a>
-                )}
+            <div className="grid lg:grid-cols-3 gap-6">
+              {/* لیست فایل‌ها */}
+              <div className="lg:col-span-1">
+                <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-4">
+                  <h2 className="font-bold mb-4">📁 فایل‌های پروژه ({files.length})</h2>
+
+                  {files.length === 0 ? (
+                    <div className="text-center py-8 text-gray-400">
+                      <div className="text-4xl mb-2">📭</div>
+                      <p>{project.project_type === 'github_import' ? 'فایلی import نشده' : 'هنوز فایلی تولید نشده'}</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-1 max-h-[60vh] overflow-auto">
+                      {files.map((file, idx) => {
+                        const isSelected = selectedFile?.path === file.path;
+                        return (
+                          <div
+                            key={idx}
+                            onClick={() => loadFileContent(file.path)}
+                            className={`p-2 rounded cursor-pointer text-sm ${
+                              isSelected
+                                ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-600'
+                                : 'hover:bg-gray-100 dark:hover:bg-gray-700'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              <span>📄</span>
+                              <span className="truncate font-mono text-xs" title={file.path}>{file.path}</span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               </div>
 
-              {selectedFile?.content ? (
-                <pre className="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-auto max-h-[70vh] text-sm">
-                  <code>{selectedFile.content}</code>
-                </pre>
-              ) : (
-                <div className="text-center py-12 text-gray-400">
-                  <div className="text-6xl mb-4">👈</div>
-                  <p>یک فایل از سمت راست انتخاب کنید</p>
+              {/* محتوای فایل */}
+              <div className="lg:col-span-2">
+                <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-4">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="font-bold">
+                      {selectedFile ? `📄 ${selectedFile.path}` : '📝 محتوای فایل'}
+                    </h2>
+                    {selectedFile?.github_url && (
+                      <a
+                        href={selectedFile.github_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm text-blue-500 hover:underline"
+                      >
+                        مشاهده در GitHub
+                      </a>
+                    )}
+                  </div>
+
+                  {selectedFile?.content ? (
+                    <pre className="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-auto max-h-[70vh] text-sm">
+                      <code>{selectedFile.content}</code>
+                    </pre>
+                  ) : (
+                    <div className="text-center py-12 text-gray-400">
+                      <div className="text-6xl mb-4">👈</div>
+                      <p>یک فایل از سمت راست انتخاب کنید</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* محتوای تب حافظه */}
+        {activeTab === 'memory' && (
+          <div className="grid lg:grid-cols-2 gap-6">
+            {/* باکس حافظه - دستورات ثابت */}
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="text-2xl">🧠</span>
+                <h2 className="font-bold text-lg">باکس حافظه (دستورات ثابت)</h2>
+              </div>
+              <p className="text-sm text-gray-500 mb-4">
+                دستوراتی که همیشه توسط مدل‌های AI در این پروژه رعایت می‌شوند
+              </p>
+
+              <textarea
+                value={memoryInstructions.content}
+                onChange={(e) => setMemoryInstructions({ ...memoryInstructions, content: e.target.value })}
+                placeholder="مثال: همیشه کدها را به زبان فارسی کامنت‌گذاری کن. از TypeScript استفاده کن. کدها باید تست‌پذیر باشند..."
+                className="w-full h-48 p-4 border rounded-lg resize-none dark:bg-gray-700 dark:border-gray-600 text-sm"
+                dir="rtl"
+              />
+
+              <div className="mt-4">
+                <label className="text-sm font-medium text-gray-600 dark:text-gray-400">
+                  این دستورات برای کدام مدل‌ها اعمال شود؟
+                </label>
+                <ModelSelector
+                  selectedModels={memoryInstructions.target_models}
+                  onChange={(models) => setMemoryInstructions({ ...memoryInstructions, target_models: models })}
+                />
+              </div>
+
+              <button
+                onClick={saveMemoryInstructions}
+                disabled={savingMemory}
+                className="mt-4 w-full py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 disabled:opacity-50"
+              >
+                {savingMemory ? '⏳ در حال ذخیره...' : '💾 ذخیره باکس حافظه'}
+              </button>
+            </div>
+
+            {/* فیلدهای پویا */}
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <span className="text-2xl">📝</span>
+                  <h2 className="font-bold text-lg">فیلدهای پویا</h2>
+                </div>
+                <button
+                  onClick={() => setShowNewFieldForm(true)}
+                  className="px-3 py-1 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600"
+                >
+                  + افزودن فیلد
+                </button>
+              </div>
+              <p className="text-sm text-gray-500 mb-4">
+                دستورات متغیر که ممکن است زود به زود تغییر کنند
+              </p>
+
+              {/* فرم افزودن فیلد جدید */}
+              {showNewFieldForm && (
+                <div className="mb-4 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+                  <h3 className="font-medium mb-3">فیلد جدید</h3>
+                  <input
+                    type="text"
+                    placeholder="نام فیلد (مثلاً: اولویت فعلی)"
+                    value={newFieldName}
+                    onChange={(e) => setNewFieldName(e.target.value)}
+                    className="w-full p-2 border rounded mb-2 dark:bg-gray-700 dark:border-gray-600 text-sm"
+                  />
+                  <textarea
+                    placeholder="مقدار فیلد (مثلاً: تمرکز روی عملکرد و سرعت)"
+                    value={newFieldValue}
+                    onChange={(e) => setNewFieldValue(e.target.value)}
+                    className="w-full p-2 border rounded mb-2 dark:bg-gray-700 dark:border-gray-600 text-sm h-20 resize-none"
+                  />
+                  <div className="mb-3">
+                    <label className="text-xs text-gray-500">مدل‌های هدف:</label>
+                    <ModelSelector
+                      selectedModels={newFieldModels}
+                      onChange={setNewFieldModels}
+                    />
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={addDynamicField}
+                      className="flex-1 py-2 bg-green-500 text-white rounded-lg text-sm hover:bg-green-600"
+                    >
+                      افزودن
+                    </button>
+                    <button
+                      onClick={() => { setShowNewFieldForm(false); setNewFieldName(''); setNewFieldValue(''); }}
+                      className="px-4 py-2 bg-gray-200 dark:bg-gray-700 rounded-lg text-sm"
+                    >
+                      انصراف
+                    </button>
+                  </div>
                 </div>
               )}
+
+              {/* لیست فیلدها */}
+              <div className="space-y-3 max-h-[50vh] overflow-auto">
+                {dynamicFields.length === 0 ? (
+                  <div className="text-center py-8 text-gray-400">
+                    <div className="text-4xl mb-2">📭</div>
+                    <p>فیلدی تعریف نشده</p>
+                  </div>
+                ) : (
+                  dynamicFields.map((field) => (
+                    <div
+                      key={field.id}
+                      className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg"
+                    >
+                      {editingField === field.id ? (
+                        // حالت ویرایش
+                        <div>
+                          <input
+                            type="text"
+                            value={field.name}
+                            onChange={(e) => {
+                              const updated = dynamicFields.map(f =>
+                                f.id === field.id ? { ...f, name: e.target.value } : f
+                              );
+                              setDynamicFields(updated);
+                            }}
+                            className="w-full p-2 border rounded mb-2 dark:bg-gray-600 dark:border-gray-500 text-sm"
+                          />
+                          <textarea
+                            value={field.value}
+                            onChange={(e) => {
+                              const updated = dynamicFields.map(f =>
+                                f.id === field.id ? { ...f, value: e.target.value } : f
+                              );
+                              setDynamicFields(updated);
+                            }}
+                            className="w-full p-2 border rounded mb-2 dark:bg-gray-600 dark:border-gray-500 text-sm h-20 resize-none"
+                          />
+                          <div className="mb-2">
+                            <ModelSelector
+                              selectedModels={field.target_models}
+                              onChange={(models) => {
+                                const updated = dynamicFields.map(f =>
+                                  f.id === field.id ? { ...f, target_models: models } : f
+                                );
+                                setDynamicFields(updated);
+                              }}
+                            />
+                          </div>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => updateDynamicField(field)}
+                              className="px-3 py-1 bg-green-500 text-white rounded text-sm"
+                            >
+                              ذخیره
+                            </button>
+                            <button
+                              onClick={() => { setEditingField(null); loadMemory(); }}
+                              className="px-3 py-1 bg-gray-300 dark:bg-gray-600 rounded text-sm"
+                            >
+                              انصراف
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        // حالت نمایش
+                        <div>
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="font-medium">{field.name}</span>
+                            <div className="flex gap-1">
+                              <button
+                                onClick={() => setEditingField(field.id)}
+                                className="p-1 text-blue-500 hover:bg-blue-100 rounded"
+                                title="ویرایش"
+                              >
+                                ✏️
+                              </button>
+                              <button
+                                onClick={() => deleteDynamicField(field.id)}
+                                className="p-1 text-red-500 hover:bg-red-100 rounded"
+                                title="حذف"
+                              >
+                                🗑️
+                              </button>
+                            </div>
+                          </div>
+                          <p className="text-sm text-gray-600 dark:text-gray-300 whitespace-pre-wrap">
+                            {field.value}
+                          </p>
+                          <div className="mt-2 flex flex-wrap gap-1">
+                            {field.target_models.map(m => {
+                              const model = availableModels.find(am => am.id === m);
+                              return (
+                                <span
+                                  key={m}
+                                  className="px-2 py-0.5 bg-gray-200 dark:bg-gray-600 rounded text-xs"
+                                >
+                                  {model?.icon} {model?.name || m}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );
