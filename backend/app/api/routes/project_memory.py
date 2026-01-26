@@ -324,3 +324,102 @@ async def get_memory_for_model(
         "dynamic_fields": result_fields,
         "combined_prompt": combined_prompt.strip() if combined_prompt else None
     }
+
+
+# =====================================
+# چت با AI در context پروژه
+# =====================================
+
+class ProjectChatRequest(BaseModel):
+    """درخواست چت در context پروژه"""
+    prompt: str
+    model_id: str = "openai"  # مدل پیش‌فرض
+    include_memory: bool = True  # شامل دستورات حافظه شود؟
+
+
+@router.post("/{project_id}/chat")
+async def project_chat(
+    project_id: str,
+    request: ProjectChatRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    چت با AI در context یک پروژه
+    دستورات حافظه و فیلدهای پویا به صورت خودکار به prompt اضافه می‌شوند
+    """
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # ساخت system prompt با context پروژه
+    system_parts = [f"تو یک دستیار هوشمند برای پروژه '{project.name}' هستی."]
+
+    if project.description:
+        system_parts.append(f"توضیحات پروژه: {project.description}")
+
+    # اضافه کردن دستورات حافظه اگر فعال باشد
+    if request.include_memory:
+        # دریافت دستورات برای این مدل
+        memory_instructions = {"content": "", "target_models": ["all"]}
+        dynamic_fields = []
+
+        try:
+            if project.memory_instructions:
+                memory_instructions = json.loads(project.memory_instructions)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        try:
+            if project.dynamic_fields:
+                dynamic_fields = json.loads(project.dynamic_fields)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # فیلتر بر اساس مدل
+        model_id = request.model_id.split("/")[0] if "/" in request.model_id else request.model_id
+
+        if "all" in memory_instructions.get("target_models", []) or model_id in memory_instructions.get("target_models", []):
+            if memory_instructions.get("content"):
+                system_parts.append(f"\n## دستورات ثابت:\n{memory_instructions['content']}")
+
+        relevant_fields = []
+        for field in dynamic_fields:
+            if "all" in field.get("target_models", []) or model_id in field.get("target_models", []):
+                relevant_fields.append(field)
+
+        if relevant_fields:
+            system_parts.append("\n## دستورات اضافی:")
+            for field in relevant_fields:
+                system_parts.append(f"- {field.get('name')}: {field.get('value')}")
+
+    system_prompt = "\n".join(system_parts)
+
+    # ارسال به AI
+    try:
+        ai_manager = get_ai_manager()
+
+        messages = [
+            Message(role="system", content=system_prompt),
+            Message(role="user", content=request.prompt),
+        ]
+
+        response = await ai_manager.generate(
+            model_id=request.model_id,
+            messages=messages,
+            max_tokens=4096,
+            temperature=0.7,
+        )
+
+        return {
+            "success": True,
+            "model_id": response.model_id,
+            "content": response.content,
+            "tokens_used": response.tokens_used,
+            "latency_ms": response.latency_ms,
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"خطا در ارتباط با AI: {str(e)}")

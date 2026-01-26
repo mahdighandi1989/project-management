@@ -30,6 +30,7 @@ services:
       name: storage
       mountPath: /app/storage
       sizeGB: 1
+      # دیتابیس SQLite در این مسیر ذخیره می‌شود و بین deploy ها حفظ می‌شود
 
   # Frontend (Next.js)
   - type: web

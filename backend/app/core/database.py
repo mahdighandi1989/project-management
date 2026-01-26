@@ -12,13 +12,25 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# مسیر دیتابیس
-DATABASE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
+# مسیر دیتابیس - استفاده از persistent storage در Render
+# در production از /app/storage استفاده می‌کنیم که persistent disk است
+ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
+
+if ENVIRONMENT == "production":
+    # Render persistent disk path
+    DATABASE_DIR = os.environ.get("DATABASE_DIR", "/app/storage")
+else:
+    # مسیر محلی برای development
+    DATABASE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
+
 DATABASE_PATH = os.path.join(DATABASE_DIR, "database.db")
 DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
 
 # ایجاد پوشه data اگر وجود نداشت
 os.makedirs(DATABASE_DIR, exist_ok=True)
+
+logger.info(f"📁 Database directory: {DATABASE_DIR}")
+logger.info(f"📁 Database path: {DATABASE_PATH}")
 
 # ایجاد engine با تنظیمات بهینه برای SQLite
 engine = create_engine(
