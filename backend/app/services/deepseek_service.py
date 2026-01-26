@@ -52,8 +52,9 @@ class DeepSeekService(AIServiceBase):
             if not model:
                 raise AIServiceError(f"Model {model_id} not found", "deepseek", model_id)
 
+            # استفاده از model.id به جای model_id برای حل alias
             payload = {
-                "model": model_id,
+                "model": model.id,  # استفاده از ID واقعی مدل (نه alias)
                 "messages": self._format_messages(messages),
                 "max_tokens": min(max_tokens, model.max_tokens),
                 "temperature": temperature,
@@ -127,8 +128,9 @@ class DeepSeekService(AIServiceBase):
             if not model:
                 raise AIServiceError(f"Model {model_id} not found", "deepseek", model_id)
 
+            # استفاده از model.id به جای model_id برای حل alias
             payload = {
-                "model": model_id,
+                "model": model.id,  # استفاده از ID واقعی مدل (نه alias)
                 "messages": self._format_messages(messages),
                 "max_tokens": min(max_tokens, model.max_tokens),
                 "temperature": temperature,

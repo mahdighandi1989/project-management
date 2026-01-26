@@ -68,8 +68,9 @@ class OpenAIService(AIServiceBase):
             if model.is_image_generator:
                 return await self._generate_image(model_id, messages[-1].content, **kwargs)
 
+            # استفاده از model.id به جای model_id برای حل alias
             payload = {
-                "model": model_id,
+                "model": model.id,  # استفاده از ID واقعی مدل (نه alias)
                 "messages": self._format_messages(messages),
                 "max_tokens": min(max_tokens, model.max_tokens),
                 "temperature": temperature,
@@ -196,8 +197,9 @@ class OpenAIService(AIServiceBase):
             if not model or model.is_image_generator:
                 raise AIServiceError("Streaming not supported for this model", "openai", model_id)
 
+            # استفاده از model.id به جای model_id برای حل alias
             payload = {
-                "model": model_id,
+                "model": model.id,  # استفاده از ID واقعی مدل (نه alias)
                 "messages": self._format_messages(messages),
                 "max_tokens": min(max_tokens, model.max_tokens),
                 "temperature": temperature,

@@ -76,8 +76,9 @@ class ClaudeService(AIServiceBase):
 
             system_prompt, formatted_messages = self._format_messages(messages)
 
+            # استفاده از model.id به جای model_id برای حل alias
             payload = {
-                "model": model_id,
+                "model": model.id,  # استفاده از ID واقعی مدل (نه alias)
                 "messages": formatted_messages,
                 "max_tokens": min(max_tokens, model.max_tokens),
                 "temperature": temperature,
@@ -152,8 +153,9 @@ class ClaudeService(AIServiceBase):
 
             system_prompt, formatted_messages = self._format_messages(messages)
 
+            # استفاده از model.id به جای model_id برای حل alias
             payload = {
-                "model": model_id,
+                "model": model.id,  # استفاده از ID واقعی مدل (نه alias)
                 "messages": formatted_messages,
                 "max_tokens": min(max_tokens, model.max_tokens),
                 "temperature": temperature,
