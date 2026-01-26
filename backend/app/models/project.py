@@ -49,7 +49,7 @@ class Project(Base):
     technologies = Column(Text)  # JSON string: ["python", "fastapi", ...]
     features = Column(Text)  # JSON string: ["authentication", ...]
     structure = Column(Text)  # JSON string: ساختار پوشه‌ها
-    metadata = Column(Text)  # JSON string: اطلاعات اضافی (GitHub info, etc.)
+    extra_data = Column(Text)  # JSON string: اطلاعات اضافی (GitHub info, etc.)
 
     # مسیرها
     local_path = Column(String(500))  # مسیر محلی فایل‌ها
@@ -98,8 +98,8 @@ class Project(Base):
             pass
 
         try:
-            if self.metadata:
-                metadata = json.loads(self.metadata) if isinstance(self.metadata, str) else self.metadata
+            if self.extra_data:
+                metadata = json.loads(self.extra_data) if isinstance(self.extra_data, str) else self.extra_data
         except (json.JSONDecodeError, TypeError):
             pass
 
