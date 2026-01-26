@@ -242,6 +242,7 @@ export default function ProjectDetailPage() {
   const [triggerIntervals, setTriggerIntervals] = useState<TriggerInterval[]>([]);
   const [savingMemory, setSavingMemory] = useState(false);
   const [executingTrigger, setExecutingTrigger] = useState<string | null>(null);
+  const [runningAutoSetup, setRunningAutoSetup] = useState(false);
 
   // New Field Form
   const [showNewFieldForm, setShowNewFieldForm] = useState(false);
@@ -672,6 +673,32 @@ export default function ProjectDetailPage() {
       showError('خطا در ارتباط');
     } finally {
       setSavingMemory(false);
+    }
+  };
+
+  // راه‌اندازی خودکار حافظه و فیلدهای پویا
+  const runAutoSetup = async () => {
+    if (!confirm('راه‌اندازی خودکار تنظیمات حافظه و فیلدهای پویا؟\n\nاین عملیات بر اساس تحلیل AI از فایل‌های پروژه انجام می‌شود و تنظیمات فعلی را جایگزین می‌کند.')) {
+      return;
+    }
+
+    setRunningAutoSetup(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/auto-setup?use_ai=true`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess(`راه‌اندازی خودکار انجام شد! نوع تشخیص داده شده: ${data.detected_type || 'عمومی'}`);
+        // بارگذاری مجدد اطلاعات حافظه
+        loadProjectMemory();
+      } else {
+        showError(data.detail || 'خطا در راه‌اندازی خودکار');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    } finally {
+      setRunningAutoSetup(false);
     }
   };
 
@@ -1272,7 +1299,27 @@ export default function ProjectDetailPage() {
 
         {/* محتوای تب حافظه */}
         {activeTab === 'memory' && (
-          <div className="grid lg:grid-cols-2 gap-6">
+          <div className="space-y-6">
+            {/* دکمه راه‌اندازی خودکار */}
+            <div className="bg-gradient-to-r from-purple-500 to-blue-500 rounded-xl shadow p-4 text-white">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="font-bold text-lg">🤖 راه‌اندازی خودکار با AI</h3>
+                  <p className="text-sm opacity-90">
+                    تحلیل هوشمند پروژه و تولید دستورات و فیلدهای مناسب
+                  </p>
+                </div>
+                <button
+                  onClick={runAutoSetup}
+                  disabled={runningAutoSetup}
+                  className="px-4 py-2 bg-white text-purple-600 rounded-lg font-medium hover:bg-gray-100 disabled:opacity-50"
+                >
+                  {runningAutoSetup ? '⏳ در حال تحلیل...' : '✨ راه‌اندازی خودکار'}
+                </button>
+              </div>
+            </div>
+
+            <div className="grid lg:grid-cols-2 gap-6">
             {/* باکس حافظه - دستورات ثابت */}
             <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
               <div className="flex items-center gap-2 mb-4">
@@ -1649,6 +1696,7 @@ export default function ProjectDetailPage() {
                   ))
                 )}
               </div>
+            </div>
             </div>
           </div>
         )}

@@ -3,10 +3,13 @@ API ساده برای مدیریت پروژه‌ها
 بدون پیچیدگی - فقط کار میکنه!
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional
+from sqlalchemy.orm import Session
 import os
+
+from ...core.database import get_db
 
 router = APIRouter(prefix="/api/simple", tags=["Simple Projects"])
 
@@ -168,14 +171,38 @@ async def get_file_content(project_id: str, file_path: str):
 
 
 @router.delete("/projects/{project_id}")
-async def delete_project(project_id: str):
+async def delete_project(project_id: str, db: Session = Depends(get_db)):
     """حذف پروژه"""
     from ...services.simple_creator import get_simple_creator
+    from ...models.project import Project, ProjectFile
 
     creator = get_simple_creator()
-    success = creator.delete_project(project_id)
 
-    if not success:
+    # حذف از memory و فایل‌سیستم
+    memory_deleted = creator.delete_project(project_id)
+
+    # حذف از دیتابیس هم
+    try:
+        # حذف داده‌های مرتبط با ژورنال
+        try:
+            from .project_journal import ActivityLog, Report, ReportTrigger
+            db.query(ActivityLog).filter(ActivityLog.project_id == project_id).delete()
+            db.query(Report).filter(Report.project_id == project_id).delete()
+            db.query(ReportTrigger).filter(ReportTrigger.project_id == project_id).delete()
+        except Exception:
+            pass
+
+        # حذف فایل‌ها و پروژه از دیتابیس
+        db.query(ProjectFile).filter(ProjectFile.project_id == project_id).delete()
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if project:
+            db.delete(project)
+            db.commit()
+    except Exception as e:
+        db.rollback()
+        # ادامه بده حتی اگه از دیتابیس نتونست حذف کنه
+
+    if not memory_deleted and not project:
         raise HTTPException(status_code=404, detail="پروژه پیدا نشد")
 
     return {

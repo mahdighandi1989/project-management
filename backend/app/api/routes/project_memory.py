@@ -624,3 +624,160 @@ async def execute_field_trigger(
         "results": results,
         "executed_at": datetime.utcnow().isoformat()
     }
+
+
+# =====================================
+# راه‌اندازی خودکار پروژه
+# =====================================
+
+@router.post("/{project_id}/memory/auto-setup")
+async def auto_setup_project(
+    project_id: str,
+    use_ai: bool = True,
+    db: Session = Depends(get_db)
+):
+    """
+    راه‌اندازی خودکار حافظه و فیلدهای پویا برای پروژه
+    بر اساس تحلیل فایل‌ها و نوع پروژه
+    """
+    from ...services.project_auto_setup import auto_setup_project_memory
+    from ...models.project import ProjectFile
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت فایل‌ها
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+    files_data = [
+        {"path": f.file_path, "content": f.content[:1000] if f.content else "", "file_type": f.file_type}
+        for f in files
+    ]
+
+    # اجرای auto-setup
+    result = await auto_setup_project_memory(
+        project_id=project_id,
+        project_name=project.name,
+        project_description=project.description or "",
+        project_type=project.project_type or "",
+        files=files_data,
+        use_ai=use_ai,
+        db_session=db
+    )
+
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "خطا در راه‌اندازی"))
+
+    return result
+
+
+@router.post("/memory/auto-setup-all")
+async def auto_setup_all_projects(
+    use_ai: bool = True,
+    force: bool = False,
+    db: Session = Depends(get_db)
+):
+    """
+    راه‌اندازی خودکار همه پروژه‌ها
+    force=True: حتی پروژه‌هایی که قبلاً تنظیم شده‌اند
+    """
+    from ...services.project_auto_setup import apply_auto_setup_to_existing_project
+
+    projects = db.query(Project).all()
+    results = {
+        "total": len(projects),
+        "success": 0,
+        "skipped": 0,
+        "failed": 0,
+        "details": []
+    }
+
+    for project in projects:
+        try:
+            # بررسی اگه قبلا تنظیم شده
+            if not force:
+                existing_memory = {}
+                try:
+                    if project.memory_instructions:
+                        existing_memory = json.loads(project.memory_instructions)
+                except:
+                    pass
+
+                if existing_memory.get("content") and not existing_memory.get("auto_generated"):
+                    results["skipped"] += 1
+                    results["details"].append({
+                        "project_id": project.id,
+                        "name": project.name,
+                        "status": "skipped",
+                        "reason": "قبلاً تنظیم شده"
+                    })
+                    continue
+
+            result = await apply_auto_setup_to_existing_project(project.id, db)
+
+            if result.get("success"):
+                if result.get("skipped"):
+                    results["skipped"] += 1
+                else:
+                    results["success"] += 1
+            else:
+                results["failed"] += 1
+
+            results["details"].append({
+                "project_id": project.id,
+                "name": project.name,
+                "status": "success" if result.get("success") else "failed",
+                "detected_type": result.get("detected_type"),
+                "ai_insights": result.get("ai_insights")
+            })
+
+        except Exception as e:
+            results["failed"] += 1
+            results["details"].append({
+                "project_id": project.id,
+                "name": project.name,
+                "status": "error",
+                "error": str(e)
+            })
+
+    return {
+        "success": True,
+        "results": results
+    }
+
+
+@router.get("/{project_id}/memory/auto-setup/preview")
+async def preview_auto_setup(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    پیش‌نمایش راه‌اندازی خودکار بدون اعمال تغییرات
+    """
+    from ...services.project_auto_setup import auto_setup_project_memory
+    from ...models.project import ProjectFile
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت فایل‌ها
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+    files_data = [
+        {"path": f.file_path, "content": f.content[:1000] if f.content else "", "file_type": f.file_type}
+        for f in files
+    ]
+
+    # اجرای auto-setup بدون ذخیره (db_session=None)
+    result = await auto_setup_project_memory(
+        project_id=project_id,
+        project_name=project.name,
+        project_description=project.description or "",
+        project_type=project.project_type or "",
+        files=files_data,
+        use_ai=False,  # برای preview فقط قالب
+        db_session=None  # ذخیره نکن
+    )
+
+    result["is_preview"] = True
+    return result
