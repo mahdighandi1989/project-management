@@ -22,12 +22,14 @@ class CheckRepoRequest(BaseModel):
     """درخواست بررسی دسترسی به repo"""
     url: str
     token: Optional[str] = None
+    use_global_token: bool = False  # استفاده از توکن ذخیره شده
 
 
 class ImportRepoRequest(BaseModel):
     """درخواست import یک repository"""
     url: str
     token: Optional[str] = None
+    use_global_token: bool = False  # استفاده از توکن ذخیره شده
     include_files: bool = True
     max_file_size: int = 500000  # 500KB
     excluded_dirs: Optional[List[str]] = None
@@ -37,6 +39,16 @@ class ImportRepoRequest(BaseModel):
 # ===========================================
 # Endpoints
 # ===========================================
+
+def get_effective_token(provided_token: str = None, use_global: bool = False) -> str:
+    """دریافت توکن مناسب - سراسری یا ارسال شده"""
+    import os
+    if provided_token:
+        return provided_token
+    if use_global:
+        return os.environ.get("GITHUB_TOKEN", "")
+    return ""
+
 
 @router.post("/check")
 async def check_repository(request: CheckRepoRequest):
@@ -55,11 +67,14 @@ async def check_repository(request: CheckRepoRequest):
             "hint": "فرمت صحیح: https://github.com/owner/repo یا owner/repo"
         }
 
+    # دریافت توکن مناسب
+    token = get_effective_token(request.token, request.use_global_token)
+
     # بررسی دسترسی
     result = await service.check_repo_access(
         parsed["owner"],
         parsed["repo"],
-        request.token
+        token if token else None
     )
 
     # اگر موفق بود، زبان‌ها رو هم بگیر
@@ -67,7 +82,7 @@ async def check_repository(request: CheckRepoRequest):
         languages = await service.get_repo_languages(
             parsed["owner"],
             parsed["repo"],
-            request.token
+            token if token else None
         )
         result["languages"] = languages
 
@@ -85,10 +100,13 @@ async def import_repository(request: ImportRepoRequest):
     """
     service = get_github_import_service()
 
+    # دریافت توکن مناسب
+    token = get_effective_token(request.token, request.use_global_token)
+
     # انجام import
     result = await service.import_repository(
         url_or_path=request.url,
-        token=request.token,
+        token=token if token else None,
         include_files=request.include_files,
         max_file_size=request.max_file_size,
         excluded_dirs=request.excluded_dirs,

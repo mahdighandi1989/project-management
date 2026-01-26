@@ -34,11 +34,27 @@ function ProjectsContent() {
   const [importProgress, setImportProgress] = useState('');
   const [repoInfo, setRepoInfo] = useState<any>(null);
   const [checkingRepo, setCheckingRepo] = useState(false);
+  const [hasGlobalToken, setHasGlobalToken] = useState(false);
+  const [useGlobalToken, setUseGlobalToken] = useState(true);
 
   useEffect(() => {
     loadProjects();
     loadGitHubProjects();
+    checkGlobalGithubToken();
   }, []);
+
+  // بررسی اینکه توکن سراسری GitHub ذخیره شده یا نه
+  const checkGlobalGithubToken = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/settings/deploy-keys/status`);
+      if (res.ok) {
+        const data = await res.json();
+        setHasGlobalToken(data.github === true);
+      }
+    } catch (e) {
+      console.error('Error checking GitHub token:', e);
+    }
+  };
 
   // وقتی پروژه‌ها لود شدن و id داریم، پروژه رو انتخاب کن
   useEffect(() => {
@@ -151,12 +167,16 @@ function ProjectsContent() {
     setRepoInfo(null);
 
     try {
+      // اگه توکن سراسری داریم و انتخاب شده، توکن رو نفرست (سرور خودش استفاده می‌کنه)
+      const tokenToUse = (hasGlobalToken && useGlobalToken) ? undefined : (githubToken || undefined);
+
       const res = await fetch(`${API_BASE}/api/github/check`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           url: githubUrl,
-          token: githubToken || undefined,
+          token: tokenToUse,
+          use_global_token: hasGlobalToken && useGlobalToken,
         }),
       });
 
@@ -189,13 +209,17 @@ function ProjectsContent() {
     setImportProgress('در حال دریافت اطلاعات...');
 
     try {
+      // اگه توکن سراسری داریم و انتخاب شده، توکن رو نفرست
+      const tokenToUse = (hasGlobalToken && useGlobalToken) ? undefined : (githubToken || undefined);
+
       const res = await fetch(`${API_BASE}/api/github/import`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           url: githubUrl,
-          token: githubToken || undefined,
+          token: tokenToUse,
           include_files: true,
+          use_global_token: hasGlobalToken && useGlobalToken,
         }),
       });
 
@@ -607,17 +631,54 @@ function ProjectsContent() {
                 توکن GitHub
                 <span className="text-gray-400 font-normal mr-2">(برای repo های private)</span>
               </label>
-              <input
-                type="password"
-                placeholder="ghp_xxxxxxxxxxxx"
-                value={githubToken}
-                onChange={(e) => setGithubToken(e.target.value)}
-                className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                dir="ltr"
-              />
-              <p className="text-xs text-gray-400 mt-1">
-                از Settings → Developer settings → Personal access tokens بسازید
-              </p>
+
+              {/* اگه توکن سراسری داریم */}
+              {hasGlobalToken && (
+                <div className="mb-3 p-3 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={useGlobalToken}
+                      onChange={(e) => setUseGlobalToken(e.target.checked)}
+                      className="w-4 h-4 accent-green-500"
+                    />
+                    <span className="text-sm text-green-700 dark:text-green-300">
+                      ✅ استفاده از توکن ذخیره شده در تنظیمات
+                    </span>
+                  </label>
+                  <p className="text-xs text-green-600 dark:text-green-400 mt-1 mr-6">
+                    توکن GitHub شما قبلاً در تنظیمات ذخیره شده
+                  </p>
+                </div>
+              )}
+
+              {/* فیلد توکن دستی */}
+              {(!hasGlobalToken || !useGlobalToken) && (
+                <>
+                  <input
+                    type="password"
+                    placeholder="ghp_xxxxxxxxxxxx"
+                    value={githubToken}
+                    onChange={(e) => setGithubToken(e.target.value)}
+                    className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
+                    dir="ltr"
+                  />
+                  <p className="text-xs text-gray-400 mt-1">
+                    از Settings → Developer settings → Personal access tokens بسازید
+                  </p>
+                </>
+              )}
+
+              {/* لینک به تنظیمات */}
+              {!hasGlobalToken && (
+                <div className="mt-2 p-2 bg-yellow-50 dark:bg-yellow-900/20 rounded text-xs">
+                  <span className="text-yellow-700 dark:text-yellow-300">
+                    💡 برای راحتی بیشتر، توکن رو در{' '}
+                    <a href="/settings" className="underline text-blue-500">صفحه تنظیمات</a>
+                    {' '}ذخیره کنید تا هر بار نیازی به وارد کردن نباشه
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* نتیجه بررسی */}

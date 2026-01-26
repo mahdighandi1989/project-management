@@ -18,7 +18,7 @@ const PROVIDERS = [
 // سرویس‌های Deploy
 const DEPLOY_SERVICES = [
   { id: 'render', name: 'Render', icon: '🚀', desc: 'برای Deploy خودکار پروژه‌ها' },
-  { id: 'github', name: 'GitHub Token', icon: '🐙', desc: 'برای Push به ریپازیتوری' },
+  { id: 'github', name: 'GitHub Token', icon: '🐙', desc: 'برای دسترسی به ریپوهای Private و Push' },
 ];
 
 export default function SettingsPage() {
@@ -372,14 +372,29 @@ export default function SettingsPage() {
                 <li>
                   <strong>🚀 Render:</strong>
                   <br />
-                  Dashboard &rarr; Account Settings &rarr; API Keys &rarr; Create API Key
+                  Dashboard → Account Settings → API Keys → Create API Key
                 </li>
                 <li>
-                  <strong>🐙 GitHub:</strong>
+                  <strong>🐙 GitHub Token:</strong>
                   <br />
-                  Settings &rarr; Developer Settings &rarr; Personal Access Tokens &rarr; Generate
+                  1. به <a href="https://github.com/settings/tokens" target="_blank" className="text-blue-500 underline">github.com/settings/tokens</a> برید
+                  <br />
+                  2. روی <strong>Generate new token (classic)</strong> کلیک کنید
+                  <br />
+                  3. تیک <strong>repo</strong> رو بزنید (دسترسی کامل)
+                  <br />
+                  4. Generate token و کپی کنید
                 </li>
               </ul>
+            </div>
+
+            {/* نکته مهم */}
+            <div className="mt-4 p-4 bg-green-50 dark:bg-green-900/30 rounded-lg border border-green-200 dark:border-green-800">
+              <h3 className="font-medium mb-1 text-green-700 dark:text-green-300">💡 نکته مهم</h3>
+              <p className="text-sm text-green-600 dark:text-green-400">
+                با یک توکن GitHub می‌تونید به <strong>همه ریپوهای Private</strong> زیر اکانتتون دسترسی داشته باشید.
+                بعد از ذخیره، در صفحه پروژه‌ها نیازی به وارد کردن مجدد توکن نیست!
+              </p>
             </div>
           </div>
         ) : (
