@@ -544,86 +544,119 @@ async def execute_field_trigger(
     from datetime import datetime
     from ...services.ai_manager import get_ai_manager
     from ...services.ai_base import Message
+    import asyncio
 
-    project = db.query(Project).filter(Project.id == project_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
-
-    dynamic_fields = []
     try:
-        if project.dynamic_fields:
-            dynamic_fields = json.loads(project.dynamic_fields)
-    except (json.JSONDecodeError, TypeError):
-        pass
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if not project:
+            raise HTTPException(status_code=404, detail="پروژه یافت نشد")
 
-    target_field = None
-    for field in dynamic_fields:
-        if field["id"] == field_id:
-            target_field = field
-            break
-
-    if not target_field:
-        raise HTTPException(status_code=404, detail="فیلد یافت نشد")
-
-    # ساخت prompt از دستور فیلد
-    system_prompt = f"تو یک دستیار هوشمند برای پروژه '{project.name}' هستی."
-    if project.description:
-        system_prompt += f"\nتوضیحات پروژه: {project.description}"
-
-    user_prompt = f"دستور: {target_field['name']}\n\n{target_field['value']}"
-
-    # ارسال به مدل(های) هدف
-    target_models = target_field.get("target_models", ["all"])
-    if "all" in target_models:
-        target_models = ["openai"]  # پیش‌فرض
-
-    results = []
-    ai_manager = get_ai_manager()
-
-    for model_id in target_models:
-        if model_id == "all":
-            continue
+        dynamic_fields = []
         try:
-            messages = [
-                Message(role="system", content=system_prompt),
-                Message(role="user", content=user_prompt),
-            ]
+            if project.dynamic_fields:
+                dynamic_fields = json.loads(project.dynamic_fields)
+        except (json.JSONDecodeError, TypeError):
+            pass
 
-            response = await ai_manager.generate(
-                model_id=model_id,
-                messages=messages,
-                max_tokens=4096,
-                temperature=0.7,
-            )
+        target_field = None
+        for field in dynamic_fields:
+            if field.get("id") == field_id:
+                target_field = field
+                break
 
-            results.append({
-                "model_id": response.model_id,
-                "content": response.content,
-                "tokens_used": response.tokens_used,
-            })
-        except Exception as e:
-            results.append({
-                "model_id": model_id,
-                "error": str(e)
-            })
+        if not target_field:
+            raise HTTPException(status_code=404, detail="فیلد یافت نشد")
 
-    # بروزرسانی last_run
-    for field in dynamic_fields:
-        if field["id"] == field_id:
-            if "trigger" not in field:
-                field["trigger"] = {}
-            field["trigger"]["last_run"] = datetime.utcnow().isoformat()
-            break
+        # ساخت prompt از دستور فیلد
+        system_prompt = f"تو یک دستیار هوشمند برای پروژه '{project.name}' هستی."
+        if project.description:
+            system_prompt += f"\nتوضیحات پروژه: {project.description}"
 
-    project.dynamic_fields = json.dumps(dynamic_fields, ensure_ascii=False)
-    db.commit()
+        # اضافه کردن دستورات حافظه به system prompt
+        try:
+            if project.memory_instructions:
+                memory = json.loads(project.memory_instructions)
+                if memory.get("content"):
+                    system_prompt += f"\n\nدستورات کلی:\n{memory['content']}"
+        except:
+            pass
 
-    return {
-        "success": True,
-        "field_name": target_field["name"],
-        "results": results,
-        "executed_at": datetime.utcnow().isoformat()
-    }
+        user_prompt = f"دستور: {target_field.get('name', 'فیلد')}\n\n{target_field.get('value', '')}"
+
+        # ارسال به مدل(های) هدف
+        target_models = target_field.get("target_models", ["all"])
+        if "all" in target_models or not target_models:
+            target_models = ["claude"]  # پیش‌فرض claude بهتره برای کد
+
+        results = []
+        ai_manager = get_ai_manager()
+
+        for model_id in target_models:
+            if model_id == "all":
+                continue
+            try:
+                messages = [
+                    Message(role="system", content=system_prompt),
+                    Message(role="user", content=user_prompt),
+                ]
+
+                # اجرا با timeout 60 ثانیه
+                response = await asyncio.wait_for(
+                    ai_manager.generate(
+                        model_id=model_id,
+                        messages=messages,
+                        max_tokens=4096,
+                        temperature=0.7,
+                    ),
+                    timeout=60.0
+                )
+
+                results.append({
+                    "model_id": response.model_id,
+                    "content": response.content,
+                    "tokens_used": response.tokens_used,
+                    "success": True
+                })
+            except asyncio.TimeoutError:
+                results.append({
+                    "model_id": model_id,
+                    "error": "Timeout - پاسخ مدل بیش از 60 ثانیه طول کشید",
+                    "success": False
+                })
+            except Exception as e:
+                results.append({
+                    "model_id": model_id,
+                    "error": str(e),
+                    "success": False
+                })
+
+        # بروزرسانی last_run
+        for field in dynamic_fields:
+            if field.get("id") == field_id:
+                if "trigger" not in field:
+                    field["trigger"] = {}
+                field["trigger"]["last_run"] = datetime.utcnow().isoformat()
+                break
+
+        project.dynamic_fields = json.dumps(dynamic_fields, ensure_ascii=False)
+        db.commit()
+
+        return {
+            "success": True,
+            "field_id": field_id,
+            "field_name": target_field.get("name"),
+            "results": results,
+            "executed_at": datetime.utcnow().isoformat()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "field_id": field_id
+        }
 
 
 # =====================================
