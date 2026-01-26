@@ -304,27 +304,6 @@ async def get_activity_journal(
     }
 
 
-@router.get("/{project_id}/journal/{log_id}")
-async def get_activity_detail(
-    project_id: str,
-    log_id: str,
-    db: Session = Depends(get_db)
-):
-    """دریافت جزئیات کامل یک فعالیت"""
-    log = db.query(ActivityLog).filter(
-        ActivityLog.id == log_id,
-        ActivityLog.project_id == project_id
-    ).first()
-
-    if not log:
-        raise HTTPException(status_code=404, detail="فعالیت یافت نشد")
-
-    return {
-        "success": True,
-        "activity": log_to_full_response(log)
-    }
-
-
 @router.get("/{project_id}/journal/stats")
 async def get_journal_stats(
     project_id: str,
@@ -378,6 +357,27 @@ async def get_journal_stats(
     }
 
 
+@router.get("/{project_id}/journal/{log_id}")
+async def get_activity_detail(
+    project_id: str,
+    log_id: str,
+    db: Session = Depends(get_db)
+):
+    """دریافت جزئیات کامل یک فعالیت"""
+    log = db.query(ActivityLog).filter(
+        ActivityLog.id == log_id,
+        ActivityLog.project_id == project_id
+    ).first()
+
+    if not log:
+        raise HTTPException(status_code=404, detail="فعالیت یافت نشد")
+
+    return {
+        "success": True,
+        "activity": log_to_full_response(log)
+    }
+
+
 # ===================== گزارشات =====================
 
 @router.get("/{project_id}/reports")
@@ -416,47 +416,6 @@ async def get_project_reports(
             "page_size": page_size,
             "total": total,
             "total_pages": (total + page_size - 1) // page_size,
-        }
-    }
-
-
-@router.get("/{project_id}/reports/{report_id}")
-async def get_report_detail(
-    project_id: str,
-    report_id: str,
-    db: Session = Depends(get_db)
-):
-    """دریافت جزئیات کامل یک گزارش"""
-    report = db.query(Report).filter(
-        Report.id == report_id,
-        Report.project_id == project_id
-    ).first()
-
-    if not report:
-        raise HTTPException(status_code=404, detail="گزارش یافت نشد")
-
-    models_used = []
-    try:
-        if report.models_used:
-            models_used = json.loads(report.models_used)
-    except:
-        pass
-
-    return {
-        "success": True,
-        "report": {
-            "id": report.id,
-            "report_type": report.report_type,
-            "title": report.title,
-            "content": report.content,
-            "summary": report.summary,
-            "total_activities": report.total_activities,
-            "total_tokens": report.total_tokens,
-            "models_used": models_used,
-            "period_start": report.period_start.isoformat() if report.period_start else None,
-            "period_end": report.period_end.isoformat() if report.period_end else None,
-            "created_at": report.created_at.isoformat() if report.created_at else None,
-            "generated_by": report.generated_by,
         }
     }
 
@@ -610,5 +569,48 @@ async def update_report_trigger(
             "interval_type": trigger.interval_type,
             "report_model": trigger.report_model,
             "next_run": trigger.next_run.isoformat() if trigger.next_run else None,
+        }
+    }
+
+
+# ===================== جزئیات گزارش (باید آخر باشد) =====================
+
+@router.get("/{project_id}/reports/{report_id}")
+async def get_report_detail(
+    project_id: str,
+    report_id: str,
+    db: Session = Depends(get_db)
+):
+    """دریافت جزئیات کامل یک گزارش"""
+    report = db.query(Report).filter(
+        Report.id == report_id,
+        Report.project_id == project_id
+    ).first()
+
+    if not report:
+        raise HTTPException(status_code=404, detail="گزارش یافت نشد")
+
+    models_used = []
+    try:
+        if report.models_used:
+            models_used = json.loads(report.models_used)
+    except:
+        pass
+
+    return {
+        "success": True,
+        "report": {
+            "id": report.id,
+            "report_type": report.report_type,
+            "title": report.title,
+            "content": report.content,
+            "summary": report.summary,
+            "total_activities": report.total_activities,
+            "total_tokens": report.total_tokens,
+            "models_used": models_used,
+            "period_start": report.period_start.isoformat() if report.period_start else None,
+            "period_end": report.period_end.isoformat() if report.period_end else None,
+            "created_at": report.created_at.isoformat() if report.created_at else None,
+            "generated_by": report.generated_by,
         }
     }
