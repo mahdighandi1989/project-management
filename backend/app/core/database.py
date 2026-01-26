@@ -100,10 +100,10 @@ def migrate_db():
         if "projects" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
             existing_cols = get_columns("projects")
 
-            # اضافه کردن ستون metadata اگر وجود نداشت
-            if "metadata" not in existing_cols:
-                cursor.execute("ALTER TABLE projects ADD COLUMN metadata TEXT")
-                logger.info("Added 'metadata' column to projects table")
+            # اضافه کردن ستون extra_data اگر وجود نداشت
+            if "extra_data" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN extra_data TEXT")
+                logger.info("Added 'extra_data' column to projects table")
 
         # Migration برای جدول project_files
         if "project_files" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:

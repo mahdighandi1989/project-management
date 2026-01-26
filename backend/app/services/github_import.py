@@ -484,7 +484,7 @@ class GitHubImportService:
                     existing.description = import_result.get("description", "")
                     existing.technologies = json.dumps(technologies, ensure_ascii=False)
                     existing.structure = json.dumps(structure, ensure_ascii=False)
-                    existing.metadata = json.dumps(metadata, ensure_ascii=False)
+                    existing.extra_data = json.dumps(metadata, ensure_ascii=False)
                     existing.status = "imported"
                 else:
                     # ایجاد جدید
@@ -497,7 +497,7 @@ class GitHubImportService:
                         technologies=json.dumps(technologies, ensure_ascii=False),
                         features=json.dumps(import_result.get("topics", []), ensure_ascii=False),
                         structure=json.dumps(structure, ensure_ascii=False),
-                        metadata=json.dumps(metadata, ensure_ascii=False),
+                        extra_data=json.dumps(metadata, ensure_ascii=False),
                     )
                     db.add(project)
 
