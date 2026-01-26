@@ -51,6 +51,10 @@ class Project(Base):
     structure = Column(Text)  # JSON string: ساختار پوشه‌ها
     extra_data = Column(Text)  # JSON string: اطلاعات اضافی (GitHub info, etc.)
 
+    # باکس حافظه و دستورات برای AI
+    memory_instructions = Column(Text)  # JSON: {"content": "...", "target_models": ["all"]}
+    dynamic_fields = Column(Text)  # JSON: [{"id": "...", "name": "...", "value": "...", "target_models": [...]}]
+
     # مسیرها
     local_path = Column(String(500))  # مسیر محلی فایل‌ها
     github_path = Column(String(500))  # مسیر در GitHub
@@ -78,6 +82,8 @@ class Project(Base):
         features = []
         structure = {}
         metadata = {}
+        memory_instructions = {"content": "", "target_models": ["all"]}
+        dynamic_fields = []
 
         try:
             if self.technologies:
@@ -103,6 +109,18 @@ class Project(Base):
         except (json.JSONDecodeError, TypeError):
             pass
 
+        try:
+            if self.memory_instructions:
+                memory_instructions = json.loads(self.memory_instructions) if isinstance(self.memory_instructions, str) else self.memory_instructions
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        try:
+            if self.dynamic_fields:
+                dynamic_fields = json.loads(self.dynamic_fields) if isinstance(self.dynamic_fields, str) else self.dynamic_fields
+        except (json.JSONDecodeError, TypeError):
+            pass
+
         return {
             "id": self.id,
             "name": self.name,
@@ -113,6 +131,8 @@ class Project(Base):
             "features": features,
             "structure": structure,
             "metadata": metadata,
+            "memory_instructions": memory_instructions,
+            "dynamic_fields": dynamic_fields,
             "local_path": self.local_path,
             "github_path": self.github_path,
             "deploy_url": self.deploy_url,

@@ -105,6 +105,16 @@ def migrate_db():
                 cursor.execute("ALTER TABLE projects ADD COLUMN extra_data TEXT")
                 logger.info("Added 'extra_data' column to projects table")
 
+            # اضافه کردن ستون memory_instructions برای باکس حافظه
+            if "memory_instructions" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN memory_instructions TEXT")
+                logger.info("Added 'memory_instructions' column to projects table")
+
+            # اضافه کردن ستون dynamic_fields برای فیلدهای پویا
+            if "dynamic_fields" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN dynamic_fields TEXT")
+                logger.info("Added 'dynamic_fields' column to projects table")
+
         # Migration برای جدول project_files
         if "project_files" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
             existing_cols = get_columns("project_files")
