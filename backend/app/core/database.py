@@ -77,6 +77,73 @@ def get_db_session():
         db.close()
 
 
+def migrate_db():
+    """
+    اعمال migration برای ستون‌های جدید
+    SQLite از ALTER TABLE ADD COLUMN پشتیبانی می‌کند
+    """
+    import sqlite3
+
+    if not os.path.exists(DATABASE_PATH):
+        return  # دیتابیس وجود ندارد، نیاز به migration نیست
+
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+
+    # دریافت ستون‌های موجود در هر جدول
+    def get_columns(table_name):
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        return [row[1] for row in cursor.fetchall()]
+
+    try:
+        # Migration برای جدول projects
+        if "projects" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
+            existing_cols = get_columns("projects")
+
+            # اضافه کردن ستون metadata اگر وجود نداشت
+            if "metadata" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN metadata TEXT")
+                logger.info("Added 'metadata' column to projects table")
+
+        # Migration برای جدول project_files
+        if "project_files" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
+            existing_cols = get_columns("project_files")
+
+            # اضافه کردن ستون‌های جدید
+            if "file_path" not in existing_cols:
+                cursor.execute("ALTER TABLE project_files ADD COLUMN file_path VARCHAR(500)")
+                logger.info("Added 'file_path' column to project_files table")
+
+            if "content" not in existing_cols:
+                cursor.execute("ALTER TABLE project_files ADD COLUMN content TEXT")
+                logger.info("Added 'content' column to project_files table")
+
+            if "github_url" not in existing_cols:
+                cursor.execute("ALTER TABLE project_files ADD COLUMN github_url VARCHAR(500)")
+                logger.info("Added 'github_url' column to project_files table")
+
+            if "checksum" not in existing_cols:
+                cursor.execute("ALTER TABLE project_files ADD COLUMN checksum VARCHAR(64)")
+                logger.info("Added 'checksum' column to project_files table")
+
+            if "storage_type" not in existing_cols:
+                cursor.execute("ALTER TABLE project_files ADD COLUMN storage_type VARCHAR(20) DEFAULT 'local'")
+                logger.info("Added 'storage_type' column to project_files table")
+
+            if "storage_path" not in existing_cols:
+                cursor.execute("ALTER TABLE project_files ADD COLUMN storage_path VARCHAR(500)")
+                logger.info("Added 'storage_path' column to project_files table")
+
+        conn.commit()
+        logger.info("Database migration completed")
+
+    except Exception as e:
+        logger.error(f"Migration error: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
+
 def init_db():
     """
     ایجاد جداول در دیتابیس
@@ -85,7 +152,10 @@ def init_db():
     # Import models تا register شوند
     from ..models import project, debate, setting, ai_log
 
-    # ایجاد جداول
+    # اول migration رو اجرا کن (برای جداول موجود)
+    migrate_db()
+
+    # ایجاد جداول جدید (اگر وجود نداشتند)
     Base.metadata.create_all(bind=engine)
     logger.info(f"Database initialized at {DATABASE_PATH}")
 

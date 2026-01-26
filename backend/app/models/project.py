@@ -6,6 +6,7 @@ from sqlalchemy import Column, String, Text, Integer, DateTime, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
+import json
 
 from ..core.database import Base
 
@@ -18,6 +19,7 @@ class ProjectStatus(enum.Enum):
     DEPLOYED = "deployed"
     FAILED = "failed"
     ARCHIVED = "archived"
+    IMPORTED = "imported"
 
 
 class ProjectType(enum.Enum):
@@ -30,6 +32,7 @@ class ProjectType(enum.Enum):
     LIBRARY = "library"
     TRADING = "trading"
     CUSTOM = "custom"
+    GITHUB_IMPORT = "github_import"
 
 
 class Project(Base):
@@ -43,9 +46,10 @@ class Project(Base):
     status = Column(String(50), default="created", index=True)
 
     # تنظیمات
-    technologies = Column(JSON, default=list)  # ["python", "fastapi", ...]
-    features = Column(JSON, default=list)  # ["authentication", ...]
-    structure = Column(JSON, default=dict)  # ساختار پوشه‌ها
+    technologies = Column(Text)  # JSON string: ["python", "fastapi", ...]
+    features = Column(Text)  # JSON string: ["authentication", ...]
+    structure = Column(Text)  # JSON string: ساختار پوشه‌ها
+    metadata = Column(Text)  # JSON string: اطلاعات اضافی (GitHub info, etc.)
 
     # مسیرها
     local_path = Column(String(500))  # مسیر محلی فایل‌ها
@@ -69,15 +73,46 @@ class Project(Base):
 
     def to_dict(self):
         """تبدیل به dictionary"""
+        # پارس JSON fields
+        technologies = []
+        features = []
+        structure = {}
+        metadata = {}
+
+        try:
+            if self.technologies:
+                technologies = json.loads(self.technologies) if isinstance(self.technologies, str) else self.technologies
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        try:
+            if self.features:
+                features = json.loads(self.features) if isinstance(self.features, str) else self.features
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        try:
+            if self.structure:
+                structure = json.loads(self.structure) if isinstance(self.structure, str) else self.structure
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        try:
+            if self.metadata:
+                metadata = json.loads(self.metadata) if isinstance(self.metadata, str) else self.metadata
+        except (json.JSONDecodeError, TypeError):
+            pass
+
         return {
             "id": self.id,
             "name": self.name,
             "description": self.description,
             "project_type": self.project_type,
             "status": self.status,
-            "technologies": self.technologies or [],
-            "features": self.features or [],
-            "structure": self.structure or {},
+            "technologies": technologies,
+            "features": features,
+            "structure": structure,
+            "metadata": metadata,
             "local_path": self.local_path,
             "github_path": self.github_path,
             "deploy_url": self.deploy_url,
@@ -89,7 +124,6 @@ class Project(Base):
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "deployed_at": self.deployed_at.isoformat() if self.deployed_at else None,
-            "files": [f.to_dict() for f in self.files] if self.files else []
         }
 
 
@@ -99,14 +133,18 @@ class ProjectFile(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
-    path = Column(String(500), nullable=False)  # مسیر نسبی فایل
-    language = Column(String(50))  # زبان برنامه‌نویسی
+
+    # اطلاعات فایل
+    file_path = Column(String(500), nullable=False)  # مسیر نسبی فایل
+    content = Column(Text)  # محتوای فایل
+    file_type = Column(String(50))  # نوع فایل (python, javascript, etc.)
     size = Column(Integer, default=0)  # سایز به بایت
     checksum = Column(String(64))  # SHA256 hash
 
     # محل ذخیره
     storage_type = Column(String(20), default="local")  # local, github
     storage_path = Column(String(500))  # مسیر واقعی در storage
+    github_url = Column(String(500))  # لینک مستقیم به GitHub
 
     # متادیتا
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -120,12 +158,14 @@ class ProjectFile(Base):
         return {
             "id": self.id,
             "project_id": self.project_id,
-            "path": self.path,
-            "language": self.language,
+            "file_path": self.file_path,
+            "content": self.content[:500] + "..." if self.content and len(self.content) > 500 else self.content,
+            "file_type": self.file_type,
             "size": self.size,
             "checksum": self.checksum,
             "storage_type": self.storage_type,
             "storage_path": self.storage_path,
+            "github_url": self.github_url,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
