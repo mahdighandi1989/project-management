@@ -650,25 +650,41 @@ async def auto_setup_project(
     # دریافت فایل‌ها
     files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
     files_data = [
-        {"path": f.file_path, "content": f.content[:1000] if f.content else "", "file_type": f.file_type}
+        {"path": f.file_path, "content": f.content[:2000] if f.content else "", "file_type": f.file_type}
         for f in files
     ]
 
     # اجرای auto-setup
-    result = await auto_setup_project_memory(
-        project_id=project_id,
-        project_name=project.name,
-        project_description=project.description or "",
-        project_type=project.project_type or "",
-        files=files_data,
-        use_ai=use_ai,
-        db_session=db
-    )
+    try:
+        result = await auto_setup_project_memory(
+            project_id=project_id,
+            project_name=project.name,
+            project_description=project.description or "",
+            project_type=project.project_type or "",
+            files=files_data,
+            use_ai=use_ai,
+            db_session=db
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"خطا در راه‌اندازی: {str(e)}")
 
     if not result.get("success"):
         raise HTTPException(status_code=500, detail=result.get("error", "خطا در راه‌اندازی"))
 
-    return result
+    # تبدیل به JSON-serializable
+    return {
+        "success": True,
+        "project_id": result.get("project_id"),
+        "detected_type": result.get("detected_type"),
+        "language": result.get("language"),
+        "architecture": result.get("architecture"),
+        "frameworks": result.get("frameworks", []),
+        "ai_insights": result.get("ai_insights"),
+        "recommendations": result.get("recommendations", []),
+        "tokens_used": result.get("tokens_used", 0),
+        "model_used": result.get("model_used"),
+        "fields_created": len(result.get("dynamic_fields", []))
+    }
 
 
 @router.post("/memory/auto-setup-all")
