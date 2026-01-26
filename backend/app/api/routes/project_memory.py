@@ -20,6 +20,15 @@ router = APIRouter(prefix="/projects", tags=["Project Memory"])
 # مدل‌های درخواست
 # =====================================
 
+class TriggerSettings(BaseModel):
+    """تنظیمات تریگر برای اجرای خودکار"""
+    enabled: bool = False
+    interval_minutes: int = 60  # هر چند دقیقه اجرا شود
+    interval_type: str = "minutes"  # minutes, hours, days
+    last_run: Optional[str] = None  # آخرین زمان اجرا
+    next_run: Optional[str] = None  # زمان اجرای بعدی
+
+
 class MemoryInstructionsRequest(BaseModel):
     """درخواست بروزرسانی باکس حافظه"""
     content: str
@@ -31,6 +40,7 @@ class DynamicFieldRequest(BaseModel):
     name: str
     value: str
     target_models: List[str] = ["all"]
+    trigger: Optional[TriggerSettings] = None
 
 
 class UpdateDynamicFieldRequest(BaseModel):
@@ -39,6 +49,7 @@ class UpdateDynamicFieldRequest(BaseModel):
     name: Optional[str] = None
     value: Optional[str] = None
     target_models: Optional[List[str]] = None
+    trigger: Optional[TriggerSettings] = None
 
 
 # =====================================
@@ -53,6 +64,19 @@ AVAILABLE_MODELS = [
     {"id": "deepseek", "name": "DeepSeek", "icon": "🔷"},
     {"id": "openrouter", "name": "OpenRouter", "icon": "🔶"},
     {"id": "groq", "name": "Groq", "icon": "⚡"},
+]
+
+# گزینه‌های بازه زمانی برای تریگرها
+TRIGGER_INTERVALS = [
+    {"value": 5, "type": "minutes", "label": "هر ۵ دقیقه"},
+    {"value": 15, "type": "minutes", "label": "هر ۱۵ دقیقه"},
+    {"value": 30, "type": "minutes", "label": "هر ۳۰ دقیقه"},
+    {"value": 1, "type": "hours", "label": "هر ۱ ساعت"},
+    {"value": 2, "type": "hours", "label": "هر ۲ ساعت"},
+    {"value": 6, "type": "hours", "label": "هر ۶ ساعت"},
+    {"value": 12, "type": "hours", "label": "هر ۱۲ ساعت"},
+    {"value": 1, "type": "days", "label": "روزانه"},
+    {"value": 7, "type": "days", "label": "هفتگی"},
 ]
 
 
@@ -100,7 +124,8 @@ async def get_project_memory(project_id: str, db: Session = Depends(get_db)):
         "project_id": project_id,
         "memory_instructions": memory_instructions,
         "dynamic_fields": dynamic_fields,
-        "available_models": AVAILABLE_MODELS
+        "available_models": AVAILABLE_MODELS,
+        "trigger_intervals": TRIGGER_INTERVALS
     }
 
 
@@ -155,12 +180,19 @@ async def add_dynamic_field(
     except (json.JSONDecodeError, TypeError):
         pass
 
-    # افزودن فیلد جدید
+    # افزودن فیلد جدید با تنظیمات تریگر
     new_field = {
         "id": str(uuid.uuid4()),
         "name": request.name,
         "value": request.value,
-        "target_models": request.target_models
+        "target_models": request.target_models,
+        "trigger": {
+            "enabled": request.trigger.enabled if request.trigger else False,
+            "interval_minutes": request.trigger.interval_minutes if request.trigger else 60,
+            "interval_type": request.trigger.interval_type if request.trigger else "minutes",
+            "last_run": None,
+            "next_run": None
+        }
     }
     dynamic_fields.append(new_field)
 
@@ -207,6 +239,13 @@ async def update_dynamic_field(
                 field["value"] = request.value
             if request.target_models is not None:
                 field["target_models"] = request.target_models
+            if request.trigger is not None:
+                # اطمینان از وجود فیلد trigger
+                if "trigger" not in field:
+                    field["trigger"] = {}
+                field["trigger"]["enabled"] = request.trigger.enabled
+                field["trigger"]["interval_minutes"] = request.trigger.interval_minutes
+                field["trigger"]["interval_type"] = request.trigger.interval_type
             field_found = True
             break
 
@@ -423,3 +462,164 @@ async def project_chat(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"خطا در ارتباط با AI: {str(e)}")
+
+
+# =====================================
+# مدیریت تریگرها
+# =====================================
+
+@router.post("/{project_id}/memory/fields/{field_id}/trigger/toggle")
+async def toggle_field_trigger(
+    project_id: str,
+    field_id: str,
+    enabled: bool,
+    db: Session = Depends(get_db)
+):
+    """
+    روشن/خاموش کردن تریگر یک فیلد
+    """
+    from datetime import datetime, timedelta
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    dynamic_fields = []
+    try:
+        if project.dynamic_fields:
+            dynamic_fields = json.loads(project.dynamic_fields)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    field_found = False
+    for field in dynamic_fields:
+        if field["id"] == field_id:
+            if "trigger" not in field:
+                field["trigger"] = {"enabled": False, "interval_minutes": 60, "interval_type": "minutes"}
+
+            field["trigger"]["enabled"] = enabled
+
+            # اگر فعال شد، زمان اجرای بعدی را محاسبه کن
+            if enabled:
+                interval = field["trigger"].get("interval_minutes", 60)
+                interval_type = field["trigger"].get("interval_type", "minutes")
+
+                if interval_type == "hours":
+                    next_run = datetime.utcnow() + timedelta(hours=interval)
+                elif interval_type == "days":
+                    next_run = datetime.utcnow() + timedelta(days=interval)
+                else:
+                    next_run = datetime.utcnow() + timedelta(minutes=interval)
+
+                field["trigger"]["next_run"] = next_run.isoformat()
+            else:
+                field["trigger"]["next_run"] = None
+
+            field_found = True
+            break
+
+    if not field_found:
+        raise HTTPException(status_code=404, detail="فیلد یافت نشد")
+
+    project.dynamic_fields = json.dumps(dynamic_fields, ensure_ascii=False)
+    db.commit()
+
+    return {
+        "success": True,
+        "enabled": enabled,
+        "message": "تریگر فعال شد" if enabled else "تریگر غیرفعال شد"
+    }
+
+
+@router.post("/{project_id}/memory/fields/{field_id}/trigger/execute")
+async def execute_field_trigger(
+    project_id: str,
+    field_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    اجرای دستی یک تریگر (بدون انتظار برای زمان‌بندی)
+    """
+    from datetime import datetime
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    dynamic_fields = []
+    try:
+        if project.dynamic_fields:
+            dynamic_fields = json.loads(project.dynamic_fields)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    target_field = None
+    for field in dynamic_fields:
+        if field["id"] == field_id:
+            target_field = field
+            break
+
+    if not target_field:
+        raise HTTPException(status_code=404, detail="فیلد یافت نشد")
+
+    # ساخت prompt از دستور فیلد
+    system_prompt = f"تو یک دستیار هوشمند برای پروژه '{project.name}' هستی."
+    if project.description:
+        system_prompt += f"\nتوضیحات پروژه: {project.description}"
+
+    user_prompt = f"دستور: {target_field['name']}\n\n{target_field['value']}"
+
+    # ارسال به مدل(های) هدف
+    target_models = target_field.get("target_models", ["all"])
+    if "all" in target_models:
+        target_models = ["openai"]  # پیش‌فرض
+
+    results = []
+    ai_manager = get_ai_manager()
+
+    for model_id in target_models:
+        if model_id == "all":
+            continue
+        try:
+            messages = [
+                Message(role="system", content=system_prompt),
+                Message(role="user", content=user_prompt),
+            ]
+
+            response = await ai_manager.generate(
+                model_id=model_id,
+                messages=messages,
+                max_tokens=4096,
+                temperature=0.7,
+            )
+
+            results.append({
+                "model_id": response.model_id,
+                "content": response.content,
+                "tokens_used": response.tokens_used,
+            })
+        except Exception as e:
+            results.append({
+                "model_id": model_id,
+                "error": str(e)
+            })
+
+    # بروزرسانی last_run
+    for field in dynamic_fields:
+        if field["id"] == field_id:
+            if "trigger" not in field:
+                field["trigger"] = {}
+            field["trigger"]["last_run"] = datetime.utcnow().isoformat()
+            break
+
+    project.dynamic_fields = json.dumps(dynamic_fields, ensure_ascii=False)
+    db.commit()
+
+    return {
+        "success": True,
+        "field_name": target_field["name"],
+        "results": results,
+        "executed_at": datetime.utcnow().isoformat()
+    }

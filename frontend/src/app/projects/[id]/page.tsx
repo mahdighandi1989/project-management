@@ -49,17 +49,32 @@ interface MemoryInstructions {
   target_models: string[];
 }
 
+interface TriggerSettings {
+  enabled: boolean;
+  interval_minutes: number;
+  interval_type: string;
+  last_run?: string;
+  next_run?: string;
+}
+
 interface DynamicField {
   id: string;
   name: string;
   value: string;
   target_models: string[];
+  trigger?: TriggerSettings;
 }
 
 interface AIModel {
   id: string;
   name: string;
   icon: string;
+}
+
+interface TriggerInterval {
+  value: number;
+  type: string;
+  label: string;
 }
 
 export default function ProjectDetailPage() {
@@ -84,13 +99,18 @@ export default function ProjectDetailPage() {
   });
   const [dynamicFields, setDynamicFields] = useState<DynamicField[]>([]);
   const [availableModels, setAvailableModels] = useState<AIModel[]>([]);
+  const [triggerIntervals, setTriggerIntervals] = useState<TriggerInterval[]>([]);
   const [savingMemory, setSavingMemory] = useState(false);
+  const [executingTrigger, setExecutingTrigger] = useState<string | null>(null);
 
   // New Field Form
   const [showNewFieldForm, setShowNewFieldForm] = useState(false);
   const [newFieldName, setNewFieldName] = useState('');
   const [newFieldValue, setNewFieldValue] = useState('');
   const [newFieldModels, setNewFieldModels] = useState<string[]>(['all']);
+  const [newFieldTriggerEnabled, setNewFieldTriggerEnabled] = useState(false);
+  const [newFieldTriggerInterval, setNewFieldTriggerInterval] = useState(60);
+  const [newFieldTriggerType, setNewFieldTriggerType] = useState('minutes');
 
   // Edit Field
   const [editingField, setEditingField] = useState<string | null>(null);
@@ -203,6 +223,7 @@ export default function ProjectDetailPage() {
           setMemoryInstructions(data.memory_instructions || { content: '', target_models: ['all'] });
           setDynamicFields(data.dynamic_fields || []);
           setAvailableModels(data.available_models || []);
+          setTriggerIntervals(data.trigger_intervals || []);
         }
       }
     } catch (e) {
@@ -245,6 +266,11 @@ export default function ProjectDetailPage() {
           name: newFieldName,
           value: newFieldValue,
           target_models: newFieldModels,
+          trigger: {
+            enabled: newFieldTriggerEnabled,
+            interval_minutes: newFieldTriggerInterval,
+            interval_type: newFieldTriggerType,
+          },
         }),
       });
       const data = await res.json();
@@ -253,6 +279,9 @@ export default function ProjectDetailPage() {
         setNewFieldName('');
         setNewFieldValue('');
         setNewFieldModels(['all']);
+        setNewFieldTriggerEnabled(false);
+        setNewFieldTriggerInterval(60);
+        setNewFieldTriggerType('minutes');
         setShowNewFieldForm(false);
         loadMemory();
       } else {
@@ -299,6 +328,47 @@ export default function ProjectDetailPage() {
       }
     } catch (e) {
       showError('خطا در ارتباط');
+    }
+  };
+
+  // روشن/خاموش کردن تریگر
+  const toggleFieldTrigger = async (fieldId: string, enabled: boolean) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields/${fieldId}/trigger/toggle?enabled=${enabled}`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess(data.message);
+        loadMemory();
+      } else {
+        showError(data.detail || 'خطا');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    }
+  };
+
+  // اجرای دستی تریگر
+  const executeFieldTrigger = async (fieldId: string) => {
+    setExecutingTrigger(fieldId);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields/${fieldId}/trigger/execute`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess(`تریگر "${data.field_name}" اجرا شد`);
+        loadMemory();
+        // نمایش نتایج در console
+        console.log('Trigger execution results:', data.results);
+      } else {
+        showError(data.detail || 'خطا در اجرای تریگر');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    } finally {
+      setExecutingTrigger(null);
     }
   };
 
@@ -839,6 +909,40 @@ export default function ProjectDetailPage() {
                       onChange={setNewFieldModels}
                     />
                   </div>
+
+                  {/* تنظیمات تریگر */}
+                  <div className="mb-3 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-600">
+                    <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      <input
+                        type="checkbox"
+                        checked={newFieldTriggerEnabled}
+                        onChange={(e) => setNewFieldTriggerEnabled(e.target.checked)}
+                        className="rounded"
+                      />
+                      ⏰ فعال‌سازی تریگر (اجرای خودکار)
+                    </label>
+                    {newFieldTriggerEnabled && (
+                      <div className="mr-6">
+                        <label className="text-xs text-gray-500 block mb-1">بازه زمانی:</label>
+                        <select
+                          value={`${newFieldTriggerInterval}-${newFieldTriggerType}`}
+                          onChange={(e) => {
+                            const [val, type] = e.target.value.split('-');
+                            setNewFieldTriggerInterval(parseInt(val));
+                            setNewFieldTriggerType(type);
+                          }}
+                          className="w-full p-2 border rounded text-sm dark:bg-gray-700 dark:border-gray-600"
+                        >
+                          {triggerIntervals.map((interval, idx) => (
+                            <option key={idx} value={`${interval.value}-${interval.type}`}>
+                              {interval.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+
                   <div className="flex gap-2">
                     <button
                       onClick={addDynamicField}
@@ -847,7 +951,12 @@ export default function ProjectDetailPage() {
                       افزودن
                     </button>
                     <button
-                      onClick={() => { setShowNewFieldForm(false); setNewFieldName(''); setNewFieldValue(''); }}
+                      onClick={() => {
+                        setShowNewFieldForm(false);
+                        setNewFieldName('');
+                        setNewFieldValue('');
+                        setNewFieldTriggerEnabled(false);
+                      }}
                       className="px-4 py-2 bg-gray-200 dark:bg-gray-700 rounded-lg text-sm"
                     >
                       انصراف
@@ -904,6 +1013,67 @@ export default function ProjectDetailPage() {
                               }}
                             />
                           </div>
+
+                          {/* تنظیمات تریگر در حالت ویرایش */}
+                          <div className="mb-3 p-3 bg-white dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600">
+                            <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                              <input
+                                type="checkbox"
+                                checked={field.trigger?.enabled || false}
+                                onChange={(e) => {
+                                  const updated = dynamicFields.map(f =>
+                                    f.id === field.id
+                                      ? {
+                                          ...f,
+                                          trigger: {
+                                            ...f.trigger,
+                                            enabled: e.target.checked,
+                                            interval_minutes: f.trigger?.interval_minutes || 60,
+                                            interval_type: f.trigger?.interval_type || 'minutes',
+                                          }
+                                        }
+                                      : f
+                                  );
+                                  setDynamicFields(updated);
+                                }}
+                                className="rounded"
+                              />
+                              ⏰ فعال‌سازی تریگر (اجرای خودکار)
+                            </label>
+                            {field.trigger?.enabled && (
+                              <div className="mr-6">
+                                <label className="text-xs text-gray-500 block mb-1">بازه زمانی:</label>
+                                <select
+                                  value={`${field.trigger?.interval_minutes || 60}-${field.trigger?.interval_type || 'minutes'}`}
+                                  onChange={(e) => {
+                                    const [val, type] = e.target.value.split('-');
+                                    const updated = dynamicFields.map(f =>
+                                      f.id === field.id
+                                        ? {
+                                            ...f,
+                                            trigger: {
+                                              ...f.trigger,
+                                              enabled: true,
+                                              interval_minutes: parseInt(val),
+                                              interval_type: type,
+                                            }
+                                          }
+                                        : f
+                                    );
+                                    setDynamicFields(updated);
+                                  }}
+                                  className="w-full p-2 border rounded text-sm dark:bg-gray-600 dark:border-gray-500"
+                                >
+                                  {triggerIntervals.map((interval, idx) => (
+                                    <option key={idx} value={`${interval.value}-${interval.type}`}>
+                                      {interval.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            )}
+                          </div>
+
                           <div className="flex gap-2">
                             <button
                               onClick={() => updateDynamicField(field)}
@@ -956,6 +1126,79 @@ export default function ProjectDetailPage() {
                                 </span>
                               );
                             })}
+                          </div>
+
+                          {/* تریگر کنترل‌ها */}
+                          <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-600">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                  <div className="relative">
+                                    <input
+                                      type="checkbox"
+                                      checked={field.trigger?.enabled || false}
+                                      onChange={(e) => toggleFieldTrigger(field.id, e.target.checked)}
+                                      className="sr-only"
+                                    />
+                                    <div className={`w-10 h-5 rounded-full transition ${
+                                      field.trigger?.enabled
+                                        ? 'bg-green-500'
+                                        : 'bg-gray-300 dark:bg-gray-600'
+                                    }`}>
+                                      <div className={`w-4 h-4 bg-white rounded-full shadow transform transition ${
+                                        field.trigger?.enabled
+                                          ? 'translate-x-5'
+                                          : 'translate-x-0.5'
+                                      } mt-0.5`}></div>
+                                    </div>
+                                  </div>
+                                  <span className="text-xs text-gray-600 dark:text-gray-400">
+                                    ⏰ تریگر خودکار
+                                  </span>
+                                </label>
+                                {field.trigger?.enabled && (
+                                  <span className="text-xs text-green-600 dark:text-green-400">
+                                    ({triggerIntervals.find(
+                                      i => i.value === field.trigger?.interval_minutes && i.type === field.trigger?.interval_type
+                                    )?.label || `هر ${field.trigger?.interval_minutes} دقیقه`})
+                                  </span>
+                                )}
+                              </div>
+
+                              <button
+                                onClick={() => executeFieldTrigger(field.id)}
+                                disabled={executingTrigger === field.id}
+                                className="px-3 py-1 bg-orange-500 text-white rounded text-xs hover:bg-orange-600 disabled:opacity-50 flex items-center gap-1"
+                                title="اجرای دستی تریگر"
+                              >
+                                {executingTrigger === field.id ? (
+                                  <>
+                                    <span className="animate-spin">⏳</span>
+                                    در حال اجرا...
+                                  </>
+                                ) : (
+                                  <>
+                                    ▶️ اجرا الان
+                                  </>
+                                )}
+                              </button>
+                            </div>
+
+                            {/* نمایش آخرین و بعدی اجرا */}
+                            {field.trigger?.enabled && (field.trigger?.last_run || field.trigger?.next_run) && (
+                              <div className="mt-2 flex flex-wrap gap-3 text-xs text-gray-500">
+                                {field.trigger?.last_run && (
+                                  <span>
+                                    آخرین اجرا: {new Date(field.trigger.last_run).toLocaleString('fa-IR')}
+                                  </span>
+                                )}
+                                {field.trigger?.next_run && (
+                                  <span>
+                                    اجرای بعدی: {new Date(field.trigger.next_run).toLocaleString('fa-IR')}
+                                  </span>
+                                )}
+                              </div>
+                            )}
                           </div>
                         </div>
                       )}
