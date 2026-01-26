@@ -1,8 +1,20 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
+import ReactFlow, {
+  Node,
+  Edge,
+  Controls,
+  Background,
+  MiniMap,
+  useNodesState,
+  useEdgesState,
+  BackgroundVariant,
+  MarkerType,
+} from 'reactflow';
+import 'reactflow/dist/style.css';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -77,6 +89,45 @@ interface TriggerInterval {
   label: string;
 }
 
+// Diagram interfaces
+interface DiagramNode {
+  id: string;
+  type: string;
+  label: string;
+  description?: string;
+  position: { x: number; y: number };
+  data?: Record<string, any>;
+  style?: Record<string, any>;
+  is_active?: boolean;
+}
+
+interface DiagramEdge {
+  id: string;
+  source: string;
+  target: string;
+  label?: string;
+  type?: string;
+  style?: Record<string, any>;
+  animated?: boolean;
+}
+
+interface ProjectStructure {
+  nodes: DiagramNode[];
+  edges: DiagramEdge[];
+  metadata?: Record<string, any>;
+}
+
+interface StructureSettings {
+  instruction: string;
+  target_models: string[];
+  trigger_enabled: boolean;
+  trigger_interval_minutes: number;
+  trigger_interval_type: string;
+  last_analysis?: string;
+  next_analysis?: string;
+  auto_analyze_on_import: boolean;
+}
+
 export default function ProjectDetailPage() {
   const params = useParams();
   const projectId = params.id as string;
@@ -90,7 +141,23 @@ export default function ProjectDetailPage() {
   const [deploying, setDeploying] = useState(false);
 
   // تب فعال
-  const [activeTab, setActiveTab] = useState<'files' | 'memory'>('files');
+  const [activeTab, setActiveTab] = useState<'files' | 'memory' | 'structure'>('files');
+
+  // Structure Diagram State
+  const [structureData, setStructureData] = useState<ProjectStructure | null>(null);
+  const [structureSettings, setStructureSettings] = useState<StructureSettings>({
+    instruction: 'تمام پروژه را از ریز تا درشت بررسی کن و ساختار کامل آن را استخراج کن',
+    target_models: ['all'],
+    trigger_enabled: true,
+    trigger_interval_minutes: 30,
+    trigger_interval_type: 'minutes',
+    auto_analyze_on_import: true,
+  });
+  const [structureLoading, setStructureLoading] = useState(false);
+  const [analyzingStructure, setAnalyzingStructure] = useState(false);
+  const [savingStructureSettings, setSavingStructureSettings] = useState(false);
+  const [nodes, setNodes, onNodesChange] = useNodesState([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
 
   // Memory Box State
   const [memoryInstructions, setMemoryInstructions] = useState<MemoryInstructions>({
@@ -129,6 +196,13 @@ export default function ProjectDetailPage() {
       loadMemory();
     }
   }, [projectId]);
+
+  // بارگذاری ساختار وقتی تب ساختار باز میشه
+  useEffect(() => {
+    if (activeTab === 'structure' && projectId) {
+      loadStructure();
+    }
+  }, [activeTab, projectId]);
 
   const showError = (msg: string) => {
     setError(msg);
@@ -228,6 +302,122 @@ export default function ProjectDetailPage() {
       }
     } catch (e) {
       console.error('Error loading memory:', e);
+    }
+  };
+
+  // بارگذاری ساختار پروژه
+  const loadStructure = async () => {
+    setStructureLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/structure`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setStructureData(data.structure);
+          setStructureSettings(data.settings);
+          // تبدیل به فرمت React Flow
+          convertToReactFlow(data.structure);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading structure:', e);
+    } finally {
+      setStructureLoading(false);
+    }
+  };
+
+  // تبدیل داده‌ها به فرمت React Flow
+  const convertToReactFlow = (structure: ProjectStructure) => {
+    const flowNodes: Node[] = structure.nodes.map((node) => ({
+      id: node.id,
+      type: 'default',
+      position: node.position,
+      data: {
+        label: (
+          <div className={`text-center ${node.is_active ? 'animate-pulse' : ''}`}>
+            <div className="font-bold">{node.label}</div>
+            {node.description && (
+              <div className="text-xs opacity-70 mt-1">{node.description}</div>
+            )}
+          </div>
+        ),
+      },
+      style: {
+        background: node.style?.background || '#6366f1',
+        color: node.style?.color || 'white',
+        border: node.is_active ? '3px solid #22c55e' : '1px solid #4b5563',
+        borderRadius: '8px',
+        padding: '10px',
+        fontSize: node.style?.fontSize || '14px',
+        fontWeight: node.style?.fontWeight || 'normal',
+        boxShadow: node.is_active ? '0 0 15px #22c55e' : '0 2px 4px rgba(0,0,0,0.2)',
+      },
+    }));
+
+    const flowEdges: Edge[] = structure.edges.map((edge) => ({
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      type: edge.type || 'smoothstep',
+      animated: edge.animated || false,
+      label: edge.label,
+      style: {
+        stroke: edge.animated ? '#22c55e' : '#6b7280',
+        strokeWidth: edge.animated ? 3 : 2,
+      },
+      markerEnd: {
+        type: MarkerType.ArrowClosed,
+        color: edge.animated ? '#22c55e' : '#6b7280',
+      },
+    }));
+
+    setNodes(flowNodes);
+    setEdges(flowEdges);
+  };
+
+  // تحلیل مجدد ساختار
+  const analyzeStructure = async () => {
+    setAnalyzingStructure(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/structure/analyze`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess('ساختار پروژه با موفقیت تحلیل شد');
+        setStructureData(data.structure);
+        setStructureSettings(data.settings);
+        convertToReactFlow(data.structure);
+      } else {
+        showError(data.detail || 'خطا در تحلیل');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    } finally {
+      setAnalyzingStructure(false);
+    }
+  };
+
+  // ذخیره تنظیمات ساختار
+  const saveStructureSettings = async () => {
+    setSavingStructureSettings(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/structure/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(structureSettings),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess('تنظیمات ذخیره شد');
+        setStructureSettings(data.settings);
+      } else {
+        showError(data.detail || 'خطا');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    } finally {
+      setSavingStructureSettings(false);
     }
   };
 
@@ -626,6 +816,16 @@ export default function ProjectDetailPage() {
             }`}
           >
             🧠 حافظه و دستورات AI
+          </button>
+          <button
+            onClick={() => setActiveTab('structure')}
+            className={`px-6 py-3 font-medium ${
+              activeTab === 'structure'
+                ? 'border-b-2 border-green-500 text-green-600'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            🔀 ساختار پروژه
           </button>
         </div>
 
@@ -1206,6 +1406,201 @@ export default function ProjectDetailPage() {
                   ))
                 )}
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* محتوای تب ساختار پروژه */}
+        {activeTab === 'structure' && (
+          <div className="space-y-6">
+            {/* تنظیمات تحلیل */}
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <span className="text-2xl">⚙️</span>
+                  <h2 className="font-bold text-lg">تنظیمات تحلیل ساختار</h2>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={analyzeStructure}
+                    disabled={analyzingStructure}
+                    className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {analyzingStructure ? (
+                      <>
+                        <span className="animate-spin">⏳</span>
+                        در حال تحلیل...
+                      </>
+                    ) : (
+                      <>
+                        🔄 تحلیل مجدد
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid md:grid-cols-2 gap-4">
+                {/* دستور تحلیل */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    دستور تحلیل (برای مدل‌های AI):
+                  </label>
+                  <textarea
+                    value={structureSettings.instruction}
+                    onChange={(e) => setStructureSettings({ ...structureSettings, instruction: e.target.value })}
+                    className="w-full p-3 border rounded-lg resize-none h-24 dark:bg-gray-700 dark:border-gray-600 text-sm"
+                    placeholder="دستور برای تحلیل ساختار پروژه..."
+                  />
+                </div>
+
+                {/* تنظیمات تریگر */}
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={structureSettings.trigger_enabled}
+                        onChange={(e) => setStructureSettings({ ...structureSettings, trigger_enabled: e.target.checked })}
+                        className="rounded"
+                      />
+                      <span className="text-sm font-medium">⏰ تریگر خودکار (بروزرسانی زمان‌بندی شده)</span>
+                    </label>
+                  </div>
+
+                  {structureSettings.trigger_enabled && (
+                    <div className="mr-6">
+                      <label className="text-xs text-gray-500 block mb-1">بازه زمانی:</label>
+                      <select
+                        value={`${structureSettings.trigger_interval_minutes}-${structureSettings.trigger_interval_type}`}
+                        onChange={(e) => {
+                          const [val, type] = e.target.value.split('-');
+                          setStructureSettings({
+                            ...structureSettings,
+                            trigger_interval_minutes: parseInt(val),
+                            trigger_interval_type: type,
+                          });
+                        }}
+                        className="w-full p-2 border rounded text-sm dark:bg-gray-700 dark:border-gray-600"
+                      >
+                        {triggerIntervals.map((interval, idx) => (
+                          <option key={idx} value={`${interval.value}-${interval.type}`}>
+                            {interval.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {/* مدل‌های هدف */}
+                  <div>
+                    <label className="text-xs text-gray-500 block mb-1">مدل‌های AI:</label>
+                    <ModelSelector
+                      selectedModels={structureSettings.target_models}
+                      onChange={(models) => setStructureSettings({ ...structureSettings, target_models: models })}
+                    />
+                  </div>
+
+                  {/* آخرین و بعدی تحلیل */}
+                  {(structureSettings.last_analysis || structureSettings.next_analysis) && (
+                    <div className="flex flex-wrap gap-3 text-xs text-gray-500 pt-2">
+                      {structureSettings.last_analysis && (
+                        <span>
+                          آخرین تحلیل: {new Date(structureSettings.last_analysis).toLocaleString('fa-IR')}
+                        </span>
+                      )}
+                      {structureSettings.next_analysis && (
+                        <span>
+                          تحلیل بعدی: {new Date(structureSettings.next_analysis).toLocaleString('fa-IR')}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <button
+                onClick={saveStructureSettings}
+                disabled={savingStructureSettings}
+                className="mt-4 px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 disabled:opacity-50"
+              >
+                {savingStructureSettings ? '⏳ در حال ذخیره...' : '💾 ذخیره تنظیمات'}
+              </button>
+            </div>
+
+            {/* دیاگرام ساختار */}
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow overflow-hidden">
+              <div className="flex items-center justify-between p-4 border-b dark:border-gray-700">
+                <div className="flex items-center gap-2">
+                  <span className="text-2xl">🔀</span>
+                  <h2 className="font-bold text-lg">دیاگرام ساختار پروژه</h2>
+                </div>
+                {structureData?.metadata && (
+                  <div className="flex gap-4 text-sm text-gray-500">
+                    <span>📁 {structureData.metadata.total_folders} پوشه</span>
+                    <span>📄 {structureData.metadata.total_files} فایل</span>
+                  </div>
+                )}
+              </div>
+
+              {structureLoading ? (
+                <div className="h-[600px] flex items-center justify-center">
+                  <div className="text-center">
+                    <div className="animate-spin text-4xl mb-4">⏳</div>
+                    <p>در حال بارگذاری ساختار...</p>
+                  </div>
+                </div>
+              ) : nodes.length === 0 ? (
+                <div className="h-[600px] flex items-center justify-center">
+                  <div className="text-center text-gray-400">
+                    <div className="text-6xl mb-4">📊</div>
+                    <p className="mb-4">ساختار پروژه هنوز تحلیل نشده</p>
+                    <button
+                      onClick={analyzeStructure}
+                      disabled={analyzingStructure}
+                      className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600"
+                    >
+                      {analyzingStructure ? '⏳ در حال تحلیل...' : '🔄 تحلیل ساختار'}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="h-[600px]">
+                  <ReactFlow
+                    nodes={nodes}
+                    edges={edges}
+                    onNodesChange={onNodesChange}
+                    onEdgesChange={onEdgesChange}
+                    fitView
+                    attributionPosition="bottom-left"
+                    className="bg-gray-50 dark:bg-gray-900"
+                  >
+                    <Controls className="bg-white dark:bg-gray-800 rounded shadow" />
+                    <MiniMap
+                      className="bg-white dark:bg-gray-800 rounded shadow"
+                      nodeColor={(node) => node.style?.background as string || '#6366f1'}
+                      maskColor="rgba(0, 0, 0, 0.2)"
+                    />
+                    <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#9ca3af" />
+                  </ReactFlow>
+                </div>
+              )}
+            </div>
+
+            {/* راهنما */}
+            <div className="bg-gradient-to-r from-blue-50 to-purple-50 dark:from-gray-800 dark:to-gray-800 rounded-xl p-4 border border-blue-200 dark:border-gray-700">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-xl">💡</span>
+                <h3 className="font-bold">راهنما</h3>
+              </div>
+              <ul className="text-sm text-gray-600 dark:text-gray-400 space-y-1 list-disc list-inside mr-4">
+                <li>نودهای سبز: نقاط ورودی و فایل‌های اصلی</li>
+                <li>نودهای بنفش: پوشه‌ها و دایرکتوری‌ها</li>
+                <li>نودهای سبز روشن: فایل‌ها</li>
+                <li>خطوط متحرک: اتصالات فعال و جریان داده</li>
+                <li>نودهای چشمک‌زن: فرآیندهای در حال اجرا</li>
+                <li>با ماوس می‌توانید نودها را جابه‌جا کنید و زوم کنید</li>
+              </ul>
             </div>
           </div>
         )}
