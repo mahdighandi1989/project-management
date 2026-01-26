@@ -16,6 +16,7 @@ class ModelProvider(str, Enum):
     DEEPSEEK = "deepseek"
     OPENROUTER = "openrouter"
     GROQ = "groq"
+    PERPLEXITY = "perplexity"  # 🆕 Perplexity AI
 
 
 class ModelCapability(str, Enum):
@@ -341,6 +342,61 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
         priority=2,
         is_image_generator=True
     ),
+
+    # ===========================================
+    # Perplexity Models 🆕
+    # ===========================================
+    "sonar-pro": AIModel(
+        id="sonar-pro",
+        provider=ModelProvider.PERPLEXITY,
+        name="Sonar Pro",
+        endpoint="https://api.perplexity.ai/chat/completions",
+        capabilities=[
+            ModelCapability.TEXT,
+            ModelCapability.REASONING,
+            ModelCapability.LONG_CONTEXT
+        ],
+        max_tokens=8192,
+        context_window=200000,
+        strengths=["search", "research", "up-to-date-info", "citations"],
+        weaknesses=["code-generation"],
+        cost_per_1k_tokens=0.003,
+        priority=1
+    ),
+
+    "sonar": AIModel(
+        id="sonar",
+        provider=ModelProvider.PERPLEXITY,
+        name="Sonar",
+        endpoint="https://api.perplexity.ai/chat/completions",
+        capabilities=[
+            ModelCapability.TEXT,
+            ModelCapability.FAST_RESPONSE
+        ],
+        max_tokens=8192,
+        context_window=128000,
+        strengths=["search", "speed", "cost-effective", "citations"],
+        weaknesses=["complex-reasoning"],
+        cost_per_1k_tokens=0.001,
+        priority=2
+    ),
+
+    "sonar-reasoning": AIModel(
+        id="sonar-reasoning",
+        provider=ModelProvider.PERPLEXITY,
+        name="Sonar Reasoning",
+        endpoint="https://api.perplexity.ai/chat/completions",
+        capabilities=[
+            ModelCapability.TEXT,
+            ModelCapability.REASONING,
+            ModelCapability.THINKING
+        ],
+        max_tokens=16384,
+        context_window=128000,
+        strengths=["reasoning", "logic", "research", "citations"],
+        cost_per_1k_tokens=0.005,
+        priority=1
+    ),
 }
 
 # ===========================================
@@ -354,6 +410,7 @@ MODEL_ALIASES: Dict[str, str] = {
     "claude-3": "claude-3-5-sonnet-20241022",
     "deepseek": "deepseek-chat",
     "gemini": "gemini-2.0-flash",
+    "perplexity": "sonar-pro",  # 🆕
 }
 
 

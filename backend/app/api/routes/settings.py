@@ -38,6 +38,7 @@ class ApiKeyStatus(BaseModel):
     deepseek: bool
     openrouter: bool
     groq: bool
+    perplexity: bool  # 🆕
 
 
 class WorkModeInfo(BaseModel):
@@ -70,6 +71,7 @@ class UpdateApiKeysRequest(BaseModel):
     deepseek: Optional[str] = None
     openrouter: Optional[str] = None
     groq: Optional[str] = None
+    perplexity: Optional[str] = None  # 🆕
 
 
 # ===========================================
@@ -99,6 +101,7 @@ async def get_api_keys_status():
         deepseek=providers.get("deepseek", False),
         openrouter=providers.get("openrouter", False),
         groq=providers.get("groq", False),
+        perplexity=providers.get("perplexity", False),  # 🆕
     )
 
 
@@ -138,6 +141,11 @@ async def update_api_keys(request: UpdateApiKeysRequest):
             os.environ["GROQ_API_KEY"] = request.groq
             env_updates["GROQ_API_KEY"] = request.groq
             updated.append("groq")
+
+        if request.perplexity:  # 🆕
+            os.environ["PERPLEXITY_API_KEY"] = request.perplexity
+            env_updates["PERPLEXITY_API_KEY"] = request.perplexity
+            updated.append("perplexity")
 
         # ذخیره در فایل .env
         env_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), ".env")
@@ -441,6 +449,7 @@ async def sync_env_to_db(db: Session = Depends(get_db)):
             "DEEPSEEK_API_KEY": "deepseek",
             "OPENROUTER_API_KEY": "openrouter",
             "GROQ_API_KEY": "groq",
+            "PERPLEXITY_API_KEY": "perplexity",  # 🆕
             "RENDER_API_KEY": "render",
             "GITHUB_TOKEN": "github",
         }

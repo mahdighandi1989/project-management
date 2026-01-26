@@ -1,8 +1,20 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
+import ReactFlow, {
+  Node,
+  Edge,
+  Controls,
+  Background,
+  MiniMap,
+  useNodesState,
+  useEdgesState,
+  BackgroundVariant,
+  MarkerType,
+} from 'reactflow';
+import 'reactflow/dist/style.css';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -77,6 +89,98 @@ interface TriggerInterval {
   label: string;
 }
 
+// Diagram interfaces
+interface DiagramNode {
+  id: string;
+  type: string;
+  label: string;
+  description?: string;
+  position: { x: number; y: number };
+  data?: Record<string, any>;
+  style?: Record<string, any>;
+  is_active?: boolean;
+}
+
+interface DiagramEdge {
+  id: string;
+  source: string;
+  target: string;
+  label?: string;
+  type?: string;
+  style?: Record<string, any>;
+  animated?: boolean;
+}
+
+interface ProjectStructure {
+  nodes: DiagramNode[];
+  edges: DiagramEdge[];
+  metadata?: Record<string, any>;
+}
+
+interface StructureSettings {
+  instruction: string;
+  target_models: string[];
+  trigger_enabled: boolean;
+  trigger_interval_minutes: number;
+  trigger_interval_type: string;
+  last_analysis?: string;
+  next_analysis?: string;
+  auto_analyze_on_import: boolean;
+}
+
+// Journal interfaces
+interface ActivityLog {
+  id: string;
+  project_id: string;
+  model_id: string;
+  model_provider?: string;
+  activity_type: string;
+  prompt?: string;
+  response?: string;
+  tokens_used: number;
+  latency_ms: number;
+  success: boolean;
+  error_message?: string;
+  field_id?: string;
+  field_name?: string;
+  created_at: string;
+  extra_data?: Record<string, any>;
+}
+
+interface ProjectReport {
+  id: string;
+  report_type: string;
+  title: string;
+  summary?: string;
+  content?: string;
+  total_activities: number;
+  total_tokens: number;
+  models_used?: string[];
+  period_start?: string;
+  period_end?: string;
+  created_at: string;
+  generated_by?: string;
+}
+
+interface JournalStats {
+  period_days: number;
+  total_activities: number;
+  total_tokens: number;
+  avg_latency_ms: number;
+  success_rate: number;
+  by_model: Record<string, { count: number; tokens: number }>;
+  by_type: Record<string, number>;
+}
+
+interface ReportTriggerSettings {
+  enabled: boolean;
+  interval_minutes: number;
+  interval_type: string;
+  report_model: string;
+  last_run?: string;
+  next_run?: string;
+}
+
 export default function ProjectDetailPage() {
   const params = useParams();
   const projectId = params.id as string;
@@ -90,7 +194,43 @@ export default function ProjectDetailPage() {
   const [deploying, setDeploying] = useState(false);
 
   // تب فعال
-  const [activeTab, setActiveTab] = useState<'files' | 'memory'>('files');
+  const [activeTab, setActiveTab] = useState<'files' | 'memory' | 'structure' | 'journal'>('files');
+
+  // Journal & Reports State
+  const [journalLogs, setJournalLogs] = useState<ActivityLog[]>([]);
+  const [journalStats, setJournalStats] = useState<JournalStats | null>(null);
+  const [journalLoading, setJournalLoading] = useState(false);
+  const [journalPage, setJournalPage] = useState(1);
+  const [journalTotal, setJournalTotal] = useState(0);
+  const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
+  const [selectedLog, setSelectedLog] = useState<ActivityLog | null>(null);
+  const [reports, setReports] = useState<ProjectReport[]>([]);
+  const [reportsLoading, setReportsLoading] = useState(false);
+  const [selectedReport, setSelectedReport] = useState<ProjectReport | null>(null);
+  const [reportTrigger, setReportTrigger] = useState<ReportTriggerSettings>({
+    enabled: false,
+    interval_minutes: 1440,
+    interval_type: 'days',
+    report_model: 'openai',
+  });
+  const [generatingReport, setGeneratingReport] = useState(false);
+  const [journalSubTab, setJournalSubTab] = useState<'logs' | 'reports'>('logs');
+
+  // Structure Diagram State
+  const [structureData, setStructureData] = useState<ProjectStructure | null>(null);
+  const [structureSettings, setStructureSettings] = useState<StructureSettings>({
+    instruction: 'تمام پروژه را از ریز تا درشت بررسی کن و ساختار کامل آن را استخراج کن',
+    target_models: ['all'],
+    trigger_enabled: true,
+    trigger_interval_minutes: 30,
+    trigger_interval_type: 'minutes',
+    auto_analyze_on_import: true,
+  });
+  const [structureLoading, setStructureLoading] = useState(false);
+  const [analyzingStructure, setAnalyzingStructure] = useState(false);
+  const [savingStructureSettings, setSavingStructureSettings] = useState(false);
+  const [nodes, setNodes, onNodesChange] = useNodesState([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
 
   // Memory Box State
   const [memoryInstructions, setMemoryInstructions] = useState<MemoryInstructions>({
@@ -129,6 +269,23 @@ export default function ProjectDetailPage() {
       loadMemory();
     }
   }, [projectId]);
+
+  // بارگذاری ساختار وقتی تب ساختار باز میشه
+  useEffect(() => {
+    if (activeTab === 'structure' && projectId) {
+      loadStructure();
+    }
+  }, [activeTab, projectId]);
+
+  // بارگذاری ژورنال وقتی تب ژورنال باز میشه
+  useEffect(() => {
+    if (activeTab === 'journal' && projectId) {
+      loadJournal();
+      loadJournalStats();
+      loadReports();
+      loadReportTrigger();
+    }
+  }, [activeTab, projectId]);
 
   const showError = (msg: string) => {
     setError(msg);
@@ -230,6 +387,272 @@ export default function ProjectDetailPage() {
       console.error('Error loading memory:', e);
     }
   };
+
+  // بارگذاری ساختار پروژه
+  const loadStructure = async () => {
+    setStructureLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/structure`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setStructureData(data.structure);
+          setStructureSettings(data.settings);
+          // تبدیل به فرمت React Flow
+          convertToReactFlow(data.structure);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading structure:', e);
+    } finally {
+      setStructureLoading(false);
+    }
+  };
+
+  // تبدیل داده‌ها به فرمت React Flow
+  const convertToReactFlow = (structure: ProjectStructure) => {
+    const flowNodes: Node[] = structure.nodes.map((node) => ({
+      id: node.id,
+      type: 'default',
+      position: node.position,
+      data: {
+        label: (
+          <div className={`text-center ${node.is_active ? 'animate-pulse' : ''}`}>
+            <div className="font-bold">{node.label}</div>
+            {node.description && (
+              <div className="text-xs opacity-70 mt-1">{node.description}</div>
+            )}
+          </div>
+        ),
+      },
+      style: {
+        background: node.style?.background || '#6366f1',
+        color: node.style?.color || 'white',
+        border: node.is_active ? '3px solid #22c55e' : '1px solid #4b5563',
+        borderRadius: '8px',
+        padding: '10px',
+        fontSize: node.style?.fontSize || '14px',
+        fontWeight: node.style?.fontWeight || 'normal',
+        boxShadow: node.is_active ? '0 0 15px #22c55e' : '0 2px 4px rgba(0,0,0,0.2)',
+      },
+    }));
+
+    const flowEdges: Edge[] = structure.edges.map((edge) => ({
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      type: edge.type || 'smoothstep',
+      animated: edge.animated || false,
+      label: edge.label,
+      style: {
+        stroke: edge.animated ? '#22c55e' : '#6b7280',
+        strokeWidth: edge.animated ? 3 : 2,
+      },
+      markerEnd: {
+        type: MarkerType.ArrowClosed,
+        color: edge.animated ? '#22c55e' : '#6b7280',
+      },
+    }));
+
+    setNodes(flowNodes);
+    setEdges(flowEdges);
+  };
+
+  // تحلیل مجدد ساختار
+  const analyzeStructure = async () => {
+    setAnalyzingStructure(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/structure/analyze`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess('ساختار پروژه با موفقیت تحلیل شد');
+        setStructureData(data.structure);
+        setStructureSettings(data.settings);
+        convertToReactFlow(data.structure);
+      } else {
+        showError(data.detail || 'خطا در تحلیل');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    } finally {
+      setAnalyzingStructure(false);
+    }
+  };
+
+  // ذخیره تنظیمات ساختار
+  const saveStructureSettings = async () => {
+    setSavingStructureSettings(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/structure/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(structureSettings),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess('تنظیمات ذخیره شد');
+        setStructureSettings(data.settings);
+      } else {
+        showError(data.detail || 'خطا');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    } finally {
+      setSavingStructureSettings(false);
+    }
+  };
+
+  // ===================== توابع ژورنال =====================
+
+  // بارگذاری لاگ‌های فعالیت
+  const loadJournal = async () => {
+    setJournalLoading(true);
+    try {
+      const params = new URLSearchParams({
+        page: journalPage.toString(),
+        page_size: '20',
+      });
+      if (journalFilter.type) params.append('activity_type', journalFilter.type);
+      if (journalFilter.model) params.append('model_id', journalFilter.model);
+      if (journalFilter.success !== undefined) params.append('success', journalFilter.success.toString());
+
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/journal?${params}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setJournalLogs(data.journal);
+          setJournalTotal(data.pagination.total);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading journal:', e);
+    } finally {
+      setJournalLoading(false);
+    }
+  };
+
+  // بارگذاری آمار ژورنال
+  const loadJournalStats = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/journal/stats?days=30`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setJournalStats(data.stats);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading stats:', e);
+    }
+  };
+
+  // بارگذاری جزئیات یک فعالیت
+  const loadActivityDetail = async (logId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/journal/${logId}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setSelectedLog(data.activity);
+        }
+      }
+    } catch (e) {
+      showError('خطا در بارگذاری جزئیات');
+    }
+  };
+
+  // بارگذاری گزارشات
+  const loadReports = async () => {
+    setReportsLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/reports`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setReports(data.reports);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading reports:', e);
+    } finally {
+      setReportsLoading(false);
+    }
+  };
+
+  // بارگذاری جزئیات گزارش
+  const loadReportDetail = async (reportId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/reports/${reportId}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setSelectedReport(data.report);
+        }
+      }
+    } catch (e) {
+      showError('خطا در بارگذاری گزارش');
+    }
+  };
+
+  // بارگذاری تنظیمات تریگر گزارش
+  const loadReportTrigger = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/reports/trigger`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setReportTrigger(data.trigger);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading trigger:', e);
+    }
+  };
+
+  // ذخیره تنظیمات تریگر
+  const saveReportTrigger = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/reports/trigger`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(reportTrigger),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess('تنظیمات تریگر ذخیره شد');
+        setReportTrigger(data.trigger);
+      } else {
+        showError(data.detail || 'خطا');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    }
+  };
+
+  // تولید گزارش جدید
+  const generateReport = async (days: number = 7) => {
+    setGeneratingReport(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/reports/generate?days=${days}&model_id=${reportTrigger.report_model}`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess(data.message);
+        loadReports();
+      } else {
+        showError(data.message || 'خطا در تولید گزارش');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    } finally {
+      setGeneratingReport(false);
+    }
+  };
+
+  // ===================== پایان توابع ژورنال =====================
 
   const saveMemoryInstructions = async () => {
     setSavingMemory(true);
@@ -626,6 +1049,26 @@ export default function ProjectDetailPage() {
             }`}
           >
             🧠 حافظه و دستورات AI
+          </button>
+          <button
+            onClick={() => setActiveTab('structure')}
+            className={`px-6 py-3 font-medium ${
+              activeTab === 'structure'
+                ? 'border-b-2 border-green-500 text-green-600'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            🔀 ساختار پروژه
+          </button>
+          <button
+            onClick={() => setActiveTab('journal')}
+            className={`px-6 py-3 font-medium ${
+              activeTab === 'journal'
+                ? 'border-b-2 border-orange-500 text-orange-600'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            📊 ژورنال و گزارشات
           </button>
         </div>
 
@@ -1207,6 +1650,633 @@ export default function ProjectDetailPage() {
                 )}
               </div>
             </div>
+          </div>
+        )}
+
+        {/* محتوای تب ساختار پروژه */}
+        {activeTab === 'structure' && (
+          <div className="space-y-6">
+            {/* تنظیمات تحلیل */}
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <span className="text-2xl">⚙️</span>
+                  <h2 className="font-bold text-lg">تنظیمات تحلیل ساختار</h2>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={analyzeStructure}
+                    disabled={analyzingStructure}
+                    className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {analyzingStructure ? (
+                      <>
+                        <span className="animate-spin">⏳</span>
+                        در حال تحلیل...
+                      </>
+                    ) : (
+                      <>
+                        🔄 تحلیل مجدد
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid md:grid-cols-2 gap-4">
+                {/* دستور تحلیل */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    دستور تحلیل (برای مدل‌های AI):
+                  </label>
+                  <textarea
+                    value={structureSettings.instruction}
+                    onChange={(e) => setStructureSettings({ ...structureSettings, instruction: e.target.value })}
+                    className="w-full p-3 border rounded-lg resize-none h-24 dark:bg-gray-700 dark:border-gray-600 text-sm"
+                    placeholder="دستور برای تحلیل ساختار پروژه..."
+                  />
+                </div>
+
+                {/* تنظیمات تریگر */}
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={structureSettings.trigger_enabled}
+                        onChange={(e) => setStructureSettings({ ...structureSettings, trigger_enabled: e.target.checked })}
+                        className="rounded"
+                      />
+                      <span className="text-sm font-medium">⏰ تریگر خودکار (بروزرسانی زمان‌بندی شده)</span>
+                    </label>
+                  </div>
+
+                  {structureSettings.trigger_enabled && (
+                    <div className="mr-6">
+                      <label className="text-xs text-gray-500 block mb-1">بازه زمانی:</label>
+                      <select
+                        value={`${structureSettings.trigger_interval_minutes}-${structureSettings.trigger_interval_type}`}
+                        onChange={(e) => {
+                          const [val, type] = e.target.value.split('-');
+                          setStructureSettings({
+                            ...structureSettings,
+                            trigger_interval_minutes: parseInt(val),
+                            trigger_interval_type: type,
+                          });
+                        }}
+                        className="w-full p-2 border rounded text-sm dark:bg-gray-700 dark:border-gray-600"
+                      >
+                        {triggerIntervals.map((interval, idx) => (
+                          <option key={idx} value={`${interval.value}-${interval.type}`}>
+                            {interval.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {/* مدل‌های هدف */}
+                  <div>
+                    <label className="text-xs text-gray-500 block mb-1">مدل‌های AI:</label>
+                    <ModelSelector
+                      selectedModels={structureSettings.target_models}
+                      onChange={(models) => setStructureSettings({ ...structureSettings, target_models: models })}
+                    />
+                  </div>
+
+                  {/* آخرین و بعدی تحلیل */}
+                  {(structureSettings.last_analysis || structureSettings.next_analysis) && (
+                    <div className="flex flex-wrap gap-3 text-xs text-gray-500 pt-2">
+                      {structureSettings.last_analysis && (
+                        <span>
+                          آخرین تحلیل: {new Date(structureSettings.last_analysis).toLocaleString('fa-IR')}
+                        </span>
+                      )}
+                      {structureSettings.next_analysis && (
+                        <span>
+                          تحلیل بعدی: {new Date(structureSettings.next_analysis).toLocaleString('fa-IR')}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <button
+                onClick={saveStructureSettings}
+                disabled={savingStructureSettings}
+                className="mt-4 px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 disabled:opacity-50"
+              >
+                {savingStructureSettings ? '⏳ در حال ذخیره...' : '💾 ذخیره تنظیمات'}
+              </button>
+            </div>
+
+            {/* دیاگرام ساختار */}
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow overflow-hidden">
+              <div className="flex items-center justify-between p-4 border-b dark:border-gray-700">
+                <div className="flex items-center gap-2">
+                  <span className="text-2xl">🔀</span>
+                  <h2 className="font-bold text-lg">دیاگرام ساختار پروژه</h2>
+                </div>
+                {structureData?.metadata && (
+                  <div className="flex gap-4 text-sm text-gray-500">
+                    <span>📁 {structureData.metadata.total_folders} پوشه</span>
+                    <span>📄 {structureData.metadata.total_files} فایل</span>
+                  </div>
+                )}
+              </div>
+
+              {structureLoading ? (
+                <div className="h-[600px] flex items-center justify-center">
+                  <div className="text-center">
+                    <div className="animate-spin text-4xl mb-4">⏳</div>
+                    <p>در حال بارگذاری ساختار...</p>
+                  </div>
+                </div>
+              ) : nodes.length === 0 ? (
+                <div className="h-[600px] flex items-center justify-center">
+                  <div className="text-center text-gray-400">
+                    <div className="text-6xl mb-4">📊</div>
+                    <p className="mb-4">ساختار پروژه هنوز تحلیل نشده</p>
+                    <button
+                      onClick={analyzeStructure}
+                      disabled={analyzingStructure}
+                      className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600"
+                    >
+                      {analyzingStructure ? '⏳ در حال تحلیل...' : '🔄 تحلیل ساختار'}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="h-[600px]">
+                  <ReactFlow
+                    nodes={nodes}
+                    edges={edges}
+                    onNodesChange={onNodesChange}
+                    onEdgesChange={onEdgesChange}
+                    fitView
+                    attributionPosition="bottom-left"
+                    className="bg-gray-50 dark:bg-gray-900"
+                  >
+                    <Controls className="bg-white dark:bg-gray-800 rounded shadow" />
+                    <MiniMap
+                      className="bg-white dark:bg-gray-800 rounded shadow"
+                      nodeColor={(node) => node.style?.background as string || '#6366f1'}
+                      maskColor="rgba(0, 0, 0, 0.2)"
+                    />
+                    <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#9ca3af" />
+                  </ReactFlow>
+                </div>
+              )}
+            </div>
+
+            {/* راهنما */}
+            <div className="bg-gradient-to-r from-blue-50 to-purple-50 dark:from-gray-800 dark:to-gray-800 rounded-xl p-4 border border-blue-200 dark:border-gray-700">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-xl">💡</span>
+                <h3 className="font-bold">راهنما</h3>
+              </div>
+              <ul className="text-sm text-gray-600 dark:text-gray-400 space-y-1 list-disc list-inside mr-4">
+                <li>نودهای سبز: نقاط ورودی و فایل‌های اصلی</li>
+                <li>نودهای بنفش: پوشه‌ها و دایرکتوری‌ها</li>
+                <li>نودهای سبز روشن: فایل‌ها</li>
+                <li>خطوط متحرک: اتصالات فعال و جریان داده</li>
+                <li>نودهای چشمک‌زن: فرآیندهای در حال اجرا</li>
+                <li>با ماوس می‌توانید نودها را جابه‌جا کنید و زوم کنید</li>
+              </ul>
+            </div>
+          </div>
+        )}
+
+        {/* محتوای تب ژورنال و گزارشات */}
+        {activeTab === 'journal' && (
+          <div className="space-y-6">
+            {/* سابتب‌ها */}
+            <div className="flex gap-2 bg-white dark:bg-gray-800 rounded-xl p-2">
+              <button
+                onClick={() => setJournalSubTab('logs')}
+                className={`flex-1 py-2 px-4 rounded-lg font-medium transition ${
+                  journalSubTab === 'logs'
+                    ? 'bg-orange-500 text-white'
+                    : 'hover:bg-gray-100 dark:hover:bg-gray-700'
+                }`}
+              >
+                📋 ژورنال فعالیت‌ها
+              </button>
+              <button
+                onClick={() => setJournalSubTab('reports')}
+                className={`flex-1 py-2 px-4 rounded-lg font-medium transition ${
+                  journalSubTab === 'reports'
+                    ? 'bg-orange-500 text-white'
+                    : 'hover:bg-gray-100 dark:hover:bg-gray-700'
+                }`}
+              >
+                📊 گزارشات
+              </button>
+            </div>
+
+            {/* آمار کلی */}
+            {journalStats && (
+              <div className="grid grid-cols-4 gap-4">
+                <div className="bg-white dark:bg-gray-800 rounded-xl p-4 text-center shadow">
+                  <div className="text-3xl font-bold text-blue-500">{journalStats.total_activities}</div>
+                  <div className="text-sm text-gray-500">فعالیت (۳۰ روز)</div>
+                </div>
+                <div className="bg-white dark:bg-gray-800 rounded-xl p-4 text-center shadow">
+                  <div className="text-3xl font-bold text-green-500">{journalStats.total_tokens.toLocaleString()}</div>
+                  <div className="text-sm text-gray-500">توکن مصرفی</div>
+                </div>
+                <div className="bg-white dark:bg-gray-800 rounded-xl p-4 text-center shadow">
+                  <div className="text-3xl font-bold text-purple-500">{journalStats.avg_latency_ms}ms</div>
+                  <div className="text-sm text-gray-500">میانگین تأخیر</div>
+                </div>
+                <div className="bg-white dark:bg-gray-800 rounded-xl p-4 text-center shadow">
+                  <div className="text-3xl font-bold text-emerald-500">{journalStats.success_rate}%</div>
+                  <div className="text-sm text-gray-500">نرخ موفقیت</div>
+                </div>
+              </div>
+            )}
+
+            {/* ژورنال فعالیت‌ها */}
+            {journalSubTab === 'logs' && (
+              <div className="bg-white dark:bg-gray-800 rounded-xl shadow overflow-hidden">
+                <div className="p-4 border-b dark:border-gray-700 flex items-center justify-between">
+                  <h2 className="font-bold text-lg flex items-center gap-2">
+                    <span className="text-xl">📋</span>
+                    ژورنال فعالیت‌های AI
+                  </h2>
+                  <div className="flex gap-2">
+                    <select
+                      value={journalFilter.type || ''}
+                      onChange={(e) => {
+                        setJournalFilter({...journalFilter, type: e.target.value || undefined});
+                        setJournalPage(1);
+                      }}
+                      className="px-3 py-1 border rounded text-sm dark:bg-gray-700 dark:border-gray-600"
+                    >
+                      <option value="">همه انواع</option>
+                      <option value="chat">چت</option>
+                      <option value="trigger">تریگر</option>
+                      <option value="analysis">تحلیل</option>
+                      <option value="generation">تولید</option>
+                    </select>
+                    <button
+                      onClick={() => loadJournal()}
+                      className="px-3 py-1 bg-blue-500 text-white rounded text-sm hover:bg-blue-600"
+                    >
+                      🔄 بروزرسانی
+                    </button>
+                  </div>
+                </div>
+
+                {journalLoading ? (
+                  <div className="p-8 text-center text-gray-400">
+                    <div className="animate-spin text-3xl mb-2">⏳</div>
+                    در حال بارگذاری...
+                  </div>
+                ) : journalLogs.length === 0 ? (
+                  <div className="p-8 text-center text-gray-400">
+                    <div className="text-4xl mb-2">📭</div>
+                    <p>فعالیتی ثبت نشده</p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="divide-y dark:divide-gray-700">
+                      {journalLogs.map((log) => (
+                        <div
+                          key={log.id}
+                          onClick={() => loadActivityDetail(log.id)}
+                          className="p-4 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer"
+                        >
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="flex items-center gap-2">
+                              <span className={`px-2 py-0.5 rounded text-xs ${
+                                log.activity_type === 'chat' ? 'bg-blue-100 text-blue-700' :
+                                log.activity_type === 'trigger' ? 'bg-orange-100 text-orange-700' :
+                                log.activity_type === 'analysis' ? 'bg-purple-100 text-purple-700' :
+                                'bg-gray-100 text-gray-700'
+                              }`}>
+                                {log.activity_type}
+                              </span>
+                              <span className="font-medium text-sm">{log.model_id}</span>
+                              {log.field_name && (
+                                <span className="text-xs text-gray-500">({log.field_name})</span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-3 text-xs text-gray-500">
+                              <span>{log.tokens_used} توکن</span>
+                              <span>{log.latency_ms}ms</span>
+                              <span className={log.success ? 'text-green-500' : 'text-red-500'}>
+                                {log.success ? '✓' : '✗'}
+                              </span>
+                            </div>
+                          </div>
+                          {log.prompt && (
+                            <p className="text-sm text-gray-600 dark:text-gray-400 truncate">
+                              {log.prompt}
+                            </p>
+                          )}
+                          <div className="text-xs text-gray-400 mt-1">
+                            {log.created_at ? new Date(log.created_at).toLocaleString('fa-IR') : ''}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* صفحه‌بندی */}
+                    <div className="p-4 border-t dark:border-gray-700 flex items-center justify-between">
+                      <span className="text-sm text-gray-500">
+                        {journalTotal} فعالیت
+                      </span>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => { setJournalPage(p => Math.max(1, p-1)); loadJournal(); }}
+                          disabled={journalPage <= 1}
+                          className="px-3 py-1 border rounded text-sm disabled:opacity-50"
+                        >
+                          قبلی
+                        </button>
+                        <span className="px-3 py-1 text-sm">صفحه {journalPage}</span>
+                        <button
+                          onClick={() => { setJournalPage(p => p+1); loadJournal(); }}
+                          disabled={journalLogs.length < 20}
+                          className="px-3 py-1 border rounded text-sm disabled:opacity-50"
+                        >
+                          بعدی
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* گزارشات */}
+            {journalSubTab === 'reports' && (
+              <div className="space-y-6">
+                {/* تنظیمات تریگر گزارش */}
+                <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="font-bold text-lg flex items-center gap-2">
+                      <span className="text-xl">⚙️</span>
+                      تنظیمات گزارش‌گیری خودکار
+                    </h2>
+                    <button
+                      onClick={() => generateReport(7)}
+                      disabled={generatingReport}
+                      className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50"
+                    >
+                      {generatingReport ? '⏳ در حال تولید...' : '📝 تولید گزارش ۷ روزه'}
+                    </button>
+                  </div>
+
+                  <div className="grid md:grid-cols-2 gap-4">
+                    <div className="flex items-center gap-2">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={reportTrigger.enabled}
+                          onChange={(e) => setReportTrigger({...reportTrigger, enabled: e.target.checked})}
+                          className="rounded"
+                        />
+                        <span className="text-sm font-medium">⏰ تریگر خودکار گزارش‌گیری</span>
+                      </label>
+                    </div>
+
+                    {reportTrigger.enabled && (
+                      <>
+                        <div>
+                          <label className="text-xs text-gray-500 block mb-1">بازه زمانی:</label>
+                          <select
+                            value={`${reportTrigger.interval_minutes}-${reportTrigger.interval_type}`}
+                            onChange={(e) => {
+                              const [val, type] = e.target.value.split('-');
+                              setReportTrigger({
+                                ...reportTrigger,
+                                interval_minutes: parseInt(val),
+                                interval_type: type,
+                              });
+                            }}
+                            className="w-full p-2 border rounded text-sm dark:bg-gray-700 dark:border-gray-600"
+                          >
+                            {triggerIntervals.map((interval, idx) => (
+                              <option key={idx} value={`${interval.value}-${interval.type}`}>
+                                {interval.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="text-xs text-gray-500 block mb-1">مدل برای گزارش:</label>
+                          <select
+                            value={reportTrigger.report_model}
+                            onChange={(e) => setReportTrigger({...reportTrigger, report_model: e.target.value})}
+                            className="w-full p-2 border rounded text-sm dark:bg-gray-700 dark:border-gray-600"
+                          >
+                            {availableModels.filter(m => m.id !== 'all').map(model => (
+                              <option key={model.id} value={model.id}>
+                                {model.icon} {model.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {reportTrigger.enabled && (
+                    <button
+                      onClick={saveReportTrigger}
+                      className="mt-4 px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600"
+                    >
+                      💾 ذخیره تنظیمات
+                    </button>
+                  )}
+
+                  {reportTrigger.next_run && (
+                    <div className="mt-3 text-sm text-gray-500">
+                      گزارش بعدی: {new Date(reportTrigger.next_run).toLocaleString('fa-IR')}
+                    </div>
+                  )}
+                </div>
+
+                {/* لیست گزارشات */}
+                <div className="bg-white dark:bg-gray-800 rounded-xl shadow overflow-hidden">
+                  <div className="p-4 border-b dark:border-gray-700">
+                    <h2 className="font-bold text-lg flex items-center gap-2">
+                      <span className="text-xl">📊</span>
+                      گزارشات تولید شده
+                    </h2>
+                  </div>
+
+                  {reportsLoading ? (
+                    <div className="p-8 text-center text-gray-400">
+                      <div className="animate-spin text-3xl mb-2">⏳</div>
+                      در حال بارگذاری...
+                    </div>
+                  ) : reports.length === 0 ? (
+                    <div className="p-8 text-center text-gray-400">
+                      <div className="text-4xl mb-2">📭</div>
+                      <p>گزارشی ایجاد نشده</p>
+                      <button
+                        onClick={() => generateReport(7)}
+                        disabled={generatingReport}
+                        className="mt-4 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600"
+                      >
+                        📝 اولین گزارش را بسازید
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="divide-y dark:divide-gray-700">
+                      {reports.map((report) => (
+                        <div
+                          key={report.id}
+                          onClick={() => loadReportDetail(report.id)}
+                          className="p-4 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer"
+                        >
+                          <div className="flex items-center justify-between mb-2">
+                            <h3 className="font-medium">{report.title}</h3>
+                            <span className="text-xs text-gray-500">
+                              {report.created_at ? new Date(report.created_at).toLocaleString('fa-IR') : ''}
+                            </span>
+                          </div>
+                          {report.summary && (
+                            <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
+                              {report.summary}
+                            </p>
+                          )}
+                          <div className="flex gap-3 text-xs text-gray-500">
+                            <span>{report.total_activities} فعالیت</span>
+                            <span>{report.total_tokens.toLocaleString()} توکن</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* مودال جزئیات فعالیت */}
+            {selectedLog && (
+              <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl max-w-2xl w-full max-h-[80vh] overflow-auto">
+                  <div className="p-4 border-b dark:border-gray-700 flex items-center justify-between sticky top-0 bg-white dark:bg-gray-800">
+                    <h3 className="font-bold">جزئیات فعالیت</h3>
+                    <button
+                      onClick={() => setSelectedLog(null)}
+                      className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="p-4 space-y-4">
+                    <div className="grid grid-cols-2 gap-4 text-sm">
+                      <div>
+                        <span className="text-gray-500">مدل:</span>
+                        <span className="mr-2 font-medium">{selectedLog.model_id}</span>
+                      </div>
+                      <div>
+                        <span className="text-gray-500">نوع:</span>
+                        <span className="mr-2 font-medium">{selectedLog.activity_type}</span>
+                      </div>
+                      <div>
+                        <span className="text-gray-500">توکن:</span>
+                        <span className="mr-2 font-medium">{selectedLog.tokens_used}</span>
+                      </div>
+                      <div>
+                        <span className="text-gray-500">تأخیر:</span>
+                        <span className="mr-2 font-medium">{selectedLog.latency_ms}ms</span>
+                      </div>
+                    </div>
+
+                    {selectedLog.prompt && (
+                      <div>
+                        <h4 className="font-medium text-sm text-gray-500 mb-1">پرامپت:</h4>
+                        <pre className="p-3 bg-gray-100 dark:bg-gray-700 rounded text-sm overflow-auto whitespace-pre-wrap">
+                          {selectedLog.prompt}
+                        </pre>
+                      </div>
+                    )}
+
+                    {selectedLog.response && (
+                      <div>
+                        <h4 className="font-medium text-sm text-gray-500 mb-1">پاسخ:</h4>
+                        <pre className="p-3 bg-gray-100 dark:bg-gray-700 rounded text-sm overflow-auto whitespace-pre-wrap max-h-64">
+                          {selectedLog.response}
+                        </pre>
+                      </div>
+                    )}
+
+                    {selectedLog.error_message && (
+                      <div>
+                        <h4 className="font-medium text-sm text-red-500 mb-1">خطا:</h4>
+                        <pre className="p-3 bg-red-50 dark:bg-red-900/20 rounded text-sm text-red-600">
+                          {selectedLog.error_message}
+                        </pre>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* مودال جزئیات گزارش */}
+            {selectedReport && (
+              <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl max-w-3xl w-full max-h-[80vh] overflow-auto">
+                  <div className="p-4 border-b dark:border-gray-700 flex items-center justify-between sticky top-0 bg-white dark:bg-gray-800">
+                    <h3 className="font-bold">{selectedReport.title}</h3>
+                    <button
+                      onClick={() => setSelectedReport(null)}
+                      className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="p-4 space-y-4">
+                    <div className="grid grid-cols-3 gap-4 text-sm">
+                      <div className="text-center p-3 bg-gray-100 dark:bg-gray-700 rounded">
+                        <div className="text-2xl font-bold text-blue-500">{selectedReport.total_activities}</div>
+                        <div className="text-xs text-gray-500">فعالیت</div>
+                      </div>
+                      <div className="text-center p-3 bg-gray-100 dark:bg-gray-700 rounded">
+                        <div className="text-2xl font-bold text-green-500">{selectedReport.total_tokens.toLocaleString()}</div>
+                        <div className="text-xs text-gray-500">توکن</div>
+                      </div>
+                      <div className="text-center p-3 bg-gray-100 dark:bg-gray-700 rounded">
+                        <div className="text-2xl font-bold text-purple-500">{selectedReport.models_used?.length || 0}</div>
+                        <div className="text-xs text-gray-500">مدل</div>
+                      </div>
+                    </div>
+
+                    {selectedReport.summary && (
+                      <div>
+                        <h4 className="font-medium text-sm text-gray-500 mb-1">خلاصه:</h4>
+                        <p className="p-3 bg-gray-100 dark:bg-gray-700 rounded text-sm">
+                          {selectedReport.summary}
+                        </p>
+                      </div>
+                    )}
+
+                    {selectedReport.content && (
+                      <div>
+                        <h4 className="font-medium text-sm text-gray-500 mb-1">جزئیات:</h4>
+                        <pre className="p-3 bg-gray-100 dark:bg-gray-700 rounded text-sm overflow-auto max-h-64 whitespace-pre-wrap">
+                          {selectedReport.content}
+                        </pre>
+                      </div>
+                    )}
+
+                    <div className="text-xs text-gray-500 flex justify-between">
+                      <span>بازه: {selectedReport.period_start ? new Date(selectedReport.period_start).toLocaleDateString('fa-IR') : ''} تا {selectedReport.period_end ? new Date(selectedReport.period_end).toLocaleDateString('fa-IR') : ''}</span>
+                      <span>تولید شده توسط: {selectedReport.generated_by}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
