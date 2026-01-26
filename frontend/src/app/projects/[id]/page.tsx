@@ -95,6 +95,14 @@ export default function ProjectDetailPage() {
   // Edit Field
   const [editingField, setEditingField] = useState<string | null>(null);
 
+  // AI Chat State
+  const [chatPrompt, setChatPrompt] = useState('');
+  const [chatResponse, setChatResponse] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
+  const [selectedChatModel, setSelectedChatModel] = useState('openai');
+  const [includeMemory, setIncludeMemory] = useState(true);
+  const [showChatBox, setShowChatBox] = useState(false);
+
   useEffect(() => {
     if (projectId) {
       loadProject();
@@ -373,6 +381,40 @@ export default function ProjectDetailPage() {
     }
   };
 
+  // ارسال پیام به AI
+  const sendChatMessage = async () => {
+    if (!chatPrompt.trim()) {
+      showError('لطفاً سوال خود را وارد کنید');
+      return;
+    }
+
+    setChatLoading(true);
+    setChatResponse('');
+
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: chatPrompt,
+          model_id: selectedChatModel,
+          include_memory: includeMemory,
+        }),
+      });
+
+      const data = await res.json();
+      if (data.success) {
+        setChatResponse(data.content);
+      } else {
+        showError(data.detail || 'خطا در دریافت پاسخ');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط با سرور');
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
   // Model selector component
   const ModelSelector = ({ selectedModels, onChange }: { selectedModels: string[], onChange: (models: string[]) => void }) => (
     <div className="flex flex-wrap gap-2 mt-2">
@@ -618,6 +660,98 @@ export default function ProjectDetailPage() {
                     </div>
                   )}
                 </div>
+              </div>
+            </div>
+
+            {/* باکس چت با AI */}
+            <div className="mt-6">
+              <div className="bg-white dark:bg-gray-800 rounded-xl shadow">
+                {/* هدر چت */}
+                <div
+                  onClick={() => setShowChatBox(!showChatBox)}
+                  className="flex items-center justify-between p-4 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 rounded-t-xl"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-xl">🤖</span>
+                    <h3 className="font-bold">پرسش از AI درباره پروژه</h3>
+                  </div>
+                  <span className="text-gray-400">{showChatBox ? '▲' : '▼'}</span>
+                </div>
+
+                {/* محتوای چت */}
+                {showChatBox && (
+                  <div className="p-4 border-t dark:border-gray-700">
+                    {/* انتخاب مدل */}
+                    <div className="flex flex-wrap items-center gap-3 mb-4">
+                      <label className="text-sm text-gray-600 dark:text-gray-400">مدل:</label>
+                      <select
+                        value={selectedChatModel}
+                        onChange={(e) => setSelectedChatModel(e.target.value)}
+                        className="px-3 py-1 border rounded-lg text-sm dark:bg-gray-700 dark:border-gray-600"
+                      >
+                        {availableModels.filter(m => m.id !== 'all').map(model => (
+                          <option key={model.id} value={model.id}>
+                            {model.icon} {model.name}
+                          </option>
+                        ))}
+                      </select>
+
+                      <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
+                        <input
+                          type="checkbox"
+                          checked={includeMemory}
+                          onChange={(e) => setIncludeMemory(e.target.checked)}
+                          className="rounded"
+                        />
+                        استفاده از دستورات حافظه
+                      </label>
+                    </div>
+
+                    {/* ورودی پرامپت */}
+                    <div className="flex gap-2">
+                      <textarea
+                        value={chatPrompt}
+                        onChange={(e) => setChatPrompt(e.target.value)}
+                        placeholder="سوال خود را درباره پروژه بپرسید... مثلاً: این پروژه چه کاری انجام می‌دهد؟ یا: چگونه یک فیچر جدید اضافه کنم؟"
+                        className="flex-1 p-3 border rounded-lg resize-none dark:bg-gray-700 dark:border-gray-600 text-sm"
+                        rows={2}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            sendChatMessage();
+                          }
+                        }}
+                      />
+                      <button
+                        onClick={sendChatMessage}
+                        disabled={chatLoading || !chatPrompt.trim()}
+                        className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 self-end"
+                      >
+                        {chatLoading ? '⏳' : '📤 ارسال'}
+                      </button>
+                    </div>
+
+                    {/* پاسخ AI */}
+                    {(chatResponse || chatLoading) && (
+                      <div className="mt-4 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                        <div className="flex items-center gap-2 mb-2 text-sm text-gray-500">
+                          <span>🤖</span>
+                          <span>پاسخ {availableModels.find(m => m.id === selectedChatModel)?.name || selectedChatModel}:</span>
+                        </div>
+                        {chatLoading ? (
+                          <div className="flex items-center gap-2 text-gray-400">
+                            <div className="animate-spin">⏳</div>
+                            <span>در حال پردازش...</span>
+                          </div>
+                        ) : (
+                          <div className="prose dark:prose-invert max-w-none text-sm whitespace-pre-wrap">
+                            {chatResponse}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           </>
