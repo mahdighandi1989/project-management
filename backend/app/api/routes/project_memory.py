@@ -330,10 +330,23 @@ async def trigger_render_deploy(
                         "message": f"Deploy triggered for {success_count}/{len(results)} services",
                     }
                 else:
-                    # هیچ سرویس مطابقی پیدا نشد، اولین سرویس رو استفاده کن
-                    svc_data = services[0].get("service", services[0])
-                    service_id = svc_data.get("id")
-                    logger.info(f"[Render Deploy] No match found, using first service: {svc_data.get('name')}")
+                    # هیچ سرویس مطابقی پیدا نشد - لیست سرویس‌ها رو برگردون
+                    await render_service.close()
+                    all_services = []
+                    for svc in services:
+                        svc_data = svc.get("service", svc)
+                        all_services.append({
+                            "id": svc_data.get("id"),
+                            "name": svc_data.get("name"),
+                            "type": svc_data.get("type"),
+                        })
+
+                    return {
+                        "success": False,
+                        "error": f"سرویسی با نام '{search_name}' در Render پیدا نشد",
+                        "available_services": all_services,
+                        "hint": "لطفاً از لیست سرویس‌ها، service_id مناسب را در تنظیمات پروژه ذخیره کنید"
+                    }
 
         except Exception as e:
             logger.error(f"[Render Deploy] Error listing services: {e}")
