@@ -523,19 +523,40 @@ async def generate_engineering_report(
     files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
     files_summary = []
     code_samples = []
+    total_code_chars = 0
+    max_code_chars = 80000  # افزایش به 80K کاراکتر برای تحلیل بهتر
 
-    for f in files[:50]:  # حداکثر 50 فایل
+    # اولویت‌بندی فایل‌ها - فایل‌های مهم‌تر اول
+    priority_files = ['auth', 'login', 'user', 'route', 'api', 'main', 'app', 'index', 'config', 'setting']
+    code_extensions = ['py', 'ts', 'tsx', 'js', 'jsx', 'vue', 'svelte', 'java', 'go', 'rs', 'rb', 'php']
+
+    # مرتب‌سازی فایل‌ها بر اساس اهمیت
+    def file_priority(f):
+        name = f.file_path.lower()
+        score = 0
+        for pf in priority_files:
+            if pf in name:
+                score += 10
+        if f.file_type in code_extensions:
+            score += 5
+        return -score  # منفی برای مرتب‌سازی نزولی
+
+    sorted_files = sorted(files, key=file_priority)
+
+    for f in sorted_files[:100]:  # حداکثر 100 فایل
         files_summary.append({
             "path": f.file_path,
             "type": f.file_type,
             "size": len(f.content) if f.content else 0
         })
-        # نمونه کد از فایل‌های مهم
-        if f.content and f.file_type in ['py', 'ts', 'tsx', 'js', 'jsx']:
+        # نمونه کد از فایل‌های کد - با محتوای بیشتر
+        if f.content and f.file_type in code_extensions and total_code_chars < max_code_chars:
+            content_limit = min(6000, max_code_chars - total_code_chars)  # حداکثر 6K per file
             code_samples.append({
                 "path": f.file_path,
-                "content": f.content[:2000]  # 2000 کاراکتر اول
+                "content": f.content[:content_limit]
             })
+            total_code_chars += len(f.content[:content_limit])
 
     # دریافت فیلدهای فعلی
     existing_fields = []
@@ -649,8 +670,8 @@ async def generate_engineering_report(
 === ساختار فایل‌ها ===
 {json.dumps(files_summary, ensure_ascii=False, indent=2)}
 
-=== نمونه کدها ===
-{json.dumps(code_samples[:10], ensure_ascii=False, indent=2)}
+=== کدهای پروژه ({len(code_samples)} فایل) ===
+{json.dumps(code_samples[:30], ensure_ascii=False, indent=2)}
 
 === فعالیت‌های اخیر ({days} روز) ===
 {json.dumps(activities_summary, ensure_ascii=False, indent=2)}

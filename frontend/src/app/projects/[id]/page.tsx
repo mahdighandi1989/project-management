@@ -1167,7 +1167,7 @@ export default function ProjectDetailPage() {
       });
       const data = await res.json();
       if (data.success) {
-        showSuccess(`${data.total_executed} فیلد با موفقیت اجرا شد`);
+        showSuccess(`${data.success_count || data.executed_count || 0} فیلد با موفقیت اجرا شد`);
         setSelectedFields([]);
         loadMemory();
 
@@ -1239,10 +1239,10 @@ export default function ProjectDetailPage() {
   };
 
   // حذف پیوست
-  const deleteAttachment = async (fieldId: string, attachmentPath: string) => {
+  const deleteAttachment = async (fieldId: string, attachmentIdOrPath: string) => {
     if (!confirm('پیوست حذف شود؟')) return;
     try {
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields/${fieldId}/attachments?attachment_path=${encodeURIComponent(attachmentPath)}`, {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields/${fieldId}/attachments/${encodeURIComponent(attachmentIdOrPath)}`, {
         method: 'DELETE',
       });
       const data = await res.json();
@@ -2615,9 +2615,12 @@ export default function ProjectDetailPage() {
                               </div>
                               {field.attachments && field.attachments.length > 0 && (
                                 <div className="flex flex-wrap gap-2">
-                                  {field.attachments.map((att: string, idx: number) => {
-                                    const fileName = att.split('/').pop() || att;
-                                    const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(fileName);
+                                  {field.attachments.map((att: any, idx: number) => {
+                                    // پشتیبانی از string یا object
+                                    const attId = typeof att === 'string' ? att : (att?.id || att?.path || String(idx));
+                                    const attName = typeof att === 'string' ? att : (att?.name || att?.file_name || att?.path || 'فایل');
+                                    const fileName = attName.includes('/') ? attName.split('/').pop() : attName;
+                                    const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(fileName || '');
                                     return (
                                       <div
                                         key={idx}
@@ -2626,7 +2629,7 @@ export default function ProjectDetailPage() {
                                         <span>{isImage ? '🖼️' : '📄'}</span>
                                         <span className="max-w-[100px] truncate" title={fileName}>{fileName}</span>
                                         <button
-                                          onClick={() => deleteAttachment(field.id, att)}
+                                          onClick={() => deleteAttachment(field.id, attId)}
                                           className="text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
                                           title="حذف پیوست"
                                         >
