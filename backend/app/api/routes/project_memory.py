@@ -965,10 +965,67 @@ async def execute_field_trigger(
         target_path = target_field.get("target_path")
         archive_after_run = target_field.get("archive_after_run", False)
 
+        # ============ دریافت فایل‌های پروژه برای context ============
+        from ...models.project import ProjectFile
+
+        project_files_context = ""
+        try:
+            # دریافت فایل‌های پروژه
+            files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+
+            if files:
+                # اگر target_path مشخص شده، اول اون فایل رو بخون
+                target_file_content = None
+                if target_path:
+                    for f in files:
+                        if f.file_path == target_path or f.file_path.endswith(target_path):
+                            target_file_content = f.content
+                            break
+
+                # ساخت context از فایل‌های مرتبط
+                relevant_files = []
+                total_chars = 0
+                max_chars = 50000  # حداکثر 50K کاراکتر برای context
+
+                # اولویت: فایل هدف
+                if target_file_content and target_path:
+                    relevant_files.append({
+                        "path": target_path,
+                        "content": target_file_content
+                    })
+                    total_chars += len(target_file_content)
+
+                # بقیه فایل‌های کد (py, ts, tsx, js, jsx)
+                code_extensions = ['py', 'ts', 'tsx', 'js', 'jsx', 'java', 'go', 'rs', 'rb', 'php', 'vue', 'svelte']
+                for f in files:
+                    if total_chars >= max_chars:
+                        break
+                    if f.file_path == target_path:  # قبلاً اضافه شده
+                        continue
+                    if f.content and f.file_type in code_extensions:
+                        content = f.content[:8000] if len(f.content) > 8000 else f.content
+                        relevant_files.append({
+                            "path": f.file_path,
+                            "content": content
+                        })
+                        total_chars += len(content)
+
+                # ساخت متن context
+                if relevant_files:
+                    project_files_context = "\n\n=== فایل‌های پروژه ===\n"
+                    for rf in relevant_files[:20]:  # حداکثر 20 فایل
+                        project_files_context += f"\n--- {rf['path']} ---\n```\n{rf['content']}\n```\n"
+        except Exception as e:
+            project_files_context = f"\n\n[خطا در خواندن فایل‌های پروژه: {str(e)}]"
+
         # ساخت prompt از دستور فیلد
         system_prompt = f"تو یک دستیار هوشمند برای پروژه '{project.name}' هستی."
         if project.description:
             system_prompt += f"\nتوضیحات پروژه: {project.description}"
+
+        # اضافه کردن فایل‌های پروژه به context
+        if project_files_context:
+            system_prompt += project_files_context
 
         # اضافه کردن دستورات حافظه به system prompt
         try:
@@ -1093,8 +1150,8 @@ async def execute_field_trigger(
                     model_id=response.model_id,
                     model_provider=model_id.split("-")[0] if "-" in model_id else model_id,
                     activity_type="trigger",
-                    prompt=user_prompt[:2000],
-                    response=response.content[:5000] if response.content else None,
+                    prompt=user_prompt[:10000],  # افزایش محدودیت برای گزارش کامل‌تر
+                    response=response.content,  # بدون محدودیت - گزارش کامل ذخیره شود
                     tokens_used=response.tokens_used or 0,
                     latency_ms=latency_ms,
                     success=True,
@@ -1118,7 +1175,7 @@ async def execute_field_trigger(
                     project_id=project_id,
                     model_id=model_id,
                     activity_type="trigger",
-                    prompt=user_prompt[:2000],
+                    prompt=user_prompt[:10000],
                     tokens_used=0,
                     latency_ms=latency_ms,
                     success=False,
@@ -1142,7 +1199,7 @@ async def execute_field_trigger(
                     project_id=project_id,
                     model_id=model_id,
                     activity_type="trigger",
-                    prompt=user_prompt[:2000],
+                    prompt=user_prompt[:10000],
                     tokens_used=0,
                     latency_ms=latency_ms,
                     success=False,

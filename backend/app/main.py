@@ -45,6 +45,9 @@ async def lifespan(app: FastAPI):
         for table, count in db_info['record_counts'].items():
             logger.info(f"  📋 {table}: {count} records")
 
+    # بارگذاری API keys از دیتابیس
+    await load_api_keys_from_database()
+
     # بررسی API keys
     providers = settings.get_available_providers()
     available = [k for k, v in providers.items() if v]
@@ -70,6 +73,53 @@ async def lifespan(app: FastAPI):
     from .services.ai_manager import get_ai_manager
     ai_manager = get_ai_manager()
     await ai_manager.close()
+
+
+async def load_api_keys_from_database():
+    """بارگذاری API keys از دیتابیس به environment در startup"""
+    import os
+    try:
+        from sqlalchemy.orm import Session
+        from .core.database import SessionLocal
+        from .models.setting import Setting
+
+        db = SessionLocal()
+
+        # مپ کلیدها: (db_key, env_key)
+        key_mapping = [
+            ("api_key_openai", "OPENAI_API_KEY"),
+            ("api_key_claude", "CLAUDE_API_KEY"),
+            ("api_key_gemini", "GEMINI_API_KEY"),
+            ("api_key_deepseek", "DEEPSEEK_API_KEY"),
+            ("api_key_openrouter", "OPENROUTER_API_KEY"),
+            ("api_key_groq", "GROQ_API_KEY"),
+            ("api_key_perplexity", "PERPLEXITY_API_KEY"),
+            ("api_key_render", "RENDER_API_KEY"),
+            ("api_key_github", "GITHUB_TOKEN"),
+        ]
+
+        loaded_count = 0
+        for db_key, env_key in key_mapping:
+            # فقط اگر در environment نیست، از دیتابیس بخون
+            if not os.environ.get(env_key):
+                try:
+                    value = Setting.get_value(db, db_key)
+                    if value:
+                        os.environ[env_key] = value
+                        loaded_count += 1
+                        logger.info(f"  🔑 Loaded {env_key} from database")
+                except Exception:
+                    pass
+
+        db.close()
+
+        if loaded_count > 0:
+            logger.info(f"🔐 Loaded {loaded_count} API keys from database")
+        else:
+            logger.info("🔐 No API keys found in database (or all already in environment)")
+
+    except Exception as e:
+        logger.warning(f"⚠️ Could not load API keys from database: {e}")
 
 
 async def initialize_persistent_data():
