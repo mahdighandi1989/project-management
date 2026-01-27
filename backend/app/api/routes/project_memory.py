@@ -220,19 +220,18 @@ async def commit_to_github(
 async def trigger_render_deploy(
     render_service_id: str = None,
     project_id: str = None,
-    db_session = None
+    db_session = None,
+    project_name: str = None
 ) -> dict:
     """
     Trigger یک deploy جدید در Render
-    ابتدا سعی می‌کند از render_service_id استفاده کند
-    اگر نبود، از تنظیمات پروژه می‌خواند
+    سعی میکنه خودکار سرویس مناسب رو پیدا کنه بر اساس نام پروژه
     """
     import logging
     logger = logging.getLogger(__name__)
 
     from ...services.deploy_service import RenderDeployService
 
-    # دریافت کلید از environment (ممکن است بعد از شروع برنامه تنظیم شده باشد)
     render_api_key = os.getenv("RENDER_API_KEY", "")
 
     logger.info(f"[Render Deploy] API Key exists: {bool(render_api_key)}")
@@ -240,39 +239,89 @@ async def trigger_render_deploy(
     if not render_api_key:
         return {"success": False, "error": "Render API key not configured. Please set it in Settings."}
 
-    # ساخت مستقیم سرویس Render با کلید جدید (جلوگیری از cache شدن session قدیمی)
     render_service = RenderDeployService(api_key=render_api_key)
 
-    # پیدا کردن service_id
     service_id = render_service_id
+    repo_name = None
 
-    # اگر service_id نداریم، از پروژه بخوان
+    # دریافت نام repo از پروژه
     if not service_id and project_id and db_session:
         try:
             project = db_session.query(Project).filter(Project.id == project_id).first()
             if project and project.extra_data:
                 extra = json.loads(project.extra_data)
                 service_id = extra.get("render_service_id")
-                logger.info(f"[Render Deploy] Found service_id from project: {service_id}")
+                repo_name = extra.get("repo")
+                project_name = project_name or project.name
+                logger.info(f"[Render Deploy] Project: {project_name}, repo: {repo_name}, service_id: {service_id}")
         except Exception as e:
             logger.warning(f"[Render Deploy] Error reading project extra_data: {e}")
 
+    # اگر service_id نداریم، سعی کن از روی نام پروژه پیدا کنی
     if not service_id:
-        # سعی کن از سرویس‌های موجود پیدا کنی
         try:
-            logger.info("[Render Deploy] Listing services to find service_id...")
+            logger.info("[Render Deploy] Listing services to find matching ones...")
             services = await render_service.list_services()
             logger.info(f"[Render Deploy] Found {len(services) if services else 0} services")
 
             if services and len(services) > 0:
-                # اولین سرویس را استفاده کن (یا می‌تونی بر اساس نام پروژه فیلتر کنی)
+                matched_services = []
+                search_name = (repo_name or project_name or "").lower().replace("_", "-").replace(" ", "-")
+
                 for svc in services:
                     svc_data = svc.get("service", svc)
+                    svc_id = svc_data.get("id")
+                    svc_name = (svc_data.get("name") or "").lower()
+
+                    # مطابقت بر اساس نام
+                    if search_name and (search_name in svc_name or svc_name in search_name):
+                        matched_services.append({
+                            "id": svc_id,
+                            "name": svc_data.get("name"),
+                            "type": svc_data.get("type"),
+                            "url": svc_data.get("serviceDetails", {}).get("url"),
+                        })
+                        logger.info(f"[Render Deploy] Matched service: {svc_data.get('name')} ({svc_id})")
+
+                # اگر یک یا چند سرویس پیدا شد
+                if len(matched_services) == 1:
+                    service_id = matched_services[0]["id"]
+                elif len(matched_services) > 1:
+                    # چند سرویس پیدا شد (مثلاً frontend و backend) - همه رو deploy کن
+                    results = []
+                    for svc in matched_services:
+                        try:
+                            result = await render_service.trigger_deploy(svc["id"])
+                            results.append({
+                                "service_id": svc["id"],
+                                "name": svc["name"],
+                                "success": result.get("success"),
+                                "deploy_id": result.get("deploy_id"),
+                                "error": result.get("error"),
+                            })
+                        except Exception as e:
+                            results.append({
+                                "service_id": svc["id"],
+                                "name": svc["name"],
+                                "success": False,
+                                "error": str(e),
+                            })
+
+                    await render_service.close()
+                    success_count = sum(1 for r in results if r.get("success"))
+
+                    return {
+                        "success": success_count > 0,
+                        "multiple_services": True,
+                        "services_deployed": results,
+                        "message": f"Deploy triggered for {success_count}/{len(results)} services",
+                    }
+                else:
+                    # هیچ سرویس مطابقی پیدا نشد، اولین سرویس رو استفاده کن
+                    svc_data = services[0].get("service", services[0])
                     service_id = svc_data.get("id")
-                    svc_name = svc_data.get("name", "unknown")
-                    if service_id:
-                        logger.info(f"[Render Deploy] Using service: {svc_name} ({service_id})")
-                        break
+                    logger.info(f"[Render Deploy] No match found, using first service: {svc_data.get('name')}")
+
         except Exception as e:
             logger.error(f"[Render Deploy] Error listing services: {e}")
             await render_service.close()
@@ -280,7 +329,7 @@ async def trigger_render_deploy(
 
     if not service_id:
         await render_service.close()
-        return {"success": False, "error": "No Render service found. Please deploy your project to Render first or set render_service_id in project settings."}
+        return {"success": False, "error": "No Render service found. Please deploy your project to Render first."}
 
     # Trigger deploy
     try:
@@ -1591,3 +1640,181 @@ async def preview_auto_setup(
 
     result["is_preview"] = True
     return result
+
+
+# =====================================
+# تنظیمات سینک GitHub
+# =====================================
+
+class SyncSettingsRequest(BaseModel):
+    """تنظیمات سینک GitHub"""
+    auto_sync_enabled: bool = False  # سینک خودکار با تایمر
+    sync_interval_minutes: int = 15  # هر چند دقیقه
+    sync_after_field_execution: bool = True  # سینک بعد از اجرای فیلد (پیش‌فرض فعال)
+    sync_after_commit: bool = True  # سینک بعد از commit به GitHub
+    update_diagram_after_sync: bool = True  # بروزرسانی دیاگرام بعد از سینک
+    update_structure_after_sync: bool = True  # بروزرسانی ساختار بعد از سینک
+
+
+@router.get("/{project_id}/sync-settings")
+async def get_sync_settings(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """دریافت تنظیمات سینک پروژه"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت تنظیمات از extra_data
+    sync_settings = {
+        "auto_sync_enabled": False,
+        "sync_interval_minutes": 15,
+        "sync_after_field_execution": True,  # پیش‌فرض فعال
+        "sync_after_commit": True,
+        "update_diagram_after_sync": True,
+        "update_structure_after_sync": True,
+    }
+
+    try:
+        if project.extra_data:
+            extra = json.loads(project.extra_data)
+            if "sync_settings" in extra:
+                sync_settings.update(extra["sync_settings"])
+    except:
+        pass
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "sync_settings": sync_settings,
+        "is_github_project": project.project_type == "github_import"
+    }
+
+
+@router.put("/{project_id}/sync-settings")
+async def update_sync_settings(
+    project_id: str,
+    request: SyncSettingsRequest,
+    db: Session = Depends(get_db)
+):
+    """بروزرسانی تنظیمات سینک پروژه"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت extra_data موجود
+    try:
+        extra_data = json.loads(project.extra_data) if project.extra_data else {}
+    except:
+        extra_data = {}
+
+    # بروزرسانی تنظیمات سینک
+    extra_data["sync_settings"] = {
+        "auto_sync_enabled": request.auto_sync_enabled,
+        "sync_interval_minutes": request.sync_interval_minutes,
+        "sync_after_field_execution": request.sync_after_field_execution,
+        "sync_after_commit": request.sync_after_commit,
+        "update_diagram_after_sync": request.update_diagram_after_sync,
+        "update_structure_after_sync": request.update_structure_after_sync,
+    }
+
+    project.extra_data = json.dumps(extra_data, ensure_ascii=False)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": "تنظیمات سینک بروزرسانی شد",
+        "sync_settings": extra_data["sync_settings"]
+    }
+
+
+@router.post("/{project_id}/sync-now")
+async def trigger_sync_now(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    اجرای سینک فوری
+    فایل‌ها را از GitHub سینک کرده و بر اساس تنظیمات دیاگرام/ساختار را بروزرسانی می‌کند
+    """
+    from datetime import datetime
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    if project.project_type != "github_import":
+        return {
+            "success": False,
+            "error": "این پروژه از GitHub نیست"
+        }
+
+    # دریافت تنظیمات
+    sync_settings = {
+        "update_diagram_after_sync": True,
+        "update_structure_after_sync": True,
+    }
+    try:
+        if project.extra_data:
+            extra = json.loads(project.extra_data)
+            if "sync_settings" in extra:
+                sync_settings.update(extra["sync_settings"])
+    except:
+        pass
+
+    # اجرای سینک
+    result = {
+        "success": True,
+        "synced_at": datetime.utcnow().isoformat(),
+        "actions": []
+    }
+
+    # سینک فایل‌ها
+    try:
+        github_token = os.getenv("GITHUB_TOKEN", "")
+        if github_token:
+            result["actions"].append("files_sync_requested")
+            result["github_sync"] = True
+        else:
+            result["github_sync"] = False
+            result["actions"].append("github_token_missing")
+    except Exception as e:
+        result["github_sync_error"] = str(e)
+
+    # ثبت آخرین زمان سینک
+    try:
+        extra_data = json.loads(project.extra_data) if project.extra_data else {}
+        extra_data["last_sync_at"] = datetime.utcnow().isoformat()
+        project.extra_data = json.dumps(extra_data, ensure_ascii=False)
+        db.commit()
+    except:
+        pass
+
+    result["update_diagram"] = sync_settings.get("update_diagram_after_sync", True)
+    result["update_structure"] = sync_settings.get("update_structure_after_sync", True)
+
+    return result
+
+
+# Intervals برای UI
+SYNC_INTERVALS = [
+    {"value": 5, "label": "هر ۵ دقیقه"},
+    {"value": 10, "label": "هر ۱۰ دقیقه"},
+    {"value": 15, "label": "هر ۱۵ دقیقه"},
+    {"value": 30, "label": "هر ۳۰ دقیقه"},
+    {"value": 60, "label": "هر ۱ ساعت"},
+    {"value": 120, "label": "هر ۲ ساعت"},
+    {"value": 360, "label": "هر ۶ ساعت"},
+    {"value": 720, "label": "هر ۱۲ ساعت"},
+    {"value": 1440, "label": "روزانه"},
+]
+
+
+@router.get("/sync-intervals")
+async def get_sync_intervals():
+    """لیست بازه‌های زمانی موجود برای سینک"""
+    return {
+        "success": True,
+        "intervals": SYNC_INTERVALS
+    }

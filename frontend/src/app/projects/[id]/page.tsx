@@ -277,12 +277,33 @@ export default function ProjectDetailPage() {
     type: 'trigger' | 'deploy' | 'commit' | null;
   }>({ nodeIds: [], edgeIds: [], type: null });
 
+  // Sync Settings State
+  const [syncSettings, setSyncSettings] = useState({
+    auto_sync_enabled: false,
+    sync_interval_minutes: 15,
+    sync_after_field_execution: true,
+    sync_after_commit: true,
+    update_diagram_after_sync: true,
+    update_structure_after_sync: true,
+  });
+  const [showSyncSettings, setShowSyncSettings] = useState(false);
+  const [savingSyncSettings, setSavingSyncSettings] = useState(false);
+  const [syncIntervalTimer, setSyncIntervalTimer] = useState<NodeJS.Timeout | null>(null);
+
   useEffect(() => {
     if (projectId) {
       loadProject();
       loadMemory();
+      loadSyncSettings();
     }
   }, [projectId]);
+
+  // راه‌اندازی سینک خودکار وقتی تنظیمات تغییر کنه
+  useEffect(() => {
+    if (project?.project_type === 'github_import') {
+      setupAutoSync();
+    }
+  }, [syncSettings.auto_sync_enabled, syncSettings.sync_interval_minutes, project?.project_type]);
 
   // بارگذاری ساختار وقتی تب ساختار باز میشه
   useEffect(() => {
@@ -449,6 +470,100 @@ export default function ProjectDetailPage() {
       console.error('Error loading memory:', e);
     }
   };
+
+  // بارگذاری تنظیمات سینک
+  const loadSyncSettings = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/sync-settings`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setSyncSettings(data.sync_settings);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading sync settings:', e);
+    }
+  };
+
+  // ذخیره تنظیمات سینک
+  const saveSyncSettings = async () => {
+    setSavingSyncSettings(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/sync-settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(syncSettings),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess('تنظیمات سینک ذخیره شد');
+        // راه‌اندازی مجدد تایمر سینک خودکار
+        setupAutoSync();
+      } else {
+        showError(data.error || 'خطا در ذخیره تنظیمات');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط با سرور');
+    } finally {
+      setSavingSyncSettings(false);
+    }
+  };
+
+  // اجرای سینک خودکار با تنظیمات
+  const performAutoSync = async () => {
+    console.log('[Auto Sync] Performing sync...');
+    try {
+      // سینک فایل‌ها
+      await fetch(`${API_BASE}/api/github/imported/${projectId}/refresh`, {
+        method: 'POST',
+      });
+
+      // بروزرسانی پروژه
+      loadProject();
+
+      // بروزرسانی دیاگرام و ساختار اگر فعال باشه
+      if (syncSettings.update_diagram_after_sync || syncSettings.update_structure_after_sync) {
+        loadStructure();
+      }
+
+      console.log('[Auto Sync] Sync completed');
+    } catch (e) {
+      console.error('[Auto Sync] Error:', e);
+    }
+  };
+
+  // راه‌اندازی سینک خودکار با تایمر
+  const setupAutoSync = useCallback(() => {
+    // پاکسازی تایمر قبلی
+    if (syncIntervalTimer) {
+      clearInterval(syncIntervalTimer);
+      setSyncIntervalTimer(null);
+    }
+
+    // اگر سینک خودکار فعال نیست یا پروژه از GitHub نیست، کاری نکن
+    if (!syncSettings.auto_sync_enabled || project?.project_type !== 'github_import') {
+      return;
+    }
+
+    const intervalMs = syncSettings.sync_interval_minutes * 60 * 1000;
+    console.log(`[Auto Sync] Setting up timer: every ${syncSettings.sync_interval_minutes} minutes`);
+
+    const timer = setInterval(() => {
+      performAutoSync();
+    }, intervalMs);
+
+    setSyncIntervalTimer(timer);
+  }, [syncSettings.auto_sync_enabled, syncSettings.sync_interval_minutes, project?.project_type]);
+
+  // پاکسازی تایمر در unmount
+  useEffect(() => {
+    return () => {
+      if (syncIntervalTimer) {
+        clearInterval(syncIntervalTimer);
+      }
+    };
+  }, [syncIntervalTimer]);
 
   // بارگذاری ساختار پروژه
   const loadStructure = async () => {
@@ -944,10 +1059,26 @@ export default function ProjectDetailPage() {
             workflowNodes.push('github', 'code_files');
             workflowEdges.push('ai_to_github', 'github_to_files');
 
-            // بروزرسانی دیاگرام ساختار
-            setTimeout(() => {
-              loadStructure();
-            }, 1500);
+            // سینک خودکار از GitHub و بروزرسانی دیاگرام - بر اساس تنظیمات
+            if (syncSettings.sync_after_field_execution || syncSettings.sync_after_commit) {
+              setTimeout(async () => {
+                try {
+                  // سینک فایل‌ها از GitHub
+                  await fetch(`${API_BASE}/api/github/imported/${projectId}/refresh`, {
+                    method: 'POST',
+                  });
+                  // ریلود پروژه برای نمایش فایل‌های جدید
+                  loadProject();
+                  // بروزرسانی دیاگرام ساختار - بر اساس تنظیمات
+                  if (syncSettings.update_diagram_after_sync || syncSettings.update_structure_after_sync) {
+                    loadStructure();
+                  }
+                  showSuccess('✅ سینک خودکار از GitHub انجام شد');
+                } catch (e) {
+                  console.log('Auto-sync error:', e);
+                }
+              }, 2000);
+            }
           }
         }
 
@@ -1054,60 +1185,34 @@ export default function ProjectDetailPage() {
   // تست Deploy به Render (برای دیباگ)
   const testRenderDeploy = async () => {
     setDeploying(true);
+    showSuccess('🔄 در حال جستجوی سرویس‌های Render...');
+
     try {
-      // ابتدا وضعیت رو چک کن
-      const statusRes = await fetch(`${API_BASE}/api/projects/${projectId}/deploy/status`);
-      const statusData = await statusRes.json();
-
-      console.log('Deploy Status:', statusData);
-
-      if (!statusData.status?.render_api_key_configured) {
-        showError('❌ کلید API رندر تنظیم نشده. لطفاً در Settings → Deploy Keys تنظیم کنید.');
-        return;
-      }
-
-      if (!statusData.status?.render_service_id) {
-        // پیشنهاد ست کردن service_id
-        const serviceId = prompt(
-          'Render Service ID پیدا نشد!\n\n' +
-          'لطفاً Service ID رو از Render Dashboard کپی کنید:\n' +
-          '1. به dashboard.render.com برید\n' +
-          '2. سرویس مربوط به این پروژه رو باز کنید\n' +
-          '3. از URL مرورگر، service ID رو کپی کنید (مثل srv-xxxxx)\n\n' +
-          'Service ID:'
-        );
-
-        if (serviceId && serviceId.trim()) {
-          // ذخیره service_id
-          const saveRes = await fetch(`${API_BASE}/api/projects/${projectId}/deploy/set-service-id?service_id=${encodeURIComponent(serviceId.trim())}`, {
-            method: 'POST',
-          });
-          const saveData = await saveRes.json();
-
-          if (saveData.success) {
-            showSuccess(`✅ Service ID ذخیره شد: ${serviceId}`);
-          } else {
-            showError(saveData.error || 'خطا در ذخیره');
-            return;
-          }
-        } else {
-          showError('برای Deploy نیاز به Service ID دارید');
-          return;
-        }
-      }
-
-      // حالا تست deploy
       const res = await fetch(`${API_BASE}/api/projects/${projectId}/deploy/test`, {
         method: 'POST',
       });
       const data = await res.json();
 
-      console.log('Deploy Test Result:', data);
+      console.log('Deploy Result:', data);
 
       if (data.success) {
-        showSuccess('✅ Deploy شروع شد! وضعیت: ' + (data.deploy_result?.status || 'pending'));
+        // اگر چند سرویس deploy شد
+        if (data.deploy_result?.multiple_services) {
+          const results = data.deploy_result.services_deployed;
+          const successCount = results.filter((r: any) => r.success).length;
+          showSuccess(`✅ Deploy شروع شد برای ${successCount}/${results.length} سرویس: ${results.map((r: any) => r.name).join(', ')}`);
+        } else {
+          showSuccess('✅ Deploy شروع شد! وضعیت: ' + (data.deploy_result?.status || 'pending'));
+        }
       } else {
         let errorMsg = data.error || data.deploy_result?.error || 'خطا در Deploy';
+
+        if (errorMsg.includes('API key')) {
+          errorMsg = '❌ کلید API رندر تنظیم نشده. Settings → Deploy Keys';
+        } else if (errorMsg.includes('No Render service')) {
+          errorMsg = '❌ سرویسی در Render پیدا نشد. ابتدا پروژه را در Render deploy کنید.';
+        }
+
         console.log('Debug Info:', data.debug_info);
         showError(errorMsg);
       }
@@ -1312,14 +1417,29 @@ export default function ProjectDetailPage() {
             {/* دکمه‌های GitHub */}
             {project.project_type === 'github_import' && (
               <>
-                <button
-                  onClick={syncFromGitHub}
-                  disabled={loading}
-                  className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50"
-                  title="دریافت آخرین تغییرات از GitHub"
-                >
-                  {loading ? '⏳...' : '🔄 سینک از GitHub'}
-                </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={syncFromGitHub}
+                    disabled={loading}
+                    className="px-4 py-2 bg-blue-500 text-white rounded-r-lg hover:bg-blue-600 disabled:opacity-50"
+                    title="دریافت آخرین تغییرات از GitHub"
+                  >
+                    {loading ? '⏳...' : '🔄 سینک از GitHub'}
+                  </button>
+                  <button
+                    onClick={() => setShowSyncSettings(true)}
+                    className="px-2 py-2 bg-blue-600 text-white rounded-l-lg hover:bg-blue-700"
+                    title="تنظیمات سینک"
+                  >
+                    ⚙️
+                  </button>
+                </div>
+                {syncSettings.auto_sync_enabled && (
+                  <span className="text-xs text-green-500 flex items-center gap-1">
+                    <span className="animate-pulse">●</span>
+                    سینک خودکار: هر {syncSettings.sync_interval_minutes} دقیقه
+                  </span>
+                )}
                 <button
                   onClick={testRenderDeploy}
                   disabled={deploying}
@@ -2755,6 +2875,119 @@ export default function ProjectDetailPage() {
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* مودال تنظیمات سینک */}
+        {showSyncSettings && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl max-w-md w-full">
+              <div className="p-4 border-b dark:border-gray-700 flex items-center justify-between">
+                <h3 className="font-bold flex items-center gap-2">
+                  <span>🔄</span>
+                  تنظیمات سینک GitHub
+                </h3>
+                <button
+                  onClick={() => setShowSyncSettings(false)}
+                  className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="p-4 space-y-4">
+                {/* سینک خودکار با تایمر */}
+                <div className="flex items-center justify-between p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+                  <div>
+                    <div className="font-medium">⏰ سینک خودکار</div>
+                    <div className="text-xs text-gray-500">سینک خودکار با فاصله زمانی مشخص</div>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={syncSettings.auto_sync_enabled}
+                      onChange={(e) => setSyncSettings({...syncSettings, auto_sync_enabled: e.target.checked})}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
+                  </label>
+                </div>
+
+                {syncSettings.auto_sync_enabled && (
+                  <div className="mr-4">
+                    <label className="text-sm text-gray-600 dark:text-gray-400">بازه زمانی سینک:</label>
+                    <select
+                      value={syncSettings.sync_interval_minutes}
+                      onChange={(e) => setSyncSettings({...syncSettings, sync_interval_minutes: parseInt(e.target.value)})}
+                      className="w-full mt-1 p-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
+                    >
+                      <option value={5}>هر ۵ دقیقه</option>
+                      <option value={10}>هر ۱۰ دقیقه</option>
+                      <option value={15}>هر ۱۵ دقیقه</option>
+                      <option value={30}>هر ۳۰ دقیقه</option>
+                      <option value={60}>هر ۱ ساعت</option>
+                      <option value={120}>هر ۲ ساعت</option>
+                      <option value={360}>هر ۶ ساعت</option>
+                      <option value={720}>هر ۱۲ ساعت</option>
+                      <option value={1440}>روزانه</option>
+                    </select>
+                  </div>
+                )}
+
+                {/* سینک بعد از اجرای فیلد */}
+                <div className="flex items-center justify-between p-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
+                  <div>
+                    <div className="font-medium">📤 سینک بعد از اجرای فیلد</div>
+                    <div className="text-xs text-gray-500">بعد از اجرای فیلد و commit، خودکار سینک شود</div>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={syncSettings.sync_after_field_execution}
+                      onChange={(e) => setSyncSettings({...syncSettings, sync_after_field_execution: e.target.checked})}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-green-300 dark:peer-focus:ring-green-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-green-600"></div>
+                  </label>
+                </div>
+
+                {/* بروزرسانی دیاگرام */}
+                <div className="flex items-center justify-between p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg">
+                  <div>
+                    <div className="font-medium">📊 بروزرسانی دیاگرام</div>
+                    <div className="text-xs text-gray-500">دیاگرام و ساختار پروژه بعد از سینک بروز شود</div>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={syncSettings.update_diagram_after_sync}
+                      onChange={(e) => setSyncSettings({...syncSettings, update_diagram_after_sync: e.target.checked, update_structure_after_sync: e.target.checked})}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-purple-300 dark:peer-focus:ring-purple-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-purple-600"></div>
+                  </label>
+                </div>
+
+                {/* دکمه‌های عملیات */}
+                <div className="flex gap-2 pt-4">
+                  <button
+                    onClick={() => {
+                      saveSyncSettings();
+                      setShowSyncSettings(false);
+                    }}
+                    disabled={savingSyncSettings}
+                    className="flex-1 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50"
+                  >
+                    {savingSyncSettings ? '⏳...' : '💾 ذخیره'}
+                  </button>
+                  <button
+                    onClick={() => setShowSyncSettings(false)}
+                    className="px-4 py-2 bg-gray-200 dark:bg-gray-700 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600"
+                  >
+                    لغو
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         )}
       </div>
