@@ -5,6 +5,7 @@ API routes for Project Memory Management
 
 import json
 import uuid
+import time
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from ...core.database import get_db
 from ...models.project import Project
+from .project_journal import ActivityLog
 
 router = APIRouter(prefix="/projects", tags=["Project Memory"])
 
@@ -438,6 +440,9 @@ async def project_chat(
     system_prompt = "\n".join(system_parts)
 
     # ارسال به AI
+    from datetime import datetime
+    start_time = time.time()
+
     try:
         ai_manager = get_ai_manager()
 
@@ -453,15 +458,52 @@ async def project_chat(
             temperature=0.7,
         )
 
+        latency_ms = int((time.time() - start_time) * 1000)
+
+        # ثبت در ژورنال - موفق
+        log_entry = ActivityLog(
+            id=f"log_{uuid.uuid4().hex[:12]}",
+            project_id=project_id,
+            model_id=response.model_id,
+            model_provider=request.model_id.split("-")[0] if "-" in request.model_id else request.model_id,
+            activity_type="chat",
+            prompt=request.prompt[:2000],
+            response=response.content[:5000] if response.content else None,
+            tokens_used=response.tokens_used or 0,
+            latency_ms=latency_ms,
+            success=True,
+            created_at=datetime.utcnow(),
+        )
+        db.add(log_entry)
+        db.commit()
+
         return {
             "success": True,
             "model_id": response.model_id,
             "content": response.content,
             "tokens_used": response.tokens_used,
-            "latency_ms": response.latency_ms,
+            "latency_ms": latency_ms,
         }
 
     except Exception as e:
+        latency_ms = int((time.time() - start_time) * 1000)
+
+        # ثبت در ژورنال - خطا
+        log_entry = ActivityLog(
+            id=f"log_{uuid.uuid4().hex[:12]}",
+            project_id=project_id,
+            model_id=request.model_id,
+            activity_type="chat",
+            prompt=request.prompt[:2000],
+            tokens_used=0,
+            latency_ms=latency_ms,
+            success=False,
+            error_message=str(e)[:500],
+            created_at=datetime.utcnow(),
+        )
+        db.add(log_entry)
+        db.commit()
+
         raise HTTPException(status_code=500, detail=f"خطا در ارتباط با AI: {str(e)}")
 
 
@@ -594,6 +636,8 @@ async def execute_field_trigger(
         for model_id in target_models:
             if model_id == "all":
                 continue
+
+            start_time = time.time()
             try:
                 messages = [
                     Message(role="system", content=system_prompt),
@@ -611,24 +655,82 @@ async def execute_field_trigger(
                     timeout=60.0
                 )
 
+                latency_ms = int((time.time() - start_time) * 1000)
+
                 results.append({
                     "model_id": response.model_id,
                     "content": response.content,
                     "tokens_used": response.tokens_used,
                     "success": True
                 })
+
+                # ثبت در ژورنال - موفق
+                log_entry = ActivityLog(
+                    id=f"log_{uuid.uuid4().hex[:12]}",
+                    project_id=project_id,
+                    model_id=response.model_id,
+                    model_provider=model_id.split("-")[0] if "-" in model_id else model_id,
+                    activity_type="trigger",
+                    prompt=user_prompt[:2000],  # محدود کردن طول
+                    response=response.content[:5000] if response.content else None,
+                    tokens_used=response.tokens_used or 0,
+                    latency_ms=latency_ms,
+                    success=True,
+                    field_id=field_id,
+                    field_name=target_field.get("name"),
+                    created_at=datetime.utcnow(),
+                )
+                db.add(log_entry)
+
             except asyncio.TimeoutError:
+                latency_ms = int((time.time() - start_time) * 1000)
                 results.append({
                     "model_id": model_id,
                     "error": "Timeout - پاسخ مدل بیش از 60 ثانیه طول کشید",
                     "success": False
                 })
+
+                # ثبت در ژورنال - خطای timeout
+                log_entry = ActivityLog(
+                    id=f"log_{uuid.uuid4().hex[:12]}",
+                    project_id=project_id,
+                    model_id=model_id,
+                    activity_type="trigger",
+                    prompt=user_prompt[:2000],
+                    tokens_used=0,
+                    latency_ms=latency_ms,
+                    success=False,
+                    error_message="Timeout - پاسخ مدل بیش از 60 ثانیه طول کشید",
+                    field_id=field_id,
+                    field_name=target_field.get("name"),
+                    created_at=datetime.utcnow(),
+                )
+                db.add(log_entry)
+
             except Exception as e:
+                latency_ms = int((time.time() - start_time) * 1000)
                 results.append({
                     "model_id": model_id,
                     "error": str(e),
                     "success": False
                 })
+
+                # ثبت در ژورنال - خطا
+                log_entry = ActivityLog(
+                    id=f"log_{uuid.uuid4().hex[:12]}",
+                    project_id=project_id,
+                    model_id=model_id,
+                    activity_type="trigger",
+                    prompt=user_prompt[:2000],
+                    tokens_used=0,
+                    latency_ms=latency_ms,
+                    success=False,
+                    error_message=str(e)[:500],
+                    field_id=field_id,
+                    field_name=target_field.get("name"),
+                    created_at=datetime.utcnow(),
+                )
+                db.add(log_entry)
 
         # بروزرسانی last_run
         for field in dynamic_fields:
