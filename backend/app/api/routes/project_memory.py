@@ -1079,7 +1079,21 @@ async def execute_field_trigger(
 
                 # بقیه فایل‌های کد (py, ts, tsx, js, jsx)
                 code_extensions = ['py', 'ts', 'tsx', 'js', 'jsx', 'java', 'go', 'rs', 'rb', 'php', 'vue', 'svelte']
-                for f in files:
+
+                # اولویت‌بندی فایل‌ها بر اساس اهمیت
+                priority_keywords = ['auth', 'login', 'user', 'route', 'api', 'main', 'app', 'index', 'config', 'model', 'service']
+
+                def file_score(f):
+                    score = 0
+                    name = f.file_path.lower()
+                    for kw in priority_keywords:
+                        if kw in name:
+                            score += 10
+                    return score
+
+                sorted_files = sorted(files, key=file_score, reverse=True)
+
+                for f in sorted_files:
                     if total_chars >= max_chars:
                         break
                     if f.file_path == target_path:  # قبلاً اضافه شده
@@ -1668,19 +1682,33 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
             if files:
                 relevant_files = []
                 total_chars = 0
-                max_chars = 30000  # کمتر برای batch
+                max_chars = 50000  # افزایش به 50K
 
-                for f in files[:15]:
+                # اولویت‌بندی فایل‌ها
+                priority_keywords = ['auth', 'login', 'user', 'route', 'api', 'main', 'app', 'index', 'config']
+                code_extensions = ['py', 'ts', 'tsx', 'js', 'jsx', 'vue', 'svelte']
+
+                def file_score(f):
+                    score = 0
+                    name = f.file_path.lower()
+                    for kw in priority_keywords:
+                        if kw in name:
+                            score += 10
+                    return score
+
+                sorted_files = sorted(files, key=file_score, reverse=True)
+
+                for f in sorted_files[:30]:
                     if total_chars >= max_chars:
                         break
-                    if f.content and f.file_type in ['py', 'ts', 'tsx', 'js', 'jsx']:
-                        content = f.content[:5000] if len(f.content) > 5000 else f.content
+                    if f.content and f.file_type in code_extensions:
+                        content = f.content[:6000] if len(f.content) > 6000 else f.content
                         relevant_files.append({"path": f.file_path, "content": content})
                         total_chars += len(content)
 
                 if relevant_files:
                     project_files_context = "\n\n=== فایل‌های پروژه ===\n"
-                    for rf in relevant_files[:10]:
+                    for rf in relevant_files[:20]:
                         project_files_context += f"\n--- {rf['path']} ---\n```\n{rf['content']}\n```\n"
         except:
             pass
