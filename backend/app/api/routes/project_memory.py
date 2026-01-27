@@ -47,6 +47,7 @@ class DynamicFieldRequest(BaseModel):
     action_type: str = "display"  # display, github_commit, github_multi_commit
     target_path: Optional[str] = None  # مسیر فایل در ریپو (مثلاً: backend/models/customer.py)
     archive_after_run: bool = False  # آیا بعد از اجرای موفق بایگانی شود؟
+    deploy_after_commit: bool = False  # آیا بعد از commit در Render دیپلوی شود؟
 
 
 class UpdateDynamicFieldRequest(BaseModel):
@@ -59,6 +60,7 @@ class UpdateDynamicFieldRequest(BaseModel):
     action_type: Optional[str] = None
     target_path: Optional[str] = None
     archive_after_run: Optional[bool] = None
+    deploy_after_commit: Optional[bool] = None  # آیا بعد از commit در Render دیپلوی شود؟
     archived: Optional[bool] = None  # برای بایگانی/خروج از بایگانی
 
 
@@ -213,6 +215,72 @@ async def commit_to_github(
                     "path": file_path,
                     "error": error
                 }
+
+
+async def trigger_render_deploy(
+    render_service_id: str = None,
+    project_id: str = None,
+    db_session = None
+) -> dict:
+    """
+    Trigger یک deploy جدید در Render
+    ابتدا سعی می‌کند از render_service_id استفاده کند
+    اگر نبود، از تنظیمات پروژه می‌خواند
+    """
+    from ...services.deploy_service import get_deploy_manager
+
+    deploy_manager = get_deploy_manager()
+
+    # اگر سرویس تنظیم نشده
+    if not deploy_manager.render.is_configured():
+        return {"success": False, "error": "Render API key not configured"}
+
+    # پیدا کردن service_id
+    service_id = render_service_id
+
+    # اگر service_id نداریم، از پروژه بخوان
+    if not service_id and project_id and db_session:
+        try:
+            project = db_session.query(Project).filter(Project.id == project_id).first()
+            if project and project.extra_data:
+                extra = json.loads(project.extra_data)
+                service_id = extra.get("render_service_id")
+        except:
+            pass
+
+    if not service_id:
+        # سعی کن از سرویس‌های موجود پیدا کنی
+        try:
+            services = await deploy_manager.render.list_services()
+            if services and len(services) > 0:
+                # اولین سرویس را استفاده کن (یا می‌تونی بر اساس نام پروژه فیلتر کنی)
+                for svc in services:
+                    svc_data = svc.get("service", svc)
+                    service_id = svc_data.get("id")
+                    if service_id:
+                        break
+        except:
+            pass
+
+    if not service_id:
+        return {"success": False, "error": "No Render service found for this project"}
+
+    # Trigger deploy
+    result = await deploy_manager.render.trigger_deploy(service_id)
+
+    if result.get("success"):
+        return {
+            "success": True,
+            "service_id": service_id,
+            "deploy_id": result.get("deploy_id"),
+            "status": result.get("status"),
+            "message": "Deploy triggered successfully"
+        }
+    else:
+        return {
+            "success": False,
+            "error": result.get("error", "Failed to trigger deploy")
+        }
 
 
 # =====================================
@@ -952,6 +1020,21 @@ async def execute_field_trigger(
         any_success = any(r.get("success") for r in results)
         any_github_success = any(c.get("success") for c in github_commits) if github_commits else False
 
+        # Trigger Render deploy اگر فعال باشد و commit موفق بوده
+        deploy_result = None
+        deploy_after_commit = target_field.get("deploy_after_commit", False)
+
+        if deploy_after_commit and any_github_success:
+            try:
+                render_service_id = github_info.get("render_service_id")
+                deploy_result = await trigger_render_deploy(
+                    render_service_id=render_service_id,
+                    project_id=project_id,
+                    db_session=db
+                )
+            except Exception as e:
+                deploy_result = {"success": False, "error": str(e)}
+
         for field in dynamic_fields:
             if field.get("id") == field_id:
                 if "trigger" not in field:
@@ -975,6 +1058,7 @@ async def execute_field_trigger(
             "action_type": action_type,
             "results": results,
             "github_commits": github_commits if github_commits else None,
+            "deploy_result": deploy_result,
             "archived": target_field.get("archived", False),
             "executed_at": datetime.utcnow().isoformat()
         }

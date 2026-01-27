@@ -343,6 +343,7 @@ async def generate_intelligent_setup(
             "action_type": "display یا github_commit یا github_multi_commit",
             "target_path": "مسیر فایل در ریپو اگر action_type=github_commit باشد (مثل backend/models/user.py)",
             "archive_after_run": true/false,
+            "deploy_after_commit": true/false,
             "needs_trigger": false,
             "is_one_time": true/false
         }}
@@ -369,6 +370,10 @@ async def generate_intelligent_setup(
 ## راهنمای archive_after_run:
 - **true**: برای کارهای یکبار مصرف مثل ایجاد فایل‌های اولیه، setup، migration
 - **false**: برای کارهای تکرارشونده مثل بررسی کد، تحلیل، گزارش‌گیری
+
+## راهنمای deploy_after_commit:
+- **true**: وقتی تغییرات باید بلافاصله روی سرور اعمال شوند (مثل bugfix، hotfix، تغییرات مهم)
+- **false**: برای تغییراتی که نیازی به deploy فوری ندارند
 
 نکات مهم:
 - حداقل ۲ و حداکثر ۶ فیلد پویا تعریف کن
@@ -585,6 +590,7 @@ async def auto_setup_project_memory(
                     "action_type": action_type,
                     "target_path": target_path if action_type == "github_commit" else None,
                     "archive_after_run": ai_field.get("archive_after_run", False),
+                    "deploy_after_commit": ai_field.get("deploy_after_commit", False),
                     # متادیتا
                     "created_at": datetime.utcnow().isoformat(),
                     "auto_generated": True,

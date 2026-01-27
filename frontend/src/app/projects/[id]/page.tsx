@@ -256,6 +256,7 @@ export default function ProjectDetailPage() {
   const [newFieldActionType, setNewFieldActionType] = useState('display');
   const [newFieldTargetPath, setNewFieldTargetPath] = useState('');
   const [newFieldArchiveAfterRun, setNewFieldArchiveAfterRun] = useState(false);
+  const [newFieldDeployAfterCommit, setNewFieldDeployAfterCommit] = useState(false);
   const [showArchivedFields, setShowArchivedFields] = useState(false);
 
   // Edit Field
@@ -729,6 +730,7 @@ export default function ProjectDetailPage() {
           action_type: newFieldActionType,
           target_path: newFieldTargetPath || undefined,
           archive_after_run: newFieldArchiveAfterRun,
+          deploy_after_commit: newFieldDeployAfterCommit,
         }),
       });
       const data = await res.json();
@@ -743,6 +745,7 @@ export default function ProjectDetailPage() {
         setNewFieldActionType('display');
         setNewFieldTargetPath('');
         setNewFieldArchiveAfterRun(false);
+        setNewFieldDeployAfterCommit(false);
         setShowNewFieldForm(false);
         loadMemory();
       } else {
@@ -1439,15 +1442,26 @@ export default function ProjectDetailPage() {
                     )}
 
                     {newFieldActionType !== 'display' && (
-                      <label className="flex items-center gap-2 text-sm text-orange-600 dark:text-orange-400 mt-2">
-                        <input
-                          type="checkbox"
-                          checked={newFieldArchiveAfterRun}
-                          onChange={(e) => setNewFieldArchiveAfterRun(e.target.checked)}
-                          className="rounded"
-                        />
-                        📦 بایگانی خودکار بعد از اجرای موفق
-                      </label>
+                      <>
+                        <label className="flex items-center gap-2 text-sm text-orange-600 dark:text-orange-400 mt-2">
+                          <input
+                            type="checkbox"
+                            checked={newFieldArchiveAfterRun}
+                            onChange={(e) => setNewFieldArchiveAfterRun(e.target.checked)}
+                            className="rounded"
+                          />
+                          📦 بایگانی خودکار بعد از اجرای موفق
+                        </label>
+                        <label className="flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400 mt-2">
+                          <input
+                            type="checkbox"
+                            checked={newFieldDeployAfterCommit}
+                            onChange={(e) => setNewFieldDeployAfterCommit(e.target.checked)}
+                            className="rounded"
+                          />
+                          🚀 Deploy در Render بعد از Commit
+                        </label>
+                      </>
                     )}
                   </div>
 
