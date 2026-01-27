@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
+import ProjectHealthPanel from '@/components/ProjectHealthPanel';
 import ReactFlow, {
   Node,
   Edge,
@@ -200,7 +201,7 @@ export default function ProjectDetailPage() {
   const [deploying, setDeploying] = useState(false);
 
   // تب فعال
-  const [activeTab, setActiveTab] = useState<'files' | 'memory' | 'structure' | 'journal'>('files');
+  const [activeTab, setActiveTab] = useState<'files' | 'memory' | 'structure' | 'journal' | 'health'>('files');
 
   // Journal & Reports State
   const [journalLogs, setJournalLogs] = useState<ActivityLog[]>([]);
@@ -1705,6 +1706,16 @@ export default function ProjectDetailPage() {
             }`}
           >
             📊 ژورنال و گزارشات
+          </button>
+          <button
+            onClick={() => setActiveTab('health')}
+            className={`px-6 py-3 font-medium ${
+              activeTab === 'health'
+                ? 'border-b-2 border-teal-500 text-teal-600'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            🏥 تحلیل سلامت
           </button>
         </div>
 
@@ -3297,6 +3308,13 @@ export default function ProjectDetailPage() {
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* محتوای تب تحلیل سلامت */}
+        {activeTab === 'health' && (
+          <div className="space-y-6">
+            <ProjectHealthPanel projectId={projectId as string} onHealthUpdate={loadProject} />
           </div>
         )}
 
