@@ -47,6 +47,7 @@ class DynamicFieldRequest(BaseModel):
     action_type: str = "display"  # display, github_commit, github_multi_commit
     target_path: Optional[str] = None  # مسیر فایل در ریپو (مثلاً: backend/models/customer.py)
     archive_after_run: bool = False  # آیا بعد از اجرای موفق بایگانی شود؟
+    deploy_after_commit: bool = False  # آیا بعد از commit در Render دیپلوی شود؟
 
 
 class UpdateDynamicFieldRequest(BaseModel):
@@ -59,6 +60,7 @@ class UpdateDynamicFieldRequest(BaseModel):
     action_type: Optional[str] = None
     target_path: Optional[str] = None
     archive_after_run: Optional[bool] = None
+    deploy_after_commit: Optional[bool] = None  # آیا بعد از commit در Render دیپلوی شود؟
     archived: Optional[bool] = None  # برای بایگانی/خروج از بایگانی
 
 
@@ -213,6 +215,101 @@ async def commit_to_github(
                     "path": file_path,
                     "error": error
                 }
+
+
+async def trigger_render_deploy(
+    render_service_id: str = None,
+    project_id: str = None,
+    db_session = None
+) -> dict:
+    """
+    Trigger یک deploy جدید در Render
+    ابتدا سعی می‌کند از render_service_id استفاده کند
+    اگر نبود، از تنظیمات پروژه می‌خواند
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    from ...services.deploy_service import RenderDeployService
+
+    # دریافت کلید از environment (ممکن است بعد از شروع برنامه تنظیم شده باشد)
+    render_api_key = os.getenv("RENDER_API_KEY", "")
+
+    logger.info(f"[Render Deploy] API Key exists: {bool(render_api_key)}")
+
+    if not render_api_key:
+        return {"success": False, "error": "Render API key not configured. Please set it in Settings."}
+
+    # ساخت مستقیم سرویس Render با کلید جدید (جلوگیری از cache شدن session قدیمی)
+    render_service = RenderDeployService(api_key=render_api_key)
+
+    # پیدا کردن service_id
+    service_id = render_service_id
+
+    # اگر service_id نداریم، از پروژه بخوان
+    if not service_id and project_id and db_session:
+        try:
+            project = db_session.query(Project).filter(Project.id == project_id).first()
+            if project and project.extra_data:
+                extra = json.loads(project.extra_data)
+                service_id = extra.get("render_service_id")
+                logger.info(f"[Render Deploy] Found service_id from project: {service_id}")
+        except Exception as e:
+            logger.warning(f"[Render Deploy] Error reading project extra_data: {e}")
+
+    if not service_id:
+        # سعی کن از سرویس‌های موجود پیدا کنی
+        try:
+            logger.info("[Render Deploy] Listing services to find service_id...")
+            services = await render_service.list_services()
+            logger.info(f"[Render Deploy] Found {len(services) if services else 0} services")
+
+            if services and len(services) > 0:
+                # اولین سرویس را استفاده کن (یا می‌تونی بر اساس نام پروژه فیلتر کنی)
+                for svc in services:
+                    svc_data = svc.get("service", svc)
+                    service_id = svc_data.get("id")
+                    svc_name = svc_data.get("name", "unknown")
+                    if service_id:
+                        logger.info(f"[Render Deploy] Using service: {svc_name} ({service_id})")
+                        break
+        except Exception as e:
+            logger.error(f"[Render Deploy] Error listing services: {e}")
+            await render_service.close()
+            return {"success": False, "error": f"Error listing Render services: {str(e)}"}
+
+    if not service_id:
+        await render_service.close()
+        return {"success": False, "error": "No Render service found. Please deploy your project to Render first or set render_service_id in project settings."}
+
+    # Trigger deploy
+    try:
+        logger.info(f"[Render Deploy] Triggering deploy for service: {service_id}")
+        result = await render_service.trigger_deploy(service_id)
+        await render_service.close()
+
+        logger.info(f"[Render Deploy] Result: {result}")
+
+        if result.get("success"):
+            return {
+                "success": True,
+                "service_id": service_id,
+                "deploy_id": result.get("deploy_id"),
+                "status": result.get("status"),
+                "message": "Deploy triggered successfully"
+            }
+        else:
+            return {
+                "success": False,
+                "error": result.get("error", "Failed to trigger deploy")
+            }
+    except Exception as e:
+        logger.error(f"[Render Deploy] Deploy error: {e}")
+        await render_service.close()
+        return {
+            "success": False,
+            "error": f"Deploy error: {str(e)}"
+        }
 
 
 # =====================================
@@ -952,6 +1049,21 @@ async def execute_field_trigger(
         any_success = any(r.get("success") for r in results)
         any_github_success = any(c.get("success") for c in github_commits) if github_commits else False
 
+        # Trigger Render deploy اگر فعال باشد و commit موفق بوده
+        deploy_result = None
+        deploy_after_commit = target_field.get("deploy_after_commit", False)
+
+        if deploy_after_commit and any_github_success:
+            try:
+                render_service_id = github_info.get("render_service_id")
+                deploy_result = await trigger_render_deploy(
+                    render_service_id=render_service_id,
+                    project_id=project_id,
+                    db_session=db
+                )
+            except Exception as e:
+                deploy_result = {"success": False, "error": str(e)}
+
         for field in dynamic_fields:
             if field.get("id") == field_id:
                 if "trigger" not in field:
@@ -975,6 +1087,7 @@ async def execute_field_trigger(
             "action_type": action_type,
             "results": results,
             "github_commits": github_commits if github_commits else None,
+            "deploy_result": deploy_result,
             "archived": target_field.get("archived", False),
             "executed_at": datetime.utcnow().isoformat()
         }
