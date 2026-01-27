@@ -21,6 +21,7 @@ from .api.routes import project_memory  # 🆕 Project Memory (باکس حافظ
 from .api.routes import project_structure  # 🆕 Project Structure Diagram
 from .api.routes import project_journal  # 🆕 Project Journal & Reports
 from .api.routes import analysis  # 🆕 Project Analysis & AI Profiles
+from .api.routes import project_health  # 🆕 Project Health Analysis (تحلیل سلامت پروژه)
 
 # تنظیم logging
 logging.basicConfig(
@@ -393,6 +394,7 @@ app.include_router(project_memory.router, prefix="/api")  # 🆕 Project Memory 
 app.include_router(project_structure.router, prefix="/api/projects")  # 🆕 Project Structure Diagram
 app.include_router(project_journal.router, prefix="/api/projects")  # 🆕 Project Journal & Reports
 app.include_router(analysis.router, prefix="/api")  # 🆕 Project Analysis & AI Profiles
+app.include_router(project_health.router)  # 🆕 Project Health Analysis (تحلیل سلامت پروژه)
 
 
 # Root endpoint

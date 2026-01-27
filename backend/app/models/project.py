@@ -66,6 +66,30 @@ class Project(Base):
     ai_model_used = Column(String(100))
     tokens_used = Column(Integer, default=0)
 
+    # ====================================
+    # 🆕 تنظیمات و نتایج تحلیل سلامت پروژه
+    # ====================================
+
+    # تنظیمات تحلیل (prompts قوی قابل ویرایش، مدل‌های منتخب، زمان‌بندی)
+    analysis_settings = Column(Text)  # JSON: {"instruction": "...", "target_models": [...], "trigger_interval": 60, ...}
+
+    # نمرات سلامت (هر بار از صفر محاسبه می‌شود)
+    health_scores = Column(Text)  # JSON: {"overall": 85, "code_quality": 90, ...}
+
+    # رنگ‌بندی فایل‌ها برای دیاگرام
+    file_health_map = Column(Text)  # JSON: {"file_path": {"score": 85, "color": "#22c55e", "models": [...], "date": "..."}}
+
+    # آخرین تحلیل
+    last_analysis_id = Column(String(50))  # شناسه آخرین تحلیل
+    last_analysis_at = Column(DateTime)  # زمان آخرین تحلیل
+    last_analysis_models = Column(Text)  # JSON: لیست مدل‌های استفاده شده
+
+    # محتوای Roadmap و README (ایجاد/به‌روزرسانی شده توسط AI)
+    roadmap_content = Column(Text)  # محتوای فایل ROADMAP.md
+    readme_content = Column(Text)  # محتوای فایل README.md
+    ideal_state = Column(Text)  # توضیح حالت ایده‌آل پروژه
+    issues_found = Column(Text)  # JSON: لیست ایرادات شناسایی شده
+
     # زمان‌ها
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -121,6 +145,43 @@ class Project(Base):
         except (json.JSONDecodeError, TypeError):
             pass
 
+        # Parse new analysis fields
+        analysis_settings = {}
+        health_scores = {}
+        file_health_map = {}
+        issues_found = []
+        last_analysis_models = []
+
+        try:
+            if self.analysis_settings:
+                analysis_settings = json.loads(self.analysis_settings) if isinstance(self.analysis_settings, str) else self.analysis_settings
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        try:
+            if self.health_scores:
+                health_scores = json.loads(self.health_scores) if isinstance(self.health_scores, str) else self.health_scores
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        try:
+            if self.file_health_map:
+                file_health_map = json.loads(self.file_health_map) if isinstance(self.file_health_map, str) else self.file_health_map
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        try:
+            if self.issues_found:
+                issues_found = json.loads(self.issues_found) if isinstance(self.issues_found, str) else self.issues_found
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        try:
+            if self.last_analysis_models:
+                last_analysis_models = json.loads(self.last_analysis_models) if isinstance(self.last_analysis_models, str) else self.last_analysis_models
+        except (json.JSONDecodeError, TypeError):
+            pass
+
         return {
             "id": self.id,
             "name": self.name,
@@ -140,6 +201,18 @@ class Project(Base):
             "total_size": self.total_size,
             "ai_model_used": self.ai_model_used,
             "tokens_used": self.tokens_used,
+            # 🆕 Analysis fields
+            "analysis_settings": analysis_settings,
+            "health_scores": health_scores,
+            "file_health_map": file_health_map,
+            "last_analysis_id": self.last_analysis_id,
+            "last_analysis_at": self.last_analysis_at.isoformat() if self.last_analysis_at else None,
+            "last_analysis_models": last_analysis_models,
+            "roadmap_content": self.roadmap_content,
+            "readme_content": self.readme_content,
+            "ideal_state": self.ideal_state,
+            "issues_found": issues_found,
+            # Timestamps
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
