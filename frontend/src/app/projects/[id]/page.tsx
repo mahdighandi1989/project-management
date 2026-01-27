@@ -270,6 +270,13 @@ export default function ProjectDetailPage() {
   const [includeMemory, setIncludeMemory] = useState(true);
   const [showChatBox, setShowChatBox] = useState(false);
 
+  // Activity Visualization State (for diagram blinking/highlighting)
+  const [activeWorkflow, setActiveWorkflow] = useState<{
+    nodeIds: string[];
+    edgeIds: string[];
+    type: 'trigger' | 'deploy' | 'commit' | null;
+  }>({ nodeIds: [], edgeIds: [], type: null });
+
   useEffect(() => {
     if (projectId) {
       loadProject();
@@ -293,6 +300,54 @@ export default function ProjectDetailPage() {
       loadReportTrigger();
     }
   }, [activeTab, projectId]);
+
+  // بروزرسانی استایل نودها و لبه‌ها وقتی workflow فعال میشه
+  useEffect(() => {
+    if (activeWorkflow.type && activeWorkflow.nodeIds.length > 0) {
+      // هایلایت کردن نودها
+      setNodes((nds) =>
+        nds.map((node) => {
+          const isActive = activeWorkflow.nodeIds.includes(node.id);
+          return {
+            ...node,
+            style: {
+              ...node.style,
+              border: isActive ? '3px solid #22c55e' : node.style?.border || '1px solid #4b5563',
+              boxShadow: isActive ? '0 0 20px #22c55e' : node.style?.boxShadow || '0 2px 4px rgba(0,0,0,0.2)',
+              animation: isActive ? 'pulse 1s ease-in-out infinite' : 'none',
+            },
+          };
+        })
+      );
+
+      // هایلایت کردن لبه‌ها
+      setEdges((eds) =>
+        eds.map((edge) => {
+          const isActive = activeWorkflow.edgeIds.includes(edge.id);
+          return {
+            ...edge,
+            animated: isActive,
+            style: {
+              ...edge.style,
+              stroke: isActive ? '#22c55e' : edge.style?.stroke || '#6b7280',
+              strokeWidth: isActive ? 3 : edge.style?.strokeWidth || 2,
+            },
+            markerEnd: {
+              type: MarkerType.ArrowClosed,
+              color: isActive ? '#22c55e' : '#6b7280',
+            },
+          };
+        })
+      );
+
+      // غیرفعال کردن بعد از 5 ثانیه
+      const timer = setTimeout(() => {
+        setActiveWorkflow({ nodeIds: [], edgeIds: [], type: null });
+      }, 5000);
+
+      return () => clearTimeout(timer);
+    }
+  }, [activeWorkflow]);
 
   const showError = (msg: string) => {
     setError(msg);
@@ -816,21 +871,74 @@ export default function ProjectDetailPage() {
   // اجرای دستی تریگر
   const executeFieldTrigger = async (fieldId: string) => {
     setExecutingTrigger(fieldId);
+
+    // فعال کردن ویژوالیزیشن workflow - نشان دادن که trigger در حال اجراست
+    const triggerNodeId = `trigger_${fieldId}`;
+    setActiveWorkflow({
+      nodeIds: [triggerNodeId, 'ai_process'],
+      edgeIds: ['trigger_to_ai'],
+      type: 'trigger',
+    });
+
     try {
       const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields/${fieldId}/trigger/execute`, {
         method: 'POST',
       });
       const data = await res.json();
       if (data.success) {
-        showSuccess(`تریگر "${data.field_name}" اجرا شد`);
+        // ساخت پیام موفقیت با جزئیات
+        let successMsg = `تریگر "${data.field_name}" اجرا شد`;
+        let workflowNodes: string[] = ['ai_process'];
+        let workflowEdges: string[] = [];
+
+        // اگر GitHub commits داشتیم
+        if (data.github_commits && data.github_commits.length > 0) {
+          const successCommits = data.github_commits.filter((c: any) => c.success);
+          if (successCommits.length > 0) {
+            successMsg += ` | ${successCommits.length} فایل commit شد`;
+            workflowNodes.push('github', 'code_files');
+            workflowEdges.push('ai_to_github', 'github_to_files');
+
+            // بروزرسانی دیاگرام ساختار
+            setTimeout(() => {
+              loadStructure();
+            }, 1500);
+          }
+        }
+
+        // اگر Deploy انجام شد
+        if (data.deploy_result) {
+          if (data.deploy_result.success) {
+            successMsg += ` | 🚀 Deploy شروع شد`;
+            workflowNodes.push('render', 'deploy');
+            workflowEdges.push('github_to_render', 'render_to_deploy');
+          } else {
+            showError(`خطا در Deploy: ${data.deploy_result.error}`);
+          }
+        }
+
+        // بروزرسانی workflow visualization با مسیر نهایی
+        setActiveWorkflow({
+          nodeIds: workflowNodes,
+          edgeIds: workflowEdges,
+          type: data.deploy_result?.success ? 'deploy' : (data.github_commits?.length > 0 ? 'commit' : 'trigger'),
+        });
+
+        showSuccess(successMsg);
         loadMemory();
+
         // نمایش نتایج در console
         console.log('Trigger execution results:', data.results);
+        if (data.github_commits) console.log('GitHub commits:', data.github_commits);
+        if (data.deploy_result) console.log('Deploy result:', data.deploy_result);
       } else {
         showError(data.detail || 'خطا در اجرای تریگر');
+        // ریست کردن workflow در صورت خطا
+        setActiveWorkflow({ nodeIds: [], edgeIds: [], type: null });
       }
     } catch (e) {
       showError('خطا در ارتباط');
+      setActiveWorkflow({ nodeIds: [], edgeIds: [], type: null });
     } finally {
       setExecutingTrigger(null);
     }

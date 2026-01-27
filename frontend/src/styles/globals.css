@@ -233,3 +233,78 @@ body {
 .response-card.pending {
   @apply border-l-yellow-500;
 }
+
+/* Workflow Activity Visualization - ReactFlow */
+@keyframes pulse {
+  0%, 100% {
+    box-shadow: 0 0 5px #22c55e;
+    opacity: 1;
+  }
+  50% {
+    box-shadow: 0 0 25px #22c55e, 0 0 50px #22c55e40;
+    opacity: 0.9;
+  }
+}
+
+@keyframes glow {
+  0%, 100% {
+    filter: brightness(1);
+  }
+  50% {
+    filter: brightness(1.3);
+  }
+}
+
+@keyframes flowPath {
+  0% {
+    stroke-dashoffset: 100;
+  }
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* استایل برای نودهای فعال در ReactFlow */
+.react-flow__node.active-node {
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.react-flow__edge.active-edge path {
+  animation: flowPath 1.5s linear infinite;
+  stroke-dasharray: 5;
+}
+
+/* استایل برای نود در حال پردازش */
+.workflow-active {
+  position: relative;
+}
+
+.workflow-active::after {
+  content: '';
+  position: absolute;
+  top: -4px;
+  left: -4px;
+  right: -4px;
+  bottom: -4px;
+  border-radius: 12px;
+  border: 2px solid #22c55e;
+  animation: pulse 1s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* Badge برای نشان دادن وضعیت workflow */
+.workflow-badge {
+  @apply absolute -top-2 -right-2 w-4 h-4 rounded-full animate-ping;
+}
+
+.workflow-badge.trigger {
+  @apply bg-orange-500;
+}
+
+.workflow-badge.commit {
+  @apply bg-purple-500;
+}
+
+.workflow-badge.deploy {
+  @apply bg-green-500;
+}
