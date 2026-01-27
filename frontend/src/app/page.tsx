@@ -32,6 +32,7 @@ export default function HomePage() {
     { href: '/creator', icon: '🚀', title: 'موتور خالق', desc: 'ساخت پروژه جدید' },
     { href: '/projects', icon: '📁', title: 'پروژه‌ها', desc: 'مدیریت پروژه‌ها' },
     { href: '/debate', icon: '💬', title: 'مناظره', desc: 'مناظره هوش مصنوعی' },
+    { href: '/analysis', icon: '🔍', title: 'تحلیل پروژه', desc: 'بررسی سلامت و پروفایل AI' },
     { href: '/archive', icon: '📦', title: 'آرشیو', desc: 'تاریخچه و فایل‌ها' },
     { href: '/settings', icon: '⚙️', title: 'تنظیمات', desc: 'پیکربندی سیستم' },
     { href: '/diagrams', icon: '📊', title: 'نمودارها', desc: 'تولید نمودار' },

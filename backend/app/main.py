@@ -20,6 +20,7 @@ from .api.routes import github_import  # 🆕 GitHub Import
 from .api.routes import project_memory  # 🆕 Project Memory (باکس حافظه)
 from .api.routes import project_structure  # 🆕 Project Structure Diagram
 from .api.routes import project_journal  # 🆕 Project Journal & Reports
+from .api.routes import analysis  # 🆕 Project Analysis & AI Profiles
 
 # تنظیم logging
 logging.basicConfig(
@@ -391,6 +392,7 @@ app.include_router(github_import.router, prefix="/api")  # 🆕 GitHub Import
 app.include_router(project_memory.router, prefix="/api")  # 🆕 Project Memory (باکس حافظه)
 app.include_router(project_structure.router, prefix="/api/projects")  # 🆕 Project Structure Diagram
 app.include_router(project_journal.router, prefix="/api/projects")  # 🆕 Project Journal & Reports
+app.include_router(analysis.router, prefix="/api")  # 🆕 Project Analysis & AI Profiles
 
 
 # Root endpoint
