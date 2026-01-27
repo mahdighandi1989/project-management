@@ -944,10 +944,21 @@ export default function ProjectDetailPage() {
             workflowNodes.push('github', 'code_files');
             workflowEdges.push('ai_to_github', 'github_to_files');
 
-            // بروزرسانی دیاگرام ساختار
-            setTimeout(() => {
-              loadStructure();
-            }, 1500);
+            // سینک خودکار از GitHub و بروزرسانی دیاگرام
+            setTimeout(async () => {
+              try {
+                // سینک فایل‌ها از GitHub
+                await fetch(`${API_BASE}/api/github/imported/${projectId}/refresh`, {
+                  method: 'POST',
+                });
+                // ریلود پروژه برای نمایش فایل‌های جدید
+                loadProject();
+                // بروزرسانی دیاگرام ساختار
+                loadStructure();
+              } catch (e) {
+                console.log('Auto-sync error:', e);
+              }
+            }, 2000);
           }
         }
 
@@ -1054,60 +1065,34 @@ export default function ProjectDetailPage() {
   // تست Deploy به Render (برای دیباگ)
   const testRenderDeploy = async () => {
     setDeploying(true);
+    showSuccess('🔄 در حال جستجوی سرویس‌های Render...');
+
     try {
-      // ابتدا وضعیت رو چک کن
-      const statusRes = await fetch(`${API_BASE}/api/projects/${projectId}/deploy/status`);
-      const statusData = await statusRes.json();
-
-      console.log('Deploy Status:', statusData);
-
-      if (!statusData.status?.render_api_key_configured) {
-        showError('❌ کلید API رندر تنظیم نشده. لطفاً در Settings → Deploy Keys تنظیم کنید.');
-        return;
-      }
-
-      if (!statusData.status?.render_service_id) {
-        // پیشنهاد ست کردن service_id
-        const serviceId = prompt(
-          'Render Service ID پیدا نشد!\n\n' +
-          'لطفاً Service ID رو از Render Dashboard کپی کنید:\n' +
-          '1. به dashboard.render.com برید\n' +
-          '2. سرویس مربوط به این پروژه رو باز کنید\n' +
-          '3. از URL مرورگر، service ID رو کپی کنید (مثل srv-xxxxx)\n\n' +
-          'Service ID:'
-        );
-
-        if (serviceId && serviceId.trim()) {
-          // ذخیره service_id
-          const saveRes = await fetch(`${API_BASE}/api/projects/${projectId}/deploy/set-service-id?service_id=${encodeURIComponent(serviceId.trim())}`, {
-            method: 'POST',
-          });
-          const saveData = await saveRes.json();
-
-          if (saveData.success) {
-            showSuccess(`✅ Service ID ذخیره شد: ${serviceId}`);
-          } else {
-            showError(saveData.error || 'خطا در ذخیره');
-            return;
-          }
-        } else {
-          showError('برای Deploy نیاز به Service ID دارید');
-          return;
-        }
-      }
-
-      // حالا تست deploy
       const res = await fetch(`${API_BASE}/api/projects/${projectId}/deploy/test`, {
         method: 'POST',
       });
       const data = await res.json();
 
-      console.log('Deploy Test Result:', data);
+      console.log('Deploy Result:', data);
 
       if (data.success) {
-        showSuccess('✅ Deploy شروع شد! وضعیت: ' + (data.deploy_result?.status || 'pending'));
+        // اگر چند سرویس deploy شد
+        if (data.deploy_result?.multiple_services) {
+          const results = data.deploy_result.services_deployed;
+          const successCount = results.filter((r: any) => r.success).length;
+          showSuccess(`✅ Deploy شروع شد برای ${successCount}/${results.length} سرویس: ${results.map((r: any) => r.name).join(', ')}`);
+        } else {
+          showSuccess('✅ Deploy شروع شد! وضعیت: ' + (data.deploy_result?.status || 'pending'));
+        }
       } else {
         let errorMsg = data.error || data.deploy_result?.error || 'خطا در Deploy';
+
+        if (errorMsg.includes('API key')) {
+          errorMsg = '❌ کلید API رندر تنظیم نشده. Settings → Deploy Keys';
+        } else if (errorMsg.includes('No Render service')) {
+          errorMsg = '❌ سرویسی در Render پیدا نشد. ابتدا پروژه را در Render deploy کنید.';
+        }
+
         console.log('Debug Info:', data.debug_info);
         showError(errorMsg);
       }

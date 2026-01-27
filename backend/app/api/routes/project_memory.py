@@ -220,19 +220,18 @@ async def commit_to_github(
 async def trigger_render_deploy(
     render_service_id: str = None,
     project_id: str = None,
-    db_session = None
+    db_session = None,
+    project_name: str = None
 ) -> dict:
     """
     Trigger یک deploy جدید در Render
-    ابتدا سعی می‌کند از render_service_id استفاده کند
-    اگر نبود، از تنظیمات پروژه می‌خواند
+    سعی میکنه خودکار سرویس مناسب رو پیدا کنه بر اساس نام پروژه
     """
     import logging
     logger = logging.getLogger(__name__)
 
     from ...services.deploy_service import RenderDeployService
 
-    # دریافت کلید از environment (ممکن است بعد از شروع برنامه تنظیم شده باشد)
     render_api_key = os.getenv("RENDER_API_KEY", "")
 
     logger.info(f"[Render Deploy] API Key exists: {bool(render_api_key)}")
@@ -240,39 +239,89 @@ async def trigger_render_deploy(
     if not render_api_key:
         return {"success": False, "error": "Render API key not configured. Please set it in Settings."}
 
-    # ساخت مستقیم سرویس Render با کلید جدید (جلوگیری از cache شدن session قدیمی)
     render_service = RenderDeployService(api_key=render_api_key)
 
-    # پیدا کردن service_id
     service_id = render_service_id
+    repo_name = None
 
-    # اگر service_id نداریم، از پروژه بخوان
+    # دریافت نام repo از پروژه
     if not service_id and project_id and db_session:
         try:
             project = db_session.query(Project).filter(Project.id == project_id).first()
             if project and project.extra_data:
                 extra = json.loads(project.extra_data)
                 service_id = extra.get("render_service_id")
-                logger.info(f"[Render Deploy] Found service_id from project: {service_id}")
+                repo_name = extra.get("repo")
+                project_name = project_name or project.name
+                logger.info(f"[Render Deploy] Project: {project_name}, repo: {repo_name}, service_id: {service_id}")
         except Exception as e:
             logger.warning(f"[Render Deploy] Error reading project extra_data: {e}")
 
+    # اگر service_id نداریم، سعی کن از روی نام پروژه پیدا کنی
     if not service_id:
-        # سعی کن از سرویس‌های موجود پیدا کنی
         try:
-            logger.info("[Render Deploy] Listing services to find service_id...")
+            logger.info("[Render Deploy] Listing services to find matching ones...")
             services = await render_service.list_services()
             logger.info(f"[Render Deploy] Found {len(services) if services else 0} services")
 
             if services and len(services) > 0:
-                # اولین سرویس را استفاده کن (یا می‌تونی بر اساس نام پروژه فیلتر کنی)
+                matched_services = []
+                search_name = (repo_name or project_name or "").lower().replace("_", "-").replace(" ", "-")
+
                 for svc in services:
                     svc_data = svc.get("service", svc)
+                    svc_id = svc_data.get("id")
+                    svc_name = (svc_data.get("name") or "").lower()
+
+                    # مطابقت بر اساس نام
+                    if search_name and (search_name in svc_name or svc_name in search_name):
+                        matched_services.append({
+                            "id": svc_id,
+                            "name": svc_data.get("name"),
+                            "type": svc_data.get("type"),
+                            "url": svc_data.get("serviceDetails", {}).get("url"),
+                        })
+                        logger.info(f"[Render Deploy] Matched service: {svc_data.get('name')} ({svc_id})")
+
+                # اگر یک یا چند سرویس پیدا شد
+                if len(matched_services) == 1:
+                    service_id = matched_services[0]["id"]
+                elif len(matched_services) > 1:
+                    # چند سرویس پیدا شد (مثلاً frontend و backend) - همه رو deploy کن
+                    results = []
+                    for svc in matched_services:
+                        try:
+                            result = await render_service.trigger_deploy(svc["id"])
+                            results.append({
+                                "service_id": svc["id"],
+                                "name": svc["name"],
+                                "success": result.get("success"),
+                                "deploy_id": result.get("deploy_id"),
+                                "error": result.get("error"),
+                            })
+                        except Exception as e:
+                            results.append({
+                                "service_id": svc["id"],
+                                "name": svc["name"],
+                                "success": False,
+                                "error": str(e),
+                            })
+
+                    await render_service.close()
+                    success_count = sum(1 for r in results if r.get("success"))
+
+                    return {
+                        "success": success_count > 0,
+                        "multiple_services": True,
+                        "services_deployed": results,
+                        "message": f"Deploy triggered for {success_count}/{len(results)} services",
+                    }
+                else:
+                    # هیچ سرویس مطابقی پیدا نشد، اولین سرویس رو استفاده کن
+                    svc_data = services[0].get("service", services[0])
                     service_id = svc_data.get("id")
-                    svc_name = svc_data.get("name", "unknown")
-                    if service_id:
-                        logger.info(f"[Render Deploy] Using service: {svc_name} ({service_id})")
-                        break
+                    logger.info(f"[Render Deploy] No match found, using first service: {svc_data.get('name')}")
+
         except Exception as e:
             logger.error(f"[Render Deploy] Error listing services: {e}")
             await render_service.close()
@@ -280,7 +329,7 @@ async def trigger_render_deploy(
 
     if not service_id:
         await render_service.close()
-        return {"success": False, "error": "No Render service found. Please deploy your project to Render first or set render_service_id in project settings."}
+        return {"success": False, "error": "No Render service found. Please deploy your project to Render first."}
 
     # Trigger deploy
     try:
