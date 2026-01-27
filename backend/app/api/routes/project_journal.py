@@ -519,12 +519,21 @@ async def generate_engineering_report(
         ActivityLog.created_at >= since
     ).order_by(ActivityLog.created_at).all()
 
+    # دریافت تنظیمات محدودیت‌ها
+    from .settings import get_ai_limits_sync
+    ai_limits = get_ai_limits_sync(db)
+    limits_enabled = ai_limits.get("limits_enabled", False)
+
+    # مقادیر محدودیت (0 = نامحدود)
+    max_files = ai_limits.get("max_files_for_report", 0) if limits_enabled else 0
+    max_code_samples = ai_limits.get("max_code_samples_for_report", 0) if limits_enabled else 0
+    max_chars_per_sample = ai_limits.get("max_chars_per_code_sample", 0) if limits_enabled else 0
+
     # دریافت فایل‌های پروژه
     files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
     files_summary = []
     code_samples = []
     total_code_chars = 0
-    max_code_chars = 80000  # افزایش به 80K کاراکتر برای تحلیل بهتر
 
     # اولویت‌بندی فایل‌ها - فایل‌های مهم‌تر اول
     priority_files = ['auth', 'login', 'user', 'route', 'api', 'main', 'app', 'index', 'config', 'setting']
@@ -543,20 +552,32 @@ async def generate_engineering_report(
 
     sorted_files = sorted(files, key=file_priority)
 
-    for f in sorted_files[:100]:  # حداکثر 100 فایل
+    files_added = 0
+    for f in sorted_files:
+        # چک محدودیت تعداد فایل (0 = نامحدود)
+        if max_files > 0 and files_added >= max_files:
+            break
+
         files_summary.append({
             "path": f.file_path,
             "type": f.file_type,
             "size": len(f.content) if f.content else 0
         })
-        # نمونه کد از فایل‌های کد - با محتوای بیشتر
-        if f.content and f.file_type in code_extensions and total_code_chars < max_code_chars:
-            content_limit = min(6000, max_code_chars - total_code_chars)  # حداکثر 6K per file
+        files_added += 1
+
+        # نمونه کد از فایل‌های کد
+        if f.content and f.file_type in code_extensions:
+            # چک محدودیت تعداد نمونه کد (0 = نامحدود)
+            if max_code_samples > 0 and len(code_samples) >= max_code_samples:
+                continue
+
+            # محتوای فایل (0 = بدون محدودیت)
+            content = f.content if max_chars_per_sample == 0 else f.content[:max_chars_per_sample]
             code_samples.append({
                 "path": f.file_path,
-                "content": f.content[:content_limit]
+                "content": content
             })
-            total_code_chars += len(f.content[:content_limit])
+            total_code_chars += len(content)
 
     # دریافت فیلدهای فعلی
     existing_fields = []
@@ -670,8 +691,8 @@ async def generate_engineering_report(
 === ساختار فایل‌ها ===
 {json.dumps(files_summary, ensure_ascii=False, indent=2)}
 
-=== کدهای پروژه ({len(code_samples)} فایل) ===
-{json.dumps(code_samples[:30], ensure_ascii=False, indent=2)}
+=== کدهای پروژه ({len(code_samples)} فایل، {total_code_chars:,} کاراکتر) ===
+{json.dumps(code_samples, ensure_ascii=False, indent=2)}
 
 === فعالیت‌های اخیر ({days} روز) ===
 {json.dumps(activities_summary, ensure_ascii=False, indent=2)}

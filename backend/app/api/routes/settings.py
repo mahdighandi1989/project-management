@@ -556,3 +556,111 @@ async def sync_env_to_db(db: Session = Depends(get_db)):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===========================================
+# تنظیمات محدودیت AI Context
+# ===========================================
+
+class AILimitsSettings(BaseModel):
+    """تنظیمات محدودیت‌های AI"""
+    # محدودیت‌های فایل‌ها
+    max_files_for_context: int = 0  # 0 = نامحدود
+    max_chars_per_file: int = 0  # 0 = نامحدود
+    max_total_context_chars: int = 0  # 0 = نامحدود
+
+    # محدودیت‌های گزارش
+    max_files_for_report: int = 0  # 0 = نامحدود
+    max_code_samples_for_report: int = 0  # 0 = نامحدود
+    max_chars_per_code_sample: int = 0  # 0 = نامحدود
+
+    # فعال/غیرفعال کردن محدودیت‌ها
+    limits_enabled: bool = False  # پیش‌فرض: غیرفعال (نامحدود)
+
+
+# مقادیر پیش‌فرض وقتی محدودیت‌ها فعال باشن
+DEFAULT_LIMITS = {
+    "max_files_for_context": 50,
+    "max_chars_per_file": 10000,
+    "max_total_context_chars": 100000,
+    "max_files_for_report": 100,
+    "max_code_samples_for_report": 50,
+    "max_chars_per_code_sample": 8000,
+    "limits_enabled": False
+}
+
+
+@router.get("/ai-limits")
+async def get_ai_limits(db: Session = Depends(get_db)):
+    """دریافت تنظیمات محدودیت‌های AI"""
+    try:
+        limits = {}
+        for key, default in DEFAULT_LIMITS.items():
+            value = Setting.get_value(db, f"ai_limit_{key}")
+            if value is not None:
+                if key == "limits_enabled":
+                    limits[key] = value.lower() == "true"
+                else:
+                    limits[key] = int(value)
+            else:
+                limits[key] = default
+
+        return {
+            "success": True,
+            "limits": limits,
+            "message": "نامحدود" if not limits["limits_enabled"] else "محدودیت‌ها فعال"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/ai-limits")
+async def update_ai_limits(request: AILimitsSettings, db: Session = Depends(get_db)):
+    """آپدیت تنظیمات محدودیت‌های AI"""
+    try:
+        updated = []
+
+        settings_to_save = {
+            "max_files_for_context": request.max_files_for_context,
+            "max_chars_per_file": request.max_chars_per_file,
+            "max_total_context_chars": request.max_total_context_chars,
+            "max_files_for_report": request.max_files_for_report,
+            "max_code_samples_for_report": request.max_code_samples_for_report,
+            "max_chars_per_code_sample": request.max_chars_per_code_sample,
+            "limits_enabled": str(request.limits_enabled).lower()
+        }
+
+        for key, value in settings_to_save.items():
+            Setting.set_value(
+                db=db,
+                key=f"ai_limit_{key}",
+                value=str(value),
+                value_type="string",
+                category="ai_limits",
+                description=f"AI Limit: {key}"
+            )
+            updated.append(key)
+
+        return {
+            "success": True,
+            "updated": updated,
+            "limits_enabled": request.limits_enabled,
+            "message": "تنظیمات محدودیت‌ها ذخیره شد" if request.limits_enabled else "محدودیت‌ها غیرفعال شد (نامحدود)"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def get_ai_limits_sync(db: Session) -> dict:
+    """دریافت همزمان تنظیمات محدودیت‌ها - برای استفاده در سایر ماژول‌ها"""
+    limits = {}
+    for key, default in DEFAULT_LIMITS.items():
+        value = Setting.get_value(db, f"ai_limit_{key}")
+        if value is not None:
+            if key == "limits_enabled":
+                limits[key] = value.lower() == "true"
+            else:
+                limits[key] = int(value)
+        else:
+            limits[key] = default
+    return limits

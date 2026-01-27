@@ -23,7 +23,7 @@ const DEPLOY_SERVICES = [
 ];
 
 export default function SettingsPage() {
-  const [activeTab, setActiveTab] = useState<'api' | 'deploy' | 'config'>('api');
+  const [activeTab, setActiveTab] = useState<'api' | 'deploy' | 'config' | 'limits'>('api');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -43,6 +43,17 @@ export default function SettingsPage() {
     temperature: 0.7,
     request_timeout: 60,
     max_retries: 3,
+  });
+
+  // محدودیت‌های AI
+  const [aiLimits, setAiLimits] = useState({
+    limits_enabled: false,
+    max_files_for_context: 0,
+    max_chars_per_file: 0,
+    max_total_context_chars: 0,
+    max_files_for_report: 0,
+    max_code_samples_for_report: 0,
+    max_chars_per_code_sample: 0,
   });
 
   useEffect(() => {
@@ -82,11 +93,42 @@ export default function SettingsPage() {
           });
         }
       }
+
+      // محدودیت‌های AI
+      const limitsRes = await fetch(`${API_BASE}/api/settings/ai-limits`);
+      if (limitsRes.ok) {
+        const data = await limitsRes.json();
+        if (data.success && data.limits) {
+          setAiLimits(data.limits);
+        }
+      }
     } catch (e) {
       console.error('Error loading settings:', e);
       // Settings load failed - will use defaults
     } finally {
       setLoading(false);
+    }
+  };
+
+  // ذخیره محدودیت‌های AI
+  const saveAiLimits = async () => {
+    setSaving(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/settings/ai-limits`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(aiLimits),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess(data.message || 'تنظیمات ذخیره شد');
+      } else {
+        showError(data.detail || 'خطا');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -247,6 +289,16 @@ export default function SettingsPage() {
             }`}
           >
             ⚙️ پیکربندی
+          </button>
+          <button
+            onClick={() => setActiveTab('limits')}
+            className={`px-4 py-2 rounded-lg font-medium transition ${
+              activeTab === 'limits'
+                ? 'bg-orange-500 text-white'
+                : 'bg-white dark:bg-gray-800 hover:bg-gray-100'
+            }`}
+          >
+            📊 محدودیت AI
           </button>
         </div>
 
@@ -497,6 +549,137 @@ export default function SettingsPage() {
               onClick={saveConfig}
               disabled={saving}
               className="w-full mt-6 py-3 bg-purple-500 text-white rounded-lg font-bold hover:bg-purple-600 disabled:opacity-50"
+            >
+              {saving ? 'در حال ذخیره...' : '💾 ذخیره تنظیمات'}
+            </button>
+          </div>
+        ) : activeTab === 'limits' ? (
+          // محدودیت‌های AI
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
+            <h2 className="font-bold text-lg mb-2">محدودیت‌های AI Context</h2>
+            <p className="text-sm text-gray-500 mb-6">
+              تنظیم محدودیت‌ها برای میزان فایل‌ها و کاراکترهایی که به AI ارسال می‌شود
+            </p>
+
+            {/* سوییچ فعال/غیرفعال */}
+            <div className="mb-6 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="font-medium">فعال‌سازی محدودیت‌ها</h3>
+                  <p className="text-sm text-gray-500">
+                    {aiLimits.limits_enabled
+                      ? '⚠️ محدودیت‌ها فعال - AI فقط بخشی از فایل‌ها را می‌بیند'
+                      : '✅ نامحدود - AI همه فایل‌های پروژه را می‌بیند'}
+                  </p>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={aiLimits.limits_enabled}
+                    onChange={(e) => setAiLimits({...aiLimits, limits_enabled: e.target.checked})}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-orange-300 dark:peer-focus:ring-orange-800 rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-orange-500"></div>
+                </label>
+              </div>
+            </div>
+
+            {aiLimits.limits_enabled && (
+              <div className="space-y-6">
+                {/* محدودیت‌های اجرای فیلد */}
+                <div className="p-4 border border-gray-200 dark:border-gray-600 rounded-lg">
+                  <h3 className="font-medium mb-4">📁 محدودیت‌های اجرای فیلدها</h3>
+
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm mb-1">حداکثر تعداد فایل‌ها:</label>
+                      <input
+                        type="number"
+                        value={aiLimits.max_files_for_context}
+                        onChange={(e) => setAiLimits({...aiLimits, max_files_for_context: parseInt(e.target.value) || 0})}
+                        className="w-full p-2 border rounded dark:bg-gray-700 dark:border-gray-600"
+                        placeholder="0 = نامحدود"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm mb-1">حداکثر کاراکتر هر فایل:</label>
+                      <input
+                        type="number"
+                        value={aiLimits.max_chars_per_file}
+                        onChange={(e) => setAiLimits({...aiLimits, max_chars_per_file: parseInt(e.target.value) || 0})}
+                        className="w-full p-2 border rounded dark:bg-gray-700 dark:border-gray-600"
+                        placeholder="0 = نامحدود"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm mb-1">حداکثر کل کاراکترها (Context):</label>
+                      <input
+                        type="number"
+                        value={aiLimits.max_total_context_chars}
+                        onChange={(e) => setAiLimits({...aiLimits, max_total_context_chars: parseInt(e.target.value) || 0})}
+                        className="w-full p-2 border rounded dark:bg-gray-700 dark:border-gray-600"
+                        placeholder="0 = نامحدود"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* محدودیت‌های گزارش */}
+                <div className="p-4 border border-gray-200 dark:border-gray-600 rounded-lg">
+                  <h3 className="font-medium mb-4">📊 محدودیت‌های گزارش‌گیری</h3>
+
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm mb-1">حداکثر تعداد فایل‌ها در گزارش:</label>
+                      <input
+                        type="number"
+                        value={aiLimits.max_files_for_report}
+                        onChange={(e) => setAiLimits({...aiLimits, max_files_for_report: parseInt(e.target.value) || 0})}
+                        className="w-full p-2 border rounded dark:bg-gray-700 dark:border-gray-600"
+                        placeholder="0 = نامحدود"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm mb-1">حداکثر نمونه کد:</label>
+                      <input
+                        type="number"
+                        value={aiLimits.max_code_samples_for_report}
+                        onChange={(e) => setAiLimits({...aiLimits, max_code_samples_for_report: parseInt(e.target.value) || 0})}
+                        className="w-full p-2 border rounded dark:bg-gray-700 dark:border-gray-600"
+                        placeholder="0 = نامحدود"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm mb-1">حداکثر کاراکتر هر نمونه کد:</label>
+                      <input
+                        type="number"
+                        value={aiLimits.max_chars_per_code_sample}
+                        onChange={(e) => setAiLimits({...aiLimits, max_chars_per_code_sample: parseInt(e.target.value) || 0})}
+                        className="w-full p-2 border rounded dark:bg-gray-700 dark:border-gray-600"
+                        placeholder="0 = نامحدود"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {!aiLimits.limits_enabled && (
+              <div className="text-center py-8 text-gray-500">
+                <div className="text-4xl mb-2">♾️</div>
+                <p>محدودیت‌ها غیرفعال است</p>
+                <p className="text-sm mt-2">AI تمام فایل‌های پروژه را بدون محدودیت می‌بیند</p>
+              </div>
+            )}
+
+            <button
+              onClick={saveAiLimits}
+              disabled={saving}
+              className="w-full mt-6 py-3 bg-orange-500 text-white rounded-lg font-bold hover:bg-orange-600 disabled:opacity-50"
             >
               {saving ? 'در حال ذخیره...' : '💾 ذخیره تنظیمات'}
             </button>
