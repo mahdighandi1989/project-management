@@ -5,6 +5,7 @@ API routes for Project Memory Management
 
 import json
 import uuid
+import time
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from ...core.database import get_db
 from ...models.project import Project
+from .project_journal import ActivityLog
 
 router = APIRouter(prefix="/projects", tags=["Project Memory"])
 
@@ -41,6 +43,10 @@ class DynamicFieldRequest(BaseModel):
     value: str
     target_models: List[str] = ["all"]
     trigger: Optional[TriggerSettings] = None
+    # تنظیمات جدید برای اعمال روی GitHub
+    action_type: str = "display"  # display, github_commit, github_multi_commit
+    target_path: Optional[str] = None  # مسیر فایل در ریپو (مثلاً: backend/models/customer.py)
+    archive_after_run: bool = False  # آیا بعد از اجرای موفق بایگانی شود؟
 
 
 class UpdateDynamicFieldRequest(BaseModel):
@@ -50,6 +56,18 @@ class UpdateDynamicFieldRequest(BaseModel):
     value: Optional[str] = None
     target_models: Optional[List[str]] = None
     trigger: Optional[TriggerSettings] = None
+    action_type: Optional[str] = None
+    target_path: Optional[str] = None
+    archive_after_run: Optional[bool] = None
+    archived: Optional[bool] = None  # برای بایگانی/خروج از بایگانی
+
+
+# ثابت‌های نوع اکشن
+ACTION_TYPES = [
+    {"id": "display", "name": "فقط نمایش", "icon": "👁️", "description": "نتیجه فقط در ژورنال نمایش داده می‌شود"},
+    {"id": "github_commit", "name": "Commit به GitHub", "icon": "📤", "description": "نتیجه به عنوان یک فایل در ریپو commit می‌شود"},
+    {"id": "github_multi_commit", "name": "Multi Commit", "icon": "📦", "description": "چند فایل از پاسخ استخراج و commit می‌شوند"},
+]
 
 
 # =====================================
@@ -79,6 +97,122 @@ TRIGGER_INTERVALS = [
     {"value": 1, "type": "days", "label": "روزانه"},
     {"value": 7, "type": "days", "label": "هفتگی"},
 ]
+
+
+# =====================================
+# توابع کمکی GitHub
+# =====================================
+
+import re
+import os
+import base64
+import aiohttp
+
+async def extract_code_blocks(content: str) -> List[dict]:
+    """
+    استخراج بلوک‌های کد از پاسخ AI
+    پشتیبانی از فرمت‌های:
+    - ```python\n# path/to/file.py\n...```
+    - ```python:path/to/file.py\n...```
+    - # filename: path/to/file.py
+    """
+    blocks = []
+
+    # الگوی اول: ```lang:path یا ```lang\n# path
+    pattern = r'```(\w+)?(?::([^\n]+))?\n(.*?)```'
+    matches = re.findall(pattern, content, re.DOTALL)
+
+    for lang, path, code in matches:
+        if not path:
+            # بررسی خط اول برای مسیر
+            lines = code.strip().split('\n')
+            if lines and lines[0].startswith('#'):
+                first_line = lines[0]
+                # الگوهای مختلف برای مسیر فایل
+                path_patterns = [
+                    r'#\s*(?:path|file|filename):\s*(.+)',
+                    r'#\s*([a-zA-Z0-9_/\\.-]+\.[a-zA-Z]+)',
+                ]
+                for pp in path_patterns:
+                    match = re.match(pp, first_line, re.IGNORECASE)
+                    if match:
+                        path = match.group(1).strip()
+                        code = '\n'.join(lines[1:])
+                        break
+
+        if path and code.strip():
+            blocks.append({
+                "path": path.strip(),
+                "language": lang or "text",
+                "content": code.strip()
+            })
+
+    return blocks
+
+
+async def commit_to_github(
+    owner: str,
+    repo: str,
+    token: str,
+    file_path: str,
+    content: str,
+    message: str,
+    branch: str = "main"
+) -> dict:
+    """
+    Commit یک فایل به ریپو GitHub
+    """
+    api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{file_path}"
+
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+
+    # کدگذاری محتوا به base64
+    content_bytes = content.encode('utf-8')
+    content_b64 = base64.b64encode(content_bytes).decode('utf-8')
+
+    async with aiohttp.ClientSession() as session:
+        # بررسی وجود فایل برای گرفتن SHA
+        existing_sha = None
+        try:
+            async with session.get(api_url, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    existing_sha = data.get("sha")
+        except:
+            pass
+
+        # ساخت payload
+        payload = {
+            "message": message,
+            "content": content_b64,
+            "branch": branch
+        }
+
+        if existing_sha:
+            payload["sha"] = existing_sha
+
+        # ارسال درخواست
+        async with session.put(api_url, headers=headers, json=payload) as resp:
+            if resp.status in [200, 201]:
+                data = await resp.json()
+                return {
+                    "success": True,
+                    "path": file_path,
+                    "sha": data.get("content", {}).get("sha"),
+                    "url": data.get("content", {}).get("html_url"),
+                    "action": "updated" if existing_sha else "created"
+                }
+            else:
+                error = await resp.text()
+                return {
+                    "success": False,
+                    "path": file_path,
+                    "error": error
+                }
 
 
 # =====================================
@@ -438,6 +572,9 @@ async def project_chat(
     system_prompt = "\n".join(system_parts)
 
     # ارسال به AI
+    from datetime import datetime
+    start_time = time.time()
+
     try:
         ai_manager = get_ai_manager()
 
@@ -453,15 +590,52 @@ async def project_chat(
             temperature=0.7,
         )
 
+        latency_ms = int((time.time() - start_time) * 1000)
+
+        # ثبت در ژورنال - موفق
+        log_entry = ActivityLog(
+            id=f"log_{uuid.uuid4().hex[:12]}",
+            project_id=project_id,
+            model_id=response.model_id,
+            model_provider=request.model_id.split("-")[0] if "-" in request.model_id else request.model_id,
+            activity_type="chat",
+            prompt=request.prompt[:2000],
+            response=response.content[:5000] if response.content else None,
+            tokens_used=response.tokens_used or 0,
+            latency_ms=latency_ms,
+            success=True,
+            created_at=datetime.utcnow(),
+        )
+        db.add(log_entry)
+        db.commit()
+
         return {
             "success": True,
             "model_id": response.model_id,
             "content": response.content,
             "tokens_used": response.tokens_used,
-            "latency_ms": response.latency_ms,
+            "latency_ms": latency_ms,
         }
 
     except Exception as e:
+        latency_ms = int((time.time() - start_time) * 1000)
+
+        # ثبت در ژورنال - خطا
+        log_entry = ActivityLog(
+            id=f"log_{uuid.uuid4().hex[:12]}",
+            project_id=project_id,
+            model_id=request.model_id,
+            activity_type="chat",
+            prompt=request.prompt[:2000],
+            tokens_used=0,
+            latency_ms=latency_ms,
+            success=False,
+            error_message=str(e)[:500],
+            created_at=datetime.utcnow(),
+        )
+        db.add(log_entry)
+        db.commit()
+
         raise HTTPException(status_code=500, detail=f"خطا در ارتباط با AI: {str(e)}")
 
 
@@ -540,10 +714,293 @@ async def execute_field_trigger(
 ):
     """
     اجرای دستی یک تریگر (بدون انتظار برای زمان‌بندی)
+    با قابلیت commit به GitHub و بایگانی خودکار
     """
     from datetime import datetime
     from ...services.ai_manager import get_ai_manager
     from ...services.ai_base import Message
+    import asyncio
+
+    try:
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if not project:
+            raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+        dynamic_fields = []
+        try:
+            if project.dynamic_fields:
+                dynamic_fields = json.loads(project.dynamic_fields)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        target_field = None
+        target_field_index = None
+        for idx, field in enumerate(dynamic_fields):
+            if field.get("id") == field_id:
+                target_field = field
+                target_field_index = idx
+                break
+
+        if not target_field:
+            raise HTTPException(status_code=404, detail="فیلد یافت نشد")
+
+        # بررسی بایگانی بودن
+        if target_field.get("archived"):
+            raise HTTPException(status_code=400, detail="این فیلد بایگانی شده و قابل اجرا نیست")
+
+        # دریافت تنظیمات GitHub از پروژه
+        github_info = {}
+        try:
+            if project.extra_data:
+                github_info = json.loads(project.extra_data)
+        except:
+            pass
+
+        action_type = target_field.get("action_type", "display")
+        target_path = target_field.get("target_path")
+        archive_after_run = target_field.get("archive_after_run", False)
+
+        # ساخت prompt از دستور فیلد
+        system_prompt = f"تو یک دستیار هوشمند برای پروژه '{project.name}' هستی."
+        if project.description:
+            system_prompt += f"\nتوضیحات پروژه: {project.description}"
+
+        # اضافه کردن دستورات حافظه به system prompt
+        try:
+            if project.memory_instructions:
+                memory = json.loads(project.memory_instructions)
+                if memory.get("content"):
+                    system_prompt += f"\n\nدستورات کلی:\n{memory['content']}"
+        except:
+            pass
+
+        # برای commit به GitHub، دستورات اضافی
+        if action_type in ["github_commit", "github_multi_commit"]:
+            system_prompt += "\n\n⚠️ مهم: کد تولید شده مستقیماً در ریپو commit می‌شود."
+            if action_type == "github_commit" and target_path:
+                system_prompt += f"\nفایل هدف: {target_path}"
+                system_prompt += "\nفقط محتوای کد را بدون توضیحات اضافی تولید کن."
+            else:
+                system_prompt += "\nبرای هر فایل از این فرمت استفاده کن:"
+                system_prompt += "\n```language:path/to/file.ext\nکد\n```"
+
+        user_prompt = f"دستور: {target_field.get('name', 'فیلد')}\n\n{target_field.get('value', '')}"
+
+        # ارسال به مدل(های) هدف
+        target_models = target_field.get("target_models", ["all"])
+        if "all" in target_models or not target_models:
+            target_models = ["claude"]  # پیش‌فرض claude بهتره برای کد
+
+        results = []
+        github_commits = []
+        ai_manager = get_ai_manager()
+
+        for model_id in target_models:
+            if model_id == "all":
+                continue
+
+            start_time = time.time()
+            try:
+                messages = [
+                    Message(role="system", content=system_prompt),
+                    Message(role="user", content=user_prompt),
+                ]
+
+                # اجرا با timeout 120 ثانیه برای تولید کد بیشتر
+                response = await asyncio.wait_for(
+                    ai_manager.generate(
+                        model_id=model_id,
+                        messages=messages,
+                        max_tokens=8192,  # افزایش برای کد بیشتر
+                        temperature=0.7,
+                    ),
+                    timeout=120.0
+                )
+
+                latency_ms = int((time.time() - start_time) * 1000)
+
+                result = {
+                    "model_id": response.model_id,
+                    "content": response.content,
+                    "tokens_used": response.tokens_used,
+                    "success": True
+                }
+
+                # اگر action_type برای GitHub است، commit کن
+                if action_type in ["github_commit", "github_multi_commit"] and response.content:
+                    if github_info.get("source") == "github":
+                        owner = github_info.get("owner")
+                        repo = github_info.get("repo")
+                        token = os.getenv("GITHUB_TOKEN", "")
+
+                        if owner and repo and token:
+                            if action_type == "github_commit" and target_path:
+                                # یک فایل مشخص
+                                # استخراج محتوای کد از پاسخ (حذف markdown)
+                                code_content = response.content
+                                # حذف بلوک‌های markdown
+                                code_match = re.search(r'```\w*\n?(.*?)```', code_content, re.DOTALL)
+                                if code_match:
+                                    code_content = code_match.group(1)
+
+                                commit_result = await commit_to_github(
+                                    owner=owner,
+                                    repo=repo,
+                                    token=token,
+                                    file_path=target_path,
+                                    content=code_content.strip(),
+                                    message=f"AI Generated: {target_field.get('name', 'Update')}",
+                                    branch=github_info.get("branch", "main")
+                                )
+                                github_commits.append(commit_result)
+
+                            elif action_type == "github_multi_commit":
+                                # چند فایل از پاسخ
+                                code_blocks = await extract_code_blocks(response.content)
+                                for block in code_blocks:
+                                    commit_result = await commit_to_github(
+                                        owner=owner,
+                                        repo=repo,
+                                        token=token,
+                                        file_path=block["path"],
+                                        content=block["content"],
+                                        message=f"AI Generated: {block['path']}",
+                                        branch=github_info.get("branch", "main")
+                                    )
+                                    github_commits.append(commit_result)
+
+                            result["github_commits"] = github_commits
+                        else:
+                            result["github_error"] = "اطلاعات GitHub ناقص است"
+                    else:
+                        result["github_error"] = "این پروژه از GitHub ایمپورت نشده"
+
+                results.append(result)
+
+                # ثبت در ژورنال - موفق
+                extra_data = None
+                if github_commits:
+                    extra_data = json.dumps({"github_commits": github_commits}, ensure_ascii=False)
+
+                log_entry = ActivityLog(
+                    id=f"log_{uuid.uuid4().hex[:12]}",
+                    project_id=project_id,
+                    model_id=response.model_id,
+                    model_provider=model_id.split("-")[0] if "-" in model_id else model_id,
+                    activity_type="trigger",
+                    prompt=user_prompt[:2000],
+                    response=response.content[:5000] if response.content else None,
+                    tokens_used=response.tokens_used or 0,
+                    latency_ms=latency_ms,
+                    success=True,
+                    field_id=field_id,
+                    field_name=target_field.get("name"),
+                    extra_data=extra_data,
+                    created_at=datetime.utcnow(),
+                )
+                db.add(log_entry)
+
+            except asyncio.TimeoutError:
+                latency_ms = int((time.time() - start_time) * 1000)
+                results.append({
+                    "model_id": model_id,
+                    "error": "Timeout - پاسخ مدل بیش از 120 ثانیه طول کشید",
+                    "success": False
+                })
+
+                log_entry = ActivityLog(
+                    id=f"log_{uuid.uuid4().hex[:12]}",
+                    project_id=project_id,
+                    model_id=model_id,
+                    activity_type="trigger",
+                    prompt=user_prompt[:2000],
+                    tokens_used=0,
+                    latency_ms=latency_ms,
+                    success=False,
+                    error_message="Timeout - پاسخ مدل بیش از 120 ثانیه طول کشید",
+                    field_id=field_id,
+                    field_name=target_field.get("name"),
+                    created_at=datetime.utcnow(),
+                )
+                db.add(log_entry)
+
+            except Exception as e:
+                latency_ms = int((time.time() - start_time) * 1000)
+                results.append({
+                    "model_id": model_id,
+                    "error": str(e),
+                    "success": False
+                })
+
+                log_entry = ActivityLog(
+                    id=f"log_{uuid.uuid4().hex[:12]}",
+                    project_id=project_id,
+                    model_id=model_id,
+                    activity_type="trigger",
+                    prompt=user_prompt[:2000],
+                    tokens_used=0,
+                    latency_ms=latency_ms,
+                    success=False,
+                    error_message=str(e)[:500],
+                    field_id=field_id,
+                    field_name=target_field.get("name"),
+                    created_at=datetime.utcnow(),
+                )
+                db.add(log_entry)
+
+        # بروزرسانی فیلد
+        any_success = any(r.get("success") for r in results)
+        any_github_success = any(c.get("success") for c in github_commits) if github_commits else False
+
+        for field in dynamic_fields:
+            if field.get("id") == field_id:
+                if "trigger" not in field:
+                    field["trigger"] = {}
+                field["trigger"]["last_run"] = datetime.utcnow().isoformat()
+
+                # بایگانی خودکار اگر موفق و تنظیم شده
+                if archive_after_run and any_success:
+                    if action_type == "display" or any_github_success:
+                        field["archived"] = True
+                        field["archived_at"] = datetime.utcnow().isoformat()
+                break
+
+        project.dynamic_fields = json.dumps(dynamic_fields, ensure_ascii=False)
+        db.commit()
+
+        return {
+            "success": True,
+            "field_id": field_id,
+            "field_name": target_field.get("name"),
+            "action_type": action_type,
+            "results": results,
+            "github_commits": github_commits if github_commits else None,
+            "archived": target_field.get("archived", False),
+            "executed_at": datetime.utcnow().isoformat()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "field_id": field_id
+        }
+
+
+# =====================================
+# بایگانی فیلدها
+# =====================================
+
+@router.post("/{project_id}/memory/fields/{field_id}/archive")
+async def archive_field(
+    project_id: str,
+    field_id: str,
+    db: Session = Depends(get_db)
+):
+    """بایگانی یک فیلد"""
+    from datetime import datetime
 
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -553,76 +1010,93 @@ async def execute_field_trigger(
     try:
         if project.dynamic_fields:
             dynamic_fields = json.loads(project.dynamic_fields)
-    except (json.JSONDecodeError, TypeError):
+    except:
         pass
 
-    target_field = None
+    field_found = False
     for field in dynamic_fields:
-        if field["id"] == field_id:
-            target_field = field
+        if field.get("id") == field_id:
+            field["archived"] = True
+            field["archived_at"] = datetime.utcnow().isoformat()
+            field_found = True
             break
 
-    if not target_field:
+    if not field_found:
         raise HTTPException(status_code=404, detail="فیلد یافت نشد")
-
-    # ساخت prompt از دستور فیلد
-    system_prompt = f"تو یک دستیار هوشمند برای پروژه '{project.name}' هستی."
-    if project.description:
-        system_prompt += f"\nتوضیحات پروژه: {project.description}"
-
-    user_prompt = f"دستور: {target_field['name']}\n\n{target_field['value']}"
-
-    # ارسال به مدل(های) هدف
-    target_models = target_field.get("target_models", ["all"])
-    if "all" in target_models:
-        target_models = ["openai"]  # پیش‌فرض
-
-    results = []
-    ai_manager = get_ai_manager()
-
-    for model_id in target_models:
-        if model_id == "all":
-            continue
-        try:
-            messages = [
-                Message(role="system", content=system_prompt),
-                Message(role="user", content=user_prompt),
-            ]
-
-            response = await ai_manager.generate(
-                model_id=model_id,
-                messages=messages,
-                max_tokens=4096,
-                temperature=0.7,
-            )
-
-            results.append({
-                "model_id": response.model_id,
-                "content": response.content,
-                "tokens_used": response.tokens_used,
-            })
-        except Exception as e:
-            results.append({
-                "model_id": model_id,
-                "error": str(e)
-            })
-
-    # بروزرسانی last_run
-    for field in dynamic_fields:
-        if field["id"] == field_id:
-            if "trigger" not in field:
-                field["trigger"] = {}
-            field["trigger"]["last_run"] = datetime.utcnow().isoformat()
-            break
 
     project.dynamic_fields = json.dumps(dynamic_fields, ensure_ascii=False)
     db.commit()
 
+    return {"success": True, "message": "فیلد بایگانی شد"}
+
+
+@router.post("/{project_id}/memory/fields/{field_id}/unarchive")
+async def unarchive_field(
+    project_id: str,
+    field_id: str,
+    db: Session = Depends(get_db)
+):
+    """خروج از بایگانی"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    dynamic_fields = []
+    try:
+        if project.dynamic_fields:
+            dynamic_fields = json.loads(project.dynamic_fields)
+    except:
+        pass
+
+    field_found = False
+    for field in dynamic_fields:
+        if field.get("id") == field_id:
+            field["archived"] = False
+            field.pop("archived_at", None)
+            field_found = True
+            break
+
+    if not field_found:
+        raise HTTPException(status_code=404, detail="فیلد یافت نشد")
+
+    project.dynamic_fields = json.dumps(dynamic_fields, ensure_ascii=False)
+    db.commit()
+
+    return {"success": True, "message": "فیلد از بایگانی خارج شد"}
+
+
+@router.get("/{project_id}/memory/fields/archived")
+async def get_archived_fields(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """دریافت فیلدهای بایگانی شده"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    dynamic_fields = []
+    try:
+        if project.dynamic_fields:
+            dynamic_fields = json.loads(project.dynamic_fields)
+    except:
+        pass
+
+    archived = [f for f in dynamic_fields if f.get("archived")]
+
     return {
         "success": True,
-        "field_name": target_field["name"],
-        "results": results,
-        "executed_at": datetime.utcnow().isoformat()
+        "archived_fields": archived,
+        "count": len(archived)
+    }
+
+
+@router.get("/{project_id}/memory/action-types")
+async def get_action_types():
+    """دریافت لیست انواع اکشن برای فیلدها"""
+    return {
+        "success": True,
+        "action_types": ACTION_TYPES
     }
 
 
