@@ -252,6 +252,11 @@ export default function ProjectDetailPage() {
   const [newFieldTriggerEnabled, setNewFieldTriggerEnabled] = useState(false);
   const [newFieldTriggerInterval, setNewFieldTriggerInterval] = useState(60);
   const [newFieldTriggerType, setNewFieldTriggerType] = useState('minutes');
+  // تنظیمات GitHub و بایگانی
+  const [newFieldActionType, setNewFieldActionType] = useState('display');
+  const [newFieldTargetPath, setNewFieldTargetPath] = useState('');
+  const [newFieldArchiveAfterRun, setNewFieldArchiveAfterRun] = useState(false);
+  const [showArchivedFields, setShowArchivedFields] = useState(false);
 
   // Edit Field
   const [editingField, setEditingField] = useState<string | null>(null);
@@ -721,6 +726,9 @@ export default function ProjectDetailPage() {
             interval_minutes: newFieldTriggerInterval,
             interval_type: newFieldTriggerType,
           },
+          action_type: newFieldActionType,
+          target_path: newFieldTargetPath || undefined,
+          archive_after_run: newFieldArchiveAfterRun,
         }),
       });
       const data = await res.json();
@@ -732,6 +740,9 @@ export default function ProjectDetailPage() {
         setNewFieldTriggerEnabled(false);
         setNewFieldTriggerInterval(60);
         setNewFieldTriggerType('minutes');
+        setNewFieldActionType('display');
+        setNewFieldTargetPath('');
+        setNewFieldArchiveAfterRun(false);
         setShowNewFieldForm(false);
         loadMemory();
       } else {
@@ -1400,6 +1411,46 @@ export default function ProjectDetailPage() {
                     />
                   </div>
 
+                  {/* نوع اکشن */}
+                  <div className="mb-3 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-600">
+                    <label className="text-xs text-gray-500 block mb-2">نوع اکشن:</label>
+                    <select
+                      value={newFieldActionType}
+                      onChange={(e) => setNewFieldActionType(e.target.value)}
+                      className="w-full p-2 border rounded text-sm dark:bg-gray-700 dark:border-gray-600"
+                    >
+                      <option value="display">👁️ فقط نمایش - نتیجه در ژورنال نمایش داده می‌شود</option>
+                      <option value="github_commit">📤 Commit به GitHub - یک فایل در ریپو ایجاد/بروزرسانی می‌شود</option>
+                      <option value="github_multi_commit">📦 Multi Commit - چند فایل از پاسخ استخراج و commit می‌شوند</option>
+                    </select>
+
+                    {newFieldActionType === 'github_commit' && (
+                      <div className="mt-2">
+                        <label className="text-xs text-gray-500 block mb-1">مسیر فایل در ریپو:</label>
+                        <input
+                          type="text"
+                          placeholder="مثال: backend/models/customer.py"
+                          value={newFieldTargetPath}
+                          onChange={(e) => setNewFieldTargetPath(e.target.value)}
+                          className="w-full p-2 border rounded text-sm dark:bg-gray-700 dark:border-gray-600"
+                          dir="ltr"
+                        />
+                      </div>
+                    )}
+
+                    {newFieldActionType !== 'display' && (
+                      <label className="flex items-center gap-2 text-sm text-orange-600 dark:text-orange-400 mt-2">
+                        <input
+                          type="checkbox"
+                          checked={newFieldArchiveAfterRun}
+                          onChange={(e) => setNewFieldArchiveAfterRun(e.target.checked)}
+                          className="rounded"
+                        />
+                        📦 بایگانی خودکار بعد از اجرای موفق
+                      </label>
+                    )}
+                  </div>
+
                   {/* تنظیمات تریگر */}
                   <div className="mb-3 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-600">
                     <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
@@ -1455,18 +1506,35 @@ export default function ProjectDetailPage() {
                 </div>
               )}
 
-              {/* لیست فیلدها */}
+              {/* فیلتر و لیست فیلدها */}
+              {dynamicFields.some((f: any) => f.archived) && (
+                <div className="mb-3 flex items-center gap-2">
+                  <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
+                    <input
+                      type="checkbox"
+                      checked={showArchivedFields}
+                      onChange={(e) => setShowArchivedFields(e.target.checked)}
+                      className="rounded"
+                    />
+                    📦 نمایش فیلدهای بایگانی شده ({dynamicFields.filter((f: any) => f.archived).length})
+                  </label>
+                </div>
+              )}
+
               <div className="space-y-3 max-h-[50vh] overflow-auto">
-                {dynamicFields.length === 0 ? (
+                {dynamicFields.filter((f: any) => !f.archived || showArchivedFields).length === 0 ? (
                   <div className="text-center py-8 text-gray-400">
                     <div className="text-4xl mb-2">📭</div>
                     <p>فیلدی تعریف نشده</p>
                   </div>
                 ) : (
-                  dynamicFields.map((field) => (
+                  dynamicFields.filter((f: any) => !f.archived || showArchivedFields).map((field: any) => (
                     <div
                       key={field.id}
-                      className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg"
+                      className={`p-4 rounded-lg ${field.archived
+                        ? 'bg-gray-200 dark:bg-gray-800 opacity-60'
+                        : 'bg-gray-50 dark:bg-gray-700'
+                      }`}
                     >
                       {editingField === field.id ? (
                         // حالت ویرایش
@@ -1583,15 +1651,64 @@ export default function ProjectDetailPage() {
                         // حالت نمایش
                         <div>
                           <div className="flex items-center justify-between mb-2">
-                            <span className="font-medium">{field.name}</span>
+                            <div className="flex items-center gap-2">
+                              <span className="font-medium">{field.name}</span>
+                              {/* نشانگر نوع اکشن */}
+                              {field.action_type === 'github_commit' && (
+                                <span className="px-2 py-0.5 bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 text-xs rounded">
+                                  📤 GitHub
+                                </span>
+                              )}
+                              {field.action_type === 'github_multi_commit' && (
+                                <span className="px-2 py-0.5 bg-purple-100 dark:bg-purple-900 text-purple-700 dark:text-purple-300 text-xs rounded">
+                                  📦 Multi
+                                </span>
+                              )}
+                              {field.archived && (
+                                <span className="px-2 py-0.5 bg-gray-300 dark:bg-gray-600 text-gray-600 dark:text-gray-300 text-xs rounded">
+                                  📦 بایگانی
+                                </span>
+                              )}
+                            </div>
                             <div className="flex gap-1">
-                              <button
-                                onClick={() => setEditingField(field.id)}
-                                className="p-1 text-blue-500 hover:bg-blue-100 rounded"
-                                title="ویرایش"
-                              >
-                                ✏️
-                              </button>
+                              {field.archived ? (
+                                <button
+                                  onClick={async () => {
+                                    try {
+                                      await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields/${field.id}/unarchive`, { method: 'POST' });
+                                      loadMemory();
+                                      showSuccess('از بایگانی خارج شد');
+                                    } catch { showError('خطا'); }
+                                  }}
+                                  className="p-1 text-green-500 hover:bg-green-100 rounded"
+                                  title="خروج از بایگانی"
+                                >
+                                  📤
+                                </button>
+                              ) : (
+                                <>
+                                  <button
+                                    onClick={() => setEditingField(field.id)}
+                                    className="p-1 text-blue-500 hover:bg-blue-100 rounded"
+                                    title="ویرایش"
+                                  >
+                                    ✏️
+                                  </button>
+                                  <button
+                                    onClick={async () => {
+                                      try {
+                                        await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields/${field.id}/archive`, { method: 'POST' });
+                                        loadMemory();
+                                        showSuccess('بایگانی شد');
+                                      } catch { showError('خطا'); }
+                                    }}
+                                    className="p-1 text-orange-500 hover:bg-orange-100 rounded"
+                                    title="بایگانی"
+                                  >
+                                    📦
+                                  </button>
+                                </>
+                              )}
                               <button
                                 onClick={() => deleteDynamicField(field.id)}
                                 className="p-1 text-red-500 hover:bg-red-100 rounded"
@@ -1604,8 +1721,16 @@ export default function ProjectDetailPage() {
                           <p className="text-sm text-gray-600 dark:text-gray-300 whitespace-pre-wrap">
                             {field.value}
                           </p>
+
+                          {/* نمایش مسیر هدف برای GitHub */}
+                          {field.target_path && (
+                            <div className="mt-2 px-2 py-1 bg-gray-100 dark:bg-gray-600 rounded text-xs font-mono" dir="ltr">
+                              📁 {field.target_path}
+                            </div>
+                          )}
+
                           <div className="mt-2 flex flex-wrap gap-1">
-                            {field.target_models.map(m => {
+                            {field.target_models.map((m: string) => {
                               const model = availableModels.find(am => am.id === m);
                               return (
                                 <span
@@ -1618,7 +1743,8 @@ export default function ProjectDetailPage() {
                             })}
                           </div>
 
-                          {/* تریگر کنترل‌ها */}
+                          {/* تریگر کنترل‌ها - فقط برای فیلدهای غیر بایگانی */}
+                          {!field.archived && (
                           <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-600">
                             <div className="flex items-center justify-between">
                               <div className="flex items-center gap-2">
@@ -1649,7 +1775,7 @@ export default function ProjectDetailPage() {
                                 {field.trigger?.enabled && (
                                   <span className="text-xs text-green-600 dark:text-green-400">
                                     ({triggerIntervals.find(
-                                      i => i.value === field.trigger?.interval_minutes && i.type === field.trigger?.interval_type
+                                      (i: any) => i.value === field.trigger?.interval_minutes && i.type === field.trigger?.interval_type
                                     )?.label || `هر ${field.trigger?.interval_minutes} دقیقه`})
                                   </span>
                                 )}
@@ -1659,7 +1785,7 @@ export default function ProjectDetailPage() {
                                 onClick={() => executeFieldTrigger(field.id)}
                                 disabled={executingTrigger === field.id}
                                 className="px-3 py-1 bg-orange-500 text-white rounded text-xs hover:bg-orange-600 disabled:opacity-50 flex items-center gap-1"
-                                title="اجرای دستی تریگر"
+                                title={field.action_type === 'github_commit' ? 'اجرا و Commit به GitHub' : 'اجرای دستی تریگر'}
                               >
                                 {executingTrigger === field.id ? (
                                   <>
@@ -1690,6 +1816,7 @@ export default function ProjectDetailPage() {
                               </div>
                             )}
                           </div>
+                          )}
                         </div>
                       )}
                     </div>
