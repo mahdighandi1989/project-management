@@ -75,6 +75,12 @@ interface DynamicField {
   value: string;
   target_models: string[];
   trigger?: TriggerSettings;
+  field_type?: string;  // "permanent" | "temporary"
+  priority?: number;    // 1-10
+  attachments?: string[];
+  archived?: boolean;
+  action_type?: string;
+  target_path?: string;
 }
 
 interface AIModel {
@@ -258,6 +264,17 @@ export default function ProjectDetailPage() {
   const [newFieldArchiveAfterRun, setNewFieldArchiveAfterRun] = useState(false);
   const [newFieldDeployAfterCommit, setNewFieldDeployAfterCommit] = useState(false);
   const [showArchivedFields, setShowArchivedFields] = useState(false);
+
+  // نوع فیلد و اولویت
+  const [newFieldType, setNewFieldType] = useState('temporary');  // temporary | permanent
+  const [newFieldPriority, setNewFieldPriority] = useState(5);     // 1-10
+
+  // اجرای گروهی
+  const [selectedFields, setSelectedFields] = useState<string[]>([]);
+  const [executingBatch, setExecutingBatch] = useState(false);
+
+  // آپلود پیوست
+  const [uploadingAttachment, setUploadingAttachment] = useState<string | null>(null);
 
   // Edit Field
   const [editingField, setEditingField] = useState<string | null>(null);
@@ -952,6 +969,8 @@ export default function ProjectDetailPage() {
           target_path: newFieldTargetPath || undefined,
           archive_after_run: newFieldArchiveAfterRun,
           deploy_after_commit: newFieldDeployAfterCommit,
+          field_type: newFieldType,
+          priority: newFieldPriority,
         }),
       });
       const data = await res.json();
@@ -967,6 +986,8 @@ export default function ProjectDetailPage() {
         setNewFieldTargetPath('');
         setNewFieldArchiveAfterRun(false);
         setNewFieldDeployAfterCommit(false);
+        setNewFieldType('temporary');
+        setNewFieldPriority(5);
         setShowNewFieldForm(false);
         loadMemory();
       } else {
@@ -1124,6 +1145,134 @@ export default function ProjectDetailPage() {
     } finally {
       setExecutingTrigger(null);
     }
+  };
+
+  // اجرای گروهی فیلدها
+  const executeBatchFields = async () => {
+    if (selectedFields.length === 0) {
+      showError('لطفاً حداقل یک فیلد انتخاب کنید');
+      return;
+    }
+
+    setExecutingBatch(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields/batch-execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          field_ids: selectedFields,
+          execute_type: 'selected',
+          auto_prioritize: true,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess(`${data.total_executed} فیلد با موفقیت اجرا شد`);
+        setSelectedFields([]);
+        loadMemory();
+
+        // سینک خودکار بعد از اجرا
+        if (syncSettings.sync_after_field_execution) {
+          setTimeout(async () => {
+            try {
+              await fetch(`${API_BASE}/api/github/imported/${projectId}/refresh`, { method: 'POST' });
+              loadProject();
+              if (syncSettings.update_diagram_after_sync) {
+                loadStructure();
+              }
+            } catch (e) {
+              console.log('Auto-sync error:', e);
+            }
+          }, 2000);
+        }
+      } else {
+        showError(data.detail || 'خطا در اجرای گروهی');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    } finally {
+      setExecutingBatch(false);
+    }
+  };
+
+  // انتخاب/عدم انتخاب همه فیلدها
+  const toggleSelectAll = () => {
+    const activeFields = dynamicFields.filter((f: any) => !f.archived);
+    if (selectedFields.length === activeFields.length) {
+      setSelectedFields([]);
+    } else {
+      setSelectedFields(activeFields.map((f: any) => f.id));
+    }
+  };
+
+  // آپلود پیوست برای فیلد
+  const uploadAttachment = async (fieldId: string, file: File) => {
+    setUploadingAttachment(fieldId);
+    try {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        const base64 = (e.target?.result as string)?.split(',')[1];
+        const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields/${fieldId}/attachments`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            field_id: fieldId,
+            file_content: base64,
+            file_name: file.name,
+            file_type: file.type,
+          }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          showSuccess('پیوست اضافه شد');
+          loadMemory();
+        } else {
+          showError(data.detail || 'خطا در آپلود');
+        }
+        setUploadingAttachment(null);
+      };
+      reader.readAsDataURL(file);
+    } catch (e) {
+      showError('خطا در خواندن فایل');
+      setUploadingAttachment(null);
+    }
+  };
+
+  // حذف پیوست
+  const deleteAttachment = async (fieldId: string, attachmentPath: string) => {
+    if (!confirm('پیوست حذف شود؟')) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields/${fieldId}/attachments?attachment_path=${encodeURIComponent(attachmentPath)}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess('پیوست حذف شد');
+        loadMemory();
+      } else {
+        showError(data.detail || 'خطا');
+      }
+    } catch (e) {
+      showError('خطا');
+    }
+  };
+
+  // دریافت آیکون اولویت
+  const getPriorityIcon = (priority: number) => {
+    if (priority <= 2) return '🔴';
+    if (priority <= 4) return '🟠';
+    if (priority <= 6) return '🟢';
+    if (priority <= 8) return '🔵';
+    return '⚪';
+  };
+
+  // دریافت نام اولویت
+  const getPriorityName = (priority: number) => {
+    if (priority === 1) return 'بحرانی';
+    if (priority <= 3) return 'بالا';
+    if (priority <= 5) return 'عادی';
+    if (priority <= 7) return 'پایین';
+    return 'خیلی پایین';
   };
 
   const toggleModel = (modelId: string, currentModels: string[], setModels: (m: string[]) => void) => {
@@ -1860,6 +2009,40 @@ export default function ProjectDetailPage() {
                     />
                   </div>
 
+                  {/* نوع فیلد و اولویت */}
+                  <div className="mb-3 grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">نوع فیلد:</label>
+                      <select
+                        value={newFieldType}
+                        onChange={(e) => setNewFieldType(e.target.value)}
+                        className="w-full p-2 border rounded text-sm dark:bg-gray-700 dark:border-gray-600"
+                      >
+                        <option value="temporary">⏱️ موقت/یکبار مصرف</option>
+                        <option value="permanent">🔄 دائمی/تکرارشونده</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">اولویت:</label>
+                      <select
+                        value={newFieldPriority}
+                        onChange={(e) => setNewFieldPriority(parseInt(e.target.value))}
+                        className="w-full p-2 border rounded text-sm dark:bg-gray-700 dark:border-gray-600"
+                      >
+                        <option value={1}>🔴 1 - بحرانی</option>
+                        <option value={2}>🔴 2 - خیلی بالا</option>
+                        <option value={3}>🟠 3 - بالا</option>
+                        <option value={4}>🟠 4 - نسبتاً بالا</option>
+                        <option value={5}>🟢 5 - عادی</option>
+                        <option value={6}>🟢 6 - نسبتاً پایین</option>
+                        <option value={7}>🔵 7 - پایین</option>
+                        <option value={8}>🔵 8 - کم اهمیت</option>
+                        <option value={9}>⚪ 9 - خیلی پایین</option>
+                        <option value={10}>⚪ 10 - کمترین</option>
+                      </select>
+                    </div>
+                  </div>
+
                   {/* نوع اکشن */}
                   <div className="mb-3 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-600">
                     <label className="text-xs text-gray-500 block mb-2">نوع اکشن:</label>
@@ -1966,6 +2149,61 @@ export default function ProjectDetailPage() {
                 </div>
               )}
 
+              {/* کنترل‌های اجرای گروهی */}
+              {dynamicFields.filter((f: any) => !f.archived).length > 0 && (
+                <div className="mb-3 p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg border border-gray-200 dark:border-gray-600">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-3">
+                      <label className="flex items-center gap-2 text-sm cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedFields.length === dynamicFields.filter((f: any) => !f.archived).length && selectedFields.length > 0}
+                          onChange={toggleSelectAll}
+                          className="rounded"
+                        />
+                        انتخاب همه ({dynamicFields.filter((f: any) => !f.archived).length})
+                      </label>
+                      {selectedFields.length > 0 && (
+                        <span className="text-xs text-gray-500">
+                          {selectedFields.length} فیلد انتخاب شده
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {selectedFields.length > 0 && (
+                        <>
+                          <button
+                            onClick={() => setSelectedFields([])}
+                            className="px-2 py-1 text-xs text-gray-600 hover:bg-gray-200 dark:hover:bg-gray-600 rounded"
+                          >
+                            لغو انتخاب
+                          </button>
+                          <button
+                            onClick={executeBatchFields}
+                            disabled={executingBatch}
+                            className="px-4 py-2 bg-orange-500 text-white rounded-lg text-sm hover:bg-orange-600 disabled:opacity-50 flex items-center gap-2"
+                          >
+                            {executingBatch ? (
+                              <>
+                                <span className="animate-spin">⏳</span>
+                                در حال اجرا...
+                              </>
+                            ) : (
+                              <>
+                                ▶️ اجرای گروهی ({selectedFields.length})
+                              </>
+                            )}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">
+                    💡 فیلدها بر اساس اولویت مرتب و اجرا می‌شوند (اولویت ۱ = بالاترین)
+                  </p>
+                </div>
+              )}
+
               {/* فیلتر و لیست فیلدها */}
               {dynamicFields.some((f: any) => f.archived) && (
                 <div className="mb-3 flex items-center gap-2">
@@ -1988,7 +2226,10 @@ export default function ProjectDetailPage() {
                     <p>فیلدی تعریف نشده</p>
                   </div>
                 ) : (
-                  dynamicFields.filter((f: any) => !f.archived || showArchivedFields).map((field: any) => (
+                  dynamicFields
+                    .filter((f: any) => !f.archived || showArchivedFields)
+                    .sort((a: any, b: any) => (a.priority || 5) - (b.priority || 5))
+                    .map((field: any) => (
                     <div
                       key={field.id}
                       className={`p-4 rounded-lg ${field.archived
@@ -2030,6 +2271,50 @@ export default function ProjectDetailPage() {
                                 setDynamicFields(updated);
                               }}
                             />
+                          </div>
+
+                          {/* نوع فیلد و اولویت در حالت ویرایش */}
+                          <div className="mb-3 grid grid-cols-2 gap-3">
+                            <div>
+                              <label className="text-xs text-gray-500 block mb-1">نوع فیلد:</label>
+                              <select
+                                value={field.field_type || 'temporary'}
+                                onChange={(e) => {
+                                  const updated = dynamicFields.map(f =>
+                                    f.id === field.id ? { ...f, field_type: e.target.value } : f
+                                  );
+                                  setDynamicFields(updated);
+                                }}
+                                className="w-full p-2 border rounded text-sm dark:bg-gray-600 dark:border-gray-500"
+                              >
+                                <option value="temporary">⏱️ موقت/یکبار مصرف</option>
+                                <option value="permanent">🔄 دائمی/تکرارشونده</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="text-xs text-gray-500 block mb-1">اولویت:</label>
+                              <select
+                                value={field.priority || 5}
+                                onChange={(e) => {
+                                  const updated = dynamicFields.map(f =>
+                                    f.id === field.id ? { ...f, priority: parseInt(e.target.value) } : f
+                                  );
+                                  setDynamicFields(updated);
+                                }}
+                                className="w-full p-2 border rounded text-sm dark:bg-gray-600 dark:border-gray-500"
+                              >
+                                <option value={1}>🔴 1 - بحرانی</option>
+                                <option value={2}>🔴 2 - خیلی بالا</option>
+                                <option value={3}>🟠 3 - بالا</option>
+                                <option value={4}>🟠 4 - نسبتاً بالا</option>
+                                <option value={5}>🟢 5 - عادی</option>
+                                <option value={6}>🟢 6 - نسبتاً پایین</option>
+                                <option value={7}>🔵 7 - پایین</option>
+                                <option value={8}>🔵 8 - کم اهمیت</option>
+                                <option value={9}>⚪ 9 - خیلی پایین</option>
+                                <option value={10}>⚪ 10 - کمترین</option>
+                              </select>
+                            </div>
                           </div>
 
                           {/* تنظیمات تریگر در حالت ویرایش */}
@@ -2112,6 +2397,30 @@ export default function ProjectDetailPage() {
                         <div>
                           <div className="flex items-center justify-between mb-2">
                             <div className="flex items-center gap-2">
+                              {/* چک‌باکس انتخاب برای اجرای گروهی */}
+                              {!field.archived && (
+                                <input
+                                  type="checkbox"
+                                  checked={selectedFields.includes(field.id)}
+                                  onChange={(e) => {
+                                    if (e.target.checked) {
+                                      setSelectedFields([...selectedFields, field.id]);
+                                    } else {
+                                      setSelectedFields(selectedFields.filter(id => id !== field.id));
+                                    }
+                                  }}
+                                  className="rounded"
+                                  title="انتخاب برای اجرای گروهی"
+                                />
+                              )}
+                              {/* آیکون نوع فیلد */}
+                              <span className="text-sm" title={field.field_type === 'permanent' ? 'دائمی/تکرارشونده' : 'موقت/یکبار مصرف'}>
+                                {field.field_type === 'permanent' ? '🔄' : '⏱️'}
+                              </span>
+                              {/* آیکون اولویت */}
+                              <span className="text-sm" title={`اولویت: ${field.priority || 5} - ${getPriorityName(field.priority || 5)}`}>
+                                {getPriorityIcon(field.priority || 5)}
+                              </span>
                               <span className="font-medium">{field.name}</span>
                               {/* نشانگر نوع اکشن */}
                               {field.action_type === 'github_commit' && (
@@ -2275,6 +2584,60 @@ export default function ProjectDetailPage() {
                                 )}
                               </div>
                             )}
+
+                            {/* بخش پیوست‌ها */}
+                            <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-600">
+                              <div className="flex items-center justify-between mb-2">
+                                <span className="text-xs text-gray-500 flex items-center gap-1">
+                                  📎 پیوست‌ها ({field.attachments?.length || 0})
+                                </span>
+                                <label className="px-2 py-1 bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 text-xs rounded cursor-pointer hover:bg-blue-200 dark:hover:bg-blue-800">
+                                  {uploadingAttachment === field.id ? (
+                                    <span className="animate-pulse">در حال آپلود...</span>
+                                  ) : (
+                                    <>
+                                      + افزودن فایل
+                                      <input
+                                        type="file"
+                                        className="hidden"
+                                        accept="image/*,.pdf,.txt,.json,.md,.csv"
+                                        onChange={(e) => {
+                                          const file = e.target.files?.[0];
+                                          if (file) {
+                                            uploadAttachment(field.id, file);
+                                          }
+                                          e.target.value = '';
+                                        }}
+                                      />
+                                    </>
+                                  )}
+                                </label>
+                              </div>
+                              {field.attachments && field.attachments.length > 0 && (
+                                <div className="flex flex-wrap gap-2">
+                                  {field.attachments.map((att: string, idx: number) => {
+                                    const fileName = att.split('/').pop() || att;
+                                    const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(fileName);
+                                    return (
+                                      <div
+                                        key={idx}
+                                        className="flex items-center gap-1 px-2 py-1 bg-gray-100 dark:bg-gray-600 rounded text-xs group"
+                                      >
+                                        <span>{isImage ? '🖼️' : '📄'}</span>
+                                        <span className="max-w-[100px] truncate" title={fileName}>{fileName}</span>
+                                        <button
+                                          onClick={() => deleteAttachment(field.id, att)}
+                                          className="text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                                          title="حذف پیوست"
+                                        >
+                                          ×
+                                        </button>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
                           </div>
                           )}
                         </div>
