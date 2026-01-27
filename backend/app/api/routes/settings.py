@@ -91,9 +91,36 @@ async def get_system_status():
 
 
 @router.get("/api-keys/status", response_model=ApiKeyStatus)
-async def get_api_keys_status():
-    """وضعیت API keys (فقط بررسی وجود)"""
-    providers = settings.get_available_providers()
+async def get_api_keys_status(db: Session = Depends(get_db)):
+    """وضعیت API keys (فقط بررسی وجود) - چک environment و دیتابیس"""
+
+    # لیست کلیدها برای چک
+    key_mapping = {
+        "openai": ("OPENAI_API_KEY", "api_key_openai"),
+        "claude": ("CLAUDE_API_KEY", "api_key_claude"),
+        "gemini": ("GEMINI_API_KEY", "api_key_gemini"),
+        "deepseek": ("DEEPSEEK_API_KEY", "api_key_deepseek"),
+        "openrouter": ("OPENROUTER_API_KEY", "api_key_openrouter"),
+        "groq": ("GROQ_API_KEY", "api_key_groq"),
+        "perplexity": ("PERPLEXITY_API_KEY", "api_key_perplexity"),
+    }
+
+    providers = {}
+    for name, (env_key, db_key) in key_mapping.items():
+        # اول از environment چک کن
+        key_value = os.environ.get(env_key)
+
+        # اگر در environment نبود، از دیتابیس بخون
+        if not key_value:
+            try:
+                key_value = Setting.get_value(db, db_key)
+                if key_value:
+                    os.environ[env_key] = key_value  # load به environment
+            except:
+                pass
+
+        providers[name] = bool(key_value)
+
     return ApiKeyStatus(
         openai=providers.get("openai", False),
         claude=providers.get("claude", False),
@@ -106,46 +133,40 @@ async def get_api_keys_status():
 
 
 @router.put("/api-keys")
-async def update_api_keys(request: UpdateApiKeysRequest):
-    """آپدیت API keys (ذخیره در environment و فایل .env)"""
+async def update_api_keys(request: UpdateApiKeysRequest, db: Session = Depends(get_db)):
+    """آپدیت API keys (ذخیره در دیتابیس، environment و فایل .env)"""
     try:
         updated = []
         env_updates = {}
 
-        if request.openai:
-            os.environ["OPENAI_API_KEY"] = request.openai
-            env_updates["OPENAI_API_KEY"] = request.openai
-            updated.append("openai")
+        # مپ کلیدها
+        key_configs = [
+            ("openai", request.openai, "OPENAI_API_KEY", "api_key_openai", "OpenAI API Key"),
+            ("claude", request.claude, "CLAUDE_API_KEY", "api_key_claude", "Claude API Key"),
+            ("gemini", request.gemini, "GEMINI_API_KEY", "api_key_gemini", "Gemini API Key"),
+            ("deepseek", request.deepseek, "DEEPSEEK_API_KEY", "api_key_deepseek", "DeepSeek API Key"),
+            ("openrouter", request.openrouter, "OPENROUTER_API_KEY", "api_key_openrouter", "OpenRouter API Key"),
+            ("groq", request.groq, "GROQ_API_KEY", "api_key_groq", "Groq API Key"),
+            ("perplexity", request.perplexity, "PERPLEXITY_API_KEY", "api_key_perplexity", "Perplexity API Key"),
+        ]
 
-        if request.claude:
-            os.environ["CLAUDE_API_KEY"] = request.claude
-            env_updates["CLAUDE_API_KEY"] = request.claude
-            updated.append("claude")
+        for name, value, env_key, db_key, description in key_configs:
+            if value:
+                # ذخیره در environment
+                os.environ[env_key] = value
+                env_updates[env_key] = value
 
-        if request.gemini:
-            os.environ["GEMINI_API_KEY"] = request.gemini
-            env_updates["GEMINI_API_KEY"] = request.gemini
-            updated.append("gemini")
-
-        if request.deepseek:
-            os.environ["DEEPSEEK_API_KEY"] = request.deepseek
-            env_updates["DEEPSEEK_API_KEY"] = request.deepseek
-            updated.append("deepseek")
-
-        if request.openrouter:
-            os.environ["OPENROUTER_API_KEY"] = request.openrouter
-            env_updates["OPENROUTER_API_KEY"] = request.openrouter
-            updated.append("openrouter")
-
-        if request.groq:
-            os.environ["GROQ_API_KEY"] = request.groq
-            env_updates["GROQ_API_KEY"] = request.groq
-            updated.append("groq")
-
-        if request.perplexity:  # 🆕
-            os.environ["PERPLEXITY_API_KEY"] = request.perplexity
-            env_updates["PERPLEXITY_API_KEY"] = request.perplexity
-            updated.append("perplexity")
+                # ذخیره در دیتابیس
+                Setting.set_value(
+                    db=db,
+                    key=db_key,
+                    value=value,
+                    value_type="encrypted",
+                    category="api_keys",
+                    description=description,
+                    is_secret=True
+                )
+                updated.append(name)
 
         # ذخیره در فایل .env
         env_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), ".env")
