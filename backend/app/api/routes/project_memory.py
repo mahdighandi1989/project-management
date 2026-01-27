@@ -1049,9 +1049,19 @@ async def execute_field_trigger(
 
         # ============ دریافت فایل‌های پروژه برای context ============
         from ...models.project import ProjectFile
+        from .settings import get_ai_limits_sync
 
         project_files_context = ""
         try:
+            # دریافت تنظیمات محدودیت‌ها
+            ai_limits = get_ai_limits_sync(db)
+            limits_enabled = ai_limits.get("limits_enabled", False)
+
+            # مقادیر محدودیت (0 = نامحدود)
+            max_files = ai_limits.get("max_files_for_context", 0) if limits_enabled else 0
+            max_chars_per_file = ai_limits.get("max_chars_per_file", 0) if limits_enabled else 0
+            max_total_chars = ai_limits.get("max_total_context_chars", 0) if limits_enabled else 0
+
             # دریافت فایل‌های پروژه
             files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
 
@@ -1067,17 +1077,17 @@ async def execute_field_trigger(
                 # ساخت context از فایل‌های مرتبط
                 relevant_files = []
                 total_chars = 0
-                max_chars = 50000  # حداکثر 50K کاراکتر برای context
 
-                # اولویت: فایل هدف
+                # اولویت: فایل هدف (بدون محدودیت)
                 if target_file_content and target_path:
+                    content = target_file_content if max_chars_per_file == 0 else target_file_content[:max_chars_per_file]
                     relevant_files.append({
                         "path": target_path,
-                        "content": target_file_content
+                        "content": content
                     })
-                    total_chars += len(target_file_content)
+                    total_chars += len(content)
 
-                # بقیه فایل‌های کد (py, ts, tsx, js, jsx)
+                # بقیه فایل‌های کد
                 code_extensions = ['py', 'ts', 'tsx', 'js', 'jsx', 'java', 'go', 'rs', 'rb', 'php', 'vue', 'svelte']
 
                 # اولویت‌بندی فایل‌ها بر اساس اهمیت
@@ -1093,23 +1103,30 @@ async def execute_field_trigger(
 
                 sorted_files = sorted(files, key=file_score, reverse=True)
 
+                files_added = 1 if target_file_content else 0
                 for f in sorted_files:
-                    if total_chars >= max_chars:
+                    # چک محدودیت تعداد فایل (0 = نامحدود)
+                    if max_files > 0 and files_added >= max_files:
+                        break
+                    # چک محدودیت کل کاراکترها (0 = نامحدود)
+                    if max_total_chars > 0 and total_chars >= max_total_chars:
                         break
                     if f.file_path == target_path:  # قبلاً اضافه شده
                         continue
                     if f.content and f.file_type in code_extensions:
-                        content = f.content[:8000] if len(f.content) > 8000 else f.content
+                        # اگر محدودیت فعال نیست، همه محتوا رو بگیر
+                        content = f.content if max_chars_per_file == 0 else f.content[:max_chars_per_file]
                         relevant_files.append({
                             "path": f.file_path,
                             "content": content
                         })
                         total_chars += len(content)
+                        files_added += 1
 
-                # ساخت متن context
+                # ساخت متن context (بدون محدودیت تعداد در خروجی)
                 if relevant_files:
-                    project_files_context = "\n\n=== فایل‌های پروژه ===\n"
-                    for rf in relevant_files[:20]:  # حداکثر 20 فایل
+                    project_files_context = f"\n\n=== فایل‌های پروژه ({len(relevant_files)} فایل، {total_chars:,} کاراکتر) ===\n"
+                    for rf in relevant_files:
                         project_files_context += f"\n--- {rf['path']} ---\n```\n{rf['content']}\n```\n"
         except Exception as e:
             project_files_context = f"\n\n[خطا در خواندن فایل‌های پروژه: {str(e)}]"
@@ -1676,17 +1693,26 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
         target_path = target_field.get("target_path")
 
         # دریافت فایل‌های پروژه برای context
+        from .settings import get_ai_limits_sync
         project_files_context = ""
         try:
+            # دریافت تنظیمات محدودیت‌ها
+            ai_limits = get_ai_limits_sync(db)
+            limits_enabled = ai_limits.get("limits_enabled", False)
+
+            # مقادیر محدودیت (0 = نامحدود)
+            max_files = ai_limits.get("max_files_for_context", 0) if limits_enabled else 0
+            max_chars_per_file = ai_limits.get("max_chars_per_file", 0) if limits_enabled else 0
+            max_total_chars = ai_limits.get("max_total_context_chars", 0) if limits_enabled else 0
+
             files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
             if files:
                 relevant_files = []
                 total_chars = 0
-                max_chars = 50000  # افزایش به 50K
 
                 # اولویت‌بندی فایل‌ها
                 priority_keywords = ['auth', 'login', 'user', 'route', 'api', 'main', 'app', 'index', 'config']
-                code_extensions = ['py', 'ts', 'tsx', 'js', 'jsx', 'vue', 'svelte']
+                code_extensions = ['py', 'ts', 'tsx', 'js', 'jsx', 'vue', 'svelte', 'java', 'go', 'rs', 'rb', 'php']
 
                 def file_score(f):
                     score = 0
@@ -1698,17 +1724,22 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
 
                 sorted_files = sorted(files, key=file_score, reverse=True)
 
-                for f in sorted_files[:30]:
-                    if total_chars >= max_chars:
+                files_added = 0
+                for f in sorted_files:
+                    # چک محدودیت‌ها (0 = نامحدود)
+                    if max_files > 0 and files_added >= max_files:
+                        break
+                    if max_total_chars > 0 and total_chars >= max_total_chars:
                         break
                     if f.content and f.file_type in code_extensions:
-                        content = f.content[:6000] if len(f.content) > 6000 else f.content
+                        content = f.content if max_chars_per_file == 0 else f.content[:max_chars_per_file]
                         relevant_files.append({"path": f.file_path, "content": content})
                         total_chars += len(content)
+                        files_added += 1
 
                 if relevant_files:
-                    project_files_context = "\n\n=== فایل‌های پروژه ===\n"
-                    for rf in relevant_files[:20]:
+                    project_files_context = f"\n\n=== فایل‌های پروژه ({len(relevant_files)} فایل) ===\n"
+                    for rf in relevant_files:
                         project_files_context += f"\n--- {rf['path']} ---\n```\n{rf['content']}\n```\n"
         except:
             pass
