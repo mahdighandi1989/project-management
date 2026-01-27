@@ -450,7 +450,7 @@ export default function SettingsPage() {
               </p>
             </div>
           </div>
-        ) : (
+        ) : activeTab === 'config' ? (
           // پیکربندی
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
             <h2 className="font-bold text-lg mb-4">پیکربندی سیستم</h2>
@@ -684,7 +684,7 @@ export default function SettingsPage() {
               {saving ? 'در حال ذخیره...' : '💾 ذخیره تنظیمات'}
             </button>
           </div>
-        )}
+        ) : null}
 
         {/* لینک‌ها */}
         <div className="mt-6 flex justify-center gap-4 text-sm">
