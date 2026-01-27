@@ -290,6 +290,12 @@ export default function ProjectDetailPage() {
   const [savingSyncSettings, setSavingSyncSettings] = useState(false);
   const [syncIntervalTimer, setSyncIntervalTimer] = useState<NodeJS.Timeout | null>(null);
 
+  // Render Service Selector State
+  const [showServiceSelector, setShowServiceSelector] = useState(false);
+  const [availableRenderServices, setAvailableRenderServices] = useState<{id: string; name: string; type: string}[]>([]);
+  const [selectedRenderServices, setSelectedRenderServices] = useState<string[]>([]);
+  const [savedRenderServices, setSavedRenderServices] = useState<{id: string; name: string}[]>([]);
+
   useEffect(() => {
     if (projectId) {
       loadProject();
@@ -1208,29 +1214,10 @@ export default function ProjectDetailPage() {
         // اگر سرویس مطابق پیدا نشد ولی لیست سرویس‌ها موجوده
         if (data.deploy_result?.available_services || data.available_services) {
           const services = data.deploy_result?.available_services || data.available_services;
-          const serviceList = services.map((s: any) => `${s.name} (${s.id})`).join('\n');
-
-          const selectedService = prompt(
-            `سرویسی با نام این پروژه در Render پیدا نشد.\n\nلطفاً از لیست زیر، ID سرویس مورد نظر را کپی کنید:\n\n${serviceList}\n\nService ID را وارد کنید:`
-          );
-
-          if (selectedService && selectedService.trim()) {
-            // ذخیره service_id در پروژه
-            try {
-              const saveRes = await fetch(`${API_BASE}/api/projects/${projectId}/deploy/set-service-id?service_id=${encodeURIComponent(selectedService.trim())}`, {
-                method: 'POST',
-              });
-              const saveData = await saveRes.json();
-
-              if (saveData.success) {
-                showSuccess('✅ Service ID ذخیره شد. دوباره Deploy را امتحان کنید.');
-              } else {
-                showError('خطا در ذخیره Service ID');
-              }
-            } catch {
-              showError('خطا در ذخیره');
-            }
-          }
+          // نمایش مودال انتخاب سرویس با چک‌باکس
+          setAvailableRenderServices(services);
+          setSelectedRenderServices([]);
+          setShowServiceSelector(true);
           return;
         }
 
@@ -1250,6 +1237,46 @@ export default function ProjectDetailPage() {
     } finally {
       setDeploying(false);
     }
+  };
+
+  // ذخیره سرویس‌های Render انتخاب شده
+  const saveSelectedRenderServices = async () => {
+    if (selectedRenderServices.length === 0) {
+      showError('لطفاً حداقل یک سرویس انتخاب کنید');
+      return;
+    }
+
+    try {
+      // ذخیره سرویس‌های انتخاب شده در پروژه
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/deploy/set-services`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          service_ids: selectedRenderServices,
+          services: availableRenderServices.filter(s => selectedRenderServices.includes(s.id))
+        }),
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        showSuccess(`✅ ${selectedRenderServices.length} سرویس ذخیره شد. حالا Deploy را بزنید.`);
+        setShowServiceSelector(false);
+        setSavedRenderServices(availableRenderServices.filter(s => selectedRenderServices.includes(s.id)));
+      } else {
+        showError(data.error || 'خطا در ذخیره');
+      }
+    } catch {
+      showError('خطا در ارتباط');
+    }
+  };
+
+  // تغییر انتخاب سرویس
+  const toggleServiceSelection = (serviceId: string) => {
+    setSelectedRenderServices(prev =>
+      prev.includes(serviceId)
+        ? prev.filter(id => id !== serviceId)
+        : [...prev, serviceId]
+    );
   };
 
   const generateMoreFiles = async () => {
@@ -3015,6 +3042,87 @@ export default function ProjectDetailPage() {
                     لغو
                   </button>
                 </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* مودال انتخاب سرویس‌های Render */}
+        {showServiceSelector && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl max-w-lg w-full max-h-[80vh] overflow-auto">
+              <div className="p-4 border-b dark:border-gray-700 flex items-center justify-between sticky top-0 bg-white dark:bg-gray-800">
+                <h3 className="font-bold flex items-center gap-2">
+                  <span>🚀</span>
+                  انتخاب سرویس‌های Render
+                </h3>
+                <button
+                  onClick={() => setShowServiceSelector(false)}
+                  className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="p-4">
+                <p className="text-sm text-gray-500 mb-4">
+                  سرویسی با نام این پروژه پیدا نشد. لطفاً سرویس‌های مرتبط را انتخاب کنید:
+                </p>
+
+                <div className="space-y-2 max-h-64 overflow-auto">
+                  {availableRenderServices.map((service) => (
+                    <label
+                      key={service.id}
+                      className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition ${
+                        selectedRenderServices.includes(service.id)
+                          ? 'bg-orange-100 dark:bg-orange-900/30 border-2 border-orange-500'
+                          : 'bg-gray-50 dark:bg-gray-700 border-2 border-transparent hover:bg-gray-100 dark:hover:bg-gray-600'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedRenderServices.includes(service.id)}
+                        onChange={() => toggleServiceSelection(service.id)}
+                        className="w-5 h-5 rounded text-orange-500 focus:ring-orange-500"
+                      />
+                      <div className="flex-1">
+                        <div className="font-medium">{service.name}</div>
+                        <div className="text-xs text-gray-500 font-mono">{service.id}</div>
+                      </div>
+                      <span className="text-xs px-2 py-1 bg-gray-200 dark:bg-gray-600 rounded">
+                        {service.type}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+
+                {selectedRenderServices.length > 0 && (
+                  <div className="mt-4 p-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
+                    <div className="text-sm text-green-700 dark:text-green-300">
+                      ✅ {selectedRenderServices.length} سرویس انتخاب شد
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex gap-2 mt-4">
+                  <button
+                    onClick={saveSelectedRenderServices}
+                    disabled={selectedRenderServices.length === 0}
+                    className="flex-1 px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50"
+                  >
+                    💾 ذخیره و Deploy
+                  </button>
+                  <button
+                    onClick={() => setShowServiceSelector(false)}
+                    className="px-4 py-2 bg-gray-200 dark:bg-gray-700 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600"
+                  >
+                    لغو
+                  </button>
+                </div>
+
+                <p className="text-xs text-gray-400 mt-3">
+                  💡 این انتخاب ذخیره میشه و دیگه نیازی به انتخاب مجدد نیست.
+                  برای تغییر، از تنظیمات Deploy استفاده کنید.
+                </p>
               </div>
             </div>
           </div>

@@ -256,19 +256,52 @@ async def trigger_render_deploy(
 
     service_id = render_service_id
     repo_name = None
+    saved_service_ids = []
 
-    # دریافت نام repo از پروژه
-    if not service_id and project_id and db_session:
+    # دریافت نام repo و سرویس‌های ذخیره شده از پروژه
+    if project_id and db_session:
         try:
             project = db_session.query(Project).filter(Project.id == project_id).first()
             if project and project.extra_data:
                 extra = json.loads(project.extra_data)
-                service_id = extra.get("render_service_id")
+                # ابتدا چک کن آیا چند سرویس ذخیره شده
+                saved_service_ids = extra.get("render_service_ids", [])
+                if not service_id:
+                    service_id = extra.get("render_service_id")
                 repo_name = extra.get("repo")
                 project_name = project_name or project.name
-                logger.info(f"[Render Deploy] Project: {project_name}, repo: {repo_name}, service_id: {service_id}")
+                logger.info(f"[Render Deploy] Project: {project_name}, saved_services: {len(saved_service_ids)}, service_id: {service_id}")
         except Exception as e:
             logger.warning(f"[Render Deploy] Error reading project extra_data: {e}")
+
+    # اگر چند سرویس ذخیره شده، همه رو deploy کن
+    if saved_service_ids and len(saved_service_ids) > 0:
+        results = []
+        for svc_id in saved_service_ids:
+            try:
+                result = await render_service.trigger_deploy(svc_id)
+                results.append({
+                    "service_id": svc_id,
+                    "success": result.get("success"),
+                    "deploy_id": result.get("deploy_id"),
+                    "error": result.get("error"),
+                })
+            except Exception as e:
+                results.append({
+                    "service_id": svc_id,
+                    "success": False,
+                    "error": str(e),
+                })
+
+        await render_service.close()
+        success_count = sum(1 for r in results if r.get("success"))
+
+        return {
+            "success": success_count > 0,
+            "multiple_services": True,
+            "services_deployed": results,
+            "message": f"Deploy triggered for {success_count}/{len(results)} services",
+        }
 
     # اگر service_id نداریم، سعی کن از روی نام پروژه پیدا کنی
     if not service_id:
@@ -1461,6 +1494,72 @@ async def set_render_service_id(
         "success": True,
         "message": f"Render service ID ذخیره شد: {service_id}",
         "service_id": service_id
+    }
+
+
+class SetServicesRequest(BaseModel):
+    """درخواست ذخیره چند سرویس Render"""
+    service_ids: List[str]
+    services: List[dict] = []
+
+
+@router.post("/{project_id}/deploy/set-services")
+async def set_render_services(
+    project_id: str,
+    request: SetServicesRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    ذخیره چند سرویس Render برای پروژه
+    برای پروژه‌هایی که هم frontend و هم backend دارند
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت و بروزرسانی extra_data
+    try:
+        extra_data = json.loads(project.extra_data) if project.extra_data else {}
+    except:
+        extra_data = {}
+
+    # ذخیره لیست سرویس‌ها
+    extra_data["render_services"] = request.services
+    extra_data["render_service_ids"] = request.service_ids
+    # برای سازگاری با کد قبلی، اولین سرویس رو هم ذخیره کن
+    if request.service_ids:
+        extra_data["render_service_id"] = request.service_ids[0]
+
+    project.extra_data = json.dumps(extra_data, ensure_ascii=False)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": f"{len(request.service_ids)} سرویس Render ذخیره شد",
+        "services": request.services,
+        "service_ids": request.service_ids
+    }
+
+
+@router.get("/{project_id}/deploy/saved-services")
+async def get_saved_render_services(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """دریافت سرویس‌های Render ذخیره شده برای پروژه"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    try:
+        extra_data = json.loads(project.extra_data) if project.extra_data else {}
+    except:
+        extra_data = {}
+
+    return {
+        "success": True,
+        "services": extra_data.get("render_services", []),
+        "service_ids": extra_data.get("render_service_ids", []),
     }
 
 
