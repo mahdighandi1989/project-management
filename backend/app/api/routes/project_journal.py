@@ -604,15 +604,25 @@ async def generate_engineering_report(
         {"priority": "high/medium/low", "title": "عنوان", "description": "توضیحات", "effort": "کم/متوسط/زیاد"}
     ],
 
+    "field_management": {
+        "fields_to_archive": ["id_فیلدهایی که انجام شده یا دیگر نیاز نیست"],
+        "fields_to_merge": [
+            {"source_ids": ["id1", "id2"], "merged_name": "نام جدید", "merged_value": "دستور ادغام‌شده"}
+        ],
+        "fields_to_update": [
+            {"id": "id_فیلد", "new_value": "دستور جدید", "new_priority": 3}
+        ]
+    },
+
     "roadmap": {
         "immediate": [
-            {"task": "کار فوری 1", "description": "توضیحات کامل برای تولید کد", "action_type": "github_commit", "target_path": "path/to/file.py", "priority": 1}
+            {"task": "کار فوری 1", "description": "توضیحات کامل برای تولید کد", "action_type": "github_commit", "target_path": "path/to/file.py", "priority": 1, "field_type": "temporary"}
         ],
         "short_term": [
-            {"task": "کار کوتاه‌مدت 1", "description": "توضیحات", "action_type": "github_commit", "target_path": "path/to/file.py", "priority": 2}
+            {"task": "کار کوتاه‌مدت 1", "description": "توضیحات", "action_type": "github_commit", "target_path": "path/to/file.py", "priority": 3, "field_type": "temporary"}
         ],
         "long_term": [
-            {"task": "کار بلندمدت 1", "description": "توضیحات", "action_type": "display", "priority": 3}
+            {"task": "کار بلندمدت 1", "description": "توضیحات", "action_type": "display", "priority": 7, "field_type": "permanent"}
         ]
     },
 
@@ -627,7 +637,10 @@ async def generate_engineering_report(
 ⚠️ مهم:
 - فقط JSON خروجی بده، بدون هیچ توضیح اضافی
 - در roadmap، برای هر تسک که نیاز به تولید کد دارد، action_type را "github_commit" و target_path را مسیر فایل هدف قرار بده
-- توضیحات هر تسک باید به قدری کامل باشد که AI بتواند مستقیماً کد تولید کند"""
+- توضیحات هر تسک باید به قدری کامل باشد که AI بتواند مستقیماً کد تولید کند
+- در field_management، فیلدهای موجود را بررسی کن و تصمیم بگیر کدام‌ها بایگانی، ادغام یا به‌روزرسانی شوند
+- priority از 1 (بالاترین) تا 10 (پایین‌ترین): 1-2=فوری، 3-4=بالا، 5=عادی، 6-7=پایین، 8-10=خیلی پایین
+- field_type: "permanent" برای دائمی/تکرارشونده، "temporary" برای یکبار مصرف"""
 
     user_prompt = f"""پروژه: {project.name}
 توضیحات: {project.description or 'ندارد'}
@@ -678,18 +691,77 @@ async def generate_engineering_report(
         if not report_data:
             report_data = {"raw_content": report_content}
 
-        # تولید خودکار فیلدها از roadmap
+        # مدیریت هوشمند فیلدها
         created_fields = []
-        if auto_create_fields and report_data.get("roadmap"):
-            roadmap = report_data["roadmap"]
+        archived_count = 0
+        merged_count = 0
+        updated_count = 0
 
-            # فیلدهای فوری و کوتاه‌مدت
+        if auto_create_fields:
+            # 1. پردازش field_management - بایگانی، ادغام، به‌روزرسانی
+            field_mgmt = report_data.get("field_management", {})
+
+            # بایگانی فیلدها
+            for field_id in field_mgmt.get("fields_to_archive", []):
+                for field in existing_fields:
+                    if field.get("id") == field_id and not field.get("archived"):
+                        field["archived"] = True
+                        field["archived_at"] = datetime.utcnow().isoformat()
+                        field["archived_reason"] = "report review"
+                        archived_count += 1
+
+            # ادغام فیلدها
+            for merge_info in field_mgmt.get("fields_to_merge", []):
+                source_ids = merge_info.get("source_ids", [])
+                if len(source_ids) >= 2:
+                    merged_attachments = []
+                    for sid in source_ids:
+                        for field in existing_fields:
+                            if field.get("id") == sid:
+                                merged_attachments.extend(field.get("attachments", []))
+                                field["archived"] = True
+                                field["archived_at"] = datetime.utcnow().isoformat()
+                                field["archived_reason"] = "merged"
+
+                    merged_field = {
+                        "id": str(uuid.uuid4()),
+                        "name": merge_info.get("merged_name", "فیلد ادغام‌شده"),
+                        "value": merge_info.get("merged_value", ""),
+                        "target_models": ["claude"],
+                        "action_type": "display",
+                        "field_type": "permanent",
+                        "priority": 5,
+                        "attachments": merged_attachments,
+                        "trigger": {"enabled": False, "interval_minutes": 60, "interval_type": "minutes"},
+                        "created_from_report": True,
+                        "merged_from": source_ids,
+                    }
+                    existing_fields.append(merged_field)
+                    merged_count += 1
+
+            # به‌روزرسانی فیلدها
+            for update_info in field_mgmt.get("fields_to_update", []):
+                field_id = update_info.get("id")
+                for field in existing_fields:
+                    if field.get("id") == field_id and not field.get("archived"):
+                        if update_info.get("new_value"):
+                            field["value"] = update_info["new_value"]
+                        if update_info.get("new_priority"):
+                            field["priority"] = update_info["new_priority"]
+                        field["updated_at"] = datetime.utcnow().isoformat()
+                        updated_count += 1
+
+            # 2. تولید فیلدهای جدید از roadmap
+            roadmap = report_data.get("roadmap", {})
+
             for phase_name, phase_tasks in [("immediate", roadmap.get("immediate", [])), ("short_term", roadmap.get("short_term", []))]:
-                for task in phase_tasks[:5]:  # حداکثر 5 تسک از هر فاز
+                for task in phase_tasks[:5]:
                     field_name = task.get("task", "تسک جدید")
                     field_value = task.get("description", "")
                     action_type = task.get("action_type", "display")
                     target_path = task.get("target_path")
+                    field_type = task.get("field_type", "temporary")
+                    priority = task.get("priority", 5)
 
                     # بررسی وجود فیلد مشابه
                     existing = any(
@@ -705,21 +777,24 @@ async def generate_engineering_report(
                             "target_models": ["claude"],
                             "action_type": action_type,
                             "target_path": target_path,
-                            "archive_after_run": True,
+                            "archive_after_run": field_type == "temporary",
                             "deploy_after_commit": action_type == "github_commit",
-                            "trigger": {
-                                "enabled": False,
-                                "interval_minutes": 60,
-                                "interval_type": "minutes"
-                            },
+                            "field_type": field_type,
+                            "priority": priority,
+                            "attachments": [],
+                            "trigger": {"enabled": False, "interval_minutes": 60, "interval_type": "minutes"},
                             "created_from_report": True,
-                            "priority": task.get("priority", 99)
                         }
                         existing_fields.append(new_field)
                         created_fields.append(new_field["name"])
 
-            # ذخیره فیلدهای جدید
-            if created_fields:
+            # 3. مرتب‌سازی براساس اولویت و ذخیره
+            active = [f for f in existing_fields if not f.get("archived")]
+            archived = [f for f in existing_fields if f.get("archived")]
+            active.sort(key=lambda x: x.get("priority", 5))
+            existing_fields = active + archived
+
+            if created_fields or archived_count or merged_count or updated_count:
                 project.dynamic_fields = json.dumps(existing_fields, ensure_ascii=False)
                 db.commit()
 
@@ -754,6 +829,9 @@ async def generate_engineering_report(
             "message": f"گزارش مهندسی جامع تولید شد",
             "fields_created": created_fields,
             "fields_count": len(created_fields),
+            "fields_archived": archived_count,
+            "fields_merged": merged_count,
+            "fields_updated": updated_count,
             "project_health_score": report_data.get("project_health", {}).get("score"),
             "bugs_found": len(report_data.get("bugs_and_issues", [])),
             "recommendations_count": len(report_data.get("recommendations", []))
