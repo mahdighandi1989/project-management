@@ -1102,6 +1102,35 @@ export default function ProjectDetailPage() {
     }
   };
 
+  // سینک فایل‌ها از GitHub
+  const syncFromGitHub = async () => {
+    if (!confirm('آیا می‌خواهید آخرین تغییرات را از GitHub دریافت کنید؟\n\nاین عملیات فایل‌های پروژه را با GitHub همگام‌سازی می‌کند.')) {
+      return;
+    }
+
+    setLoading(true);
+    showSuccess('در حال سینک با GitHub...');
+
+    try {
+      const res = await fetch(`${API_BASE}/api/github/imported/${projectId}/refresh`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        showSuccess(`✅ سینک موفق! ${data.files_updated || 0} فایل بروزرسانی شد`);
+        // ریلود پروژه
+        loadProject();
+      } else {
+        showError(data.detail || 'خطا در سینک');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط با سرور');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // ارسال پیام به AI
   const sendChatMessage = async () => {
     if (!chatPrompt.trim()) {
@@ -1247,16 +1276,26 @@ export default function ProjectDetailPage() {
                 </button>
               </>
             )}
-            {/* دکمه تست برای پروژه‌های GitHub */}
+            {/* دکمه‌های GitHub */}
             {project.project_type === 'github_import' && (
-              <button
-                onClick={testRenderDeploy}
-                disabled={deploying}
-                className="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50"
-                title="تست اتصال به Render و دیباگ مشکلات Deploy"
-              >
-                {deploying ? '⏳...' : '🧪 تست Deploy'}
-              </button>
+              <>
+                <button
+                  onClick={syncFromGitHub}
+                  disabled={loading}
+                  className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50"
+                  title="دریافت آخرین تغییرات از GitHub"
+                >
+                  {loading ? '⏳...' : '🔄 سینک از GitHub'}
+                </button>
+                <button
+                  onClick={testRenderDeploy}
+                  disabled={deploying}
+                  className="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50"
+                  title="تست اتصال به Render و دیباگ مشکلات Deploy"
+                >
+                  {deploying ? '⏳...' : '🧪 تست Deploy'}
+                </button>
+              </>
             )}
             <Link
               href="/projects"
