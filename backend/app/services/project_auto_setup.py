@@ -267,10 +267,12 @@ async def generate_intelligent_setup(
     project_description: str,
     insights: Dict[str, Any],
     sample_files: List[Dict],
+    existing_fields: List[Dict] = None,
     model_id: str = "claude"
 ) -> Dict[str, Any]:
     """
     تولید دستورات و فیلدهای کاملاً اختصاصی با AI
+    با پشتیبانی از action_type و archive_after_run
     """
     try:
         from .ai_manager import get_ai_manager
@@ -290,6 +292,19 @@ async def generate_intelligent_setup(
 
         files_text = "\n\n".join(files_detail) if files_detail else "فایلی برای نمایش نیست"
 
+        # لیست فایل‌های موجود برای تشخیص چه چیزی کم است
+        existing_files = [f.get("path", f.get("file_path", "")) for f in sample_files]
+        file_list = "\n".join([f"- {p}" for p in existing_files[:30]])
+
+        # لیست فیلدهای موجود (غیر بایگانی)
+        existing_field_names = []
+        if existing_fields:
+            for ef in existing_fields:
+                if not ef.get("archived"):
+                    existing_field_names.append(ef.get("name", ""))
+
+        existing_fields_text = ", ".join(existing_field_names) if existing_field_names else "هیچ"
+
         prompt = f"""تو یک معمار نرم‌افزار و DevOps متخصص هستی. این پروژه را تحلیل کن و دستورات دقیق و اختصاصی برای کار با AI تولید کن.
 
 ## اطلاعات پروژه
@@ -304,39 +319,64 @@ async def generate_intelligent_setup(
 - **مدل‌های دیتابیس**: {', '.join(insights.get('database_models', [])[:5]) or 'ندارد'}
 - **وابستگی‌ها**: {', '.join(insights.get('dependencies', [])[:15]) or 'نامشخص'}
 
-## نمونه فایل‌های پروژه
+## فایل‌های موجود در پروژه
+{file_list}
+
+## نمونه محتوای فایل‌ها
 {files_text}
+
+## فیلدهای فعلی (غیر بایگانی)
+{existing_fields_text}
 
 ## وظیفه تو
 بر اساس تحلیل دقیق این پروژه، یک JSON با این ساختار برگردان:
 
 {{
-    "memory_instructions": "دستورات ثابت و اختصاصی برای این پروژه (۳۰۰-۵۰۰ کاراکتر فارسی). شامل: نحوه کدنویسی، استانداردها، نکات مهم این پروژه خاص، چیزهایی که باید رعایت شود",
+    "memory_instructions": "دستورات ثابت و اختصاصی برای این پروژه (۵۰۰-۱۰۰۰ کاراکتر فارسی). شامل: نحوه کدنویسی، استانداردها، naming conventions، ساختار فایل‌ها، نکات مهم این پروژه خاص",
 
     "dynamic_fields": [
         {{
             "name": "نام فیلد (فارسی، مرتبط با این پروژه)",
-            "value": "دستور دقیق برای AI (فارسی)",
+            "value": "دستور دقیق برای AI (فارسی) - توضیح کامل چه کدی تولید شود",
             "why": "چرا این فیلد برای این پروژه مهمه",
-            "recommended_model": "openai یا claude یا deepseek (بر اساس نوع کار)",
-            "needs_trigger": true/false,
-            "trigger_hours": 24
+            "recommended_model": "claude یا openai یا deepseek",
+            "action_type": "display یا github_commit یا github_multi_commit",
+            "target_path": "مسیر فایل در ریپو اگر action_type=github_commit باشد (مثل backend/models/user.py)",
+            "archive_after_run": true/false,
+            "needs_trigger": false,
+            "is_one_time": true/false
         }}
     ],
 
-    "project_summary": "خلاصه ۲-۳ خطی از ماهیت و هدف پروژه",
+    "missing_files": [
+        {{
+            "path": "مسیر فایلی که در پروژه وجود ندارد ولی باید ایجاد شود",
+            "description": "توضیح کوتاه این فایل چیست",
+            "priority": "high یا medium یا low"
+        }}
+    ],
+
+    "project_summary": "خلاصه ۳-۵ خطی از ماهیت، هدف و وضعیت فعلی پروژه",
 
     "key_recommendations": ["توصیه ۱", "توصیه ۲", "توصیه ۳"]
 }}
 
+## راهنمای انتخاب action_type:
+- **display**: فقط برای مشاوره، بررسی کد، سوال جواب - نتیجه فقط در ژورنال نمایش داده می‌شود
+- **github_commit**: وقتی باید یک فایل خاص در ریپو ایجاد یا بروزرسانی شود - حتماً target_path بده
+- **github_multi_commit**: وقتی باید چند فایل مرتبط تولید شود (مثل model + schema + route)
+
+## راهنمای archive_after_run:
+- **true**: برای کارهای یکبار مصرف مثل ایجاد فایل‌های اولیه، setup، migration
+- **false**: برای کارهای تکرارشونده مثل بررسی کد، تحلیل، گزارش‌گیری
+
 نکات مهم:
-- دستورات باید کاملاً اختصاصی این پروژه باشند، نه کلی
-- حداکثر ۴ فیلد پویا تعریف کن
-- فیلدها باید واقعاً مفید و عملی باشند
-- از تحلیل کدها و ساختار پروژه استفاده کن
-- اگه پروژه ترید/مالی است، روی ریسک و دقت تمرکز کن
-- اگه وب اپ است، روی UX و امنیت تمرکز کن
-- اگه API است، روی مستندسازی و تست تمرکز کن"""
+- حداقل ۲ و حداکثر ۶ فیلد پویا تعریف کن
+- حداقل ۱ فیلد یکبار مصرف (archive_after_run=true, action_type=github_commit) برای ایجاد فایل‌های کمبود
+- حداقل ۱ فیلد تکرارشونده برای نظارت و بهبود
+- فیلدهای github_commit باید دستور کاملی داشته باشند تا AI بتواند فایل کامل تولید کند
+- از ساختار و naming convention پروژه پیروی کن
+- فیلدهای تکراری با فیلدهای موجود ({existing_fields_text}) ایجاد نکن"""
 
         messages = [
             Message(role="system", content="تو یک معمار نرم‌افزار متخصص هستی که پروژه‌ها را تحلیل می‌کنی. پاسخ را فقط به صورت JSON معتبر بده."),
@@ -383,6 +423,19 @@ async def generate_intelligent_setup(
                 content = content[:end + 1]
 
         result = json.loads(content)
+
+        # اعتبارسنجی و تکمیل فیلدها
+        if "dynamic_fields" in result:
+            for field in result["dynamic_fields"]:
+                # مقادیر پیش‌فرض برای فیلدهای جدید
+                if "action_type" not in field:
+                    field["action_type"] = "display"
+                if "archive_after_run" not in field:
+                    field["archive_after_run"] = field.get("is_one_time", False)
+                if field["action_type"] == "github_commit" and not field.get("target_path"):
+                    # اگه مسیر نداره، به display تغییر بده
+                    field["action_type"] = "display"
+
         return {
             "success": True,
             "data": result,
@@ -444,9 +497,25 @@ async def auto_setup_project_memory(
 ) -> Dict[str, Any]:
     """
     راه‌اندازی خودکار هوشمند حافظه و فیلدهای پویا
+    با حفظ فیلدهای بایگانی شده و به‌روزرسانی هوشمند
     """
     try:
         logger.info(f"Starting intelligent auto-setup for project {project_id}")
+
+        # دریافت فیلدهای فعلی برای حفظ فیلدهای بایگانی شده
+        existing_fields = []
+        archived_fields = []
+        if db_session:
+            from ..models.project import Project
+            project = db_session.query(Project).filter(Project.id == project_id).first()
+            if project and project.dynamic_fields:
+                try:
+                    existing_fields = json.loads(project.dynamic_fields)
+                    # جدا کردن فیلدهای بایگانی شده
+                    archived_fields = [f for f in existing_fields if f.get("archived")]
+                    existing_fields = [f for f in existing_fields if not f.get("archived")]
+                except:
+                    pass
 
         # مرحله ۱: تحلیل عمیق پروژه
         insights = extract_project_insights(files)
@@ -469,7 +538,7 @@ async def auto_setup_project_memory(
         if len(important_files) < 3:
             important_files = files[:15]
         else:
-            important_files = important_files[:10]
+            important_files = important_files[:12]
 
         # مرحله ۲: تولید دستورات با AI
         ai_result = None
@@ -480,6 +549,7 @@ async def auto_setup_project_memory(
                 project_description=project_description,
                 insights=insights,
                 sample_files=important_files,
+                existing_fields=existing_fields,  # ارسال فیلدهای موجود
                 model_id=best_model
             )
 
@@ -498,6 +568,9 @@ async def auto_setup_project_memory(
             dynamic_fields = []
             for ai_field in data.get("dynamic_fields", []):
                 recommended_model = ai_field.get("recommended_model", "claude")
+                action_type = ai_field.get("action_type", "display")
+                target_path = ai_field.get("target_path")
+
                 field = {
                     "id": f"field_{uuid.uuid4().hex[:8]}",
                     "name": ai_field.get("name", "فیلد"),
@@ -505,15 +578,24 @@ async def auto_setup_project_memory(
                     "target_models": [recommended_model] if recommended_model != "all" else ["all"],
                     "trigger": {
                         "enabled": ai_field.get("needs_trigger", False),
-                        "interval_minutes": ai_field.get("trigger_hours", 24) * 60,
+                        "interval_minutes": ai_field.get("trigger_hours", 24) * 60 if ai_field.get("trigger_hours") else 1440,
                         "interval_type": "minutes"
                     },
+                    # فیلدهای جدید
+                    "action_type": action_type,
+                    "target_path": target_path if action_type == "github_commit" else None,
+                    "archive_after_run": ai_field.get("archive_after_run", False),
+                    # متادیتا
                     "created_at": datetime.utcnow().isoformat(),
                     "auto_generated": True,
                     "ai_generated": True,
-                    "reason": ai_field.get("why", "")
+                    "reason": ai_field.get("why", ""),
+                    "is_one_time": ai_field.get("is_one_time", ai_field.get("archive_after_run", False))
                 }
                 dynamic_fields.append(field)
+
+            # اضافه کردن فیلدهای بایگانی شده قبلی
+            all_fields = dynamic_fields + archived_fields
 
             result = {
                 "success": True,
@@ -523,7 +605,10 @@ async def auto_setup_project_memory(
                 "architecture": insights.get("architecture"),
                 "frameworks": insights.get("frameworks", []),
                 "memory_instructions": memory_instructions,
-                "dynamic_fields": dynamic_fields,
+                "dynamic_fields": all_fields,
+                "new_fields_count": len(dynamic_fields),
+                "archived_fields_preserved": len(archived_fields),
+                "missing_files": data.get("missing_files", []),
                 "ai_insights": data.get("project_summary"),
                 "recommendations": data.get("key_recommendations", []),
                 "tokens_used": ai_result.get("tokens_used", 0),
@@ -533,6 +618,8 @@ async def auto_setup_project_memory(
         else:
             # Fallback به حالت ساده
             result = _create_fallback_setup(project_id, project_name, insights)
+            # حفظ فیلدهای بایگانی شده در fallback هم
+            result["dynamic_fields"] = result.get("dynamic_fields", []) + archived_fields
 
         # مرحله ۴: ذخیره در دیتابیس
         if db_session and result.get("success"):
@@ -567,29 +654,56 @@ def _create_fallback_setup(project_id: str, project_name: str, insights: Dict) -
 - فریم‌ورک: {', '.join(frameworks) if frameworks else 'نامشخص'}
 - کدها باید تمیز و خوانا باشند
 - از best practices زبان {lang} پیروی کن
-- تست‌پذیری کد مهم است"""
+- تست‌پذیری کد مهم است
+- مستندسازی توابع الزامی است"""
 
     return {
         "success": True,
         "project_id": project_id,
         "detected_type": domain,
         "language": lang,
+        "architecture": insights.get("architecture"),
+        "frameworks": frameworks,
         "memory_instructions": {
             "content": memory,
             "target_models": ["all"],
             "auto_generated": True,
-            "fallback": True
+            "fallback": True,
+            "generated_at": datetime.utcnow().isoformat()
         },
-        "dynamic_fields": [{
-            "id": f"field_{uuid.uuid4().hex[:8]}",
-            "name": "بررسی کد",
-            "value": f"کد {lang} را بررسی و پیشنهاد بهبود بده",
-            "target_models": ["all"],
-            "trigger": {"enabled": False},
-            "auto_generated": True
-        }],
+        "dynamic_fields": [
+            {
+                "id": f"field_{uuid.uuid4().hex[:8]}",
+                "name": "بررسی و بهبود کد",
+                "value": f"کد {lang} را بررسی کن. مشکلات احتمالی، پیشنهادات بهبود و نکات امنیتی را گزارش بده.",
+                "target_models": ["claude"],
+                "trigger": {"enabled": False},
+                "action_type": "display",
+                "archive_after_run": False,
+                "auto_generated": True,
+                "created_at": datetime.utcnow().isoformat()
+            },
+            {
+                "id": f"field_{uuid.uuid4().hex[:8]}",
+                "name": "تولید تست",
+                "value": f"برای کدهای اصلی پروژه، unit test بنویس با coverage بالا. از فریم‌ورک تست استاندارد {lang} استفاده کن.",
+                "target_models": ["claude"],
+                "trigger": {"enabled": False},
+                "action_type": "github_multi_commit",
+                "archive_after_run": True,
+                "auto_generated": True,
+                "is_one_time": True,
+                "created_at": datetime.utcnow().isoformat()
+            }
+        ],
         "ai_insights": None,
-        "recommendations": []
+        "recommendations": [
+            "مستندسازی کد را تکمیل کنید",
+            "تست‌های واحد بنویسید",
+            "بررسی امنیتی انجام دهید"
+        ],
+        "new_fields_count": 2,
+        "archived_fields_preserved": 0
     }
 
 
