@@ -248,12 +248,15 @@ async def get_project_file(
 async def refresh_imported_project(
     project_id: str,
     token: Optional[str] = None,
+    use_global_token: bool = True,
     db: Session = Depends(get_db)
 ):
     """
     بروزرسانی پروژه از GitHub
     آخرین تغییرات را دریافت می‌کند
     """
+    import os
+
     try:
         project = db.query(Project).filter(Project.id == project_id).first()
         if not project:
@@ -271,11 +274,16 @@ async def refresh_imported_project(
         if not owner or not repo:
             raise HTTPException(status_code=400, detail="اطلاعات GitHub ناقص است")
 
+        # دریافت توکن مناسب
+        effective_token = token
+        if not effective_token and use_global_token:
+            effective_token = os.environ.get("GITHUB_TOKEN", "")
+
         # Re-import
         service = get_github_import_service()
         result = await service.import_repository(
             url_or_path=f"{owner}/{repo}",
-            token=token,
+            token=effective_token if effective_token else None,
             include_files=True,
         )
 

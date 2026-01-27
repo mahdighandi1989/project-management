@@ -1339,6 +1339,87 @@ async def get_deploy_status(
     }
 
 
+@router.post("/{project_id}/deploy/set-service-id")
+async def set_render_service_id(
+    project_id: str,
+    service_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    ذخیره Render service_id برای پروژه
+    این service_id از Render Dashboard دریافت میشه (مثلاً srv-xxxxx)
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت و بروزرسانی extra_data
+    try:
+        extra_data = json.loads(project.extra_data) if project.extra_data else {}
+    except:
+        extra_data = {}
+
+    extra_data["render_service_id"] = service_id
+    project.extra_data = json.dumps(extra_data, ensure_ascii=False)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": f"Render service ID ذخیره شد: {service_id}",
+        "service_id": service_id
+    }
+
+
+@router.get("/{project_id}/deploy/list-services")
+async def list_render_services(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    لیست سرویس‌های موجود در Render
+    برای انتخاب service_id مناسب
+    """
+    from ...services.deploy_service import RenderDeployService
+
+    render_api_key = os.getenv("RENDER_API_KEY", "")
+
+    if not render_api_key:
+        return {
+            "success": False,
+            "error": "Render API key not configured"
+        }
+
+    render_service = RenderDeployService(api_key=render_api_key)
+
+    try:
+        services = await render_service.list_services()
+        await render_service.close()
+
+        # استخراج اطلاعات مفید
+        service_list = []
+        for svc in services:
+            svc_data = svc.get("service", svc)
+            service_list.append({
+                "id": svc_data.get("id"),
+                "name": svc_data.get("name"),
+                "type": svc_data.get("type"),
+                "suspended": svc_data.get("suspended"),
+                "url": svc_data.get("serviceDetails", {}).get("url"),
+            })
+
+        return {
+            "success": True,
+            "services": service_list,
+            "count": len(service_list)
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
 # =====================================
 # راه‌اندازی خودکار پروژه
 # =====================================

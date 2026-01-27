@@ -1055,6 +1055,48 @@ export default function ProjectDetailPage() {
   const testRenderDeploy = async () => {
     setDeploying(true);
     try {
+      // ابتدا وضعیت رو چک کن
+      const statusRes = await fetch(`${API_BASE}/api/projects/${projectId}/deploy/status`);
+      const statusData = await statusRes.json();
+
+      console.log('Deploy Status:', statusData);
+
+      if (!statusData.status?.render_api_key_configured) {
+        showError('❌ کلید API رندر تنظیم نشده. لطفاً در Settings → Deploy Keys تنظیم کنید.');
+        return;
+      }
+
+      if (!statusData.status?.render_service_id) {
+        // پیشنهاد ست کردن service_id
+        const serviceId = prompt(
+          'Render Service ID پیدا نشد!\n\n' +
+          'لطفاً Service ID رو از Render Dashboard کپی کنید:\n' +
+          '1. به dashboard.render.com برید\n' +
+          '2. سرویس مربوط به این پروژه رو باز کنید\n' +
+          '3. از URL مرورگر، service ID رو کپی کنید (مثل srv-xxxxx)\n\n' +
+          'Service ID:'
+        );
+
+        if (serviceId && serviceId.trim()) {
+          // ذخیره service_id
+          const saveRes = await fetch(`${API_BASE}/api/projects/${projectId}/deploy/set-service-id?service_id=${encodeURIComponent(serviceId.trim())}`, {
+            method: 'POST',
+          });
+          const saveData = await saveRes.json();
+
+          if (saveData.success) {
+            showSuccess(`✅ Service ID ذخیره شد: ${serviceId}`);
+          } else {
+            showError(saveData.error || 'خطا در ذخیره');
+            return;
+          }
+        } else {
+          showError('برای Deploy نیاز به Service ID دارید');
+          return;
+        }
+      }
+
+      // حالا تست deploy
       const res = await fetch(`${API_BASE}/api/projects/${projectId}/deploy/test`, {
         method: 'POST',
       });
@@ -1063,19 +1105,10 @@ export default function ProjectDetailPage() {
       console.log('Deploy Test Result:', data);
 
       if (data.success) {
-        showSuccess('✅ تست Deploy موفق! ' + JSON.stringify(data.deploy_result));
+        showSuccess('✅ Deploy شروع شد! وضعیت: ' + (data.deploy_result?.status || 'pending'));
       } else {
-        // نمایش جزئیات خطا
-        let errorMsg = data.error || 'خطا در تست Deploy';
-        if (data.debug_info) {
-          console.log('Debug Info:', data.debug_info);
-          if (!data.debug_info.render_api_key_exists) {
-            errorMsg = '❌ کلید API رندر تنظیم نشده. لطفاً در Settings تنظیم کنید.';
-          }
-        }
-        if (data.solution) {
-          errorMsg += ` | ${data.solution}`;
-        }
+        let errorMsg = data.error || data.deploy_result?.error || 'خطا در Deploy';
+        console.log('Debug Info:', data.debug_info);
         showError(errorMsg);
       }
     } catch (e) {
@@ -1099,6 +1132,35 @@ export default function ProjectDetailPage() {
       }
     } catch (e) {
       showError('خطا');
+    }
+  };
+
+  // سینک فایل‌ها از GitHub
+  const syncFromGitHub = async () => {
+    if (!confirm('آیا می‌خواهید آخرین تغییرات را از GitHub دریافت کنید؟\n\nاین عملیات فایل‌های پروژه را با GitHub همگام‌سازی می‌کند.')) {
+      return;
+    }
+
+    setLoading(true);
+    showSuccess('در حال سینک با GitHub...');
+
+    try {
+      const res = await fetch(`${API_BASE}/api/github/imported/${projectId}/refresh`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        showSuccess(`✅ سینک موفق! ${data.files_updated || 0} فایل بروزرسانی شد`);
+        // ریلود پروژه
+        loadProject();
+      } else {
+        showError(data.detail || 'خطا در سینک');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط با سرور');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -1247,16 +1309,26 @@ export default function ProjectDetailPage() {
                 </button>
               </>
             )}
-            {/* دکمه تست برای پروژه‌های GitHub */}
+            {/* دکمه‌های GitHub */}
             {project.project_type === 'github_import' && (
-              <button
-                onClick={testRenderDeploy}
-                disabled={deploying}
-                className="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50"
-                title="تست اتصال به Render و دیباگ مشکلات Deploy"
-              >
-                {deploying ? '⏳...' : '🧪 تست Deploy'}
-              </button>
+              <>
+                <button
+                  onClick={syncFromGitHub}
+                  disabled={loading}
+                  className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50"
+                  title="دریافت آخرین تغییرات از GitHub"
+                >
+                  {loading ? '⏳...' : '🔄 سینک از GitHub'}
+                </button>
+                <button
+                  onClick={testRenderDeploy}
+                  disabled={deploying}
+                  className="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50"
+                  title="تست اتصال به Render و دیباگ مشکلات Deploy"
+                >
+                  {deploying ? '⏳...' : '🧪 تست Deploy'}
+                </button>
+              </>
             )}
             <Link
               href="/projects"
