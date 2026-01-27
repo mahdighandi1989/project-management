@@ -1205,9 +1205,38 @@ export default function ProjectDetailPage() {
           showSuccess('✅ Deploy شروع شد! وضعیت: ' + (data.deploy_result?.status || 'pending'));
         }
       } else {
+        // اگر سرویس مطابق پیدا نشد ولی لیست سرویس‌ها موجوده
+        if (data.deploy_result?.available_services || data.available_services) {
+          const services = data.deploy_result?.available_services || data.available_services;
+          const serviceList = services.map((s: any) => `${s.name} (${s.id})`).join('\n');
+
+          const selectedService = prompt(
+            `سرویسی با نام این پروژه در Render پیدا نشد.\n\nلطفاً از لیست زیر، ID سرویس مورد نظر را کپی کنید:\n\n${serviceList}\n\nService ID را وارد کنید:`
+          );
+
+          if (selectedService && selectedService.trim()) {
+            // ذخیره service_id در پروژه
+            try {
+              const saveRes = await fetch(`${API_BASE}/api/projects/${projectId}/deploy/set-service-id?service_id=${encodeURIComponent(selectedService.trim())}`, {
+                method: 'POST',
+              });
+              const saveData = await saveRes.json();
+
+              if (saveData.success) {
+                showSuccess('✅ Service ID ذخیره شد. دوباره Deploy را امتحان کنید.');
+              } else {
+                showError('خطا در ذخیره Service ID');
+              }
+            } catch {
+              showError('خطا در ذخیره');
+            }
+          }
+          return;
+        }
+
         let errorMsg = data.error || data.deploy_result?.error || 'خطا در Deploy';
 
-        if (errorMsg.includes('API key')) {
+        if (errorMsg.includes('API key') || errorMsg.includes('not set')) {
           errorMsg = '❌ کلید API رندر تنظیم نشده. Settings → Deploy Keys';
         } else if (errorMsg.includes('No Render service')) {
           errorMsg = '❌ سرویسی در Render پیدا نشد. ابتدا پروژه را در Render deploy کنید.';
