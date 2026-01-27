@@ -427,7 +427,7 @@ async def generate_report(
     model_id: str = Query("openai"),
     db: Session = Depends(get_db)
 ):
-    """تولید گزارش از فعالیت‌های اخیر"""
+    """تولید گزارش ساده از فعالیت‌های اخیر"""
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
@@ -486,6 +486,284 @@ async def generate_report(
         "report_id": report.id,
         "message": f"گزارش با {len(logs)} فعالیت ایجاد شد"
     }
+
+
+@router.post("/{project_id}/reports/generate-engineering")
+async def generate_engineering_report(
+    project_id: str,
+    days: int = Query(7, ge=1, le=30),
+    model_id: str = Query("claude"),
+    auto_create_fields: bool = Query(True),
+    db: Session = Depends(get_db)
+):
+    """
+    تولید گزارش مهندسی جامع با:
+    - تحلیل کامل ساختار پروژه
+    - شناسایی باگ‌ها و مشکلات فنی
+    - پیشنهادات بهبود
+    - نقشه راه توسعه
+    - تولید خودکار فیلدها بر اساس نقشه راه
+    """
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+    from ...models.project import ProjectFile
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت فعالیت‌های اخیر
+    since = datetime.utcnow() - timedelta(days=days)
+    logs = db.query(ActivityLog).filter(
+        ActivityLog.project_id == project_id,
+        ActivityLog.created_at >= since
+    ).order_by(ActivityLog.created_at).all()
+
+    # دریافت فایل‌های پروژه
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+    files_summary = []
+    code_samples = []
+
+    for f in files[:50]:  # حداکثر 50 فایل
+        files_summary.append({
+            "path": f.file_path,
+            "type": f.file_type,
+            "size": len(f.content) if f.content else 0
+        })
+        # نمونه کد از فایل‌های مهم
+        if f.content and f.file_type in ['py', 'ts', 'tsx', 'js', 'jsx']:
+            code_samples.append({
+                "path": f.file_path,
+                "content": f.content[:2000]  # 2000 کاراکتر اول
+            })
+
+    # دریافت فیلدهای فعلی
+    existing_fields = []
+    try:
+        if project.dynamic_fields:
+            existing_fields = json.loads(project.dynamic_fields)
+    except:
+        pass
+
+    # خلاصه فعالیت‌ها
+    activities_summary = []
+    for log in logs[:30]:
+        activities_summary.append({
+            "type": log.activity_type,
+            "model": log.model_id,
+            "field": log.field_name,
+            "success": log.success,
+            "error": log.error_message if not log.success else None,
+            "date": log.created_at.strftime("%Y-%m-%d %H:%M"),
+        })
+
+    # ساخت prompt برای AI
+    system_prompt = """تو یک مهندس ارشد نرم‌افزار هستی که باید یک گزارش مهندسی جامع و حرفه‌ای تولید کنی.
+
+گزارش باید شامل بخش‌های زیر باشد (حتماً از این ساختار JSON استفاده کن):
+
+```json
+{
+    "executive_summary": "خلاصه مدیریتی 2-3 پاراگراف از وضعیت پروژه",
+
+    "project_health": {
+        "score": 75,
+        "status": "متوسط/خوب/عالی/نیاز به توجه",
+        "key_metrics": {
+            "code_quality": 70,
+            "documentation": 50,
+            "test_coverage": 30,
+            "architecture": 80
+        }
+    },
+
+    "technical_analysis": {
+        "strengths": ["نقطه قوت 1", "نقطه قوت 2"],
+        "weaknesses": ["نقطه ضعف 1", "نقطه ضعف 2"],
+        "architecture_review": "تحلیل معماری",
+        "code_quality_issues": [
+            {"file": "path/to/file", "issue": "توضیح مشکل", "severity": "high/medium/low"}
+        ]
+    },
+
+    "bugs_and_issues": [
+        {"title": "عنوان باگ", "description": "توضیحات", "severity": "critical/high/medium/low", "file": "path/to/file", "suggested_fix": "راه حل پیشنهادی"}
+    ],
+
+    "security_review": {
+        "vulnerabilities": [{"type": "نوع آسیب‌پذیری", "location": "محل", "risk": "high/medium/low"}],
+        "recommendations": ["پیشنهاد امنیتی 1", "پیشنهاد امنیتی 2"]
+    },
+
+    "performance_analysis": {
+        "bottlenecks": ["گلوگاه 1", "گلوگاه 2"],
+        "optimization_suggestions": ["پیشنهاد بهینه‌سازی 1"]
+    },
+
+    "recommendations": [
+        {"priority": "high/medium/low", "title": "عنوان", "description": "توضیحات", "effort": "کم/متوسط/زیاد"}
+    ],
+
+    "roadmap": {
+        "immediate": [
+            {"task": "کار فوری 1", "description": "توضیحات کامل برای تولید کد", "action_type": "github_commit", "target_path": "path/to/file.py", "priority": 1}
+        ],
+        "short_term": [
+            {"task": "کار کوتاه‌مدت 1", "description": "توضیحات", "action_type": "github_commit", "target_path": "path/to/file.py", "priority": 2}
+        ],
+        "long_term": [
+            {"task": "کار بلندمدت 1", "description": "توضیحات", "action_type": "display", "priority": 3}
+        ]
+    },
+
+    "activity_analysis": {
+        "success_rate": 75,
+        "failed_tasks_analysis": "تحلیل تسک‌های ناموفق",
+        "model_performance": {"claude": "خوب", "openai": "متوسط"}
+    }
+}
+```
+
+⚠️ مهم:
+- فقط JSON خروجی بده، بدون هیچ توضیح اضافی
+- در roadmap، برای هر تسک که نیاز به تولید کد دارد، action_type را "github_commit" و target_path را مسیر فایل هدف قرار بده
+- توضیحات هر تسک باید به قدری کامل باشد که AI بتواند مستقیماً کد تولید کند"""
+
+    user_prompt = f"""پروژه: {project.name}
+توضیحات: {project.description or 'ندارد'}
+نوع پروژه: {project.project_type or 'نامشخص'}
+
+=== ساختار فایل‌ها ===
+{json.dumps(files_summary, ensure_ascii=False, indent=2)}
+
+=== نمونه کدها ===
+{json.dumps(code_samples[:10], ensure_ascii=False, indent=2)}
+
+=== فعالیت‌های اخیر ({days} روز) ===
+{json.dumps(activities_summary, ensure_ascii=False, indent=2)}
+
+=== فیلدهای فعلی ===
+{json.dumps([{"name": f.get("name"), "action_type": f.get("action_type")} for f in existing_fields if not f.get("archived")], ensure_ascii=False, indent=2)}
+
+لطفاً گزارش مهندسی جامع تولید کن."""
+
+    # فراخوانی AI
+    ai_manager = get_ai_manager()
+    messages = [
+        Message(role="system", content=system_prompt),
+        Message(role="user", content=user_prompt),
+    ]
+
+    try:
+        response = await ai_manager.generate(
+            model_id=model_id,
+            messages=messages,
+            max_tokens=8192,
+            temperature=0.3,
+        )
+
+        # پارس JSON از پاسخ
+        report_content = response.content
+        report_data = None
+
+        # استخراج JSON از پاسخ
+        import re
+        json_match = re.search(r'\{[\s\S]*\}', report_content)
+        if json_match:
+            try:
+                report_data = json.loads(json_match.group())
+            except json.JSONDecodeError:
+                pass
+
+        if not report_data:
+            report_data = {"raw_content": report_content}
+
+        # تولید خودکار فیلدها از roadmap
+        created_fields = []
+        if auto_create_fields and report_data.get("roadmap"):
+            roadmap = report_data["roadmap"]
+
+            # فیلدهای فوری و کوتاه‌مدت
+            for phase_name, phase_tasks in [("immediate", roadmap.get("immediate", [])), ("short_term", roadmap.get("short_term", []))]:
+                for task in phase_tasks[:5]:  # حداکثر 5 تسک از هر فاز
+                    field_name = task.get("task", "تسک جدید")
+                    field_value = task.get("description", "")
+                    action_type = task.get("action_type", "display")
+                    target_path = task.get("target_path")
+
+                    # بررسی وجود فیلد مشابه
+                    existing = any(
+                        f.get("name", "").lower() == field_name.lower()
+                        for f in existing_fields if not f.get("archived")
+                    )
+
+                    if not existing and field_value:
+                        new_field = {
+                            "id": str(uuid.uuid4()),
+                            "name": f"[{phase_name}] {field_name}",
+                            "value": field_value,
+                            "target_models": ["claude"],
+                            "action_type": action_type,
+                            "target_path": target_path,
+                            "archive_after_run": True,
+                            "deploy_after_commit": action_type == "github_commit",
+                            "trigger": {
+                                "enabled": False,
+                                "interval_minutes": 60,
+                                "interval_type": "minutes"
+                            },
+                            "created_from_report": True,
+                            "priority": task.get("priority", 99)
+                        }
+                        existing_fields.append(new_field)
+                        created_fields.append(new_field["name"])
+
+            # ذخیره فیلدهای جدید
+            if created_fields:
+                project.dynamic_fields = json.dumps(existing_fields, ensure_ascii=False)
+                db.commit()
+
+        # ایجاد گزارش
+        total_tokens = sum(log.tokens_used for log in logs) + (response.tokens_used or 0)
+        models_used = list(set(log.model_id for log in logs))
+        models_used.append(model_id)
+
+        report = Report(
+            id=f"eng_report_{uuid.uuid4().hex[:12]}",
+            project_id=project_id,
+            report_type="engineering",
+            title=f"گزارش مهندسی - {project.name}",
+            content=json.dumps(report_data, ensure_ascii=False, indent=2),
+            summary=report_data.get("executive_summary", f"گزارش مهندسی با تحلیل {len(files)} فایل"),
+            total_activities=len(logs),
+            total_tokens=total_tokens,
+            models_used=json.dumps(list(set(models_used))),
+            period_start=since,
+            period_end=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+            generated_by=model_id,
+        )
+
+        db.add(report)
+        db.commit()
+
+        return {
+            "success": True,
+            "report_id": report.id,
+            "report_type": "engineering",
+            "message": f"گزارش مهندسی جامع تولید شد",
+            "fields_created": created_fields,
+            "fields_count": len(created_fields),
+            "project_health_score": report_data.get("project_health", {}).get("score"),
+            "bugs_found": len(report_data.get("bugs_and_issues", [])),
+            "recommendations_count": len(report_data.get("recommendations", []))
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"خطا در تولید گزارش: {str(e)}"
+        }
 
 
 # ===================== تریگر گزارش =====================
