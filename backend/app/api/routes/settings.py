@@ -240,8 +240,8 @@ class UpdateDeployKeysRequest(BaseModel):
 
 
 @router.put("/deploy-keys")
-async def update_deploy_keys(request: UpdateDeployKeysRequest):
-    """آپدیت کلیدهای Deploy (Render, GitHub)"""
+async def update_deploy_keys(request: UpdateDeployKeysRequest, db: Session = Depends(get_db)):
+    """آپدیت کلیدهای Deploy (Render, GitHub) - ذخیره در دیتابیس و environment"""
     try:
         updated = []
         env_updates = {}
@@ -249,11 +249,31 @@ async def update_deploy_keys(request: UpdateDeployKeysRequest):
         if request.render:
             os.environ["RENDER_API_KEY"] = request.render
             env_updates["RENDER_API_KEY"] = request.render
+            # ذخیره در دیتابیس
+            Setting.set_value(
+                db=db,
+                key="api_key_render",
+                value=request.render,
+                value_type="encrypted",
+                category="api_keys",
+                description="Render API Key",
+                is_secret=True
+            )
             updated.append("render")
 
         if request.github:
             os.environ["GITHUB_TOKEN"] = request.github
             env_updates["GITHUB_TOKEN"] = request.github
+            # ذخیره در دیتابیس
+            Setting.set_value(
+                db=db,
+                key="api_key_github",
+                value=request.github,
+                value_type="encrypted",
+                category="api_keys",
+                description="GitHub Token",
+                is_secret=True
+            )
             updated.append("github")
 
         # ذخیره در فایل .env
@@ -287,11 +307,31 @@ async def update_deploy_keys(request: UpdateDeployKeysRequest):
 
 
 @router.get("/deploy-keys/status")
-async def get_deploy_keys_status():
-    """وضعیت کلیدهای Deploy"""
+async def get_deploy_keys_status(db: Session = Depends(get_db)):
+    """وضعیت کلیدهای Deploy - چک environment و دیتابیس"""
+    render_key = os.environ.get("RENDER_API_KEY")
+    github_key = os.environ.get("GITHUB_TOKEN")
+
+    # اگر در environment نبود، از دیتابیس بخون
+    if not render_key:
+        try:
+            render_key = Setting.get_value(db, "api_key_render")
+            if render_key:
+                os.environ["RENDER_API_KEY"] = render_key
+        except:
+            pass
+
+    if not github_key:
+        try:
+            github_key = Setting.get_value(db, "api_key_github")
+            if github_key:
+                os.environ["GITHUB_TOKEN"] = github_key
+        except:
+            pass
+
     return {
-        "render": bool(os.environ.get("RENDER_API_KEY")),
-        "github": bool(os.environ.get("GITHUB_TOKEN")),
+        "render": bool(render_key),
+        "github": bool(github_key),
     }
 
 
