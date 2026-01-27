@@ -1214,6 +1214,132 @@ async def get_action_types():
 
 
 # =====================================
+# تست و Debug دیپلوی
+# =====================================
+
+@router.post("/{project_id}/deploy/test")
+async def test_render_deploy(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    تست دیپلوی به Render - برای دیباگ
+    این endpoint مستقیماً Render deploy رو تست میکنه
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # بررسی API Key
+    render_api_key = os.getenv("RENDER_API_KEY", "")
+    github_token = os.getenv("GITHUB_TOKEN", "")
+
+    debug_info = {
+        "render_api_key_exists": bool(render_api_key),
+        "render_api_key_length": len(render_api_key) if render_api_key else 0,
+        "github_token_exists": bool(github_token),
+    }
+
+    # دریافت اطلاعات پروژه
+    github_info = {}
+    try:
+        if project.extra_data:
+            github_info = json.loads(project.extra_data)
+    except:
+        pass
+
+    debug_info["github_info"] = {
+        "source": github_info.get("source"),
+        "owner": github_info.get("owner"),
+        "repo": github_info.get("repo"),
+        "render_service_id": github_info.get("render_service_id"),
+    }
+
+    if not render_api_key:
+        return {
+            "success": False,
+            "error": "RENDER_API_KEY is not set in environment",
+            "debug_info": debug_info,
+            "solution": "در صفحه Settings، کلید API رندر را تنظیم کنید"
+        }
+
+    # تست اتصال به Render
+    try:
+        result = await trigger_render_deploy(
+            render_service_id=github_info.get("render_service_id"),
+            project_id=project_id,
+            db_session=db
+        )
+
+        return {
+            "success": result.get("success", False),
+            "deploy_result": result,
+            "debug_info": debug_info,
+        }
+
+    except Exception as e:
+        logger.error(f"[Render Deploy Test] Error: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "debug_info": debug_info,
+        }
+
+
+@router.get("/{project_id}/deploy/status")
+async def get_deploy_status(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """بررسی وضعیت Deploy keys و تنظیمات"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    render_api_key = os.getenv("RENDER_API_KEY", "")
+    github_token = os.getenv("GITHUB_TOKEN", "")
+
+    # دریافت اطلاعات پروژه
+    github_info = {}
+    try:
+        if project.extra_data:
+            github_info = json.loads(project.extra_data)
+    except:
+        pass
+
+    # بررسی فیلدهایی که deploy_after_commit دارند
+    fields_with_deploy = []
+    try:
+        if project.dynamic_fields:
+            fields = json.loads(project.dynamic_fields)
+            for f in fields:
+                if f.get("deploy_after_commit") and not f.get("archived"):
+                    fields_with_deploy.append({
+                        "name": f.get("name"),
+                        "action_type": f.get("action_type"),
+                    })
+    except:
+        pass
+
+    return {
+        "success": True,
+        "status": {
+            "render_api_key_configured": bool(render_api_key),
+            "github_token_configured": bool(github_token),
+            "project_from_github": github_info.get("source") == "github",
+            "github_owner": github_info.get("owner"),
+            "github_repo": github_info.get("repo"),
+            "render_service_id": github_info.get("render_service_id"),
+            "fields_with_deploy_enabled": fields_with_deploy,
+        },
+        "ready_for_deploy": bool(render_api_key) and github_info.get("source") == "github",
+    }
+
+
+# =====================================
 # راه‌اندازی خودکار پروژه
 # =====================================
 

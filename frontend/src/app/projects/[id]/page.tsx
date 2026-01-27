@@ -714,6 +714,51 @@ export default function ProjectDetailPage() {
     }
   };
 
+  // تولید گزارش مهندسی جامع
+  const generateEngineeringReport = async (days: number = 7) => {
+    if (!confirm('تولید گزارش مهندسی جامع؟\n\nاین گزارش شامل:\n• تحلیل کامل ساختار پروژه\n• شناسایی باگ‌ها و مشکلات\n• پیشنهادات بهبود\n• نقشه راه توسعه\n• تولید خودکار فیلدها برای اجرای نقشه راه\n\nاین عملیات ممکن است چند دقیقه طول بکشد.')) {
+      return;
+    }
+
+    setGeneratingReport(true);
+    showSuccess('در حال تحلیل پروژه و تولید گزارش مهندسی... لطفاً صبر کنید');
+
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/reports/generate-engineering?days=${days}&model_id=claude&auto_create_fields=true`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        let successMsg = `✅ گزارش مهندسی تولید شد`;
+
+        if (data.project_health_score) {
+          successMsg += ` | امتیاز سلامت: ${data.project_health_score}%`;
+        }
+        if (data.bugs_found > 0) {
+          successMsg += ` | ${data.bugs_found} باگ شناسایی شد`;
+        }
+        if (data.fields_count > 0) {
+          successMsg += ` | ${data.fields_count} فیلد جدید ایجاد شد`;
+        }
+
+        showSuccess(successMsg);
+        loadReports();
+
+        // اگر فیلد جدید ایجاد شد، حافظه رو هم ریلود کن
+        if (data.fields_count > 0) {
+          loadMemory();
+        }
+      } else {
+        showError(data.error || 'خطا در تولید گزارش');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    } finally {
+      setGeneratingReport(false);
+    }
+  };
+
   // ===================== پایان توابع ژورنال =====================
 
   const saveMemoryInstructions = async () => {
@@ -1006,6 +1051,40 @@ export default function ProjectDetailPage() {
     }
   };
 
+  // تست Deploy به Render (برای دیباگ)
+  const testRenderDeploy = async () => {
+    setDeploying(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/deploy/test`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+
+      console.log('Deploy Test Result:', data);
+
+      if (data.success) {
+        showSuccess('✅ تست Deploy موفق! ' + JSON.stringify(data.deploy_result));
+      } else {
+        // نمایش جزئیات خطا
+        let errorMsg = data.error || 'خطا در تست Deploy';
+        if (data.debug_info) {
+          console.log('Debug Info:', data.debug_info);
+          if (!data.debug_info.render_api_key_exists) {
+            errorMsg = '❌ کلید API رندر تنظیم نشده. لطفاً در Settings تنظیم کنید.';
+          }
+        }
+        if (data.solution) {
+          errorMsg += ` | ${data.solution}`;
+        }
+        showError(errorMsg);
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    } finally {
+      setDeploying(false);
+    }
+  };
+
   const generateMoreFiles = async () => {
     try {
       const res = await fetch(`${API_BASE}/api/creator/projects/${projectId}/generate`, {
@@ -1167,6 +1246,17 @@ export default function ProjectDetailPage() {
                   {deploying ? '⏳ در حال Deploy...' : '🚀 Deploy'}
                 </button>
               </>
+            )}
+            {/* دکمه تست برای پروژه‌های GitHub */}
+            {project.project_type === 'github_import' && (
+              <button
+                onClick={testRenderDeploy}
+                disabled={deploying}
+                className="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50"
+                title="تست اتصال به Render و دیباگ مشکلات Deploy"
+              >
+                {deploying ? '⏳...' : '🧪 تست Deploy'}
+              </button>
             )}
             <Link
               href="/projects"
@@ -2318,13 +2408,23 @@ export default function ProjectDetailPage() {
                       <span className="text-xl">⚙️</span>
                       تنظیمات گزارش‌گیری خودکار
                     </h2>
-                    <button
-                      onClick={() => generateReport(7)}
-                      disabled={generatingReport}
-                      className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50"
-                    >
-                      {generatingReport ? '⏳ در حال تولید...' : '📝 تولید گزارش ۷ روزه'}
-                    </button>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => generateReport(7)}
+                        disabled={generatingReport}
+                        className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50"
+                      >
+                        {generatingReport ? '⏳ در حال تولید...' : '📝 گزارش ساده'}
+                      </button>
+                      <button
+                        onClick={() => generateEngineeringReport(7)}
+                        disabled={generatingReport}
+                        className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 flex items-center gap-2"
+                        title="گزارش مهندسی جامع با تحلیل کد، شناسایی باگ‌ها، پیشنهادات و تولید خودکار فیلدها"
+                      >
+                        {generatingReport ? '⏳ در حال تولید...' : '🔬 گزارش مهندسی'}
+                      </button>
+                    </div>
                   </div>
 
                   <div className="grid md:grid-cols-2 gap-4">
@@ -2416,13 +2516,22 @@ export default function ProjectDetailPage() {
                     <div className="p-8 text-center text-gray-400">
                       <div className="text-4xl mb-2">📭</div>
                       <p>گزارشی ایجاد نشده</p>
-                      <button
-                        onClick={() => generateReport(7)}
-                        disabled={generatingReport}
-                        className="mt-4 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600"
-                      >
-                        📝 اولین گزارش را بسازید
-                      </button>
+                      <div className="mt-4 flex flex-col gap-2 items-center">
+                        <button
+                          onClick={() => generateEngineeringReport(7)}
+                          disabled={generatingReport}
+                          className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50"
+                        >
+                          🔬 تولید گزارش مهندسی جامع
+                        </button>
+                        <button
+                          onClick={() => generateReport(7)}
+                          disabled={generatingReport}
+                          className="px-3 py-1 bg-gray-500 text-white rounded text-sm hover:bg-gray-600"
+                        >
+                          📝 یا گزارش ساده
+                        </button>
+                      </div>
                     </div>
                   ) : (
                     <div className="divide-y dark:divide-gray-700">
