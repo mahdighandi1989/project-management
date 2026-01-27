@@ -127,6 +127,60 @@ def migrate_db():
                 cursor.execute("ALTER TABLE projects ADD COLUMN dynamic_fields TEXT")
                 logger.info("Added 'dynamic_fields' column to projects table")
 
+            # =====================================================
+            # 🆕 ستون‌های جدید برای تحلیل سلامت پروژه
+            # =====================================================
+
+            # تنظیمات تحلیل
+            if "analysis_settings" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN analysis_settings TEXT")
+                logger.info("Added 'analysis_settings' column to projects table")
+
+            # نمرات سلامت
+            if "health_scores" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN health_scores TEXT")
+                logger.info("Added 'health_scores' column to projects table")
+
+            # نقشه سلامت فایل‌ها
+            if "file_health_map" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN file_health_map TEXT")
+                logger.info("Added 'file_health_map' column to projects table")
+
+            # شناسه آخرین تحلیل
+            if "last_analysis_id" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN last_analysis_id VARCHAR(50)")
+                logger.info("Added 'last_analysis_id' column to projects table")
+
+            # زمان آخرین تحلیل
+            if "last_analysis_at" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN last_analysis_at DATETIME")
+                logger.info("Added 'last_analysis_at' column to projects table")
+
+            # مدل‌های آخرین تحلیل
+            if "last_analysis_models" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN last_analysis_models TEXT")
+                logger.info("Added 'last_analysis_models' column to projects table")
+
+            # محتوای Roadmap
+            if "roadmap_content" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN roadmap_content TEXT")
+                logger.info("Added 'roadmap_content' column to projects table")
+
+            # محتوای README
+            if "readme_content" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN readme_content TEXT")
+                logger.info("Added 'readme_content' column to projects table")
+
+            # حالت ایده‌آل
+            if "ideal_state" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN ideal_state TEXT")
+                logger.info("Added 'ideal_state' column to projects table")
+
+            # مشکلات شناسایی شده
+            if "issues_found" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN issues_found TEXT")
+                logger.info("Added 'issues_found' column to projects table")
+
         # Migration برای جدول project_files
         if "project_files" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
             existing_cols = get_columns("project_files")
@@ -172,7 +226,7 @@ def init_db():
     این تابع در startup اپلیکیشن فراخوانی می‌شود
     """
     # Import models تا register شوند
-    from ..models import project, debate, setting, ai_log
+    from ..models import project, debate, setting, ai_log, ai_profile
 
     # اول migration رو اجرا کن (برای جداول موجود)
     migrate_db()
