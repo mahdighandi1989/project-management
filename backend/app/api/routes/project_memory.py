@@ -231,8 +231,21 @@ async def trigger_render_deploy(
     logger = logging.getLogger(__name__)
 
     from ...services.deploy_service import RenderDeployService
+    from ...models.setting import Setting
 
+    # ابتدا از environment بخون
     render_api_key = os.getenv("RENDER_API_KEY", "")
+
+    # اگر نبود، از دیتابیس بخون
+    if not render_api_key and db_session:
+        try:
+            render_api_key = Setting.get_value(db_session, "api_key_render") or ""
+            if render_api_key:
+                logger.info("[Render Deploy] API Key loaded from database")
+                # همچنین در environment ذخیره کن برای دفعات بعد
+                os.environ["RENDER_API_KEY"] = render_api_key
+        except Exception as e:
+            logger.warning(f"[Render Deploy] Could not load API key from database: {e}")
 
     logger.info(f"[Render Deploy] API Key exists: {bool(render_api_key)}")
 
@@ -1277,14 +1290,33 @@ async def test_render_deploy(
     """
     import logging
     logger = logging.getLogger(__name__)
+    from ...models.setting import Setting
 
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
 
-    # بررسی API Key
+    # بررسی API Key - ابتدا environment بعد دیتابیس
     render_api_key = os.getenv("RENDER_API_KEY", "")
     github_token = os.getenv("GITHUB_TOKEN", "")
+
+    # اگر در environment نبود، از دیتابیس بخون
+    if not render_api_key:
+        try:
+            render_api_key = Setting.get_value(db, "api_key_render") or ""
+            if render_api_key:
+                os.environ["RENDER_API_KEY"] = render_api_key
+                logger.info("[Deploy Test] Render API key loaded from database")
+        except Exception as e:
+            logger.warning(f"Could not load Render API key from DB: {e}")
+
+    if not github_token:
+        try:
+            github_token = Setting.get_value(db, "api_key_github") or ""
+            if github_token:
+                os.environ["GITHUB_TOKEN"] = github_token
+        except:
+            pass
 
     debug_info = {
         "render_api_key_exists": bool(render_api_key),
@@ -1310,9 +1342,9 @@ async def test_render_deploy(
     if not render_api_key:
         return {
             "success": False,
-            "error": "RENDER_API_KEY is not set in environment",
+            "error": "RENDER_API_KEY is not set. Please set it in Settings → Deploy Keys",
             "debug_info": debug_info,
-            "solution": "در صفحه Settings، کلید API رندر را تنظیم کنید"
+            "solution": "در صفحه Settings → Deploy Keys کلید API رندر را تنظیم کنید"
         }
 
     # تست اتصال به Render
