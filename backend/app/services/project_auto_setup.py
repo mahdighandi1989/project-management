@@ -268,11 +268,13 @@ async def generate_intelligent_setup(
     insights: Dict[str, Any],
     sample_files: List[Dict],
     existing_fields: List[Dict] = None,
-    model_id: str = "claude"
+    model_id: str = "claude",
+    full_review: bool = True  # 🆕 بررسی کامل و به‌روزرسانی فیلدهای موجود
 ) -> Dict[str, Any]:
     """
     تولید دستورات و فیلدهای کاملاً اختصاصی با AI
-    با پشتیبانی از action_type و archive_after_run
+    با پشتیبانی از action_type، archive_after_run، field_type و priority
+    🆕 با قابلیت بررسی و به‌روزرسانی فیلدهای موجود
     """
     try:
         from .ai_manager import get_ai_manager
@@ -296,14 +298,41 @@ async def generate_intelligent_setup(
         existing_files = [f.get("path", f.get("file_path", "")) for f in sample_files]
         file_list = "\n".join([f"- {p}" for p in existing_files[:30]])
 
-        # لیست فیلدهای موجود (غیر بایگانی)
+        # لیست فیلدهای موجود (غیر بایگانی) با جزئیات کامل
+        existing_field_details = []
         existing_field_names = []
         if existing_fields:
             for ef in existing_fields:
                 if not ef.get("archived"):
                     existing_field_names.append(ef.get("name", ""))
+                    existing_field_details.append({
+                        "id": ef.get("id"),
+                        "name": ef.get("name"),
+                        "value": ef.get("value", "")[:200],  # خلاصه
+                        "field_type": ef.get("field_type", "temporary"),
+                        "priority": ef.get("priority", 5),
+                        "action_type": ef.get("action_type", "display"),
+                        "has_attachments": len(ef.get("attachments", [])) > 0
+                    })
 
         existing_fields_text = ", ".join(existing_field_names) if existing_field_names else "هیچ"
+        existing_fields_json = json.dumps(existing_field_details, ensure_ascii=False, indent=2) if existing_field_details else "[]"
+
+        # 🆕 تنظیم prompt براساس حالت بررسی کامل
+        review_section = ""
+        if full_review and existing_field_details:
+            review_section = f"""
+## ⚠️ بررسی و به‌روزرسانی فیلدهای موجود (مهم!)
+فیلدهای فعلی:
+{existing_fields_json}
+
+**وظیفه بررسی:**
+1. هر فیلد موجود را بررسی کن
+2. فیلدهایی که باید **بایگانی** شوند (انجام شده یا منسوخ): در لیست `fields_to_archive` قرار بده
+3. فیلدهایی که باید **ادغام** شوند (مشابه یا تکراری): در لیست `fields_to_merge` قرار بده
+4. فیلدهایی که باید **به‌روزرسانی** شوند: در لیست `fields_to_update` قرار بده
+5. فقط فیلدهای **واقعاً جدید** که وجود ندارند در `dynamic_fields` قرار بده
+"""
 
         prompt = f"""تو یک معمار نرم‌افزار و DevOps متخصص هستی. این پروژه را تحلیل کن و دستورات دقیق و اختصاصی برای کار با AI تولید کن.
 
@@ -324,15 +353,22 @@ async def generate_intelligent_setup(
 
 ## نمونه محتوای فایل‌ها
 {files_text}
-
-## فیلدهای فعلی (غیر بایگانی)
-{existing_fields_text}
-
+{review_section}
 ## وظیفه تو
 بر اساس تحلیل دقیق این پروژه، یک JSON با این ساختار برگردان:
 
 {{
     "memory_instructions": "دستورات ثابت و اختصاصی برای این پروژه (۵۰۰-۱۰۰۰ کاراکتر فارسی). شامل: نحوه کدنویسی، استانداردها، naming conventions، ساختار فایل‌ها، نکات مهم این پروژه خاص",
+
+    "fields_to_archive": ["id_فیلد_1", "id_فیلد_2"],
+
+    "fields_to_merge": [
+        {{"source_ids": ["id1", "id2"], "merged_name": "نام فیلد ادغام‌شده", "merged_value": "دستور ادغام‌شده"}}
+    ],
+
+    "fields_to_update": [
+        {{"id": "id_فیلد", "new_value": "دستور جدید", "new_priority": 3, "reason": "چرا باید آپدیت شود"}}
+    ],
 
     "dynamic_fields": [
         {{
@@ -341,47 +377,45 @@ async def generate_intelligent_setup(
             "why": "چرا این فیلد برای این پروژه مهمه",
             "recommended_model": "claude یا openai یا deepseek",
             "action_type": "display یا github_commit یا github_multi_commit",
-            "target_path": "مسیر فایل در ریپو اگر action_type=github_commit باشد (مثل backend/models/user.py)",
+            "target_path": "مسیر فایل در ریپو اگر action_type=github_commit باشد",
             "archive_after_run": true/false,
             "deploy_after_commit": true/false,
+            "field_type": "permanent یا temporary",
+            "priority": 1-10,
             "needs_trigger": false,
             "is_one_time": true/false
         }}
     ],
 
     "missing_files": [
-        {{
-            "path": "مسیر فایلی که در پروژه وجود ندارد ولی باید ایجاد شود",
-            "description": "توضیح کوتاه این فایل چیست",
-            "priority": "high یا medium یا low"
-        }}
+        {{"path": "مسیر فایل", "description": "توضیح", "priority": "high/medium/low"}}
     ],
 
     "project_summary": "خلاصه ۳-۵ خطی از ماهیت، هدف و وضعیت فعلی پروژه",
-
     "key_recommendations": ["توصیه ۱", "توصیه ۲", "توصیه ۳"]
 }}
 
+## راهنمای field_type:
+- **permanent**: فیلدهای دائمی/تکرارشونده که باید همیشه فعال باشند (بررسی کد، تحلیل، گزارش‌گیری)
+- **temporary**: فیلدهای موقت/یکبار مصرف که بعد از اجرا بایگانی می‌شوند (ایجاد فایل، setup)
+
+## راهنمای priority (1=بالاترین، 10=پایین‌ترین):
+- 1-2: بحرانی/فوری - باید ابتدا اجرا شود
+- 3-4: بالا
+- 5: عادی (پیش‌فرض)
+- 6-7: پایین
+- 8-10: خیلی پایین - در صورت فرصت
+
 ## راهنمای انتخاب action_type:
-- **display**: فقط برای مشاوره، بررسی کد، سوال جواب - نتیجه فقط در ژورنال نمایش داده می‌شود
-- **github_commit**: وقتی باید یک فایل خاص در ریپو ایجاد یا بروزرسانی شود - حتماً target_path بده
-- **github_multi_commit**: وقتی باید چند فایل مرتبط تولید شود (مثل model + schema + route)
-
-## راهنمای archive_after_run:
-- **true**: برای کارهای یکبار مصرف مثل ایجاد فایل‌های اولیه، setup، migration
-- **false**: برای کارهای تکرارشونده مثل بررسی کد، تحلیل، گزارش‌گیری
-
-## راهنمای deploy_after_commit:
-- **true**: وقتی تغییرات باید بلافاصله روی سرور اعمال شوند (مثل bugfix، hotfix، تغییرات مهم)
-- **false**: برای تغییراتی که نیازی به deploy فوری ندارند
+- **display**: فقط برای مشاوره، بررسی کد، سوال جواب
+- **github_commit**: وقتی باید یک فایل خاص در ریپو ایجاد/بروزرسانی شود
+- **github_multi_commit**: وقتی باید چند فایل مرتبط تولید شود
 
 نکات مهم:
-- حداقل ۲ و حداکثر ۶ فیلد پویا تعریف کن
-- حداقل ۱ فیلد یکبار مصرف (archive_after_run=true, action_type=github_commit) برای ایجاد فایل‌های کمبود
-- حداقل ۱ فیلد تکرارشونده برای نظارت و بهبود
-- فیلدهای github_commit باید دستور کاملی داشته باشند تا AI بتواند فایل کامل تولید کند
-- از ساختار و naming convention پروژه پیروی کن
-- فیلدهای تکراری با فیلدهای موجود ({existing_fields_text}) ایجاد نکن"""
+- حداقل ۲ و حداکثر ۶ فیلد پویای **جدید** تعریف کن (فقط اگر واقعاً نیاز باشد)
+- فیلدهای تکراری با فیلدهای موجود ایجاد نکن - به‌روزرسانی یا ادغام کن
+- فیلدهای permanent باید priority پایین‌تر (عدد بالاتر) داشته باشند
+- فیلدهای temporary با اولویت بالا باید اول اجرا شوند"""
 
         messages = [
             Message(role="system", content="تو یک معمار نرم‌افزار متخصص هستی که پروژه‌ها را تحلیل می‌کنی. پاسخ را فقط به صورت JSON معتبر بده."),
@@ -570,11 +604,91 @@ async def auto_setup_project_memory(
                 "model_used": ai_result.get("model_used")
             }
 
-            dynamic_fields = []
+            # 🆕 پردازش فیلدهای موجود براساس دستورات AI
+            updated_existing_fields = list(existing_fields)  # کپی از فیلدهای موجود
+            fields_archived_count = 0
+            fields_merged_count = 0
+            fields_updated_count = 0
+
+            # 1. بایگانی فیلدهای مشخص شده
+            fields_to_archive = data.get("fields_to_archive", [])
+            for field_id in fields_to_archive:
+                for field in updated_existing_fields:
+                    if field.get("id") == field_id and not field.get("archived"):
+                        field["archived"] = True
+                        field["archived_at"] = datetime.utcnow().isoformat()
+                        field["archived_reason"] = "auto-setup review"
+                        fields_archived_count += 1
+                        logger.info(f"Auto-archived field: {field.get('name')}")
+
+            # 2. ادغام فیلدهای مشخص شده
+            fields_to_merge = data.get("fields_to_merge", [])
+            for merge_info in fields_to_merge:
+                source_ids = merge_info.get("source_ids", [])
+                if len(source_ids) >= 2:
+                    # پیدا کردن فیلدهای منبع و جمع‌آوری پیوست‌ها
+                    merged_attachments = []
+                    for sid in source_ids:
+                        for field in updated_existing_fields:
+                            if field.get("id") == sid:
+                                # جمع‌آوری پیوست‌ها قبل از بایگانی
+                                merged_attachments.extend(field.get("attachments", []))
+                                # بایگانی فیلد منبع
+                                field["archived"] = True
+                                field["archived_at"] = datetime.utcnow().isoformat()
+                                field["archived_reason"] = f"merged into new field"
+                                fields_archived_count += 1
+
+                    # ایجاد فیلد ادغام‌شده
+                    merged_field = {
+                        "id": f"field_{uuid.uuid4().hex[:8]}",
+                        "name": merge_info.get("merged_name", "فیلد ادغام‌شده"),
+                        "value": merge_info.get("merged_value", ""),
+                        "target_models": ["claude"],
+                        "trigger": {"enabled": False, "interval_minutes": 60, "interval_type": "minutes"},
+                        "action_type": "display",
+                        "field_type": "permanent",
+                        "priority": 5,
+                        "attachments": merged_attachments,  # حفظ پیوست‌ها
+                        "created_at": datetime.utcnow().isoformat(),
+                        "auto_generated": True,
+                        "merged_from": source_ids,
+                    }
+                    updated_existing_fields.append(merged_field)
+                    fields_merged_count += 1
+                    logger.info(f"Merged fields {source_ids} into: {merged_field['name']}")
+
+            # 3. به‌روزرسانی فیلدهای مشخص شده
+            fields_to_update = data.get("fields_to_update", [])
+            for update_info in fields_to_update:
+                field_id = update_info.get("id")
+                for field in updated_existing_fields:
+                    if field.get("id") == field_id and not field.get("archived"):
+                        if update_info.get("new_value"):
+                            field["value"] = update_info["new_value"]
+                        if update_info.get("new_priority"):
+                            field["priority"] = update_info["new_priority"]
+                        if update_info.get("new_field_type"):
+                            field["field_type"] = update_info["new_field_type"]
+                        field["updated_at"] = datetime.utcnow().isoformat()
+                        field["update_reason"] = update_info.get("reason", "auto-setup review")
+                        fields_updated_count += 1
+                        logger.info(f"Updated field: {field.get('name')}")
+
+            # 4. فیلدهای کاملاً جدید از AI
+            new_dynamic_fields = []
             for ai_field in data.get("dynamic_fields", []):
                 recommended_model = ai_field.get("recommended_model", "claude")
                 action_type = ai_field.get("action_type", "display")
                 target_path = ai_field.get("target_path")
+                field_type = ai_field.get("field_type", "temporary")
+                priority = ai_field.get("priority", 5)
+
+                # تعیین خودکار field_type براساس archive_after_run
+                if ai_field.get("archive_after_run") or ai_field.get("is_one_time"):
+                    field_type = "temporary"
+                elif ai_field.get("needs_trigger"):
+                    field_type = "permanent"
 
                 field = {
                     "id": f"field_{uuid.uuid4().hex[:8]}",
@@ -586,22 +700,28 @@ async def auto_setup_project_memory(
                         "interval_minutes": ai_field.get("trigger_hours", 24) * 60 if ai_field.get("trigger_hours") else 1440,
                         "interval_type": "minutes"
                     },
-                    # فیلدهای جدید
                     "action_type": action_type,
                     "target_path": target_path if action_type == "github_commit" else None,
                     "archive_after_run": ai_field.get("archive_after_run", False),
                     "deploy_after_commit": ai_field.get("deploy_after_commit", False),
-                    # متادیتا
+                    "field_type": field_type,
+                    "priority": priority,
+                    "attachments": [],
                     "created_at": datetime.utcnow().isoformat(),
                     "auto_generated": True,
                     "ai_generated": True,
                     "reason": ai_field.get("why", ""),
                     "is_one_time": ai_field.get("is_one_time", ai_field.get("archive_after_run", False))
                 }
-                dynamic_fields.append(field)
+                new_dynamic_fields.append(field)
 
-            # اضافه کردن فیلدهای بایگانی شده قبلی
-            all_fields = dynamic_fields + archived_fields
+            # ترکیب همه فیلدها و مرتب‌سازی براساس اولویت
+            all_fields = updated_existing_fields + new_dynamic_fields
+            # فیلدهای غیربایگانی رو مرتب کن
+            active_fields = [f for f in all_fields if not f.get("archived")]
+            archived_fields_final = [f for f in all_fields if f.get("archived")]
+            active_fields.sort(key=lambda x: x.get("priority", 5))
+            all_fields = active_fields + archived_fields_final
 
             result = {
                 "success": True,
@@ -612,8 +732,10 @@ async def auto_setup_project_memory(
                 "frameworks": insights.get("frameworks", []),
                 "memory_instructions": memory_instructions,
                 "dynamic_fields": all_fields,
-                "new_fields_count": len(dynamic_fields),
-                "archived_fields_preserved": len(archived_fields),
+                "new_fields_count": len(new_dynamic_fields),
+                "fields_archived": fields_archived_count,
+                "fields_merged": fields_merged_count,
+                "fields_updated": fields_updated_count,
                 "missing_files": data.get("missing_files", []),
                 "ai_insights": data.get("project_summary"),
                 "recommendations": data.get("key_recommendations", []),

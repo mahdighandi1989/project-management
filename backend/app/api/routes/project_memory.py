@@ -48,6 +48,10 @@ class DynamicFieldRequest(BaseModel):
     target_path: Optional[str] = None  # مسیر فایل در ریپو (مثلاً: backend/models/customer.py)
     archive_after_run: bool = False  # آیا بعد از اجرای موفق بایگانی شود؟
     deploy_after_commit: bool = False  # آیا بعد از commit در Render دیپلوی شود؟
+    # 🆕 فیلدهای جدید
+    field_type: str = "temporary"  # "permanent" (دائمی/تکرارشونده) یا "temporary" (موقت/یکبار مصرف)
+    priority: int = 5  # اولویت از 1 (بالاترین) تا 10 (پایین‌ترین)
+    attachments: Optional[List[str]] = None  # لیست فایل‌های پیوست (آدرس فایل یا base64)
 
 
 class UpdateDynamicFieldRequest(BaseModel):
@@ -62,6 +66,26 @@ class UpdateDynamicFieldRequest(BaseModel):
     archive_after_run: Optional[bool] = None
     deploy_after_commit: Optional[bool] = None  # آیا بعد از commit در Render دیپلوی شود؟
     archived: Optional[bool] = None  # برای بایگانی/خروج از بایگانی
+    # 🆕 فیلدهای جدید
+    field_type: Optional[str] = None  # "permanent" یا "temporary"
+    priority: Optional[int] = None  # اولویت از 1 تا 10
+    attachments: Optional[List[str]] = None  # لیست پیوست‌ها
+
+
+class BatchExecuteRequest(BaseModel):
+    """درخواست اجرای گروهی فیلدها"""
+    field_ids: List[str]  # لیست آی‌دی فیلدها یا "all" یا "permanent" یا "temporary"
+    execute_type: str = "selected"  # "selected", "all", "permanent", "temporary"
+    auto_prioritize: bool = True  # مرتب‌سازی خودکار براساس اولویت
+
+
+class FieldAttachmentRequest(BaseModel):
+    """درخواست افزودن پیوست به فیلد"""
+    field_id: str
+    file_path: Optional[str] = None  # آدرس فایل در سرور
+    file_content: Optional[str] = None  # محتوای فایل (base64)
+    file_name: str  # نام فایل
+    file_type: str  # نوع فایل (image, document, code)
 
 
 # ثابت‌های نوع اکشن
@@ -69,6 +93,22 @@ ACTION_TYPES = [
     {"id": "display", "name": "فقط نمایش", "icon": "👁️", "description": "نتیجه فقط در ژورنال نمایش داده می‌شود"},
     {"id": "github_commit", "name": "Commit به GitHub", "icon": "📤", "description": "نتیجه به عنوان یک فایل در ریپو commit می‌شود"},
     {"id": "github_multi_commit", "name": "Multi Commit", "icon": "📦", "description": "چند فایل از پاسخ استخراج و commit می‌شوند"},
+]
+
+# 🆕 ثابت‌های نوع فیلد
+FIELD_TYPES = [
+    {"id": "permanent", "name": "دائمی/تکرارشونده", "icon": "🔄", "description": "فیلدهایی که باید همیشه فعال باشند و به صورت دوره‌ای اجرا شوند"},
+    {"id": "temporary", "name": "موقت/یکبار مصرف", "icon": "⏱️", "description": "فیلدهایی که برای یک کار خاص ایجاد شده و بعد از اجرا بایگانی می‌شوند"},
+]
+
+# 🆕 سطوح اولویت
+PRIORITY_LEVELS = [
+    {"value": 1, "name": "بحرانی", "icon": "🔴", "description": "فوری - باید ابتدا اجرا شود"},
+    {"value": 2, "name": "بسیار بالا", "icon": "🟠"},
+    {"value": 3, "name": "بالا", "icon": "🟡"},
+    {"value": 5, "name": "عادی", "icon": "🟢", "description": "پیش‌فرض"},
+    {"value": 7, "name": "پایین", "icon": "🔵"},
+    {"value": 10, "name": "خیلی پایین", "icon": "⚪", "description": "در صورت فرصت"},
 ]
 
 
@@ -520,7 +560,14 @@ async def add_dynamic_field(
     except (json.JSONDecodeError, TypeError):
         pass
 
-    # افزودن فیلد جدید با تنظیمات تریگر
+    # تعیین خودکار field_type براساس archive_after_run
+    field_type = request.field_type
+    if field_type == "temporary" and request.archive_after_run:
+        field_type = "temporary"
+    elif not request.archive_after_run and request.trigger and request.trigger.enabled:
+        field_type = "permanent"
+
+    # افزودن فیلد جدید با تنظیمات کامل
     new_field = {
         "id": str(uuid.uuid4()),
         "name": request.name,
@@ -532,7 +579,19 @@ async def add_dynamic_field(
             "interval_type": request.trigger.interval_type if request.trigger else "minutes",
             "last_run": None,
             "next_run": None
-        }
+        },
+        # فیلدهای GitHub
+        "action_type": request.action_type,
+        "target_path": request.target_path,
+        "archive_after_run": request.archive_after_run,
+        "deploy_after_commit": request.deploy_after_commit,
+        # 🆕 فیلدهای جدید
+        "field_type": field_type,
+        "priority": request.priority if request.priority else 5,
+        "attachments": request.attachments or [],
+        # متادیتا
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "archived": False,
     }
     dynamic_fields.append(new_field)
 
@@ -571,6 +630,7 @@ async def update_dynamic_field(
 
     # پیدا کردن و ویرایش فیلد
     field_found = False
+    updated_field = None
     for field in dynamic_fields:
         if field["id"] == field_id:
             if request.name is not None:
@@ -586,7 +646,29 @@ async def update_dynamic_field(
                 field["trigger"]["enabled"] = request.trigger.enabled
                 field["trigger"]["interval_minutes"] = request.trigger.interval_minutes
                 field["trigger"]["interval_type"] = request.trigger.interval_type
+            # فیلدهای GitHub
+            if request.action_type is not None:
+                field["action_type"] = request.action_type
+            if request.target_path is not None:
+                field["target_path"] = request.target_path
+            if request.archive_after_run is not None:
+                field["archive_after_run"] = request.archive_after_run
+            if request.deploy_after_commit is not None:
+                field["deploy_after_commit"] = request.deploy_after_commit
+            if request.archived is not None:
+                field["archived"] = request.archived
+                if request.archived:
+                    field["archived_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            # 🆕 فیلدهای جدید
+            if request.field_type is not None:
+                field["field_type"] = request.field_type
+            if request.priority is not None:
+                field["priority"] = request.priority
+            if request.attachments is not None:
+                field["attachments"] = request.attachments
+            field["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
             field_found = True
+            updated_field = field
             break
 
     if not field_found:
@@ -1376,6 +1458,385 @@ async def get_action_types():
         "success": True,
         "action_types": ACTION_TYPES
     }
+
+
+# =====================================
+# 🆕 انواع فیلد و اولویت‌ها
+# =====================================
+
+@router.get("/{project_id}/memory/field-types")
+async def get_field_types():
+    """دریافت لیست انواع فیلد (دائمی/موقت)"""
+    return {
+        "success": True,
+        "field_types": FIELD_TYPES,
+        "priority_levels": PRIORITY_LEVELS
+    }
+
+
+@router.get("/{project_id}/memory/fields/by-type")
+async def get_fields_by_type(
+    project_id: str,
+    field_type: Optional[str] = None,  # permanent, temporary, all
+    include_archived: bool = False,
+    sort_by_priority: bool = True,
+    db: Session = Depends(get_db)
+):
+    """
+    دریافت فیلدها براساس نوع با امکان فیلتر و مرتب‌سازی
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    dynamic_fields = []
+    try:
+        if project.dynamic_fields:
+            dynamic_fields = json.loads(project.dynamic_fields)
+    except:
+        pass
+
+    # فیلتر بر اساس نوع
+    if field_type and field_type != "all":
+        dynamic_fields = [f for f in dynamic_fields if f.get("field_type") == field_type]
+
+    # فیلتر بایگانی
+    if not include_archived:
+        dynamic_fields = [f for f in dynamic_fields if not f.get("archived")]
+
+    # مرتب‌سازی بر اساس اولویت
+    if sort_by_priority:
+        dynamic_fields.sort(key=lambda x: x.get("priority", 5))
+
+    # گروه‌بندی
+    permanent_fields = [f for f in dynamic_fields if f.get("field_type") == "permanent"]
+    temporary_fields = [f for f in dynamic_fields if f.get("field_type") == "temporary"]
+    other_fields = [f for f in dynamic_fields if f.get("field_type") not in ["permanent", "temporary"]]
+
+    return {
+        "success": True,
+        "all_fields": dynamic_fields,
+        "permanent_fields": permanent_fields,
+        "temporary_fields": temporary_fields,
+        "other_fields": other_fields,
+        "counts": {
+            "total": len(dynamic_fields),
+            "permanent": len(permanent_fields),
+            "temporary": len(temporary_fields),
+            "other": len(other_fields)
+        }
+    }
+
+
+# =====================================
+# 🆕 اجرای گروهی فیلدها با اولویت‌بندی
+# =====================================
+
+@router.post("/{project_id}/memory/fields/batch-execute")
+async def batch_execute_fields(
+    project_id: str,
+    request: BatchExecuteRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    اجرای گروهی فیلدها با اولویت‌بندی هوشمند
+    - execute_type: "selected" (فیلدهای انتخاب شده), "all", "permanent", "temporary"
+    - auto_prioritize: مرتب‌سازی خودکار براساس اولویت
+    """
+    from datetime import datetime
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+    import asyncio
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    dynamic_fields = []
+    try:
+        if project.dynamic_fields:
+            dynamic_fields = json.loads(project.dynamic_fields)
+    except:
+        pass
+
+    # فیلتر فیلدهای غیربایگانی
+    active_fields = [f for f in dynamic_fields if not f.get("archived")]
+
+    # انتخاب فیلدها برای اجرا
+    fields_to_execute = []
+
+    if request.execute_type == "all":
+        fields_to_execute = active_fields
+    elif request.execute_type == "permanent":
+        fields_to_execute = [f for f in active_fields if f.get("field_type") == "permanent"]
+    elif request.execute_type == "temporary":
+        fields_to_execute = [f for f in active_fields if f.get("field_type") == "temporary"]
+    elif request.execute_type == "selected":
+        fields_to_execute = [f for f in active_fields if f.get("id") in request.field_ids]
+
+    if not fields_to_execute:
+        return {
+            "success": False,
+            "error": "هیچ فیلدی برای اجرا انتخاب نشده",
+            "executed_count": 0
+        }
+
+    # مرتب‌سازی براساس اولویت (1 = بالاترین اولویت)
+    if request.auto_prioritize:
+        fields_to_execute.sort(key=lambda x: x.get("priority", 5))
+
+    # اجرای ترتیبی فیلدها
+    execution_results = []
+    success_count = 0
+    failed_count = 0
+
+    for field in fields_to_execute:
+        try:
+            # اجرای فیلد با استفاده از endpoint موجود
+            # صدا زدن تابع execute_field_trigger به صورت مستقیم
+            result = await execute_field_internal(
+                project_id=project_id,
+                field_id=field.get("id"),
+                db=db,
+                field_data=field,
+                project=project
+            )
+
+            execution_results.append({
+                "field_id": field.get("id"),
+                "field_name": field.get("name"),
+                "priority": field.get("priority", 5),
+                "field_type": field.get("field_type"),
+                "success": result.get("success", False),
+                "error": result.get("error"),
+            })
+
+            if result.get("success"):
+                success_count += 1
+            else:
+                failed_count += 1
+
+        except Exception as e:
+            execution_results.append({
+                "field_id": field.get("id"),
+                "field_name": field.get("name"),
+                "success": False,
+                "error": str(e)
+            })
+            failed_count += 1
+
+    return {
+        "success": success_count > 0,
+        "executed_count": len(fields_to_execute),
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "results": execution_results,
+        "execution_order": [f.get("name") for f in fields_to_execute],
+        "executed_at": datetime.utcnow().isoformat()
+    }
+
+
+async def execute_field_internal(project_id: str, field_id: str, db: Session, field_data: dict, project: Project):
+    """
+    اجرای داخلی فیلد برای batch execution
+    نسخه ساده‌تر از execute_field_trigger
+    """
+    from datetime import datetime
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+    from ...models.project import ProjectFile
+    import asyncio
+
+    try:
+        target_field = field_data
+
+        # دریافت تنظیمات GitHub از پروژه
+        github_info = {}
+        try:
+            if project.extra_data:
+                github_info = json.loads(project.extra_data)
+        except:
+            pass
+
+        action_type = target_field.get("action_type", "display")
+        target_path = target_field.get("target_path")
+
+        # دریافت فایل‌های پروژه برای context
+        project_files_context = ""
+        try:
+            files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+            if files:
+                relevant_files = []
+                total_chars = 0
+                max_chars = 30000  # کمتر برای batch
+
+                for f in files[:15]:
+                    if total_chars >= max_chars:
+                        break
+                    if f.content and f.file_type in ['py', 'ts', 'tsx', 'js', 'jsx']:
+                        content = f.content[:5000] if len(f.content) > 5000 else f.content
+                        relevant_files.append({"path": f.file_path, "content": content})
+                        total_chars += len(content)
+
+                if relevant_files:
+                    project_files_context = "\n\n=== فایل‌های پروژه ===\n"
+                    for rf in relevant_files[:10]:
+                        project_files_context += f"\n--- {rf['path']} ---\n```\n{rf['content']}\n```\n"
+        except:
+            pass
+
+        # ساخت prompt
+        system_prompt = f"تو یک دستیار هوشمند برای پروژه '{project.name}' هستی."
+        if project.description:
+            system_prompt += f"\nتوضیحات پروژه: {project.description}"
+        if project_files_context:
+            system_prompt += project_files_context
+
+        # اضافه کردن پیوست‌ها به prompt
+        attachments = target_field.get("attachments", [])
+        if attachments:
+            system_prompt += "\n\n=== پیوست‌ها ===\n"
+            for att in attachments:
+                if isinstance(att, dict):
+                    system_prompt += f"- {att.get('name', 'پیوست')}: {att.get('content', '')[:2000]}\n"
+                else:
+                    system_prompt += f"- {att[:500]}\n"
+
+        user_prompt = f"دستور: {target_field.get('name', 'فیلد')}\n\n{target_field.get('value', '')}"
+
+        # ارسال به مدل
+        target_models = target_field.get("target_models", ["claude"])
+        if "all" in target_models:
+            target_models = ["claude"]
+
+        ai_manager = get_ai_manager()
+        results = []
+
+        for model_id in target_models[:1]:  # فقط یک مدل برای batch
+            try:
+                messages = [
+                    Message(role="system", content=system_prompt),
+                    Message(role="user", content=user_prompt),
+                ]
+
+                response = await asyncio.wait_for(
+                    ai_manager.generate(
+                        model_id=model_id,
+                        messages=messages,
+                        max_tokens=4096,
+                        temperature=0.7,
+                    ),
+                    timeout=60.0  # کمتر برای batch
+                )
+
+                results.append({
+                    "model_id": model_id,
+                    "content": response.content[:500] + "..." if len(response.content) > 500 else response.content,
+                    "success": True
+                })
+
+            except Exception as e:
+                results.append({
+                    "model_id": model_id,
+                    "error": str(e),
+                    "success": False
+                })
+
+        any_success = any(r.get("success") for r in results)
+        return {"success": any_success, "results": results}
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# =====================================
+# 🆕 مدیریت پیوست‌های فیلد
+# =====================================
+
+@router.post("/{project_id}/memory/fields/{field_id}/attachments")
+async def add_field_attachment(
+    project_id: str,
+    field_id: str,
+    request: FieldAttachmentRequest,
+    db: Session = Depends(get_db)
+):
+    """افزودن پیوست به فیلد"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    dynamic_fields = []
+    try:
+        if project.dynamic_fields:
+            dynamic_fields = json.loads(project.dynamic_fields)
+    except:
+        pass
+
+    field_found = False
+    for field in dynamic_fields:
+        if field.get("id") == field_id:
+            if "attachments" not in field:
+                field["attachments"] = []
+
+            attachment = {
+                "id": str(uuid.uuid4())[:8],
+                "name": request.file_name,
+                "type": request.file_type,
+                "path": request.file_path,
+                "content": request.file_content[:10000] if request.file_content else None,  # حداکثر 10K
+                "added_at": time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            }
+            field["attachments"].append(attachment)
+            field_found = True
+            break
+
+    if not field_found:
+        raise HTTPException(status_code=404, detail="فیلد یافت نشد")
+
+    project.dynamic_fields = json.dumps(dynamic_fields, ensure_ascii=False)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": "پیوست اضافه شد",
+        "attachment_id": attachment["id"]
+    }
+
+
+@router.delete("/{project_id}/memory/fields/{field_id}/attachments/{attachment_id}")
+async def remove_field_attachment(
+    project_id: str,
+    field_id: str,
+    attachment_id: str,
+    db: Session = Depends(get_db)
+):
+    """حذف پیوست از فیلد"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    dynamic_fields = []
+    try:
+        if project.dynamic_fields:
+            dynamic_fields = json.loads(project.dynamic_fields)
+    except:
+        pass
+
+    field_found = False
+    for field in dynamic_fields:
+        if field.get("id") == field_id:
+            attachments = field.get("attachments", [])
+            field["attachments"] = [a for a in attachments if a.get("id") != attachment_id]
+            field_found = True
+            break
+
+    if not field_found:
+        raise HTTPException(status_code=404, detail="فیلد یافت نشد")
+
+    project.dynamic_fields = json.dumps(dynamic_fields, ensure_ascii=False)
+    db.commit()
+
+    return {"success": True, "message": "پیوست حذف شد"}
 
 
 # =====================================
