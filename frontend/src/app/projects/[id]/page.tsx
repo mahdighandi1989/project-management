@@ -1051,6 +1051,40 @@ export default function ProjectDetailPage() {
     }
   };
 
+  // تست Deploy به Render (برای دیباگ)
+  const testRenderDeploy = async () => {
+    setDeploying(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/deploy/test`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+
+      console.log('Deploy Test Result:', data);
+
+      if (data.success) {
+        showSuccess('✅ تست Deploy موفق! ' + JSON.stringify(data.deploy_result));
+      } else {
+        // نمایش جزئیات خطا
+        let errorMsg = data.error || 'خطا در تست Deploy';
+        if (data.debug_info) {
+          console.log('Debug Info:', data.debug_info);
+          if (!data.debug_info.render_api_key_exists) {
+            errorMsg = '❌ کلید API رندر تنظیم نشده. لطفاً در Settings تنظیم کنید.';
+          }
+        }
+        if (data.solution) {
+          errorMsg += ` | ${data.solution}`;
+        }
+        showError(errorMsg);
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    } finally {
+      setDeploying(false);
+    }
+  };
+
   const generateMoreFiles = async () => {
     try {
       const res = await fetch(`${API_BASE}/api/creator/projects/${projectId}/generate`, {
@@ -1212,6 +1246,17 @@ export default function ProjectDetailPage() {
                   {deploying ? '⏳ در حال Deploy...' : '🚀 Deploy'}
                 </button>
               </>
+            )}
+            {/* دکمه تست برای پروژه‌های GitHub */}
+            {project.project_type === 'github_import' && (
+              <button
+                onClick={testRenderDeploy}
+                disabled={deploying}
+                className="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50"
+                title="تست اتصال به Render و دیباگ مشکلات Deploy"
+              >
+                {deploying ? '⏳...' : '🧪 تست Deploy'}
+              </button>
             )}
             <Link
               href="/projects"
