@@ -227,13 +227,21 @@ async def trigger_render_deploy(
     ابتدا سعی می‌کند از render_service_id استفاده کند
     اگر نبود، از تنظیمات پروژه می‌خواند
     """
-    from ...services.deploy_service import get_deploy_manager
+    import logging
+    logger = logging.getLogger(__name__)
 
-    deploy_manager = get_deploy_manager()
+    from ...services.deploy_service import RenderDeployService
 
-    # اگر سرویس تنظیم نشده
-    if not deploy_manager.render.is_configured():
-        return {"success": False, "error": "Render API key not configured"}
+    # دریافت کلید از environment (ممکن است بعد از شروع برنامه تنظیم شده باشد)
+    render_api_key = os.getenv("RENDER_API_KEY", "")
+
+    logger.info(f"[Render Deploy] API Key exists: {bool(render_api_key)}")
+
+    if not render_api_key:
+        return {"success": False, "error": "Render API key not configured. Please set it in Settings."}
+
+    # ساخت مستقیم سرویس Render با کلید جدید (جلوگیری از cache شدن session قدیمی)
+    render_service = RenderDeployService(api_key=render_api_key)
 
     # پیدا کردن service_id
     service_id = render_service_id
@@ -245,41 +253,62 @@ async def trigger_render_deploy(
             if project and project.extra_data:
                 extra = json.loads(project.extra_data)
                 service_id = extra.get("render_service_id")
-        except:
-            pass
+                logger.info(f"[Render Deploy] Found service_id from project: {service_id}")
+        except Exception as e:
+            logger.warning(f"[Render Deploy] Error reading project extra_data: {e}")
 
     if not service_id:
         # سعی کن از سرویس‌های موجود پیدا کنی
         try:
-            services = await deploy_manager.render.list_services()
+            logger.info("[Render Deploy] Listing services to find service_id...")
+            services = await render_service.list_services()
+            logger.info(f"[Render Deploy] Found {len(services) if services else 0} services")
+
             if services and len(services) > 0:
                 # اولین سرویس را استفاده کن (یا می‌تونی بر اساس نام پروژه فیلتر کنی)
                 for svc in services:
                     svc_data = svc.get("service", svc)
                     service_id = svc_data.get("id")
+                    svc_name = svc_data.get("name", "unknown")
                     if service_id:
+                        logger.info(f"[Render Deploy] Using service: {svc_name} ({service_id})")
                         break
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"[Render Deploy] Error listing services: {e}")
+            await render_service.close()
+            return {"success": False, "error": f"Error listing Render services: {str(e)}"}
 
     if not service_id:
-        return {"success": False, "error": "No Render service found for this project"}
+        await render_service.close()
+        return {"success": False, "error": "No Render service found. Please deploy your project to Render first or set render_service_id in project settings."}
 
     # Trigger deploy
-    result = await deploy_manager.render.trigger_deploy(service_id)
+    try:
+        logger.info(f"[Render Deploy] Triggering deploy for service: {service_id}")
+        result = await render_service.trigger_deploy(service_id)
+        await render_service.close()
 
-    if result.get("success"):
-        return {
-            "success": True,
-            "service_id": service_id,
-            "deploy_id": result.get("deploy_id"),
-            "status": result.get("status"),
-            "message": "Deploy triggered successfully"
-        }
-    else:
+        logger.info(f"[Render Deploy] Result: {result}")
+
+        if result.get("success"):
+            return {
+                "success": True,
+                "service_id": service_id,
+                "deploy_id": result.get("deploy_id"),
+                "status": result.get("status"),
+                "message": "Deploy triggered successfully"
+            }
+        else:
+            return {
+                "success": False,
+                "error": result.get("error", "Failed to trigger deploy")
+            }
+    except Exception as e:
+        logger.error(f"[Render Deploy] Deploy error: {e}")
+        await render_service.close()
         return {
             "success": False,
-            "error": result.get("error", "Failed to trigger deploy")
+            "error": f"Deploy error: {str(e)}"
         }
 
 
