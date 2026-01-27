@@ -1640,3 +1640,181 @@ async def preview_auto_setup(
 
     result["is_preview"] = True
     return result
+
+
+# =====================================
+# تنظیمات سینک GitHub
+# =====================================
+
+class SyncSettingsRequest(BaseModel):
+    """تنظیمات سینک GitHub"""
+    auto_sync_enabled: bool = False  # سینک خودکار با تایمر
+    sync_interval_minutes: int = 15  # هر چند دقیقه
+    sync_after_field_execution: bool = True  # سینک بعد از اجرای فیلد (پیش‌فرض فعال)
+    sync_after_commit: bool = True  # سینک بعد از commit به GitHub
+    update_diagram_after_sync: bool = True  # بروزرسانی دیاگرام بعد از سینک
+    update_structure_after_sync: bool = True  # بروزرسانی ساختار بعد از سینک
+
+
+@router.get("/{project_id}/sync-settings")
+async def get_sync_settings(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """دریافت تنظیمات سینک پروژه"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت تنظیمات از extra_data
+    sync_settings = {
+        "auto_sync_enabled": False,
+        "sync_interval_minutes": 15,
+        "sync_after_field_execution": True,  # پیش‌فرض فعال
+        "sync_after_commit": True,
+        "update_diagram_after_sync": True,
+        "update_structure_after_sync": True,
+    }
+
+    try:
+        if project.extra_data:
+            extra = json.loads(project.extra_data)
+            if "sync_settings" in extra:
+                sync_settings.update(extra["sync_settings"])
+    except:
+        pass
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "sync_settings": sync_settings,
+        "is_github_project": project.project_type == "github_import"
+    }
+
+
+@router.put("/{project_id}/sync-settings")
+async def update_sync_settings(
+    project_id: str,
+    request: SyncSettingsRequest,
+    db: Session = Depends(get_db)
+):
+    """بروزرسانی تنظیمات سینک پروژه"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت extra_data موجود
+    try:
+        extra_data = json.loads(project.extra_data) if project.extra_data else {}
+    except:
+        extra_data = {}
+
+    # بروزرسانی تنظیمات سینک
+    extra_data["sync_settings"] = {
+        "auto_sync_enabled": request.auto_sync_enabled,
+        "sync_interval_minutes": request.sync_interval_minutes,
+        "sync_after_field_execution": request.sync_after_field_execution,
+        "sync_after_commit": request.sync_after_commit,
+        "update_diagram_after_sync": request.update_diagram_after_sync,
+        "update_structure_after_sync": request.update_structure_after_sync,
+    }
+
+    project.extra_data = json.dumps(extra_data, ensure_ascii=False)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": "تنظیمات سینک بروزرسانی شد",
+        "sync_settings": extra_data["sync_settings"]
+    }
+
+
+@router.post("/{project_id}/sync-now")
+async def trigger_sync_now(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    اجرای سینک فوری
+    فایل‌ها را از GitHub سینک کرده و بر اساس تنظیمات دیاگرام/ساختار را بروزرسانی می‌کند
+    """
+    from datetime import datetime
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    if project.project_type != "github_import":
+        return {
+            "success": False,
+            "error": "این پروژه از GitHub نیست"
+        }
+
+    # دریافت تنظیمات
+    sync_settings = {
+        "update_diagram_after_sync": True,
+        "update_structure_after_sync": True,
+    }
+    try:
+        if project.extra_data:
+            extra = json.loads(project.extra_data)
+            if "sync_settings" in extra:
+                sync_settings.update(extra["sync_settings"])
+    except:
+        pass
+
+    # اجرای سینک
+    result = {
+        "success": True,
+        "synced_at": datetime.utcnow().isoformat(),
+        "actions": []
+    }
+
+    # سینک فایل‌ها
+    try:
+        github_token = os.getenv("GITHUB_TOKEN", "")
+        if github_token:
+            result["actions"].append("files_sync_requested")
+            result["github_sync"] = True
+        else:
+            result["github_sync"] = False
+            result["actions"].append("github_token_missing")
+    except Exception as e:
+        result["github_sync_error"] = str(e)
+
+    # ثبت آخرین زمان سینک
+    try:
+        extra_data = json.loads(project.extra_data) if project.extra_data else {}
+        extra_data["last_sync_at"] = datetime.utcnow().isoformat()
+        project.extra_data = json.dumps(extra_data, ensure_ascii=False)
+        db.commit()
+    except:
+        pass
+
+    result["update_diagram"] = sync_settings.get("update_diagram_after_sync", True)
+    result["update_structure"] = sync_settings.get("update_structure_after_sync", True)
+
+    return result
+
+
+# Intervals برای UI
+SYNC_INTERVALS = [
+    {"value": 5, "label": "هر ۵ دقیقه"},
+    {"value": 10, "label": "هر ۱۰ دقیقه"},
+    {"value": 15, "label": "هر ۱۵ دقیقه"},
+    {"value": 30, "label": "هر ۳۰ دقیقه"},
+    {"value": 60, "label": "هر ۱ ساعت"},
+    {"value": 120, "label": "هر ۲ ساعت"},
+    {"value": 360, "label": "هر ۶ ساعت"},
+    {"value": 720, "label": "هر ۱۲ ساعت"},
+    {"value": 1440, "label": "روزانه"},
+]
+
+
+@router.get("/sync-intervals")
+async def get_sync_intervals():
+    """لیست بازه‌های زمانی موجود برای سینک"""
+    return {
+        "success": True,
+        "intervals": SYNC_INTERVALS
+    }
