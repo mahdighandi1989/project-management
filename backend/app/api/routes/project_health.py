@@ -162,6 +162,101 @@ async def debug_ai_status():
     }
 
 
+@router.delete("/{project_id}/health/clear")
+async def clear_analysis_data(project_id: str, db=Depends(get_db)):
+    """
+    پاک کردن همه داده‌های تحلیل یک پروژه
+
+    برای شروع از صفر و رفع سردرگمی درباره داده‌های قدیمی
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # پاک کردن همه داده‌های تحلیل
+    old_data = {
+        "health_scores": project.health_scores,
+        "file_health_map": project.file_health_map,
+        "issues_found": project.issues_found,
+        "last_analysis_at": str(project.last_analysis_at) if project.last_analysis_at else None
+    }
+
+    project.health_scores = None
+    project.file_health_map = None
+    project.issues_found = None
+    project.ideal_state = None
+    project.last_analysis_id = None
+    project.last_analysis_at = None
+    project.last_analysis_models = None
+
+    db.commit()
+
+    logger.info(f"🗑️ Cleared all analysis data for project {project_id}")
+
+    return {
+        "success": True,
+        "message": "همه داده‌های تحلیل پاک شدند",
+        "project_id": project_id,
+        "cleared_data_existed": bool(old_data.get("health_scores") or old_data.get("file_health_map"))
+    }
+
+
+@router.get("/{project_id}/health/status")
+async def get_analysis_status(project_id: str, db=Depends(get_db)):
+    """
+    وضعیت دقیق تحلیل پروژه
+
+    نشون میده:
+    - آیا داده‌ای وجود داره یا نه
+    - آخرین تحلیل کی بوده
+    - چه مدل‌هایی استفاده شدن
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    has_health_scores = bool(project.health_scores)
+    has_file_map = bool(project.file_health_map)
+    has_issues = bool(project.issues_found)
+
+    # پارس داده‌ها
+    file_count = 0
+    issues_count = 0
+    try:
+        if project.file_health_map:
+            file_map = json.loads(project.file_health_map)
+            file_count = len(file_map)
+        if project.issues_found:
+            issues = json.loads(project.issues_found)
+            issues_count = len(issues)
+    except:
+        pass
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "has_analysis_data": has_health_scores or has_file_map,
+        "data_status": {
+            "health_scores": has_health_scores,
+            "file_health_map": has_file_map,
+            "files_analyzed": file_count,
+            "issues_found": has_issues,
+            "issues_count": issues_count,
+        },
+        "last_analysis": {
+            "id": project.last_analysis_id,
+            "at": project.last_analysis_at.isoformat() if project.last_analysis_at else None,
+            "models": json.loads(project.last_analysis_models) if project.last_analysis_models else [],
+            "how_long_ago": str(datetime.utcnow() - project.last_analysis_at) if project.last_analysis_at else None
+        },
+        "ideal_state_exists": bool(project.ideal_state),
+        "note": "اگر has_analysis_data=false باشه، یعنی هیچ تحلیلی انجام نشده"
+    }
+
+
 @router.post("/{project_id}/health/analyze-direct")
 async def run_direct_analysis(project_id: str, db=Depends(get_db)):
     """

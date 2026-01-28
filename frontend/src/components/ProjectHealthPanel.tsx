@@ -74,6 +74,10 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
   const [editingSettings, setEditingSettings] = useState(false);
   const [tempSettings, setTempSettings] = useState<AnalysisSettings | null>(null);
 
+  // Status states
+  const [hasRealData, setHasRealData] = useState(false);
+  const [analysisLog, setAnalysisLog] = useState<string[]>([]);
+
   // Messages
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -81,7 +85,71 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
   useEffect(() => {
     loadAllData();
     loadAvailableModels();
+    checkAnalysisStatus();
   }, [projectId]);
+
+  const checkAnalysisStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/status`);
+      if (res.ok) {
+        const data = await res.json();
+        setHasRealData(data.has_analysis_data);
+      }
+    } catch (e) {
+      console.error('Error checking status:', e);
+    }
+  };
+
+  const clearAnalysisData = async () => {
+    if (!confirm('آیا مطمئنید؟ همه داده‌های تحلیل پاک خواهند شد.')) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/clear`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        showSuccess('داده‌های تحلیل پاک شدند');
+        setHealthScores(null);
+        setFileHealthMap({});
+        setIssues([]);
+        setIdealState('');
+        setLastAnalysis(null);
+        setHasRealData(false);
+      } else {
+        showError('خطا در پاک کردن داده‌ها');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    }
+  };
+
+  const runDirectAnalysis = async () => {
+    setAnalyzing(true);
+    setAnalysisLog(['🚀 شروع تحلیل مستقیم...']);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/analyze-direct`, {
+        method: 'POST'
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        setAnalysisLog(prev => [...prev, '✅ تحلیل کامل شد']);
+        showSuccess('تحلیل با موفقیت انجام شد');
+        await loadAllData();
+        await checkAnalysisStatus();
+      } else {
+        setAnalysisLog(prev => [...prev, `❌ خطا: ${data.error}`]);
+        showError(data.error || 'خطا در تحلیل');
+      }
+    } catch (e) {
+      setAnalysisLog(prev => [...prev, `❌ خطای شبکه: ${e}`]);
+      showError('خطا در ارتباط با سرور');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
 
   const showError = (msg: string) => {
     setError(msg);
@@ -294,25 +362,50 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
           <div>
             <h2 className="text-lg font-bold">تحلیل سلامت پروژه</h2>
             <p className="text-sm opacity-80">بررسی خودکار ساختار و کیفیت</p>
-          </div>
-          <button
-            onClick={runAnalysis}
-            disabled={analyzing}
-            className="px-4 py-2 bg-white/20 rounded-lg hover:bg-white/30 disabled:opacity-50 flex items-center gap-2"
-          >
-            {analyzing ? (
-              <>
-                <span className="animate-spin">*</span>
-                <span>در حال تحلیل...</span>
-              </>
+            {hasRealData ? (
+              <span className="text-xs bg-green-500/50 px-2 py-0.5 rounded mt-1 inline-block">✓ داده واقعی</span>
             ) : (
-              <>
-                <span>*</span>
-                <span>شروع تحلیل</span>
-              </>
+              <span className="text-xs bg-yellow-500/50 px-2 py-0.5 rounded mt-1 inline-block">⚠ بدون تحلیل</span>
             )}
-          </button>
+          </div>
+          <div className="flex gap-2">
+            {hasRealData && (
+              <button
+                onClick={clearAnalysisData}
+                className="px-3 py-2 bg-red-500/30 rounded-lg hover:bg-red-500/50 text-sm"
+                title="پاک کردن داده‌های تحلیل"
+              >
+                🗑️ پاک کردن
+              </button>
+            )}
+            <button
+              onClick={runDirectAnalysis}
+              disabled={analyzing}
+              className="px-4 py-2 bg-white/20 rounded-lg hover:bg-white/30 disabled:opacity-50 flex items-center gap-2"
+            >
+              {analyzing ? (
+                <>
+                  <span className="animate-spin">⏳</span>
+                  <span>در حال تحلیل...</span>
+                </>
+              ) : (
+                <>
+                  <span>🔬</span>
+                  <span>شروع تحلیل</span>
+                </>
+              )}
+            </button>
+          </div>
         </div>
+
+        {/* لاگ تحلیل */}
+        {analysisLog.length > 0 && (
+          <div className="mt-3 bg-black/20 rounded-lg p-2 text-xs font-mono max-h-32 overflow-auto">
+            {analysisLog.map((log, i) => (
+              <div key={i}>{log}</div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* تب‌ها */}
@@ -343,10 +436,25 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
         {/* تب نمای کلی */}
         {activeTab === 'overview' && (
           <div className="space-y-6">
+            {/* هشدار اگر داده‌ای نیست */}
+            {!hasRealData && (
+              <div className="p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-300 dark:border-yellow-700 rounded-lg">
+                <div className="flex items-center gap-3">
+                  <span className="text-2xl">⚠️</span>
+                  <div>
+                    <h4 className="font-bold text-yellow-800 dark:text-yellow-400">هیچ تحلیلی انجام نشده</h4>
+                    <p className="text-sm text-yellow-700 dark:text-yellow-500">
+                      برای مشاهده نمرات واقعی، دکمه "شروع تحلیل" را بزنید.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* نمره کلی */}
             <div className="flex items-center gap-6">
-              <div className={`w-24 h-24 rounded-2xl flex items-center justify-center text-3xl font-bold text-white ${getScoreBg(healthScores?.overall || 0)}`}>
-                {healthScores?.overall?.toFixed(0) || '?'}
+              <div className={`w-24 h-24 rounded-2xl flex items-center justify-center text-3xl font-bold text-white ${hasRealData ? getScoreBg(healthScores?.overall || 0) : 'bg-gray-400'}`}>
+                {hasRealData ? (healthScores?.overall?.toFixed(0) || '0') : '?'}
               </div>
               <div>
                 <h3 className="text-xl font-bold">نمره سلامت کلی</h3>
