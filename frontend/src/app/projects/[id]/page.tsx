@@ -239,6 +239,20 @@ export default function ProjectDetailPage() {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
 
+  // Health Map State - برای رنگ‌بندی دیاگرام بر اساس سلامت
+  const [fileHealthMap, setFileHealthMap] = useState<Record<string, {
+    score: number;
+    color: string;
+    hex: string;
+    label: string;
+    models_analyzed: number;
+    model_scores: Record<string, number>;
+    issues_count: number;
+    analyzed_at: string;
+  }>>({});
+  const [healthDataLoaded, setHealthDataLoaded] = useState(false);
+  const [hoveredNode, setHoveredNode] = useState<string | null>(null);
+
   // Memory Box State
   const [memoryInstructions, setMemoryInstructions] = useState<MemoryInstructions>({
     content: '',
@@ -589,18 +603,49 @@ export default function ProjectDetailPage() {
     };
   }, [syncIntervalTimer]);
 
+  // بارگذاری داده‌های سلامت فایل‌ها
+  const loadFileHealthMap = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/file-map`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.file_map) {
+          setFileHealthMap(data.file_map);
+          setHealthDataLoaded(true);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading file health map:', e);
+    }
+  };
+
   // بارگذاری ساختار پروژه
   const loadStructure = async () => {
     setStructureLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/structure`);
-      if (res.ok) {
-        const data = await res.json();
+      // بارگذاری همزمان ساختار و داده‌های سلامت
+      const [structureRes, healthRes] = await Promise.all([
+        fetch(`${API_BASE}/api/projects/${projectId}/structure`),
+        fetch(`${API_BASE}/api/projects/${projectId}/health/file-map`)
+      ]);
+
+      let healthMap: Record<string, any> = {};
+      if (healthRes.ok) {
+        const healthData = await healthRes.json();
+        if (healthData.success && healthData.file_map) {
+          healthMap = healthData.file_map;
+          setFileHealthMap(healthMap);
+          setHealthDataLoaded(true);
+        }
+      }
+
+      if (structureRes.ok) {
+        const data = await structureRes.json();
         if (data.success) {
           setStructureData(data.structure);
           setStructureSettings(data.settings);
-          // تبدیل به فرمت React Flow
-          convertToReactFlow(data.structure);
+          // تبدیل به فرمت React Flow با رنگ‌بندی سلامت
+          convertToReactFlow(data.structure, healthMap);
         }
       }
     } catch (e) {
@@ -610,33 +655,133 @@ export default function ProjectDetailPage() {
     }
   };
 
-  // تبدیل داده‌ها به فرمت React Flow
-  const convertToReactFlow = (structure: ProjectStructure) => {
-    const flowNodes: Node[] = structure.nodes.map((node) => ({
-      id: node.id,
-      type: 'default',
-      position: node.position,
-      data: {
-        label: (
-          <div className={`text-center ${node.is_active ? 'animate-pulse' : ''}`}>
-            <div className="font-bold">{node.label}</div>
-            {node.description && (
-              <div className="text-xs opacity-70 mt-1">{node.description}</div>
-            )}
-          </div>
-        ),
-      },
-      style: {
-        background: node.style?.background || '#6366f1',
-        color: node.style?.color || 'white',
-        border: node.is_active ? '3px solid #22c55e' : '1px solid #4b5563',
-        borderRadius: '8px',
-        padding: '10px',
-        fontSize: node.style?.fontSize || '14px',
-        fontWeight: node.style?.fontWeight || 'normal',
-        boxShadow: node.is_active ? '0 0 15px #22c55e' : '0 2px 4px rgba(0,0,0,0.2)',
-      },
-    }));
+  // تبدیل داده‌ها به فرمت React Flow با رنگ‌بندی سلامت
+  const convertToReactFlow = (structure: ProjectStructure, healthMap?: Record<string, any>) => {
+    const currentHealthMap = healthMap || fileHealthMap;
+
+    const flowNodes: Node[] = structure.nodes.map((node) => {
+      // پیدا کردن اطلاعات سلامت برای این نود
+      const nodePath = node.data?.path || node.label || node.id;
+      const healthInfo = findHealthInfoForNode(nodePath, currentHealthMap);
+
+      // تعیین رنگ نود بر اساس سلامت
+      let nodeBackground = node.style?.background || '#6366f1';
+      let borderColor = node.is_active ? '#22c55e' : '#4b5563';
+      let healthScore = null;
+      let healthLabel = '';
+
+      if (healthInfo) {
+        nodeBackground = healthInfo.hex || nodeBackground;
+        healthScore = healthInfo.score;
+        healthLabel = healthInfo.label || '';
+        // برای فایل‌های با مشکل، حاشیه قرمز
+        if (healthInfo.score < 50) {
+          borderColor = '#ef4444';
+        } else if (healthInfo.score < 70) {
+          borderColor = '#f97316';
+        }
+      }
+
+      return {
+        id: node.id,
+        type: 'default',
+        position: node.position,
+        data: {
+          label: (
+            <div
+              className={`text-center ${node.is_active ? 'animate-pulse' : ''} relative group cursor-pointer`}
+              onMouseEnter={() => setHoveredNode(node.id)}
+              onMouseLeave={() => setHoveredNode(null)}
+            >
+              <div className="font-bold">{node.label}</div>
+              {node.description && (
+                <div className="text-xs opacity-70 mt-1">{node.description}</div>
+              )}
+              {/* نمایش نمره سلامت روی نود */}
+              {healthScore !== null && (
+                <div className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-white text-xs font-bold flex items-center justify-center shadow"
+                     style={{ color: healthInfo?.hex || '#666' }}>
+                  {Math.round(healthScore)}
+                </div>
+              )}
+
+              {/* هاور tooltip با جزئیات سلامت */}
+              {healthInfo && hoveredNode === node.id && (
+                <div className="absolute z-50 top-full left-1/2 transform -translate-x-1/2 mt-2 w-64 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-lg shadow-xl p-3 text-right border border-gray-200 dark:border-gray-700"
+                     style={{ pointerEvents: 'none' }}>
+                  <div className="text-sm font-bold mb-2 pb-2 border-b flex items-center justify-between">
+                    <span>وضعیت سلامت</span>
+                    <span className="px-2 py-0.5 rounded text-xs text-white"
+                          style={{ backgroundColor: healthInfo.hex }}>
+                      {healthLabel}
+                    </span>
+                  </div>
+
+                  <div className="space-y-1 text-xs">
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">نمره کلی:</span>
+                      <span className="font-bold" style={{ color: healthInfo.hex }}>
+                        {healthInfo.score?.toFixed(1)}%
+                      </span>
+                    </div>
+
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">مدل‌های بررسی‌کننده:</span>
+                      <span className="font-bold">{healthInfo.models_analyzed || 0}</span>
+                    </div>
+
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">تعداد ایرادات:</span>
+                      <span className={`font-bold ${(healthInfo.issues_count || 0) > 0 ? 'text-red-500' : 'text-green-500'}`}>
+                        {healthInfo.issues_count || 0}
+                      </span>
+                    </div>
+
+                    {healthInfo.analyzed_at && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">تاریخ تحلیل:</span>
+                        <span className="text-gray-600 dark:text-gray-400">
+                          {new Date(healthInfo.analyzed_at).toLocaleDateString('fa-IR')}
+                        </span>
+                      </div>
+                    )}
+
+                    {/* نمرات هر مدل */}
+                    {healthInfo.model_scores && Object.keys(healthInfo.model_scores).length > 0 && (
+                      <div className="pt-2 mt-2 border-t border-gray-200 dark:border-gray-600">
+                        <div className="text-gray-500 mb-1">نمره هر مدل:</div>
+                        <div className="flex flex-wrap gap-1">
+                          {Object.entries(healthInfo.model_scores).map(([model, score]) => (
+                            <span key={model}
+                                  className="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">
+                              {model.split('/').pop()}: {(score as number).toFixed(0)}%
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          ),
+          // ذخیره اطلاعات سلامت در data نود
+          healthInfo: healthInfo,
+          path: nodePath,
+        },
+        style: {
+          background: nodeBackground,
+          color: node.style?.color || 'white',
+          border: node.is_active ? `3px solid ${borderColor}` : `2px solid ${borderColor}`,
+          borderRadius: '8px',
+          padding: '10px',
+          fontSize: node.style?.fontSize || '14px',
+          fontWeight: node.style?.fontWeight || 'normal',
+          boxShadow: node.is_active ? `0 0 15px ${borderColor}` : '0 2px 8px rgba(0,0,0,0.3)',
+          transition: 'all 0.3s ease',
+        },
+      };
+    });
 
     const flowEdges: Edge[] = structure.edges.map((edge) => ({
       id: edge.id,
@@ -659,6 +804,26 @@ export default function ProjectDetailPage() {
     setEdges(flowEdges);
   };
 
+  // تابع کمکی برای پیدا کردن اطلاعات سلامت یک نود
+  const findHealthInfoForNode = (nodePath: string, healthMap: Record<string, any>) => {
+    if (!healthMap || !nodePath) return null;
+
+    // جستجوی دقیق
+    if (healthMap[nodePath]) {
+      return healthMap[nodePath];
+    }
+
+    // جستجوی با نام فایل
+    const fileName = nodePath.split('/').pop();
+    for (const [path, info] of Object.entries(healthMap)) {
+      if (path.endsWith(nodePath) || path.split('/').pop() === fileName) {
+        return info;
+      }
+    }
+
+    return null;
+  };
+
   // تحلیل مجدد ساختار
   const analyzeStructure = async () => {
     setAnalyzingStructure(true);
@@ -671,7 +836,24 @@ export default function ProjectDetailPage() {
         showSuccess('ساختار پروژه با موفقیت تحلیل شد');
         setStructureData(data.structure);
         setStructureSettings(data.settings);
-        convertToReactFlow(data.structure);
+
+        // دریافت داده‌های سلامت برای رنگ‌بندی
+        try {
+          const healthRes = await fetch(`${API_BASE}/api/projects/${projectId}/health/file-map`);
+          if (healthRes.ok) {
+            const healthData = await healthRes.json();
+            if (healthData.success && healthData.file_map) {
+              setFileHealthMap(healthData.file_map);
+              convertToReactFlow(data.structure, healthData.file_map);
+            } else {
+              convertToReactFlow(data.structure);
+            }
+          } else {
+            convertToReactFlow(data.structure);
+          }
+        } catch {
+          convertToReactFlow(data.structure);
+        }
       } else {
         showError(data.detail || 'خطا در تحلیل');
       }
@@ -2848,14 +3030,30 @@ export default function ProjectDetailPage() {
                 <span className="text-xl">💡</span>
                 <h3 className="font-bold">راهنما</h3>
               </div>
-              <ul className="text-sm text-gray-600 dark:text-gray-400 space-y-1 list-disc list-inside mr-4">
-                <li>نودهای سبز: نقاط ورودی و فایل‌های اصلی</li>
-                <li>نودهای بنفش: پوشه‌ها و دایرکتوری‌ها</li>
-                <li>نودهای سبز روشن: فایل‌ها</li>
-                <li>خطوط متحرک: اتصالات فعال و جریان داده</li>
-                <li>نودهای چشمک‌زن: فرآیندهای در حال اجرا</li>
-                <li>با ماوس می‌توانید نودها را جابه‌جا کنید و زوم کنید</li>
-              </ul>
+              <div className="grid md:grid-cols-2 gap-4">
+                <div>
+                  <h4 className="font-medium text-sm mb-2">🎨 رنگ‌بندی سلامت:</h4>
+                  <ul className="text-sm text-gray-600 dark:text-gray-400 space-y-1 list-disc list-inside mr-4">
+                    <li><span className="inline-block w-3 h-3 rounded-full bg-green-500 ml-1"></span> سبز: سالم (90%+)</li>
+                    <li><span className="inline-block w-3 h-3 rounded-full bg-lime-500 ml-1"></span> سبز روشن: خوب (75-90%)</li>
+                    <li><span className="inline-block w-3 h-3 rounded-full bg-yellow-500 ml-1"></span> زرد: متوسط (60-75%)</li>
+                    <li><span className="inline-block w-3 h-3 rounded-full bg-orange-500 ml-1"></span> نارنجی: ضعیف (40-60%)</li>
+                    <li><span className="inline-block w-3 h-3 rounded-full bg-red-500 ml-1"></span> قرمز: بد (20-40%)</li>
+                    <li><span className="inline-block w-3 h-3 rounded-full bg-red-800 ml-1"></span> قرمز تیره: بحرانی (0-20%)</li>
+                  </ul>
+                </div>
+                <div>
+                  <h4 className="font-medium text-sm mb-2">📊 اطلاعات نود:</h4>
+                  <ul className="text-sm text-gray-600 dark:text-gray-400 space-y-1 list-disc list-inside mr-4">
+                    <li>عدد روی نود = نمره سلامت</li>
+                    <li>با هاور روی نود جزئیات را ببینید</li>
+                    <li>مدل‌های بررسی‌کننده و تاریخ</li>
+                    <li>نمره هر مدل به تفکیک</li>
+                    <li>تعداد ایرادات شناسایی شده</li>
+                    <li>برای تحلیل از تب "تحلیل سلامت" استفاده کنید</li>
+                  </ul>
+                </div>
+              </div>
             </div>
           </div>
         )}
