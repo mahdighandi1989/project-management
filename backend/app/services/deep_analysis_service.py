@@ -655,7 +655,7 @@ class DeepAnalysisService:
     ) -> str:
         """ساخت پرامپت تحلیل ساختاری"""
 
-        file_list = "\n".join([f"- {f.get('path', f.get('file_path', ''))}" for f in files[:100]])
+        file_list = "\n".join([f"- {f.get('path', f.get('file_path', ''))}" for f in files])
 
         prompt = f"""# تحلیل ساختاری پروژه (Structural Analysis)
 
@@ -812,57 +812,77 @@ class DeepAnalysisService:
         }
         return type_map.get(ext, "other")
 
-    async def _call_ai_model(self, model_id: str, prompt: str) -> str:
-        """فراخوانی مدل AI"""
+    async def _call_ai_model(self, model_id: str, prompt: str, fallback_models: List[str] = None) -> str:
+        """
+        فراخوانی مدل AI با قابلیت fallback
+
+        اگر مدل اصلی fail کنه، مدل‌های دیگه امتحان میشن
+        """
         import time
-        start_time = time.time()
 
-        logger.info(f"🚀 [AI CALL] Starting call to model {model_id}...")
-        logger.info(f"📝 [AI CALL] Prompt length: {len(prompt)} chars")
+        if not self.ai_manager:
+            logger.error("❌ [AI CALL] AI Manager is None! Cannot make AI calls!")
+            return "{}"
 
-        if self.ai_manager:
+        # لیست مدل‌ها برای امتحان
+        models_to_try = [model_id]
+        if fallback_models:
+            models_to_try.extend([m for m in fallback_models if m != model_id])
+        else:
+            # اگر fallback داده نشده، از همه مدل‌های موجود استفاده کن
             try:
-                # ساخت پیام در فرمت صحیح
+                all_models = self.ai_manager.get_available_models()
+                models_to_try.extend([m.id for m in all_models if m.id != model_id])
+            except:
+                pass
+
+        last_error = None
+        for try_model in models_to_try:
+            start_time = time.time()
+            logger.info(f"🚀 [AI CALL] Trying model {try_model}...")
+
+            try:
                 messages = [
                     Message(role="system", content="تو یک تحلیل‌گر حرفه‌ای کد هستی. فقط خروجی JSON برگردان."),
                     Message(role="user", content=prompt)
                 ]
 
-                logger.info(f"📡 [AI CALL] Calling ai_manager.generate for {model_id}...")
-
-                # فراخوانی generate به جای call_model
                 response = await self.ai_manager.generate(
-                    model_id=model_id,
+                    model_id=try_model,
                     messages=messages,
                     max_tokens=4000,
                     temperature=0.3
                 )
 
                 elapsed = time.time() - start_time
-                logger.info(f"✅ [AI CALL] Got response from {model_id} in {elapsed:.2f}s")
+                logger.info(f"✅ [AI CALL] Got response from {try_model} in {elapsed:.2f}s")
 
-                # استخراج محتوا از AIResponse
-                if hasattr(response, 'content'):
-                    content = response.content
-                    logger.info(f"📦 [AI CALL] Response content length: {len(content) if content else 0} chars")
-                    logger.info(f"📦 [AI CALL] Response preview: {content[:200] if content else 'EMPTY'}...")
-                    return content
+                # استخراج محتوا
+                if hasattr(response, 'content') and response.content:
+                    logger.info(f"📦 [AI CALL] Response length: {len(response.content)} chars")
+                    return response.content
                 elif isinstance(response, dict):
                     content = response.get("content", response.get("response", "{}"))
-                    logger.info(f"📦 [AI CALL] Dict response content length: {len(content)} chars")
                     return content
                 else:
-                    logger.warning(f"⚠️ [AI CALL] Unexpected response type: {type(response)}")
                     return str(response)
 
             except Exception as e:
                 elapsed = time.time() - start_time
-                logger.error(f"❌ [AI CALL] Error calling {model_id} after {elapsed:.2f}s: {e}", exc_info=True)
-                raise
-        else:
-            logger.error("❌ [AI CALL] AI Manager is None! Cannot make AI calls!")
-            logger.error(f"❌ [AI CALL] self.ai_manager = {self.ai_manager}")
-            return "{}"
+                last_error = e
+                logger.warning(f"⚠️ [AI CALL] Model {try_model} failed after {elapsed:.2f}s: {e}")
+
+                # اگه quota یا billing error هست، سریع مدل بعدی
+                error_str = str(e).lower()
+                if "quota" in error_str or "billing" in error_str or "rate" in error_str:
+                    logger.info(f"🔄 [AI CALL] Quota/billing issue, trying next model...")
+                    continue
+                # برای خطاهای دیگه هم ادامه بده
+                continue
+
+        # اگه هیچ مدلی جواب نداد
+        logger.error(f"❌ [AI CALL] All models failed! Last error: {last_error}")
+        return "{}"
 
     async def _get_available_models(self) -> List[str]:
         """دریافت لیست مدل‌های در دسترس"""
@@ -871,7 +891,8 @@ class DeepAnalysisService:
                 # get_available_models یک متد sync است
                 models = self.ai_manager.get_available_models()
                 # AIModel objects have .id attribute
-                return [m.id for m in models[:3]]
+                # بدون محدودیت - همه مدل‌ها
+                return [m.id for m in models]
             except Exception as e:
                 logger.warning(f"خطا در دریافت مدل‌ها: {e}")
 
