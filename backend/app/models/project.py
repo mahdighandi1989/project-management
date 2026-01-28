@@ -111,6 +111,30 @@ class Project(Base):
     ideal_state = Column(Text)  # توضیح حالت ایده‌آل پروژه
     issues_found = Column(Text)  # JSON: لیست ایرادات شناسایی شده
 
+    # ====================================
+    # 🆕 آرشیو مسائل رد شده (زنجیره اعتبارسنجی)
+    # ====================================
+    rejected_issues_archive = Column(Text)  # JSON: [{
+    #   "id": "...",
+    #   "original_issue": {...},  # ایراد اصلی از health analysis
+    #   "source_model": "deepseek",  # مدلی که ایراد را پیدا کرد
+    #   "validator_model": "claude",  # مدل اعتبارسنج
+    #   "rejection_reason": "...",  # دلیل رد شدن
+    #   "rejected_at": "...",
+    #   "validation_score": 25,  # امتیاز اعتبارسنجی (0-100)
+    # }]
+
+    # آخرین نتایج اعتبارسنجی سلامت
+    last_validation_results = Column(Text)  # JSON: {
+    #   "validated_at": "...",
+    #   "validator_model": "claude",
+    #   "total_issues_reviewed": 15,
+    #   "validated_count": 10,
+    #   "rejected_count": 5,
+    #   "validation_summary": "...",
+    #   "validated_issues": [...],  # ایرادات تایید شده با مارکر
+    # }
+
     # زمان‌ها
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -203,6 +227,22 @@ class Project(Base):
         except (json.JSONDecodeError, TypeError):
             pass
 
+        # Parse rejected issues archive and validation results
+        rejected_issues_archive = []
+        last_validation_results = {}
+
+        try:
+            if self.rejected_issues_archive:
+                rejected_issues_archive = json.loads(self.rejected_issues_archive) if isinstance(self.rejected_issues_archive, str) else self.rejected_issues_archive
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        try:
+            if self.last_validation_results:
+                last_validation_results = json.loads(self.last_validation_results) if isinstance(self.last_validation_results, str) else self.last_validation_results
+        except (json.JSONDecodeError, TypeError):
+            pass
+
         return {
             "id": self.id,
             "name": self.name,
@@ -233,6 +273,9 @@ class Project(Base):
             "readme_content": self.readme_content,
             "ideal_state": self.ideal_state,
             "issues_found": issues_found,
+            # 🆕 Validation chain fields
+            "rejected_issues_archive": rejected_issues_archive,
+            "last_validation_results": last_validation_results,
             # Timestamps
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

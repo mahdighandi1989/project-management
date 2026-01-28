@@ -494,19 +494,24 @@ async def generate_engineering_report(
     days: int = Query(7, ge=1, le=30),
     model_id: str = Query("claude"),
     auto_create_fields: bool = Query(True),
+    validate_health_issues: bool = Query(True),  # 🆕 اعتبارسنجی نتایج health analysis
     db: Session = Depends(get_db)
 ):
     """
     تولید گزارش مهندسی جامع با:
     - تحلیل کامل ساختار پروژه
+    - 🆕 اعتبارسنجی نتایج آخرین health analysis توسط مدل‌های منتخب
     - شناسایی باگ‌ها و مشکلات فنی
     - پیشنهادات بهبود
     - نقشه راه توسعه
-    - تولید خودکار فیلدها بر اساس نقشه راه
+    - تولید خودکار فیلدها با مارکر اعتبارسنجی
+    - 🆕 آرشیو مسائل رد شده برای مشاهده
     """
     from ...services.ai_manager import get_ai_manager
     from ...services.ai_base import Message
     from ...models.project import ProjectFile
+    import logging
+    logger = logging.getLogger(__name__)
 
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -587,6 +592,68 @@ async def generate_engineering_report(
     except:
         pass
 
+    # ====================================
+    # 🆕 دریافت و آماده‌سازی نتایج health analysis برای اعتبارسنجی
+    # ====================================
+    health_analysis_issues = []
+    health_analysis_summary = ""
+    partial_results = {}
+
+    # دریافت نتایج از analysis_progress (partial_results)
+    if project.analysis_progress:
+        try:
+            progress_data = json.loads(project.analysis_progress)
+            partial_results = progress_data.get("partial_results", {})
+
+            # استخراج issues از micro analysis
+            if "micro" in partial_results:
+                micro_results = partial_results["micro"]
+                for file_path, file_data in micro_results.items():
+                    issues = file_data.get("issues", [])
+                    for issue in issues:
+                        health_analysis_issues.append({
+                            "file": file_path,
+                            "type": issue.get("type", "unknown"),
+                            "severity": issue.get("severity", "medium"),
+                            "message": issue.get("message", ""),
+                            "line": issue.get("line"),
+                            "source_models": file_data.get("analyzed_by", []),
+                            "score": file_data.get("score", 50),
+                        })
+
+            # استخراج issues از structural analysis
+            if "structural" in partial_results:
+                structural = partial_results["structural"]
+                for issue in structural.get("issues", []):
+                    health_analysis_issues.append({
+                        "file": issue.get("file", "structural"),
+                        "type": issue.get("type", "architecture"),
+                        "severity": issue.get("severity", "medium"),
+                        "message": issue.get("description", issue.get("message", "")),
+                        "source_models": ["structural_analysis"],
+                    })
+        except Exception as e:
+            logger.warning(f"Error parsing analysis_progress: {e}")
+
+    # دریافت از issues_found (ذخیره شده از قبل)
+    if project.issues_found:
+        try:
+            stored_issues = json.loads(project.issues_found)
+            # ادغام با issues موجود (بدون تکرار)
+            existing_keys = {f"{i['file']}:{i.get('line', '')}:{i['type']}" for i in health_analysis_issues}
+            for issue in stored_issues:
+                key = f"{issue.get('file', '')}:{issue.get('line', '')}:{issue.get('type', '')}"
+                if key not in existing_keys:
+                    health_analysis_issues.append(issue)
+        except:
+            pass
+
+    # ساخت خلاصه health analysis برای prompt
+    if health_analysis_issues:
+        health_analysis_summary = f"\n=== 🔍 نتایج آخرین health analysis ({len(health_analysis_issues)} ایراد شناسایی شده) ===\n"
+        health_analysis_summary += "این ایرادات باید توسط شما اعتبارسنجی شوند:\n"
+        health_analysis_summary += json.dumps(health_analysis_issues[:30], ensure_ascii=False, indent=2)  # حداکثر 30
+
     # خلاصه فعالیت‌ها
     activities_summary = []
     for log in logs[:30]:
@@ -601,6 +668,11 @@ async def generate_engineering_report(
 
     # ساخت prompt برای AI
     system_prompt = """تو یک مهندس ارشد نرم‌افزار هستی که باید یک گزارش مهندسی جامع و حرفه‌ای تولید کنی.
+
+⚠️ مهم‌ترین وظیفه تو: اعتبارسنجی ایرادات شناسایی شده توسط health analysis
+- هر ایراد را بررسی کن و مشخص کن آیا واقعاً وجود دارد یا نه
+- ایرادات معتبر را در validated_issues قرار بده
+- ایرادات نامعتبر یا اشتباه را در rejected_issues با دلیل رد شدن قرار بده
 
 گزارش باید شامل بخش‌های زیر باشد (حتماً از این ساختار JSON استفاده کن):
 
@@ -672,6 +744,40 @@ async def generate_engineering_report(
         "success_rate": 75,
         "failed_tasks_analysis": "تحلیل تسک‌های ناموفق",
         "model_performance": {"claude": "خوب", "openai": "متوسط"}
+    },
+
+    "health_analysis_validation": {
+        "total_reviewed": 15,
+        "validated_issues": [
+            {
+                "original_issue": {"file": "path/file.py", "type": "security", "message": "..."},
+                "validation_score": 95,
+                "validation_note": "این ایراد تایید می‌شود چون...",
+                "priority": "high",
+                "create_field": true
+            }
+        ],
+        "rejected_issues": [
+            {
+                "original_issue": {"file": "path/file.py", "type": "unused", "message": "..."},
+                "rejection_reason": "این متغیر در خط 45 استفاده شده است",
+                "validation_score": 20,
+                "source_model_error": "مدل X اشتباهاً این را ایراد تشخیص داده"
+            }
+        ],
+        "validation_summary": "خلاصه اعتبارسنجی: از 15 ایراد، 10 تایید و 5 رد شد"
+    },
+
+    "comprehensive_ideal_state": {
+        "description": "توضیح کامل حالت ایده‌آل پروژه (3-5 پاراگراف)",
+        "current_deficiencies": ["کمبود 1", "کمبود 2"],
+        "unexecuted_tasks": ["تسک اجرا نشده 1", "تسک اجرا نشده 2"],
+        "system_structure": {
+            "overview": "ساختار کلی سیستم",
+            "components": ["کامپوننت 1", "کامپوننت 2"],
+            "wiring": "نحوه اتصال و سیم‌کشی بین بخش‌ها"
+        },
+        "roadmap_integration": "نحوه رسیدن از وضعیت فعلی به حالت ایده‌آل"
     }
 }
 ```
@@ -682,7 +788,25 @@ async def generate_engineering_report(
 - توضیحات هر تسک باید به قدری کامل باشد که AI بتواند مستقیماً کد تولید کند
 - در field_management، فیلدهای موجود را بررسی کن و تصمیم بگیر کدام‌ها بایگانی، ادغام یا به‌روزرسانی شوند
 - priority از 1 (بالاترین) تا 10 (پایین‌ترین): 1-2=فوری، 3-4=بالا، 5=عادی، 6-7=پایین، 8-10=خیلی پایین
-- field_type: "permanent" برای دائمی/تکرارشونده، "temporary" برای یکبار مصرف"""
+- field_type: "permanent" برای دائمی/تکرارشونده، "temporary" برای یکبار مصرف
+
+🔴 اعتبارسنجی health analysis (بسیار مهم):
+- تمام ایرادات ارسال شده از health analysis را یک به یک بررسی کن
+- با نگاه به کد واقعی، مشخص کن آیا هر ایراد معتبر است یا نه
+- ایرادات معتبر را در validated_issues با create_field=true قرار بده (فیلد ساخته می‌شود)
+- ایرادات نامعتبر را در rejected_issues با دلیل دقیق رد شدن قرار بده
+- validation_score از 0-100: بالای 70 = معتبر، زیر 30 = رد شده
+
+🟢 حالت ایده‌آل جامع (comprehensive_ideal_state):
+- وضعیت ایده‌آل باید شامل: کمبودها، تسک‌های اجرا نشده، ساختار سیستم، سیم‌کشی و نقشه راه باشد
+- این بخش برای راهنمایی توسعه‌دهنده بسیار مهم است"""
+
+    # ساخت خلاصه فیلدهای اجرا نشده برای ideal state
+    unexecuted_fields = [
+        {"name": f.get("name"), "value": f.get("value", "")[:200], "priority": f.get("priority", 5)}
+        for f in existing_fields
+        if not f.get("archived") and f.get("field_type") == "temporary" and not f.get("executed")
+    ]
 
     user_prompt = f"""پروژه: {project.name}
 توضیحات: {project.description or 'ندارد'}
@@ -693,14 +817,23 @@ async def generate_engineering_report(
 
 === کدهای پروژه ({len(code_samples)} فایل، {total_code_chars:,} کاراکتر) ===
 {json.dumps(code_samples, ensure_ascii=False, indent=2)}
-
+{health_analysis_summary if validate_health_issues and health_analysis_issues else ''}
 === فعالیت‌های اخیر ({days} روز) ===
 {json.dumps(activities_summary, ensure_ascii=False, indent=2)}
 
-=== فیلدهای فعلی ===
-{json.dumps([{"name": f.get("name"), "action_type": f.get("action_type")} for f in existing_fields if not f.get("archived")], ensure_ascii=False, indent=2)}
+=== فیلدهای فعلی (غیربایگانی) ===
+{json.dumps([{"id": f.get("id"), "name": f.get("name"), "action_type": f.get("action_type"), "field_type": f.get("field_type"), "executed": f.get("executed", False)} for f in existing_fields if not f.get("archived")], ensure_ascii=False, indent=2)}
 
-لطفاً گزارش مهندسی جامع تولید کن."""
+=== فیلدهای اجرا نشده (برای ideal state) ===
+{json.dumps(unexecuted_fields, ensure_ascii=False, indent=2)}
+
+=== حالت ایده‌آل فعلی ===
+{project.ideal_state or 'تعریف نشده'}
+
+=== نقشه راه فعلی ===
+{(project.roadmap_content or '')[:2000] if project.roadmap_content else 'تعریف نشده'}
+
+لطفاً گزارش مهندسی جامع تولید کن. اگر health analysis issues ارسال شده، حتماً همه آنها را اعتبارسنجی کن."""
 
     # فراخوانی AI
     ai_manager = get_ai_manager()
@@ -732,6 +865,84 @@ async def generate_engineering_report(
 
         if not report_data:
             report_data = {"raw_content": report_content}
+
+        # ====================================
+        # 🆕 پردازش نتایج اعتبارسنجی health analysis
+        # ====================================
+        validated_issues_count = 0
+        rejected_issues_count = 0
+        new_rejected_archive = []
+
+        if validate_health_issues and "health_analysis_validation" in report_data:
+            validation_data = report_data["health_analysis_validation"]
+
+            # ذخیره نتایج اعتبارسنجی
+            validation_results = {
+                "validated_at": datetime.utcnow().isoformat(),
+                "validator_model": model_id,
+                "total_issues_reviewed": validation_data.get("total_reviewed", 0),
+                "validated_count": len(validation_data.get("validated_issues", [])),
+                "rejected_count": len(validation_data.get("rejected_issues", [])),
+                "validation_summary": validation_data.get("validation_summary", ""),
+                "validated_issues": validation_data.get("validated_issues", []),
+            }
+            project.last_validation_results = json.dumps(validation_results, ensure_ascii=False)
+            validated_issues_count = validation_results["validated_count"]
+            rejected_issues_count = validation_results["rejected_count"]
+
+            # پردازش ایرادات رد شده و اضافه به آرشیو
+            existing_archive = []
+            if project.rejected_issues_archive:
+                try:
+                    existing_archive = json.loads(project.rejected_issues_archive)
+                except:
+                    pass
+
+            for rejected in validation_data.get("rejected_issues", []):
+                archive_entry = {
+                    "id": f"rej_{uuid.uuid4().hex[:8]}",
+                    "original_issue": rejected.get("original_issue", {}),
+                    "source_model": rejected.get("original_issue", {}).get("source_models", ["unknown"])[0] if isinstance(rejected.get("original_issue", {}).get("source_models"), list) else "unknown",
+                    "validator_model": model_id,
+                    "rejection_reason": rejected.get("rejection_reason", ""),
+                    "rejected_at": datetime.utcnow().isoformat(),
+                    "validation_score": rejected.get("validation_score", 0),
+                }
+                new_rejected_archive.append(archive_entry)
+
+            # ادغام با آرشیو موجود (حداکثر 100 آیتم)
+            combined_archive = new_rejected_archive + existing_archive
+            project.rejected_issues_archive = json.dumps(combined_archive[:100], ensure_ascii=False)
+
+            logger.info(f"Health validation: {validated_issues_count} validated, {rejected_issues_count} rejected")
+
+        # ====================================
+        # 🆕 به‌روزرسانی حالت ایده‌آل جامع
+        # ====================================
+        if "comprehensive_ideal_state" in report_data:
+            ideal_state_data = report_data["comprehensive_ideal_state"]
+            comprehensive_ideal = f"""## حالت ایده‌آل پروژه
+
+{ideal_state_data.get('description', '')}
+
+### کمبودهای فعلی:
+{chr(10).join(['- ' + d for d in ideal_state_data.get('current_deficiencies', [])])}
+
+### تسک‌های اجرا نشده:
+{chr(10).join(['- ' + t for t in ideal_state_data.get('unexecuted_tasks', [])])}
+
+### ساختار سیستم:
+{ideal_state_data.get('system_structure', {}).get('overview', '')}
+
+**کامپوننت‌ها:** {', '.join(ideal_state_data.get('system_structure', {}).get('components', []))}
+
+**سیم‌کشی:** {ideal_state_data.get('system_structure', {}).get('wiring', '')}
+
+### نقشه راه یکپارچه:
+{ideal_state_data.get('roadmap_integration', '')}
+"""
+            project.ideal_state = comprehensive_ideal
+            logger.info(f"Updated comprehensive ideal state for project {project_id}")
 
         # مدیریت هوشمند فیلدها
         created_fields = []
@@ -793,7 +1004,65 @@ async def generate_engineering_report(
                         field["updated_at"] = datetime.utcnow().isoformat()
                         updated_count += 1
 
-            # 2. تولید فیلدهای جدید از roadmap
+            # 2. 🆕 تولید فیلدهای جدید از validated issues (با مارکر اعتبارسنجی)
+            if validate_health_issues and "health_analysis_validation" in report_data:
+                validated_issues = report_data["health_analysis_validation"].get("validated_issues", [])
+                for issue in validated_issues:
+                    if not issue.get("create_field", True):
+                        continue
+
+                    original = issue.get("original_issue", {})
+                    field_name = f"✅ [تایید شده] {original.get('type', 'issue')}: {original.get('file', 'unknown')}"
+
+                    # بررسی وجود فیلد مشابه
+                    existing = any(
+                        f.get("name", "").lower() == field_name.lower()
+                        for f in existing_fields if not f.get("archived")
+                    )
+
+                    if not existing:
+                        priority_map = {"critical": 1, "high": 2, "medium": 5, "low": 7}
+                        priority = priority_map.get(issue.get("priority", original.get("severity", "medium")), 5)
+
+                        new_field = {
+                            "id": str(uuid.uuid4()),
+                            "name": field_name,
+                            "value": f"""## ایراد تایید شده توسط {model_id}
+
+**فایل:** {original.get('file', 'نامشخص')}
+**نوع:** {original.get('type', 'نامشخص')}
+**شدت:** {original.get('severity', 'نامشخص')}
+**خط:** {original.get('line', 'نامشخص')}
+
+### پیام:
+{original.get('message', '')}
+
+### یادداشت اعتبارسنجی:
+{issue.get('validation_note', '')}
+
+### امتیاز اعتبارسنجی: {issue.get('validation_score', 0)}/100
+
+---
+لطفاً این مشکل را بررسی و رفع کنید.
+""",
+                            "target_models": ["claude"],
+                            "action_type": "display",
+                            "target_path": original.get("file"),
+                            "archive_after_run": True,
+                            "field_type": "temporary",
+                            "priority": priority,
+                            "attachments": [],
+                            "trigger": {"enabled": False, "interval_minutes": 60, "interval_type": "minutes"},
+                            "created_from_report": True,
+                            "validation_marker": "validated",
+                            "validation_score": issue.get("validation_score", 0),
+                            "validator_model": model_id,
+                            "original_issue": original,
+                        }
+                        existing_fields.append(new_field)
+                        created_fields.append(new_field["name"])
+
+            # 3. تولید فیلدهای جدید از roadmap
             roadmap = report_data.get("roadmap", {})
 
             for phase_name, phase_tasks in [("immediate", roadmap.get("immediate", [])), ("short_term", roadmap.get("short_term", []))]:
@@ -876,7 +1145,15 @@ async def generate_engineering_report(
             "fields_updated": updated_count,
             "project_health_score": report_data.get("project_health", {}).get("score"),
             "bugs_found": len(report_data.get("bugs_and_issues", [])),
-            "recommendations_count": len(report_data.get("recommendations", []))
+            "recommendations_count": len(report_data.get("recommendations", [])),
+            # 🆕 نتایج اعتبارسنجی
+            "validation_results": {
+                "issues_reviewed": validated_issues_count + rejected_issues_count,
+                "validated_count": validated_issues_count,
+                "rejected_count": rejected_issues_count,
+                "fields_created_from_validation": len([f for f in created_fields if "✅" in f]),
+            } if validate_health_issues else None,
+            "ideal_state_updated": "comprehensive_ideal_state" in report_data,
         }
 
     except Exception as e:

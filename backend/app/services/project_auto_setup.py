@@ -1357,8 +1357,22 @@ async def _manage_dynamic_fields(
     ai_manager,
     model_id: str
 ) -> Dict:
-    """مدیریت فیلدهای پویا بر اساس تحلیل"""
-    result = {"created": [], "updated": [], "merged": [], "archived": []}
+    """
+    مدیریت هوشمند فیلدهای پویا بر اساس تحلیل
+
+    🆕 قابلیت‌های جدید:
+    - حفظ فیلدهای اجرا نشده که هنوز مشکلشان وجود دارد
+    - ادغام هوشمند فیلدهای مشابه
+    - بایگانی فقط فیلدهایی که مشکلشان رفع شده
+    - مارکرگذاری فیلدهای معتبر
+    """
+    result = {
+        "created": [],
+        "updated": [],
+        "merged": [],
+        "archived": [],
+        "preserved": [],  # 🆕 فیلدهای حفظ شده
+    }
 
     # دریافت فیلدهای موجود
     existing_fields = []
@@ -1368,11 +1382,80 @@ async def _manage_dynamic_fields(
     except:
         pass
 
-    # ایجاد فیلدهای جدید بر اساس مشکلات شناسایی شده
+    # استخراج فایل‌های پروژه برای بررسی وجود مشکلات
+    file_paths = [f.get("path", f.get("file_path", "")).lower() for f in files_data]
+    file_contents = {f.get("path", f.get("file_path", "")).lower(): f.get("content", "") for f in files_data}
+
+    # ====================================
+    # 🆕 مرحله 1: بررسی فیلدهای موجود - آیا مشکلشان هنوز وجود دارد؟
+    # ====================================
+    preserved_fields = []
+    fields_to_archive = []
+
+    for field in existing_fields:
+        if field.get("archived"):
+            # فیلدهای بایگانی شده را نگه دار
+            preserved_fields.append(field)
+            continue
+
+        # بررسی فیلدهای اجرا نشده
+        if not field.get("executed", False) and field.get("field_type") == "temporary":
+            # بررسی آیا مشکل هنوز وجود دارد
+            original_issue = field.get("original_issue", {})
+            target_file = field.get("target_path") or original_issue.get("file", "")
+
+            # اگر فایل مرتبط حذف شده، فیلد را بایگانی کن
+            if target_file and target_file.lower() not in file_paths:
+                field["archived"] = True
+                field["archived_at"] = datetime.utcnow().isoformat()
+                field["archived_reason"] = "target_file_removed"
+                fields_to_archive.append(field["name"])
+                result["archived"].append(field["name"])
+                logger.info(f"Auto-archived field (file removed): {field['name']}")
+            else:
+                # فیلد را حفظ کن - مشکل هنوز ممکن است وجود داشته باشد
+                preserved_fields.append(field)
+                result["preserved"].append(field["name"])
+                logger.info(f"Preserved unexecuted field: {field['name']}")
+        elif field.get("executed", False):
+            # فیلدهای اجرا شده را بررسی کن - آیا باید بایگانی شوند؟
+            if field.get("archive_after_run", False):
+                field["archived"] = True
+                field["archived_at"] = datetime.utcnow().isoformat()
+                field["archived_reason"] = "executed_and_archive_after_run"
+                fields_to_archive.append(field["name"])
+                result["archived"].append(field["name"])
+            else:
+                preserved_fields.append(field)
+        else:
+            # فیلدهای permanent را حفظ کن
+            preserved_fields.append(field)
+
+    # ====================================
+    # 🆕 مرحله 2: ایجاد فیلدهای جدید فقط برای مشکلات جدید
+    # ====================================
     new_fields = []
     issues = analysis.get("issues_found", [])
 
+    # استخراج نام فیلدهای موجود برای جلوگیری از تکرار
+    existing_field_issues = set()
+    for f in preserved_fields:
+        original = f.get("original_issue", {})
+        if original:
+            key = f"{original.get('file', '')}:{original.get('type', '')}:{original.get('line', '')}"
+            existing_field_issues.add(key)
+        # همچنین نام فیلد را چک کن
+        existing_field_issues.add(f.get("name", "").lower())
+
     for i, issue in enumerate(issues[:5]):  # حداکثر 5 فیلد از مشکلات
+        # بررسی تکراری بودن
+        issue_key = f"{issue.get('file', '')}:{issue.get('type', '')}:{issue.get('line', '')}"
+        issue_name = f"رفع: {issue.get('title', f'مشکل {i+1}')}".lower()
+
+        if issue_key in existing_field_issues or issue_name in existing_field_issues:
+            logger.info(f"Skipping duplicate issue: {issue_key}")
+            continue
+
         severity = issue.get("severity", "medium")
         priority = {"critical": 1, "high": 2, "medium": 5, "low": 7}.get(severity, 5)
 
@@ -1394,45 +1477,85 @@ async def _manage_dynamic_fields(
             "target_models": ["claude"],
             "trigger": {"enabled": False},
             "action_type": "display",
+            "target_path": issue.get("file"),
             "field_type": "temporary",
             "priority": priority,
             "attachments": [],
             "created_at": datetime.utcnow().isoformat(),
             "auto_generated": True,
-            "source": "auto-setup-analysis"
+            "source": "auto-setup-analysis",
+            "original_issue": issue,  # 🆕 ذخیره issue اصلی برای بررسی‌های بعدی
+            "executed": False,
         }
         new_fields.append(field)
         result["created"].append(field["name"])
+        existing_field_issues.add(issue_key)
 
-    # ایجاد فیلد برای حالت ایده‌آل
+    # ====================================
+    # مرحله 3: ایجاد/به‌روزرسانی فیلد حالت ایده‌آل
+    # ====================================
     if analysis.get("ideal_state"):
-        ideal_field = {
-            "id": f"field_{uuid.uuid4().hex[:8]}",
-            "name": "حالت ایده‌آل پروژه",
-            "value": f"""## حالت ایده‌آل:
+        # بررسی وجود فیلد حالت ایده‌آل
+        existing_ideal = None
+        for f in preserved_fields:
+            if "حالت ایده‌آل" in f.get("name", ""):
+                existing_ideal = f
+                break
+
+        if existing_ideal:
+            # به‌روزرسانی فیلد موجود
+            existing_ideal["value"] = f"""## حالت ایده‌آل:
+{analysis.get('ideal_state', '')}
+
+---
+از این به عنوان راهنما برای توسعه استفاده کنید.
+"""
+            existing_ideal["updated_at"] = datetime.utcnow().isoformat()
+            result["updated"].append("حالت ایده‌آل پروژه")
+        else:
+            # ایجاد فیلد جدید
+            ideal_field = {
+                "id": f"field_{uuid.uuid4().hex[:8]}",
+                "name": "حالت ایده‌آل پروژه",
+                "value": f"""## حالت ایده‌آل:
 {analysis.get('ideal_state', '')}
 
 ---
 از این به عنوان راهنما برای توسعه استفاده کنید.
 """,
-            "target_models": ["all"],
-            "trigger": {"enabled": False},
-            "action_type": "display",
-            "field_type": "permanent",
-            "priority": 10,
-            "attachments": [],
-            "created_at": datetime.utcnow().isoformat(),
-            "auto_generated": True,
-            "source": "auto-setup-analysis"
-        }
-        new_fields.append(ideal_field)
-        result["created"].append("حالت ایده‌آل پروژه")
+                "target_models": ["all"],
+                "trigger": {"enabled": False},
+                "action_type": "display",
+                "field_type": "permanent",
+                "priority": 10,
+                "attachments": [],
+                "created_at": datetime.utcnow().isoformat(),
+                "auto_generated": True,
+                "source": "auto-setup-analysis"
+            }
+            new_fields.append(ideal_field)
+            result["created"].append("حالت ایده‌آل پروژه")
 
-    # ترکیب با فیلدهای موجود
-    all_fields = existing_fields + new_fields
+    # ====================================
+    # مرحله 4: ترکیب و مرتب‌سازی
+    # ====================================
+    # فیلدهای فعال (غیربایگانی) و بایگانی شده را جدا کن
+    active_fields = [f for f in preserved_fields if not f.get("archived")]
+    archived_fields = [f for f in preserved_fields if f.get("archived")]
+
+    # اضافه کردن فیلدهای جدید به فعال
+    active_fields.extend(new_fields)
+
+    # مرتب‌سازی براساس اولویت
+    active_fields.sort(key=lambda x: x.get("priority", 5))
+
+    # ترکیب نهایی
+    all_fields = active_fields + archived_fields
 
     # ذخیره
     project.dynamic_fields = json.dumps(all_fields, ensure_ascii=False)
+
+    logger.info(f"Field management: created={len(result['created'])}, preserved={len(result['preserved'])}, archived={len(result['archived'])}")
 
     return result
 

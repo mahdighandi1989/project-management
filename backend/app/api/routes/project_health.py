@@ -2164,3 +2164,266 @@ async def _run_resumed_analysis_task(
         if project_id in _active_progress_managers:
             del _active_progress_managers[project_id]
         db.close()
+
+
+# =====================================
+# 🆕 API Endpoints برای زنجیره اعتبارسنجی
+# Validation Chain Endpoints
+# =====================================
+
+@router.get("/{project_id}/health/rejected-issues")
+async def get_rejected_issues_archive(
+    project_id: str,
+    page: int = 1,
+    page_size: int = 20,
+    db=Depends(get_db)
+):
+    """
+    دریافت آرشیو ایرادات رد شده
+
+    این ایرادات توسط مدل‌های health analysis شناسایی شده
+    اما توسط مدل اعتبارسنج رد شده‌اند.
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    archive = []
+    if project.rejected_issues_archive:
+        try:
+            archive = json.loads(project.rejected_issues_archive)
+        except:
+            pass
+
+    # صفحه‌بندی
+    total = len(archive)
+    start = (page - 1) * page_size
+    end = start + page_size
+    paginated = archive[start:end]
+
+    return {
+        "success": True,
+        "rejected_issues": paginated,
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": (total + page_size - 1) // page_size if total > 0 else 0
+        },
+        "summary": {
+            "total_rejected": total,
+            "by_validator": {},
+            "by_source_model": {}
+        }
+    }
+
+
+@router.get("/{project_id}/health/validation-results")
+async def get_validation_results(
+    project_id: str,
+    db=Depends(get_db)
+):
+    """
+    دریافت آخرین نتایج اعتبارسنجی
+
+    شامل:
+    - تعداد ایرادات بررسی شده
+    - تعداد تایید شده
+    - تعداد رد شده
+    - خلاصه اعتبارسنجی
+    - لیست ایرادات تایید شده با مارکر
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    validation_results = {}
+    if project.last_validation_results:
+        try:
+            validation_results = json.loads(project.last_validation_results)
+        except:
+            pass
+
+    return {
+        "success": True,
+        "validation_results": validation_results,
+        "has_validation": bool(validation_results)
+    }
+
+
+@router.delete("/{project_id}/health/rejected-issues/{issue_id}")
+async def restore_rejected_issue(
+    project_id: str,
+    issue_id: str,
+    db=Depends(get_db)
+):
+    """
+    بازگرداندن یک ایراد رد شده به لیست ایرادات فعال
+
+    اگر کاربر فکر می‌کند ایراد به اشتباه رد شده،
+    می‌تواند آن را بازگرداند.
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    archive = []
+    if project.rejected_issues_archive:
+        try:
+            archive = json.loads(project.rejected_issues_archive)
+        except:
+            pass
+
+    # پیدا کردن ایراد
+    restored_issue = None
+    new_archive = []
+    for item in archive:
+        if item.get("id") == issue_id:
+            restored_issue = item
+        else:
+            new_archive.append(item)
+
+    if not restored_issue:
+        raise HTTPException(status_code=404, detail="ایراد یافت نشد")
+
+    # اضافه کردن به issues_found
+    issues = []
+    if project.issues_found:
+        try:
+            issues = json.loads(project.issues_found)
+        except:
+            pass
+
+    original = restored_issue.get("original_issue", {})
+    original["restored_from_archive"] = True
+    original["restored_at"] = datetime.utcnow().isoformat()
+    issues.append(original)
+
+    # ذخیره
+    project.rejected_issues_archive = json.dumps(new_archive, ensure_ascii=False)
+    project.issues_found = json.dumps(issues, ensure_ascii=False)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": "ایراد به لیست فعال بازگردانده شد",
+        "restored_issue": original
+    }
+
+
+@router.get("/{project_id}/health/chain-status")
+async def get_validation_chain_status(
+    project_id: str,
+    db=Depends(get_db)
+):
+    """
+    دریافت وضعیت کامل زنجیره اعتبارسنجی
+
+    نمایش یکپارچه:
+    - وضعیت health analysis
+    - وضعیت اعتبارسنجی
+    - فیلدهای ایجاد شده با مارکر
+    - ایرادات رد شده
+    - حالت ایده‌آل
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # Parse all relevant data
+    health_scores = {}
+    issues_found = []
+    validation_results = {}
+    rejected_archive = []
+    dynamic_fields = []
+
+    if project.health_scores:
+        try:
+            health_scores = json.loads(project.health_scores)
+        except:
+            pass
+
+    if project.issues_found:
+        try:
+            issues_found = json.loads(project.issues_found)
+        except:
+            pass
+
+    if project.last_validation_results:
+        try:
+            validation_results = json.loads(project.last_validation_results)
+        except:
+            pass
+
+    if project.rejected_issues_archive:
+        try:
+            rejected_archive = json.loads(project.rejected_issues_archive)
+        except:
+            pass
+
+    if project.dynamic_fields:
+        try:
+            dynamic_fields = json.loads(project.dynamic_fields)
+        except:
+            pass
+
+    # فیلدهای با مارکر اعتبارسنجی
+    validated_fields = [
+        f for f in dynamic_fields
+        if f.get("validation_marker") == "validated" and not f.get("archived")
+    ]
+
+    # فیلدهای اجرا نشده
+    unexecuted_fields = [
+        f for f in dynamic_fields
+        if not f.get("archived") and not f.get("executed") and f.get("field_type") == "temporary"
+    ]
+
+    return {
+        "success": True,
+        "chain_status": {
+            # Health Analysis
+            "health_analysis": {
+                "scores": health_scores,
+                "total_issues": len(issues_found),
+                "last_analysis": project.last_analysis_at.isoformat() if project.last_analysis_at else None,
+                "models_used": json.loads(project.last_analysis_models) if project.last_analysis_models else []
+            },
+
+            # Validation
+            "validation": {
+                "last_validated": validation_results.get("validated_at"),
+                "validator_model": validation_results.get("validator_model"),
+                "total_reviewed": validation_results.get("total_issues_reviewed", 0),
+                "validated_count": validation_results.get("validated_count", 0),
+                "rejected_count": validation_results.get("rejected_count", 0),
+                "summary": validation_results.get("validation_summary", "")
+            },
+
+            # Dynamic Fields
+            "fields": {
+                "total_active": len([f for f in dynamic_fields if not f.get("archived")]),
+                "validated_fields": len(validated_fields),
+                "unexecuted_fields": len(unexecuted_fields),
+                "archived_fields": len([f for f in dynamic_fields if f.get("archived")])
+            },
+
+            # Rejected Archive
+            "rejected_archive": {
+                "total": len(rejected_archive),
+                "recent": rejected_archive[:5]  # 5 تای اخیر
+            },
+
+            # Ideal State
+            "ideal_state": {
+                "defined": bool(project.ideal_state),
+                "preview": (project.ideal_state or "")[:500]
+            },
+
+            # Roadmap
+            "roadmap": {
+                "defined": bool(project.roadmap_content),
+                "preview": (project.roadmap_content or "")[:500]
+            }
+        }
+    }
