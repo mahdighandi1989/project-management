@@ -232,111 +232,9 @@ async def get_aliases():
         return {}
 
 
-@router.get("/{model_id}", response_model=ModelInfo)
-async def get_model_info(model_id: str):
-    """دریافت اطلاعات یک مدل"""
-    try:
-        from ...core.models_registry import get_model
-        from ...services.ai_manager import get_ai_manager
-
-        model = get_model(model_id)
-        if not model:
-            raise HTTPException(status_code=404, detail="Model not found")
-
-        # Check if available
-        is_available = False
-        try:
-            ai_manager = get_ai_manager()
-            is_available = get_provider_value(model.provider) in ai_manager.get_available_providers()
-        except Exception:
-            pass  # If AI manager not available, mark as unavailable
-
-        return ModelInfo(
-            id=model.id,
-            provider=get_provider_value(model.provider),
-            name=model.name,
-            capabilities=[get_capability_value(c) for c in model.capabilities],
-            max_tokens=model.max_tokens,
-            context_window=model.context_window,
-            strengths=model.strengths,
-            weaknesses=model.weaknesses,
-            cost_per_1k_tokens=model.cost_per_1k_tokens,
-            priority=model.priority,
-            enabled=model.enabled,
-            supports_images=model.supports_images,
-            supports_video=model.supports_video,
-            is_image_generator=model.is_image_generator,
-            is_available=is_available,
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting model {model_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/smart-select", response_model=List[ModelInfo])
-async def smart_select_models(request: SmartSelectRequest):
-    """انتخاب هوشمند مدل‌ها"""
-    try:
-        from ...services.ai_manager import get_ai_manager
-        from ...core.models_registry import ModelCapability, ModelProvider
-
-        ai_manager = get_ai_manager()
-
-        # تبدیل capabilities
-        caps = None
-        if request.required_capabilities:
-            caps = []
-            for c in request.required_capabilities:
-                try:
-                    caps.append(ModelCapability(c))
-                except ValueError:
-                    pass
-
-        # تبدیل providers
-        providers = None
-        if request.prefer_providers:
-            providers = []
-            for p in request.prefer_providers:
-                try:
-                    providers.append(ModelProvider(p))
-                except ValueError:
-                    pass
-
-        selected = ai_manager.smart_select_models(
-            prompt=request.prompt,
-            required_capabilities=caps,
-            max_models=request.max_models,
-            prefer_providers=providers,
-        )
-
-        return [ModelInfo(
-            id=m.id,
-            provider=get_provider_value(m.provider),
-            name=m.name,
-            capabilities=[get_capability_value(c) for c in m.capabilities],
-            max_tokens=m.max_tokens,
-            context_window=m.context_window,
-            strengths=m.strengths,
-            weaknesses=m.weaknesses,
-            cost_per_1k_tokens=m.cost_per_1k_tokens,
-            priority=m.priority,
-            enabled=m.enabled,
-            supports_images=m.supports_images,
-            supports_video=m.supports_video,
-            is_image_generator=m.is_image_generator,
-            is_available=True,
-        ) for m in selected]
-
-    except Exception as e:
-        logger.error(f"Error in smart_select: {e}")
-        return []
-
-
 # ===========================================
 # Model Profiles & Rankings Endpoints
+# IMPORTANT: These MUST be before /{model_id} to avoid route conflicts!
 # ===========================================
 
 @router.get("/profiles")
@@ -448,3 +346,111 @@ async def get_model_rankings():
     except Exception as e:
         logger.error(f"Error getting rankings: {e}")
         return {"by_score": [], "by_accuracy": [], "by_speed": [], "by_cost_efficiency": []}
+
+
+# ===========================================
+# Dynamic route - MUST be last!
+# ===========================================
+@router.get("/{model_id}", response_model=ModelInfo)
+async def get_model_info(model_id: str):
+    """دریافت اطلاعات یک مدل"""
+    try:
+        from ...core.models_registry import get_model
+        from ...services.ai_manager import get_ai_manager
+
+        model = get_model(model_id)
+        if not model:
+            raise HTTPException(status_code=404, detail="Model not found")
+
+        # Check if available
+        is_available = False
+        try:
+            ai_manager = get_ai_manager()
+            is_available = get_provider_value(model.provider) in ai_manager.get_available_providers()
+        except Exception:
+            pass  # If AI manager not available, mark as unavailable
+
+        return ModelInfo(
+            id=model.id,
+            provider=get_provider_value(model.provider),
+            name=model.name,
+            capabilities=[get_capability_value(c) for c in model.capabilities],
+            max_tokens=model.max_tokens,
+            context_window=model.context_window,
+            strengths=model.strengths,
+            weaknesses=model.weaknesses,
+            cost_per_1k_tokens=model.cost_per_1k_tokens,
+            priority=model.priority,
+            enabled=model.enabled,
+            supports_images=model.supports_images,
+            supports_video=model.supports_video,
+            is_image_generator=model.is_image_generator,
+            is_available=is_available,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting model {model_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/smart-select", response_model=List[ModelInfo])
+async def smart_select_models(request: SmartSelectRequest):
+    """انتخاب هوشمند مدل‌ها"""
+    try:
+        from ...services.ai_manager import get_ai_manager
+        from ...core.models_registry import ModelCapability, ModelProvider
+
+        ai_manager = get_ai_manager()
+
+        # تبدیل capabilities
+        caps = None
+        if request.required_capabilities:
+            caps = []
+            for c in request.required_capabilities:
+                try:
+                    caps.append(ModelCapability(c))
+                except ValueError:
+                    pass
+
+        # تبدیل providers
+        providers = None
+        if request.prefer_providers:
+            providers = []
+            for p in request.prefer_providers:
+                try:
+                    providers.append(ModelProvider(p))
+                except ValueError:
+                    pass
+
+        selected = ai_manager.smart_select_models(
+            prompt=request.prompt,
+            required_capabilities=caps,
+            max_models=request.max_models,
+            prefer_providers=providers,
+        )
+
+        return [ModelInfo(
+            id=m.id,
+            provider=get_provider_value(m.provider),
+            name=m.name,
+            capabilities=[get_capability_value(c) for c in m.capabilities],
+            max_tokens=m.max_tokens,
+            context_window=m.context_window,
+            strengths=m.strengths,
+            weaknesses=m.weaknesses,
+            cost_per_1k_tokens=m.cost_per_1k_tokens,
+            priority=m.priority,
+            enabled=m.enabled,
+            supports_images=m.supports_images,
+            supports_video=m.supports_video,
+            is_image_generator=m.is_image_generator,
+            is_available=True,
+        ) for m in selected]
+
+    except Exception as e:
+        logger.error(f"Error in smart_select: {e}")
+        return []
+
+
