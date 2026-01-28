@@ -14,6 +14,7 @@ import asyncio
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
+import time
 import logging
 import re
 import os
@@ -107,12 +108,29 @@ class DeepAnalysisService:
         """
         analysis_id = str(uuid.uuid4())[:8]
         start_time = datetime.now()
+        start_time_unix = time.time()
 
-        logger.info(f"[{analysis_id}] شروع تحلیل عمیق پروژه {project_id}")
+        logger.info(f"=" * 60)
+        logger.info(f"🔬 [{analysis_id}] STARTING DEEP ANALYSIS for project {project_id}")
+        logger.info(f"📁 [{analysis_id}] Files count: {len(files)}")
+        logger.info(f"🤖 [{analysis_id}] AI Manager available: {self.ai_manager is not None}")
+
+        if self.ai_manager:
+            try:
+                available = self.ai_manager.get_available_models()
+                providers = self.ai_manager.get_available_providers()
+                logger.info(f"🤖 [{analysis_id}] Available providers: {providers}")
+                logger.info(f"🤖 [{analysis_id}] Available models: {[m.id for m in available]}")
+            except Exception as e:
+                logger.error(f"❌ [{analysis_id}] Error getting models: {e}")
+        else:
+            logger.error(f"❌ [{analysis_id}] AI Manager is None! Analysis will return empty results!")
 
         # اگر مدل مشخص نشده، از مدل‌های پیش‌فرض استفاده کن
         if not model_ids:
             model_ids = await self._get_available_models()
+
+        logger.info(f"🤖 [{analysis_id}] Models to use: {model_ids}")
 
         results = {
             "analysis_id": analysis_id,
@@ -218,10 +236,17 @@ class DeepAnalysisService:
                 total_issues=len(final_results.get("issues", []))
             )
 
-            logger.info(f"[{analysis_id}] تحلیل کامل شد. نمره کلی: {final_results['overall_scores'].get('total', 0):.1f}")
+            elapsed_total = time.time() - start_time_unix
+            logger.info(f"=" * 60)
+            logger.info(f"✅ [{analysis_id}] ANALYSIS COMPLETE in {elapsed_total:.2f}s")
+            logger.info(f"📊 [{analysis_id}] Overall score: {final_results['overall_scores'].get('total', 0):.1f}")
+            logger.info(f"📊 [{analysis_id}] Files analyzed: {results['analyzed_files']}")
+            logger.info(f"📊 [{analysis_id}] Issues found: {len(final_results.get('issues', []))}")
+            logger.info(f"=" * 60)
 
         except Exception as e:
-            logger.error(f"[{analysis_id}] خطا در تحلیل: {str(e)}")
+            elapsed_total = time.time() - start_time_unix
+            logger.error(f"❌ [{analysis_id}] ANALYSIS FAILED after {elapsed_total:.2f}s: {str(e)}", exc_info=True)
             results["status"] = "failed"
             results["error"] = str(e)
 
@@ -245,6 +270,10 @@ class DeepAnalysisService:
         - تحلیل تمام خطوط کد
         - بررسی جزئیات کامل
         """
+        start_time = time.time()
+        logger.info(f"🔍 [MICRO ANALYSIS] Starting with {len(files)} files and {len(model_ids)} models")
+        logger.info(f"🔍 [MICRO ANALYSIS] Models: {model_ids}")
+
         results = {
             "files": {},
             "summary": {
@@ -256,11 +285,13 @@ class DeepAnalysisService:
 
         # تحلیل موازی فایل‌ها با چند مدل
         tasks = []
+        skipped_files = []
         for file_data in files:
             file_path = file_data.get("path", file_data.get("file_path", ""))
             content = file_data.get("content", "")
 
             if not content or len(content) < 10:
+                skipped_files.append(file_path)
                 continue
 
             # برای هر فایل، تحلیل با همه مدل‌ها
@@ -273,19 +304,33 @@ class DeepAnalysisService:
             )
             tasks.append(task)
 
+        logger.info(f"🔍 [MICRO ANALYSIS] Created {len(tasks)} analysis tasks, skipped {len(skipped_files)} empty files")
+
+        if skipped_files and len(skipped_files) <= 10:
+            logger.info(f"🔍 [MICRO ANALYSIS] Skipped files: {skipped_files}")
+
         # اجرای موازی
         if tasks:
+            logger.info(f"🔍 [MICRO ANALYSIS] Running asyncio.gather for {len(tasks)} tasks...")
             file_results = await asyncio.gather(*tasks, return_exceptions=True)
+            logger.info(f"🔍 [MICRO ANALYSIS] asyncio.gather completed, got {len(file_results)} results")
 
-            for result in file_results:
+            for idx, result in enumerate(file_results):
                 if isinstance(result, Exception):
-                    logger.error(f"خطا در تحلیل فایل: {result}")
+                    logger.error(f"❌ [MICRO ANALYSIS] Task {idx} exception: {result}")
                     continue
 
                 if result and result.get("file_path"):
-                    results["files"][result["file_path"]] = result
+                    file_path = result["file_path"]
+                    results["files"][file_path] = result
                     results["summary"]["analyzed"] += 1
                     results["summary"]["issues_found"] += len(result.get("issues", []))
+                    logger.info(f"✅ [MICRO ANALYSIS] File {file_path}: score={result.get('aggregated_scores', {}).get('total', 'N/A')}")
+        else:
+            logger.warning(f"⚠️ [MICRO ANALYSIS] No tasks to run! All {len(files)} files were skipped.")
+
+        elapsed = time.time() - start_time
+        logger.info(f"🔍 [MICRO ANALYSIS] Completed in {elapsed:.2f}s. Analyzed {results['summary']['analyzed']} files, found {results['summary']['issues_found']} issues")
 
         return results
 
@@ -298,6 +343,10 @@ class DeepAnalysisService:
         instruction: str
     ) -> Dict[str, Any]:
         """تحلیل یک فایل با چند مدل به صورت موازی"""
+        import time
+        start_time = time.time()
+
+        logger.info(f"📄 [MICRO] Starting analysis of {file_path} with models: {model_ids}")
 
         result = {
             "file_path": file_path,
@@ -311,26 +360,44 @@ class DeepAnalysisService:
 
         # پرامپت تحلیل جزئی
         prompt = self._build_micro_analysis_prompt(file_path, content, roadmap_content, instruction)
+        logger.info(f"📄 [MICRO] Built prompt for {file_path}, length: {len(prompt)} chars")
 
-        # تحلیل با هر مدل
-        model_tasks = []
-        for model_id in model_ids:
-            task = self._call_ai_model(model_id, prompt)
-            model_tasks.append((model_id, task))
-
-        # اجرای موازی
-        for model_id, task in model_tasks:
+        # ایجاد تسک‌های موازی با asyncio.gather
+        async def analyze_with_model(model_id: str) -> Tuple[str, Dict]:
+            """تحلیل با یک مدل خاص"""
             try:
-                response = await task
+                logger.info(f"📄 [MICRO] Calling model {model_id} for {file_path}...")
+                response = await self._call_ai_model(model_id, prompt)
                 analysis = self._parse_model_response(response)
-                result["model_analyses"][model_id] = analysis
+                logger.info(f"📄 [MICRO] Got response from {model_id} for {file_path}: {list(analysis.keys()) if isinstance(analysis, dict) else 'not dict'}")
+                return (model_id, analysis)
             except Exception as e:
-                logger.error(f"خطا در تحلیل {file_path} با مدل {model_id}: {e}")
-                result["model_analyses"][model_id] = {"error": str(e)}
+                logger.error(f"❌ [MICRO] Error analyzing {file_path} with {model_id}: {e}")
+                return (model_id, {"error": str(e)})
+
+        # اجرای واقعاً موازی با asyncio.gather
+        tasks = [analyze_with_model(model_id) for model_id in model_ids]
+        logger.info(f"📄 [MICRO] Running {len(tasks)} model tasks in parallel for {file_path}...")
+
+        results_list = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # پردازش نتایج
+        for item in results_list:
+            if isinstance(item, Exception):
+                logger.error(f"❌ [MICRO] Task exception: {item}")
+                continue
+            if isinstance(item, tuple) and len(item) == 2:
+                model_id, analysis = item
+                result["model_analyses"][model_id] = analysis
+
+        elapsed = time.time() - start_time
+        logger.info(f"📄 [MICRO] Completed {file_path} in {elapsed:.2f}s, got {len(result['model_analyses'])} model responses")
 
         # میانگین‌گیری نمرات
         result["aggregated_scores"] = self._aggregate_scores(result["model_analyses"])
         result["issues"] = self._collect_issues(result["model_analyses"], file_path)
+
+        logger.info(f"📄 [MICRO] Final scores for {file_path}: {result['aggregated_scores']}")
 
         return result
 
@@ -747,6 +814,12 @@ class DeepAnalysisService:
 
     async def _call_ai_model(self, model_id: str, prompt: str) -> str:
         """فراخوانی مدل AI"""
+        import time
+        start_time = time.time()
+
+        logger.info(f"🚀 [AI CALL] Starting call to model {model_id}...")
+        logger.info(f"📝 [AI CALL] Prompt length: {len(prompt)} chars")
+
         if self.ai_manager:
             try:
                 # ساخت پیام در فرمت صحیح
@@ -754,6 +827,8 @@ class DeepAnalysisService:
                     Message(role="system", content="تو یک تحلیل‌گر حرفه‌ای کد هستی. فقط خروجی JSON برگردان."),
                     Message(role="user", content=prompt)
                 ]
+
+                logger.info(f"📡 [AI CALL] Calling ai_manager.generate for {model_id}...")
 
                 # فراخوانی generate به جای call_model
                 response = await self.ai_manager.generate(
@@ -763,19 +838,30 @@ class DeepAnalysisService:
                     temperature=0.3
                 )
 
+                elapsed = time.time() - start_time
+                logger.info(f"✅ [AI CALL] Got response from {model_id} in {elapsed:.2f}s")
+
                 # استخراج محتوا از AIResponse
                 if hasattr(response, 'content'):
-                    return response.content
+                    content = response.content
+                    logger.info(f"📦 [AI CALL] Response content length: {len(content) if content else 0} chars")
+                    logger.info(f"📦 [AI CALL] Response preview: {content[:200] if content else 'EMPTY'}...")
+                    return content
                 elif isinstance(response, dict):
-                    return response.get("content", response.get("response", "{}"))
+                    content = response.get("content", response.get("response", "{}"))
+                    logger.info(f"📦 [AI CALL] Dict response content length: {len(content)} chars")
+                    return content
                 else:
+                    logger.warning(f"⚠️ [AI CALL] Unexpected response type: {type(response)}")
                     return str(response)
 
             except Exception as e:
-                logger.error(f"خطا در فراخوانی مدل {model_id}: {e}", exc_info=True)
+                elapsed = time.time() - start_time
+                logger.error(f"❌ [AI CALL] Error calling {model_id} after {elapsed:.2f}s: {e}", exc_info=True)
                 raise
         else:
-            logger.warning("AI Manager در دسترس نیست - بازگشت نتیجه خالی")
+            logger.error("❌ [AI CALL] AI Manager is None! Cannot make AI calls!")
+            logger.error(f"❌ [AI CALL] self.ai_manager = {self.ai_manager}")
             return "{}"
 
     async def _get_available_models(self) -> List[str]:
@@ -809,18 +895,26 @@ class DeepAnalysisService:
 
     def _aggregate_scores(self, model_analyses: Dict) -> Dict[str, float]:
         """میانگین‌گیری نمرات از چند مدل"""
+        logger.info(f"📊 [AGGREGATE] Starting aggregation for {len(model_analyses)} model analyses")
+
         all_scores = {}
         successful_models = 0
+        error_models = []
 
         for model_id, analysis in model_analyses.items():
+            logger.info(f"📊 [AGGREGATE] Processing {model_id}: {type(analysis)}")
+
             if isinstance(analysis, dict):
                 # اگر error داره، skip کن
                 if analysis.get("error"):
+                    error_models.append(model_id)
+                    logger.warning(f"📊 [AGGREGATE] Model {model_id} has error: {analysis.get('error')}")
                     continue
 
                 successful_models += 1
 
                 if "scores" in analysis:
+                    logger.info(f"📊 [AGGREGATE] Model {model_id} has scores: {analysis['scores']}")
                     for key, value in analysis["scores"].items():
                         if key not in all_scores:
                             all_scores[key] = []
@@ -829,17 +923,29 @@ class DeepAnalysisService:
 
                 # اگر scores نبود ولی overall_score یا code_quality بود
                 elif "overall_score" in analysis:
+                    logger.info(f"📊 [AGGREGATE] Model {model_id} has overall_score: {analysis['overall_score']}")
                     if "code_quality" not in all_scores:
                         all_scores["code_quality"] = []
                     all_scores["code_quality"].append(analysis["overall_score"])
 
                 # اگر raw_response داره، سعی کن از متن نمره استخراج کنی
                 elif "raw_response" in analysis:
+                    logger.info(f"📊 [AGGREGATE] Model {model_id} has raw_response, trying to extract score")
                     extracted = self._extract_score_from_text(analysis["raw_response"])
                     if extracted > 0:
                         if "code_quality" not in all_scores:
                             all_scores["code_quality"] = []
                         all_scores["code_quality"].append(extracted)
+                        logger.info(f"📊 [AGGREGATE] Extracted score {extracted} from raw_response")
+                    else:
+                        logger.warning(f"📊 [AGGREGATE] Could not extract score from raw_response for {model_id}")
+                else:
+                    logger.warning(f"📊 [AGGREGATE] Model {model_id} returned dict but no scores/raw_response. Keys: {list(analysis.keys())}")
+            else:
+                logger.warning(f"📊 [AGGREGATE] Model {model_id} returned non-dict: {type(analysis)}")
+
+        logger.info(f"📊 [AGGREGATE] Collected scores from {successful_models} successful models, {len(error_models)} errors")
+        logger.info(f"📊 [AGGREGATE] All scores: {all_scores}")
 
         aggregated = {}
         for key, values in all_scores.items():
@@ -849,10 +955,18 @@ class DeepAnalysisService:
         # محاسبه نمره کلی
         if aggregated:
             aggregated["total"] = sum(aggregated.values()) / len(aggregated)
+            logger.info(f"📊 [AGGREGATE] Final aggregated scores: {aggregated}")
         elif successful_models > 0:
             # اگر مدل‌ها پاسخ دادن ولی نمره قابل استخراج نبود
             aggregated["total"] = 0
             aggregated["parse_failed"] = True
+            aggregated["_debug_successful_models"] = successful_models
+            aggregated["_debug_error_models"] = error_models
+            logger.warning(f"📊 [AGGREGATE] No scores extracted despite {successful_models} successful models!")
+        else:
+            aggregated["_debug_all_failed"] = True
+            aggregated["_debug_error_models"] = error_models
+            logger.error(f"📊 [AGGREGATE] ALL models failed or returned errors!")
 
         return aggregated
 
@@ -963,12 +1077,29 @@ class DeepAnalysisService:
         model_ids: List[str]
     ) -> Dict[str, Any]:
         """محاسبه نتایج نهایی"""
+        logger.info(f"📈 [FINAL] Calculating final results from {len(micro_results.get('files', {}))} files")
 
         # ساخت file_health_map با رنگ‌بندی
         file_health_map = {}
+        files_with_real_scores = 0
+        files_with_default_scores = 0
+
         for file_path, file_data in micro_results.get("files", {}).items():
             scores = file_data.get("aggregated_scores", {})
-            total_score = scores.get("total", 50)
+            total_score = scores.get("total")
+
+            # بررسی آیا نمره واقعی است یا پیش‌فرض
+            has_real_score = total_score is not None and not scores.get("_debug_all_failed")
+
+            if total_score is None:
+                total_score = 50  # Default value
+                files_with_default_scores += 1
+                logger.warning(f"📈 [FINAL] File {file_path} has NO score, using default 50")
+            else:
+                files_with_real_scores += 1
+
+            if scores.get("parse_failed"):
+                logger.warning(f"📈 [FINAL] File {file_path} parse failed, score: {total_score}")
 
             color_info = get_health_color(total_score)
 
@@ -988,9 +1119,18 @@ class DeepAnalysisService:
                 "analyzed_at": file_data.get("analyzed_at")
             }
 
+        # Log summary
+        logger.info(f"📈 [FINAL] Files with REAL AI scores: {files_with_real_scores}")
+        logger.info(f"📈 [FINAL] Files with DEFAULT (50) scores: {files_with_default_scores}")
+
+        if files_with_default_scores > 0 and files_with_real_scores == 0:
+            logger.error(f"❌ [FINAL] ALL files have default scores! AI calls likely failed!")
+
         # میانگین نمرات فایل‌ها
         file_scores = [f["score"] for f in file_health_map.values()]
         avg_file_score = sum(file_scores) / len(file_scores) if file_scores else 0
+
+        logger.info(f"📈 [FINAL] Average file score: {avg_file_score:.1f}")
 
         # نمرات از هر مرحله
         macro_score = macro_results.get("aggregated", {}).get("overall_health", 0)
