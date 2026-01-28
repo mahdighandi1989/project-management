@@ -36,6 +36,9 @@ export default function GlobalAnalysisProgress() {
         const activeList: AnalysisProgress[] = [];
 
         for (const project of projects.slice(0, 10)) { // Limit to 10 projects
+          // Skip if project has no valid id
+          if (!project || !project.id) continue;
+
           try {
             const progressRes = await fetch(`${API_BASE}/api/projects/${project.id}/health/progress`);
             if (progressRes.ok) {
