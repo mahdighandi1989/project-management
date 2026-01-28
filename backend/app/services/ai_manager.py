@@ -27,41 +27,75 @@ class AIManager:
 
     def __init__(self):
         self._services: Dict[ModelProvider, AIServiceBase] = {}
+        self._init_errors: Dict[str, str] = {}  # برای debug
         self._initialize_services()
 
     def _initialize_services(self):
         """راه‌اندازی سرویس‌های موجود بر اساس API keys"""
+        import logging
+        logger = logging.getLogger(__name__)
+
         available = settings.get_available_providers()
+        logger.info(f"🔑 Available providers from settings: {available}")
 
         if available.get("openai"):
             try:
                 self._services[ModelProvider.OPENAI] = OpenAIService()
-            except AIServiceError:
-                pass
+                logger.info("✅ OpenAI service initialized")
+            except AIServiceError as e:
+                self._init_errors["openai"] = str(e)
+                logger.warning(f"⚠️ OpenAI init failed: {e}")
+            except Exception as e:
+                self._init_errors["openai"] = str(e)
+                logger.error(f"❌ OpenAI init error: {e}")
 
         if available.get("claude"):
             try:
                 self._services[ModelProvider.CLAUDE] = ClaudeService()
-            except AIServiceError:
-                pass
+                logger.info("✅ Claude service initialized")
+            except AIServiceError as e:
+                self._init_errors["claude"] = str(e)
+                logger.warning(f"⚠️ Claude init failed: {e}")
+            except Exception as e:
+                self._init_errors["claude"] = str(e)
+                logger.error(f"❌ Claude init error: {e}")
 
         if available.get("gemini"):
             try:
                 self._services[ModelProvider.GEMINI] = GeminiService()
-            except AIServiceError:
-                pass
+                logger.info("✅ Gemini service initialized")
+            except AIServiceError as e:
+                self._init_errors["gemini"] = str(e)
+                logger.warning(f"⚠️ Gemini init failed: {e}")
+            except Exception as e:
+                self._init_errors["gemini"] = str(e)
+                logger.error(f"❌ Gemini init error: {e}")
 
         if available.get("deepseek"):
             try:
                 self._services[ModelProvider.DEEPSEEK] = DeepSeekService()
-            except AIServiceError:
-                pass
+                logger.info("✅ DeepSeek service initialized")
+            except AIServiceError as e:
+                self._init_errors["deepseek"] = str(e)
+                logger.warning(f"⚠️ DeepSeek init failed: {e}")
+            except Exception as e:
+                self._init_errors["deepseek"] = str(e)
+                logger.error(f"❌ DeepSeek init error: {e}")
 
-        if available.get("perplexity"):  # 🆕 Perplexity
+        if available.get("perplexity"):
             try:
                 self._services[ModelProvider.PERPLEXITY] = PerplexityService()
-            except AIServiceError:
-                pass
+                logger.info("✅ Perplexity service initialized")
+            except AIServiceError as e:
+                self._init_errors["perplexity"] = str(e)
+                logger.warning(f"⚠️ Perplexity init failed: {e}")
+            except Exception as e:
+                self._init_errors["perplexity"] = str(e)
+                logger.error(f"❌ Perplexity init error: {e}")
+
+        logger.info(f"📊 Initialized {len(self._services)} services: {list(self._services.keys())}")
+        if self._init_errors:
+            logger.warning(f"⚠️ Init errors: {self._init_errors}")
 
     def get_available_providers(self) -> List[str]:
         """لیست provider های فعال"""
