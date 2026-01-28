@@ -51,8 +51,31 @@ interface AIProfile {
   speed_score: number;
 }
 
+interface ModelCapabilityResult {
+  model_id: string;
+  tested_at: string;
+  overall_score: number;
+  badges: Array<{
+    type: string;
+    badge_id: string;
+    label: string;
+    icon: string;
+    color: string;
+    score: number;
+  }>;
+  self_description: {
+    name?: string;
+    strengths?: string[];
+    limitations?: string[];
+    best_for?: string[];
+  };
+  strengths: Array<{ category: string; score: number }>;
+  weaknesses: Array<{ category: string; score: number }>;
+  categories: Record<string, { avg_score: number; tests: any[] }>;
+}
+
 export default function AnalysisPage() {
-  const [activeTab, setActiveTab] = useState<'reports' | 'profiles' | 'run'>('reports');
+  const [activeTab, setActiveTab] = useState<'reports' | 'profiles' | 'run' | 'capabilities'>('reports');
 
   // Reports state
   const [reports, setReports] = useState<AnalysisReport[]>([]);
@@ -66,6 +89,26 @@ export default function AnalysisPage() {
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [availableModels, setAvailableModels] = useState<any[]>([]);
   const [running, setRunning] = useState(false);
+
+  // Progress tracking state
+  const [progressData, setProgressData] = useState<{
+    phase: string;
+    current_file: string;
+    current_model: string;
+    analyzed_files: number;
+    total_files: number;
+    progress_percentage: number;
+    elapsed_time: number;
+    issues_found: number;
+    message: string;
+    model_statuses: Record<string, string>;
+  } | null>(null);
+  const [showProgressDetails, setShowProgressDetails] = useState(false);
+
+  // Capability testing state
+  const [capabilityResults, setCapabilityResults] = useState<Record<string, ModelCapabilityResult>>({});
+  const [testingModel, setTestingModel] = useState<string | null>(null);
+  const [selectedCapabilityModel, setSelectedCapabilityModel] = useState<string | null>(null);
 
   // UI state
   const [loading, setLoading] = useState(true);
@@ -140,8 +183,11 @@ export default function AnalysisPage() {
     }
 
     setRunning(true);
+    setProgressData(null);
+
     try {
-      const res = await fetch(`${API_BASE}/api/analysis/run`, {
+      // استفاده از Streaming endpoint با EventSource
+      const response = await fetch(`${API_BASE}/api/analysis/run-stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -151,19 +197,72 @@ export default function AnalysisPage() {
         }),
       });
 
-      const data = await res.json();
-      if (data.success) {
-        showSuccess('تحلیل با موفقیت انجام شد!');
-        setSelectedReport(data.report);
-        await loadReports();
-        setActiveTab('reports');
-      } else {
-        showError(data.message || 'خطا در تحلیل');
+      if (!response.ok) {
+        throw new Error('خطا در شروع تحلیل');
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('خطا در خواندن استریم');
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+
+              // به‌روزرسانی وضعیت پیشرفت
+              if (data.event !== 'heartbeat') {
+                setProgressData({
+                  phase: data.phase || 'preparing',
+                  current_file: data.current_file || '',
+                  current_model: data.current_model || '',
+                  analyzed_files: data.analyzed_files || 0,
+                  total_files: data.total_files || 0,
+                  progress_percentage: data.progress_percentage || 0,
+                  elapsed_time: data.elapsed_time || 0,
+                  issues_found: data.issues_found || 0,
+                  message: data.message || '',
+                  model_statuses: data.model_statuses || {},
+                });
+              }
+
+              // اگر تحلیل تمام شد
+              if (data.event === 'done' || data.event === 'analysis_completed') {
+                showSuccess('تحلیل با موفقیت انجام شد!');
+                await loadReports();
+                setActiveTab('reports');
+                break;
+              }
+
+              // اگر خطا داریم
+              if (data.event === 'error') {
+                showError(data.message || 'خطا در تحلیل');
+                break;
+              }
+            } catch (e) {
+              // JSON parse error - ignore
+            }
+          }
+        }
       }
     } catch (e) {
       showError('خطا در ارتباط');
     } finally {
       setRunning(false);
+      // پاک کردن progress بعد از چند ثانیه
+      setTimeout(() => setProgressData(null), 3000);
     }
   };
 
@@ -191,6 +290,45 @@ export default function AnalysisPage() {
       case 'F': return 'bg-red-500 text-white';
       default: return 'bg-gray-500 text-white';
     }
+  };
+
+  const testModelCapability = async (modelId: string) => {
+    setTestingModel(modelId);
+    try {
+      const res = await fetch(`${API_BASE}/api/models/capability-test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_id: modelId }),
+      });
+
+      const data = await res.json();
+      if (data.success) {
+        setCapabilityResults(prev => ({
+          ...prev,
+          [modelId]: data.results
+        }));
+        setSelectedCapabilityModel(modelId);
+        showSuccess(`تست توانایی ${modelId} تکمیل شد!`);
+      } else {
+        showError(data.error || 'خطا در تست مدل');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    } finally {
+      setTestingModel(null);
+    }
+  };
+
+  const getBadgeColor = (color: string): string => {
+    const colors: Record<string, string> = {
+      gold: 'bg-gradient-to-r from-yellow-400 to-yellow-600 text-white',
+      purple: 'bg-gradient-to-r from-purple-500 to-purple-700 text-white',
+      blue: 'bg-gradient-to-r from-blue-500 to-blue-700 text-white',
+      green: 'bg-gradient-to-r from-green-500 to-green-700 text-white',
+      yellow: 'bg-gradient-to-r from-yellow-400 to-orange-500 text-black',
+      gray: 'bg-gradient-to-r from-gray-400 to-gray-600 text-white',
+    };
+    return colors[color] || colors.gray;
   };
 
   return (
@@ -261,6 +399,16 @@ export default function AnalysisPage() {
             }`}
           >
             اجرای تحلیل
+          </button>
+          <button
+            onClick={() => setActiveTab('capabilities')}
+            className={`px-4 py-2 rounded-lg font-medium transition ${
+              activeTab === 'capabilities'
+                ? 'bg-orange-500 text-white'
+                : 'bg-white dark:bg-gray-800 hover:bg-gray-100'
+            }`}
+          >
+            تست توانایی مدل‌ها
           </button>
         </div>
 
@@ -560,6 +708,97 @@ export default function AnalysisPage() {
                   </button>
                 </div>
 
+                {/* نوار پیشرفت Real-time */}
+                {running && progressData && (
+                  <div className="mt-6">
+                    {/* نوار اصلی پیشرفت - کلیک‌پذیر */}
+                    <div
+                      onClick={() => setShowProgressDetails(!showProgressDetails)}
+                      className="cursor-pointer bg-gradient-to-r from-blue-500 to-purple-500 rounded-lg p-4 text-white relative overflow-hidden"
+                    >
+                      {/* نوار پیشرفت داخلی */}
+                      <div
+                        className="absolute inset-0 bg-white/20 transition-all duration-500"
+                        style={{ width: `${progressData.progress_percentage}%` }}
+                      />
+
+                      <div className="relative z-10">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="animate-pulse">●</span>
+                            <span className="font-bold">
+                              {progressData.phase === 'micro' && 'بررسی فایل‌ها'}
+                              {progressData.phase === 'macro' && 'بررسی همکاری‌ها'}
+                              {progressData.phase === 'structural' && 'بررسی ساختار'}
+                              {progressData.phase === 'finalizing' && 'نهایی‌سازی'}
+                              {progressData.phase === 'preparing' && 'آماده‌سازی'}
+                            </span>
+                          </div>
+                          <span className="font-mono text-lg">{progressData.progress_percentage.toFixed(0)}%</span>
+                        </div>
+
+                        <div className="text-sm opacity-90">
+                          {progressData.current_model && (
+                            <span className="inline-flex items-center gap-1 bg-white/20 px-2 py-1 rounded mr-2">
+                              🤖 {progressData.current_model}
+                            </span>
+                          )}
+                          {progressData.message && (
+                            <span>{progressData.message}</span>
+                          )}
+                        </div>
+
+                        <div className="flex items-center justify-between mt-2 text-xs opacity-75">
+                          <span>فایل‌ها: {progressData.analyzed_files}/{progressData.total_files}</span>
+                          <span>مشکلات: {progressData.issues_found}</span>
+                          <span>زمان: {Math.floor(progressData.elapsed_time)}s</span>
+                          <span className="cursor-pointer hover:underline">
+                            {showProgressDetails ? '▼ بستن' : '▲ جزئیات بیشتر'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* پنل جزئیات - نمایش با کلیک */}
+                    {showProgressDetails && (
+                      <div className="mt-2 bg-gray-900 text-gray-100 rounded-lg p-4 text-sm font-mono max-h-64 overflow-auto">
+                        <div className="mb-3 text-xs text-gray-400">وضعیت مدل‌ها:</div>
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                          {Object.entries(progressData.model_statuses || {}).map(([modelId, status]) => (
+                            <div
+                              key={modelId}
+                              className={`p-2 rounded text-xs ${
+                                status === 'working'
+                                  ? 'bg-yellow-500/20 text-yellow-300 animate-pulse'
+                                  : status === 'completed'
+                                  ? 'bg-green-500/20 text-green-300'
+                                  : status === 'failed'
+                                  ? 'bg-red-500/20 text-red-300'
+                                  : 'bg-gray-700 text-gray-400'
+                              }`}
+                            >
+                              <div className="flex items-center gap-1">
+                                {status === 'working' && '⏳'}
+                                {status === 'completed' && '✅'}
+                                {status === 'failed' && '❌'}
+                                {status === 'waiting' && '⏸️'}
+                                <span className="truncate">{modelId.split('/').pop()}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {progressData.current_file && (
+                          <div className="mt-3 pt-3 border-t border-gray-700">
+                            <div className="text-xs text-gray-400 mb-1">فایل فعلی:</div>
+                            <div className="text-blue-300 truncate">{progressData.current_file}</div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div className="mt-8 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
                   <h3 className="font-bold mb-2">توضیحات</h3>
                   <ul className="text-sm space-y-1 text-gray-600 dark:text-gray-300">
@@ -569,6 +808,210 @@ export default function AnalysisPage() {
                     <li>* با hover روی هر فایل، جزئیات بیشتر نمایش داده می‌شود</li>
                     <li>* نمرات مدل‌ها در پروفایلشان ذخیره و تجمیع می‌شوند</li>
                   </ul>
+                </div>
+              </div>
+            )}
+
+            {/* تب تست توانایی مدل‌ها */}
+            {activeTab === 'capabilities' && (
+              <div className="grid lg:grid-cols-3 gap-6">
+                {/* لیست مدل‌ها */}
+                <div className="lg:col-span-1">
+                  <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-4">
+                    <h2 className="font-bold mb-4">مدل‌های قابل تست</h2>
+                    <p className="text-xs text-gray-500 mb-4">
+                      روی هر مدل کلیک کنید تا تست توانایی اجرا شود
+                    </p>
+
+                    <div className="space-y-2 max-h-[60vh] overflow-auto">
+                      {availableModels.map((model) => {
+                        const hasResult = capabilityResults[model.id];
+                        const isSelected = selectedCapabilityModel === model.id;
+                        const isTesting = testingModel === model.id;
+
+                        return (
+                          <div
+                            key={model.id}
+                            onClick={() => !isTesting && testModelCapability(model.id)}
+                            className={`p-3 rounded-lg cursor-pointer transition ${
+                              isSelected
+                                ? 'bg-orange-50 dark:bg-orange-900/30 border-2 border-orange-500'
+                                : isTesting
+                                ? 'bg-yellow-50 dark:bg-yellow-900/30 animate-pulse'
+                                : 'bg-gray-50 dark:bg-gray-700 hover:bg-gray-100'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="font-medium text-sm">{model.name || model.id}</span>
+                              {isTesting && (
+                                <span className="text-xs text-yellow-600">در حال تست...</span>
+                              )}
+                              {hasResult && !isTesting && (
+                                <span className={`px-2 py-1 rounded text-xs font-bold ${getScoreBgColor(hasResult.overall_score)}`}>
+                                  {hasResult.overall_score.toFixed(0)}
+                                </span>
+                              )}
+                            </div>
+
+                            {/* نمایش badge ها */}
+                            {hasResult && hasResult.badges && hasResult.badges.length > 0 && (
+                              <div className="flex flex-wrap gap-1 mt-2">
+                                {hasResult.badges.slice(0, 3).map((badge, idx) => (
+                                  <span
+                                    key={idx}
+                                    className={`text-xs px-2 py-0.5 rounded-full ${getBadgeColor(badge.color)}`}
+                                    title={`${badge.label}: ${badge.score.toFixed(0)}`}
+                                  >
+                                    {badge.icon} {badge.label}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+
+                {/* نتایج تست */}
+                <div className="lg:col-span-2">
+                  <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
+                    {!selectedCapabilityModel || !capabilityResults[selectedCapabilityModel] ? (
+                      <div className="text-center py-12 text-gray-400">
+                        <div className="text-5xl mb-4">🧪</div>
+                        <p>یک مدل را انتخاب کنید تا تست توانایی اجرا شود</p>
+                        <p className="text-sm mt-2">
+                          هر مدل با سوالات استاندارد تست می‌شود و badge می‌گیرد
+                        </p>
+                      </div>
+                    ) : (
+                      <div>
+                        {(() => {
+                          const result = capabilityResults[selectedCapabilityModel];
+                          return (
+                            <>
+                              {/* هدر با badge ها */}
+                              <div className="flex items-start gap-4 mb-6">
+                                <div className={`w-24 h-24 rounded-xl flex flex-col items-center justify-center text-white ${
+                                  result.overall_score >= 80 ? 'bg-gradient-to-br from-purple-500 to-purple-700' :
+                                  result.overall_score >= 60 ? 'bg-gradient-to-br from-blue-500 to-blue-700' :
+                                  'bg-gradient-to-br from-gray-500 to-gray-700'
+                                }`}>
+                                  <div className="text-3xl font-bold">{result.overall_score.toFixed(0)}</div>
+                                  <div className="text-xs opacity-75">امتیاز کلی</div>
+                                </div>
+                                <div className="flex-1">
+                                  <h2 className="text-xl font-bold">{selectedCapabilityModel}</h2>
+                                  <p className="text-gray-500 text-sm">
+                                    تست شده در {new Date(result.tested_at).toLocaleString('fa-IR')}
+                                  </p>
+
+                                  {/* Badge ها */}
+                                  <div className="flex flex-wrap gap-2 mt-3">
+                                    {result.badges.map((badge, idx) => (
+                                      <span
+                                        key={idx}
+                                        className={`px-3 py-1 rounded-full text-sm font-medium ${getBadgeColor(badge.color)}`}
+                                      >
+                                        {badge.icon} {badge.label}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* معرفی مدل */}
+                              {result.self_description && (result.self_description.strengths || result.self_description.best_for) && (
+                                <div className="mb-6 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                                  <h3 className="font-bold mb-2">معرفی مدل</h3>
+                                  {result.self_description.strengths && (
+                                    <div className="mb-2">
+                                      <span className="text-sm text-gray-500">نقاط قوت:</span>
+                                      <div className="flex flex-wrap gap-1 mt-1">
+                                        {result.self_description.strengths.map((s, i) => (
+                                          <span key={i} className="px-2 py-1 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 rounded text-xs">
+                                            {s}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                  {result.self_description.best_for && (
+                                    <div>
+                                      <span className="text-sm text-gray-500">بهترین برای:</span>
+                                      <div className="flex flex-wrap gap-1 mt-1">
+                                        {result.self_description.best_for.map((b, i) => (
+                                          <span key={i} className="px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded text-xs">
+                                            {b}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+
+                              {/* نمرات دسته‌بندی */}
+                              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+                                {Object.entries(result.categories).map(([category, data]) => {
+                                  const categoryLabels: Record<string, string> = {
+                                    code_analysis: 'تحلیل کد',
+                                    code_generation: 'کدنویسی',
+                                    documentation: 'مستندسازی',
+                                    security: 'امنیت',
+                                    problem_solving: 'حل مسئله',
+                                    language: 'زبان',
+                                    reasoning: 'استدلال',
+                                    identity: 'هویت',
+                                  };
+                                  return (
+                                    <div key={category} className="p-3 bg-gray-50 dark:bg-gray-700 rounded-lg text-center">
+                                      <div className="text-xs text-gray-500 mb-1">
+                                        {categoryLabels[category] || category}
+                                      </div>
+                                      <div className={`text-lg font-bold ${
+                                        data.avg_score >= 75 ? 'text-green-500' :
+                                        data.avg_score >= 50 ? 'text-yellow-500' : 'text-red-500'
+                                      }`}>
+                                        {data.avg_score.toFixed(0)}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+
+                              {/* نقاط قوت و ضعف */}
+                              <div className="grid md:grid-cols-2 gap-4">
+                                {result.strengths.length > 0 && (
+                                  <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg">
+                                    <h4 className="font-bold text-green-700 dark:text-green-300 mb-2">نقاط قوت</h4>
+                                    {result.strengths.map((s, i) => (
+                                      <div key={i} className="flex items-center justify-between text-sm py-1">
+                                        <span>{s.category}</span>
+                                        <span className="font-mono text-green-600">{s.score.toFixed(0)}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                {result.weaknesses.length > 0 && (
+                                  <div className="p-4 bg-red-50 dark:bg-red-900/20 rounded-lg">
+                                    <h4 className="font-bold text-red-700 dark:text-red-300 mb-2">نیاز به بهبود</h4>
+                                    {result.weaknesses.map((w, i) => (
+                                      <div key={i} className="flex items-center justify-between text-sm py-1">
+                                        <span>{w.category}</span>
+                                        <span className="font-mono text-red-600">{w.score.toFixed(0)}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
