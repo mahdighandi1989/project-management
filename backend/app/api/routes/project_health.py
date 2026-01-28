@@ -66,6 +66,161 @@ class AnalysisScheduleRequest(BaseModel):
 # API Endpoints
 # =====================================
 
+@router.get("/debug/ai-status")
+async def debug_ai_status():
+    """
+    بررسی وضعیت AI - برای تشخیص مشکلات
+
+    این endpoint نشون میده:
+    - چه provider هایی فعال هستند
+    - چه مدل‌هایی در دسترس هستند
+    - آیا API key ها درست تنظیم شدن
+    """
+    import os
+    from ...services.ai_manager import get_ai_manager
+    from ...core.config import settings
+
+    # چک کردن API keys (فقط اینکه وجود دارن، نه مقدارشون)
+    api_keys_status = {
+        "OPENAI_API_KEY": bool(os.environ.get("OPENAI_API_KEY")),
+        "CLAUDE_API_KEY": bool(os.environ.get("CLAUDE_API_KEY")),
+        "GEMINI_API_KEY": bool(os.environ.get("GEMINI_API_KEY")),
+        "DEEPSEEK_API_KEY": bool(os.environ.get("DEEPSEEK_API_KEY")),
+        "PERPLEXITY_API_KEY": bool(os.environ.get("PERPLEXITY_API_KEY")),
+    }
+
+    # دریافت AI manager
+    try:
+        ai_manager = get_ai_manager()
+        available_providers = ai_manager.get_available_providers()
+        available_models = [m.id for m in ai_manager.get_available_models()]
+    except Exception as e:
+        available_providers = []
+        available_models = []
+        error = str(e)
+    else:
+        error = None
+
+    # خواندن از settings
+    settings_providers = settings.get_available_providers()
+
+    return {
+        "success": True,
+        "api_keys_in_env": api_keys_status,
+        "settings_providers": settings_providers,
+        "ai_manager_providers": available_providers,
+        "available_models": available_models,
+        "any_model_available": len(available_models) > 0,
+        "error": error,
+        "hint": "اگر any_model_available=false باشه، تحلیل سلامت کار نمیکنه"
+    }
+
+
+@router.post("/{project_id}/health/analyze-direct")
+async def run_direct_analysis(project_id: str, db=Depends(get_db)):
+    """
+    تحلیل مستقیم (بدون background task) برای تست
+
+    این endpoint تحلیل را به صورت همزمان اجرا می‌کند
+    و نتیجه را مستقیم برمی‌گرداند
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"🔬 Starting DIRECT analysis for project {project_id}")
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت فایل‌های پروژه
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+    files_data = [
+        {
+            "path": f.file_path,
+            "content": f.content or "",
+            "file_type": f.file_type
+        }
+        for f in files
+    ]
+
+    if not files_data:
+        return {
+            "success": False,
+            "error": "پروژه فایلی ندارد"
+        }
+
+    # بررسی مدل‌های در دسترس
+    from ...services.ai_manager import get_ai_manager
+    ai_manager = get_ai_manager()
+    available_models = ai_manager.get_available_models()
+    available_providers = ai_manager.get_available_providers()
+
+    logger.info(f"📊 Available providers: {available_providers}")
+    logger.info(f"📊 Available models: {[m.id for m in available_models]}")
+
+    if not available_models:
+        return {
+            "success": False,
+            "error": "هیچ مدل AI در دسترس نیست",
+            "available_providers": available_providers,
+            "hint": "لطفا کلیدهای API را در تنظیمات یا متغیرهای محیطی وارد کنید"
+        }
+
+    model_ids = [m.id for m in available_models[:2]]  # حداکثر 2 مدل برای تست
+
+    # اجرای تحلیل مستقیم
+    try:
+        from ...services.deep_analysis_service import get_deep_analysis_service
+
+        deep_analyzer = get_deep_analysis_service(ai_manager)
+        logger.info(f"✅ Deep analyzer initialized, AI manager: {deep_analyzer.ai_manager is not None}")
+
+        analysis_result = await deep_analyzer.run_full_analysis(
+            project_id=project_id,
+            files=files_data,
+            roadmap_content=project.roadmap_content or "",
+            readme_content=project.readme_content or "",
+            model_ids=model_ids,
+            instruction="تحلیل کامل پروژه",
+            db_session=db
+        )
+
+        # ذخیره نتایج
+        if analysis_result.get("status") == "completed":
+            project.health_scores = json.dumps(
+                analysis_result.get("overall_scores", {}),
+                ensure_ascii=False
+            )
+            project.file_health_map = json.dumps(
+                analysis_result.get("file_health_map", {}),
+                ensure_ascii=False
+            )
+            project.issues_found = json.dumps(
+                analysis_result.get("issues", [])[:100],
+                ensure_ascii=False
+            )
+            project.last_analysis_at = datetime.utcnow()
+            project.last_analysis_models = json.dumps(model_ids, ensure_ascii=False)
+            db.commit()
+            logger.info(f"✅ Direct analysis completed and saved!")
+
+        return {
+            "success": True,
+            "message": "تحلیل مستقیم انجام شد",
+            "analysis_result": analysis_result,
+            "models_used": model_ids,
+            "files_analyzed": len(files_data)
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Direct analysis failed: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": str(e),
+            "models_attempted": model_ids
+        }
+
+
 @router.get("/{project_id}/health")
 async def get_project_health(project_id: str, db=Depends(get_db)):
     """
@@ -245,25 +400,40 @@ async def run_health_analysis(
     }
 
     # تعیین مدل‌ها
+    from ...services.ai_manager import get_ai_manager
+    ai_manager = get_ai_manager()
+    available_models = ai_manager.get_available_models()
+    available_providers = ai_manager.get_available_providers()
+
     model_ids = request.model_ids
     if not model_ids or "all" in model_ids:
         # دریافت همه مدل‌های فعال
-        from ...services.ai_manager import get_ai_manager
-        ai_manager = get_ai_manager()
-        available = ai_manager.get_available_models()
-        model_ids = [m.id for m in available[:3]]  # حداکثر 3 مدل
+        model_ids = [m.id for m in available_models[:3]]  # حداکثر 3 مدل
+
+    # اگر هیچ مدلی در دسترس نیست، خطا بده (نه fallback!)
+    if not model_ids and not available_models:
+        return {
+            "success": False,
+            "error": "هیچ مدل AI در دسترس نیست",
+            "hint": "لطفا کلیدهای API را در تنظیمات وارد کنید",
+            "available_providers": available_providers,
+            "project_id": project_id
+        }
 
     if not model_ids:
-        model_ids = ["claude"]  # پیش‌فرض
+        model_ids = [available_models[0].id] if available_models else []
 
     # اجرای تحلیل در background
-    background_tasks.add_task(
-        _run_analysis_task,
-        project_id=project_id,
-        files_data=files_data,
-        project_info=project_info,
-        model_ids=model_ids,
-        request=request
+    import asyncio
+    # اطمینان از اجرای صحیح async task
+    asyncio.create_task(
+        _run_analysis_task(
+            project_id=project_id,
+            files_data=files_data,
+            project_info=project_info,
+            model_ids=model_ids,
+            request=request
+        )
     )
 
     return {
@@ -271,6 +441,8 @@ async def run_health_analysis(
         "message": "تحلیل شروع شد",
         "project_id": project_id,
         "models": model_ids,
+        "available_models": [m.id for m in available_models],
+        "available_providers": available_providers,
         "files_count": len(files_data),
         "status": "running"
     }

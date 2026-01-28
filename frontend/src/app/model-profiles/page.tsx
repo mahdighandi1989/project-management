@@ -83,6 +83,8 @@ export default function ModelProfilesPage() {
   const [sortBy, setSortBy] = useState('overall_score');
   const [sortOrder, setSortOrder] = useState('desc');
   const [activeTab, setActiveTab] = useState<'rankings' | 'leaderboard' | 'history'>('rankings');
+  const [isFallbackData, setIsFallbackData] = useState(false);
+  const [dataNote, setDataNote] = useState<string | null>(null);
 
   // داده‌های پیش‌فرض
   const defaultProfiles: ModelProfile[] = [
@@ -110,18 +112,29 @@ export default function ModelProfilesPage() {
   const loadProfiles = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/models/profiles?sort_by=${sortBy}&order=${sortOrder}`);
+      // درخواست بدون fallback برای دیدن داده‌های واقعی
+      const res = await fetch(`${API_BASE}/api/models/profiles?sort_by=${sortBy}&order=${sortOrder}&use_fallback=false`);
       if (res.ok) {
         const data = await res.json();
         if (data.success && data.profiles?.length > 0) {
           setProfiles(data.profiles);
+          setIsFallbackData(data.is_fallback || false);
+          setDataNote(data.note || null);
           return;
+        } else if (data.note) {
+          // پروفایل واقعی نیست، استفاده از پیش‌فرض
+          setDataNote(data.note);
         }
       }
+      // اگر پاسخ موفق نبود، داده‌های پیش‌فرض
       setProfiles(defaultProfiles);
+      setIsFallbackData(true);
+      setDataNote("داده‌های نمایشی - هنوز تحلیلی انجام نشده");
     } catch (e) {
       console.log('Using default profiles');
       setProfiles(defaultProfiles);
+      setIsFallbackData(true);
+      setDataNote("خطا در اتصال به سرور - نمایش داده‌های پیش‌فرض");
     } finally {
       setLoading(false);
     }
@@ -134,13 +147,20 @@ export default function ModelProfilesPage() {
         const data = await res.json();
         if (data.success && Object.keys(data.leaderboard || {}).length > 0) {
           setLeaderboard(data.leaderboard);
+          // اگر همه مدل‌ها 0 تسک دارند، نمایشی است
+          const anyActive = Object.values(data.leaderboard).some((l: any) => l.score > 0);
+          if (!anyActive) {
+            setIsFallbackData(true);
+          }
           return;
         }
       }
       setLeaderboard(defaultLeaderboard);
+      setIsFallbackData(true);
     } catch (e) {
       console.log('Using default leaderboard');
       setLeaderboard(defaultLeaderboard);
+      setIsFallbackData(true);
     }
   };
 
@@ -265,6 +285,24 @@ export default function ModelProfilesPage() {
       </div>
 
       <div className="max-w-7xl mx-auto px-4 py-6">
+        {/* هشدار داده‌های نمایشی */}
+        {isFallbackData && (
+          <div className="mb-6 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-300 dark:border-yellow-700 rounded-xl p-4">
+            <div className="flex items-center gap-3">
+              <span className="text-2xl">⚠️</span>
+              <div>
+                <h4 className="font-bold text-yellow-800 dark:text-yellow-400">داده‌های نمایشی</h4>
+                <p className="text-sm text-yellow-700 dark:text-yellow-500">
+                  {dataNote || "این داده‌ها نمایشی هستند. برای مشاهده نمرات واقعی، ابتدا تحلیل سلامت را روی یک پروژه اجرا کنید."}
+                </p>
+                <p className="text-xs text-yellow-600 dark:text-yellow-600 mt-1">
+                  نمرات واقعی بر اساس عملکرد مدل‌ها در تحلیل‌های سلامت پروژه محاسبه می‌شوند.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* تب‌ها */}
         <div className="flex gap-2 mb-6 bg-white dark:bg-gray-800 rounded-xl p-2 shadow">
           <button
