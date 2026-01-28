@@ -24,6 +24,7 @@ import logging
 from ..core.database import SessionLocal
 from ..models.project import Project, ProjectFile
 from .ai_manager import get_ai_manager
+from .ai_base import Message
 from .model_profiler import get_model_profiler
 
 logger = logging.getLogger(__name__)
@@ -266,7 +267,7 @@ class ProjectHealthAnalyzer:
         try:
             response = await self.ai_manager.generate(
                 model_id=model_id,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[Message(role="user", content=prompt)],
                 max_tokens=4000,
                 temperature=0.5
             )
@@ -275,7 +276,7 @@ class ProjectHealthAnalyzer:
             return result
 
         except Exception as e:
-            logger.error(f"Error upgrading roadmap: {e}")
+            logger.error(f"Error upgrading roadmap: {e}", exc_info=True)
             return {
                 "content": current_roadmap,
                 "issues": [{"type": "error", "description": str(e)}],
@@ -332,7 +333,7 @@ class ProjectHealthAnalyzer:
         try:
             response = await self.ai_manager.generate(
                 model_id=model_id,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[Message(role="user", content=prompt)],
                 max_tokens=4000,
                 temperature=0.6
             )
@@ -380,7 +381,7 @@ README باید شامل این بخش‌ها باشد:
         try:
             response = await self.ai_manager.generate(
                 model_id=model_id,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[Message(role="user", content=prompt)],
                 max_tokens=3000,
                 temperature=0.6
             )
@@ -423,7 +424,7 @@ README باید شامل این بخش‌ها باشد:
         try:
             response = await self.ai_manager.generate(
                 model_id=model_id,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[Message(role="user", content=prompt)],
                 max_tokens=3000,
                 temperature=0.5
             )
@@ -625,7 +626,7 @@ README باید شامل این بخش‌ها باشد:
         try:
             response = await self.ai_manager.generate(
                 model_id=model_id,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[Message(role="user", content=prompt)],
                 max_tokens=1500,
                 temperature=0.3
             )
@@ -691,7 +692,7 @@ README باید شامل این بخش‌ها باشد:
         try:
             response = await self.ai_manager.generate(
                 model_id=model_ids[0] if model_ids else "claude",
-                messages=[{"role": "user", "content": prompt}],
+                messages=[Message(role="user", content=prompt)],
                 max_tokens=2500,
                 temperature=0.4
             )

@@ -18,6 +18,8 @@ import logging
 import re
 import os
 
+from .ai_base import Message
+
 logger = logging.getLogger(__name__)
 
 
@@ -739,27 +741,46 @@ class DeepAnalysisService:
         """فراخوانی مدل AI"""
         if self.ai_manager:
             try:
-                result = await self.ai_manager.call_model(
+                # ساخت پیام در فرمت صحیح
+                messages = [
+                    Message(role="system", content="تو یک تحلیل‌گر حرفه‌ای کد هستی. فقط خروجی JSON برگردان."),
+                    Message(role="user", content=prompt)
+                ]
+
+                # فراخوانی generate به جای call_model
+                response = await self.ai_manager.generate(
                     model_id=model_id,
-                    prompt=prompt,
-                    max_tokens=4000
+                    messages=messages,
+                    max_tokens=4000,
+                    temperature=0.3
                 )
-                return result.get("content", result.get("response", ""))
+
+                # استخراج محتوا از AIResponse
+                if hasattr(response, 'content'):
+                    return response.content
+                elif isinstance(response, dict):
+                    return response.get("content", response.get("response", "{}"))
+                else:
+                    return str(response)
+
             except Exception as e:
-                logger.error(f"خطا در فراخوانی مدل {model_id}: {e}")
+                logger.error(f"خطا در فراخوانی مدل {model_id}: {e}", exc_info=True)
                 raise
         else:
-            # برای تست بدون AI manager
+            logger.warning("AI Manager در دسترس نیست - بازگشت نتیجه خالی")
             return "{}"
 
     async def _get_available_models(self) -> List[str]:
         """دریافت لیست مدل‌های در دسترس"""
         if self.ai_manager:
             try:
-                models = await self.ai_manager.get_available_models()
-                return [m["id"] for m in models if m.get("available")][:3]
-            except:
-                pass
+                # get_available_models یک متد sync است
+                models = self.ai_manager.get_available_models()
+                # AIModel objects have .id attribute
+                return [m.id for m in models[:3]]
+            except Exception as e:
+                logger.warning(f"خطا در دریافت مدل‌ها: {e}")
+
         return ["gpt-4", "claude-3-opus"]
 
     def _parse_model_response(self, response: str) -> Dict:
