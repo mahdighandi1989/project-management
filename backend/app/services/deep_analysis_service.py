@@ -1026,6 +1026,13 @@ _deep_analysis_service = None
 def get_deep_analysis_service(ai_manager=None) -> DeepAnalysisService:
     """دریافت instance سرویس تحلیل عمیق"""
     global _deep_analysis_service
+
+    # اگر instance وجود نداره یا ai_manager جدید داده شده، ایجاد کن
     if _deep_analysis_service is None:
         _deep_analysis_service = DeepAnalysisService(ai_manager)
+    elif ai_manager is not None and _deep_analysis_service.ai_manager is None:
+        # اگر ai_manager قبلاً تنظیم نشده، الان تنظیم کن
+        _deep_analysis_service.ai_manager = ai_manager
+        logger.info("AI Manager set on existing DeepAnalysisService instance")
+
     return _deep_analysis_service

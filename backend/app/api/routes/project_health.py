@@ -297,14 +297,43 @@ async def _run_analysis_task(
     import logging
 
     logger = logging.getLogger(__name__)
+    logger.info(f"🚀 Starting analysis task for project {project_id}")
+    logger.info(f"📁 Files count: {len(files_data)}, Models: {model_ids}")
+
     db = SessionLocal()
 
     try:
         # دریافت AI manager برای فراخوانی مدل‌ها
         ai_manager = get_ai_manager()
 
+        # چک کردن وضعیت AI manager
+        available_providers = ai_manager.get_available_providers()
+        available_models = ai_manager.get_available_models()
+
+        logger.info(f"🤖 Available providers: {available_providers}")
+        logger.info(f"🤖 Available models: {[m.id for m in available_models]}")
+
+        if not available_models:
+            logger.error("❌ No AI models available! Check API keys in .env file")
+            # ذخیره خطا در پروژه
+            project = db.query(Project).filter(Project.id == project_id).first()
+            if project:
+                project.health_scores = json.dumps({
+                    "error": "No AI models available",
+                    "overall": 0,
+                    "overall_color": "red"
+                })
+                project.issues_found = json.dumps([{
+                    "severity": "critical",
+                    "message": "هیچ مدل AI در دسترس نیست. کلیدهای API در فایل .env را بررسی کنید.",
+                    "type": "config"
+                }])
+                db.commit()
+            return
+
         # دریافت سرویس تحلیل عمیق
         deep_analyzer = get_deep_analysis_service(ai_manager)
+        logger.info(f"✅ Deep analyzer initialized with AI manager: {deep_analyzer.ai_manager is not None}")
 
         # دریافت پروژه
         project = db.query(Project).filter(Project.id == project_id).first()
@@ -363,17 +392,36 @@ async def _run_analysis_task(
                 logger.warning(f"README update failed: {e}")
 
         # 3. اجرای تحلیل عمیق سه‌مرحله‌ای
-        logger.info(f"Starting deep analysis for project {project_id} with models: {model_ids}")
+        logger.info(f"🔬 Starting deep analysis for project {project_id} with models: {model_ids}")
 
-        analysis_result = await deep_analyzer.run_full_analysis(
-            project_id=project_id,
-            files=files_data,
-            roadmap_content=roadmap_content,
-            readme_content=readme_content,
-            model_ids=model_ids,
-            instruction=instruction,
-            db_session=db
-        )
+        try:
+            analysis_result = await deep_analyzer.run_full_analysis(
+                project_id=project_id,
+                files=files_data,
+                roadmap_content=roadmap_content,
+                readme_content=readme_content,
+                model_ids=model_ids,
+                instruction=instruction,
+                db_session=db
+            )
+            logger.info(f"📊 Analysis result status: {analysis_result.get('status')}")
+            logger.info(f"📊 Files analyzed: {analysis_result.get('analyzed_files', 0)}")
+            logger.info(f"📊 Overall scores: {analysis_result.get('overall_scores', {})}")
+        except Exception as analysis_error:
+            logger.error(f"❌ Deep analysis failed: {analysis_error}", exc_info=True)
+            # ذخیره خطا
+            project.health_scores = json.dumps({
+                "error": str(analysis_error),
+                "overall": 0,
+                "overall_color": "red"
+            })
+            project.issues_found = json.dumps([{
+                "severity": "critical",
+                "message": f"خطا در تحلیل: {str(analysis_error)}",
+                "type": "error"
+            }])
+            db.commit()
+            return
 
         # 4. ذخیره نتایج
         if analysis_result.get("status") == "completed":
@@ -399,13 +447,37 @@ async def _run_analysis_task(
             if analysis_result.get("ideal_state"):
                 project.ideal_state = analysis_result["ideal_state"]
 
-            logger.info(f"Analysis completed for project {project_id}. Score: {analysis_result.get('overall_scores', {}).get('total', 0):.1f}")
+            logger.info(f"✅ Analysis completed for project {project_id}. Score: {analysis_result.get('overall_scores', {}).get('total', 0):.1f}")
+        else:
+            logger.warning(f"⚠️ Analysis did not complete successfully: {analysis_result.get('status')}")
+            if analysis_result.get("error"):
+                logger.error(f"❌ Analysis error: {analysis_result.get('error')}")
 
         db.commit()
+        logger.info(f"💾 Results saved to database for project {project_id}")
 
     except Exception as e:
-        logger.error(f"Analysis task error for {project_id}: {e}", exc_info=True)
+        logger.error(f"❌ Analysis task error for {project_id}: {e}", exc_info=True)
         db.rollback()
+
+        # ذخیره خطا در پروژه
+        try:
+            project = db.query(Project).filter(Project.id == project_id).first()
+            if project:
+                project.health_scores = json.dumps({
+                    "error": str(e),
+                    "overall": 0,
+                    "overall_color": "red"
+                })
+                project.issues_found = json.dumps([{
+                    "severity": "critical",
+                    "message": f"خطای سیستمی در تحلیل: {str(e)}",
+                    "type": "system_error"
+                }])
+                db.commit()
+        except:
+            pass
+
     finally:
         db.close()
 
