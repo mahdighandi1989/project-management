@@ -55,7 +55,7 @@ interface Props {
 }
 
 export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'settings' | 'files' | 'roadmap' | 'issues'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'settings' | 'files' | 'roadmap' | 'issues' | 'validation'>('overview');
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
 
@@ -69,6 +69,18 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
   const [idealState, setIdealState] = useState('');
   const [lastAnalysis, setLastAnalysis] = useState<{ id: string; at: string; models: string[] } | null>(null);
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
+
+  // 🆕 Validation Chain states
+  const [validationChainStatus, setValidationChainStatus] = useState<{
+    health_analysis: { scores: any; total_issues: number; last_analysis: string | null; models_used: string[] };
+    validation: { last_validated: string | null; validator_model: string; total_reviewed: number; validated_count: number; rejected_count: number; summary: string };
+    fields: { total_active: number; validated_fields: number; unexecuted_fields: number; archived_fields: number };
+    rejected_archive: { total: number; recent: any[] };
+    ideal_state: { defined: boolean; preview: string };
+    roadmap: { defined: boolean; preview: string };
+  } | null>(null);
+  const [rejectedIssues, setRejectedIssues] = useState<any[]>([]);
+  const [loadingValidation, setLoadingValidation] = useState(false);
 
   // Edit states
   const [editingSettings, setEditingSettings] = useState(false);
@@ -337,12 +349,65 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
         loadSettings(),
         loadFileMap(),
         loadRoadmap(),
-        loadIssues()
+        loadIssues(),
+        loadValidationChainStatus()
       ]);
     } catch (e) {
       console.error('Error loading data:', e);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // 🆕 بارگذاری وضعیت زنجیره اعتبارسنجی
+  const loadValidationChainStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/chain-status`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setValidationChainStatus(data.chain_status);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading validation chain status:', e);
+    }
+  };
+
+  // 🆕 بارگذاری ایرادات رد شده
+  const loadRejectedIssues = async () => {
+    setLoadingValidation(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/rejected-issues`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setRejectedIssues(data.rejected_issues || []);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading rejected issues:', e);
+    } finally {
+      setLoadingValidation(false);
+    }
+  };
+
+  // 🆕 بازگرداندن ایراد رد شده
+  const restoreRejectedIssue = async (issueId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/rejected-issues/${issueId}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        showSuccess('ایراد به لیست فعال بازگردانده شد');
+        loadRejectedIssues();
+        loadValidationChainStatus();
+        loadIssues();
+      } else {
+        showError('خطا در بازگرداندن ایراد');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط با سرور');
     }
   };
 
@@ -742,6 +807,7 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
           { id: 'files', label: 'فایل‌ها', icon: '-' },
           { id: 'roadmap', label: 'نقشه راه', icon: '#' },
           { id: 'issues', label: `ایرادات (${issues.length})`, icon: '!' },
+          { id: 'validation', label: 'زنجیره اعتبارسنجی', icon: '✓' },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -1262,6 +1328,181 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 🆕 تب زنجیره اعتبارسنجی */}
+        {activeTab === 'validation' && (
+          <div className="space-y-6">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-lg">زنجیره اعتبارسنجی</h3>
+              <button
+                onClick={() => {
+                  loadValidationChainStatus();
+                  loadRejectedIssues();
+                }}
+                className="px-3 py-1 bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300"
+              >
+                بروزرسانی
+              </button>
+            </div>
+
+            {!validationChainStatus ? (
+              <div className="text-center py-8 text-gray-400">
+                <div className="text-5xl mb-4">✓</div>
+                <p>داده‌ای برای نمایش وجود ندارد</p>
+                <p className="text-sm mt-2">ابتدا تحلیل سلامت و سپس گزارش مهندسی تولید کنید</p>
+              </div>
+            ) : (
+              <div className="space-y-6">
+                {/* خلاصه زنجیره */}
+                <div className="grid grid-cols-4 gap-4">
+                  <div className="p-4 bg-blue-50 dark:bg-blue-900/30 rounded-xl text-center">
+                    <div className="text-3xl font-bold text-blue-600">
+                      {validationChainStatus.health_analysis?.total_issues || 0}
+                    </div>
+                    <div className="text-sm text-blue-500">ایرادات شناسایی شده</div>
+                  </div>
+                  <div className="p-4 bg-green-50 dark:bg-green-900/30 rounded-xl text-center">
+                    <div className="text-3xl font-bold text-green-600">
+                      {validationChainStatus.validation?.validated_count || 0}
+                    </div>
+                    <div className="text-sm text-green-500">تایید شده</div>
+                  </div>
+                  <div className="p-4 bg-red-50 dark:bg-red-900/30 rounded-xl text-center">
+                    <div className="text-3xl font-bold text-red-600">
+                      {validationChainStatus.validation?.rejected_count || 0}
+                    </div>
+                    <div className="text-sm text-red-500">رد شده</div>
+                  </div>
+                  <div className="p-4 bg-purple-50 dark:bg-purple-900/30 rounded-xl text-center">
+                    <div className="text-3xl font-bold text-purple-600">
+                      {validationChainStatus.fields?.validated_fields || 0}
+                    </div>
+                    <div className="text-sm text-purple-500">فیلدهای معتبر</div>
+                  </div>
+                </div>
+
+                {/* وضعیت اعتبارسنجی */}
+                {validationChainStatus.validation?.last_validated && (
+                  <div className="p-4 bg-gray-50 dark:bg-gray-700 rounded-xl">
+                    <h4 className="font-bold mb-2">آخرین اعتبارسنجی</h4>
+                    <div className="grid grid-cols-2 gap-4 text-sm">
+                      <div>
+                        <span className="text-gray-500">تاریخ:</span>{' '}
+                        {new Date(validationChainStatus.validation.last_validated).toLocaleString('fa-IR')}
+                      </div>
+                      <div>
+                        <span className="text-gray-500">مدل اعتبارسنج:</span>{' '}
+                        {validationChainStatus.validation.validator_model || 'نامشخص'}
+                      </div>
+                      <div className="col-span-2">
+                        <span className="text-gray-500">خلاصه:</span>{' '}
+                        {validationChainStatus.validation.summary || 'ندارد'}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* وضعیت فیلدها */}
+                <div className="p-4 bg-gray-50 dark:bg-gray-700 rounded-xl">
+                  <h4 className="font-bold mb-2">وضعیت فیلدها</h4>
+                  <div className="grid grid-cols-4 gap-4 text-sm">
+                    <div className="text-center">
+                      <div className="text-2xl font-bold">{validationChainStatus.fields?.total_active || 0}</div>
+                      <div className="text-gray-500">فعال</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-green-600">{validationChainStatus.fields?.validated_fields || 0}</div>
+                      <div className="text-gray-500">معتبرشده</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-yellow-600">{validationChainStatus.fields?.unexecuted_fields || 0}</div>
+                      <div className="text-gray-500">اجرانشده</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-gray-400">{validationChainStatus.fields?.archived_fields || 0}</div>
+                      <div className="text-gray-500">بایگانی</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* آرشیو ایرادات رد شده */}
+                <div className="p-4 bg-red-50 dark:bg-red-900/20 rounded-xl">
+                  <div className="flex items-center justify-between mb-3">
+                    <h4 className="font-bold text-red-700 dark:text-red-400">
+                      ایرادات رد شده ({validationChainStatus.rejected_archive?.total || 0})
+                    </h4>
+                    {!loadingValidation && rejectedIssues.length === 0 && (
+                      <button
+                        onClick={loadRejectedIssues}
+                        className="text-sm text-red-600 hover:underline"
+                      >
+                        بارگذاری
+                      </button>
+                    )}
+                  </div>
+
+                  {loadingValidation ? (
+                    <div className="text-center py-4 text-gray-400">در حال بارگذاری...</div>
+                  ) : rejectedIssues.length === 0 && validationChainStatus.rejected_archive?.total === 0 ? (
+                    <p className="text-sm text-red-600 dark:text-red-400">هیچ ایرادی رد نشده است</p>
+                  ) : (
+                    <div className="space-y-2 max-h-[300px] overflow-auto">
+                      {(rejectedIssues.length > 0 ? rejectedIssues : validationChainStatus.rejected_archive?.recent || []).map((item: any, idx: number) => (
+                        <div
+                          key={item.id || idx}
+                          className="p-3 bg-white dark:bg-gray-800 rounded-lg"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex-1">
+                              <div className="text-xs font-mono text-blue-500 mb-1">
+                                {item.original_issue?.file || 'نامشخص'}
+                              </div>
+                              <p className="text-sm">{item.original_issue?.message || item.rejection_reason}</p>
+                              <div className="flex gap-2 mt-1 text-xs text-gray-400">
+                                <span>منبع: {item.source_model}</span>
+                                <span>•</span>
+                                <span>اعتبارسنج: {item.validator_model}</span>
+                              </div>
+                            </div>
+                            <div className="flex flex-col items-end gap-1">
+                              <span className="px-2 py-0.5 rounded text-xs bg-red-100 text-red-700">
+                                امتیاز: {item.validation_score || 0}
+                              </span>
+                              {item.id && (
+                                <button
+                                  onClick={() => restoreRejectedIssue(item.id)}
+                                  className="text-xs text-blue-500 hover:underline"
+                                >
+                                  بازگرداندن
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                          {item.rejection_reason && (
+                            <div className="mt-2 p-2 bg-red-50 dark:bg-red-900/30 rounded text-xs text-red-600 dark:text-red-400">
+                              <strong>دلیل رد:</strong> {item.rejection_reason}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* حالت ایده‌آل */}
+                {validationChainStatus.ideal_state?.defined && (
+                  <div className="p-4 bg-blue-50 dark:bg-blue-900/30 rounded-xl">
+                    <h4 className="font-bold text-blue-700 dark:text-blue-400 mb-2">حالت ایده‌آل پروژه</h4>
+                    <p className="text-sm text-blue-600 dark:text-blue-400 whitespace-pre-wrap">
+                      {validationChainStatus.ideal_state.preview}
+                      {validationChainStatus.ideal_state.preview.length >= 500 && '...'}
+                    </p>
+                  </div>
+                )}
               </div>
             )}
           </div>

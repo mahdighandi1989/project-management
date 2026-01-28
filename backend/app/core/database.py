@@ -186,6 +186,20 @@ def migrate_db():
                 cursor.execute("ALTER TABLE projects ADD COLUMN issues_found TEXT")
                 logger.info("Added 'issues_found' column to projects table")
 
+            # =====================================================
+            # 🆕 ستون‌های جدید برای زنجیره اعتبارسنجی
+            # =====================================================
+
+            # آرشیو مسائل رد شده
+            if "rejected_issues_archive" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN rejected_issues_archive TEXT")
+                logger.info("Added 'rejected_issues_archive' column to projects table")
+
+            # آخرین نتایج اعتبارسنجی
+            if "last_validation_results" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN last_validation_results TEXT")
+                logger.info("Added 'last_validation_results' column to projects table")
+
         # Migration برای جدول project_files
         if "project_files" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
             existing_cols = get_columns("project_files")
