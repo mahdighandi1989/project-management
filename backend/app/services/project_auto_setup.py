@@ -877,3 +877,594 @@ async def apply_auto_setup_to_existing_project(project_id: str, db_session) -> D
     except Exception as e:
         logger.error(f"Error applying auto-setup: {e}")
         return {"success": False, "error": str(e)}
+
+
+# =====================================
+# راه‌اندازی خودکار پیشرفته (Advanced Auto Setup)
+# =====================================
+
+async def advanced_auto_setup(
+    project_id: str,
+    db_session,
+    include_roadmap: bool = True,
+    include_readme: bool = True,
+    include_analysis: bool = True,
+    model_id: str = None
+) -> Dict[str, Any]:
+    """
+    راه‌اندازی خودکار پیشرفته با قابلیت‌های:
+
+    1. بررسی کامل ساختار پروژه (ریز تا درشت)
+    2. تطبیق با فایل نقشه‌راه موجود (Roadmap)
+    3. ارتقاء و تکمیل نقشه‌راه در صورت تطابق
+    4. ایجاد نقشه‌راه/README در صورت عدم وجود
+    5. تحلیل وضعیت فعلی برنامه
+    6. شناسایی ایرادات و باگ‌ها
+    7. ارائه حالت ایده‌آل برنامه
+    8. ایجاد/به‌روزرسانی/ادغام فیلدها
+
+    خروجی‌های مورد انتظار:
+    - تایید یا عدم تایید انطباق
+    - مستندسازی "برنامه اینطوره"
+    - مستندسازی "ایراداش اینه"
+    - مستندسازی "حالت ایده‌آل باید این باشه"
+    - فیلدهای پویا به‌روزرسانی شده یا ایجاد شده یا ادغام شده
+    """
+    from ..models.project import Project, ProjectFile
+    from .ai_manager import get_ai_manager
+
+    logger.info(f"Starting advanced auto-setup for project {project_id}")
+
+    result = {
+        "success": False,
+        "project_id": project_id,
+        "analysis": {
+            "current_state": "",
+            "issues_found": [],
+            "ideal_state": "",
+            "roadmap_compliance": None,
+            "structure_analysis": {}
+        },
+        "roadmap": {
+            "exists": False,
+            "created": False,
+            "updated": False,
+            "content": ""
+        },
+        "readme": {
+            "exists": False,
+            "created": False,
+            "updated": False,
+            "content": ""
+        },
+        "fields": {
+            "created": [],
+            "updated": [],
+            "merged": [],
+            "archived": []
+        },
+        "model_used": None
+    }
+
+    try:
+        # دریافت پروژه
+        project = db_session.query(Project).filter(Project.id == project_id).first()
+        if not project:
+            return {"success": False, "error": "پروژه یافت نشد"}
+
+        # دریافت فایل‌های پروژه
+        files = db_session.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+        files_data = [
+            {
+                "path": f.file_path,
+                "content": f.content or "",
+                "file_type": f.file_type
+            }
+            for f in files
+        ]
+
+        if not files_data:
+            return {"success": False, "error": "پروژه فایلی ندارد"}
+
+        # AI Manager
+        ai_manager = get_ai_manager()
+        if not model_id:
+            available = ai_manager.get_available_models()
+            model_id = available[0].id if available else "claude"
+
+        # =====================================
+        # مرحله 1: تحلیل عمیق ساختار
+        # =====================================
+        logger.info(f"[{project_id}] مرحله 1: تحلیل عمیق ساختار")
+
+        insights = extract_project_insights(files_data)
+
+        # بررسی وجود Roadmap و README
+        roadmap_file = None
+        readme_file = None
+        for f in files_data:
+            path_lower = f.get("path", "").lower()
+            if "roadmap" in path_lower and path_lower.endswith(".md"):
+                roadmap_file = f
+            if "readme" in path_lower and path_lower.endswith(".md"):
+                readme_file = f
+
+        result["roadmap"]["exists"] = bool(roadmap_file) or bool(project.roadmap_content)
+        result["readme"]["exists"] = bool(readme_file) or bool(project.readme_content)
+
+        # =====================================
+        # مرحله 2: تحلیل وضعیت فعلی با AI
+        # =====================================
+        logger.info(f"[{project_id}] مرحله 2: تحلیل وضعیت فعلی")
+
+        analysis_prompt = _build_analysis_prompt(
+            project_name=project.name,
+            project_description=project.description or "",
+            insights=insights,
+            files=files_data[:20],  # حداکثر 20 فایل
+            existing_roadmap=roadmap_file.get("content") if roadmap_file else (project.roadmap_content or ""),
+            existing_readme=readme_file.get("content") if readme_file else (project.readme_content or "")
+        )
+
+        try:
+            from .ai_manager import Message
+            messages = [
+                Message(role="system", content="تو یک معمار نرم‌افزار متخصص هستی. پاسخ را فقط JSON معتبر بده."),
+                Message(role="user", content=analysis_prompt)
+            ]
+
+            response = await ai_manager.generate(
+                model_id=model_id,
+                messages=messages,
+                max_tokens=4000,
+                temperature=0.3
+            )
+
+            result["model_used"] = model_id
+
+            # پارس پاسخ
+            analysis_data = _parse_json_response(response.content)
+
+            if analysis_data:
+                result["analysis"]["current_state"] = analysis_data.get("current_state", "")
+                result["analysis"]["issues_found"] = analysis_data.get("issues_found", [])
+                result["analysis"]["ideal_state"] = analysis_data.get("ideal_state", "")
+                result["analysis"]["roadmap_compliance"] = analysis_data.get("roadmap_compliance", {})
+                result["analysis"]["structure_analysis"] = analysis_data.get("structure_analysis", {})
+
+                # ذخیره در پروژه
+                project.ideal_state = analysis_data.get("ideal_state", "")
+                project.issues_found = json.dumps(
+                    analysis_data.get("issues_found", []),
+                    ensure_ascii=False
+                )
+
+        except Exception as e:
+            logger.error(f"Error in analysis phase: {e}")
+
+        # =====================================
+        # مرحله 3: بررسی/ایجاد/ارتقای Roadmap
+        # =====================================
+        if include_roadmap:
+            logger.info(f"[{project_id}] مرحله 3: مدیریت Roadmap")
+
+            roadmap_result = await _manage_roadmap(
+                project=project,
+                files_data=files_data,
+                insights=insights,
+                analysis=result["analysis"],
+                existing_roadmap=roadmap_file,
+                ai_manager=ai_manager,
+                model_id=model_id
+            )
+
+            result["roadmap"].update(roadmap_result)
+            if roadmap_result.get("content"):
+                project.roadmap_content = roadmap_result["content"]
+
+        # =====================================
+        # مرحله 4: بررسی/ایجاد/ارتقای README
+        # =====================================
+        if include_readme:
+            logger.info(f"[{project_id}] مرحله 4: مدیریت README")
+
+            readme_result = await _manage_readme(
+                project=project,
+                files_data=files_data,
+                insights=insights,
+                roadmap_content=result["roadmap"].get("content", ""),
+                existing_readme=readme_file,
+                ai_manager=ai_manager,
+                model_id=model_id
+            )
+
+            result["readme"].update(readme_result)
+            if readme_result.get("content"):
+                project.readme_content = readme_result["content"]
+
+        # =====================================
+        # مرحله 5: ایجاد/به‌روزرسانی فیلدهای پویا
+        # =====================================
+        logger.info(f"[{project_id}] مرحله 5: مدیریت فیلدهای پویا")
+
+        fields_result = await _manage_dynamic_fields(
+            project=project,
+            files_data=files_data,
+            insights=insights,
+            analysis=result["analysis"],
+            ai_manager=ai_manager,
+            model_id=model_id
+        )
+
+        result["fields"] = fields_result
+
+        # ذخیره تغییرات
+        db_session.commit()
+
+        result["success"] = True
+        logger.info(f"[{project_id}] راه‌اندازی خودکار پیشرفته کامل شد")
+
+    except Exception as e:
+        logger.error(f"Error in advanced auto-setup: {e}", exc_info=True)
+        result["error"] = str(e)
+        db_session.rollback()
+
+    return result
+
+
+def _build_analysis_prompt(
+    project_name: str,
+    project_description: str,
+    insights: Dict,
+    files: List[Dict],
+    existing_roadmap: str,
+    existing_readme: str
+) -> str:
+    """ساخت پرامپت تحلیل جامع"""
+
+    files_summary = []
+    for f in files[:20]:
+        path = f.get("path", "")
+        content = f.get("content", "")[:1000]
+        files_summary.append(f"### {path}\n```\n{content}\n```\n")
+
+    prompt = f"""# تحلیل جامع پروژه
+
+## اطلاعات پروژه:
+- نام: {project_name}
+- توضیحات: {project_description}
+- زبان اصلی: {insights.get('language', '?')}
+- فریم‌ورک‌ها: {', '.join(insights.get('frameworks', []))}
+- معماری: {insights.get('architecture', '?')}
+
+## فایل‌های پروژه:
+{chr(10).join(files_summary)}
+
+{f'''## نقشه‌راه موجود:
+{existing_roadmap[:2000]}
+''' if existing_roadmap else '## نقشه‌راه: ندارد'}
+
+{f'''## README موجود:
+{existing_readme[:1500]}
+''' if existing_readme else '## README: ندارد'}
+
+## وظیفه تو:
+1. **وضعیت فعلی برنامه را توصیف کن** - چه کارهایی انجام می‌دهد؟ چه قابلیت‌هایی دارد؟
+2. **ایرادات و مشکلات را شناسایی کن** - باگ‌ها، کمبودها، مشکلات معماری
+3. **حالت ایده‌آل را شرح بده** - برنامه باید چطور باشد؟
+4. **تطابق با نقشه‌راه را بررسی کن** (اگر وجود دارد)
+5. **ساختار را تحلیل کن** - فایل‌های اضافی/کم، سیم‌کشی نادرست
+
+## فرمت خروجی (JSON):
+```json
+{{
+    "current_state": "توضیح کامل وضعیت فعلی برنامه (2-3 پاراگراف)",
+    "issues_found": [
+        {{
+            "type": "bug|missing|architecture|security|performance",
+            "severity": "critical|high|medium|low",
+            "title": "عنوان مشکل",
+            "description": "توضیح کامل",
+            "file": "مسیر فایل (اگر مرتبط)",
+            "suggestion": "پیشنهاد رفع"
+        }}
+    ],
+    "ideal_state": "توضیح کامل حالت ایده‌آل برنامه (2-3 پاراگراف)",
+    "roadmap_compliance": {{
+        "compliant": true/false,
+        "score": 0-100,
+        "completed_items": ["موارد تکمیل شده"],
+        "pending_items": ["موارد باقیمانده"],
+        "missing_items": ["مواردی که در roadmap نیست ولی باید باشد"]
+    }},
+    "structure_analysis": {{
+        "score": 0-100,
+        "strengths": ["نقاط قوت ساختار"],
+        "weaknesses": ["نقاط ضعف ساختار"],
+        "missing_files": ["فایل‌های پیشنهادی که باید ایجاد شوند"],
+        "unnecessary_files": ["فایل‌های اضافی"]
+    }}
+}}
+```
+
+مهم: فقط JSON برگردان!
+"""
+    return prompt
+
+
+async def _manage_roadmap(
+    project,
+    files_data: List[Dict],
+    insights: Dict,
+    analysis: Dict,
+    existing_roadmap: Optional[Dict],
+    ai_manager,
+    model_id: str
+) -> Dict:
+    """مدیریت Roadmap - ایجاد یا ارتقا"""
+    result = {"created": False, "updated": False, "content": ""}
+
+    roadmap_content = existing_roadmap.get("content") if existing_roadmap else (project.roadmap_content or "")
+
+    prompt = f"""# مدیریت نقشه‌راه پروژه
+
+## پروژه: {project.name}
+
+## وضعیت فعلی:
+{analysis.get('current_state', '')}
+
+## ایرادات شناسایی شده:
+{json.dumps(analysis.get('issues_found', []), ensure_ascii=False, indent=2)}
+
+## حالت ایده‌آل:
+{analysis.get('ideal_state', '')}
+
+{f'''## نقشه‌راه موجود:
+{roadmap_content[:3000]}
+''' if roadmap_content else '## نقشه‌راه موجود: ندارد'}
+
+## وظیفه:
+{'ارتقا و تکمیل نقشه‌راه موجود' if roadmap_content else 'ایجاد نقشه‌راه جدید'}
+
+یک نقشه‌راه کامل و حرفه‌ای به زبان فارسی بنویس که شامل:
+1. اهداف کوتاه‌مدت و بلندمدت
+2. فازهای توسعه با جزئیات
+3. باگ‌ها و مشکلاتی که باید رفع شوند
+4. قابلیت‌های جدید پیشنهادی
+5. زمان‌بندی تقریبی
+
+فقط محتوای Markdown نقشه‌راه را برگردان (بدون توضیح اضافی).
+"""
+
+    try:
+        from .ai_manager import Message
+        messages = [
+            Message(role="system", content="تو یک مدیر پروژه متخصص هستی. نقشه‌راه حرفه‌ای بنویس."),
+            Message(role="user", content=prompt)
+        ]
+
+        response = await ai_manager.generate(
+            model_id=model_id,
+            messages=messages,
+            max_tokens=3000,
+            temperature=0.5
+        )
+
+        content = response.content.strip()
+
+        # حذف markdown code block اگر وجود دارد
+        if content.startswith("```"):
+            content = content.split("```", 2)[1]
+            if content.startswith("markdown"):
+                content = content[8:]
+            content = content.strip()
+
+        result["content"] = content
+        result["created"] = not bool(roadmap_content)
+        result["updated"] = bool(roadmap_content)
+
+    except Exception as e:
+        logger.error(f"Error managing roadmap: {e}")
+
+    return result
+
+
+async def _manage_readme(
+    project,
+    files_data: List[Dict],
+    insights: Dict,
+    roadmap_content: str,
+    existing_readme: Optional[Dict],
+    ai_manager,
+    model_id: str
+) -> Dict:
+    """مدیریت README - ایجاد یا ارتقا"""
+    result = {"created": False, "updated": False, "content": ""}
+
+    readme_content = existing_readme.get("content") if existing_readme else (project.readme_content or "")
+
+    prompt = f"""# مدیریت README پروژه
+
+## پروژه: {project.name}
+## توضیحات: {project.description or ''}
+
+## اطلاعات فنی:
+- زبان: {insights.get('language', '?')}
+- فریم‌ورک‌ها: {', '.join(insights.get('frameworks', []))}
+- معماری: {insights.get('architecture', '?')}
+- وابستگی‌ها: {', '.join(insights.get('dependencies', [])[:10])}
+
+{f'''## README موجود:
+{readme_content[:2000]}
+''' if readme_content else '## README موجود: ندارد'}
+
+{f'''## نقشه‌راه:
+{roadmap_content[:1500]}
+''' if roadmap_content else ''}
+
+## وظیفه:
+{'ارتقا و تکمیل README موجود' if readme_content else 'ایجاد README جدید'}
+
+یک README کامل و حرفه‌ای به زبان فارسی بنویس که شامل:
+1. معرفی پروژه
+2. ویژگی‌ها و قابلیت‌ها
+3. نیازمندی‌ها و نحوه نصب
+4. نحوه استفاده
+5. ساختار پروژه
+6. مشارکت در توسعه
+
+فقط محتوای Markdown README را برگردان.
+"""
+
+    try:
+        from .ai_manager import Message
+        messages = [
+            Message(role="system", content="تو یک توسعه‌دهنده متخصص هستی. README حرفه‌ای بنویس."),
+            Message(role="user", content=prompt)
+        ]
+
+        response = await ai_manager.generate(
+            model_id=model_id,
+            messages=messages,
+            max_tokens=2500,
+            temperature=0.5
+        )
+
+        content = response.content.strip()
+
+        # حذف markdown code block
+        if content.startswith("```"):
+            content = content.split("```", 2)[1]
+            if content.startswith("markdown"):
+                content = content[8:]
+            content = content.strip()
+
+        result["content"] = content
+        result["created"] = not bool(readme_content)
+        result["updated"] = bool(readme_content)
+
+    except Exception as e:
+        logger.error(f"Error managing readme: {e}")
+
+    return result
+
+
+async def _manage_dynamic_fields(
+    project,
+    files_data: List[Dict],
+    insights: Dict,
+    analysis: Dict,
+    ai_manager,
+    model_id: str
+) -> Dict:
+    """مدیریت فیلدهای پویا بر اساس تحلیل"""
+    result = {"created": [], "updated": [], "merged": [], "archived": []}
+
+    # دریافت فیلدهای موجود
+    existing_fields = []
+    try:
+        if project.dynamic_fields:
+            existing_fields = json.loads(project.dynamic_fields)
+    except:
+        pass
+
+    # ایجاد فیلدهای جدید بر اساس مشکلات شناسایی شده
+    new_fields = []
+    issues = analysis.get("issues_found", [])
+
+    for i, issue in enumerate(issues[:5]):  # حداکثر 5 فیلد از مشکلات
+        severity = issue.get("severity", "medium")
+        priority = {"critical": 1, "high": 2, "medium": 5, "low": 7}.get(severity, 5)
+
+        field = {
+            "id": f"field_{uuid.uuid4().hex[:8]}",
+            "name": f"رفع: {issue.get('title', f'مشکل {i+1}')}",
+            "value": f"""## مشکل شناسایی شده:
+{issue.get('description', '')}
+
+## فایل مرتبط:
+{issue.get('file', 'نامشخص')}
+
+## پیشنهاد رفع:
+{issue.get('suggestion', '')}
+
+---
+لطفاً این مشکل را بررسی و رفع کنید.
+""",
+            "target_models": ["claude"],
+            "trigger": {"enabled": False},
+            "action_type": "display",
+            "field_type": "temporary",
+            "priority": priority,
+            "attachments": [],
+            "created_at": datetime.utcnow().isoformat(),
+            "auto_generated": True,
+            "source": "auto-setup-analysis"
+        }
+        new_fields.append(field)
+        result["created"].append(field["name"])
+
+    # ایجاد فیلد برای حالت ایده‌آل
+    if analysis.get("ideal_state"):
+        ideal_field = {
+            "id": f"field_{uuid.uuid4().hex[:8]}",
+            "name": "حالت ایده‌آل پروژه",
+            "value": f"""## حالت ایده‌آل:
+{analysis.get('ideal_state', '')}
+
+---
+از این به عنوان راهنما برای توسعه استفاده کنید.
+""",
+            "target_models": ["all"],
+            "trigger": {"enabled": False},
+            "action_type": "display",
+            "field_type": "permanent",
+            "priority": 10,
+            "attachments": [],
+            "created_at": datetime.utcnow().isoformat(),
+            "auto_generated": True,
+            "source": "auto-setup-analysis"
+        }
+        new_fields.append(ideal_field)
+        result["created"].append("حالت ایده‌آل پروژه")
+
+    # ترکیب با فیلدهای موجود
+    all_fields = existing_fields + new_fields
+
+    # ذخیره
+    project.dynamic_fields = json.dumps(all_fields, ensure_ascii=False)
+
+    return result
+
+
+def _parse_json_response(content: str) -> Optional[Dict]:
+    """پارس پاسخ JSON از AI"""
+    if not content:
+        return None
+
+    try:
+        # پیدا کردن JSON در پاسخ
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0]
+        elif "```" in content:
+            parts = content.split("```")
+            for part in parts:
+                if "{" in part and "}" in part:
+                    content = part
+                    break
+
+        # پاکسازی
+        content = content.strip()
+        if not content.startswith("{"):
+            start = content.find("{")
+            if start != -1:
+                content = content[start:]
+        if not content.endswith("}"):
+            end = content.rfind("}")
+            if end != -1:
+                content = content[:end + 1]
+
+        return json.loads(content)
+
+    except json.JSONDecodeError:
+        return None

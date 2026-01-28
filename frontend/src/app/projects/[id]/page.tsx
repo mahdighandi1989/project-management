@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
+import ProjectHealthPanel from '@/components/ProjectHealthPanel';
 import ReactFlow, {
   Node,
   Edge,
@@ -200,7 +201,7 @@ export default function ProjectDetailPage() {
   const [deploying, setDeploying] = useState(false);
 
   // تب فعال
-  const [activeTab, setActiveTab] = useState<'files' | 'memory' | 'structure' | 'journal'>('files');
+  const [activeTab, setActiveTab] = useState<'files' | 'memory' | 'structure' | 'journal' | 'health'>('files');
 
   // Journal & Reports State
   const [journalLogs, setJournalLogs] = useState<ActivityLog[]>([]);
@@ -220,7 +221,16 @@ export default function ProjectDetailPage() {
     report_model: 'openai',
   });
   const [generatingReport, setGeneratingReport] = useState(false);
-  const [journalSubTab, setJournalSubTab] = useState<'logs' | 'reports'>('logs');
+  const [journalSubTab, setJournalSubTab] = useState<'logs' | 'reports' | 'validation' | 'profiles'>('logs');
+
+  // Validation & Model Profiles State
+  const [modelProfiles, setModelProfiles] = useState<any[]>([]);
+  const [profilesLoading, setProfilesLoading] = useState(false);
+  const [selectedProfile, setSelectedProfile] = useState<any>(null);
+  const [modelRankings, setModelRankings] = useState<any[]>([]);
+  const [leaderboard, setLeaderboard] = useState<any>(null);
+  const [validationInProgress, setValidationInProgress] = useState(false);
+  const [validationResult, setValidationResult] = useState<any>(null);
 
   // Structure Diagram State
   const [structureData, setStructureData] = useState<ProjectStructure | null>(null);
@@ -237,6 +247,20 @@ export default function ProjectDetailPage() {
   const [savingStructureSettings, setSavingStructureSettings] = useState(false);
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+
+  // Health Map State - برای رنگ‌بندی دیاگرام بر اساس سلامت
+  const [fileHealthMap, setFileHealthMap] = useState<Record<string, {
+    score: number;
+    color: string;
+    hex: string;
+    label: string;
+    models_analyzed: number;
+    model_scores: Record<string, number>;
+    issues_count: number;
+    analyzed_at: string;
+  }>>({});
+  const [healthDataLoaded, setHealthDataLoaded] = useState(false);
+  const [hoveredNode, setHoveredNode] = useState<string | null>(null);
 
   // Memory Box State
   const [memoryInstructions, setMemoryInstructions] = useState<MemoryInstructions>({
@@ -344,6 +368,15 @@ export default function ProjectDetailPage() {
       loadReportTrigger();
     }
   }, [activeTab, projectId]);
+
+  // بارگذاری پروفایل مدل‌ها وقتی سابتب تغییر کنه
+  useEffect(() => {
+    if (activeTab === 'journal' && (journalSubTab === 'profiles' || journalSubTab === 'validation')) {
+      loadModelProfiles();
+      loadModelRankings();
+      loadLeaderboard();
+    }
+  }, [activeTab, journalSubTab]);
 
   // بروزرسانی استایل نودها و لبه‌ها وقتی workflow فعال میشه
   useEffect(() => {
@@ -588,18 +621,49 @@ export default function ProjectDetailPage() {
     };
   }, [syncIntervalTimer]);
 
+  // بارگذاری داده‌های سلامت فایل‌ها
+  const loadFileHealthMap = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/file-map`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.file_map) {
+          setFileHealthMap(data.file_map);
+          setHealthDataLoaded(true);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading file health map:', e);
+    }
+  };
+
   // بارگذاری ساختار پروژه
   const loadStructure = async () => {
     setStructureLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/structure`);
-      if (res.ok) {
-        const data = await res.json();
+      // بارگذاری همزمان ساختار و داده‌های سلامت
+      const [structureRes, healthRes] = await Promise.all([
+        fetch(`${API_BASE}/api/projects/${projectId}/structure`),
+        fetch(`${API_BASE}/api/projects/${projectId}/health/file-map`)
+      ]);
+
+      let healthMap: Record<string, any> = {};
+      if (healthRes.ok) {
+        const healthData = await healthRes.json();
+        if (healthData.success && healthData.file_map) {
+          healthMap = healthData.file_map;
+          setFileHealthMap(healthMap);
+          setHealthDataLoaded(true);
+        }
+      }
+
+      if (structureRes.ok) {
+        const data = await structureRes.json();
         if (data.success) {
           setStructureData(data.structure);
           setStructureSettings(data.settings);
-          // تبدیل به فرمت React Flow
-          convertToReactFlow(data.structure);
+          // تبدیل به فرمت React Flow با رنگ‌بندی سلامت
+          convertToReactFlow(data.structure, healthMap);
         }
       }
     } catch (e) {
@@ -609,33 +673,133 @@ export default function ProjectDetailPage() {
     }
   };
 
-  // تبدیل داده‌ها به فرمت React Flow
-  const convertToReactFlow = (structure: ProjectStructure) => {
-    const flowNodes: Node[] = structure.nodes.map((node) => ({
-      id: node.id,
-      type: 'default',
-      position: node.position,
-      data: {
-        label: (
-          <div className={`text-center ${node.is_active ? 'animate-pulse' : ''}`}>
-            <div className="font-bold">{node.label}</div>
-            {node.description && (
-              <div className="text-xs opacity-70 mt-1">{node.description}</div>
-            )}
-          </div>
-        ),
-      },
-      style: {
-        background: node.style?.background || '#6366f1',
-        color: node.style?.color || 'white',
-        border: node.is_active ? '3px solid #22c55e' : '1px solid #4b5563',
-        borderRadius: '8px',
-        padding: '10px',
-        fontSize: node.style?.fontSize || '14px',
-        fontWeight: node.style?.fontWeight || 'normal',
-        boxShadow: node.is_active ? '0 0 15px #22c55e' : '0 2px 4px rgba(0,0,0,0.2)',
-      },
-    }));
+  // تبدیل داده‌ها به فرمت React Flow با رنگ‌بندی سلامت
+  const convertToReactFlow = (structure: ProjectStructure, healthMap?: Record<string, any>) => {
+    const currentHealthMap = healthMap || fileHealthMap;
+
+    const flowNodes: Node[] = structure.nodes.map((node) => {
+      // پیدا کردن اطلاعات سلامت برای این نود
+      const nodePath = node.data?.path || node.label || node.id;
+      const healthInfo = findHealthInfoForNode(nodePath, currentHealthMap);
+
+      // تعیین رنگ نود بر اساس سلامت
+      let nodeBackground = node.style?.background || '#6366f1';
+      let borderColor = node.is_active ? '#22c55e' : '#4b5563';
+      let healthScore = null;
+      let healthLabel = '';
+
+      if (healthInfo) {
+        nodeBackground = healthInfo.hex || nodeBackground;
+        healthScore = healthInfo.score;
+        healthLabel = healthInfo.label || '';
+        // برای فایل‌های با مشکل، حاشیه قرمز
+        if (healthInfo.score < 50) {
+          borderColor = '#ef4444';
+        } else if (healthInfo.score < 70) {
+          borderColor = '#f97316';
+        }
+      }
+
+      return {
+        id: node.id,
+        type: 'default',
+        position: node.position,
+        data: {
+          label: (
+            <div
+              className={`text-center ${node.is_active ? 'animate-pulse' : ''} relative group cursor-pointer`}
+              onMouseEnter={() => setHoveredNode(node.id)}
+              onMouseLeave={() => setHoveredNode(null)}
+            >
+              <div className="font-bold">{node.label}</div>
+              {node.description && (
+                <div className="text-xs opacity-70 mt-1">{node.description}</div>
+              )}
+              {/* نمایش نمره سلامت روی نود */}
+              {healthScore !== null && (
+                <div className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-white text-xs font-bold flex items-center justify-center shadow"
+                     style={{ color: healthInfo?.hex || '#666' }}>
+                  {Math.round(healthScore)}
+                </div>
+              )}
+
+              {/* هاور tooltip با جزئیات سلامت */}
+              {healthInfo && hoveredNode === node.id && (
+                <div className="absolute z-50 top-full left-1/2 transform -translate-x-1/2 mt-2 w-64 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-lg shadow-xl p-3 text-right border border-gray-200 dark:border-gray-700"
+                     style={{ pointerEvents: 'none' }}>
+                  <div className="text-sm font-bold mb-2 pb-2 border-b flex items-center justify-between">
+                    <span>وضعیت سلامت</span>
+                    <span className="px-2 py-0.5 rounded text-xs text-white"
+                          style={{ backgroundColor: healthInfo.hex }}>
+                      {healthLabel}
+                    </span>
+                  </div>
+
+                  <div className="space-y-1 text-xs">
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">نمره کلی:</span>
+                      <span className="font-bold" style={{ color: healthInfo.hex }}>
+                        {healthInfo.score?.toFixed(1)}%
+                      </span>
+                    </div>
+
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">مدل‌های بررسی‌کننده:</span>
+                      <span className="font-bold">{healthInfo.models_analyzed || 0}</span>
+                    </div>
+
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">تعداد ایرادات:</span>
+                      <span className={`font-bold ${(healthInfo.issues_count || 0) > 0 ? 'text-red-500' : 'text-green-500'}`}>
+                        {healthInfo.issues_count || 0}
+                      </span>
+                    </div>
+
+                    {healthInfo.analyzed_at && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">تاریخ تحلیل:</span>
+                        <span className="text-gray-600 dark:text-gray-400">
+                          {new Date(healthInfo.analyzed_at).toLocaleDateString('fa-IR')}
+                        </span>
+                      </div>
+                    )}
+
+                    {/* نمرات هر مدل */}
+                    {healthInfo.model_scores && Object.keys(healthInfo.model_scores).length > 0 && (
+                      <div className="pt-2 mt-2 border-t border-gray-200 dark:border-gray-600">
+                        <div className="text-gray-500 mb-1">نمره هر مدل:</div>
+                        <div className="flex flex-wrap gap-1">
+                          {Object.entries(healthInfo.model_scores).map(([model, score]) => (
+                            <span key={model}
+                                  className="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">
+                              {model.split('/').pop()}: {(score as number).toFixed(0)}%
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          ),
+          // ذخیره اطلاعات سلامت در data نود
+          healthInfo: healthInfo,
+          path: nodePath,
+        },
+        style: {
+          background: nodeBackground,
+          color: node.style?.color || 'white',
+          border: node.is_active ? `3px solid ${borderColor}` : `2px solid ${borderColor}`,
+          borderRadius: '8px',
+          padding: '10px',
+          fontSize: node.style?.fontSize || '14px',
+          fontWeight: node.style?.fontWeight || 'normal',
+          boxShadow: node.is_active ? `0 0 15px ${borderColor}` : '0 2px 8px rgba(0,0,0,0.3)',
+          transition: 'all 0.3s ease',
+        },
+      };
+    });
 
     const flowEdges: Edge[] = structure.edges.map((edge) => ({
       id: edge.id,
@@ -658,6 +822,26 @@ export default function ProjectDetailPage() {
     setEdges(flowEdges);
   };
 
+  // تابع کمکی برای پیدا کردن اطلاعات سلامت یک نود
+  const findHealthInfoForNode = (nodePath: string, healthMap: Record<string, any>) => {
+    if (!healthMap || !nodePath) return null;
+
+    // جستجوی دقیق
+    if (healthMap[nodePath]) {
+      return healthMap[nodePath];
+    }
+
+    // جستجوی با نام فایل
+    const fileName = nodePath.split('/').pop();
+    for (const [path, info] of Object.entries(healthMap)) {
+      if (path.endsWith(nodePath) || path.split('/').pop() === fileName) {
+        return info;
+      }
+    }
+
+    return null;
+  };
+
   // تحلیل مجدد ساختار
   const analyzeStructure = async () => {
     setAnalyzingStructure(true);
@@ -670,7 +854,24 @@ export default function ProjectDetailPage() {
         showSuccess('ساختار پروژه با موفقیت تحلیل شد');
         setStructureData(data.structure);
         setStructureSettings(data.settings);
-        convertToReactFlow(data.structure);
+
+        // دریافت داده‌های سلامت برای رنگ‌بندی
+        try {
+          const healthRes = await fetch(`${API_BASE}/api/projects/${projectId}/health/file-map`);
+          if (healthRes.ok) {
+            const healthData = await healthRes.json();
+            if (healthData.success && healthData.file_map) {
+              setFileHealthMap(healthData.file_map);
+              convertToReactFlow(data.structure, healthData.file_map);
+            } else {
+              convertToReactFlow(data.structure);
+            }
+          } else {
+            convertToReactFlow(data.structure);
+          }
+        } catch {
+          convertToReactFlow(data.structure);
+        }
       } else {
         showError(data.detail || 'خطا در تحلیل');
       }
@@ -897,7 +1098,130 @@ export default function ProjectDetailPage() {
     }
   };
 
-  // ===================== پایان توابع ژورنال =====================
+  // ===================== توابع پروفایل مدل‌ها و اعتبارسنجی =====================
+
+  // بارگذاری لیست پروفایل مدل‌ها
+  const loadModelProfiles = async () => {
+    setProfilesLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/models/profiles`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setModelProfiles(data.profiles);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading model profiles:', e);
+    } finally {
+      setProfilesLoading(false);
+    }
+  };
+
+  // بارگذاری جزئیات پروفایل یک مدل
+  const loadProfileDetail = async (modelId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/models/profiles/${encodeURIComponent(modelId)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setSelectedProfile(data.profile);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading profile detail:', e);
+    }
+  };
+
+  // بارگذاری رتبه‌بندی مدل‌ها
+  const loadModelRankings = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/models/rankings`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setModelRankings(data.rankings);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading rankings:', e);
+    }
+  };
+
+  // بارگذاری لیدربورد
+  const loadLeaderboard = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/models/leaderboard`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setLeaderboard(data.leaderboard);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading leaderboard:', e);
+    }
+  };
+
+  // اعتبارسنجی گزارش تحلیل سلامت
+  const validateHealthAnalysis = async (analysisId: string) => {
+    setValidationInProgress(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/validate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ analysis_id: analysisId }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setValidationResult(data);
+        // بروزرسانی پروفایل‌ها
+        loadModelProfiles();
+        loadModelRankings();
+      }
+    } catch (e) {
+      console.error('Error validating analysis:', e);
+    } finally {
+      setValidationInProgress(false);
+    }
+  };
+
+  // بروزرسانی دستی نمره مدل
+  const updateModelScore = async (modelId: string, correct: number, missed: number, falsePositive: number) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/models/profiles/${encodeURIComponent(modelId)}/update-score`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          task_type: 'manual_validation',
+          correct_findings: correct,
+          missed_issues: missed,
+          false_positives: falsePositive,
+        }),
+      });
+      if (res.ok) {
+        loadModelProfiles();
+        loadModelRankings();
+      }
+    } catch (e) {
+      console.error('Error updating score:', e);
+    }
+  };
+
+  // رنگ Tier
+  const getTierColor = (tier: string) => {
+    switch (tier) {
+      case 'S': return 'bg-gradient-to-r from-yellow-400 to-yellow-600 text-white';
+      case 'A': return 'bg-gradient-to-r from-green-500 to-green-600 text-white';
+      case 'B': return 'bg-gradient-to-r from-blue-500 to-blue-600 text-white';
+      case 'C': return 'bg-gradient-to-r from-orange-400 to-orange-500 text-white';
+      case 'D': return 'bg-gradient-to-r from-red-400 to-red-500 text-white';
+      case 'F': return 'bg-gradient-to-r from-gray-500 to-gray-600 text-white';
+      default: return 'bg-gray-400 text-white';
+    }
+  };
+
+  // ===================== پایان توابع ژورنال و پروفایل =====================
 
   const saveMemoryInstructions = async () => {
     setSavingMemory(true);
@@ -1705,6 +2029,16 @@ export default function ProjectDetailPage() {
             }`}
           >
             📊 ژورنال و گزارشات
+          </button>
+          <button
+            onClick={() => setActiveTab('health')}
+            className={`px-6 py-3 font-medium ${
+              activeTab === 'health'
+                ? 'border-b-2 border-teal-500 text-teal-600'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            🏥 تحلیل سلامت
           </button>
         </div>
 
@@ -2837,14 +3171,30 @@ export default function ProjectDetailPage() {
                 <span className="text-xl">💡</span>
                 <h3 className="font-bold">راهنما</h3>
               </div>
-              <ul className="text-sm text-gray-600 dark:text-gray-400 space-y-1 list-disc list-inside mr-4">
-                <li>نودهای سبز: نقاط ورودی و فایل‌های اصلی</li>
-                <li>نودهای بنفش: پوشه‌ها و دایرکتوری‌ها</li>
-                <li>نودهای سبز روشن: فایل‌ها</li>
-                <li>خطوط متحرک: اتصالات فعال و جریان داده</li>
-                <li>نودهای چشمک‌زن: فرآیندهای در حال اجرا</li>
-                <li>با ماوس می‌توانید نودها را جابه‌جا کنید و زوم کنید</li>
-              </ul>
+              <div className="grid md:grid-cols-2 gap-4">
+                <div>
+                  <h4 className="font-medium text-sm mb-2">🎨 رنگ‌بندی سلامت:</h4>
+                  <ul className="text-sm text-gray-600 dark:text-gray-400 space-y-1 list-disc list-inside mr-4">
+                    <li><span className="inline-block w-3 h-3 rounded-full bg-green-500 ml-1"></span> سبز: سالم (90%+)</li>
+                    <li><span className="inline-block w-3 h-3 rounded-full bg-lime-500 ml-1"></span> سبز روشن: خوب (75-90%)</li>
+                    <li><span className="inline-block w-3 h-3 rounded-full bg-yellow-500 ml-1"></span> زرد: متوسط (60-75%)</li>
+                    <li><span className="inline-block w-3 h-3 rounded-full bg-orange-500 ml-1"></span> نارنجی: ضعیف (40-60%)</li>
+                    <li><span className="inline-block w-3 h-3 rounded-full bg-red-500 ml-1"></span> قرمز: بد (20-40%)</li>
+                    <li><span className="inline-block w-3 h-3 rounded-full bg-red-800 ml-1"></span> قرمز تیره: بحرانی (0-20%)</li>
+                  </ul>
+                </div>
+                <div>
+                  <h4 className="font-medium text-sm mb-2">📊 اطلاعات نود:</h4>
+                  <ul className="text-sm text-gray-600 dark:text-gray-400 space-y-1 list-disc list-inside mr-4">
+                    <li>عدد روی نود = نمره سلامت</li>
+                    <li>با هاور روی نود جزئیات را ببینید</li>
+                    <li>مدل‌های بررسی‌کننده و تاریخ</li>
+                    <li>نمره هر مدل به تفکیک</li>
+                    <li>تعداد ایرادات شناسایی شده</li>
+                    <li>برای تحلیل از تب "تحلیل سلامت" استفاده کنید</li>
+                  </ul>
+                </div>
+              </div>
             </div>
           </div>
         )}
@@ -2853,7 +3203,7 @@ export default function ProjectDetailPage() {
         {activeTab === 'journal' && (
           <div className="space-y-6">
             {/* سابتب‌ها */}
-            <div className="flex gap-2 bg-white dark:bg-gray-800 rounded-xl p-2">
+            <div className="flex gap-2 bg-white dark:bg-gray-800 rounded-xl p-2 flex-wrap">
               <button
                 onClick={() => setJournalSubTab('logs')}
                 className={`flex-1 py-2 px-4 rounded-lg font-medium transition ${
@@ -2873,6 +3223,26 @@ export default function ProjectDetailPage() {
                 }`}
               >
                 📊 گزارشات
+              </button>
+              <button
+                onClick={() => setJournalSubTab('validation')}
+                className={`flex-1 py-2 px-4 rounded-lg font-medium transition ${
+                  journalSubTab === 'validation'
+                    ? 'bg-purple-500 text-white'
+                    : 'hover:bg-gray-100 dark:hover:bg-gray-700'
+                }`}
+              >
+                ✅ اعتبارسنجی
+              </button>
+              <button
+                onClick={() => setJournalSubTab('profiles')}
+                className={`flex-1 py-2 px-4 rounded-lg font-medium transition ${
+                  journalSubTab === 'profiles'
+                    ? 'bg-blue-500 text-white'
+                    : 'hover:bg-gray-100 dark:hover:bg-gray-700'
+                }`}
+              >
+                🤖 پروفایل مدل‌ها
               </button>
             </div>
 
@@ -3178,6 +3548,391 @@ export default function ProjectDetailPage() {
               </div>
             )}
 
+            {/* اعتبارسنجی گزارشات */}
+            {journalSubTab === 'validation' && (
+              <div className="space-y-6">
+                {/* توضیحات */}
+                <div className="bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 rounded-xl p-4">
+                  <h3 className="font-bold text-purple-700 dark:text-purple-400 mb-2 flex items-center gap-2">
+                    <span>✅</span> سیستم اعتبارسنجی گزارشات AI
+                  </h3>
+                  <p className="text-sm text-purple-600 dark:text-purple-400">
+                    این سیستم گزارشات تحلیل‌های AI را اعتبارسنجی می‌کند و بر اساس نتایج، نمره مدل‌ها را بروزرسانی می‌کند.
+                    نمره‌دهی تجمعی است یعنی هر بار به نمره قبلی اضافه/کم می‌شود و هیچوقت از صفر شروع نمی‌شود.
+                  </p>
+                  <div className="mt-3 text-xs text-purple-500 dark:text-purple-400 space-y-1">
+                    <div>- یافته‌های درست = +۱ امتیاز</div>
+                    <div>- False Positive (اشتباه) = -۲ امتیاز</div>
+                    <div>- مشکلات کشف نشده = -۳ امتیاز</div>
+                  </div>
+                </div>
+
+                {/* نتیجه اعتبارسنجی */}
+                {validationResult && (
+                  <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
+                    <h3 className="font-bold mb-4 flex items-center gap-2">
+                      <span>📊</span> نتیجه آخرین اعتبارسنجی
+                    </h3>
+                    <div className="grid grid-cols-3 gap-4">
+                      <div className="text-center p-4 bg-green-100 dark:bg-green-900/30 rounded-lg">
+                        <div className="text-3xl font-bold text-green-600">{validationResult.correct || 0}</div>
+                        <div className="text-sm text-green-500">یافته‌های درست</div>
+                      </div>
+                      <div className="text-center p-4 bg-yellow-100 dark:bg-yellow-900/30 rounded-lg">
+                        <div className="text-3xl font-bold text-yellow-600">{validationResult.false_positives || 0}</div>
+                        <div className="text-sm text-yellow-500">False Positive</div>
+                      </div>
+                      <div className="text-center p-4 bg-red-100 dark:bg-red-900/30 rounded-lg">
+                        <div className="text-3xl font-bold text-red-600">{validationResult.missed || 0}</div>
+                        <div className="text-sm text-red-500">کشف نشده</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* لیست مدل‌ها برای اعتبارسنجی دستی */}
+                <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
+                  <h3 className="font-bold mb-4 flex items-center gap-2">
+                    <span>🤖</span> اعتبارسنجی دستی مدل‌ها
+                  </h3>
+                  <p className="text-sm text-gray-500 mb-4">
+                    اگر می‌خواهید نمره یک مدل را به صورت دستی تنظیم کنید، مدل را انتخاب و نتایج را وارد کنید.
+                  </p>
+
+                  <div className="grid md:grid-cols-2 gap-4">
+                    {modelProfiles.slice(0, 6).map((profile) => (
+                      <div key={profile.model_id} className="border dark:border-gray-700 rounded-lg p-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <div>
+                            <span className="font-medium">{profile.display_name}</span>
+                            <span className={`mr-2 px-2 py-0.5 rounded text-xs ${getTierColor(profile.tier)}`}>
+                              {profile.tier}
+                            </span>
+                          </div>
+                          <span className="text-2xl font-bold text-blue-500">{profile.overall_score}</span>
+                        </div>
+                        <div className="text-xs text-gray-500 mb-2">
+                          {profile.total_analyses} تحلیل | {profile.total_tasks} وظیفه
+                        </div>
+                        <button
+                          onClick={() => setSelectedProfile(profile)}
+                          className="w-full py-2 bg-purple-100 dark:bg-purple-900/30 text-purple-600 rounded hover:bg-purple-200 dark:hover:bg-purple-900/50 text-sm"
+                        >
+                          ثبت نتیجه اعتبارسنجی
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* پروفایل مدل‌ها */}
+            {journalSubTab === 'profiles' && (
+              <div className="space-y-6">
+                {/* لیدربورد */}
+                {leaderboard && Object.keys(leaderboard).length > 0 && (
+                  <div className="bg-gradient-to-r from-yellow-100 to-orange-100 dark:from-yellow-900/20 dark:to-orange-900/20 rounded-xl p-6">
+                    <h3 className="font-bold text-lg mb-4 flex items-center gap-2">
+                      <span>🏆</span> برترین‌ها در هر دسته
+                    </h3>
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                      {Object.entries(leaderboard).map(([key, data]: [string, any]) => (
+                        <div key={key} className="bg-white dark:bg-gray-800 rounded-lg p-3 text-center shadow">
+                          <div className="text-2xl mb-1">
+                            {key === 'best_accuracy' ? '🎯' :
+                             key === 'best_speed' ? '⚡' :
+                             key === 'best_reliability' ? '🛡️' :
+                             key === 'best_code_quality' ? '💎' : '🔥'}
+                          </div>
+                          <div className="text-xs text-gray-500 mb-1">{data.label}</div>
+                          <div className="font-medium text-sm truncate">{data.display_name}</div>
+                          <div className="text-lg font-bold text-blue-500">{data.score}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* رتبه‌بندی مدل‌ها */}
+                <div className="bg-white dark:bg-gray-800 rounded-xl shadow overflow-hidden">
+                  <div className="p-4 border-b dark:border-gray-700 flex items-center justify-between">
+                    <h3 className="font-bold text-lg flex items-center gap-2">
+                      <span>📊</span> رتبه‌بندی جامع مدل‌ها
+                    </h3>
+                    <button
+                      onClick={() => { loadModelProfiles(); loadModelRankings(); loadLeaderboard(); }}
+                      className="px-3 py-1 bg-blue-500 text-white rounded text-sm hover:bg-blue-600"
+                    >
+                      🔄 بروزرسانی
+                    </button>
+                  </div>
+
+                  {profilesLoading ? (
+                    <div className="p-8 text-center text-gray-400">
+                      <div className="animate-spin text-3xl mb-2">⏳</div>
+                      در حال بارگذاری...
+                    </div>
+                  ) : modelProfiles.length === 0 ? (
+                    <div className="p-8 text-center text-gray-400">
+                      <div className="text-4xl mb-2">🤖</div>
+                      <p>هنوز پروفایلی ثبت نشده</p>
+                      <p className="text-sm mt-2">با اجرای تحلیل سلامت، پروفایل مدل‌ها ایجاد می‌شود</p>
+                    </div>
+                  ) : (
+                    <div className="divide-y dark:divide-gray-700">
+                      {modelProfiles.map((profile, idx) => (
+                        <div
+                          key={profile.model_id}
+                          onClick={() => loadProfileDetail(profile.model_id)}
+                          className="p-4 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer"
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-4">
+                              {/* رتبه */}
+                              <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg ${
+                                idx === 0 ? 'bg-yellow-400 text-yellow-900' :
+                                idx === 1 ? 'bg-gray-300 text-gray-700' :
+                                idx === 2 ? 'bg-orange-400 text-orange-900' :
+                                'bg-gray-100 dark:bg-gray-700 text-gray-500'
+                              }`}>
+                                {idx + 1}
+                              </div>
+
+                              {/* اطلاعات مدل */}
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <span className="font-medium">{profile.display_name}</span>
+                                  <span className={`px-2 py-0.5 rounded text-xs font-bold ${getTierColor(profile.tier)}`}>
+                                    {profile.tier}
+                                  </span>
+                                </div>
+                                <div className="text-xs text-gray-500">
+                                  {profile.provider} | {profile.total_tasks} وظیفه
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* نمرات */}
+                            <div className="flex items-center gap-6">
+                              <div className="text-center">
+                                <div className="text-xs text-gray-500">دقت</div>
+                                <div className="font-medium text-green-500">{profile.accuracy_score}</div>
+                              </div>
+                              <div className="text-center">
+                                <div className="text-xs text-gray-500">سرعت</div>
+                                <div className="font-medium text-blue-500">{profile.speed_score}</div>
+                              </div>
+                              <div className="text-center">
+                                <div className="text-xs text-gray-500">کامل‌بودن</div>
+                                <div className="font-medium text-purple-500">{profile.completeness_score}</div>
+                              </div>
+                              <div className="text-center border-r pr-4 dark:border-gray-600">
+                                <div className="text-xs text-gray-500">نمره کل</div>
+                                <div className="text-2xl font-bold text-blue-600">{profile.overall_score}</div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* نکته */}
+                <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded-xl p-4">
+                  <h4 className="font-medium text-blue-700 dark:text-blue-400 mb-2">💡 درباره نمره‌دهی تجمعی</h4>
+                  <p className="text-sm text-blue-600 dark:text-blue-400">
+                    نمرات مدل‌ها تجمعی هستند و هیچوقت از صفر شروع نمی‌شوند. هر تحلیل جدید به تاریخچه اضافه می‌شود.
+                    این روش باعث می‌شود بهترین مدل‌ها برای پروژه‌های آینده قابل شناسایی باشند.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* مودال جزئیات پروفایل */}
+            {selectedProfile && journalSubTab === 'profiles' && (
+              <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl max-w-2xl w-full max-h-[80vh] overflow-auto">
+                  <div className="p-4 border-b dark:border-gray-700 flex items-center justify-between sticky top-0 bg-white dark:bg-gray-800">
+                    <div className="flex items-center gap-3">
+                      <h3 className="font-bold">{selectedProfile.display_name || selectedProfile.model_id}</h3>
+                      <span className={`px-2 py-0.5 rounded text-xs font-bold ${getTierColor(selectedProfile.tier || selectedProfile.ranking?.tier)}`}>
+                        {selectedProfile.tier || selectedProfile.ranking?.tier}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => setSelectedProfile(null)}
+                      className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="p-4 space-y-6">
+                    {/* نمرات */}
+                    <div>
+                      <h4 className="font-medium mb-3">📊 نمرات تجمعی</h4>
+                      <div className="grid grid-cols-3 gap-3">
+                        {selectedProfile.scores ? (
+                          <>
+                            <div className="text-center p-3 bg-gray-100 dark:bg-gray-700 rounded">
+                              <div className="text-2xl font-bold text-blue-500">{selectedProfile.scores.overall}</div>
+                              <div className="text-xs text-gray-500">نمره کل</div>
+                            </div>
+                            <div className="text-center p-3 bg-gray-100 dark:bg-gray-700 rounded">
+                              <div className="text-2xl font-bold text-green-500">{selectedProfile.scores.accuracy}</div>
+                              <div className="text-xs text-gray-500">دقت</div>
+                            </div>
+                            <div className="text-center p-3 bg-gray-100 dark:bg-gray-700 rounded">
+                              <div className="text-2xl font-bold text-purple-500">{selectedProfile.scores.completeness}</div>
+                              <div className="text-xs text-gray-500">کامل‌بودن</div>
+                            </div>
+                            <div className="text-center p-3 bg-gray-100 dark:bg-gray-700 rounded">
+                              <div className="text-2xl font-bold text-orange-500">{selectedProfile.scores.speed}</div>
+                              <div className="text-xs text-gray-500">سرعت</div>
+                            </div>
+                            <div className="text-center p-3 bg-gray-100 dark:bg-gray-700 rounded">
+                              <div className="text-2xl font-bold text-cyan-500">{selectedProfile.scores.reliability}</div>
+                              <div className="text-xs text-gray-500">قابلیت اطمینان</div>
+                            </div>
+                            <div className="text-center p-3 bg-gray-100 dark:bg-gray-700 rounded">
+                              <div className="text-2xl font-bold text-pink-500">{selectedProfile.scores.code_quality}</div>
+                              <div className="text-xs text-gray-500">کیفیت کد</div>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <div className="text-center p-3 bg-gray-100 dark:bg-gray-700 rounded">
+                              <div className="text-2xl font-bold text-blue-500">{selectedProfile.overall_score}</div>
+                              <div className="text-xs text-gray-500">نمره کل</div>
+                            </div>
+                            <div className="text-center p-3 bg-gray-100 dark:bg-gray-700 rounded">
+                              <div className="text-2xl font-bold text-green-500">{selectedProfile.accuracy_score}</div>
+                              <div className="text-xs text-gray-500">دقت</div>
+                            </div>
+                            <div className="text-center p-3 bg-gray-100 dark:bg-gray-700 rounded">
+                              <div className="text-2xl font-bold text-purple-500">{selectedProfile.completeness_score}</div>
+                              <div className="text-xs text-gray-500">کامل‌بودن</div>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* آمار */}
+                    {selectedProfile.stats && (
+                      <div>
+                        <h4 className="font-medium mb-3">📈 آمار عملکرد</h4>
+                        <div className="grid grid-cols-3 gap-3 text-sm">
+                          <div className="p-2 bg-green-50 dark:bg-green-900/20 rounded">
+                            <div className="font-bold text-green-600">{selectedProfile.stats.correct_findings}</div>
+                            <div className="text-xs text-gray-500">یافته‌های درست</div>
+                          </div>
+                          <div className="p-2 bg-yellow-50 dark:bg-yellow-900/20 rounded">
+                            <div className="font-bold text-yellow-600">{selectedProfile.stats.false_positives}</div>
+                            <div className="text-xs text-gray-500">False Positive</div>
+                          </div>
+                          <div className="p-2 bg-red-50 dark:bg-red-900/20 rounded">
+                            <div className="font-bold text-red-600">{selectedProfile.stats.missed_issues}</div>
+                            <div className="text-xs text-gray-500">کشف نشده</div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* نقاط قوت و ضعف */}
+                    {selectedProfile.capabilities && (
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <h4 className="font-medium mb-2 text-green-600">💪 نقاط قوت</h4>
+                          <ul className="text-sm space-y-1">
+                            {(selectedProfile.capabilities.strengths || []).map((s: string, i: number) => (
+                              <li key={i} className="text-gray-600 dark:text-gray-400">• {s}</li>
+                            ))}
+                            {(!selectedProfile.capabilities.strengths || selectedProfile.capabilities.strengths.length === 0) && (
+                              <li className="text-gray-400">هنوز شناسایی نشده</li>
+                            )}
+                          </ul>
+                        </div>
+                        <div>
+                          <h4 className="font-medium mb-2 text-red-600">⚠️ نقاط ضعف</h4>
+                          <ul className="text-sm space-y-1">
+                            {(selectedProfile.capabilities.weaknesses || []).map((w: string, i: number) => (
+                              <li key={i} className="text-gray-600 dark:text-gray-400">• {w}</li>
+                            ))}
+                            {(!selectedProfile.capabilities.weaknesses || selectedProfile.capabilities.weaknesses.length === 0) && (
+                              <li className="text-gray-400">هنوز شناسایی نشده</li>
+                            )}
+                          </ul>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* مودال ثبت اعتبارسنجی دستی */}
+            {selectedProfile && journalSubTab === 'validation' && (
+              <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl max-w-md w-full">
+                  <div className="p-4 border-b dark:border-gray-700 flex items-center justify-between">
+                    <h3 className="font-bold">ثبت نتیجه اعتبارسنجی: {selectedProfile.display_name}</h3>
+                    <button
+                      onClick={() => setSelectedProfile(null)}
+                      className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="p-4 space-y-4">
+                    <div>
+                      <label className="text-sm text-gray-600 dark:text-gray-400">یافته‌های درست:</label>
+                      <input
+                        type="number"
+                        min="0"
+                        defaultValue="0"
+                        id="correct_input"
+                        className="w-full mt-1 p-2 border rounded dark:bg-gray-700 dark:border-gray-600"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-sm text-gray-600 dark:text-gray-400">False Positive (اشتباه):</label>
+                      <input
+                        type="number"
+                        min="0"
+                        defaultValue="0"
+                        id="false_positive_input"
+                        className="w-full mt-1 p-2 border rounded dark:bg-gray-700 dark:border-gray-600"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-sm text-gray-600 dark:text-gray-400">مشکلات کشف نشده:</label>
+                      <input
+                        type="number"
+                        min="0"
+                        defaultValue="0"
+                        id="missed_input"
+                        className="w-full mt-1 p-2 border rounded dark:bg-gray-700 dark:border-gray-600"
+                      />
+                    </div>
+                    <button
+                      onClick={() => {
+                        const correct = parseInt((document.getElementById('correct_input') as HTMLInputElement)?.value || '0');
+                        const falsePos = parseInt((document.getElementById('false_positive_input') as HTMLInputElement)?.value || '0');
+                        const missed = parseInt((document.getElementById('missed_input') as HTMLInputElement)?.value || '0');
+                        updateModelScore(selectedProfile.model_id, correct, missed, falsePos);
+                        setSelectedProfile(null);
+                      }}
+                      className="w-full py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 font-medium"
+                    >
+                      ثبت و بروزرسانی نمره
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* مودال جزئیات فعالیت */}
             {selectedLog && (
               <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -3297,6 +4052,13 @@ export default function ProjectDetailPage() {
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* محتوای تب تحلیل سلامت */}
+        {activeTab === 'health' && (
+          <div className="space-y-6">
+            <ProjectHealthPanel projectId={projectId as string} onHealthUpdate={loadProject} />
           </div>
         )}
 

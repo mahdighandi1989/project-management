@@ -283,99 +283,128 @@ async def _run_analysis_task(
     model_ids: list,
     request: RunAnalysisRequest
 ):
-    """تسک پس‌زمینه برای اجرای تحلیل"""
-    from ...core.database import SessionLocal
+    """
+    تسک پس‌زمینه برای اجرای تحلیل عمیق سه‌مرحله‌ای
 
+    مراحل:
+    1. Micro Analysis: بررسی تک‌تک فایل‌ها
+    2. Macro Analysis: بررسی همکاری و جایگاه
+    3. Structural Analysis: بررسی سیم‌کشی و ساختار
+    """
+    from ...core.database import SessionLocal
+    from ...services.deep_analysis_service import get_deep_analysis_service
+    from ...services.ai_manager import get_ai_manager
+    import logging
+
+    logger = logging.getLogger(__name__)
     db = SessionLocal()
+
     try:
-        analyzer = get_project_health_analyzer()
-        analyzer.initialize()
+        # دریافت AI manager برای فراخوانی مدل‌ها
+        ai_manager = get_ai_manager()
+
+        # دریافت سرویس تحلیل عمیق
+        deep_analyzer = get_deep_analysis_service(ai_manager)
 
         # دریافت پروژه
         project = db.query(Project).filter(Project.id == project_id).first()
         if not project:
+            logger.error(f"Project {project_id} not found")
             return
 
-        # 1. بررسی و مدیریت Roadmap
+        # دریافت محتوای roadmap و readme
         roadmap_content = project.roadmap_content or ""
-        if request.update_roadmap:
-            roadmap_result = await analyzer.check_and_manage_roadmap(
-                project_id=project_id,
-                files=files_data,
-                project_info=project_info,
-                model_id=model_ids[0] if model_ids else None
-            )
-            roadmap_content = roadmap_result.get("roadmap_content", "")
-            project.roadmap_content = roadmap_content
-            project.ideal_state = roadmap_result.get("ideal_state", "")
+        readme_content = project.readme_content or ""
 
-            # ذخیره ایرادات
-            if roadmap_result.get("issues_found"):
-                project.issues_found = json.dumps(
-                    roadmap_result["issues_found"],
-                    ensure_ascii=False
-                )
-
-        # 2. بررسی و مدیریت README
-        if request.update_readme:
-            readme_result = await analyzer.check_and_manage_readme(
-                project_id=project_id,
-                files=files_data,
-                project_info=project_info,
-                roadmap_content=roadmap_content,
-                model_id=model_ids[0] if model_ids else None
-            )
-            project.readme_content = readme_result.get("readme_content", "")
-
-        # 3. تحلیل موازی سلامت پروژه
-        analysis_result = await analyzer.analyze_project_parallel(
-            project_id=project_id,
-            files=files_data,
-            project_info=project_info,
-            model_ids=model_ids,
-            roadmap_content=roadmap_content,
-            full_analysis=request.full_analysis
-        )
-
-        # 4. ذخیره نتایج
-        project.health_scores = json.dumps(
-            analysis_result.get("overall_scores", {}),
-            ensure_ascii=False
-        )
-        project.file_health_map = json.dumps(
-            analysis_result.get("color_map", {}),
-            ensure_ascii=False
-        )
-        project.last_analysis_id = analysis_result.get("analysis_id")
-        project.last_analysis_at = datetime.utcnow()
-        project.last_analysis_models = json.dumps(model_ids, ensure_ascii=False)
-
-        # ترکیب ایرادات
-        existing_issues = []
+        # دریافت تنظیمات تحلیل
+        analysis_settings = {}
         try:
-            if project.issues_found:
-                existing_issues = json.loads(project.issues_found)
+            if project.analysis_settings:
+                analysis_settings = json.loads(project.analysis_settings)
         except:
             pass
 
-        # اضافه کردن ایرادات از تحلیل فایل‌ها
-        for fa in analysis_result.get("file_analyses", []):
-            for model_id, model_result in fa.get("model_results", {}).items():
-                if isinstance(model_result, dict):
-                    for issue in model_result.get("issues", []):
-                        existing_issues.append({
-                            "file": fa.get("file_path"),
-                            "model": model_id,
-                            **issue
-                        })
+        instruction = analysis_settings.get("instruction", "تحلیل کامل پروژه را انجام بده")
 
-        project.issues_found = json.dumps(existing_issues[:100], ensure_ascii=False)
+        # 1. بررسی و به‌روزرسانی Roadmap (اختیاری)
+        if request.update_roadmap:
+            try:
+                analyzer = get_project_health_analyzer()
+                analyzer.initialize()
+
+                roadmap_result = await analyzer.check_and_manage_roadmap(
+                    project_id=project_id,
+                    files=files_data,
+                    project_info=project_info,
+                    model_id=model_ids[0] if model_ids else None
+                )
+                roadmap_content = roadmap_result.get("roadmap_content", "")
+                project.roadmap_content = roadmap_content
+                project.ideal_state = roadmap_result.get("ideal_state", "")
+            except Exception as e:
+                logger.warning(f"Roadmap update failed: {e}")
+
+        # 2. بررسی و به‌روزرسانی README (اختیاری)
+        if request.update_readme:
+            try:
+                analyzer = get_project_health_analyzer()
+                analyzer.initialize()
+
+                readme_result = await analyzer.check_and_manage_readme(
+                    project_id=project_id,
+                    files=files_data,
+                    project_info=project_info,
+                    roadmap_content=roadmap_content,
+                    model_id=model_ids[0] if model_ids else None
+                )
+                readme_content = readme_result.get("readme_content", "")
+                project.readme_content = readme_content
+            except Exception as e:
+                logger.warning(f"README update failed: {e}")
+
+        # 3. اجرای تحلیل عمیق سه‌مرحله‌ای
+        logger.info(f"Starting deep analysis for project {project_id} with models: {model_ids}")
+
+        analysis_result = await deep_analyzer.run_full_analysis(
+            project_id=project_id,
+            files=files_data,
+            roadmap_content=roadmap_content,
+            readme_content=readme_content,
+            model_ids=model_ids,
+            instruction=instruction,
+            db_session=db
+        )
+
+        # 4. ذخیره نتایج
+        if analysis_result.get("status") == "completed":
+            project.health_scores = json.dumps(
+                analysis_result.get("overall_scores", {}),
+                ensure_ascii=False
+            )
+            project.file_health_map = json.dumps(
+                analysis_result.get("file_health_map", {}),
+                ensure_ascii=False
+            )
+            project.last_analysis_id = analysis_result.get("analysis_id")
+            project.last_analysis_at = datetime.utcnow()
+            project.last_analysis_models = json.dumps(model_ids, ensure_ascii=False)
+
+            # ذخیره مشکلات
+            project.issues_found = json.dumps(
+                analysis_result.get("issues", [])[:100],
+                ensure_ascii=False
+            )
+
+            # ذخیره حالت ایده‌آل
+            if analysis_result.get("ideal_state"):
+                project.ideal_state = analysis_result["ideal_state"]
+
+            logger.info(f"Analysis completed for project {project_id}. Score: {analysis_result.get('overall_scores', {}).get('total', 0):.1f}")
 
         db.commit()
 
     except Exception as e:
-        import logging
-        logging.error(f"Analysis task error: {e}", exc_info=True)
+        logger.error(f"Analysis task error for {project_id}: {e}", exc_info=True)
         db.rollback()
     finally:
         db.close()

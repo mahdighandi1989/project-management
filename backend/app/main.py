@@ -22,6 +22,7 @@ from .api.routes import project_structure  # 🆕 Project Structure Diagram
 from .api.routes import project_journal  # 🆕 Project Journal & Reports
 from .api.routes import analysis  # 🆕 Project Analysis & AI Profiles
 from .api.routes import project_health  # 🆕 Project Health Analysis (تحلیل سلامت پروژه)
+from .api.routes import model_profiles  # 🆕 Model Profiles API (پروفایل مدل‌ها)
 
 # تنظیم logging
 logging.basicConfig(
@@ -395,6 +396,7 @@ app.include_router(project_structure.router, prefix="/api/projects")  # 🆕 Pro
 app.include_router(project_journal.router, prefix="/api/projects")  # 🆕 Project Journal & Reports
 app.include_router(analysis.router, prefix="/api")  # 🆕 Project Analysis & AI Profiles
 app.include_router(project_health.router)  # 🆕 Project Health Analysis (تحلیل سلامت پروژه)
+app.include_router(model_profiles.router)  # 🆕 Model Profiles API (پروفایل مدل‌ها)
 
 
 # Root endpoint
