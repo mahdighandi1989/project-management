@@ -110,18 +110,17 @@ async def get_providers_status():
         for p in all_providers:
             providers_status[p] = p in available
 
-        return {
-            "success": True,
-            "providers": providers_status,
-            "available": available,
-            "count": len(available)
-        }
+        # Return providers object directly for frontend compatibility
+        return providers_status
     except Exception as e:
         return {
-            "success": False,
-            "providers": {},
-            "available": [],
-            "error": str(e)
+            "openai": False,
+            "claude": False,
+            "gemini": False,
+            "deepseek": False,
+            "perplexity": False,
+            "groq": False,
+            "openrouter": False
         }
 
 

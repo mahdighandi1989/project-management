@@ -349,14 +349,11 @@ async def get_model_profiles():
         from ...services.model_profiler import get_model_profiler
         profiler = get_model_profiler()
         profiles = profiler.get_all_profiles()
-        return {
-            "success": True,
-            "profiles": [p.model_dump() for p in profiles],
-            "count": len(profiles)
-        }
+        # Return array directly for frontend compatibility
+        return [p.model_dump() for p in profiles]
     except Exception as e:
         logger.error(f"Error getting profiles: {e}")
-        return {"success": False, "profiles": [], "error": str(e)}
+        return []
 
 
 @router.get("/leaderboard")
@@ -380,14 +377,11 @@ async def get_model_leaderboard():
                 "avg_response_time": profile.avg_response_time
             })
 
-        return {
-            "success": True,
-            "leaderboard": leaderboard,
-            "count": len(leaderboard)
-        }
+        # Return array directly for frontend compatibility
+        return leaderboard
     except Exception as e:
         logger.error(f"Error getting leaderboard: {e}")
-        return {"success": False, "leaderboard": [], "error": str(e)}
+        return []
 
 
 @router.get("/rankings")
@@ -449,10 +443,8 @@ async def get_model_rankings():
                     "score": 50.0  # Default
                 })
 
-        return {
-            "success": True,
-            "rankings": rankings
-        }
+        # Return rankings object directly
+        return rankings
     except Exception as e:
         logger.error(f"Error getting rankings: {e}")
-        return {"success": False, "rankings": {}, "error": str(e)}
+        return {"by_score": [], "by_accuracy": [], "by_speed": [], "by_cost_efficiency": []}
