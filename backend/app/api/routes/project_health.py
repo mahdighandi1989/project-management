@@ -82,6 +82,138 @@ class AnalysisScheduleRequest(BaseModel):
 # API Endpoints
 # =====================================
 
+@router.get("/{project_id}/debug/analysis-test")
+async def debug_analysis_test(project_id: str, db=Depends(get_db)):
+    """
+    تست کامل تحلیل - نشون میده دقیقاً کجا مشکل هست
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    result = {
+        "step": "start",
+        "errors": [],
+        "debug_info": {}
+    }
+
+    try:
+        # Step 1: Check project exists
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if not project:
+            return {"error": "Project not found", "project_id": project_id}
+
+        result["debug_info"]["project_name"] = project.name
+        result["step"] = "project_found"
+
+        # Step 2: Get files
+        files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+        result["debug_info"]["total_files_in_db"] = len(files)
+
+        # Check file contents
+        files_with_content = 0
+        files_without_content = 0
+        content_sizes = []
+
+        for f in files:
+            content = f.content or ""
+            if len(content) >= 10:
+                files_with_content += 1
+                content_sizes.append({"path": f.file_path, "size": len(content)})
+            else:
+                files_without_content += 1
+
+        result["debug_info"]["files_with_content"] = files_with_content
+        result["debug_info"]["files_without_content"] = files_without_content
+        result["debug_info"]["sample_content_sizes"] = content_sizes[:5]
+        result["step"] = "files_checked"
+
+        # Step 3: Check AI manager
+        from ...services.ai_manager import get_ai_manager
+        ai_manager = get_ai_manager()
+
+        available_models = ai_manager.get_available_models()
+        available_providers = ai_manager.get_available_providers()
+
+        result["debug_info"]["ai_manager_exists"] = ai_manager is not None
+        result["debug_info"]["available_providers"] = available_providers
+        result["debug_info"]["available_models"] = [m.id for m in available_models]
+        result["debug_info"]["models_count"] = len(available_models)
+        result["step"] = "ai_manager_checked"
+
+        if not available_models:
+            result["errors"].append("No AI models available!")
+            return result
+
+        # Step 4: Test single AI call
+        from ...services.ai_base import Message
+
+        test_model = available_models[0].id
+        result["debug_info"]["test_model"] = test_model
+
+        try:
+            import time
+            start = time.time()
+
+            response = await ai_manager.generate(
+                model_id=test_model,
+                messages=[
+                    Message(role="system", content="You are a helpful assistant."),
+                    Message(role="user", content="Say 'Hello, AI is working!' in exactly 5 words.")
+                ],
+                max_tokens=50,
+                temperature=0.5
+            )
+
+            elapsed = time.time() - start
+            result["debug_info"]["ai_test_time"] = f"{elapsed:.2f}s"
+            result["debug_info"]["ai_test_response"] = response.content[:200] if response.content else "EMPTY"
+            result["debug_info"]["ai_test_success"] = True
+            result["step"] = "ai_call_success"
+
+        except Exception as e:
+            result["debug_info"]["ai_test_error"] = str(e)
+            result["debug_info"]["ai_test_success"] = False
+            result["errors"].append(f"AI call failed: {str(e)}")
+            result["step"] = "ai_call_failed"
+
+        # Step 5: Check DeepAnalysisService
+        from ...services.deep_analysis_service import get_deep_analysis_service
+        deep_analyzer = get_deep_analysis_service(ai_manager)
+
+        result["debug_info"]["deep_analyzer_has_ai_manager"] = deep_analyzer.ai_manager is not None
+        result["step"] = "deep_analyzer_checked"
+
+        # Summary
+        result["summary"] = {
+            "can_run_analysis": (
+                files_with_content > 0 and
+                len(available_models) > 0 and
+                result["debug_info"].get("ai_test_success", False) and
+                deep_analyzer.ai_manager is not None
+            ),
+            "issues": []
+        }
+
+        if files_with_content == 0:
+            result["summary"]["issues"].append("❌ No files have content (all empty)")
+        if len(available_models) == 0:
+            result["summary"]["issues"].append("❌ No AI models available")
+        if not result["debug_info"].get("ai_test_success"):
+            result["summary"]["issues"].append("❌ AI call test failed")
+        if deep_analyzer.ai_manager is None:
+            result["summary"]["issues"].append("❌ DeepAnalysisService has no AI manager")
+
+        if not result["summary"]["issues"]:
+            result["summary"]["issues"].append("✅ All checks passed - analysis should work")
+
+    except Exception as e:
+        result["errors"].append(f"Unexpected error: {str(e)}")
+        import traceback
+        result["traceback"] = traceback.format_exc()
+
+    return result
+
+
 @router.get("/debug/ai-status")
 async def debug_ai_status():
     """
