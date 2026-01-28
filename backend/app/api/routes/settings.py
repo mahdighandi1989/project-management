@@ -106,22 +106,18 @@ async def get_providers_status():
         # لیست همه provider ها
         all_providers = ["openai", "claude", "gemini", "deepseek", "perplexity", "groq", "openrouter"]
 
-        providers_status = {}
+        # Return as array for frontend compatibility
+        providers_list = []
         for p in all_providers:
-            providers_status[p] = p in available
+            providers_list.append({
+                "name": p,
+                "available": p in available
+            })
 
-        # Return providers object directly for frontend compatibility
-        return providers_status
+        return providers_list
     except Exception as e:
-        return {
-            "openai": False,
-            "claude": False,
-            "gemini": False,
-            "deepseek": False,
-            "perplexity": False,
-            "groq": False,
-            "openrouter": False
-        }
+        # Return empty array on error
+        return []
 
 
 @router.get("/api-keys/status", response_model=ApiKeyStatus)
