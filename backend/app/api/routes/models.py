@@ -247,11 +247,17 @@ async def get_model_profiles():
         from ...services.model_profiler import get_model_profiler
         profiler = get_model_profiler()
         profiles = profiler.get_all_profiles()
-        # Return array directly for frontend compatibility
-        return [p.model_dump() for p in profiles]
+        profiles_data = [p.model_dump() for p in profiles]
+        # Return in expected frontend format
+        return {
+            "success": True,
+            "profiles": profiles_data,
+            "count": len(profiles_data),
+            "is_fallback": len(profiles_data) == 0
+        }
     except Exception as e:
         logger.error(f"Error getting profiles: {e}")
-        return []
+        return {"success": False, "profiles": [], "error": str(e)}
 
 
 @router.get("/leaderboard")
@@ -264,22 +270,55 @@ async def get_model_leaderboard():
         profiler = get_model_profiler()
         top_models = profiler.get_top_models(n=20)
 
-        leaderboard = []
-        for i, profile in enumerate(top_models, 1):
-            leaderboard.append({
-                "rank": i,
-                "model_id": profile.model_id,
-                "cumulative_score": profile.cumulative_score,
-                "total_analyses": profile.total_analyses,
-                "accuracy": profile.accuracy_rate,
-                "avg_response_time": profile.avg_response_time
-            })
+        # Build leaderboard object in frontend expected format
+        leaderboard = {}
+        if top_models:
+            # Best accuracy
+            best_acc = max(top_models, key=lambda p: p.accuracy_rate)
+            leaderboard["best_accuracy"] = {
+                "label": "بهترین دقت",
+                "model_id": best_acc.model_id,
+                "display_name": best_acc.model_id,
+                "score": best_acc.accuracy_rate,
+                "tier": "S" if best_acc.accuracy_rate >= 90 else "A" if best_acc.accuracy_rate >= 80 else "B"
+            }
+            # Best speed (lowest response time)
+            profiles_with_time = [p for p in top_models if p.avg_response_time > 0]
+            if profiles_with_time:
+                best_speed = min(profiles_with_time, key=lambda p: p.avg_response_time)
+                leaderboard["best_speed"] = {
+                    "label": "سریع‌ترین",
+                    "model_id": best_speed.model_id,
+                    "display_name": best_speed.model_id,
+                    "score": 100 - min(best_speed.avg_response_time / 20, 100),
+                    "tier": "S" if best_speed.avg_response_time < 1000 else "A"
+                }
+            # Best overall
+            best_overall = max(top_models, key=lambda p: p.cumulative_score)
+            leaderboard["best_overall"] = {
+                "label": "بهترین کلی",
+                "model_id": best_overall.model_id,
+                "display_name": best_overall.model_id,
+                "score": best_overall.cumulative_score,
+                "tier": "S" if best_overall.cumulative_score >= 90 else "A" if best_overall.cumulative_score >= 80 else "B"
+            }
+            # Most active
+            most_active = max(top_models, key=lambda p: p.total_analyses)
+            leaderboard["most_active"] = {
+                "label": "فعال‌ترین",
+                "model_id": most_active.model_id,
+                "display_name": most_active.model_id,
+                "score": most_active.total_analyses,
+                "tier": "A"
+            }
 
-        # Return array directly for frontend compatibility
-        return leaderboard
+        return {
+            "success": True,
+            "leaderboard": leaderboard
+        }
     except Exception as e:
         logger.error(f"Error getting leaderboard: {e}")
-        return []
+        return {"success": False, "leaderboard": {}}
 
 
 @router.get("/rankings")
@@ -341,11 +380,13 @@ async def get_model_rankings():
                     "score": 50.0  # Default
                 })
 
-        # Return rankings object directly
-        return rankings
+        return {
+            "success": True,
+            "rankings": rankings
+        }
     except Exception as e:
         logger.error(f"Error getting rankings: {e}")
-        return {"by_score": [], "by_accuracy": [], "by_speed": [], "by_cost_efficiency": []}
+        return {"success": False, "rankings": {"by_score": [], "by_accuracy": [], "by_speed": [], "by_cost_efficiency": []}}
 
 
 # ===========================================
