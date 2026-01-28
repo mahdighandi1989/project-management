@@ -90,6 +90,41 @@ async def get_system_status():
     )
 
 
+@router.get("/providers")
+async def get_providers_status():
+    """
+    دریافت وضعیت provider های AI
+
+    برای frontend که نیاز داره بدونه کدوم provider ها فعالن
+    """
+    try:
+        from ...services.ai_manager import get_ai_manager
+
+        ai_manager = get_ai_manager()
+        available = ai_manager.get_available_providers()
+
+        # لیست همه provider ها
+        all_providers = ["openai", "claude", "gemini", "deepseek", "perplexity", "groq", "openrouter"]
+
+        providers_status = {}
+        for p in all_providers:
+            providers_status[p] = p in available
+
+        return {
+            "success": True,
+            "providers": providers_status,
+            "available": available,
+            "count": len(available)
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "providers": {},
+            "available": [],
+            "error": str(e)
+        }
+
+
 @router.get("/api-keys/status", response_model=ApiKeyStatus)
 async def get_api_keys_status(db: Session = Depends(get_db)):
     """وضعیت API keys (فقط بررسی وجود) - چک environment و دیتابیس"""
