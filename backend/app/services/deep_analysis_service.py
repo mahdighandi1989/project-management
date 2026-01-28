@@ -210,6 +210,14 @@ class DeepAnalysisService:
             if db_session:
                 await self._save_analysis_results(project_id, results, db_session)
 
+            # ⭐ به‌روزرسانی پروفایل مدل‌ها
+            await self._update_model_profiles(
+                model_ids=model_ids,
+                micro_results=micro_results,
+                analysis_id=analysis_id,
+                total_issues=len(final_results.get("issues", []))
+            )
+
             logger.info(f"[{analysis_id}] تحلیل کامل شد. نمره کلی: {final_results['overall_scores'].get('total', 0):.1f}")
 
         except Exception as e:
@@ -802,14 +810,36 @@ class DeepAnalysisService:
     def _aggregate_scores(self, model_analyses: Dict) -> Dict[str, float]:
         """میانگین‌گیری نمرات از چند مدل"""
         all_scores = {}
+        successful_models = 0
 
         for model_id, analysis in model_analyses.items():
-            if isinstance(analysis, dict) and "scores" in analysis:
-                for key, value in analysis["scores"].items():
-                    if key not in all_scores:
-                        all_scores[key] = []
-                    if isinstance(value, (int, float)):
-                        all_scores[key].append(value)
+            if isinstance(analysis, dict):
+                # اگر error داره، skip کن
+                if analysis.get("error"):
+                    continue
+
+                successful_models += 1
+
+                if "scores" in analysis:
+                    for key, value in analysis["scores"].items():
+                        if key not in all_scores:
+                            all_scores[key] = []
+                        if isinstance(value, (int, float)):
+                            all_scores[key].append(value)
+
+                # اگر scores نبود ولی overall_score یا code_quality بود
+                elif "overall_score" in analysis:
+                    if "code_quality" not in all_scores:
+                        all_scores["code_quality"] = []
+                    all_scores["code_quality"].append(analysis["overall_score"])
+
+                # اگر raw_response داره، سعی کن از متن نمره استخراج کنی
+                elif "raw_response" in analysis:
+                    extracted = self._extract_score_from_text(analysis["raw_response"])
+                    if extracted > 0:
+                        if "code_quality" not in all_scores:
+                            all_scores["code_quality"] = []
+                        all_scores["code_quality"].append(extracted)
 
         aggregated = {}
         for key, values in all_scores.items():
@@ -819,8 +849,32 @@ class DeepAnalysisService:
         # محاسبه نمره کلی
         if aggregated:
             aggregated["total"] = sum(aggregated.values()) / len(aggregated)
+        elif successful_models > 0:
+            # اگر مدل‌ها پاسخ دادن ولی نمره قابل استخراج نبود
+            aggregated["total"] = 0
+            aggregated["parse_failed"] = True
 
         return aggregated
+
+    def _extract_score_from_text(self, text: str) -> float:
+        """استخراج نمره از متن پاسخ AI"""
+        import re
+        # جستجوی الگوهای معمول نمره‌دهی
+        patterns = [
+            r'(?:score|نمره|امتیاز)[:\s]*(\d+(?:\.\d+)?)',
+            r'(\d+(?:\.\d+)?)\s*(?:out of|از)\s*100',
+            r'(\d+(?:\.\d+)?)\s*%',
+            r'(?:rating|رتبه)[:\s]*(\d+(?:\.\d+)?)',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                score = float(match.group(1))
+                if 0 <= score <= 100:
+                    return score
+                elif 0 <= score <= 10:
+                    return score * 10
+        return 0
 
     def _collect_issues(self, model_analyses: Dict, file_path: str) -> List[Dict]:
         """جمع‌آوری مشکلات از همه مدل‌ها"""
@@ -934,20 +988,44 @@ class DeepAnalysisService:
                 "analyzed_at": file_data.get("analyzed_at")
             }
 
-        # نمرات کلی
-        micro_score = micro_results.get("summary", {}).get("analyzed", 0)
-        macro_score = macro_results.get("aggregated", {}).get("overall_health", 50)
-        structural_score = structural_results.get("aggregated", {}).get("overall_score", 50)
-
         # میانگین نمرات فایل‌ها
         file_scores = [f["score"] for f in file_health_map.values()]
-        avg_file_score = sum(file_scores) / len(file_scores) if file_scores else 50
+        avg_file_score = sum(file_scores) / len(file_scores) if file_scores else 0
+
+        # نمرات از هر مرحله
+        macro_score = macro_results.get("aggregated", {}).get("overall_health", 0)
+        structural_score = structural_results.get("aggregated", {}).get("overall_score", 0)
+
+        # محاسبه نمره ساختاری بر اساس ایرادات
+        total_issues = sum(len(f.get("issues", [])) for f in micro_results.get("files", {}).values())
+        total_files = len(file_health_map)
+        if total_issues > 0 and total_files > 0:
+            # کاهش نمره بر اساس تعداد ایرادات
+            issues_penalty = min(total_issues * 2, 50)  # حداکثر 50 نمره کم میشه
+            structural_score = max(0, 100 - issues_penalty)
+        elif total_files > 0:
+            structural_score = 70  # اگر ایرادی نبود
+
+        # محاسبه نمره کلی
+        if avg_file_score > 0 or macro_score > 0 or structural_score > 0:
+            total_score = (
+                avg_file_score * 0.4 +
+                macro_score * 0.3 +
+                structural_score * 0.3
+            )
+        else:
+            total_score = 0
 
         overall_scores = {
             "micro": avg_file_score,
             "macro": macro_score,
             "structural": structural_score,
-            "total": (avg_file_score * 0.4 + macro_score * 0.3 + structural_score * 0.3)
+            "total": total_score,
+            # اضافه کردن نمرات جزئی‌تر
+            "code_quality": avg_file_score,
+            "documentation": macro_results.get("aggregated", {}).get("readme_accuracy", 50) if macro_score > 0 else 0,
+            "security": avg_file_score * 0.9,  # تقریبی
+            "roadmap_compliance": macro_results.get("aggregated", {}).get("roadmap_score", 0),
         }
 
         # جمع‌آوری همه مشکلات
@@ -988,6 +1066,42 @@ class DeepAnalysisService:
                     ideal_state = ideal.get("description", "")
                     break
 
+        # اگر AI توصیفی نداد، توصیف پیش‌فرض فارسی
+        if not ideal_state or len(ideal_state) < 50:
+            # تولید توصیف بر اساس ساختار پروژه
+            file_types = set()
+            for fp in file_health_map.keys():
+                if "frontend" in fp.lower() or ".tsx" in fp or ".jsx" in fp:
+                    file_types.add("frontend")
+                if "backend" in fp.lower() or "api" in fp.lower() or ".py" in fp:
+                    file_types.add("backend")
+                if "test" in fp.lower():
+                    file_types.add("test")
+
+            parts = []
+            if "frontend" in file_types and "backend" in file_types:
+                parts.append("ساختار ایده‌آل این پروژه شامل جداسازی کامل frontend و backend است")
+                parts.append("فایل‌های frontend باید در پوشه‌های components، pages و services سازماندهی شوند")
+                parts.append("فایل‌های backend باید در پوشه‌های routes، services، models و middleware قرار گیرند")
+            elif "frontend" in file_types:
+                parts.append("ساختار ایده‌آل یک پروژه frontend شامل پوشه‌های components، hooks، services و utils است")
+                parts.append("هر کامپوننت باید در پوشه مجزا با فایل‌های style و test خود باشد")
+            elif "backend" in file_types:
+                parts.append("ساختار ایده‌آل backend شامل لایه‌بندی MVC یا Clean Architecture است")
+                parts.append("routes، controllers، services و models باید به‌خوبی از هم جدا شوند")
+            else:
+                parts.append("ساختار پروژه باید منظم و مستند باشد")
+
+            if total_issues > 20:
+                parts.append(f"با توجه به {total_issues} ایراد شناسایی‌شده، بازنگری اساسی در کیفیت کد توصیه می‌شود")
+            elif total_issues > 5:
+                parts.append("بهبود مستندات و رفع ایرادات جزئی می‌تواند کیفیت را ارتقا دهد")
+
+            if "test" not in file_types:
+                parts.append("افزودن تست‌های واحد و یکپارچه‌سازی ضروری است")
+
+            ideal_state = ".\n".join(parts) + "."
+
         return {
             "file_health_map": file_health_map,
             "overall_scores": overall_scores,
@@ -1015,6 +1129,71 @@ class DeepAnalysisService:
                 logger.info(f"نتایج تحلیل برای پروژه {project_id} ذخیره شد")
         except Exception as e:
             logger.error(f"خطا در ذخیره نتایج: {e}")
+
+    async def _update_model_profiles(
+        self,
+        model_ids: List[str],
+        micro_results: Dict,
+        analysis_id: str,
+        total_issues: int
+    ) -> None:
+        """
+        به‌روزرسانی پروفایل مدل‌ها بر اساس نتایج تحلیل
+
+        این تابع نمرات واقعی هر مدل را از نتایج تحلیل استخراج
+        و در پروفایل مدل‌ها ذخیره می‌کند
+        """
+        try:
+            from .model_profiler import get_model_profiler
+            profiler = get_model_profiler()
+
+            # استخراج نمرات هر مدل از نتایج micro analysis
+            for model_id in model_ids:
+                model_scores = []
+                correct_findings = 0
+                response_times = []
+
+                # جمع‌آوری داده‌های هر مدل از همه فایل‌ها
+                for file_path, file_data in micro_results.get("files", {}).items():
+                    model_analysis = file_data.get("model_analyses", {}).get(model_id)
+                    if model_analysis and isinstance(model_analysis, dict):
+                        # نمره
+                        if not model_analysis.get("error"):
+                            scores = model_analysis.get("scores", {})
+                            if scores:
+                                total_score = scores.get("total", scores.get("code_quality", 0))
+                                if total_score > 0:
+                                    model_scores.append(total_score)
+
+                            # ایرادات یافت شده
+                            issues = model_analysis.get("issues", [])
+                            correct_findings += len(issues)
+
+                # محاسبه نمره میانگین این مدل
+                avg_score = sum(model_scores) / len(model_scores) if model_scores else 0
+
+                if avg_score > 0:
+                    # به‌روزرسانی پروفایل
+                    await profiler.update_profile(
+                        model_id=model_id,
+                        task_type="health_analysis",
+                        correct_findings=correct_findings,
+                        total_expected=total_issues,
+                        false_positives=0,  # فعلاً قابل محاسبه نیست
+                        response_time=sum(response_times) / len(response_times) if response_times else 0,
+                        tokens_used=0,
+                        cost=0,
+                        analysis_report_id=analysis_id,
+                        details={
+                            "files_analyzed": len(micro_results.get("files", {})),
+                            "avg_score": avg_score,
+                            "issues_found": correct_findings
+                        }
+                    )
+                    logger.info(f"پروفایل مدل {model_id} به‌روزرسانی شد - نمره: {avg_score:.1f}")
+
+        except Exception as e:
+            logger.error(f"خطا در به‌روزرسانی پروفایل مدل‌ها: {e}")
 
 
 # =====================================

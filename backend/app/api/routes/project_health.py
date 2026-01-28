@@ -48,6 +48,22 @@ class RunAnalysisRequest(BaseModel):
     update_readme: bool = True  # به‌روزرسانی readme
 
 
+# =====================================
+# Helper Functions
+# =====================================
+
+def _get_score_color(score: float) -> str:
+    """تبدیل نمره به رنگ"""
+    if score >= 90:
+        return "green"
+    elif score >= 70:
+        return "yellow"
+    elif score >= 50:
+        return "orange"
+    else:
+        return "red"
+
+
 class RoadmapUpdateRequest(BaseModel):
     """به‌روزرسانی Roadmap"""
     content: Optional[str] = None  # محتوای جدید (اختیاری)
@@ -87,16 +103,39 @@ async def debug_ai_status():
         "GEMINI_API_KEY": bool(os.environ.get("GEMINI_API_KEY")),
         "DEEPSEEK_API_KEY": bool(os.environ.get("DEEPSEEK_API_KEY")),
         "PERPLEXITY_API_KEY": bool(os.environ.get("PERPLEXITY_API_KEY")),
+        "GROQ_API_KEY": bool(os.environ.get("GROQ_API_KEY")),
     }
+
+    # چک کردن از دیتابیس
+    db_keys_status = {}
+    try:
+        from ...core.database import SessionLocal
+        from ...models.setting import Setting
+        db = SessionLocal()
+        for db_key in ["api_key_openai", "api_key_claude", "api_key_deepseek", "api_key_gemini", "api_key_perplexity"]:
+            value = Setting.get_value(db, db_key)
+            db_keys_status[db_key] = bool(value)
+        db.close()
+    except Exception as e:
+        db_keys_status["error"] = str(e)
 
     # دریافت AI manager
     try:
         ai_manager = get_ai_manager()
         available_providers = ai_manager.get_available_providers()
-        available_models = [m.id for m in ai_manager.get_available_models()]
+        available_models = [{"id": m.id, "provider": m.provider.value} for m in ai_manager.get_available_models()]
+
+        # چک کردن وضعیت error هر سرویس
+        services_status = {}
+        for provider, service in ai_manager._services.items():
+            services_status[provider.value] = {
+                "initialized": True,
+                "in_error_state": service.is_in_error_state()
+            }
     except Exception as e:
         available_providers = []
         available_models = []
+        services_status = {}
         error = str(e)
     else:
         error = None
@@ -107,12 +146,19 @@ async def debug_ai_status():
     return {
         "success": True,
         "api_keys_in_env": api_keys_status,
+        "api_keys_in_db": db_keys_status,
         "settings_providers": settings_providers,
         "ai_manager_providers": available_providers,
+        "services_status": services_status,
         "available_models": available_models,
         "any_model_available": len(available_models) > 0,
+        "models_count": len(available_models),
         "error": error,
-        "hint": "اگر any_model_available=false باشه، تحلیل سلامت کار نمیکنه"
+        "hints": {
+            "no_models": "اگر مدلی در دسترس نیست، API key ها را چک کنید",
+            "only_openai": "اگر فقط GPT مدل‌ها هستند، کلیدهای Claude/DeepSeek را وارد کنید",
+            "db_vs_env": "کلیدهای دیتابیس در startup به environment منتقل می‌شوند"
+        }
     }
 
 
@@ -258,9 +304,21 @@ async def get_project_health(project_id: str, db=Depends(get_db)):
         "success": True,
         "project_id": project_id,
         "health": {
-            "scores": health_scores,
-            "overall_score": health_scores.get("overall", 0),
-            "overall_color": health_scores.get("overall_color", "gray"),
+            "scores": {
+                # تبدیل نام کلیدها به فرمت مورد انتظار frontend
+                "overall": health_scores.get("total", health_scores.get("overall", 0)),
+                "overall_color": _get_score_color(health_scores.get("total", 0)),
+                "structure_score": health_scores.get("structural", 0),
+                "file_scores": {
+                    "code_quality": health_scores.get("micro", 0),
+                    "documentation": health_scores.get("documentation", 50),
+                    "security": health_scores.get("security", 50),
+                    "cooperation": health_scores.get("macro", 0),
+                    "roadmap_compliance": health_scores.get("roadmap_compliance", 50),
+                }
+            },
+            "overall_score": health_scores.get("total", health_scores.get("overall", 0)),
+            "overall_color": _get_score_color(health_scores.get("total", 0)),
             "file_health_map": file_health_map,
             "issues_found": issues_found,
             "issues_count": len(issues_found),
