@@ -27,41 +27,75 @@ class AIManager:
 
     def __init__(self):
         self._services: Dict[ModelProvider, AIServiceBase] = {}
+        self._init_errors: Dict[str, str] = {}  # برای debug
         self._initialize_services()
 
     def _initialize_services(self):
         """راه‌اندازی سرویس‌های موجود بر اساس API keys"""
+        import logging
+        logger = logging.getLogger(__name__)
+
         available = settings.get_available_providers()
+        logger.info(f"🔑 Available providers from settings: {available}")
 
         if available.get("openai"):
             try:
                 self._services[ModelProvider.OPENAI] = OpenAIService()
-            except AIServiceError:
-                pass
+                logger.info("✅ OpenAI service initialized")
+            except AIServiceError as e:
+                self._init_errors["openai"] = str(e)
+                logger.warning(f"⚠️ OpenAI init failed: {e}")
+            except Exception as e:
+                self._init_errors["openai"] = str(e)
+                logger.error(f"❌ OpenAI init error: {e}")
 
         if available.get("claude"):
             try:
                 self._services[ModelProvider.CLAUDE] = ClaudeService()
-            except AIServiceError:
-                pass
+                logger.info("✅ Claude service initialized")
+            except AIServiceError as e:
+                self._init_errors["claude"] = str(e)
+                logger.warning(f"⚠️ Claude init failed: {e}")
+            except Exception as e:
+                self._init_errors["claude"] = str(e)
+                logger.error(f"❌ Claude init error: {e}")
 
         if available.get("gemini"):
             try:
                 self._services[ModelProvider.GEMINI] = GeminiService()
-            except AIServiceError:
-                pass
+                logger.info("✅ Gemini service initialized")
+            except AIServiceError as e:
+                self._init_errors["gemini"] = str(e)
+                logger.warning(f"⚠️ Gemini init failed: {e}")
+            except Exception as e:
+                self._init_errors["gemini"] = str(e)
+                logger.error(f"❌ Gemini init error: {e}")
 
         if available.get("deepseek"):
             try:
                 self._services[ModelProvider.DEEPSEEK] = DeepSeekService()
-            except AIServiceError:
-                pass
+                logger.info("✅ DeepSeek service initialized")
+            except AIServiceError as e:
+                self._init_errors["deepseek"] = str(e)
+                logger.warning(f"⚠️ DeepSeek init failed: {e}")
+            except Exception as e:
+                self._init_errors["deepseek"] = str(e)
+                logger.error(f"❌ DeepSeek init error: {e}")
 
-        if available.get("perplexity"):  # 🆕 Perplexity
+        if available.get("perplexity"):
             try:
                 self._services[ModelProvider.PERPLEXITY] = PerplexityService()
-            except AIServiceError:
-                pass
+                logger.info("✅ Perplexity service initialized")
+            except AIServiceError as e:
+                self._init_errors["perplexity"] = str(e)
+                logger.warning(f"⚠️ Perplexity init failed: {e}")
+            except Exception as e:
+                self._init_errors["perplexity"] = str(e)
+                logger.error(f"❌ Perplexity init error: {e}")
+
+        logger.info(f"📊 Initialized {len(self._services)} services: {list(self._services.keys())}")
+        if self._init_errors:
+            logger.warning(f"⚠️ Init errors: {self._init_errors}")
 
     def get_available_providers(self) -> List[str]:
         """لیست provider های فعال"""
@@ -71,8 +105,17 @@ class AIManager:
         """لیست همه مدل‌های قابل استفاده"""
         available = []
         for model in get_enabled_models():
-            if model.provider in self._services:
-                if not self._services[model.provider].is_in_error_state():
+            # هندل کردن هر دو حالت enum و string
+            provider = model.provider
+            if isinstance(provider, str):
+                # تبدیل string به enum
+                try:
+                    provider = ModelProvider(provider)
+                except ValueError:
+                    continue
+
+            if provider in self._services:
+                if not self._services[provider].is_in_error_state():
                     available.append(model)
         return available
 
@@ -169,9 +212,17 @@ class AIManager:
         if not model:
             raise AIServiceError(f"Model {model_id} not found", "manager", model_id)
 
-        service = self._services.get(model.provider)
+        # هندل کردن هر دو حالت enum و string
+        provider = model.provider
+        if isinstance(provider, str):
+            try:
+                provider = ModelProvider(provider)
+            except ValueError:
+                raise AIServiceError(f"Unknown provider: {provider}", "manager", model_id)
+
+        service = self._services.get(provider)
         if not service:
-            raise AIServiceError(f"Provider {model.provider} not available", "manager", model_id)
+            raise AIServiceError(f"Provider {provider} not available", "manager", model_id)
 
         return await service.generate(model_id, messages, max_tokens, temperature, **kwargs)
 

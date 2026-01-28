@@ -120,25 +120,38 @@ async def debug_ai_status():
         db_keys_status["error"] = str(e)
 
     # دریافت AI manager
+    error = None
+    init_errors = {}
+    services_status = {}
+    available_models = []
+    available_providers = []
+
     try:
         ai_manager = get_ai_manager()
         available_providers = ai_manager.get_available_providers()
-        available_models = [{"id": m.id, "provider": m.provider.value} for m in ai_manager.get_available_models()]
+        init_errors = getattr(ai_manager, '_init_errors', {})
 
-        # چک کردن وضعیت error هر سرویس
-        services_status = {}
+        # لیست مدل‌ها - با محافظت
+        try:
+            for m in ai_manager.get_available_models():
+                provider_val = m.provider.value if hasattr(m.provider, 'value') else str(m.provider)
+                available_models.append({"id": m.id, "provider": provider_val})
+        except Exception as me:
+            error = f"Model list error: {me}"
+
+        # وضعیت سرویس‌ها - با محافظت
         for provider, service in ai_manager._services.items():
-            services_status[provider.value] = {
-                "initialized": True,
-                "in_error_state": service.is_in_error_state()
-            }
+            provider_name = provider.value if hasattr(provider, 'value') else str(provider)
+            try:
+                services_status[provider_name] = {
+                    "initialized": True,
+                    "in_error_state": service.is_in_error_state()
+                }
+            except Exception as se:
+                services_status[provider_name] = {"error": str(se)}
+
     except Exception as e:
-        available_providers = []
-        available_models = []
-        services_status = {}
         error = str(e)
-    else:
-        error = None
 
     # خواندن از settings
     settings_providers = settings.get_available_providers()
@@ -150,13 +163,15 @@ async def debug_ai_status():
         "settings_providers": settings_providers,
         "ai_manager_providers": available_providers,
         "services_status": services_status,
+        "init_errors": init_errors,
         "available_models": available_models,
         "any_model_available": len(available_models) > 0,
         "models_count": len(available_models),
+        "services_count": len(services_status),
         "error": error,
         "hints": {
-            "no_models": "اگر مدلی در دسترس نیست، API key ها را چک کنید",
-            "only_openai": "اگر فقط GPT مدل‌ها هستند، کلیدهای Claude/DeepSeek را وارد کنید",
+            "no_models": "اگر مدلی در دسترس نیست، init_errors را چک کنید",
+            "init_errors": "خطاهای initialization سرویس‌ها",
             "db_vs_env": "کلیدهای دیتابیس در startup به environment منتقل می‌شوند"
         }
     }
