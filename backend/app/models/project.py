@@ -84,6 +84,27 @@ class Project(Base):
     last_analysis_at = Column(DateTime)  # زمان آخرین تحلیل
     last_analysis_models = Column(Text)  # JSON: لیست مدل‌های استفاده شده
 
+    # ====================================
+    # 🆕 وضعیت تحلیل در حال اجرا (برای pause/resume)
+    # ====================================
+    analysis_progress = Column(Text)  # JSON: {
+    #   "status": "running|paused|completed|failed",
+    #   "analysis_id": "...",
+    #   "phase": "micro|macro|structural",
+    #   "total_files": 50,
+    #   "analyzed_files": 25,
+    #   "completed_files": ["file1.py", "file2.py", ...],
+    #   "current_file": "file3.py",
+    #   "current_model": "gpt-4",
+    #   "model_statuses": {"gpt-4": "working", ...},
+    #   "started_at": "...",
+    #   "last_update": "...",
+    #   "elapsed_time": 120.5,
+    #   "issues_found": 15,
+    #   "partial_results": {...},  # نتایج تا این لحظه
+    #   "error": null
+    # }
+
     # محتوای Roadmap و README (ایجاد/به‌روزرسانی شده توسط AI)
     roadmap_content = Column(Text)  # محتوای فایل ROADMAP.md
     readme_content = Column(Text)  # محتوای فایل README.md

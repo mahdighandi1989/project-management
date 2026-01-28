@@ -161,6 +161,11 @@ def migrate_db():
                 cursor.execute("ALTER TABLE projects ADD COLUMN last_analysis_models TEXT")
                 logger.info("Added 'last_analysis_models' column to projects table")
 
+            # وضعیت تحلیل در حال اجرا (برای pause/resume)
+            if "analysis_progress" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN analysis_progress TEXT")
+                logger.info("Added 'analysis_progress' column to projects table")
+
             # محتوای Roadmap
             if "roadmap_content" not in existing_cols:
                 cursor.execute("ALTER TABLE projects ADD COLUMN roadmap_content TEXT")
