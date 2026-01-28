@@ -676,7 +676,7 @@ async def run_direct_analysis(project_id: str, db=Depends(get_db)):
             "hint": "لطفا کلیدهای API را در تنظیمات یا متغیرهای محیطی وارد کنید"
         }
 
-    model_ids = [m.id for m in available_models[:2]]  # حداکثر 2 مدل برای تست
+    model_ids = [m.id for m in available_models]  # همه مدل‌های در دسترس
 
     # اجرای تحلیل مستقیم
     try:
@@ -929,8 +929,8 @@ async def run_health_analysis(
 
     model_ids = request.model_ids
     if not model_ids or "all" in model_ids:
-        # دریافت همه مدل‌های فعال
-        model_ids = [m.id for m in available_models[:3]]  # حداکثر 3 مدل
+        # دریافت همه مدل‌های فعال - بدون محدودیت
+        model_ids = [m.id for m in available_models]
 
     # اگر هیچ مدلی در دسترس نیست، خطا بده (نه fallback!)
     if not model_ids and not available_models:
