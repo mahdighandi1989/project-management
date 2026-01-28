@@ -144,6 +144,7 @@ async def get_all_profiles(
     sort_by: str = Query("overall_score", description="فیلد مرتب‌سازی"),
     order: str = Query("desc", description="ترتیب: asc یا desc"),
     limit: int = Query(50, description="تعداد نتایج"),
+    use_fallback: bool = Query(True, description="استفاده از داده‌های پیش‌فرض در صورت خالی بودن"),
     db=Depends(get_db)
 ):
     """
@@ -152,14 +153,24 @@ async def get_all_profiles(
     مرتب‌شده بر اساس نمره کلی (پیش‌فرض)
     شامل رتبه‌بندی و Tier هر مدل
     """
-    # اگر دیتابیس در دسترس نیست، داده‌های پیش‌فرض برگردان
+    # اگر دیتابیس در دسترس نیست
     if not DB_AVAILABLE or not MODELS_AVAILABLE or db is None:
-        return {
-            "success": True,
-            "profiles": _get_default_profile_list(),
-            "total": 0,
-            "note": "Using default profiles - database not available"
-        }
+        if use_fallback:
+            return {
+                "success": True,
+                "profiles": _get_default_profile_list(),
+                "total": 0,
+                "is_fallback": True,
+                "note": "Using default profiles - database not available"
+            }
+        else:
+            return {
+                "success": False,
+                "profiles": [],
+                "total": 0,
+                "is_fallback": False,
+                "error": "Database not available"
+            }
 
     try:
         # دریافت پروفایل‌ها از دیتابیس
@@ -174,9 +185,19 @@ async def get_all_profiles(
 
         profiles = query.limit(limit).all()
 
-        # اگر پروفایلی نیست، پروفایل‌های پیش‌فرض بساز
+        # اگر پروفایلی نیست
         if not profiles:
-            profiles = await _create_default_profiles(db)
+            if use_fallback:
+                # پروفایل‌های پیش‌فرض بساز
+                profiles = await _create_default_profiles(db)
+            else:
+                return {
+                    "success": True,
+                    "profiles": [],
+                    "total": 0,
+                    "is_fallback": False,
+                    "note": "No profiles found. Run health analysis on a project to create real profiles."
+                }
 
         # تبدیل به فرمت خروجی
         result = []
@@ -201,16 +222,27 @@ async def get_all_profiles(
         return {
             "success": True,
             "profiles": result,
-            "total": len(result)
+            "total": len(result),
+            "is_fallback": False
         }
     except Exception as e:
         logger.error(f"Error getting profiles: {e}")
-        return {
-            "success": True,
-            "profiles": _get_default_profile_list(),
-            "total": 0,
-            "note": f"Error: {str(e)}"
-        }
+        if use_fallback:
+            return {
+                "success": True,
+                "profiles": _get_default_profile_list(),
+                "total": 0,
+                "is_fallback": True,
+                "note": f"Error: {str(e)}"
+            }
+        else:
+            return {
+                "success": False,
+                "profiles": [],
+                "total": 0,
+                "is_fallback": False,
+                "error": str(e)
+            }
 
 
 @router.get("/profiles/{model_id}")
