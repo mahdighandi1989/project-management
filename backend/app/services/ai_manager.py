@@ -105,8 +105,17 @@ class AIManager:
         """لیست همه مدل‌های قابل استفاده"""
         available = []
         for model in get_enabled_models():
-            if model.provider in self._services:
-                if not self._services[model.provider].is_in_error_state():
+            # هندل کردن هر دو حالت enum و string
+            provider = model.provider
+            if isinstance(provider, str):
+                # تبدیل string به enum
+                try:
+                    provider = ModelProvider(provider)
+                except ValueError:
+                    continue
+
+            if provider in self._services:
+                if not self._services[provider].is_in_error_state():
                     available.append(model)
         return available
 
@@ -203,9 +212,17 @@ class AIManager:
         if not model:
             raise AIServiceError(f"Model {model_id} not found", "manager", model_id)
 
-        service = self._services.get(model.provider)
+        # هندل کردن هر دو حالت enum و string
+        provider = model.provider
+        if isinstance(provider, str):
+            try:
+                provider = ModelProvider(provider)
+            except ValueError:
+                raise AIServiceError(f"Unknown provider: {provider}", "manager", model_id)
+
+        service = self._services.get(provider)
         if not service:
-            raise AIServiceError(f"Provider {model.provider} not available", "manager", model_id)
+            raise AIServiceError(f"Provider {provider} not available", "manager", model_id)
 
         return await service.generate(model_id, messages, max_tokens, temperature, **kwargs)
 

@@ -51,7 +51,8 @@ class AIModel(BaseModel):
     supports_video: bool = False
     is_image_generator: bool = False
 
-    model_config = ConfigDict(use_enum_values=True)
+    # توجه: use_enum_values=False تا enum ها حفظ بشن برای مقایسه
+    model_config = ConfigDict(use_enum_values=False)
 
 
 # ===========================================
