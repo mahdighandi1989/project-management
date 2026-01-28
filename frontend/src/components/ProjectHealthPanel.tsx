@@ -78,6 +78,21 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
   const [hasRealData, setHasRealData] = useState(false);
   const [analysisLog, setAnalysisLog] = useState<string[]>([]);
 
+  // Progress tracking state
+  const [progressData, setProgressData] = useState<{
+    phase: string;
+    current_file: string;
+    current_model: string;
+    analyzed_files: number;
+    total_files: number;
+    progress_percentage: number;
+    elapsed_time: number;
+    issues_found: number;
+    message: string;
+    model_statuses: Record<string, string>;
+  } | null>(null);
+  const [showProgressDetails, setShowProgressDetails] = useState(false);
+
   // Messages
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -126,28 +141,114 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
   const runDirectAnalysis = async () => {
     setAnalyzing(true);
     setAnalysisLog(['🚀 شروع تحلیل مستقیم...']);
+    setProgressData(null);
 
     try {
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/analyze-direct`, {
-        method: 'POST'
+      // استفاده از Streaming endpoint برای پیشرفت Real-time
+      const response = await fetch(`${API_BASE}/api/projects/${projectId}/health/analyze-stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model_ids: settings?.target_models || [],
+          full_analysis: true
+        })
       });
 
-      const data = await res.json();
+      if (!response.ok) {
+        // اگر streaming endpoint موجود نبود، از روش قدیمی استفاده کن
+        const fallbackRes = await fetch(`${API_BASE}/api/projects/${projectId}/health/analyze-direct`, {
+          method: 'POST'
+        });
+        const data = await fallbackRes.json();
 
-      if (data.success) {
-        setAnalysisLog(prev => [...prev, '✅ تحلیل کامل شد']);
-        showSuccess('تحلیل با موفقیت انجام شد');
-        await loadAllData();
-        await checkAnalysisStatus();
-      } else {
-        setAnalysisLog(prev => [...prev, `❌ خطا: ${data.error}`]);
-        showError(data.error || 'خطا در تحلیل');
+        if (data.success) {
+          setAnalysisLog(prev => [...prev, '✅ تحلیل کامل شد']);
+          showSuccess('تحلیل با موفقیت انجام شد');
+          await loadAllData();
+          await checkAnalysisStatus();
+        } else {
+          setAnalysisLog(prev => [...prev, `❌ خطا: ${data.error}`]);
+          showError(data.error || 'خطا در تحلیل');
+        }
+        return;
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('خطا در خواندن استریم');
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+
+              // به‌روزرسانی وضعیت پیشرفت
+              if (data.event !== 'heartbeat') {
+                setProgressData({
+                  phase: data.phase || 'preparing',
+                  current_file: data.current_file || '',
+                  current_model: data.current_model || '',
+                  analyzed_files: data.analyzed_files || 0,
+                  total_files: data.total_files || 0,
+                  progress_percentage: data.progress_percentage || 0,
+                  elapsed_time: data.elapsed_time || 0,
+                  issues_found: data.issues_found || 0,
+                  message: data.message || '',
+                  model_statuses: data.model_statuses || {},
+                });
+
+                // به‌روزرسانی لاگ
+                if (data.message) {
+                  setAnalysisLog(prev => {
+                    const newLog = `${data.message}`;
+                    if (prev[prev.length - 1] !== newLog) {
+                      return [...prev.slice(-10), newLog];
+                    }
+                    return prev;
+                  });
+                }
+              }
+
+              // اگر تحلیل تمام شد
+              if (data.event === 'done' || data.event === 'analysis_completed') {
+                setAnalysisLog(prev => [...prev, '✅ تحلیل کامل شد!']);
+                showSuccess('تحلیل با موفقیت انجام شد');
+                await loadAllData();
+                await checkAnalysisStatus();
+                break;
+              }
+
+              // اگر خطا داریم
+              if (data.event === 'error') {
+                setAnalysisLog(prev => [...prev, `❌ ${data.message}`]);
+                showError(data.message || 'خطا در تحلیل');
+                break;
+              }
+            } catch (e) {
+              // JSON parse error - ignore
+            }
+          }
+        }
       }
     } catch (e) {
       setAnalysisLog(prev => [...prev, `❌ خطای شبکه: ${e}`]);
       showError('خطا در ارتباط با سرور');
     } finally {
       setAnalyzing(false);
+      // پاک کردن progress بعد از چند ثانیه
+      setTimeout(() => setProgressData(null), 5000);
     }
   };
 
@@ -398,8 +499,98 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
           </div>
         </div>
 
-        {/* لاگ تحلیل */}
-        {analysisLog.length > 0 && (
+        {/* نوار پیشرفت Real-time */}
+        {analyzing && progressData && (
+          <div className="mt-3">
+            {/* نوار اصلی پیشرفت - کلیک‌پذیر */}
+            <div
+              onClick={() => setShowProgressDetails(!showProgressDetails)}
+              className="cursor-pointer bg-black/30 rounded-lg p-3 relative overflow-hidden"
+            >
+              {/* نوار پیشرفت داخلی */}
+              <div
+                className="absolute inset-0 bg-white/20 transition-all duration-500"
+                style={{ width: `${progressData.progress_percentage}%` }}
+              />
+
+              <div className="relative z-10">
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2">
+                    <span className="animate-pulse text-yellow-300">●</span>
+                    <span className="font-medium text-sm">
+                      {progressData.phase === 'micro' && 'بررسی فایل‌ها'}
+                      {progressData.phase === 'macro' && 'بررسی همکاری‌ها'}
+                      {progressData.phase === 'structural' && 'بررسی ساختار'}
+                      {progressData.phase === 'finalizing' && 'نهایی‌سازی'}
+                      {progressData.phase === 'preparing' && 'آماده‌سازی'}
+                      {!progressData.phase && 'در حال تحلیل'}
+                    </span>
+                  </div>
+                  <span className="font-mono text-lg font-bold">{progressData.progress_percentage.toFixed(0)}%</span>
+                </div>
+
+                <div className="text-xs opacity-90">
+                  {progressData.current_model && (
+                    <span className="inline-flex items-center gap-1 bg-white/20 px-2 py-0.5 rounded mr-2">
+                      🤖 {progressData.current_model.split('/').pop()}
+                    </span>
+                  )}
+                  {progressData.message && (
+                    <span className="truncate">{progressData.message}</span>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between mt-1 text-xs opacity-75">
+                  <span>فایل: {progressData.analyzed_files}/{progressData.total_files}</span>
+                  <span>مشکلات: {progressData.issues_found}</span>
+                  <span>{Math.floor(progressData.elapsed_time)}s</span>
+                  <span className="hover:underline">
+                    {showProgressDetails ? '▼' : '▲'} جزئیات
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* پنل جزئیات - نمایش با کلیک */}
+            {showProgressDetails && (
+              <div className="mt-2 bg-gray-900 text-gray-100 rounded-lg p-3 text-xs font-mono max-h-48 overflow-auto">
+                <div className="mb-2 text-gray-400">وضعیت مدل‌ها:</div>
+                <div className="grid grid-cols-2 gap-1">
+                  {Object.entries(progressData.model_statuses || {}).map(([modelId, status]) => (
+                    <div
+                      key={modelId}
+                      className={`p-1.5 rounded text-xs ${
+                        status === 'working'
+                          ? 'bg-yellow-500/30 text-yellow-300 animate-pulse'
+                          : status === 'completed'
+                          ? 'bg-green-500/30 text-green-300'
+                          : status === 'failed'
+                          ? 'bg-red-500/30 text-red-300'
+                          : 'bg-gray-700 text-gray-400'
+                      }`}
+                    >
+                      {status === 'working' && '⏳'}
+                      {status === 'completed' && '✅'}
+                      {status === 'failed' && '❌'}
+                      {status === 'waiting' && '⏸️'}
+                      {' '}{modelId.split('/').pop()}
+                    </div>
+                  ))}
+                </div>
+
+                {progressData.current_file && (
+                  <div className="mt-2 pt-2 border-t border-gray-700">
+                    <span className="text-gray-400">فایل: </span>
+                    <span className="text-blue-300">{progressData.current_file}</span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* لاگ تحلیل (فقط وقتی progress نیست) */}
+        {analysisLog.length > 0 && !progressData && (
           <div className="mt-3 bg-black/20 rounded-lg p-2 text-xs font-mono max-h-32 overflow-auto">
             {analysisLog.map((log, i) => (
               <div key={i}>{log}</div>

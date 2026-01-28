@@ -11,9 +11,12 @@ Project Health Analysis API
 """
 
 import json
+import asyncio
+import logging
 from datetime import datetime
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ...core.database import get_db
@@ -21,6 +24,8 @@ from ...models.project import Project, ProjectFile
 from ...services.project_health_analyzer import get_project_health_analyzer
 from ...services.report_validator import get_report_validator
 from ...services.model_profiler import get_model_profiler
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/projects", tags=["project-health"])
 
@@ -729,6 +734,174 @@ async def run_direct_analysis(project_id: str, db=Depends(get_db)):
             "error": str(e),
             "models_attempted": model_ids
         }
+
+
+@router.post("/{project_id}/health/analyze-stream")
+async def run_streaming_analysis(
+    project_id: str,
+    request: RunAnalysisRequest = None,
+    db=Depends(get_db)
+):
+    """
+    تحلیل با استریم پیشرفت (Server-Sent Events)
+
+    این endpoint پیشرفت تحلیل را به صورت Real-time ارسال می‌کند
+    """
+    logger.info(f"🔬 Starting STREAMING analysis for project {project_id}")
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت فایل‌های پروژه
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+    files_data = [
+        {
+            "path": f.file_path,
+            "content": f.content or "",
+            "file_type": f.file_type
+        }
+        for f in files
+    ]
+
+    if not files_data:
+        raise HTTPException(status_code=400, detail="پروژه فایلی ندارد")
+
+    # بررسی مدل‌های در دسترس
+    from ...services.ai_manager import get_ai_manager
+    from ...services.deep_analysis_service import DeepAnalysisService
+
+    ai_manager = get_ai_manager()
+    available_models = ai_manager.get_available_models()
+
+    if not available_models:
+        raise HTTPException(status_code=400, detail="هیچ مدل AI در دسترس نیست")
+
+    # انتخاب مدل‌ها
+    if request and request.model_ids:
+        model_ids = request.model_ids
+    else:
+        model_ids = [m.id for m in available_models]
+
+    # صف برای ارسال رویدادها
+    progress_queue: asyncio.Queue = asyncio.Queue()
+
+    async def progress_callback(progress_data: dict):
+        """callback برای دریافت رویدادهای پیشرفت"""
+        await progress_queue.put(progress_data)
+
+    async def generate_events():
+        """ژنراتور رویدادهای SSE"""
+        final_result = None
+
+        async def run_analysis_task():
+            nonlocal final_result
+            try:
+                # ساخت DeepAnalysisService با progress callback
+                deep_analyzer = DeepAnalysisService(
+                    ai_manager=ai_manager,
+                    progress_callback=progress_callback
+                )
+
+                # اجرای تحلیل
+                final_result = await deep_analyzer.run_full_analysis(
+                    project_id=project_id,
+                    files=files_data,
+                    roadmap_content=project.roadmap_content or "",
+                    readme_content=project.readme_content or "",
+                    model_ids=model_ids,
+                    instruction="تحلیل کامل پروژه"
+                )
+
+                # ذخیره نتایج
+                if final_result.get("status") == "completed":
+                    # باز کردن session جدید برای ذخیره
+                    from ...core.database import SessionLocal
+                    new_db = SessionLocal()
+                    try:
+                        proj = new_db.query(Project).filter(Project.id == project_id).first()
+                        if proj:
+                            proj.health_scores = json.dumps(
+                                final_result.get("overall_scores", {}),
+                                ensure_ascii=False
+                            )
+                            proj.file_health_map = json.dumps(
+                                final_result.get("file_health_map", {}),
+                                ensure_ascii=False
+                            )
+                            proj.issues_found = json.dumps(
+                                final_result.get("issues", [])[:100],
+                                ensure_ascii=False
+                            )
+                            proj.last_analysis_at = datetime.utcnow()
+                            proj.last_analysis_models = json.dumps(model_ids, ensure_ascii=False)
+                            new_db.commit()
+                            logger.info(f"✅ Streaming analysis completed and saved!")
+                    finally:
+                        new_db.close()
+
+            except Exception as e:
+                logger.error(f"Streaming analysis failed: {e}", exc_info=True)
+                await progress_queue.put({
+                    "event": "error",
+                    "message": str(e),
+                    "error": True
+                })
+            finally:
+                # سیگنال اتمام
+                await progress_queue.put({
+                    "event": "done",
+                    "has_result": final_result is not None,
+                    "overall_score": final_result.get("overall_scores", {}).get("total", 0) if final_result else 0
+                })
+
+        # شروع تحلیل
+        analysis_task = asyncio.create_task(run_analysis_task())
+
+        try:
+            while True:
+                try:
+                    # دریافت رویداد با timeout
+                    progress_data = await asyncio.wait_for(
+                        progress_queue.get(),
+                        timeout=2.0
+                    )
+
+                    # ارسال رویداد SSE
+                    event_type = progress_data.get("event", "progress")
+                    data = json.dumps(progress_data, ensure_ascii=False, default=str)
+                    yield f"event: {event_type}\ndata: {data}\n\n"
+
+                    # اگر تحلیل تمام شد
+                    if event_type == "done" or event_type == "analysis_completed":
+                        break
+
+                except asyncio.TimeoutError:
+                    # ارسال heartbeat
+                    yield f"event: heartbeat\ndata: {{}}\n\n"
+
+                    # بررسی وضعیت task
+                    if analysis_task.done():
+                        break
+
+        except Exception as e:
+            logger.error(f"Error in SSE stream: {e}")
+            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+
+        finally:
+            if not analysis_task.done():
+                analysis_task.cancel()
+
+    return StreamingResponse(
+        generate_events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "*"
+        }
+    )
 
 
 @router.get("/{project_id}/health")
