@@ -21,6 +21,7 @@ import {
   CommandLineIcon,
   ArchiveBoxIcon,
 } from '@heroicons/react/24/outline';
+import GlobalAnalysisProgress from './GlobalAnalysisProgress';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -94,6 +95,9 @@ export default function Layout({ children }: LayoutProps) {
             );
           })}
         </nav>
+
+        {/* Global Analysis Progress */}
+        <GlobalAnalysisProgress />
 
         {/* Theme toggle */}
         <div className="p-4 border-t border-gray-200 dark:border-gray-700">

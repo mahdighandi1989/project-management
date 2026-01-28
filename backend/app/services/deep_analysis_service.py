@@ -247,7 +247,8 @@ class DeepAnalysisService:
         readme_content: str = "",
         model_ids: List[str] = None,
         instruction: str = "",
-        db_session=None
+        db_session=None,
+        progress_manager=None
     ) -> Dict[str, Any]:
         """
         اجرای تحلیل کامل سه‌مرحله‌ای
@@ -260,10 +261,12 @@ class DeepAnalysisService:
             model_ids: لیست مدل‌های AI برای تحلیل
             instruction: دستورات اضافی
             db_session: session دیتابیس
+            progress_manager: مدیر پیشرفت برای ذخیره وضعیت و pause/resume/stop
 
         Returns:
             نتایج کامل تحلیل
         """
+        self._progress_manager = progress_manager
         analysis_id = str(uuid.uuid4())[:8]
         start_time = datetime.now()
         start_time_unix = time.time()
@@ -440,6 +443,7 @@ class DeepAnalysisService:
         - بررسی تک‌تک فایل‌ها
         - تحلیل تمام خطوط کد
         - بررسی جزئیات کامل
+        - پشتیبانی از pause/resume/stop
         """
         start_time = time.time()
         logger.info(f"🔍 [MICRO ANALYSIS] Starting with {len(files)} files and {len(model_ids)} models")
@@ -454,8 +458,8 @@ class DeepAnalysisService:
             }
         }
 
-        # تحلیل موازی فایل‌ها با چند مدل
-        tasks = []
+        # آماده‌سازی لیست فایل‌ها
+        files_to_analyze = []
         skipped_files = []
         for file_data in files:
             file_path = file_data.get("path", file_data.get("file_path", ""))
@@ -465,40 +469,73 @@ class DeepAnalysisService:
                 skipped_files.append(file_path)
                 continue
 
-            # برای هر فایل، تحلیل با همه مدل‌ها
-            task = self._analyze_single_file_with_models(
-                file_path=file_path,
-                content=content,
-                roadmap_content=roadmap_content,
-                model_ids=model_ids,
-                instruction=instruction
-            )
-            tasks.append(task)
+            files_to_analyze.append({
+                "file_path": file_path,
+                "content": content
+            })
 
-        logger.info(f"🔍 [MICRO ANALYSIS] Created {len(tasks)} analysis tasks, skipped {len(skipped_files)} empty files")
+        logger.info(f"🔍 [MICRO ANALYSIS] {len(files_to_analyze)} files to analyze, {len(skipped_files)} skipped")
 
         if skipped_files and len(skipped_files) <= 10:
             logger.info(f"🔍 [MICRO ANALYSIS] Skipped files: {skipped_files}")
 
-        # اجرای موازی
-        if tasks:
-            logger.info(f"🔍 [MICRO ANALYSIS] Running asyncio.gather for {len(tasks)} tasks...")
-            file_results = await asyncio.gather(*tasks, return_exceptions=True)
-            logger.info(f"🔍 [MICRO ANALYSIS] asyncio.gather completed, got {len(file_results)} results")
+        # تحلیل فایل‌ها (با پشتیبانی pause/stop)
+        # به جای اجرای همه موازی، در دسته‌های کوچکتر اجرا می‌کنیم
+        batch_size = 3  # تعداد فایل در هر دسته
 
-            for idx, result in enumerate(file_results):
-                if isinstance(result, Exception):
-                    logger.error(f"❌ [MICRO ANALYSIS] Task {idx} exception: {result}")
-                    continue
+        for i in range(0, len(files_to_analyze), batch_size):
+            # بررسی درخواست توقف
+            if self._progress_manager:
+                if self._progress_manager.should_stop():
+                    logger.info(f"⏹️ [MICRO ANALYSIS] Stop requested at file {i}/{len(files_to_analyze)}")
+                    results["summary"]["stopped"] = True
+                    break
 
-                if result and result.get("file_path"):
-                    file_path = result["file_path"]
-                    results["files"][file_path] = result
-                    results["summary"]["analyzed"] += 1
-                    results["summary"]["issues_found"] += len(result.get("issues", []))
-                    logger.info(f"✅ [MICRO ANALYSIS] File {file_path}: score={result.get('aggregated_scores', {}).get('total', 'N/A')}")
-        else:
-            logger.warning(f"⚠️ [MICRO ANALYSIS] No tasks to run! All {len(files)} files were skipped.")
+                # بررسی درخواست pause
+                while self._progress_manager.should_pause():
+                    logger.info(f"⏸️ [MICRO ANALYSIS] Paused at file {i}/{len(files_to_analyze)}")
+                    await asyncio.sleep(2)  # چک کردن هر 2 ثانیه
+                    if self._progress_manager.should_stop():
+                        break
+
+            batch = files_to_analyze[i:i + batch_size]
+            tasks = []
+
+            for file_data in batch:
+                task = self._analyze_single_file_with_models(
+                    file_path=file_data["file_path"],
+                    content=file_data["content"],
+                    roadmap_content=roadmap_content,
+                    model_ids=model_ids,
+                    instruction=instruction
+                )
+                tasks.append(task)
+
+            # اجرای موازی این دسته
+            if tasks:
+                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                for result in batch_results:
+                    if isinstance(result, Exception):
+                        logger.error(f"❌ [MICRO ANALYSIS] Task exception: {result}")
+                        continue
+
+                    if result and result.get("file_path"):
+                        file_path = result["file_path"]
+                        results["files"][file_path] = result
+                        results["summary"]["analyzed"] += 1
+                        results["summary"]["issues_found"] += len(result.get("issues", []))
+
+                        # به‌روزرسانی progress manager
+                        if self._progress_manager:
+                            total_score = result.get('aggregated_scores', {}).get('total', 0)
+                            self._progress_manager.complete_file(
+                                file_path=file_path,
+                                result=result,
+                                issues=len(result.get("issues", []))
+                            )
+
+                        logger.info(f"✅ [MICRO ANALYSIS] File {file_path}: score={result.get('aggregated_scores', {}).get('total', 'N/A')}")
 
         elapsed = time.time() - start_time
         logger.info(f"🔍 [MICRO ANALYSIS] Completed in {elapsed:.2f}s. Analyzed {results['summary']['analyzed']} files, found {results['summary']['issues_found']} issues")

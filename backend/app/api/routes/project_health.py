@@ -24,8 +24,18 @@ from ...models.project import Project, ProjectFile
 from ...services.project_health_analyzer import get_project_health_analyzer
 from ...services.report_validator import get_report_validator
 from ...services.model_profiler import get_model_profiler
+from ...services.analysis_progress_manager import (
+    AnalysisProgressManager,
+    get_analysis_progress,
+    pause_analysis as pause_analysis_helper,
+    resume_analysis as resume_analysis_helper,
+    stop_analysis as stop_analysis_helper
+)
 
 logger = logging.getLogger(__name__)
+
+# ذخیره progress managers فعال برای کنترل pause/resume/stop
+_active_progress_managers: dict = {}
 
 router = APIRouter(prefix="/api/projects", tags=["project-health"])
 
@@ -1261,6 +1271,15 @@ async def _run_analysis_task(
         # 3. اجرای تحلیل عمیق سه‌مرحله‌ای
         logger.info(f"🔬 Starting deep analysis for project {project_id} with models: {model_ids}")
 
+        # ایجاد progress manager برای ذخیره وضعیت
+        progress_manager = AnalysisProgressManager(project_id, db)
+        progress_manager.start_analysis(
+            analysis_id=f"analysis_{project_id[:8]}",
+            total_files=len(files_data),
+            model_ids=model_ids
+        )
+        _active_progress_managers[project_id] = progress_manager
+
         try:
             analysis_result = await deep_analyzer.run_full_analysis(
                 project_id=project_id,
@@ -1269,7 +1288,8 @@ async def _run_analysis_task(
                 readme_content=readme_content,
                 model_ids=model_ids,
                 instruction=instruction,
-                db_session=db
+                db_session=db,
+                progress_manager=progress_manager
             )
             logger.info(f"📊 Analysis result status: {analysis_result.get('status')}")
             logger.info(f"📊 Files analyzed: {analysis_result.get('analyzed_files', 0)}")
@@ -1315,10 +1335,20 @@ async def _run_analysis_task(
                 project.ideal_state = analysis_result["ideal_state"]
 
             logger.info(f"✅ Analysis completed for project {project_id}. Score: {analysis_result.get('overall_scores', {}).get('total', 0):.1f}")
+
+            # به‌روزرسانی progress manager
+            if project_id in _active_progress_managers:
+                _active_progress_managers[project_id].complete_analysis(
+                    overall_score=analysis_result.get('overall_scores', {}).get('total', 0),
+                    total_issues=len(analysis_result.get("issues", []))
+                )
         else:
             logger.warning(f"⚠️ Analysis did not complete successfully: {analysis_result.get('status')}")
             if analysis_result.get("error"):
                 logger.error(f"❌ Analysis error: {analysis_result.get('error')}")
+                # علامت‌گذاری خطا در progress manager
+                if project_id in _active_progress_managers:
+                    _active_progress_managers[project_id].fail_analysis(analysis_result.get("error", "Unknown error"))
 
         db.commit()
         logger.info(f"💾 Results saved to database for project {project_id}")
@@ -1346,6 +1376,9 @@ async def _run_analysis_task(
             pass
 
     finally:
+        # پاک کردن از active progress managers
+        if project_id in _active_progress_managers:
+            del _active_progress_managers[project_id]
         db.close()
 
 
@@ -1752,3 +1785,367 @@ async def compare_models(model_ids: List[str]):
         "success": True,
         "comparison": comparison
     }
+
+
+# =====================================
+# Analysis Progress & Control Endpoints
+# برای Pause/Resume/Stop و Polling
+# =====================================
+
+@router.get("/{project_id}/health/progress")
+async def get_analysis_progress_endpoint(project_id: str, db=Depends(get_db)):
+    """
+    دریافت وضعیت فعلی تحلیل (برای Polling)
+
+    این endpoint به جای SSE استفاده میشه تا با جابجایی صفحه قطع نشه
+
+    Returns:
+        - status: idle, running, paused, completed, failed, stopped
+        - phase: preparing, micro, macro, structural, completed
+        - progress: درصد پیشرفت
+        - current_file: فایل در حال تحلیل
+        - current_model: مدل در حال کار
+        - analyzed_files: تعداد فایل‌های تحلیل شده
+        - total_files: تعداد کل فایل‌ها
+        - issues_found: تعداد مشکلات یافت شده
+        - elapsed_time: زمان سپری شده (ثانیه)
+        - model_statuses: وضعیت هر مدل
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # بارگذاری progress از دیتابیس
+    progress_manager = AnalysisProgressManager(project_id, db)
+    progress = progress_manager.load_progress()
+
+    # محاسبه درصد پیشرفت
+    progress_percentage = progress_manager.get_progress_percentage()
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "progress": {
+            "status": progress.get("status", "idle"),
+            "phase": progress.get("phase", "preparing"),
+            "percentage": progress_percentage,
+            "total_files": progress.get("total_files", 0),
+            "analyzed_files": progress.get("analyzed_files", 0),
+            "current_file": progress.get("current_file", ""),
+            "current_model": progress.get("current_model", ""),
+            "model_statuses": progress.get("model_statuses", {}),
+            "issues_found": progress.get("issues_found", 0),
+            "elapsed_time": progress.get("elapsed_time", 0),
+            "started_at": progress.get("started_at"),
+            "last_update": progress.get("last_update"),
+            "message": progress.get("message", ""),
+            "error": progress.get("error"),
+            "can_resume": progress_manager.can_resume()
+        }
+    }
+
+
+@router.post("/{project_id}/health/pause")
+async def pause_project_analysis(project_id: str, db=Depends(get_db)):
+    """
+    توقف موقت تحلیل
+
+    تحلیل در نقطه فعلی متوقف میشه و میتونه ادامه پیدا کنه
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    progress_manager = AnalysisProgressManager(project_id, db)
+    progress = progress_manager.load_progress()
+
+    if progress.get("status") != "running":
+        return {
+            "success": False,
+            "message": "تحلیل در حال اجرا نیست",
+            "current_status": progress.get("status")
+        }
+
+    # علامت‌گذاری برای توقف
+    progress_manager.pause_analysis()
+
+    # همچنین به active manager سیگنال بده
+    if project_id in _active_progress_managers:
+        _active_progress_managers[project_id].pause_analysis()
+
+    logger.info(f"⏸️ Analysis paused for project {project_id}")
+
+    return {
+        "success": True,
+        "message": "تحلیل متوقف شد",
+        "project_id": project_id,
+        "analyzed_files": progress.get("analyzed_files", 0),
+        "can_resume": True
+    }
+
+
+@router.post("/{project_id}/health/resume")
+async def resume_project_analysis(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    db=Depends(get_db)
+):
+    """
+    ادامه تحلیل متوقف شده
+
+    از جایی که متوقف شده ادامه میده
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    progress_manager = AnalysisProgressManager(project_id, db)
+    progress = progress_manager.load_progress()
+
+    if not progress_manager.can_resume():
+        return {
+            "success": False,
+            "message": "امکان ادامه تحلیل وجود ندارد",
+            "current_status": progress.get("status"),
+            "hint": "تحلیل باید در وضعیت paused یا failed باشد و حداقل یک فایل تحلیل شده باشد"
+        }
+
+    # دریافت فایل‌های پروژه
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+    all_files = [f.file_path for f in files]
+
+    # فایل‌های باقیمانده
+    remaining_files = progress_manager.get_remaining_files(all_files)
+
+    if not remaining_files:
+        # همه فایل‌ها تحلیل شدن
+        progress_manager.complete_analysis()
+        return {
+            "success": True,
+            "message": "همه فایل‌ها قبلاً تحلیل شده‌اند",
+            "status": "completed"
+        }
+
+    # ادامه تحلیل
+    progress_manager.resume_analysis()
+
+    # دریافت تنظیمات قبلی
+    model_ids = list(progress.get("model_statuses", {}).keys())
+    if not model_ids:
+        from ...services.ai_manager import get_ai_manager
+        ai_manager = get_ai_manager()
+        model_ids = [m.id for m in ai_manager.get_available_models()]
+
+    # اجرای ادامه تحلیل در background
+    asyncio.create_task(
+        _run_resumed_analysis_task(
+            project_id=project_id,
+            remaining_files=remaining_files,
+            model_ids=model_ids,
+            progress_manager=progress_manager
+        )
+    )
+
+    logger.info(f"▶️ Analysis resumed for project {project_id}, {len(remaining_files)} files remaining")
+
+    return {
+        "success": True,
+        "message": "تحلیل ادامه یافت",
+        "project_id": project_id,
+        "remaining_files": len(remaining_files),
+        "completed_files": len(progress.get("completed_files", []))
+    }
+
+
+@router.post("/{project_id}/health/stop")
+async def stop_project_analysis(project_id: str, db=Depends(get_db)):
+    """
+    توقف کامل تحلیل
+
+    تحلیل متوقف میشه و نتایج جزئی ذخیره میشه
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    progress_manager = AnalysisProgressManager(project_id, db)
+    progress = progress_manager.load_progress()
+
+    if progress.get("status") not in ["running", "paused"]:
+        return {
+            "success": False,
+            "message": "تحلیلی برای توقف وجود ندارد",
+            "current_status": progress.get("status")
+        }
+
+    # توقف کامل
+    progress_manager.stop_analysis()
+
+    # سیگنال به active manager
+    if project_id in _active_progress_managers:
+        _active_progress_managers[project_id].stop_analysis()
+
+    # ذخیره نتایج جزئی
+    partial_results = progress.get("partial_results", {})
+    if partial_results:
+        try:
+            # استخراج نمرات از نتایج جزئی
+            micro_results = partial_results.get("micro_analysis", {}).get("files", {})
+            if micro_results:
+                # محاسبه میانگین نمرات
+                total_score = 0
+                count = 0
+                for file_result in micro_results.values():
+                    if isinstance(file_result, dict) and "score" in file_result:
+                        total_score += file_result.get("score", 0)
+                        count += 1
+
+                if count > 0:
+                    avg_score = total_score / count
+                    project.health_scores = json.dumps({
+                        "total": avg_score,
+                        "micro": avg_score,
+                        "partial": True,
+                        "files_analyzed": count
+                    }, ensure_ascii=False)
+
+                    project.file_health_map = json.dumps(micro_results, ensure_ascii=False)
+                    db.commit()
+        except Exception as e:
+            logger.error(f"Error saving partial results: {e}")
+
+    logger.info(f"⏹️ Analysis stopped for project {project_id}")
+
+    return {
+        "success": True,
+        "message": "تحلیل متوقف شد",
+        "project_id": project_id,
+        "analyzed_files": progress.get("analyzed_files", 0),
+        "partial_results_saved": bool(partial_results)
+    }
+
+
+@router.post("/{project_id}/health/clear-progress")
+async def clear_analysis_progress(project_id: str, db=Depends(get_db)):
+    """
+    پاک کردن وضعیت تحلیل
+
+    برای شروع تحلیل از صفر
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    progress_manager = AnalysisProgressManager(project_id, db)
+    progress_manager.clear_progress()
+
+    # پاک کردن از active managers
+    if project_id in _active_progress_managers:
+        del _active_progress_managers[project_id]
+
+    logger.info(f"🗑️ Analysis progress cleared for project {project_id}")
+
+    return {
+        "success": True,
+        "message": "وضعیت تحلیل پاک شد",
+        "project_id": project_id
+    }
+
+
+async def _run_resumed_analysis_task(
+    project_id: str,
+    remaining_files: List[str],
+    model_ids: List[str],
+    progress_manager: AnalysisProgressManager
+):
+    """
+    تسک ادامه تحلیل از نقطه توقف
+    """
+    from ...core.database import SessionLocal
+    from ...services.deep_analysis_service import get_deep_analysis_service
+    from ...services.ai_manager import get_ai_manager
+
+    logger.info(f"📂 Resuming analysis for {project_id} with {len(remaining_files)} remaining files")
+
+    db = SessionLocal()
+
+    try:
+        # ذخیره progress manager در دیکشنری فعال
+        _active_progress_managers[project_id] = progress_manager
+
+        ai_manager = get_ai_manager()
+
+        # دریافت محتوای فایل‌های باقیمانده
+        files = db.query(ProjectFile).filter(
+            ProjectFile.project_id == project_id,
+            ProjectFile.file_path.in_(remaining_files)
+        ).all()
+
+        files_data = [
+            {
+                "path": f.file_path,
+                "content": f.content or "",
+                "file_type": f.file_type
+            }
+            for f in files
+        ]
+
+        project = db.query(Project).filter(Project.id == project_id).first()
+
+        # ساخت deep analyzer با progress callback
+        async def progress_callback(data: dict):
+            progress_manager._progress.update(data)
+            progress_manager.save_progress()
+
+        from ...services.deep_analysis_service import DeepAnalysisService
+        deep_analyzer = DeepAnalysisService(
+            ai_manager=ai_manager,
+            progress_callback=progress_callback
+        )
+
+        # اجرای تحلیل
+        analysis_result = await deep_analyzer.run_full_analysis(
+            project_id=project_id,
+            files=files_data,
+            roadmap_content=project.roadmap_content or "",
+            readme_content=project.readme_content or "",
+            model_ids=model_ids,
+            instruction="ادامه تحلیل",
+            db_session=db,
+            progress_manager=progress_manager
+        )
+
+        # ذخیره نتایج نهایی
+        if analysis_result.get("status") == "completed":
+            project.health_scores = json.dumps(
+                analysis_result.get("overall_scores", {}),
+                ensure_ascii=False
+            )
+            project.file_health_map = json.dumps(
+                analysis_result.get("file_health_map", {}),
+                ensure_ascii=False
+            )
+            project.issues_found = json.dumps(
+                analysis_result.get("issues", [])[:100],
+                ensure_ascii=False
+            )
+            project.last_analysis_at = datetime.utcnow()
+            project.last_analysis_models = json.dumps(model_ids, ensure_ascii=False)
+            db.commit()
+
+            progress_manager.complete_analysis(
+                overall_score=analysis_result.get("overall_scores", {}).get("total", 0),
+                total_issues=len(analysis_result.get("issues", []))
+            )
+
+            logger.info(f"✅ Resumed analysis completed for {project_id}")
+
+    except Exception as e:
+        logger.error(f"❌ Resumed analysis failed for {project_id}: {e}", exc_info=True)
+        progress_manager.fail_analysis(str(e))
+
+    finally:
+        # پاک کردن از active managers
+        if project_id in _active_progress_managers:
+            del _active_progress_managers[project_id]
+        db.close()

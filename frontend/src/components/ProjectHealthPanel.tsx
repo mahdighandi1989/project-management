@@ -80,18 +80,23 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
 
   // Progress tracking state
   const [progressData, setProgressData] = useState<{
+    status: string;
     phase: string;
     current_file: string;
     current_model: string;
     analyzed_files: number;
     total_files: number;
     progress_percentage: number;
+    percentage: number;
     elapsed_time: number;
     issues_found: number;
     message: string;
     model_statuses: Record<string, string>;
+    can_resume: boolean;
+    error?: string;
   } | null>(null);
   const [showProgressDetails, setShowProgressDetails] = useState(false);
+  const [pollingInterval, setPollingIntervalState] = useState<NodeJS.Timeout | null>(null);
 
   // Messages
   const [error, setError] = useState('');
@@ -101,7 +106,31 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
     loadAllData();
     loadAvailableModels();
     checkAnalysisStatus();
+    // بررسی وضعیت تحلیل در حال اجرا
+    pollProgress();
+
+    return () => {
+      // پاک‌سازی interval در هنگام unmount
+      if (pollingInterval) {
+        clearInterval(pollingInterval);
+      }
+    };
   }, [projectId]);
+
+  // شروع polling خودکار وقتی تحلیل در حال اجراست
+  useEffect(() => {
+    if (progressData?.status === 'running') {
+      if (!pollingInterval) {
+        const interval = setInterval(pollProgress, 2000); // هر 2 ثانیه
+        setPollingIntervalState(interval);
+      }
+    } else {
+      if (pollingInterval) {
+        clearInterval(pollingInterval);
+        setPollingIntervalState(null);
+      }
+    }
+  }, [progressData?.status]);
 
   const checkAnalysisStatus = async () => {
     try {
@@ -112,6 +141,119 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
       }
     } catch (e) {
       console.error('Error checking status:', e);
+    }
+  };
+
+  // Polling برای وضعیت پیشرفت - این باعث میشه حتی با جابجایی صفحه تحلیل قطع نشه
+  const pollProgress = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/progress`);
+      if (res.ok) {
+        const data = await res.json();
+        const progress = data.progress;
+
+        if (progress.status === 'running' || progress.status === 'paused') {
+          setAnalyzing(progress.status === 'running');
+          setProgressData({
+            status: progress.status,
+            phase: progress.phase || 'preparing',
+            current_file: progress.current_file || '',
+            current_model: progress.current_model || '',
+            analyzed_files: progress.analyzed_files || 0,
+            total_files: progress.total_files || 0,
+            progress_percentage: progress.percentage || 0,
+            percentage: progress.percentage || 0,
+            elapsed_time: progress.elapsed_time || 0,
+            issues_found: progress.issues_found || 0,
+            message: progress.message || '',
+            model_statuses: progress.model_statuses || {},
+            can_resume: progress.can_resume || false,
+            error: progress.error
+          });
+        } else if (progress.status === 'completed') {
+          setAnalyzing(false);
+          setProgressData(null);
+          showSuccess('تحلیل کامل شد!');
+          await loadAllData();
+          await checkAnalysisStatus();
+        } else if (progress.status === 'failed') {
+          setAnalyzing(false);
+          setProgressData({
+            ...progress,
+            status: 'failed',
+            can_resume: progress.can_resume || false
+          });
+          showError(progress.error || 'خطا در تحلیل');
+        } else if (progress.status === 'stopped') {
+          setAnalyzing(false);
+          setProgressData(null);
+          showSuccess('تحلیل متوقف شد');
+          await loadAllData();
+        } else {
+          // idle یا سایر
+          setProgressData(null);
+        }
+      }
+    } catch (e) {
+      console.error('Error polling progress:', e);
+    }
+  };
+
+  // توقف موقت تحلیل
+  const pauseAnalysis = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/pause`, {
+        method: 'POST'
+      });
+      if (res.ok) {
+        showSuccess('تحلیل متوقف شد');
+        pollProgress();
+      } else {
+        showError('خطا در توقف');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    }
+  };
+
+  // ادامه تحلیل
+  const resumeAnalysis = async () => {
+    try {
+      setAnalyzing(true);
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/resume`, {
+        method: 'POST'
+      });
+      if (res.ok) {
+        showSuccess('تحلیل ادامه یافت');
+        pollProgress();
+      } else {
+        showError('خطا در ادامه تحلیل');
+        setAnalyzing(false);
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+      setAnalyzing(false);
+    }
+  };
+
+  // توقف کامل تحلیل
+  const stopAnalysis = async () => {
+    if (!confirm('آیا مطمئنید؟ تحلیل متوقف شده و نتایج جزئی ذخیره می‌شوند.')) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/stop`, {
+        method: 'POST'
+      });
+      if (res.ok) {
+        showSuccess('تحلیل متوقف شد');
+        setAnalyzing(false);
+        setProgressData(null);
+        await loadAllData();
+      } else {
+        showError('خطا در توقف');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
     }
   };
 
@@ -140,115 +282,37 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
 
   const runDirectAnalysis = async () => {
     setAnalyzing(true);
-    setAnalysisLog(['🚀 شروع تحلیل مستقیم...']);
-    setProgressData(null);
+    setAnalysisLog(['🚀 شروع تحلیل...']);
 
     try {
-      // استفاده از Streaming endpoint برای پیشرفت Real-time
-      const response = await fetch(`${API_BASE}/api/projects/${projectId}/health/analyze-stream`, {
+      // شروع تحلیل با API معمولی (پس‌زمینه)
+      const response = await fetch(`${API_BASE}/api/projects/${projectId}/health/analyze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model_ids: settings?.target_models || [],
-          full_analysis: true
+          full_analysis: true,
+          update_roadmap: true,
+          update_readme: true
         })
       });
 
-      if (!response.ok) {
-        // اگر streaming endpoint موجود نبود، از روش قدیمی استفاده کن
-        const fallbackRes = await fetch(`${API_BASE}/api/projects/${projectId}/health/analyze-direct`, {
-          method: 'POST'
-        });
-        const data = await fallbackRes.json();
+      const data = await response.json();
 
-        if (data.success) {
-          setAnalysisLog(prev => [...prev, '✅ تحلیل کامل شد']);
-          showSuccess('تحلیل با موفقیت انجام شد');
-          await loadAllData();
-          await checkAnalysisStatus();
-        } else {
-          setAnalysisLog(prev => [...prev, `❌ خطا: ${data.error}`]);
-          showError(data.error || 'خطا در تحلیل');
-        }
-        return;
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error('خطا در خواندن استریم');
-      }
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-
-              // به‌روزرسانی وضعیت پیشرفت
-              if (data.event !== 'heartbeat') {
-                setProgressData({
-                  phase: data.phase || 'preparing',
-                  current_file: data.current_file || '',
-                  current_model: data.current_model || '',
-                  analyzed_files: data.analyzed_files || 0,
-                  total_files: data.total_files || 0,
-                  progress_percentage: data.progress_percentage || 0,
-                  elapsed_time: data.elapsed_time || 0,
-                  issues_found: data.issues_found || 0,
-                  message: data.message || '',
-                  model_statuses: data.model_statuses || {},
-                });
-
-                // به‌روزرسانی لاگ
-                if (data.message) {
-                  setAnalysisLog(prev => {
-                    const newLog = `${data.message}`;
-                    if (prev[prev.length - 1] !== newLog) {
-                      return [...prev.slice(-10), newLog];
-                    }
-                    return prev;
-                  });
-                }
-              }
-
-              // اگر تحلیل تمام شد
-              if (data.event === 'done' || data.event === 'analysis_completed') {
-                setAnalysisLog(prev => [...prev, '✅ تحلیل کامل شد!']);
-                showSuccess('تحلیل با موفقیت انجام شد');
-                await loadAllData();
-                await checkAnalysisStatus();
-                break;
-              }
-
-              // اگر خطا داریم
-              if (data.event === 'error') {
-                setAnalysisLog(prev => [...prev, `❌ ${data.message}`]);
-                showError(data.message || 'خطا در تحلیل');
-                break;
-              }
-            } catch (e) {
-              // JSON parse error - ignore
-            }
-          }
-        }
+      if (data.success) {
+        setAnalysisLog(prev => [...prev, '✅ تحلیل شروع شد']);
+        showSuccess('تحلیل شروع شد! وضعیت به‌روزرسانی می‌شود...');
+        // شروع polling برای دریافت وضعیت
+        pollProgress();
+      } else {
+        setAnalysisLog(prev => [...prev, `❌ خطا: ${data.error || data.detail}`]);
+        showError(data.error || data.detail || 'خطا در شروع تحلیل');
+        setAnalyzing(false);
       }
     } catch (e) {
       setAnalysisLog(prev => [...prev, `❌ خطای شبکه: ${e}`]);
       showError('خطا در ارتباط با سرور');
-    } finally {
       setAnalyzing(false);
-      // پاک کردن progress بعد از چند ثانیه
-      setTimeout(() => setProgressData(null), 5000);
     }
   };
 
@@ -502,25 +566,37 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
           </div>
         </div>
 
-        {/* نوار پیشرفت Real-time */}
-        {analyzing && progressData && (
+        {/* نوار پیشرفت Real-time با دکمه‌های کنترل */}
+        {progressData && (progressData.status === 'running' || progressData.status === 'paused' || progressData.status === 'failed') && (
           <div className="mt-3">
             {/* نوار اصلی پیشرفت - کلیک‌پذیر */}
             <div
               onClick={() => setShowProgressDetails(!showProgressDetails)}
-              className="cursor-pointer bg-black/30 rounded-lg p-3 relative overflow-hidden"
+              className={`cursor-pointer rounded-lg p-3 relative overflow-hidden ${
+                progressData.status === 'paused' ? 'bg-yellow-900/50' :
+                progressData.status === 'failed' ? 'bg-red-900/50' :
+                'bg-black/30'
+              }`}
             >
               {/* نوار پیشرفت داخلی */}
               <div
-                className="absolute inset-0 bg-white/20 transition-all duration-500"
-                style={{ width: `${progressData.progress_percentage}%` }}
+                className={`absolute inset-0 transition-all duration-500 ${
+                  progressData.status === 'paused' ? 'bg-yellow-500/30' :
+                  progressData.status === 'failed' ? 'bg-red-500/30' :
+                  'bg-white/20'
+                }`}
+                style={{ width: `${progressData.percentage || progressData.progress_percentage || 0}%` }}
               />
 
               <div className="relative z-10">
                 <div className="flex items-center justify-between mb-1">
                   <div className="flex items-center gap-2">
-                    <span className="animate-pulse text-yellow-300">●</span>
+                    {progressData.status === 'running' && <span className="animate-pulse text-yellow-300">●</span>}
+                    {progressData.status === 'paused' && <span className="text-yellow-300">⏸️</span>}
+                    {progressData.status === 'failed' && <span className="text-red-300">❌</span>}
                     <span className="font-medium text-sm">
+                      {progressData.status === 'paused' && 'متوقف شده - '}
+                      {progressData.status === 'failed' && 'خطا - '}
                       {progressData.phase === 'micro' && 'بررسی فایل‌ها'}
                       {progressData.phase === 'macro' && 'بررسی همکاری‌ها'}
                       {progressData.phase === 'structural' && 'بررسی ساختار'}
@@ -529,7 +605,9 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                       {!progressData.phase && 'در حال تحلیل'}
                     </span>
                   </div>
-                  <span className="font-mono text-lg font-bold">{progressData.progress_percentage.toFixed(0)}%</span>
+                  <span className="font-mono text-lg font-bold">
+                    {(progressData.percentage || progressData.progress_percentage || 0).toFixed(0)}%
+                  </span>
                 </div>
 
                 <div className="text-xs opacity-90">
@@ -540,6 +618,9 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                   )}
                   {progressData.message && (
                     <span className="truncate">{progressData.message}</span>
+                  )}
+                  {progressData.error && (
+                    <span className="text-red-300 truncate">{progressData.error}</span>
                   )}
                 </div>
 
@@ -552,6 +633,42 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                   </span>
                 </div>
               </div>
+            </div>
+
+            {/* دکمه‌های کنترل */}
+            <div className="flex gap-2 mt-2">
+              {progressData.status === 'running' && (
+                <>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); pauseAnalysis(); }}
+                    className="flex-1 px-3 py-2 bg-yellow-500/30 rounded-lg hover:bg-yellow-500/50 text-sm flex items-center justify-center gap-2"
+                  >
+                    ⏸️ توقف موقت
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); stopAnalysis(); }}
+                    className="flex-1 px-3 py-2 bg-red-500/30 rounded-lg hover:bg-red-500/50 text-sm flex items-center justify-center gap-2"
+                  >
+                    ⏹️ توقف کامل
+                  </button>
+                </>
+              )}
+              {(progressData.status === 'paused' || (progressData.status === 'failed' && progressData.can_resume)) && (
+                <>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); resumeAnalysis(); }}
+                    className="flex-1 px-3 py-2 bg-green-500/30 rounded-lg hover:bg-green-500/50 text-sm flex items-center justify-center gap-2"
+                  >
+                    ▶️ ادامه تحلیل
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); stopAnalysis(); }}
+                    className="flex-1 px-3 py-2 bg-red-500/30 rounded-lg hover:bg-red-500/50 text-sm flex items-center justify-center gap-2"
+                  >
+                    ⏹️ توقف کامل
+                  </button>
+                </>
+              )}
             </div>
 
             {/* پنل جزئیات - نمایش با کلیک */}
@@ -585,6 +702,12 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                   <div className="mt-2 pt-2 border-t border-gray-700">
                     <span className="text-gray-400">فایل: </span>
                     <span className="text-blue-300">{progressData.current_file}</span>
+                  </div>
+                )}
+
+                {progressData.can_resume && progressData.status !== 'running' && (
+                  <div className="mt-2 pt-2 border-t border-gray-700 text-green-400">
+                    ✓ امکان ادامه از نقطه توقف وجود دارد
                   </div>
                 )}
               </div>
