@@ -1346,12 +1346,25 @@ def get_deep_analysis_service(ai_manager=None) -> DeepAnalysisService:
     """دریافت instance سرویس تحلیل عمیق"""
     global _deep_analysis_service
 
-    # اگر instance وجود نداره یا ai_manager جدید داده شده، ایجاد کن
+    # اگر instance وجود نداره، ایجاد کن
     if _deep_analysis_service is None:
+        logger.info(f"🔧 Creating new DeepAnalysisService, ai_manager provided: {ai_manager is not None}")
         _deep_analysis_service = DeepAnalysisService(ai_manager)
-    elif ai_manager is not None and _deep_analysis_service.ai_manager is None:
-        # اگر ai_manager قبلاً تنظیم نشده، الان تنظیم کن
+    elif ai_manager is not None:
+        # همیشه ai_manager را به‌روزرسانی کن اگر داده شده (ممکنه مدل‌های جدیدی در دسترس باشن)
+        old_has_manager = _deep_analysis_service.ai_manager is not None
         _deep_analysis_service.ai_manager = ai_manager
-        logger.info("AI Manager set on existing DeepAnalysisService instance")
+        logger.info(f"🔧 Updated AI Manager on DeepAnalysisService (had manager before: {old_has_manager})")
+
+    # لاگ وضعیت فعلی
+    current_manager = _deep_analysis_service.ai_manager
+    if current_manager:
+        try:
+            models = current_manager.get_available_models()
+            logger.info(f"🔧 DeepAnalysisService has {len(models)} available models")
+        except Exception as e:
+            logger.warning(f"🔧 Error checking available models: {e}")
+    else:
+        logger.warning(f"🔧 DeepAnalysisService has NO ai_manager!")
 
     return _deep_analysis_service
