@@ -4,9 +4,12 @@ API Routes for Project Analysis
 """
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from typing import List, Optional
 from pydantic import BaseModel
 import logging
+import json
+import asyncio
 
 from ...services.project_analyzer import get_project_analyzer
 from ...services.model_profiler import get_model_profiler
@@ -75,6 +78,189 @@ async def run_analysis(
             success=False,
             message=f"خطا در تحلیل: {str(e)}"
         )
+
+
+@router.post("/run-stream")
+async def run_analysis_stream(request: AnalysisRequest):
+    """
+    اجرای تحلیل با استریم پیشرفت (Server-Sent Events)
+
+    این endpoint پیشرفت تحلیل را به صورت Real-time ارسال می‌کند:
+    - کدام مدل در حال کار است
+    - کدام فایل در حال تحلیل است
+    - درصد پیشرفت
+    - زمان سپری شده
+    """
+    import os
+    from ...services.ai_manager import get_ai_manager
+    from ...services.deep_analysis_service import DeepAnalysisService
+
+    # صف برای ارسال رویدادها
+    progress_queue: asyncio.Queue = asyncio.Queue()
+
+    async def progress_callback(progress_data: dict):
+        """callback برای دریافت رویدادهای پیشرفت"""
+        await progress_queue.put(progress_data)
+
+    async def generate_events():
+        """ژنراتور رویدادهای SSE"""
+        final_result = None
+
+        async def run_analysis_task():
+            nonlocal final_result
+            try:
+                # دریافت AI Manager
+                ai_manager = get_ai_manager()
+
+                # ساخت DeepAnalysisService با progress callback
+                deep_analyzer = DeepAnalysisService(
+                    ai_manager=ai_manager,
+                    progress_callback=progress_callback
+                )
+
+                # جمع‌آوری فایل‌های پروژه
+                project_path = request.project_path
+                files = []
+
+                # خواندن README اگر موجود باشد
+                readme_content = ""
+                readme_paths = ["README.md", "readme.md", "README.txt"]
+                for readme_name in readme_paths:
+                    readme_path = os.path.join(project_path, readme_name)
+                    if os.path.exists(readme_path):
+                        try:
+                            with open(readme_path, 'r', encoding='utf-8') as f:
+                                readme_content = f.read()
+                            break
+                        except:
+                            pass
+
+                # خواندن Roadmap اگر موجود باشد
+                roadmap_content = ""
+                if request.roadmap_path and os.path.exists(request.roadmap_path):
+                    try:
+                        with open(request.roadmap_path, 'r', encoding='utf-8') as f:
+                            roadmap_content = f.read()
+                    except:
+                        pass
+
+                # جمع‌آوری فایل‌ها
+                supported_extensions = {
+                    '.py', '.js', '.ts', '.tsx', '.jsx', '.java',
+                    '.go', '.rs', '.cpp', '.c', '.h', '.hpp',
+                    '.rb', '.php', '.swift', '.kt', '.scala',
+                    '.vue', '.svelte', '.html', '.css', '.scss'
+                }
+
+                for root, dirs, filenames in os.walk(project_path):
+                    # فیلتر دایرکتوری‌های غیرضروری
+                    dirs[:] = [d for d in dirs if d not in {
+                        'node_modules', '.git', '__pycache__', 'venv',
+                        '.venv', 'env', 'dist', 'build', '.next'
+                    }]
+
+                    for filename in filenames:
+                        ext = os.path.splitext(filename)[1].lower()
+                        if ext in supported_extensions:
+                            full_path = os.path.join(root, filename)
+                            rel_path = os.path.relpath(full_path, project_path)
+                            try:
+                                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                    content = f.read()
+                                files.append({
+                                    "path": rel_path,
+                                    "content": content
+                                })
+                            except:
+                                pass
+
+                logger.info(f"Collected {len(files)} files for analysis")
+
+                # انتخاب مدل‌ها
+                model_ids = request.models if request.models else None
+                if not model_ids:
+                    available = ai_manager.get_available_models()
+                    model_ids = [m.id for m in available]
+
+                # اجرای تحلیل
+                final_result = await deep_analyzer.run_full_analysis(
+                    project_id=request.project_id,
+                    files=files,
+                    roadmap_content=roadmap_content,
+                    readme_content=readme_content,
+                    model_ids=model_ids,
+                    instruction=""
+                )
+
+            except Exception as e:
+                logger.error(f"Streaming analysis failed: {e}", exc_info=True)
+                await progress_queue.put({
+                    "event": "error",
+                    "message": str(e),
+                    "error": True
+                })
+            finally:
+                # سیگنال اتمام
+                await progress_queue.put({
+                    "event": "done",
+                    "result": final_result if final_result else None
+                })
+
+        # شروع تحلیل
+        analysis_task = asyncio.create_task(run_analysis_task())
+
+        try:
+            while True:
+                try:
+                    # دریافت رویداد با timeout
+                    progress_data = await asyncio.wait_for(
+                        progress_queue.get(),
+                        timeout=2.0
+                    )
+
+                    # ارسال رویداد SSE
+                    event_type = progress_data.get("event", "progress")
+
+                    # محدود کردن داده‌ها برای ارسال
+                    safe_data = {k: v for k, v in progress_data.items()
+                                 if k not in ['result'] or v is None}
+                    if 'result' in progress_data and progress_data['result']:
+                        safe_data['has_result'] = True
+                        safe_data['overall_score'] = progress_data['result'].get('overall_scores', {}).get('total', 0)
+
+                    data = json.dumps(safe_data, ensure_ascii=False, default=str)
+                    yield f"event: {event_type}\ndata: {data}\n\n"
+
+                    # اگر تحلیل تمام شد
+                    if event_type == "done" or event_type == "analysis_completed":
+                        break
+
+                except asyncio.TimeoutError:
+                    # ارسال heartbeat
+                    yield f"event: heartbeat\ndata: {{}}\n\n"
+
+                    # بررسی وضعیت task
+                    if analysis_task.done():
+                        break
+
+        except Exception as e:
+            logger.error(f"Error in SSE stream: {e}")
+            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+
+        finally:
+            if not analysis_task.done():
+                analysis_task.cancel()
+
+    return StreamingResponse(
+        generate_events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # برای nginx
+            "Access-Control-Allow-Origin": "*"
+        }
+    )
 
 
 @router.get("/reports", response_model=List[AnalysisReportSchema])

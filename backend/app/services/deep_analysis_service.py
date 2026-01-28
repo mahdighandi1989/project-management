@@ -13,7 +13,7 @@ import json
 import asyncio
 import uuid
 from datetime import datetime
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Callable
 import time
 import logging
 import re
@@ -22,6 +22,162 @@ import os
 from .ai_base import Message
 
 logger = logging.getLogger(__name__)
+
+
+# =====================================
+# کلاس رصد پیشرفت (Progress Tracker)
+# =====================================
+
+class AnalysisProgressTracker:
+    """
+    رصد و گزارش پیشرفت تحلیل در لحظه
+
+    این کلاس اطلاعات پیشرفت را به callback ارسال می‌کند
+    برای استفاده در API streaming
+    """
+
+    def __init__(self, callback: Optional[Callable[[Dict], None]] = None):
+        self.callback = callback
+        self.analysis_id = ""
+        self.phase = "preparing"
+        self.total_files = 0
+        self.analyzed_files = 0
+        self.total_models = 0
+        self.current_file = ""
+        self.current_model = ""
+        self.model_statuses: Dict[str, str] = {}  # model_id -> status
+        self.start_time = time.time()
+        self.file_times: Dict[str, float] = {}
+        self.issues_found = 0
+        self.last_message = ""
+        self._lock = asyncio.Lock()
+
+    async def emit(self, event_type: str, data: Dict = None):
+        """ارسال رویداد پیشرفت"""
+        if not self.callback:
+            return
+
+        async with self._lock:
+            progress_data = {
+                "event": event_type,
+                "analysis_id": self.analysis_id,
+                "phase": self.phase,
+                "total_files": self.total_files,
+                "analyzed_files": self.analyzed_files,
+                "total_models": self.total_models,
+                "current_file": self.current_file,
+                "current_model": self.current_model,
+                "model_statuses": self.model_statuses.copy(),
+                "elapsed_time": round(time.time() - self.start_time, 1),
+                "issues_found": self.issues_found,
+                "progress_percentage": self._calculate_progress(),
+                "message": self.last_message,
+                "timestamp": datetime.now().isoformat(),
+                **(data or {})
+            }
+
+            try:
+                if asyncio.iscoroutinefunction(self.callback):
+                    await self.callback(progress_data)
+                else:
+                    self.callback(progress_data)
+            except Exception as e:
+                logger.warning(f"Error in progress callback: {e}")
+
+    def _calculate_progress(self) -> float:
+        """محاسبه درصد پیشرفت"""
+        if self.total_files == 0:
+            return 0
+
+        # وزن‌دهی به فازها
+        phase_weights = {
+            "preparing": 0,
+            "micro": 60,  # 60% زمان برای micro
+            "macro": 20,  # 20% برای macro
+            "structural": 15,  # 15% برای structural
+            "finalizing": 5,  # 5% برای نهایی‌سازی
+            "completed": 100
+        }
+
+        base = 0
+        if self.phase == "micro":
+            file_progress = (self.analyzed_files / self.total_files) * 60
+            return file_progress
+        elif self.phase == "macro":
+            return 60 + (20 * 0.5)  # نیمه راه macro
+        elif self.phase == "structural":
+            return 80 + (15 * 0.5)  # نیمه راه structural
+        elif self.phase == "finalizing":
+            return 95
+        elif self.phase == "completed":
+            return 100
+
+        return 0
+
+    async def start_analysis(self, analysis_id: str, total_files: int, model_ids: List[str]):
+        """شروع تحلیل"""
+        self.analysis_id = analysis_id
+        self.total_files = total_files
+        self.total_models = len(model_ids)
+        self.phase = "preparing"
+        self.start_time = time.time()
+        self.model_statuses = {m: "waiting" for m in model_ids}
+        self.last_message = f"شروع تحلیل {total_files} فایل با {len(model_ids)} مدل"
+        await self.emit("analysis_started")
+
+    async def start_phase(self, phase: str, message: str = ""):
+        """شروع فاز جدید"""
+        self.phase = phase
+        self.last_message = message or f"فاز {phase} شروع شد"
+        await self.emit("phase_started", {"phase_name": phase})
+
+    async def start_file(self, file_path: str):
+        """شروع تحلیل فایل"""
+        self.current_file = file_path
+        self.file_times[file_path] = time.time()
+        self.last_message = f"شروع تحلیل: {os.path.basename(file_path)}"
+        await self.emit("file_started", {"file_path": file_path})
+
+    async def start_model(self, model_id: str, file_path: str = None):
+        """شروع کار مدل"""
+        self.current_model = model_id
+        self.model_statuses[model_id] = "working"
+        self.last_message = f"مدل {model_id} در حال کار..."
+        await self.emit("model_started", {"model_id": model_id, "file_path": file_path})
+
+    async def complete_model(self, model_id: str, success: bool = True, message: str = ""):
+        """اتمام کار مدل"""
+        self.model_statuses[model_id] = "completed" if success else "failed"
+        self.last_message = message or f"مدل {model_id} {'تکمیل' if success else 'خطا'}"
+        await self.emit("model_completed", {
+            "model_id": model_id,
+            "success": success,
+            "message": message
+        })
+
+    async def complete_file(self, file_path: str, issues: int = 0, score: float = 0):
+        """اتمام تحلیل فایل"""
+        self.analyzed_files += 1
+        self.issues_found += issues
+        elapsed = time.time() - self.file_times.get(file_path, time.time())
+        self.last_message = f"فایل {os.path.basename(file_path)} تکمیل (نمره: {score:.0f})"
+        await self.emit("file_completed", {
+            "file_path": file_path,
+            "issues": issues,
+            "score": score,
+            "file_time": round(elapsed, 1)
+        })
+
+    async def complete_analysis(self, overall_score: float = 0, total_issues: int = 0):
+        """اتمام تحلیل"""
+        self.phase = "completed"
+        elapsed = time.time() - self.start_time
+        self.last_message = f"تحلیل کامل شد! نمره: {overall_score:.0f}"
+        await self.emit("analysis_completed", {
+            "overall_score": overall_score,
+            "total_issues": total_issues,
+            "total_time": round(elapsed, 1)
+        })
 
 
 # =====================================
@@ -71,15 +227,17 @@ class DeepAnalysisService:
     3. Structural Analysis: بررسی سیم‌کشی و ساختار
     """
 
-    def __init__(self, ai_manager=None):
+    def __init__(self, ai_manager=None, progress_callback: Optional[Callable[[Dict], None]] = None):
         """
         مقداردهی اولیه
 
         Args:
             ai_manager: مدیر مدل‌های AI (برای فراخوانی مدل‌ها)
+            progress_callback: callback برای گزارش پیشرفت (برای streaming)
         """
         self.ai_manager = ai_manager
         self.analysis_factors = DEFAULT_ANALYSIS_FACTORS.copy()
+        self.progress = AnalysisProgressTracker(progress_callback)
 
     async def run_full_analysis(
         self,
@@ -132,6 +290,9 @@ class DeepAnalysisService:
 
         logger.info(f"🤖 [{analysis_id}] Models to use: {model_ids}")
 
+        # شروع رصد پیشرفت
+        await self.progress.start_analysis(analysis_id, len(files), model_ids)
+
         results = {
             "analysis_id": analysis_id,
             "project_id": project_id,
@@ -162,6 +323,7 @@ class DeepAnalysisService:
             # مرحله 1: Micro Analysis (بررسی جزئی)
             # =====================================
             logger.info(f"[{analysis_id}] مرحله 1: شروع Micro Analysis")
+            await self.progress.start_phase("micro", "بررسی جزئی فایل‌ها (Micro Analysis)")
 
             micro_results = await self._run_micro_analysis(
                 files=files,
@@ -176,6 +338,7 @@ class DeepAnalysisService:
             # مرحله 2: Macro Analysis (بررسی کلی)
             # =====================================
             logger.info(f"[{analysis_id}] مرحله 2: شروع Macro Analysis")
+            await self.progress.start_phase("macro", "بررسی همکاری و جایگاه (Macro Analysis)")
 
             macro_results = await self._run_macro_analysis(
                 files=files,
@@ -191,6 +354,7 @@ class DeepAnalysisService:
             # مرحله 3: Structural Analysis (بررسی ساختاری)
             # =====================================
             logger.info(f"[{analysis_id}] مرحله 3: شروع Structural Analysis")
+            await self.progress.start_phase("structural", "بررسی ساختار و وابستگی‌ها (Structural Analysis)")
 
             structural_results = await self._run_structural_analysis(
                 files=files,
@@ -206,6 +370,7 @@ class DeepAnalysisService:
             # محاسبه نتایج نهایی
             # =====================================
             logger.info(f"[{analysis_id}] محاسبه نتایج نهایی")
+            await self.progress.start_phase("finalizing", "محاسبه نتایج نهایی")
 
             # ترکیب نتایج و محاسبه نمرات نهایی
             final_results = self._calculate_final_results(
@@ -243,6 +408,12 @@ class DeepAnalysisService:
             logger.info(f"📊 [{analysis_id}] Files analyzed: {results['analyzed_files']}")
             logger.info(f"📊 [{analysis_id}] Issues found: {len(final_results.get('issues', []))}")
             logger.info(f"=" * 60)
+
+            # گزارش اتمام تحلیل
+            await self.progress.complete_analysis(
+                overall_score=final_results['overall_scores'].get('total', 0),
+                total_issues=len(final_results.get('issues', []))
+            )
 
         except Exception as e:
             elapsed_total = time.time() - start_time_unix
@@ -348,6 +519,9 @@ class DeepAnalysisService:
 
         logger.info(f"📄 [MICRO] Starting analysis of {file_path} with models: {model_ids}")
 
+        # گزارش شروع تحلیل فایل
+        await self.progress.start_file(file_path)
+
         result = {
             "file_path": file_path,
             "file_type": self._get_file_type(file_path),
@@ -366,13 +540,19 @@ class DeepAnalysisService:
         async def analyze_with_model(model_id: str) -> Tuple[str, Dict]:
             """تحلیل با یک مدل خاص"""
             try:
+                # گزارش شروع کار مدل
+                await self.progress.start_model(model_id, file_path)
                 logger.info(f"📄 [MICRO] Calling model {model_id} for {file_path}...")
                 response = await self._call_ai_model(model_id, prompt)
                 analysis = self._parse_model_response(response)
                 logger.info(f"📄 [MICRO] Got response from {model_id} for {file_path}: {list(analysis.keys()) if isinstance(analysis, dict) else 'not dict'}")
+                # گزارش اتمام موفق مدل
+                await self.progress.complete_model(model_id, success=True)
                 return (model_id, analysis)
             except Exception as e:
                 logger.error(f"❌ [MICRO] Error analyzing {file_path} with {model_id}: {e}")
+                # گزارش خطای مدل
+                await self.progress.complete_model(model_id, success=False, message=str(e))
                 return (model_id, {"error": str(e)})
 
         # اجرای واقعاً موازی با asyncio.gather
@@ -398,6 +578,14 @@ class DeepAnalysisService:
         result["issues"] = self._collect_issues(result["model_analyses"], file_path)
 
         logger.info(f"📄 [MICRO] Final scores for {file_path}: {result['aggregated_scores']}")
+
+        # گزارش اتمام تحلیل فایل
+        total_score = result["aggregated_scores"].get("total", 0)
+        await self.progress.complete_file(
+            file_path=file_path,
+            issues=len(result["issues"]),
+            score=total_score
+        )
 
         return result
 

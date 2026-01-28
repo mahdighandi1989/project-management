@@ -495,3 +495,122 @@ async def smart_select_models(request: SmartSelectRequest):
         return []
 
 
+# ===========================================
+# Model Capability Testing Endpoints
+# ===========================================
+
+class CapabilityTestRequest(BaseModel):
+    """درخواست تست توانایی"""
+    model_id: str
+    categories: Optional[List[str]] = None  # خالی = همه
+
+
+@router.post("/capability-test")
+async def test_model_capabilities(request: CapabilityTestRequest):
+    """
+    تست توانایی‌های یک مدل
+
+    مدل با سوالات استاندارد تست می‌شود و badge می‌گیرد
+    """
+    try:
+        from ...services.ai_manager import get_ai_manager
+        from ...services.model_capability_tester import get_capability_tester
+
+        ai_manager = get_ai_manager()
+        tester = get_capability_tester(ai_manager)
+
+        results = await tester.test_model(
+            model_id=request.model_id,
+            categories=request.categories
+        )
+
+        return {
+            "success": True,
+            "results": results
+        }
+
+    except Exception as e:
+        logger.error(f"Error testing model capabilities: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@router.get("/capability-test/{model_id}")
+async def get_model_capabilities(model_id: str):
+    """
+    دریافت نتایج تست توانایی یک مدل (از cache)
+    """
+    try:
+        from ...services.model_capability_tester import get_capability_tester
+
+        tester = get_capability_tester()
+        results = tester.get_cached_results(model_id)
+
+        if results:
+            return {
+                "success": True,
+                "results": results
+            }
+        else:
+            return {
+                "success": False,
+                "message": "نتایج تست برای این مدل موجود نیست. لطفاً ابتدا تست انجام دهید."
+            }
+
+    except Exception as e:
+        logger.error(f"Error getting capabilities: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/capability-test-all")
+async def test_all_models_capabilities():
+    """
+    تست توانایی همه مدل‌های موجود
+    """
+    try:
+        from ...services.ai_manager import get_ai_manager
+        from ...services.model_capability_tester import get_capability_tester
+
+        ai_manager = get_ai_manager()
+        tester = get_capability_tester(ai_manager)
+
+        results = await tester.test_all_models()
+
+        return {
+            "success": True,
+            "tested_models": len(results),
+            "results": results
+        }
+
+    except Exception as e:
+        logger.error(f"Error testing all models: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/badges")
+async def get_all_badges():
+    """
+    دریافت همه badge های تعریف شده
+    """
+    try:
+        from ...services.model_capability_tester import CAPABILITY_BADGES
+
+        return {
+            "success": True,
+            "badges": [
+                {
+                    "id": badge_id,
+                    "min_score": config["min_score"],
+                    "color": config["color"],
+                    "label": config["label"],
+                    "icon": config["icon"]
+                }
+                for badge_id, config in CAPABILITY_BADGES.items()
+            ]
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting badges: {e}")
+        return {"success": False, "error": str(e)}
