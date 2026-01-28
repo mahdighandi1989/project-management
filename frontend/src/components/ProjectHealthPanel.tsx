@@ -115,6 +115,9 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
   const [success, setSuccess] = useState('');
 
   useEffect(() => {
+    // Only run if projectId is valid
+    if (!projectId) return;
+
     loadAllData();
     loadAvailableModels();
     checkAnalysisStatus();
@@ -145,6 +148,7 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
   }, [progressData?.status]);
 
   const checkAnalysisStatus = async () => {
+    if (!projectId) return;
     try {
       const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/status`);
       if (res.ok) {
@@ -158,6 +162,7 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
 
   // Polling برای وضعیت پیشرفت - این باعث میشه حتی با جابجایی صفحه تحلیل قطع نشه
   const pollProgress = async () => {
+    if (!projectId) return;
     try {
       const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/progress`);
       if (res.ok) {
@@ -361,6 +366,7 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
 
   // 🆕 بارگذاری وضعیت زنجیره اعتبارسنجی
   const loadValidationChainStatus = async () => {
+    if (!projectId) return;
     try {
       const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/chain-status`);
       if (res.ok) {
@@ -376,6 +382,7 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
 
   // 🆕 بارگذاری ایرادات رد شده
   const loadRejectedIssues = async () => {
+    if (!projectId) return;
     setLoadingValidation(true);
     try {
       const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/rejected-issues`);
@@ -394,6 +401,7 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
 
   // 🆕 بازگرداندن ایراد رد شده
   const restoreRejectedIssue = async (issueId: string) => {
+    if (!projectId) return;
     try {
       const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/rejected-issues/${issueId}`, {
         method: 'DELETE'
