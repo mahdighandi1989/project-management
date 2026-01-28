@@ -284,7 +284,10 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
       const res = await fetch(`${API_BASE}/api/models/available`);
       if (res.ok) {
         const data = await res.json();
-        setAvailableModels(data.models || []);
+        // API میتونه یا آرایه برگردونه یا {models: [...]}
+        const models = Array.isArray(data) ? data : (data.models || []);
+        setAvailableModels(models);
+        console.log('Loaded available models:', models.length);
       }
     } catch (e) {
       console.error('Error loading models:', e);
@@ -741,11 +744,18 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                     <div className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
                       <div className="text-sm text-gray-500 mb-1">مدل‌های منتخب</div>
                       <div className="flex flex-wrap gap-2">
-                        {settings.target_models.map((m) => (
-                          <span key={m} className="px-2 py-1 bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 rounded text-sm">
-                            {m}
+                        {settings.target_models.length === 0 ||
+                         (settings.target_models.length === 1 && settings.target_models[0] === 'all') ? (
+                          <span className="px-2 py-1 bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 rounded text-sm">
+                            ✓ همه مدل‌های در دسترس ({availableModels.length} مدل)
                           </span>
-                        ))}
+                        ) : (
+                          settings.target_models.map((m) => (
+                            <span key={m} className="px-2 py-1 bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 rounded text-sm">
+                              {availableModels.find(am => am.id === m)?.name || m}
+                            </span>
+                          ))
+                        )}
                       </div>
                     </div>
 
@@ -807,27 +817,105 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                     </div>
 
                     <div>
-                      <label className="block text-sm font-medium mb-2">مدل‌های منتخب</label>
-                      <div className="flex flex-wrap gap-2">
-                        {availableModels.map((model) => (
-                          <button
-                            key={model.id}
-                            onClick={() => {
-                              const models = tempSettings.target_models.includes(model.id)
-                                ? tempSettings.target_models.filter((m) => m !== model.id)
-                                : [...tempSettings.target_models, model.id];
-                              setTempSettings({ ...tempSettings, target_models: models });
-                            }}
-                            className={`px-3 py-1 rounded-lg text-sm transition ${
-                              tempSettings.target_models.includes(model.id)
-                                ? 'bg-blue-500 text-white'
-                                : 'bg-gray-100 dark:bg-gray-700 hover:bg-gray-200'
-                            }`}
-                          >
-                            {model.name || model.id}
-                          </button>
-                        ))}
-                      </div>
+                      <label className="block text-sm font-medium mb-2">مدل‌های منتخب برای تحلیل</label>
+                      <p className="text-xs text-gray-500 mb-3">
+                        مدل‌هایی که می‌خواهید در تحلیل شرکت کنند را انتخاب کنید. خالی = همه مدل‌ها
+                      </p>
+
+                      {availableModels.length === 0 ? (
+                        <div className="p-4 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg text-center">
+                          <p className="text-yellow-700 dark:text-yellow-300">
+                            هیچ مدلی در دسترس نیست!
+                          </p>
+                          <p className="text-xs text-yellow-600 dark:text-yellow-400 mt-1">
+                            لطفاً API key ها را در تنظیمات وارد کنید
+                          </p>
+                        </div>
+                      ) : (
+                        <>
+                          {/* دکمه‌های انتخاب سریع */}
+                          <div className="flex gap-2 mb-3">
+                            <button
+                              onClick={() => setTempSettings({ ...tempSettings, target_models: [] })}
+                              className={`px-3 py-1 rounded text-xs ${
+                                tempSettings.target_models.length === 0
+                                  ? 'bg-green-500 text-white'
+                                  : 'bg-gray-100 dark:bg-gray-700'
+                              }`}
+                            >
+                              همه مدل‌ها
+                            </button>
+                            <button
+                              onClick={() => setTempSettings({
+                                ...tempSettings,
+                                target_models: availableModels.map(m => m.id)
+                              })}
+                              className="px-3 py-1 rounded text-xs bg-gray-100 dark:bg-gray-700 hover:bg-gray-200"
+                            >
+                              انتخاب همه ({availableModels.length})
+                            </button>
+                            <button
+                              onClick={() => setTempSettings({ ...tempSettings, target_models: [] })}
+                              className="px-3 py-1 rounded text-xs bg-gray-100 dark:bg-gray-700 hover:bg-gray-200"
+                            >
+                              پاک کردن انتخاب
+                            </button>
+                          </div>
+
+                          {/* لیست مدل‌ها به تفکیک provider */}
+                          <div className="space-y-3 max-h-64 overflow-auto">
+                            {/* گروه‌بندی بر اساس provider */}
+                            {Array.from(new Set(availableModels.map(m => m.provider))).map(provider => (
+                              <div key={provider} className="p-2 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
+                                <div className="text-xs font-bold text-gray-500 mb-2 flex items-center gap-2">
+                                  <span className={`px-2 py-0.5 rounded ${
+                                    provider === 'openai' ? 'bg-green-100 text-green-700' :
+                                    provider === 'claude' ? 'bg-purple-100 text-purple-700' :
+                                    provider === 'gemini' ? 'bg-blue-100 text-blue-700' :
+                                    'bg-gray-100 text-gray-700'
+                                  }`}>
+                                    {provider}
+                                  </span>
+                                  <span>({availableModels.filter(m => m.provider === provider).length} مدل)</span>
+                                </div>
+                                <div className="flex flex-wrap gap-1">
+                                  {availableModels
+                                    .filter(m => m.provider === provider)
+                                    .map((model) => (
+                                      <button
+                                        key={model.id}
+                                        onClick={() => {
+                                          const models = tempSettings.target_models.includes(model.id)
+                                            ? tempSettings.target_models.filter((m) => m !== model.id)
+                                            : [...tempSettings.target_models, model.id];
+                                          setTempSettings({ ...tempSettings, target_models: models });
+                                        }}
+                                        className={`px-2 py-1 rounded text-xs transition ${
+                                          tempSettings.target_models.length === 0 ||
+                                          tempSettings.target_models.includes(model.id)
+                                            ? 'bg-blue-500 text-white'
+                                            : 'bg-white dark:bg-gray-600 hover:bg-gray-100 dark:hover:bg-gray-500'
+                                        }`}
+                                        title={model.id}
+                                      >
+                                        {model.name || model.id.split('/').pop()}
+                                      </button>
+                                    ))}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+
+                          {/* نمایش تعداد انتخاب شده */}
+                          <div className="mt-2 text-xs text-gray-500">
+                            {tempSettings.target_models.length === 0 ? (
+                              <span className="text-green-600">✓ همه {availableModels.length} مدل استفاده می‌شوند</span>
+                            ) : (
+                              <span>{tempSettings.target_models.length} مدل انتخاب شده</span>
+                            )}
+                          </div>
+                        </>
+                      )}
                     </div>
 
                     <div className="grid grid-cols-2 gap-4">
