@@ -1111,9 +1111,24 @@ async def run_health_analysis(
     available_providers = ai_manager.get_available_providers()
 
     model_ids = request.model_ids
-    if not model_ids or "all" in model_ids:
-        # دریافت همه مدل‌های فعال - بدون محدودیت
+
+    # فیلتر کردن "all" از لیست
+    if model_ids:
+        model_ids = [m for m in model_ids if m != "all"]
+
+    # اگر بعد از فیلتر خالی شد، یعنی فقط "all" بوده - همه مدل‌ها
+    if not model_ids:
         model_ids = [m.id for m in available_models]
+    else:
+        # اطمینان از اینکه مدل‌های انتخابی واقعاً در دسترس هستند
+        available_ids = [m.id for m in available_models]
+        model_ids = [m for m in model_ids if m in available_ids]
+
+        # اگر هیچکدام از مدل‌های انتخابی در دسترس نبود
+        if not model_ids:
+            model_ids = [m.id for m in available_models]
+
+    logger.info(f"📊 Selected models for analysis: {model_ids}")
 
     # اگر هیچ مدلی در دسترس نیست، خطا بده (نه fallback!)
     if not model_ids and not available_models:

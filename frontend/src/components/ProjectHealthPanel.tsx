@@ -285,12 +285,15 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
     setAnalysisLog(['🚀 شروع تحلیل...']);
 
     try {
+      // فیلتر کردن "all" از لیست مدل‌ها
+      const selectedModels = (settings?.target_models || []).filter(m => m !== 'all');
+
       // شروع تحلیل با API معمولی (پس‌زمینه)
       const response = await fetch(`${API_BASE}/api/projects/${projectId}/health/analyze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model_ids: settings?.target_models || [],
+          model_ids: selectedModels,
           full_analysis: true,
           update_roadmap: true,
           update_readme: true
@@ -458,15 +461,21 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
   const saveSettings = async () => {
     if (!tempSettings) return;
 
+    // فیلتر کردن "all" از لیست مدل‌ها قبل از ذخیره
+    const cleanedSettings = {
+      ...tempSettings,
+      target_models: tempSettings.target_models.filter(m => m !== 'all')
+    };
+
     try {
       const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/settings`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(tempSettings)
+        body: JSON.stringify(cleanedSettings)
       });
 
       if (res.ok) {
-        setSettings(tempSettings);
+        setSettings(cleanedSettings);
         setEditingSettings(false);
         showSuccess('تنظیمات ذخیره شد');
       } else {
@@ -867,18 +876,22 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                     <div className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
                       <div className="text-sm text-gray-500 mb-1">مدل‌های منتخب</div>
                       <div className="flex flex-wrap gap-2">
-                        {settings.target_models.length === 0 ||
-                         (settings.target_models.length === 1 && settings.target_models[0] === 'all') ? (
-                          <span className="px-2 py-1 bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 rounded text-sm">
-                            ✓ همه مدل‌های در دسترس ({availableModels.length} مدل)
-                          </span>
-                        ) : (
-                          settings.target_models.map((m) => (
+                        {(() => {
+                          // فیلتر کردن "all" از لیست مدل‌ها
+                          const selectedModels = settings.target_models.filter(m => m !== 'all');
+                          if (selectedModels.length === 0) {
+                            return (
+                              <span className="px-2 py-1 bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 rounded text-sm">
+                                ✓ همه مدل‌های در دسترس ({availableModels.length} مدل)
+                              </span>
+                            );
+                          }
+                          return selectedModels.map((m) => (
                             <span key={m} className="px-2 py-1 bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 rounded text-sm">
                               {availableModels.find(am => am.id === m)?.name || m}
                             </span>
-                          ))
-                        )}
+                          ));
+                        })()}
                       </div>
                     </div>
 
