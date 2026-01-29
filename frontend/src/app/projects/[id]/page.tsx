@@ -317,6 +317,24 @@ export default function ProjectDetailPage() {
   const [includeMemory, setIncludeMemory] = useState(true);
   const [showChatBox, setShowChatBox] = useState(false);
 
+  // Enhanced Chat State (Multi-model support)
+  const [useEnhancedChat, setUseEnhancedChat] = useState(true);
+  const [selectedChatModels, setSelectedChatModels] = useState<string[]>(['openai']);
+  const [includeFiles, setIncludeFiles] = useState(true);
+  const [includeIssues, setIncludeIssues] = useState(true);
+  const [includeHealth, setIncludeHealth] = useState(true);
+  const [createDynamicFields, setCreateDynamicFields] = useState(false);
+  const [enhancedChatResponses, setEnhancedChatResponses] = useState<Array<{
+    model_id: string;
+    actual_model?: string;
+    content: string | null;
+    tokens_used?: number;
+    latency_ms?: number;
+    success: boolean;
+    error?: string;
+  }>>([]);
+  const [createdFieldsFromChat, setCreatedFieldsFromChat] = useState<DynamicField[]>([]);
+
   // Activity Visualization State (for diagram blinking/highlighting)
   const [activeWorkflow, setActiveWorkflow] = useState<{
     nodeIds: string[];
@@ -1975,29 +1993,83 @@ export default function ProjectDetailPage() {
 
     setChatLoading(true);
     setChatResponse('');
+    setEnhancedChatResponses([]);
+    setCreatedFieldsFromChat([]);
 
     try {
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: chatPrompt,
-          model_id: selectedChatModel,
-          include_memory: includeMemory,
-        }),
-      });
+      if (useEnhancedChat) {
+        // Enhanced Chat - با context کامل و چند مدل
+        const res = await fetch(`${API_BASE}/api/projects/${projectId}/enhanced-chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: chatPrompt,
+            model_ids: selectedChatModels.length > 0 ? selectedChatModels : ['openai'],
+            include_memory: includeMemory,
+            include_files: includeFiles,
+            include_issues: includeIssues,
+            include_health: includeHealth,
+            create_dynamic_fields: createDynamicFields,
+            auto_detect_actions: true,
+          }),
+        });
 
-      const data = await res.json();
-      if (data.success) {
-        setChatResponse(data.content);
+        const data = await res.json();
+        if (data.success) {
+          setEnhancedChatResponses(data.responses || []);
+          if (data.created_fields && data.created_fields.length > 0) {
+            setCreatedFieldsFromChat(data.created_fields);
+            showSuccess(`${data.created_fields.length} فیلد پویا از پاسخ ایجاد شد`);
+            // بارگذاری مجدد فیلدهای پویا
+            loadMemory();
+          }
+          // برای سازگاری با نمایش قبلی
+          if (data.responses && data.responses.length > 0) {
+            const firstSuccess = data.responses.find((r: any) => r.success);
+            if (firstSuccess) {
+              setChatResponse(firstSuccess.content);
+            }
+          }
+        } else {
+          showError(data.detail || 'خطا در دریافت پاسخ');
+        }
       } else {
-        showError(data.detail || 'خطا در دریافت پاسخ');
+        // Chat ساده قدیمی
+        const res = await fetch(`${API_BASE}/api/projects/${projectId}/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: chatPrompt,
+            model_id: selectedChatModel,
+            include_memory: includeMemory,
+          }),
+        });
+
+        const data = await res.json();
+        if (data.success) {
+          setChatResponse(data.content);
+        } else {
+          showError(data.detail || 'خطا در دریافت پاسخ');
+        }
       }
     } catch (e) {
       showError('خطا در ارتباط با سرور');
     } finally {
       setChatLoading(false);
     }
+  };
+
+  // تغییر وضعیت انتخاب مدل برای چت چند مدله
+  const toggleChatModel = (modelId: string) => {
+    setSelectedChatModels(prev => {
+      if (prev.includes(modelId)) {
+        // حداقل یک مدل باید انتخاب باشه
+        if (prev.length === 1) return prev;
+        return prev.filter(m => m !== modelId);
+      } else {
+        return [...prev, modelId];
+      }
+    });
   };
 
   // Model selector component
@@ -2325,6 +2397,11 @@ export default function ProjectDetailPage() {
                   <div className="flex items-center gap-2">
                     <span className="text-xl">🤖</span>
                     <h3 className="font-bold">پرسش از AI درباره پروژه</h3>
+                    {useEnhancedChat && (
+                      <span className="px-2 py-0.5 bg-purple-100 dark:bg-purple-900 text-purple-600 dark:text-purple-300 text-xs rounded-full">
+                        پیشرفته
+                      </span>
+                    )}
                   </div>
                   <span className="text-gray-400">{showChatBox ? '▲' : '▼'}</span>
                 </div>
@@ -2332,30 +2409,131 @@ export default function ProjectDetailPage() {
                 {/* محتوای چت */}
                 {showChatBox && (
                   <div className="p-4 border-t dark:border-gray-700">
-                    {/* انتخاب مدل */}
-                    <div className="flex flex-wrap items-center gap-3 mb-4">
-                      <label className="text-sm text-gray-600 dark:text-gray-400">مدل:</label>
-                      <select
-                        value={selectedChatModel}
-                        onChange={(e) => setSelectedChatModel(e.target.value)}
-                        className="px-3 py-1 border rounded-lg text-sm dark:bg-gray-700 dark:border-gray-600"
-                      >
-                        {availableModels.filter(m => m.id !== 'all').map(model => (
-                          <option key={model.id} value={model.id}>
-                            {model.icon} {model.name}
-                          </option>
-                        ))}
-                      </select>
+                    {/* سوییچ حالت پیشرفته */}
+                    <div className="mb-4 p-3 bg-gradient-to-r from-purple-50 to-blue-50 dark:from-purple-900/20 dark:to-blue-900/20 rounded-lg">
+                      <div className="flex items-center justify-between mb-3">
+                        <label className="flex items-center gap-2 text-sm font-medium">
+                          <input
+                            type="checkbox"
+                            checked={useEnhancedChat}
+                            onChange={(e) => setUseEnhancedChat(e.target.checked)}
+                            className="rounded text-purple-500"
+                          />
+                          <span>🚀 حالت پیشرفته</span>
+                          <span className="text-xs text-gray-500">(دسترسی کامل به فایل‌ها + چند مدل)</span>
+                        </label>
+                      </div>
 
-                      <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
-                        <input
-                          type="checkbox"
-                          checked={includeMemory}
-                          onChange={(e) => setIncludeMemory(e.target.checked)}
-                          className="rounded"
-                        />
-                        استفاده از دستورات حافظه
-                      </label>
+                      {useEnhancedChat && (
+                        <>
+                          {/* انتخاب چند مدل */}
+                          <div className="mb-3">
+                            <label className="text-xs text-gray-600 dark:text-gray-400 block mb-2">
+                              انتخاب مدل‌ها (می‌توانید چند مدل انتخاب کنید):
+                            </label>
+                            <div className="flex flex-wrap gap-2">
+                              {availableModels.filter(m => m.id !== 'all').map(model => (
+                                <button
+                                  key={model.id}
+                                  onClick={() => toggleChatModel(model.id)}
+                                  className={`px-3 py-1.5 rounded-full text-xs flex items-center gap-1 transition border ${
+                                    selectedChatModels.includes(model.id)
+                                      ? 'bg-purple-500 text-white border-purple-500'
+                                      : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 border-gray-300 dark:border-gray-600 hover:border-purple-400'
+                                  }`}
+                                >
+                                  <span>{model.icon}</span>
+                                  <span>{model.name}</span>
+                                  {selectedChatModels.includes(model.id) && <span>✓</span>}
+                                </button>
+                              ))}
+                            </div>
+                            {selectedChatModels.length > 1 && (
+                              <p className="text-xs text-purple-600 dark:text-purple-400 mt-2">
+                                ✨ {selectedChatModels.length} مدل انتخاب شده - پاسخ همه آن‌ها نمایش داده می‌شود
+                              </p>
+                            )}
+                          </div>
+
+                          {/* تنظیمات context */}
+                          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+                            <label className="flex items-center gap-1.5 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={includeFiles}
+                                onChange={(e) => setIncludeFiles(e.target.checked)}
+                                className="rounded text-purple-500 w-3.5 h-3.5"
+                              />
+                              <span>📁 محتوای فایل‌ها</span>
+                            </label>
+                            <label className="flex items-center gap-1.5 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={includeIssues}
+                                onChange={(e) => setIncludeIssues(e.target.checked)}
+                                className="rounded text-purple-500 w-3.5 h-3.5"
+                              />
+                              <span>🐛 ایرادات شناسایی‌شده</span>
+                            </label>
+                            <label className="flex items-center gap-1.5 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={includeHealth}
+                                onChange={(e) => setIncludeHealth(e.target.checked)}
+                                className="rounded text-purple-500 w-3.5 h-3.5"
+                              />
+                              <span>💚 وضعیت سلامت</span>
+                            </label>
+                            <label className="flex items-center gap-1.5 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={includeMemory}
+                                onChange={(e) => setIncludeMemory(e.target.checked)}
+                                className="rounded text-purple-500 w-3.5 h-3.5"
+                              />
+                              <span>🧠 دستورات حافظه</span>
+                            </label>
+                          </div>
+
+                          {/* تبدیل به فیلد پویا */}
+                          <label className="flex items-center gap-2 text-xs p-2 bg-yellow-50 dark:bg-yellow-900/20 rounded border border-yellow-200 dark:border-yellow-800">
+                            <input
+                              type="checkbox"
+                              checked={createDynamicFields}
+                              onChange={(e) => setCreateDynamicFields(e.target.checked)}
+                              className="rounded text-yellow-500 w-3.5 h-3.5"
+                            />
+                            <span>✨ تبدیل خودکار پاسخ به فیلدهای پویا</span>
+                            <span className="text-yellow-600 dark:text-yellow-400">(با تشخیص اولویت و نوع اقدام)</span>
+                          </label>
+                        </>
+                      )}
+
+                      {!useEnhancedChat && (
+                        <div className="flex items-center gap-3">
+                          <label className="text-xs text-gray-600 dark:text-gray-400">مدل:</label>
+                          <select
+                            value={selectedChatModel}
+                            onChange={(e) => setSelectedChatModel(e.target.value)}
+                            className="px-3 py-1 border rounded-lg text-xs dark:bg-gray-700 dark:border-gray-600"
+                          >
+                            {availableModels.filter(m => m.id !== 'all').map(model => (
+                              <option key={model.id} value={model.id}>
+                                {model.icon} {model.name}
+                              </option>
+                            ))}
+                          </select>
+                          <label className="flex items-center gap-1.5 text-xs">
+                            <input
+                              type="checkbox"
+                              checked={includeMemory}
+                              onChange={(e) => setIncludeMemory(e.target.checked)}
+                              className="rounded w-3.5 h-3.5"
+                            />
+                            استفاده از دستورات حافظه
+                          </label>
+                        </div>
+                      )}
                     </div>
 
                     {/* ورودی پرامپت */}
@@ -2363,9 +2541,12 @@ export default function ProjectDetailPage() {
                       <textarea
                         value={chatPrompt}
                         onChange={(e) => setChatPrompt(e.target.value)}
-                        placeholder="سوال خود را درباره پروژه بپرسید... مثلاً: این پروژه چه کاری انجام می‌دهد؟ یا: چگونه یک فیچر جدید اضافه کنم؟"
+                        placeholder={useEnhancedChat
+                          ? "سوال خود را بپرسید... AI به تمام فایل‌ها و داده‌های پروژه دسترسی دارد و دقیق پاسخ می‌دهد."
+                          : "سوال خود را درباره پروژه بپرسید..."
+                        }
                         className="flex-1 p-3 border rounded-lg resize-none dark:bg-gray-700 dark:border-gray-600 text-sm"
-                        rows={2}
+                        rows={3}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' && !e.shiftKey) {
                             e.preventDefault();
@@ -2376,29 +2557,106 @@ export default function ProjectDetailPage() {
                       <button
                         onClick={sendChatMessage}
                         disabled={chatLoading || !chatPrompt.trim()}
-                        className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 self-end"
+                        className="px-4 py-2 bg-gradient-to-r from-purple-500 to-blue-500 text-white rounded-lg hover:from-purple-600 hover:to-blue-600 disabled:opacity-50 self-end font-medium"
                       >
                         {chatLoading ? '⏳' : '📤 ارسال'}
                       </button>
                     </div>
 
-                    {/* پاسخ AI */}
-                    {(chatResponse || chatLoading) && (
+                    {/* نمایش در حال پردازش */}
+                    {chatLoading && (
+                      <div className="mt-4 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                        <div className="flex items-center gap-3 text-gray-500">
+                          <div className="animate-spin text-2xl">⏳</div>
+                          <div>
+                            <p className="font-medium">در حال پردازش...</p>
+                            {useEnhancedChat && selectedChatModels.length > 1 && (
+                              <p className="text-xs">ارسال به {selectedChatModels.length} مدل همزمان</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* پاسخ‌های چند مدل (حالت پیشرفته) */}
+                    {!chatLoading && useEnhancedChat && enhancedChatResponses.length > 0 && (
+                      <div className="mt-4 space-y-4">
+                        {enhancedChatResponses.map((response, index) => (
+                          <div
+                            key={index}
+                            className={`p-4 rounded-lg border ${
+                              response.success
+                                ? 'bg-gray-50 dark:bg-gray-700 border-gray-200 dark:border-gray-600'
+                                : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between mb-2">
+                              <div className="flex items-center gap-2 text-sm font-medium">
+                                <span>🤖</span>
+                                <span>
+                                  {availableModels.find(m => m.id === response.model_id)?.name || response.model_id}
+                                </span>
+                                {response.actual_model && response.actual_model !== response.model_id && (
+                                  <span className="text-xs text-gray-400">({response.actual_model})</span>
+                                )}
+                              </div>
+                              {response.success && (
+                                <div className="flex items-center gap-3 text-xs text-gray-400">
+                                  {response.tokens_used && <span>🎯 {response.tokens_used} توکن</span>}
+                                  {response.latency_ms && <span>⚡ {(response.latency_ms / 1000).toFixed(1)}s</span>}
+                                </div>
+                              )}
+                            </div>
+
+                            {response.success ? (
+                              <div className="prose dark:prose-invert max-w-none text-sm whitespace-pre-wrap">
+                                {response.content}
+                              </div>
+                            ) : (
+                              <div className="text-red-600 dark:text-red-400 text-sm">
+                                ❌ خطا: {response.error}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+
+                        {/* فیلدهای ایجاد شده */}
+                        {createdFieldsFromChat.length > 0 && (
+                          <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800">
+                            <h4 className="font-medium text-green-700 dark:text-green-300 mb-2 flex items-center gap-2">
+                              <span>✅</span>
+                              <span>{createdFieldsFromChat.length} فیلد پویا ایجاد شد:</span>
+                            </h4>
+                            <ul className="text-sm space-y-1">
+                              {createdFieldsFromChat.map((field, i) => (
+                                <li key={i} className="flex items-center gap-2 text-gray-600 dark:text-gray-300">
+                                  <span className={`w-2 h-2 rounded-full ${
+                                    field.priority && field.priority <= 2 ? 'bg-red-500' :
+                                    field.priority && field.priority <= 4 ? 'bg-yellow-500' : 'bg-green-500'
+                                  }`}></span>
+                                  <span className="font-medium">{field.name}</span>
+                                  <span className="text-xs text-gray-400">
+                                    ({field.action_type === 'github_commit' ? '📤 Commit' :
+                                      field.action_type === 'github_multi_commit' ? '📦 Multi-Commit' : '👁️ نمایش'})
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* پاسخ ساده (حالت قدیمی) */}
+                    {!chatLoading && !useEnhancedChat && chatResponse && (
                       <div className="mt-4 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
                         <div className="flex items-center gap-2 mb-2 text-sm text-gray-500">
                           <span>🤖</span>
                           <span>پاسخ {availableModels.find(m => m.id === selectedChatModel)?.name || selectedChatModel}:</span>
                         </div>
-                        {chatLoading ? (
-                          <div className="flex items-center gap-2 text-gray-400">
-                            <div className="animate-spin">⏳</div>
-                            <span>در حال پردازش...</span>
-                          </div>
-                        ) : (
-                          <div className="prose dark:prose-invert max-w-none text-sm whitespace-pre-wrap">
-                            {chatResponse}
-                          </div>
-                        )}
+                        <div className="prose dark:prose-invert max-w-none text-sm whitespace-pre-wrap">
+                          {chatResponse}
+                        </div>
                       </div>
                     )}
                   </div>

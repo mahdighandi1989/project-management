@@ -864,6 +864,20 @@ class ProjectChatRequest(BaseModel):
     include_memory: bool = True  # شامل دستورات حافظه شود؟
 
 
+class EnhancedProjectChatRequest(BaseModel):
+    """درخواست چت پیشرفته با context کامل پروژه"""
+    prompt: str
+    model_ids: List[str] = ["openai"]  # امکان انتخاب چند مدل همزمان
+    include_memory: bool = True  # شامل دستورات حافظه شود؟
+    include_files: bool = True  # شامل محتوای فایل‌ها شود؟
+    include_issues: bool = True  # شامل ایرادات شناسایی شده شود؟
+    include_health: bool = True  # شامل وضعیت سلامت شود؟
+    file_filter: Optional[List[str]] = None  # فیلتر فایل‌ها (فقط این فایل‌ها شامل شوند)
+    max_file_content_length: int = 5000  # حداکثر طول محتوای هر فایل
+    create_dynamic_fields: bool = False  # تبدیل پاسخ به فیلدهای پویا؟
+    auto_detect_actions: bool = True  # تشخیص خودکار نوع اقدام از پاسخ؟
+
+
 @router.post("/{project_id}/chat")
 async def project_chat(
     project_id: str,
@@ -990,6 +1004,408 @@ async def project_chat(
         db.commit()
 
         raise HTTPException(status_code=500, detail=f"خطا در ارتباط با AI: {str(e)}")
+
+
+# =====================================
+# چت پیشرفته با AI - با context کامل پروژه
+# =====================================
+
+@router.post("/{project_id}/enhanced-chat")
+async def enhanced_project_chat(
+    project_id: str,
+    request: EnhancedProjectChatRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    چت پیشرفته با AI در context کامل پروژه
+
+    ویژگی‌ها:
+    - دسترسی کامل به محتوای تمام فایل‌ها
+    - مشاهده ایرادات شناسایی شده و وضعیت سلامت
+    - امکان انتخاب چندین مدل همزمان
+    - تبدیل خودکار پاسخ به فیلدهای پویا
+    """
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+    from ...models.project import ProjectFile
+    from datetime import datetime
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # 1. ساخت context کامل پروژه
+    context_parts = [
+        f"# پروژه: {project.name}",
+        f"نوع: {project.project_type}",
+    ]
+
+    if project.description:
+        context_parts.append(f"توضیحات: {project.description}")
+
+    # 2. اضافه کردن تکنولوژی‌ها و ویژگی‌ها
+    try:
+        technologies = json.loads(project.technologies) if project.technologies else []
+        if technologies:
+            context_parts.append(f"تکنولوژی‌ها: {', '.join(technologies)}")
+    except:
+        pass
+
+    try:
+        features = json.loads(project.features) if project.features else []
+        if features:
+            context_parts.append(f"ویژگی‌ها: {', '.join(features)}")
+    except:
+        pass
+
+    # 3. اضافه کردن وضعیت سلامت
+    if request.include_health:
+        try:
+            health_scores = json.loads(project.health_scores) if project.health_scores else {}
+            if health_scores:
+                context_parts.append("\n## وضعیت سلامت پروژه:")
+                for key, value in health_scores.items():
+                    context_parts.append(f"- {key}: {value}")
+        except:
+            pass
+
+        if project.ideal_state:
+            context_parts.append(f"\n## حالت ایده‌آل پروژه:\n{project.ideal_state}")
+
+    # 4. اضافه کردن ایرادات شناسایی شده
+    if request.include_issues:
+        try:
+            issues_found = json.loads(project.issues_found) if project.issues_found else []
+            if issues_found:
+                context_parts.append(f"\n## ایرادات شناسایی شده ({len(issues_found)} مورد):")
+                for i, issue in enumerate(issues_found[:20], 1):  # حداکثر 20 ایراد
+                    issue_text = f"{i}. "
+                    if isinstance(issue, dict):
+                        issue_text += f"[{issue.get('severity', 'نامشخص')}] {issue.get('title', issue.get('description', str(issue)))}"
+                        if issue.get('file'):
+                            issue_text += f" (فایل: {issue.get('file')})"
+                    else:
+                        issue_text += str(issue)
+                    context_parts.append(issue_text)
+                if len(issues_found) > 20:
+                    context_parts.append(f"... و {len(issues_found) - 20} ایراد دیگر")
+        except:
+            pass
+
+    # 5. اضافه کردن محتوای فایل‌ها
+    if request.include_files:
+        files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+
+        # فیلتر فایل‌ها
+        if request.file_filter:
+            files = [f for f in files if any(
+                pattern in f.file_path or f.file_path.endswith(pattern.lstrip('*'))
+                for pattern in request.file_filter
+            )]
+
+        if files:
+            context_parts.append(f"\n## محتوای فایل‌های پروژه ({len(files)} فایل):")
+            for file in files:
+                content = file.content or ""
+                if len(content) > request.max_file_content_length:
+                    content = content[:request.max_file_content_length] + "\n... (ادامه truncated شد)"
+
+                context_parts.append(f"\n### فایل: {file.file_path}")
+                context_parts.append(f"```{file.file_type or ''}\n{content}\n```")
+
+    # 6. اضافه کردن دستورات حافظه
+    if request.include_memory:
+        try:
+            memory_instructions = json.loads(project.memory_instructions) if project.memory_instructions else {}
+            if memory_instructions.get("content"):
+                context_parts.append(f"\n## دستورات ثابت:\n{memory_instructions['content']}")
+        except:
+            pass
+
+        try:
+            dynamic_fields = json.loads(project.dynamic_fields) if project.dynamic_fields else []
+            if dynamic_fields:
+                relevant_fields = [f for f in dynamic_fields if not f.get("archived")]
+                if relevant_fields:
+                    context_parts.append("\n## دستورات پویا:")
+                    for field in relevant_fields:
+                        context_parts.append(f"- {field.get('name')}: {field.get('value')}")
+        except:
+            pass
+
+    full_context = "\n".join(context_parts)
+
+    # 7. ساخت system prompt
+    system_prompt = f"""تو یک دستیار هوشمند برای تحلیل و بررسی دقیق پروژه هستی.
+
+وظیفه تو:
+1. بررسی دقیق و جزء به جزء محتوای پروژه
+2. یافتن مشکلات واقعی با ارجاع به فایل و خط کد مربوطه
+3. ارائه راه‌حل‌های مشخص و عملی
+4. پاسخ‌های قاطع (نه با شاید و احتمالا) بر اساس آنچه در کد می‌بینی
+
+هنگام پاسخ‌گویی:
+- اگر مشکلی وجود دارد، دقیقاً بگو کجا و چرا
+- اگر باید اقدامی انجام شود، مشخص کن: فایل، خط، و تغییر لازم
+- اولویت مشکلات را مشخص کن (بحرانی، بالا، متوسط، پایین)
+
+{full_context}"""
+
+    # 8. ارسال به مدل‌های انتخاب شده
+    ai_manager = get_ai_manager()
+    responses = []
+    total_tokens = 0
+
+    for model_id in request.model_ids:
+        start_time = time.time()
+        try:
+            messages = [
+                Message(role="system", content=system_prompt),
+                Message(role="user", content=request.prompt),
+            ]
+
+            response = await ai_manager.generate(
+                model_id=model_id,
+                messages=messages,
+                max_tokens=4096,
+                temperature=0.3,  # دقت بالاتر
+            )
+
+            latency_ms = int((time.time() - start_time) * 1000)
+            tokens_used = response.tokens_used or 0
+            total_tokens += tokens_used
+
+            model_response = {
+                "model_id": model_id,
+                "actual_model": response.model_id,
+                "content": response.content,
+                "tokens_used": tokens_used,
+                "latency_ms": latency_ms,
+                "success": True,
+            }
+            responses.append(model_response)
+
+            # ثبت در ژورنال
+            log_entry = ActivityLog(
+                id=f"log_{uuid.uuid4().hex[:12]}",
+                project_id=project_id,
+                model_id=response.model_id,
+                model_provider=model_id.split("-")[0] if "-" in model_id else model_id,
+                activity_type="enhanced_chat",
+                prompt=request.prompt[:2000],
+                response=response.content[:5000] if response.content else None,
+                tokens_used=tokens_used,
+                latency_ms=latency_ms,
+                success=True,
+                created_at=datetime.utcnow(),
+            )
+            db.add(log_entry)
+
+        except Exception as e:
+            latency_ms = int((time.time() - start_time) * 1000)
+            model_response = {
+                "model_id": model_id,
+                "content": None,
+                "error": str(e),
+                "latency_ms": latency_ms,
+                "success": False,
+            }
+            responses.append(model_response)
+
+            # ثبت خطا در ژورنال
+            log_entry = ActivityLog(
+                id=f"log_{uuid.uuid4().hex[:12]}",
+                project_id=project_id,
+                model_id=model_id,
+                activity_type="enhanced_chat",
+                prompt=request.prompt[:2000],
+                tokens_used=0,
+                latency_ms=latency_ms,
+                success=False,
+                error_message=str(e)[:500],
+                created_at=datetime.utcnow(),
+            )
+            db.add(log_entry)
+
+    db.commit()
+
+    # 9. تبدیل به فیلدهای پویا اگر درخواست شده
+    created_fields = []
+    if request.create_dynamic_fields:
+        for resp in responses:
+            if resp.get("success") and resp.get("content"):
+                fields = await parse_response_to_dynamic_fields(
+                    resp["content"],
+                    resp["model_id"],
+                    request.auto_detect_actions
+                )
+
+                # ذخیره فیلدها در پروژه
+                if fields:
+                    existing_fields = []
+                    try:
+                        existing_fields = json.loads(project.dynamic_fields) if project.dynamic_fields else []
+                    except:
+                        pass
+
+                    for field in fields:
+                        field["id"] = f"field_{uuid.uuid4().hex[:8]}"
+                        field["created_at"] = datetime.utcnow().isoformat()
+                        field["source_model"] = resp["model_id"]
+                        existing_fields.append(field)
+                        created_fields.append(field)
+
+                    project.dynamic_fields = json.dumps(existing_fields, ensure_ascii=False)
+
+        db.commit()
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "responses": responses,
+        "total_tokens": total_tokens,
+        "models_used": len(request.model_ids),
+        "context_summary": {
+            "files_included": len(files) if request.include_files else 0,
+            "issues_included": len(issues_found) if request.include_issues and 'issues_found' in locals() else 0,
+            "health_included": request.include_health,
+            "memory_included": request.include_memory,
+        },
+        "created_fields": created_fields if request.create_dynamic_fields else None,
+    }
+
+
+async def parse_response_to_dynamic_fields(content: str, model_id: str, auto_detect: bool = True) -> List[dict]:
+    """
+    تبدیل پاسخ AI به فیلدهای پویا
+
+    تشخیص خودکار:
+    - اقدامات لازم (action items)
+    - باگ‌ها و مشکلات
+    - پیشنهادات بهبود
+    """
+    fields = []
+
+    # الگوهای تشخیص
+    patterns = {
+        "bug_fix": {
+            "keywords": ["باگ", "خطا", "ایراد", "مشکل", "bug", "error", "fix"],
+            "action_type": "github_commit",
+            "priority": 2,
+            "field_type": "temporary",
+        },
+        "improvement": {
+            "keywords": ["بهبود", "پیشنهاد", "بهتر", "improve", "suggest", "enhance"],
+            "action_type": "display",
+            "priority": 5,
+            "field_type": "temporary",
+        },
+        "critical": {
+            "keywords": ["بحرانی", "فوری", "امنیتی", "critical", "urgent", "security"],
+            "action_type": "github_commit",
+            "priority": 1,
+            "field_type": "temporary",
+        },
+        "refactor": {
+            "keywords": ["ریفکتور", "بازنویسی", "refactor", "rewrite", "restructure"],
+            "action_type": "github_multi_commit",
+            "priority": 4,
+            "field_type": "temporary",
+        },
+    }
+
+    # تقسیم محتوا به بخش‌ها
+    lines = content.split('\n')
+    current_section = None
+    current_content = []
+
+    for line in lines:
+        # تشخیص سرتیتر
+        if line.strip().startswith('#') or line.strip().startswith('**'):
+            if current_section and current_content:
+                # ذخیره بخش قبلی
+                field = create_field_from_section(current_section, '\n'.join(current_content), patterns, auto_detect)
+                if field:
+                    fields.append(field)
+            current_section = line.strip().replace('#', '').replace('**', '').strip()
+            current_content = []
+        elif line.strip().startswith(('-', '*', '•')) or (line.strip() and line.strip()[0].isdigit()):
+            # آیتم‌های لیست
+            current_content.append(line.strip())
+        elif line.strip():
+            current_content.append(line.strip())
+
+    # آخرین بخش
+    if current_section and current_content:
+        field = create_field_from_section(current_section, '\n'.join(current_content), patterns, auto_detect)
+        if field:
+            fields.append(field)
+
+    # اگر هیچ بخشی نبود، کل پاسخ را به یک فیلد تبدیل کن
+    if not fields and content.strip():
+        fields.append({
+            "name": f"پاسخ {model_id}",
+            "value": content[:2000],
+            "target_models": ["all"],
+            "action_type": "display",
+            "priority": 5,
+            "field_type": "temporary",
+            "archived": False,
+        })
+
+    return fields
+
+
+def create_field_from_section(title: str, content: str, patterns: dict, auto_detect: bool) -> Optional[dict]:
+    """ساخت فیلد از یک بخش"""
+    if not title or not content.strip():
+        return None
+
+    # تنظیمات پیش‌فرض
+    action_type = "display"
+    priority = 5
+    field_type = "temporary"
+    target_path = None
+
+    if auto_detect:
+        # تشخیص نوع از محتوا
+        combined_text = (title + " " + content).lower()
+
+        for pattern_name, pattern_config in patterns.items():
+            if any(kw in combined_text for kw in pattern_config["keywords"]):
+                action_type = pattern_config["action_type"]
+                priority = min(priority, pattern_config["priority"])
+                field_type = pattern_config["field_type"]
+                break
+
+        # استخراج مسیر فایل
+        import re
+        file_patterns = [
+            r'(?:فایل|file)[:\s]+([^\s\n]+\.\w+)',
+            r'`([^\s`]+\.\w+)`',
+            r'([^\s]+\.(?:py|js|ts|tsx|jsx|json|yaml|yml|md))',
+        ]
+        for pattern in file_patterns:
+            match = re.search(pattern, content, re.IGNORECASE)
+            if match:
+                target_path = match.group(1)
+                break
+
+    return {
+        "name": title[:100],
+        "value": content[:2000],
+        "target_models": ["all"],
+        "action_type": action_type,
+        "target_path": target_path,
+        "priority": priority,
+        "field_type": field_type,
+        "archived": False,
+        "trigger": {
+            "enabled": False,
+            "interval_minutes": 60,
+            "interval_type": "minutes",
+        },
+    }
 
 
 # =====================================
