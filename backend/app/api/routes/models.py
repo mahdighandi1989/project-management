@@ -1001,3 +1001,6 @@ async def reset_model_settings(model_id: str, db: Session = Depends(get_db)):
                 "message": "مدل تنظیمات سفارشی نداشت",
                 "model_id": model_id
             }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"خطا در بازگردانی تنظیمات: {str(e)}")
