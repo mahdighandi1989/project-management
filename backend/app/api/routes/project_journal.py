@@ -1012,15 +1012,46 @@ async def generate_engineering_report(
         # استخراج JSON از پاسخ - بهبود یافته برای مدیریت markdown code blocks
         import re
 
+        def try_fix_json(json_str):
+            """تلاش برای تصحیح خطاهای رایج JSON"""
+            fixes = [
+                # حذف trailing commas قبل از } یا ]
+                (r',(\s*[}\]])', r'\1'),
+                # حذف trailing comma در آخر
+                (r',\s*$', ''),
+                # تصحیح newlines در strings
+                (r'(?<!\\)\n(?=[^"]*"[^"]*$)', r'\\n'),
+            ]
+
+            fixed = json_str
+            for pattern, replacement in fixes:
+                fixed = re.sub(pattern, replacement, fixed)
+            return fixed
+
+        def attempt_json_parse(json_str, source_name):
+            """تلاش برای پارس JSON با تصحیح خودکار"""
+            # تلاش اول - مستقیم
+            try:
+                return json.loads(json_str), None
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse JSON from {source_name}: {e}")
+
+                # تلاش دوم - با تصحیح
+                try:
+                    fixed = try_fix_json(json_str)
+                    result = json.loads(fixed)
+                    logger.info(f"Successfully parsed JSON from {source_name} after auto-fix")
+                    return result, None
+                except json.JSONDecodeError as e2:
+                    return None, str(e2)
+
         # 1. ابتدا تلاش برای استخراج از داخل ```json ... ``` یا ``` ... ```
         code_block_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', report_content)
         if code_block_match:
             json_str = code_block_match.group(1).strip()
-            try:
-                report_data = json.loads(json_str)
+            report_data, error = attempt_json_parse(json_str, "code block")
+            if report_data:
                 logger.info(f"Successfully parsed JSON from code block ({len(json_str)} chars)")
-            except json.JSONDecodeError as e:
-                logger.warning(f"Failed to parse JSON from code block: {e}")
 
         # 2. اگر از code block استخراج نشد، تلاش برای پیدا کردن مستقیم JSON
         if not report_data:
@@ -1029,15 +1060,13 @@ async def generate_engineering_report(
             last_brace = report_content.rfind('}')
             if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
                 json_str = report_content[first_brace:last_brace+1]
-                try:
-                    report_data = json.loads(json_str)
+                report_data, error = attempt_json_parse(json_str, "direct extraction")
+                if report_data:
                     logger.info(f"Successfully parsed JSON directly ({len(json_str)} chars)")
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse JSON directly: {e}")
 
         # 3. اگر هنوز پارس نشده، محتوای خام را ذخیره کن
         if not report_data:
-            logger.error(f"Could not parse JSON from AI response. Content preview: {report_content[:500]}")
+            logger.error(f"Could not parse JSON from AI response after all attempts. Content preview: {report_content[:500]}")
             report_data = {"raw_content": report_content, "parse_error": True}
         else:
             logger.info(f"Report data parsed successfully. Keys: {list(report_data.keys())}")
@@ -1102,9 +1131,12 @@ async def generate_engineering_report(
             db.commit()
             logger.info(f"✅ Health validation: {validated_issues_count} validated, {rejected_issues_count} rejected - COMMITTED to DB")
 
-        # 🆕 Fallback: اگر AI بخش health_analysis_validation را برنگرداند، فیلدها را مستقیماً از health issues بساز
-        elif validate_health_issues and health_analysis_issues and not report_data.get("raw_content"):
-            logger.warning(f"⚠️ AI did not return health_analysis_validation section. Creating fields from {len(health_analysis_issues)} health issues directly.")
+        # 🆕 Fallback: اگر AI بخش health_analysis_validation را برنگرداند (یا JSON پارس نشد)، فیلدها را مستقیماً از health issues بساز
+        elif validate_health_issues and health_analysis_issues and (report_data.get("parse_error") or "health_analysis_validation" not in report_data):
+            parse_error = report_data.get("parse_error", False)
+            has_validation = "health_analysis_validation" in report_data
+            logger.warning(f"⚠️ FALLBACK TRIGGERED: parse_error={parse_error}, has_validation={has_validation}")
+            logger.warning(f"⚠️ Creating fields from {len(health_analysis_issues)} health issues directly.")
 
             # ذخیره این به عنوان validation results
             validation_results = {
