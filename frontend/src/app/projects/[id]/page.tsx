@@ -296,6 +296,12 @@ export default function ProjectDetailPage() {
   // اجرای گروهی
   const [selectedFields, setSelectedFields] = useState<string[]>([]);
   const [executingBatch, setExecutingBatch] = useState(false);
+  const [batchStatus, setBatchStatus] = useState<{
+    status: 'idle' | 'running' | 'paused' | 'stopped';
+    progress: number;
+    current: number;
+    total: number;
+  }>({ status: 'idle', progress: 0, current: 0, total: 0 });
 
   // آپلود پیوست
   const [uploadingAttachment, setUploadingAttachment] = useState<string | null>(null);
@@ -1584,6 +1590,92 @@ export default function ProjectDetailPage() {
     }
   };
 
+  // 🔴 کنترل اجرای گروهی (Pause/Resume/Stop)
+  const controlBatchExecution = async (action: 'pause' | 'resume' | 'stop') => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields/batch-control`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setBatchStatus(prev => ({ ...prev, status: data.status }));
+        if (action === 'stop') {
+          setExecutingBatch(false);
+          showSuccess('اجرا متوقف شد');
+        } else if (action === 'pause') {
+          showSuccess('اجرا موقتاً متوقف شد');
+        } else {
+          showSuccess('اجرا از سر گرفته شد');
+        }
+      }
+    } catch (e) {
+      showError('خطا در کنترل اجرا');
+    }
+  };
+
+  // 🔴 دریافت وضعیت اجرای گروهی
+  const fetchBatchStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields/batch-status`);
+      const data = await res.json();
+      if (data.success) {
+        setBatchStatus({
+          status: data.status,
+          progress: data.progress_percent,
+          current: data.current_index,
+          total: data.total_fields,
+        });
+        if (data.status === 'idle' && executingBatch) {
+          setExecutingBatch(false);
+          loadMemory();
+        }
+      }
+    } catch (e) {
+      console.log('Error fetching batch status:', e);
+    }
+  };
+
+  // 🔴 حذف گروهی فیلدها
+  const deleteBatchFields = async () => {
+    if (selectedFields.length === 0) {
+      showError('لطفاً حداقل یک فیلد انتخاب کنید');
+      return;
+    }
+    if (!confirm(`آیا از حذف ${selectedFields.length} فیلد مطمئن هستید؟`)) {
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields/batch-delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ field_ids: selectedFields }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess(`${data.deleted_count} فیلد حذف شد`);
+        setSelectedFields([]);
+        loadMemory();
+      } else {
+        showError(data.detail || 'خطا در حذف');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط');
+    }
+  };
+
+  // 🔴 Polling وضعیت اجرا هنگام running
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null;
+    if (executingBatch || batchStatus.status === 'running' || batchStatus.status === 'paused') {
+      interval = setInterval(fetchBatchStatus, 2000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [executingBatch, batchStatus.status]);
+
   // آپلود پیوست برای فیلد
   const uploadAttachment = async (fieldId: string, file: File) => {
     setUploadingAttachment(fieldId);
@@ -2588,12 +2680,20 @@ export default function ProjectDetailPage() {
                           >
                             لغو انتخاب
                           </button>
+                          {/* 🔴 دکمه حذف گروهی */}
+                          <button
+                            onClick={deleteBatchFields}
+                            className="px-3 py-2 bg-red-500 text-white rounded-lg text-sm hover:bg-red-600 flex items-center gap-1"
+                            title="حذف گروهی فیلدهای انتخاب شده"
+                          >
+                            🗑️ حذف ({selectedFields.length})
+                          </button>
                           <button
                             onClick={executeBatchFields}
-                            disabled={executingBatch}
+                            disabled={executingBatch || batchStatus.status === 'running'}
                             className="px-4 py-2 bg-orange-500 text-white rounded-lg text-sm hover:bg-orange-600 disabled:opacity-50 flex items-center gap-2"
                           >
-                            {executingBatch ? (
+                            {executingBatch || batchStatus.status === 'running' ? (
                               <>
                                 <span className="animate-spin">⏳</span>
                                 در حال اجرا...
@@ -2608,6 +2708,52 @@ export default function ProjectDetailPage() {
                       )}
                     </div>
                   </div>
+
+                  {/* 🔴 نوار پیشرفت و کنترل‌ها */}
+                  {(executingBatch || batchStatus.status === 'running' || batchStatus.status === 'paused') && (
+                    <div className="mt-3 p-3 bg-blue-50 dark:bg-blue-900/30 rounded-lg border border-blue-200 dark:border-blue-700">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm font-medium text-blue-700 dark:text-blue-300">
+                          {batchStatus.status === 'paused' ? '⏸️ متوقف موقت' : '🔄 در حال اجرا'}
+                          {' - '}{batchStatus.current}/{batchStatus.total} فیلد ({batchStatus.progress}%)
+                        </span>
+                        <div className="flex items-center gap-2">
+                          {batchStatus.status === 'running' && (
+                            <button
+                              onClick={() => controlBatchExecution('pause')}
+                              className="px-3 py-1 bg-yellow-500 text-white rounded text-xs hover:bg-yellow-600"
+                            >
+                              ⏸️ توقف موقت
+                            </button>
+                          )}
+                          {batchStatus.status === 'paused' && (
+                            <button
+                              onClick={() => controlBatchExecution('resume')}
+                              className="px-3 py-1 bg-green-500 text-white rounded text-xs hover:bg-green-600"
+                            >
+                              ▶️ ادامه
+                            </button>
+                          )}
+                          <button
+                            onClick={() => controlBatchExecution('stop')}
+                            className="px-3 py-1 bg-red-500 text-white rounded text-xs hover:bg-red-600"
+                          >
+                            ⏹️ توقف کامل
+                          </button>
+                        </div>
+                      </div>
+                      <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                        <div
+                          className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                          style={{ width: `${batchStatus.progress}%` }}
+                        />
+                      </div>
+                      <p className="text-xs text-blue-600 dark:text-blue-400 mt-2">
+                        💡 می‌توانید به صفحات دیگر بروید - اجرا در پس‌زمینه ادامه دارد
+                      </p>
+                    </div>
+                  )}
+
                   <p className="text-xs text-gray-500 mt-2">
                     💡 فیلدها بر اساس اولویت مرتب و اجرا می‌شوند (اولویت ۱ = بالاترین)
                   </p>

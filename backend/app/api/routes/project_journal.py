@@ -1313,19 +1313,53 @@ async def generate_engineering_report(
                         priority_map = {"critical": 1, "high": 2, "medium": 5, "low": 7}
                         priority = priority_map.get(issue.get("priority", original.get("severity", "medium")), 5)
 
-                        # 🔴 تعیین هوشمند action_type براساس نوع مشکل و وجود فایل هدف
+                        # 🔴 تعیین هوشمند action_type براساس نوع مشکل و محتوای پیام
                         target_file = original.get("file")
                         issue_type = original.get("type", "").lower()
+                        issue_message = original.get("message", "").lower()
+
+                        # تعیین نوع اقدام براساس کلیدواژه‌ها
+                        field_action_type = "display"  # پیش‌فرض
+                        trigger_enabled = False
+                        trigger_interval = 60
+                        trigger_type = "minutes"
 
                         # انواع مشکلاتی که نیاز به تغییر کد دارند
-                        code_change_types = ["security", "bug", "quality", "performance", "error", "warning", "vulnerability"]
+                        code_change_types = ["security", "bug", "quality", "performance", "error", "warning", "vulnerability", "fix", "اصلاح"]
                         needs_code_change = any(t in issue_type for t in code_change_types)
 
-                        # اگر فایل هدف داریم و مشکل نیاز به تغییر کد دارد -> github_commit
-                        if target_file and needs_code_change:
-                            field_action_type = "github_commit"
-                        else:
-                            field_action_type = "display"
+                        # کلیدواژه‌های حذف فایل
+                        delete_keywords = ["delete", "remove", "حذف", "unused", "deprecated", "غیرضروری"]
+                        needs_delete = any(kw in issue_message for kw in delete_keywords)
+
+                        # کلیدواژه‌های ایجاد فایل جدید
+                        create_keywords = ["create", "add file", "new file", "missing", "ایجاد", "اضافه کن", "فایل جدید"]
+                        needs_create = any(kw in issue_message for kw in create_keywords)
+
+                        # کلیدواژه‌های جابجایی/تغییر نام
+                        move_keywords = ["move", "rename", "relocate", "جابجا", "تغییر نام", "انتقال"]
+                        needs_move = any(kw in issue_message for kw in move_keywords)
+
+                        # کلیدواژه‌های نیازمند اجرای دوره‌ای
+                        periodic_keywords = ["monitor", "check regularly", "periodic", "backup", "sync", "مانیتور", "بررسی دوره‌ای", "پشتیبان"]
+                        needs_periodic = any(kw in issue_message for kw in periodic_keywords)
+
+                        # تعیین action_type
+                        if target_file:
+                            if needs_delete:
+                                field_action_type = "github_delete"
+                            elif needs_move:
+                                field_action_type = "github_move"
+                            elif needs_create:
+                                field_action_type = "github_create"
+                            elif needs_code_change:
+                                field_action_type = "github_commit"
+
+                        # تنظیم تریگر برای موارد دوره‌ای
+                        if needs_periodic:
+                            trigger_enabled = True
+                            trigger_interval = 24 * 60  # روزانه
+                            trigger_type = "minutes"
 
                         new_field = {
                             "id": str(uuid.uuid4()),
@@ -1336,6 +1370,7 @@ async def generate_engineering_report(
 **نوع:** {original.get('type', 'نامشخص')}
 **شدت:** {original.get('severity', 'نامشخص')}
 **خط:** {original.get('line', 'نامشخص')}
+**نوع اقدام:** {field_action_type}
 
 ### پیام:
 {original.get('message', '')}
@@ -1351,12 +1386,16 @@ async def generate_engineering_report(
                             "target_models": ["claude"],
                             "action_type": field_action_type,
                             "target_path": target_file,
-                            "archive_after_run": True,
-                            "deploy_after_commit": field_action_type == "github_commit",
-                            "field_type": "temporary",
+                            "archive_after_run": not trigger_enabled,  # اگر تریگر فعال است، بایگانی نشود
+                            "deploy_after_commit": field_action_type.startswith("github_"),
+                            "field_type": "permanent" if trigger_enabled else "temporary",
                             "priority": priority,
                             "attachments": [],
-                            "trigger": {"enabled": False, "interval_minutes": 60, "interval_type": "minutes"},
+                            "trigger": {
+                                "enabled": trigger_enabled,
+                                "interval_minutes": trigger_interval,
+                                "interval_type": trigger_type
+                            },
                             "created_from_report": True,
                             "validation_marker": "validated",
                             "validation_score": issue.get("validation_score", 0),
