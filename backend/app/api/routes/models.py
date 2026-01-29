@@ -274,13 +274,13 @@ async def get_model_leaderboard():
         leaderboard = {}
         if top_models:
             # Best accuracy
-            best_acc = max(top_models, key=lambda p: p.accuracy_rate)
+            best_acc = max(top_models, key=lambda p: p.accuracy_score)
             leaderboard["best_accuracy"] = {
                 "label": "بهترین دقت",
                 "model_id": best_acc.model_id,
                 "display_name": best_acc.model_id,
-                "score": best_acc.accuracy_rate,
-                "tier": "S" if best_acc.accuracy_rate >= 90 else "A" if best_acc.accuracy_rate >= 80 else "B"
+                "score": best_acc.accuracy_score,
+                "tier": "S" if best_acc.accuracy_score >= 90 else "A" if best_acc.accuracy_score >= 80 else "B"
             }
             # Best speed (lowest response time)
             profiles_with_time = [p for p in top_models if p.avg_response_time > 0]
@@ -294,13 +294,13 @@ async def get_model_leaderboard():
                     "tier": "S" if best_speed.avg_response_time < 1000 else "A"
                 }
             # Best overall
-            best_overall = max(top_models, key=lambda p: p.cumulative_score)
+            best_overall = max(top_models, key=lambda p: p.overall_score)
             leaderboard["best_overall"] = {
                 "label": "بهترین کلی",
                 "model_id": best_overall.model_id,
                 "display_name": best_overall.model_id,
-                "score": best_overall.cumulative_score,
-                "tier": "S" if best_overall.cumulative_score >= 90 else "A" if best_overall.cumulative_score >= 80 else "B"
+                "score": best_overall.overall_score,
+                "tier": "S" if best_overall.overall_score >= 90 else "A" if best_overall.overall_score >= 80 else "B"
             }
             # Most active
             most_active = max(top_models, key=lambda p: p.total_analyses)
@@ -343,22 +343,22 @@ async def get_model_rankings():
             "by_cost_efficiency": []
         }
 
-        # Sort by cumulative score
-        sorted_by_score = sorted(profiles, key=lambda p: p.cumulative_score, reverse=True)
+        # Sort by overall score
+        sorted_by_score = sorted(profiles, key=lambda p: p.overall_score, reverse=True)
         for i, p in enumerate(sorted_by_score[:10], 1):
             rankings["by_score"].append({
                 "rank": i,
                 "model_id": p.model_id,
-                "score": p.cumulative_score
+                "score": p.overall_score
             })
 
         # Sort by accuracy
-        sorted_by_accuracy = sorted(profiles, key=lambda p: p.accuracy_rate, reverse=True)
+        sorted_by_accuracy = sorted(profiles, key=lambda p: p.accuracy_score, reverse=True)
         for i, p in enumerate(sorted_by_accuracy[:10], 1):
             rankings["by_accuracy"].append({
                 "rank": i,
                 "model_id": p.model_id,
-                "accuracy": p.accuracy_rate
+                "accuracy": p.accuracy_score
             })
 
         # Sort by speed (lower is better)
