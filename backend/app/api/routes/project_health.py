@@ -957,11 +957,11 @@ async def get_project_health(project_id: str, db=Depends(get_db)):
                 "overall_color": _get_score_color(health_scores.get("total", 0)),
                 "structure_score": health_scores.get("structural", 0),
                 "file_scores": {
-                    "code_quality": health_scores.get("micro", 0),
-                    "documentation": health_scores.get("documentation", 50),
-                    "security": health_scores.get("security", 50),
-                    "cooperation": health_scores.get("macro", 0),
-                    "roadmap_compliance": health_scores.get("roadmap_compliance", 50),
+                    "code_quality": health_scores.get("code_quality", health_scores.get("micro", 0)),
+                    "documentation": health_scores.get("documentation", 0),  # 🆕 از 50 به 0 تغییر کرد
+                    "security": health_scores.get("security", 0),            # 🆕 از 50 به 0 تغییر کرد
+                    "cooperation": health_scores.get("cooperation", health_scores.get("macro", 0)),  # 🆕 اول cooperation چک میشه
+                    "roadmap_compliance": health_scores.get("roadmap_compliance", health_scores.get("roadmap_score", 0)),  # 🆕 از 50 به 0
                 }
             },
             "overall_score": health_scores.get("total", health_scores.get("overall", 0)),
