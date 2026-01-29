@@ -1654,6 +1654,83 @@ async def get_project_issues(project_id: str, db=Depends(get_db)):
     }
 
 
+class MarkIssueConvertedRequest(BaseModel):
+    """درخواست علامت‌گذاری issue به عنوان تبدیل شده"""
+    field_id: str
+
+
+@router.post("/{project_id}/health/issues/{issue_id}/mark-converted")
+async def mark_issue_as_converted(
+    project_id: str,
+    issue_id: str,
+    request: MarkIssueConvertedRequest,
+    db=Depends(get_db)
+):
+    """علامت‌گذاری یک issue به عنوان تبدیل شده به فیلد پویا"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    issues = []
+    try:
+        if project.issues_found:
+            issues = json.loads(project.issues_found)
+    except:
+        pass
+
+    # پیدا کردن و بروزرسانی issue
+    found = False
+    for i, issue in enumerate(issues):
+        # تطبیق با id یا با index
+        current_id = issue.get("id") or f"issue_{i}"
+        if current_id == issue_id or f"issue_{i}" == issue_id:
+            issues[i]["id"] = issue_id
+            issues[i]["converted_to_field"] = True
+            issues[i]["converted_field_id"] = request.field_id
+            issues[i]["converted_at"] = datetime.utcnow().isoformat()
+            found = True
+            break
+
+    if not found:
+        raise HTTPException(status_code=404, detail="ایراد یافت نشد")
+
+    project.issues_found = json.dumps(issues, ensure_ascii=False)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": "ایراد به عنوان تبدیل شده علامت‌گذاری شد",
+        "issue_id": issue_id,
+        "field_id": request.field_id
+    }
+
+
+@router.get("/{project_id}/health/issues/unconverted-count")
+async def get_unconverted_issues_count(project_id: str, db=Depends(get_db)):
+    """دریافت تعداد ایرادات تبدیل نشده"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    issues = []
+    try:
+        if project.issues_found:
+            issues = json.loads(project.issues_found)
+    except:
+        pass
+
+    total = len(issues)
+    converted = sum(1 for i in issues if i.get("converted_to_field"))
+    unconverted = total - converted
+
+    return {
+        "success": True,
+        "total": total,
+        "converted": converted,
+        "unconverted": unconverted
+    }
+
+
 @router.get("/{project_id}/health/ideal-state")
 async def get_ideal_state(project_id: str, db=Depends(get_db)):
     """دریافت توضیحات حالت ایده‌آل پروژه"""

@@ -2196,11 +2196,45 @@ async def batch_execute_fields(
 
             if result.get("success"):
                 success_count += 1
-                # علامت‌گذاری برای بایگانی
+                # 🔴 بایگانی فوری بعد از هر فیلد (نه در انتها)
                 if result.get("should_archive"):
-                    fields_to_archive.append(field.get("id"))
-                    exec_result["archived"] = True
-                    archived_count += 1
+                    try:
+                        # بروزرسانی فوری در دیتابیس
+                        current_fields = json.loads(project.dynamic_fields) if project.dynamic_fields else []
+                        for f in current_fields:
+                            if f.get("id") == field.get("id"):
+                                f["archived"] = True
+                                f["archived_at"] = datetime.utcnow().isoformat()
+                                f["executed"] = True
+                                f["last_executed"] = datetime.utcnow().isoformat()
+                                break
+                        project.dynamic_fields = json.dumps(current_fields, ensure_ascii=False)
+                        db.commit()
+                        db.refresh(project)  # refresh برای گرفتن آخرین داده
+                        exec_result["archived"] = True
+                        archived_count += 1
+                        logger.info(f"[Batch Execute] Field {field.get('name')} archived immediately")
+                    except Exception as archive_err:
+                        logger.error(f"[Batch Execute] Failed to archive field {field.get('id')}: {archive_err}")
+                        db.rollback()
+                else:
+                    # بروزرسانی زمان اجرا حتی اگر بایگانی نشد
+                    try:
+                        current_fields = json.loads(project.dynamic_fields) if project.dynamic_fields else []
+                        for f in current_fields:
+                            if f.get("id") == field.get("id"):
+                                f["executed"] = True
+                                f["last_executed"] = datetime.utcnow().isoformat()
+                                if "trigger" not in f:
+                                    f["trigger"] = {}
+                                f["trigger"]["last_run"] = datetime.utcnow().isoformat()
+                                break
+                        project.dynamic_fields = json.dumps(current_fields, ensure_ascii=False)
+                        db.commit()
+                        db.refresh(project)
+                    except:
+                        db.rollback()
+
                 # شمارش کامیت‌های موفق
                 if result.get("any_github_success"):
                     github_success_count += 1
@@ -2208,6 +2242,13 @@ async def batch_execute_fields(
                 failed_count += 1
 
             execution_results.append(exec_result)
+
+            # 🔴 بروزرسانی state برای frontend (progress bar)
+            state["completed_count"] = success_count
+            state["failed_count"] = failed_count
+            state["archived_count"] = archived_count
+            state["current_field_name"] = field.get("name")
+            state["last_update"] = datetime.utcnow().isoformat()
 
         except Exception as e:
             logger.error(f"[Batch Execute] Exception in field {field.get('name')}: {type(e).__name__}: {str(e)}")
@@ -2224,34 +2265,13 @@ async def batch_execute_fields(
     logger.info(f"[Batch Execute] Loop completed: success={success_count}, failed={failed_count}, results={len(execution_results)}")
 
     # 🔴 بروزرسانی وضعیت نهایی
-    state["status"] = "idle"
+    state["status"] = "completed"
     state["results"] = execution_results
     state["completed_fields"] = [r["field_id"] for r in execution_results if r.get("success")]
     state["failed_fields"] = [r["field_id"] for r in execution_results if not r.get("success")]
+    state["completed_at"] = datetime.utcnow().isoformat()
 
-    # 🔴 بروزرسانی و بایگانی فیلدها در دیتابیس
-    if fields_to_archive:
-        try:
-            for field in dynamic_fields:
-                field_id = field.get("id")
-                if field_id in fields_to_archive:
-                    field["archived"] = True
-                    field["archived_at"] = datetime.utcnow().isoformat()
-                    field["executed"] = True
-                    field["last_executed"] = datetime.utcnow().isoformat()
-                # بروزرسانی زمان اجرا برای همه فیلدهای اجرا شده
-                elif field_id in [f.get("id") for f in fields_to_execute]:
-                    if "trigger" not in field:
-                        field["trigger"] = {}
-                    field["trigger"]["last_run"] = datetime.utcnow().isoformat()
-                    field["executed"] = True
-
-            project.dynamic_fields = json.dumps(dynamic_fields, ensure_ascii=False)
-            db.commit()
-        except Exception as e:
-            db.rollback()
-            # خطا در بایگانی نباید عملیات کلی را متوقف کند
-            pass
+    # 🔴 بایگانی دیگر در اینجا انجام نمیشه - هر فیلد بلافاصله بایگانی شده
 
     return {
         "success": success_count > 0,
@@ -2291,18 +2311,34 @@ def get_execution_state(project_id: str):
 
 @router.get("/{project_id}/memory/fields/batch-status")
 async def get_batch_execution_status(project_id: str):
-    """دریافت وضعیت اجرای گروهی"""
+    """دریافت وضعیت اجرای گروهی - برای polling از frontend"""
     state = get_execution_state(project_id)
+
+    # محاسبه progress با اطلاعات جدید
+    completed = state.get("completed_count", len(state.get("completed_fields", [])))
+    failed = state.get("failed_count", len(state.get("failed_fields", [])))
+    total = state.get("total_fields", 0)
+    current_idx = state.get("current_index", 0)
+
+    progress = 0
+    if total > 0:
+        progress = round(((completed + failed) / total) * 100, 1)
+
     return {
         "success": True,
-        "status": state["status"],
-        "current_index": state["current_index"],
-        "total_fields": state["total_fields"],
-        "completed_count": len(state["completed_fields"]),
-        "failed_count": len(state["failed_fields"]),
-        "progress_percent": round((state["current_index"] / state["total_fields"]) * 100, 1) if state["total_fields"] > 0 else 0,
-        "started_at": state["started_at"],
-        "last_field_id": state["last_field_id"],
+        "status": state.get("status", "idle"),
+        "current_index": current_idx,
+        "total_fields": total,
+        "completed_count": completed,
+        "failed_count": failed,
+        "archived_count": state.get("archived_count", 0),
+        "progress_percent": progress,
+        "started_at": state.get("started_at"),
+        "completed_at": state.get("completed_at"),
+        "last_field_id": state.get("last_field_id"),
+        "current_field_name": state.get("current_field_name"),
+        "last_update": state.get("last_update"),
+        "is_running": state.get("status") in ["running", "paused"],
     }
 
 
@@ -2400,7 +2436,9 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
 
         action_type = target_field.get("action_type", "display")
         target_path = target_field.get("target_path")
-        archive_after_run = target_field.get("archive_after_run", False)
+        # 🔴 پیش‌فرض: فیلدهای temporary بعد از اجرای موفق بایگانی شوند
+        field_type = target_field.get("field_type", "temporary")
+        archive_after_run = target_field.get("archive_after_run", field_type == "temporary")
         deploy_after_commit = target_field.get("deploy_after_commit", False)
 
         # 🔴 لاگ برای دیباگ GitHub commit

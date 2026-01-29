@@ -36,11 +36,15 @@ interface AnalysisSettings {
 }
 
 interface Issue {
+  id?: string;  // شناسه یکتا برای issue
   file?: string;
   severity: string;
   message: string;
   line?: number;
   model?: string;
+  converted_to_field?: boolean;  // آیا به فیلد پویا تبدیل شده؟
+  converted_field_id?: string;  // شناسه فیلد ایجاد شده
+  converted_at?: string;  // زمان تبدیل
 }
 
 interface AvailableModel {
@@ -81,6 +85,7 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
   } | null>(null);
   const [rejectedIssues, setRejectedIssues] = useState<any[]>([]);
   const [loadingValidation, setLoadingValidation] = useState(false);
+  const [convertingIssue, setConvertingIssue] = useState<string | null>(null);  // شناسه issue در حال تبدیل
 
   // Edit states
   const [editingSettings, setEditingSettings] = useState(false);
@@ -497,6 +502,105 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
     } catch (e) {
       console.error('Error loading issues:', e);
     }
+  };
+
+  // 🆕 تبدیل issue به فیلد پویا
+  const convertIssueToField = async (issue: Issue, index: number) => {
+    const issueId = issue.id || `issue_${index}`;
+    setConvertingIssue(issueId);
+
+    try {
+      // تشخیص اولویت از severity
+      const priorityMap: Record<string, number> = {
+        'critical': 1,
+        'high': 2,
+        'medium': 4,
+        'low': 6,
+      };
+      const priority = priorityMap[issue.severity] || 5;
+
+      // تشخیص action_type
+      const actionType = issue.file ? 'github_commit' : 'display';
+
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: `[${issue.severity.toUpperCase()}] ${issue.message.slice(0, 80)}`,
+          value: `مشکل شناسایی شده:\n${issue.message}${issue.file ? `\n\nفایل: ${issue.file}` : ''}${issue.line ? `\nخط: ${issue.line}` : ''}${issue.model ? `\n\nشناسایی شده توسط: ${issue.model}` : ''}`,
+          target_models: ['all'],
+          field_type: 'temporary',
+          priority: priority,
+          action_type: actionType,
+          target_path: issue.file || null,
+          archive_after_run: true,
+          source_issue_id: issueId,  // برای جلوگیری از تکرار
+        }),
+      });
+
+      const data = await res.json();
+      if (data.success || data.field_id) {
+        // علامت‌گذاری issue به عنوان تبدیل شده
+        const updatedIssues = [...issues];
+        updatedIssues[index] = {
+          ...issue,
+          id: issueId,
+          converted_to_field: true,
+          converted_field_id: data.field_id,
+          converted_at: new Date().toISOString(),
+        };
+        setIssues(updatedIssues);
+
+        // ذخیره در backend
+        await markIssueAsConverted(issueId, data.field_id);
+
+        showSuccess('ایراد به فیلد پویا تبدیل شد');
+      } else {
+        showError(data.detail || 'خطا در تبدیل');
+      }
+    } catch (e) {
+      console.error('Error converting issue:', e);
+      showError('خطا در تبدیل ایراد به فیلد');
+    } finally {
+      setConvertingIssue(null);
+    }
+  };
+
+  // علامت‌گذاری issue در backend
+  const markIssueAsConverted = async (issueId: string, fieldId: string) => {
+    try {
+      await fetch(`${API_BASE}/api/projects/${projectId}/health/issues/${issueId}/mark-converted`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ field_id: fieldId }),
+      });
+    } catch (e) {
+      console.error('Error marking issue as converted:', e);
+    }
+  };
+
+  // تبدیل همه issues به فیلد (batch)
+  const convertAllIssuesToFields = async () => {
+    const unconvertedIssues = issues.filter(i => !i.converted_to_field);
+    if (unconvertedIssues.length === 0) {
+      showError('همه ایرادات قبلاً تبدیل شده‌اند');
+      return;
+    }
+
+    setConvertingIssue('all');
+    let convertedCount = 0;
+
+    for (let i = 0; i < issues.length; i++) {
+      if (!issues[i].converted_to_field) {
+        await convertIssueToField(issues[i], i);
+        convertedCount++;
+        // کمی تاخیر بین درخواست‌ها
+        await new Promise(r => setTimeout(r, 200));
+      }
+    }
+
+    setConvertingIssue(null);
+    showSuccess(`${convertedCount} ایراد به فیلد پویا تبدیل شد`);
   };
 
   const runAnalysis = async () => {
@@ -1296,46 +1400,100 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
         {/* تب ایرادات */}
         {activeTab === 'issues' && (
           <div className="space-y-4">
-            <h3 className="font-bold">ایرادات شناسایی شده ({issues.length})</h3>
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold">ایرادات شناسایی شده ({issues.length})</h3>
+              {issues.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-500">
+                    {issues.filter(i => i.converted_to_field).length} تبدیل شده
+                  </span>
+                  <button
+                    onClick={convertAllIssuesToFields}
+                    disabled={convertingIssue === 'all' || issues.every(i => i.converted_to_field)}
+                    className="px-3 py-1 bg-purple-500 text-white text-xs rounded-lg hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                  >
+                    {convertingIssue === 'all' ? (
+                      <>
+                        <span className="animate-spin">⏳</span>
+                        در حال تبدیل...
+                      </>
+                    ) : (
+                      <>
+                        <span>✨</span>
+                        تبدیل همه به فیلد پویا
+                      </>
+                    )}
+                  </button>
+                </div>
+              )}
+            </div>
 
             {issues.length === 0 ? (
               <div className="text-center py-8 text-gray-400">
-                <div className="text-5xl mb-4">!</div>
+                <div className="text-5xl mb-4">✓</div>
                 <p>ایرادی شناسایی نشده</p>
               </div>
             ) : (
               <div className="space-y-2 max-h-[400px] overflow-auto">
-                {issues.map((issue, idx) => (
-                  <div
-                    key={idx}
-                    className="p-3 rounded-lg bg-gray-50 dark:bg-gray-700 border-r-4"
-                    style={{
-                      borderColor: issue.severity === 'critical' ? '#ef4444' :
-                                  issue.severity === 'high' ? '#f97316' :
-                                  issue.severity === 'medium' ? '#eab308' : '#3b82f6'
-                    }}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex-1">
-                        {issue.file && (
-                          <div className="text-xs font-mono text-blue-500 mb-1">{issue.file}</div>
-                        )}
-                        <p className="text-sm">{issue.message}</p>
-                        {issue.line && (
-                          <span className="text-xs text-gray-400">خط {issue.line}</span>
-                        )}
-                      </div>
-                      <div className="flex flex-col items-end gap-1">
-                        <span className={`px-2 py-0.5 rounded text-xs ${getSeverityColor(issue.severity)}`}>
-                          {issue.severity}
-                        </span>
-                        {issue.model && (
-                          <span className="text-xs text-gray-400">{issue.model}</span>
-                        )}
+                {issues.map((issue, idx) => {
+                  const issueId = issue.id || `issue_${idx}`;
+                  const isConverting = convertingIssue === issueId;
+
+                  return (
+                    <div
+                      key={idx}
+                      className={`p-3 rounded-lg border-r-4 transition-all ${
+                        issue.converted_to_field
+                          ? 'bg-green-50 dark:bg-green-900/20 opacity-70'
+                          : 'bg-gray-50 dark:bg-gray-700'
+                      }`}
+                      style={{
+                        borderColor: issue.converted_to_field ? '#22c55e' :
+                                    issue.severity === 'critical' ? '#ef4444' :
+                                    issue.severity === 'high' ? '#f97316' :
+                                    issue.severity === 'medium' ? '#eab308' : '#3b82f6'
+                      }}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1">
+                          {issue.file && (
+                            <div className="text-xs font-mono text-blue-500 mb-1">{issue.file}</div>
+                          )}
+                          <p className="text-sm">{issue.message}</p>
+                          <div className="flex items-center gap-2 mt-1">
+                            {issue.line && (
+                              <span className="text-xs text-gray-400">خط {issue.line}</span>
+                            )}
+                            {issue.converted_to_field && (
+                              <span className="text-xs text-green-600 dark:text-green-400 flex items-center gap-1">
+                                <span>✓</span>
+                                تبدیل شده به فیلد
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex flex-col items-end gap-1">
+                          <span className={`px-2 py-0.5 rounded text-xs ${getSeverityColor(issue.severity)}`}>
+                            {issue.severity}
+                          </span>
+                          {issue.model && (
+                            <span className="text-xs text-gray-400">{issue.model}</span>
+                          )}
+                          {!issue.converted_to_field && (
+                            <button
+                              onClick={() => convertIssueToField(issue, idx)}
+                              disabled={isConverting}
+                              className="mt-1 px-2 py-0.5 bg-purple-100 dark:bg-purple-900/50 text-purple-600 dark:text-purple-300 text-xs rounded hover:bg-purple-200 disabled:opacity-50"
+                              title="تبدیل به فیلد پویا"
+                            >
+                              {isConverting ? '⏳' : '➜ فیلد'}
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
