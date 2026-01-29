@@ -935,7 +935,17 @@ class DeepAnalysisService:
     "ideal_structure": {{
         "folders": ["لیست پوشه‌های ایده‌آل"],
         "key_files": ["فایل‌های کلیدی"],
-        "description": "توضیح ساختار ایده‌آل"
+        "description": "توضیح جامع و مفصل ساختار ایده‌آل پروژه (حداقل 500 کاراکتر)",
+        "architecture_overview": "معماری کلی سیستم چگونه باید باشد",
+        "components": [
+            {{"name": "نام کامپوننت", "purpose": "وظیفه", "files": ["فایل‌ها"], "depends_on": ["وابستگی‌ها"]}}
+        ],
+        "wiring": {{
+            "data_flow": "جریان داده در سیستم چگونه باید باشد",
+            "communication": "ارتباط بین بخش‌ها چگونه باید باشد"
+        }},
+        "current_gaps": ["کمبود 1", "کمبود 2"],
+        "roadmap_to_ideal": ["قدم 1 برای رسیدن به حالت ایده‌آل", "قدم 2"]
     }},
     "overall_score": 0-100,
     "summary": "خلاصه وضعیت ساختار"
@@ -1275,17 +1285,57 @@ class DeepAnalysisService:
 
     def _aggregate_macro_results(self, model_results: Dict) -> Dict:
         """ترکیب نتایج Macro از چند مدل"""
-        # پیاده‌سازی ساده - میانگین نمرات
-        scores = {"cooperation_score": [], "roadmap_score": [], "overall_health": []}
+        # پیاده‌سازی کامل - میانگین تمام نمرات
+        scores = {
+            "cooperation_score": [],
+            "roadmap_score": [],
+            "overall_health": [],
+            "readme_accuracy": [],  # 🆕 اضافه شد
+            "position_score": [],   # 🆕 اضافه شد
+        }
 
         for model_id, result in model_results.items():
             if isinstance(result, dict):
+                # نمره roadmap_compliance
                 if "roadmap_compliance" in result:
                     rc = result["roadmap_compliance"]
                     if isinstance(rc, dict) and "overall_score" in rc:
                         scores["roadmap_score"].append(rc["overall_score"])
+
+                # نمره overall_health
                 if "overall_health" in result:
                     scores["overall_health"].append(result["overall_health"])
+
+                # 🆕 نمره readme_accuracy (مستندات)
+                if "readme_accuracy" in result:
+                    ra = result["readme_accuracy"]
+                    if isinstance(ra, dict) and "score" in ra:
+                        scores["readme_accuracy"].append(ra["score"])
+                    elif isinstance(ra, (int, float)):
+                        scores["readme_accuracy"].append(ra)
+
+                # 🆕 نمره cooperation از cooperation_scores
+                if "cooperation_scores" in result:
+                    cs = result["cooperation_scores"]
+                    if isinstance(cs, dict):
+                        # میانگین نمرات همکاری فایل‌ها
+                        file_scores = []
+                        for file_data in cs.values():
+                            if isinstance(file_data, dict) and "score" in file_data:
+                                file_scores.append(file_data["score"])
+                        if file_scores:
+                            scores["cooperation_score"].append(sum(file_scores) / len(file_scores))
+
+                # 🆕 نمره position از position_scores
+                if "position_scores" in result:
+                    ps = result["position_scores"]
+                    if isinstance(ps, dict):
+                        file_scores = []
+                        for file_data in ps.values():
+                            if isinstance(file_data, dict) and "score" in file_data:
+                                file_scores.append(file_data["score"])
+                        if file_scores:
+                            scores["position_score"].append(sum(file_scores) / len(file_scores))
 
         return {k: (sum(v)/len(v) if v else 0) for k, v in scores.items()}
 
@@ -1402,6 +1452,41 @@ class DeepAnalysisService:
         else:
             total_score = 0
 
+        # 🆕 استخراج صحیح نمرات از macro aggregated
+        macro_aggregated = macro_results.get("aggregated", {})
+        documentation_score = macro_aggregated.get("readme_accuracy", 0)
+        cooperation_score = macro_aggregated.get("cooperation_score", 0)
+        position_score = macro_aggregated.get("position_score", 0)
+        roadmap_score = macro_aggregated.get("roadmap_score", 0)
+
+        # اگر نمره مستندات 0 بود، محاسبه بر اساس وجود README
+        if documentation_score == 0:
+            # بررسی وجود فایل‌های مستندات در پروژه
+            has_readme = any('readme' in f.lower() for f in file_health_map.keys())
+            has_docs = any('doc' in f.lower() or '.md' in f.lower() for f in file_health_map.keys())
+            if has_readme and has_docs:
+                documentation_score = 60  # پایه اگر README موجود باشد
+            elif has_readme:
+                documentation_score = 40
+            elif has_docs:
+                documentation_score = 30
+            # اگر هیچکدام نبود، 0 می‌ماند
+
+        # محاسبه نمره امنیت بر اساس ایرادات امنیتی
+        security_issues = sum(
+            1 for f in micro_results.get("files", {}).values()
+            for issue in f.get("issues", [])
+            if issue.get("type") == "security" or "security" in str(issue.get("message", "")).lower()
+        )
+        if security_issues == 0:
+            security_score = avg_file_score
+        else:
+            security_penalty = min(security_issues * 10, 50)
+            security_score = max(0, avg_file_score - security_penalty)
+
+        logger.info(f"📈 [FINAL] Score breakdown: micro={avg_file_score:.1f}, macro={macro_score:.1f}, structural={structural_score:.1f}")
+        logger.info(f"📈 [FINAL] Detailed: docs={documentation_score:.1f}, coop={cooperation_score:.1f}, roadmap={roadmap_score:.1f}, security={security_score:.1f}")
+
         overall_scores = {
             "micro": avg_file_score,
             "macro": macro_score,
@@ -1409,9 +1494,10 @@ class DeepAnalysisService:
             "total": total_score,
             # اضافه کردن نمرات جزئی‌تر
             "code_quality": avg_file_score,
-            "documentation": macro_results.get("aggregated", {}).get("readme_accuracy", 50) if macro_score > 0 else 0,
-            "security": avg_file_score * 0.9,  # تقریبی
-            "roadmap_compliance": macro_results.get("aggregated", {}).get("roadmap_score", 0),
+            "documentation": documentation_score,  # 🆕 استفاده از نمره واقعی
+            "security": security_score,
+            "cooperation": cooperation_score,      # 🆕 نمره همکاری
+            "roadmap_compliance": roadmap_score,
         }
 
         # جمع‌آوری همه مشکلات
@@ -1443,50 +1529,164 @@ class DeepAnalysisService:
                     "message": f"حذف فایل اضافی: {unnecessary.get('path', '?')} - {unnecessary.get('reason', '')}"
                 })
 
-        # حالت ایده‌آل
+        # حالت ایده‌آل - جامع و مفصل
         ideal_state = ""
+        ideal_structure_data = {}
+
+        # جمع‌آوری اطلاعات از نتایج structural
         for model_id, result in structural_results.get("model_analyses", {}).items():
             if isinstance(result, dict) and "ideal_structure" in result:
                 ideal = result["ideal_structure"]
                 if isinstance(ideal, dict):
-                    ideal_state = ideal.get("description", "")
-                    break
+                    # ترکیب اطلاعات از همه مدل‌ها
+                    if not ideal_structure_data:
+                        ideal_structure_data = ideal
+                    else:
+                        # ادغام کامپوننت‌ها و gaps
+                        if "components" in ideal:
+                            ideal_structure_data.setdefault("components", []).extend(ideal.get("components", []))
+                        if "current_gaps" in ideal:
+                            ideal_structure_data.setdefault("current_gaps", []).extend(ideal.get("current_gaps", []))
 
-        # اگر AI توصیفی نداد، توصیف پیش‌فرض فارسی
-        if not ideal_state or len(ideal_state) < 50:
-            # تولید توصیف بر اساس ساختار پروژه
-            file_types = set()
-            for fp in file_health_map.keys():
-                if "frontend" in fp.lower() or ".tsx" in fp or ".jsx" in fp:
-                    file_types.add("frontend")
-                if "backend" in fp.lower() or "api" in fp.lower() or ".py" in fp:
-                    file_types.add("backend")
-                if "test" in fp.lower():
-                    file_types.add("test")
+        # 🆕 تولید حالت ایده‌آل جامع
+        def build_comprehensive_ideal_state():
+            sections = []
 
-            parts = []
-            if "frontend" in file_types and "backend" in file_types:
-                parts.append("ساختار ایده‌آل این پروژه شامل جداسازی کامل frontend و backend است")
-                parts.append("فایل‌های frontend باید در پوشه‌های components، pages و services سازماندهی شوند")
-                parts.append("فایل‌های backend باید در پوشه‌های routes، services، models و middleware قرار گیرند")
-            elif "frontend" in file_types:
-                parts.append("ساختار ایده‌آل یک پروژه frontend شامل پوشه‌های components، hooks، services و utils است")
-                parts.append("هر کامپوننت باید در پوشه مجزا با فایل‌های style و test خود باشد")
-            elif "backend" in file_types:
-                parts.append("ساختار ایده‌آل backend شامل لایه‌بندی MVC یا Clean Architecture است")
-                parts.append("routes، controllers، services و models باید به‌خوبی از هم جدا شوند")
+            # 1. معماری کلی
+            sections.append("## معماری کلی سیستم")
+            if ideal_structure_data.get("architecture_overview"):
+                sections.append(ideal_structure_data["architecture_overview"])
+            elif ideal_structure_data.get("description"):
+                sections.append(ideal_structure_data["description"])
             else:
-                parts.append("ساختار پروژه باید منظم و مستند باشد")
+                # تولید بر اساس ساختار پروژه
+                file_types = set()
+                for fp in file_health_map.keys():
+                    if "frontend" in fp.lower() or ".tsx" in fp or ".jsx" in fp:
+                        file_types.add("frontend")
+                    if "backend" in fp.lower() or "api" in fp.lower() or ".py" in fp:
+                        file_types.add("backend")
+                    if "test" in fp.lower():
+                        file_types.add("test")
+                    if "config" in fp.lower() or ".env" in fp or "setting" in fp.lower():
+                        file_types.add("config")
+
+                if "frontend" in file_types and "backend" in file_types:
+                    sections.append("""این پروژه یک سیستم Full-Stack است با جداسازی کامل frontend و backend.
+معماری ایده‌آل: Monorepo با ساختار لایه‌ای
+- Backend: معماری لایه‌ای (routes → controllers → services → models → database)
+- Frontend: معماری کامپوننت‌محور (pages → components → hooks → services → utils)
+- ارتباط: REST API یا GraphQL با مستندات OpenAPI/Swagger""")
+                elif "frontend" in file_types:
+                    sections.append("""این پروژه یک اپلیکیشن Frontend است.
+معماری ایده‌آل: Component-Based Architecture با State Management مرکزی
+- ساختار پوشه‌ای: components/, pages/, hooks/, services/, utils/, contexts/
+- هر کامپوننت در پوشه مجزا با فایل‌های .tsx، .css، .test.tsx""")
+                elif "backend" in file_types:
+                    sections.append("""این پروژه یک سیستم Backend است.
+معماری ایده‌آل: Clean Architecture یا Layered Architecture
+- لایه‌ها: API Routes → Controllers → Services → Repositories → Models
+- جداسازی concerns: auth, validation, business logic, data access""")
+
+            # 2. کمبودها و نواقص
+            sections.append("\n## کمبودها و نواقص فعلی")
+            gaps = ideal_structure_data.get("current_gaps", [])
+
+            # اضافه کردن کمبودها از issues
+            severity_groups = {"critical": [], "high": [], "medium": []}
+            for issue in all_issues[:30]:
+                sev = issue.get("severity", "medium")
+                if sev in severity_groups:
+                    msg = issue.get("message", issue.get("description", str(issue)))[:100]
+                    severity_groups[sev].append(msg)
+
+            if severity_groups["critical"]:
+                gaps.append(f"⛔ {len(severity_groups['critical'])} ایراد بحرانی: {', '.join(severity_groups['critical'][:3])}")
+            if severity_groups["high"]:
+                gaps.append(f"🔴 {len(severity_groups['high'])} ایراد با اولویت بالا")
+            if severity_groups["medium"]:
+                gaps.append(f"🟡 {len(severity_groups['medium'])} ایراد متوسط")
+
+            # بررسی کمبودهای ساختاری
+            if not any("test" in f.lower() for f in file_health_map.keys()):
+                gaps.append("❌ پوشش تست: هیچ فایل تستی یافت نشد")
+            if not any("readme" in f.lower() for f in file_health_map.keys()):
+                gaps.append("❌ مستندات: فایل README.md وجود ندارد")
+            if documentation_score < 50:
+                gaps.append(f"⚠️ نمره مستندات پایین: {documentation_score:.0f}%")
+
+            if gaps:
+                sections.append("\n".join([f"- {g}" for g in gaps[:15]]))
+            else:
+                sections.append("- کمبود خاصی شناسایی نشده")
+
+            # 3. ساختار کامپوننت‌ها
+            sections.append("\n## ساختار کامپوننت‌ها و سیم‌کشی")
+            components = ideal_structure_data.get("components", [])
+            if components:
+                for comp in components[:10]:
+                    if isinstance(comp, dict):
+                        sections.append(f"**{comp.get('name', '?')}**: {comp.get('purpose', '')}")
+                        if comp.get("files"):
+                            sections.append(f"  فایل‌ها: {', '.join(comp['files'][:5])}")
+                        if comp.get("depends_on"):
+                            sections.append(f"  وابسته به: {', '.join(comp['depends_on'][:5])}")
+            else:
+                # تولید پیشنهاد ساختار بر اساس فایل‌های موجود
+                sections.append("پیشنهاد ساختار بر اساس فایل‌های موجود:")
+                folder_groups = {}
+                for fp in file_health_map.keys():
+                    parts = fp.split("/")
+                    if len(parts) > 1:
+                        folder = parts[0]
+                        folder_groups.setdefault(folder, []).append(fp)
+                for folder, files in list(folder_groups.items())[:8]:
+                    sections.append(f"- **{folder}/**: {len(files)} فایل")
+
+            # 4. سیم‌کشی
+            wiring = ideal_structure_data.get("wiring", {})
+            if wiring:
+                sections.append("\n## جریان داده و ارتباطات")
+                if wiring.get("data_flow"):
+                    sections.append(f"**جریان داده:** {wiring['data_flow']}")
+                if wiring.get("communication"):
+                    sections.append(f"**ارتباط بین بخش‌ها:** {wiring['communication']}")
+
+            # 5. نقشه راه به حالت ایده‌آل
+            sections.append("\n## نقشه راه رسیدن به حالت ایده‌آل")
+            roadmap_steps = ideal_structure_data.get("roadmap_to_ideal", [])
+
+            # اضافه کردن پیشنهادات از recommendations
+            for rec in recommendations[:10]:
+                if isinstance(rec, dict):
+                    roadmap_steps.append(rec.get("message", ""))
 
             if total_issues > 20:
-                parts.append(f"با توجه به {total_issues} ایراد شناسایی‌شده، بازنگری اساسی در کیفیت کد توصیه می‌شود")
-            elif total_issues > 5:
-                parts.append("بهبود مستندات و رفع ایرادات جزئی می‌تواند کیفیت را ارتقا دهد")
+                roadmap_steps.insert(0, f"🔴 فوری: رفع {len(severity_groups.get('critical', []))} ایراد بحرانی")
+            if total_issues > 5:
+                roadmap_steps.insert(1, f"🟡 کوتاه‌مدت: رفع ایرادات با اولویت بالا و متوسط")
+            if not any("test" in f.lower() for f in file_health_map.keys()):
+                roadmap_steps.append("📝 افزودن تست‌های واحد برای بخش‌های اصلی")
+            if documentation_score < 50:
+                roadmap_steps.append("📖 بهبود مستندات و افزودن README کامل")
 
-            if "test" not in file_types:
-                parts.append("افزودن تست‌های واحد و یکپارچه‌سازی ضروری است")
+            if roadmap_steps:
+                for i, step in enumerate(roadmap_steps[:10], 1):
+                    sections.append(f"{i}. {step}")
+            else:
+                sections.append("1. ادامه توسعه با رعایت استانداردها")
 
-            ideal_state = ".\n".join(parts) + "."
+            # 6. خلاصه امتیازات
+            sections.append(f"\n## خلاصه وضعیت فعلی")
+            sections.append(f"- نمره کیفیت کد: {avg_file_score:.0f}%")
+            sections.append(f"- نمره مستندات: {documentation_score:.0f}%")
+            sections.append(f"- نمره ساختار: {structural_score:.0f}%")
+            sections.append(f"- تعداد ایرادات: {total_issues}")
+            sections.append(f"- فایل‌های تحلیل شده: {total_files}")
+
+            return "\n".join(sections)
+
+        ideal_state = build_comprehensive_ideal_state()
 
         return {
             "file_health_map": file_health_map,
