@@ -4097,17 +4097,48 @@ export default function ProjectDetailPage() {
                         parsed = typeof selectedReport.content === 'string'
                           ? JSON.parse(selectedReport.content)
                           : selectedReport.content;
+
+                        // اگر parsed دارای raw_content است، تلاش برای پارس آن
+                        if (parsed?.raw_content) {
+                          // تلاش برای استخراج JSON از داخل raw_content (ممکن است در code block باشد)
+                          const rawContent = parsed.raw_content;
+                          const codeBlockMatch = rawContent.match(/```(?:json)?\s*([\s\S]*?)```/);
+                          if (codeBlockMatch) {
+                            try {
+                              const innerParsed = JSON.parse(codeBlockMatch[1].trim());
+                              parsed = innerParsed;
+                            } catch (e2) {}
+                          } else {
+                            // تلاش برای پیدا کردن { و }
+                            const firstBrace = rawContent.indexOf('{');
+                            const lastBrace = rawContent.lastIndexOf('}');
+                            if (firstBrace !== -1 && lastBrace > firstBrace) {
+                              try {
+                                const innerParsed = JSON.parse(rawContent.substring(firstBrace, lastBrace + 1));
+                                parsed = innerParsed;
+                              } catch (e3) {}
+                            }
+                          }
+                        }
                       } catch (e) {
                         // اگر JSON نیست، به صورت متن نمایش بده
                       }
 
-                      if (!parsed) {
+                      // اگر parsed نشد یا raw_content دارد (خطای parse در بکند)
+                      if (!parsed || parsed.raw_content) {
                         return (
-                          <div>
-                            <h4 className="font-medium text-sm text-gray-500 mb-1">جزئیات:</h4>
-                            <pre className="p-3 bg-gray-100 dark:bg-gray-700 rounded text-sm overflow-auto max-h-64 whitespace-pre-wrap">
-                              {selectedReport.content}
-                            </pre>
+                          <div className="space-y-2">
+                            {parsed?.parse_error && (
+                              <div className="p-2 bg-yellow-100 dark:bg-yellow-900/30 rounded text-sm text-yellow-800 dark:text-yellow-400">
+                                ⚠️ خطا در پردازش JSON گزارش - نمایش محتوای خام
+                              </div>
+                            )}
+                            <div>
+                              <h4 className="font-medium text-sm text-gray-500 mb-1">جزئیات:</h4>
+                              <pre className="p-3 bg-gray-100 dark:bg-gray-700 rounded text-sm overflow-auto max-h-64 whitespace-pre-wrap" dir="ltr">
+                                {parsed?.raw_content || selectedReport.content}
+                              </pre>
+                            </div>
                           </div>
                         );
                       }
