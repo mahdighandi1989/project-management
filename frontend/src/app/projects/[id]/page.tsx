@@ -1055,7 +1055,7 @@ export default function ProjectDetailPage() {
 
   // تولید گزارش مهندسی جامع
   const generateEngineeringReport = async (days: number = 7) => {
-    if (!confirm('تولید گزارش مهندسی جامع؟\n\nاین گزارش شامل:\n• تحلیل کامل ساختار پروژه\n• شناسایی باگ‌ها و مشکلات\n• پیشنهادات بهبود\n• نقشه راه توسعه\n• تولید خودکار فیلدها برای اجرای نقشه راه\n\nاین عملیات ممکن است چند دقیقه طول بکشد.')) {
+    if (!confirm('تولید گزارش مهندسی جامع؟\n\nاین گزارش شامل:\n• تحلیل کامل ساختار پروژه\n• 🔍 اعتبارسنجی نتایج تحلیل سلامت (تایید/رد ایرادات)\n• شناسایی باگ‌ها و مشکلات\n• پیشنهادات بهبود\n• نقشه راه توسعه\n• تولید خودکار فیلدها برای ایرادات تایید شده\n\nاین عملیات ممکن است چند دقیقه طول بکشد.')) {
       return;
     }
 
@@ -1063,7 +1063,7 @@ export default function ProjectDetailPage() {
     showSuccess('در حال تحلیل پروژه و تولید گزارش مهندسی... لطفاً صبر کنید');
 
     try {
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/reports/generate-engineering?days=${days}&model_id=claude&auto_create_fields=true`, {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/reports/generate-engineering?days=${days}&model_id=claude&auto_create_fields=true&validate_health_issues=true`, {
         method: 'POST',
       });
       const data = await res.json();
@@ -1079,6 +1079,13 @@ export default function ProjectDetailPage() {
         }
         if (data.fields_count > 0) {
           successMsg += ` | ${data.fields_count} فیلد جدید ایجاد شد`;
+        }
+        // 🆕 نمایش نتایج اعتبارسنجی health analysis
+        if (data.validation_results) {
+          const vr = data.validation_results;
+          if (vr.issues_reviewed > 0) {
+            successMsg += ` | اعتبارسنجی: ${vr.validated_count} تایید، ${vr.rejected_count} رد`;
+          }
         }
 
         showSuccess(successMsg);
@@ -4083,14 +4090,299 @@ export default function ProjectDetailPage() {
                       </div>
                     )}
 
-                    {selectedReport.content && (
-                      <div>
-                        <h4 className="font-medium text-sm text-gray-500 mb-1">جزئیات:</h4>
-                        <pre className="p-3 bg-gray-100 dark:bg-gray-700 rounded text-sm overflow-auto max-h-64 whitespace-pre-wrap">
-                          {selectedReport.content}
-                        </pre>
-                      </div>
-                    )}
+                    {selectedReport.content && (() => {
+                      // تلاش برای پارس JSON
+                      let parsed: any = null;
+                      try {
+                        parsed = typeof selectedReport.content === 'string'
+                          ? JSON.parse(selectedReport.content)
+                          : selectedReport.content;
+                      } catch (e) {
+                        // اگر JSON نیست، به صورت متن نمایش بده
+                      }
+
+                      if (!parsed) {
+                        return (
+                          <div>
+                            <h4 className="font-medium text-sm text-gray-500 mb-1">جزئیات:</h4>
+                            <pre className="p-3 bg-gray-100 dark:bg-gray-700 rounded text-sm overflow-auto max-h-64 whitespace-pre-wrap">
+                              {selectedReport.content}
+                            </pre>
+                          </div>
+                        );
+                      }
+
+                      // رندر ساختاریافته گزارش مهندسی
+                      return (
+                        <div className="space-y-4">
+                          {/* خلاصه مدیریتی */}
+                          {parsed.executive_summary && (
+                            <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-700">
+                              <h4 className="font-bold text-blue-700 dark:text-blue-400 mb-2 flex items-center gap-2">
+                                <span>📋</span> خلاصه مدیریتی
+                              </h4>
+                              <p className="text-sm text-blue-800 dark:text-blue-300 whitespace-pre-wrap">
+                                {parsed.executive_summary}
+                              </p>
+                            </div>
+                          )}
+
+                          {/* امتیاز سلامت */}
+                          {parsed.project_health && (
+                            <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-700">
+                              <h4 className="font-bold text-green-700 dark:text-green-400 mb-3 flex items-center gap-2">
+                                <span>💚</span> سلامت پروژه
+                              </h4>
+                              <div className="flex items-center gap-4 mb-3">
+                                <div className="text-4xl font-bold text-green-600">{parsed.project_health.score}%</div>
+                                <div className="text-lg text-green-700 dark:text-green-400">{parsed.project_health.status}</div>
+                              </div>
+                              {parsed.project_health.key_metrics && (
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                                  {Object.entries(parsed.project_health.key_metrics).map(([key, value]) => (
+                                    <div key={key} className="text-center p-2 bg-white dark:bg-gray-800 rounded">
+                                      <div className="font-bold text-green-600">{String(value)}%</div>
+                                      <div className="text-gray-500">{key.replace(/_/g, ' ')}</div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* اعتبارسنجی تحلیل سلامت */}
+                          {parsed.health_analysis_validation && (
+                            <div className="p-4 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-700">
+                              <h4 className="font-bold text-purple-700 dark:text-purple-400 mb-3 flex items-center gap-2">
+                                <span>🔍</span> نتیجه اعتبارسنجی تحلیل سلامت
+                              </h4>
+                              <div className="grid grid-cols-3 gap-3 mb-3">
+                                <div className="text-center p-2 bg-white dark:bg-gray-800 rounded">
+                                  <div className="text-2xl font-bold text-purple-600">{parsed.health_analysis_validation.total_reviewed || 0}</div>
+                                  <div className="text-xs text-gray-500">بررسی شده</div>
+                                </div>
+                                <div className="text-center p-2 bg-green-100 dark:bg-green-800/30 rounded">
+                                  <div className="text-2xl font-bold text-green-600">{parsed.health_analysis_validation.validated_issues?.length || 0}</div>
+                                  <div className="text-xs text-gray-500">✅ تایید شده</div>
+                                </div>
+                                <div className="text-center p-2 bg-red-100 dark:bg-red-800/30 rounded">
+                                  <div className="text-2xl font-bold text-red-600">{parsed.health_analysis_validation.rejected_issues?.length || 0}</div>
+                                  <div className="text-xs text-gray-500">❌ رد شده</div>
+                                </div>
+                              </div>
+                              {parsed.health_analysis_validation.validation_summary && (
+                                <p className="text-sm text-purple-600 dark:text-purple-400 bg-white dark:bg-gray-800 p-2 rounded">
+                                  {parsed.health_analysis_validation.validation_summary}
+                                </p>
+                              )}
+
+                              {/* ایرادات تایید شده */}
+                              {parsed.health_analysis_validation.validated_issues?.length > 0 && (
+                                <div className="mt-3">
+                                  <h5 className="font-medium text-sm text-green-700 dark:text-green-400 mb-2">ایرادات تایید شده:</h5>
+                                  <div className="space-y-2 max-h-40 overflow-auto">
+                                    {parsed.health_analysis_validation.validated_issues.map((issue: any, idx: number) => (
+                                      <div key={idx} className="text-xs p-2 bg-green-100 dark:bg-green-800/30 rounded border-r-2 border-green-500">
+                                        <div className="font-medium">{issue.original_issue?.file || 'نامشخص'}</div>
+                                        <div className="text-gray-600 dark:text-gray-400">{issue.original_issue?.message || issue.validation_note}</div>
+                                        <div className="flex gap-2 mt-1">
+                                          <span className="text-green-600">امتیاز: {issue.validation_score}</span>
+                                          <span className="text-purple-600">اولویت: {issue.priority}</span>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* ایرادات رد شده */}
+                              {parsed.health_analysis_validation.rejected_issues?.length > 0 && (
+                                <div className="mt-3">
+                                  <h5 className="font-medium text-sm text-red-700 dark:text-red-400 mb-2">ایرادات رد شده:</h5>
+                                  <div className="space-y-2 max-h-40 overflow-auto">
+                                    {parsed.health_analysis_validation.rejected_issues.map((issue: any, idx: number) => (
+                                      <div key={idx} className="text-xs p-2 bg-red-100 dark:bg-red-800/30 rounded border-r-2 border-red-500">
+                                        <div className="font-medium">{issue.original_issue?.file || 'نامشخص'}</div>
+                                        <div className="text-gray-600 dark:text-gray-400">{issue.original_issue?.message}</div>
+                                        <div className="text-red-600 mt-1">دلیل رد: {issue.rejection_reason}</div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* باگ‌ها و مشکلات */}
+                          {parsed.bugs_and_issues?.length > 0 && (
+                            <div className="p-4 bg-red-50 dark:bg-red-900/20 rounded-lg border border-red-200 dark:border-red-700">
+                              <h4 className="font-bold text-red-700 dark:text-red-400 mb-3 flex items-center gap-2">
+                                <span>🐛</span> باگ‌ها و مشکلات ({parsed.bugs_and_issues.length})
+                              </h4>
+                              <div className="space-y-2 max-h-48 overflow-auto">
+                                {parsed.bugs_and_issues.map((bug: any, idx: number) => (
+                                  <div key={idx} className={`p-2 rounded text-sm ${
+                                    bug.severity === 'critical' ? 'bg-red-200 dark:bg-red-800/50' :
+                                    bug.severity === 'high' ? 'bg-orange-100 dark:bg-orange-800/30' :
+                                    'bg-yellow-100 dark:bg-yellow-800/30'
+                                  }`}>
+                                    <div className="flex items-center justify-between">
+                                      <span className="font-medium">{bug.title}</span>
+                                      <span className={`text-xs px-2 py-0.5 rounded ${
+                                        bug.severity === 'critical' ? 'bg-red-500 text-white' :
+                                        bug.severity === 'high' ? 'bg-orange-500 text-white' :
+                                        'bg-yellow-500 text-black'
+                                      }`}>{bug.severity}</span>
+                                    </div>
+                                    <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">{bug.description}</div>
+                                    {bug.file && <div className="text-xs text-blue-500 mt-1">📁 {bug.file}</div>}
+                                    {bug.suggested_fix && <div className="text-xs text-green-600 mt-1">💡 {bug.suggested_fix}</div>}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* تحلیل فنی */}
+                          {parsed.technical_analysis && (
+                            <div className="p-4 bg-gray-50 dark:bg-gray-800 rounded-lg border dark:border-gray-700">
+                              <h4 className="font-bold text-gray-700 dark:text-gray-300 mb-3 flex items-center gap-2">
+                                <span>🔧</span> تحلیل فنی
+                              </h4>
+                              <div className="grid md:grid-cols-2 gap-4">
+                                {parsed.technical_analysis.strengths?.length > 0 && (
+                                  <div>
+                                    <h5 className="text-sm font-medium text-green-600 mb-1">💪 نقاط قوت:</h5>
+                                    <ul className="text-xs space-y-1">
+                                      {parsed.technical_analysis.strengths.map((s: string, i: number) => (
+                                        <li key={i} className="text-gray-600 dark:text-gray-400">• {s}</li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+                                {parsed.technical_analysis.weaknesses?.length > 0 && (
+                                  <div>
+                                    <h5 className="text-sm font-medium text-red-600 mb-1">⚠️ نقاط ضعف:</h5>
+                                    <ul className="text-xs space-y-1">
+                                      {parsed.technical_analysis.weaknesses.map((w: string, i: number) => (
+                                        <li key={i} className="text-gray-600 dark:text-gray-400">• {w}</li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+                              </div>
+                              {parsed.technical_analysis.architecture_review && (
+                                <div className="mt-3 text-xs text-gray-600 dark:text-gray-400 p-2 bg-white dark:bg-gray-700 rounded">
+                                  <span className="font-medium">معماری: </span>
+                                  {parsed.technical_analysis.architecture_review}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* پیشنهادات */}
+                          {parsed.recommendations?.length > 0 && (
+                            <div className="p-4 bg-amber-50 dark:bg-amber-900/20 rounded-lg border border-amber-200 dark:border-amber-700">
+                              <h4 className="font-bold text-amber-700 dark:text-amber-400 mb-3 flex items-center gap-2">
+                                <span>💡</span> پیشنهادات ({parsed.recommendations.length})
+                              </h4>
+                              <div className="space-y-2 max-h-48 overflow-auto">
+                                {parsed.recommendations.map((rec: any, idx: number) => (
+                                  <div key={idx} className={`p-2 rounded text-sm ${
+                                    rec.priority === 'high' ? 'bg-amber-200 dark:bg-amber-800/50' :
+                                    'bg-amber-100 dark:bg-amber-800/30'
+                                  }`}>
+                                    <div className="flex items-center justify-between">
+                                      <span className="font-medium">{rec.title}</span>
+                                      <span className="text-xs text-gray-500">تلاش: {rec.effort || 'نامشخص'}</span>
+                                    </div>
+                                    <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">{rec.description}</div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* نقشه راه */}
+                          {parsed.roadmap && (
+                            <div className="p-4 bg-indigo-50 dark:bg-indigo-900/20 rounded-lg border border-indigo-200 dark:border-indigo-700">
+                              <h4 className="font-bold text-indigo-700 dark:text-indigo-400 mb-3 flex items-center gap-2">
+                                <span>🗺️</span> نقشه راه
+                              </h4>
+                              <div className="space-y-3">
+                                {parsed.roadmap.immediate?.length > 0 && (
+                                  <div>
+                                    <h5 className="text-sm font-medium text-red-600 mb-1">🔥 فوری:</h5>
+                                    <div className="space-y-1">
+                                      {parsed.roadmap.immediate.map((t: any, i: number) => (
+                                        <div key={i} className="text-xs p-2 bg-red-100 dark:bg-red-800/30 rounded">
+                                          <span className="font-medium">{t.task}</span>
+                                          {t.target_path && <span className="text-blue-500 mr-2">📁 {t.target_path}</span>}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                                {parsed.roadmap.short_term?.length > 0 && (
+                                  <div>
+                                    <h5 className="text-sm font-medium text-amber-600 mb-1">📅 کوتاه‌مدت:</h5>
+                                    <div className="space-y-1">
+                                      {parsed.roadmap.short_term.map((t: any, i: number) => (
+                                        <div key={i} className="text-xs p-2 bg-amber-100 dark:bg-amber-800/30 rounded">
+                                          <span className="font-medium">{t.task}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                                {parsed.roadmap.long_term?.length > 0 && (
+                                  <div>
+                                    <h5 className="text-sm font-medium text-green-600 mb-1">🎯 بلندمدت:</h5>
+                                    <div className="space-y-1">
+                                      {parsed.roadmap.long_term.map((t: any, i: number) => (
+                                        <div key={i} className="text-xs p-2 bg-green-100 dark:bg-green-800/30 rounded">
+                                          <span className="font-medium">{t.task}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* حالت ایده‌آل */}
+                          {parsed.comprehensive_ideal_state && (
+                            <div className="p-4 bg-cyan-50 dark:bg-cyan-900/20 rounded-lg border border-cyan-200 dark:border-cyan-700">
+                              <h4 className="font-bold text-cyan-700 dark:text-cyan-400 mb-3 flex items-center gap-2">
+                                <span>🌟</span> حالت ایده‌آل
+                              </h4>
+                              <p className="text-sm text-cyan-800 dark:text-cyan-300 whitespace-pre-wrap mb-3">
+                                {parsed.comprehensive_ideal_state.description}
+                              </p>
+                              {parsed.comprehensive_ideal_state.current_deficiencies?.length > 0 && (
+                                <div className="mb-2">
+                                  <h5 className="text-xs font-medium text-red-600">کمبودهای فعلی:</h5>
+                                  <ul className="text-xs text-gray-600 dark:text-gray-400">
+                                    {parsed.comprehensive_ideal_state.current_deficiencies.map((d: string, i: number) => (
+                                      <li key={i}>• {d}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* نمایش محتوای خام در صورت نیاز */}
+                          <details className="text-xs">
+                            <summary className="cursor-pointer text-gray-500 hover:text-gray-700">📄 نمایش JSON خام</summary>
+                            <pre className="mt-2 p-2 bg-gray-100 dark:bg-gray-800 rounded overflow-auto max-h-48">
+                              {JSON.stringify(parsed, null, 2)}
+                            </pre>
+                          </details>
+                        </div>
+                      );
+                    })()}
 
                     <div className="text-xs text-gray-500 flex justify-between">
                       <span>بازه: {selectedReport.period_start ? new Date(selectedReport.period_start).toLocaleDateString('fa-IR') : ''} تا {selectedReport.period_end ? new Date(selectedReport.period_end).toLocaleDateString('fa-IR') : ''}</span>
