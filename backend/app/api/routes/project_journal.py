@@ -599,6 +599,16 @@ async def generate_engineering_report(
     health_analysis_summary = ""
     partial_results = {}
 
+    # 🔴 DEBUG: Log raw data before extraction
+    logger.info(f"=" * 60)
+    logger.info(f"🔴 DEBUG: Starting health issues extraction for project {project_id}")
+    logger.info(f"🔴 DEBUG: validate_health_issues = {validate_health_issues}")
+    logger.info(f"🔴 DEBUG: project.issues_found type: {type(project.issues_found)}")
+    logger.info(f"🔴 DEBUG: project.issues_found length: {len(project.issues_found or '')}")
+    if project.issues_found:
+        logger.info(f"🔴 DEBUG: project.issues_found preview: {project.issues_found[:500]}...")
+    logger.info(f"=" * 60)
+
     def normalize_issue(issue, file_path=None, source_models=None):
         """نرمال‌سازی فرمت ایراد از منابع مختلف"""
         return {
@@ -628,6 +638,8 @@ async def generate_engineering_report(
                                 ))
         except Exception as e:
             logger.warning(f"Error parsing file_health_map: {e}")
+
+    logger.info(f"🔴 DEBUG: After file_health_map extraction: {len(health_analysis_issues)} issues")
 
     # 2. دریافت نتایج از analysis_progress (partial_results)
     if project.analysis_progress:
@@ -665,13 +677,18 @@ async def generate_engineering_report(
         except Exception as e:
             logger.warning(f"Error parsing analysis_progress: {e}")
 
-    # 3. دریافت از issues_found (ذخیره شده از قبل)
+    logger.info(f"🔴 DEBUG: After analysis_progress extraction: {len(health_analysis_issues)} issues")
+
+    # 3. دریافت از issues_found (ذخیره شده از قبل) - این منبع اصلی است!
+    logger.info(f"🔴 DEBUG: Checking project.issues_found...")
     if project.issues_found:
         try:
             stored_issues = json.loads(project.issues_found)
+            logger.info(f"🔴 DEBUG: Parsed issues_found: type={type(stored_issues)}, count={len(stored_issues) if isinstance(stored_issues, list) else 'N/A'}")
             if isinstance(stored_issues, list):
                 # ادغام با issues موجود (بدون تکرار)
                 existing_keys = {f"{i.get('file', '')}:{i.get('line', '')}:{i.get('message', '')[:50]}" for i in health_analysis_issues}
+                added_count = 0
                 for issue in stored_issues:
                     if isinstance(issue, dict):
                         normalized = normalize_issue(issue)
@@ -679,8 +696,16 @@ async def generate_engineering_report(
                         if key not in existing_keys:
                             health_analysis_issues.append(normalized)
                             existing_keys.add(key)
+                            added_count += 1
+                logger.info(f"🔴 DEBUG: Added {added_count} issues from issues_found (after dedup)")
+            else:
+                logger.warning(f"🔴 DEBUG: issues_found is not a list! Content: {str(stored_issues)[:200]}")
         except Exception as e:
             logger.warning(f"Error parsing issues_found: {e}")
+    else:
+        logger.warning(f"🔴 DEBUG: project.issues_found is EMPTY!")
+
+    logger.info(f"🔴 DEBUG: After issues_found extraction: {len(health_analysis_issues)} issues")
 
     # 4. دریافت از health_scores (ممکن است issues داخلش باشد)
     if project.health_scores:
