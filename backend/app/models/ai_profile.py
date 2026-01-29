@@ -222,3 +222,97 @@ class ProfileUpdateRequest(BaseModel):
 
     # جزئیات اضافی
     details: Dict[str, Any] = {}
+
+
+# =====================
+# تنظیمات مدل‌ها (قابل ذخیره در دیتابیس)
+# =====================
+
+class ModelSettings(Base):
+    """تنظیمات هر مدل AI - قابل مدیریت توسط کاربر"""
+    __tablename__ = "model_settings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    model_id = Column(String, unique=True, index=True, nullable=False)
+
+    # وضعیت فعال بودن
+    enabled = Column(Integer, default=1)  # 1=فعال، 0=غیرفعال
+
+    # بخش‌های مجاز برای استفاده (JSON array)
+    # مثال: ["chat", "analysis", "code_generation", "all"]
+    allowed_tasks = Column(JSON, default=["all"])
+
+    # اولویت (1 = بالاترین)
+    priority = Column(Integer, default=5)
+
+    # محدودیت‌ها
+    max_tokens_override = Column(Integer, nullable=True)  # override برای max_tokens
+    max_daily_requests = Column(Integer, default=0)  # 0 = نامحدود
+    current_daily_requests = Column(Integer, default=0)
+    last_request_date = Column(String, nullable=True)  # YYYY-MM-DD
+
+    # ترجیحات
+    preferred_for = Column(JSON, default=[])  # ["code", "reasoning", ...]
+    fallback_model_id = Column(String, nullable=True)  # مدل جایگزین
+
+    # هزینه و بودجه
+    max_daily_cost = Column(Float, default=0.0)  # 0 = نامحدود
+    current_daily_cost = Column(Float, default=0.0)
+
+    # یادداشت کاربر
+    notes = Column(Text, nullable=True)
+
+    # تنظیمات پیشرفته (JSON)
+    advanced_settings = Column(JSON, default={})
+    # شامل: temperature, top_p, custom_system_prompt, etc.
+
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+
+class ModelSettingsSchema(BaseModel):
+    """اسکیما تنظیمات مدل"""
+    model_id: str
+    enabled: bool = True
+    allowed_tasks: List[str] = ["all"]
+    priority: int = 5
+    max_tokens_override: Optional[int] = None
+    max_daily_requests: int = 0
+    preferred_for: List[str] = []
+    fallback_model_id: Optional[str] = None
+    max_daily_cost: float = 0.0
+    notes: Optional[str] = None
+    advanced_settings: Dict[str, Any] = {}
+
+    class Config:
+        from_attributes = True
+
+
+class ModelSettingsUpdateRequest(BaseModel):
+    """درخواست بروزرسانی تنظیمات مدل"""
+    enabled: Optional[bool] = None
+    allowed_tasks: Optional[List[str]] = None
+    priority: Optional[int] = None
+    max_tokens_override: Optional[int] = None
+    max_daily_requests: Optional[int] = None
+    preferred_for: Optional[List[str]] = None
+    fallback_model_id: Optional[str] = None
+    max_daily_cost: Optional[float] = None
+    notes: Optional[str] = None
+    advanced_settings: Optional[Dict[str, Any]] = None
+
+
+# Task types that can be assigned to models
+AVAILABLE_TASK_TYPES = [
+    {"id": "all", "name": "همه کارها", "description": "استفاده در تمام بخش‌های برنامه"},
+    {"id": "chat", "name": "چت", "description": "پرسش و پاسخ با AI در پروژه‌ها"},
+    {"id": "analysis", "name": "تحلیل سلامت", "description": "تحلیل و بررسی سلامت کد"},
+    {"id": "code_generation", "name": "تولید کد", "description": "تولید و نوشتن کد جدید"},
+    {"id": "code_review", "name": "بررسی کد", "description": "بررسی و نقد کد موجود"},
+    {"id": "documentation", "name": "مستندسازی", "description": "تولید README و مستندات"},
+    {"id": "debugging", "name": "دیباگ", "description": "یافتن و رفع باگ‌ها"},
+    {"id": "refactoring", "name": "ریفکتور", "description": "بهبود ساختار کد"},
+    {"id": "testing", "name": "تست", "description": "نوشتن و اجرای تست‌ها"},
+    {"id": "image_analysis", "name": "تحلیل تصویر", "description": "بررسی و تحلیل تصاویر"},
+    {"id": "research", "name": "تحقیق", "description": "جستجو و تحقیق (Perplexity)"},
+]
