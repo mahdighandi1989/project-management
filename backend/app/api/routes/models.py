@@ -79,6 +79,8 @@ async def list_models(provider: Optional[str] = None, capability: Optional[str] 
     try:
         from ...core.models_registry import MODEL_REGISTRY, ModelCapability
         from ...services.ai_manager import get_ai_manager
+        from ...core.database import get_db
+        from ...models.ai_profile import ModelSettings
 
         # Get available providers
         available_providers = []
@@ -87,6 +89,15 @@ async def list_models(provider: Optional[str] = None, capability: Optional[str] 
             available_providers = ai_manager.get_available_providers()
         except Exception as e:
             logger.warning(f"Could not get AI manager: {e}")
+
+        # 🔴 دریافت تنظیمات مدل‌ها از دیتابیس
+        db_settings_map = {}
+        try:
+            db = next(get_db())
+            db_settings = db.query(ModelSettings).all()
+            db_settings_map = {s.model_id: s for s in db_settings}
+        except Exception as e:
+            logger.warning(f"Could not load model settings: {e}")
 
         models = []
         for model in MODEL_REGISTRY.values():
@@ -105,6 +116,13 @@ async def list_models(provider: Optional[str] = None, capability: Optional[str] 
 
                 is_available = model_provider in available_providers
 
+                # 🔴 چک کردن تنظیمات دیتابیس برای enabled
+                db_setting = db_settings_map.get(model.id)
+                if db_setting:
+                    is_enabled = bool(db_setting.enabled)
+                else:
+                    is_enabled = model.enabled
+
                 models.append(ModelInfo(
                     id=model.id,
                     provider=model_provider,
@@ -116,7 +134,7 @@ async def list_models(provider: Optional[str] = None, capability: Optional[str] 
                     weaknesses=model.weaknesses,
                     cost_per_1k_tokens=model.cost_per_1k_tokens,
                     priority=model.priority,
-                    enabled=model.enabled,
+                    enabled=is_enabled,  # 🔴 از دیتابیس میاد
                     supports_images=model.supports_images,
                     supports_video=model.supports_video,
                     is_image_generator=model.is_image_generator,

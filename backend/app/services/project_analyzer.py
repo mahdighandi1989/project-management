@@ -217,9 +217,9 @@ class ProjectAnalyzer:
             db.add(report)
             db.commit()
 
-            # انتخاب مدل‌ها
+            # انتخاب مدل‌ها (فقط مدل‌های مجاز برای analysis)
             if not models:
-                available = self.ai_manager.get_available_models()
+                available = self.ai_manager.get_available_models(task_type="analysis")
                 models = [m.id for m in available[:3]]  # حداکثر 3 مدل
 
             report.models_used = models

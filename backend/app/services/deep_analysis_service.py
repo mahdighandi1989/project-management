@@ -278,10 +278,10 @@ class DeepAnalysisService:
 
         if self.ai_manager:
             try:
-                available = self.ai_manager.get_available_models()
+                available = self.ai_manager.get_available_models(task_type="analysis")
                 providers = self.ai_manager.get_available_providers()
                 logger.info(f"🤖 [{analysis_id}] Available providers: {providers}")
-                logger.info(f"🤖 [{analysis_id}] Available models: {[m.id for m in available]}")
+                logger.info(f"🤖 [{analysis_id}] Available models (for analysis): {[m.id for m in available]}")
             except Exception as e:
                 logger.error(f"❌ [{analysis_id}] Error getting models: {e}")
         else:
@@ -1064,9 +1064,9 @@ class DeepAnalysisService:
         if fallback_models:
             models_to_try.extend([m for m in fallback_models if m != model_id])
         else:
-            # اگر fallback داده نشده، از همه مدل‌های موجود استفاده کن
+            # اگر fallback داده نشده، از همه مدل‌های موجود برای analysis استفاده کن
             try:
-                all_models = self.ai_manager.get_available_models()
+                all_models = self.ai_manager.get_available_models(task_type="analysis")
                 models_to_try.extend([m.id for m in all_models if m.id != model_id])
             except:
                 pass
@@ -1120,11 +1120,12 @@ class DeepAnalysisService:
         return "{}"
 
     async def _get_available_models(self) -> List[str]:
-        """دریافت لیست مدل‌های در دسترس"""
+        """دریافت لیست مدل‌های در دسترس برای تحلیل"""
         if self.ai_manager:
             try:
                 # get_available_models یک متد sync است
-                models = self.ai_manager.get_available_models()
+                # 🔴 فقط مدل‌های مجاز برای analysis
+                models = self.ai_manager.get_available_models(task_type="analysis")
                 # AIModel objects have .id attribute
                 # بدون محدودیت - همه مدل‌ها
                 return [m.id for m in models]
