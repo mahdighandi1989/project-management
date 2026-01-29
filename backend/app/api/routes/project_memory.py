@@ -1753,7 +1753,7 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
     from ...services.ai_manager import get_ai_manager
     from ...services.ai_base import Message
     from ...models.project import ProjectFile
-    from ...models.activity import ActivityLog
+    # ActivityLog is already imported at the top from project_journal
     import asyncio
     import re
     import logging
