@@ -481,7 +481,7 @@ async def get_leaderboard(db=Depends(get_db)):
     """
     # اگر دیتابیس در دسترس نیست
     if not DB_AVAILABLE or not MODELS_AVAILABLE or db is None:
-        return {"success": True, "leaderboard": _get_default_leaderboard()}
+        return {"success": True, "leaderboard": _get_default_leaderboard(), "is_real_data": False}
 
     try:
         # بهترین در هر فاکتور
@@ -494,9 +494,12 @@ async def get_leaderboard(db=Depends(get_db)):
         }
 
         leaderboard = {}
+        is_real_data = False
 
+        # 🔴 ابتدا سعی کن از مدل‌هایی که تسک واقعی داشتن بخونی
         for cat_id, cat_info in categories.items():
             field = getattr(AIProfile, cat_info["field"])
+            # اول مدل‌هایی که تسک انجام دادن
             top = db.query(AIProfile).filter(
                 AIProfile.total_tasks > 0
             ).order_by(field.desc()).first()
@@ -507,20 +510,38 @@ async def get_leaderboard(db=Depends(get_db)):
                     "model_id": top.model_id,
                     "display_name": top.display_name or top.model_id,
                     "score": round(getattr(top, cat_info["field"]), 1),
-                    "tier": top.tier
+                    "tier": top.tier,
+                    "total_tasks": top.total_tasks
                 }
+                is_real_data = True
+            else:
+                # 🔴 اگر تسک نداریم، از همه پروفایل‌ها بخون (حتی با 0 تسک)
+                top_any = db.query(AIProfile).order_by(field.desc()).first()
+                if top_any:
+                    leaderboard[cat_id] = {
+                        "label": cat_info["label"],
+                        "model_id": top_any.model_id,
+                        "display_name": top_any.display_name or top_any.model_id,
+                        "score": round(getattr(top_any, cat_info["field"]), 1),
+                        "tier": top_any.tier,
+                        "total_tasks": top_any.total_tasks,
+                        "is_estimated": True  # علامت که از داده واقعی نیست
+                    }
 
         # اگر خالی است، پیش‌فرض برگردان
         if not leaderboard:
             leaderboard = _get_default_leaderboard()
+            is_real_data = False
 
         return {
             "success": True,
-            "leaderboard": leaderboard
+            "leaderboard": leaderboard,
+            "is_real_data": is_real_data,
+            "note": None if is_real_data else "⚠️ داده‌ها بر اساس تخمین اولیه هستند. برای دقت بیشتر، تحلیل سلامت پروژه را اجرا کنید."
         }
     except Exception as e:
         logger.error(f"Error getting leaderboard: {e}")
-        return {"success": True, "leaderboard": _get_default_leaderboard()}
+        return {"success": True, "leaderboard": _get_default_leaderboard(), "is_real_data": False}
 
 
 @router.post("/profiles/{model_id}/update-score")
@@ -555,6 +576,116 @@ async def manual_update_score(
         "model_id": model_id,
         "new_scores": result
     }
+
+
+@router.post("/refresh-rankings")
+async def refresh_rankings_from_logs(db=Depends(get_db)):
+    """
+    بازسازی رتبه‌بندی مدل‌ها از روی لاگ‌های فعالیت واقعی
+
+    این endpoint از activity_logs می‌خواند و نمرات را محاسبه می‌کند
+    """
+    if not DB_AVAILABLE or db is None:
+        return {"success": False, "error": "Database not available"}
+
+    try:
+        from ...models.activity import ActivityLog
+        from sqlalchemy import func
+
+        # دریافت آمار از لاگ‌های فعالیت با query ساده‌تر
+        model_stats = db.query(
+            ActivityLog.model_id,
+            func.count(ActivityLog.id).label('total_tasks'),
+            func.avg(ActivityLog.latency_ms).label('avg_latency'),
+            func.sum(ActivityLog.tokens_used).label('total_tokens')
+        ).filter(
+            ActivityLog.model_id.isnot(None),
+            ActivityLog.model_id != ''
+        ).group_by(
+            ActivityLog.model_id
+        ).all()
+
+        updated_models = []
+        for stat in model_stats:
+            if not stat.model_id:
+                continue
+
+            # دریافت یا ایجاد پروفایل
+            profile = db.query(AIProfile).filter(AIProfile.model_id == stat.model_id).first()
+            if not profile:
+                try:
+                    model_info = get_model(stat.model_id) if PROFILER_AVAILABLE else None
+                except:
+                    model_info = None
+                profile = AIProfile(
+                    model_id=stat.model_id,
+                    provider=model_info.provider.value if model_info else "unknown",
+                    display_name=model_info.name if model_info else stat.model_id,
+                )
+                db.add(profile)
+
+            # به‌روزرسانی آمار
+            profile.total_tasks = stat.total_tasks or 0
+
+            # محاسبه نمره سرعت از میانگین تاخیر
+            if stat.avg_latency and stat.avg_latency > 0:
+                avg_sec = stat.avg_latency / 1000
+                speed_score = max(0, min(100, 100 - (avg_sec - 1) * 10))
+                profile.speed_score = speed_score
+                profile.avg_response_time = avg_sec
+
+            # تعداد موفق از دیتابیس
+            success_count = db.query(func.count(ActivityLog.id)).filter(
+                ActivityLog.model_id == stat.model_id,
+                ActivityLog.success == True
+            ).scalar() or 0
+
+            # نمره قابل اطمینان بودن بر اساس success rate
+            if stat.total_tasks and stat.total_tasks > 0:
+                success_rate = (success_count / stat.total_tasks) * 100
+                profile.reliability_score = success_rate
+
+            profile.total_tokens_used = stat.total_tokens or 0
+            profile.last_activity = datetime.utcnow()
+
+            # محاسبه مجدد نمره کلی
+            profile.overall_score = (
+                profile.accuracy_score * 0.25 +
+                profile.completeness_score * 0.25 +
+                profile.speed_score * 0.15 +
+                profile.reliability_score * 0.20 +
+                profile.code_quality_score * 0.10 +
+                profile.reasoning_score * 0.05
+            )
+
+            # تعیین tier
+            profile.tier = _calculate_tier(profile.overall_score)
+
+            updated_models.append({
+                "model_id": stat.model_id,
+                "total_tasks": stat.total_tasks,
+                "overall_score": round(profile.overall_score, 1)
+            })
+
+        db.commit()
+
+        # به‌روزرسانی رتبه‌ها
+        all_profiles = db.query(AIProfile).order_by(AIProfile.overall_score.desc()).all()
+        for i, profile in enumerate(all_profiles, 1):
+            profile.rank = i
+        db.commit()
+
+        return {
+            "success": True,
+            "updated_count": len(updated_models),
+            "models": updated_models,
+            "message": f"✅ {len(updated_models)} مدل از روی لاگ‌های فعالیت به‌روزرسانی شدند"
+        }
+
+    except Exception as e:
+        logger.error(f"Error refreshing rankings: {e}")
+        db.rollback()
+        return {"success": False, "error": str(e)}
 
 
 # =====================================
