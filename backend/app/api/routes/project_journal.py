@@ -934,6 +934,19 @@ async def generate_engineering_report(
 - ایرادات نامعتبر را در rejected_issues با دلیل دقیق رد شدن قرار بده
 - validation_score از 0-100: بالای 70 = معتبر، زیر 30 = رد شده
 
+🔴🔴🔴 تأیید اصلاحات قبلی (بسیار مهم):
+- فیلدهای بایگانی شده (archived/executed) را بررسی کن
+- با نگاه به کد فعلی، تأیید کن که مشکلات واقعاً حل شده‌اند
+- اگر مشکلی هنوز در کد وجود دارد، دوباره در validated_issues با یادداشت "مشکل هنوز حل نشده" قرار بده
+- این شامل: خطاهای runtime، مشکلات authentication/login، ارتباط frontend-backend
+
+🔴 شناسایی مشکلات واقعی runtime:
+- به دنبال مشکلات احراز هویت (login, auth, session) بگرد
+- ارتباط frontend با backend API را بررسی کن
+- خطاهای CORS, 401, 403, 500 را شناسایی کن
+- مسیرهای API که ممکن است مشکل داشته باشند را پیدا کن
+- اگر endpoint تعریف نشده یا اشتباه است، گزارش بده
+
 🟢 حالت ایده‌آل جامع (comprehensive_ideal_state):
 - وضعیت ایده‌آل باید شامل: کمبودها، تسک‌های اجرا نشده، ساختار سیستم، سیم‌کشی و نقشه راه باشد
 - این بخش برای راهنمایی توسعه‌دهنده بسیار مهم است"""
@@ -960,6 +973,9 @@ async def generate_engineering_report(
 
 === فیلدهای فعلی (غیربایگانی) ===
 {json.dumps([{"id": f.get("id"), "name": f.get("name"), "action_type": f.get("action_type"), "field_type": f.get("field_type"), "executed": f.get("executed", False)} for f in existing_fields if not f.get("archived")], ensure_ascii=False, indent=2)}
+
+=== فیلدهای بایگانی/اجرا شده (برای تأیید اصلاحات) ===
+{json.dumps([{"id": f.get("id"), "name": f.get("name"), "target_path": f.get("target_path"), "original_issue": f.get("original_issue", {})} for f in existing_fields if f.get("archived") or f.get("executed")][:20], ensure_ascii=False, indent=2)}
 
 === فیلدهای اجرا نشده (برای ideal state) ===
 {json.dumps(unexecuted_fields, ensure_ascii=False, indent=2)}
@@ -1296,6 +1312,21 @@ async def generate_engineering_report(
             if validate_health_issues and "health_analysis_validation" in report_data:
                 validated_issues = report_data["health_analysis_validation"].get("validated_issues", [])
                 logger.info(f"Creating fields from {len(validated_issues)} validated health issues")
+
+                # 🔴 دریافت سوابق اجرا برای جلوگیری از ایجاد مجدد
+                executed_issues = set()
+                for field in existing_fields:
+                    if field.get("executed") or field.get("archived"):
+                        # استخراج اطلاعات اصلی از فیلد برای تشخیص تکراری
+                        orig = field.get("original_issue", {})
+                        if orig:
+                            issue_key = f"{orig.get('file', '')}:{orig.get('type', '')}:{orig.get('line', '')}"
+                            executed_issues.add(issue_key.lower())
+                        # همچنین نام فیلد را به عنوان کلید ذخیره کن
+                        executed_issues.add(field.get("name", "").lower())
+
+                logger.info(f"Found {len(executed_issues)} previously executed/archived issues")
+
                 for issue in validated_issues:
                     if not issue.get("create_field", True):
                         continue
@@ -1303,13 +1334,23 @@ async def generate_engineering_report(
                     original = issue.get("original_issue", {})
                     field_name = f"✅ [تایید شده] {original.get('type', 'issue')}: {original.get('file', 'unknown')}"
 
-                    # بررسی وجود فیلد مشابه
-                    existing = any(
+                    # 🔴 بررسی وجود فیلد مشابه - شامل بایگانی شده‌ها
+                    # ۱. بررسی با نام
+                    existing_by_name = any(
                         f.get("name", "").lower() == field_name.lower()
-                        for f in existing_fields if not f.get("archived")
+                        for f in existing_fields  # همه فیلدها، نه فقط غیر بایگانی
                     )
 
-                    if not existing:
+                    # ۲. بررسی با کلید یکتا (فایل + نوع + خط)
+                    issue_key = f"{original.get('file', '')}:{original.get('type', '')}:{original.get('line', '')}"
+                    existing_by_key = issue_key.lower() in executed_issues
+
+                    # ۳. بررسی در سوابق اجرا
+                    already_executed = field_name.lower() in executed_issues
+
+                    if existing_by_name or existing_by_key or already_executed:
+                        logger.info(f"Skipping already processed issue: {field_name}")
+                        continue
                         priority_map = {"critical": 1, "high": 2, "medium": 5, "low": 7}
                         priority = priority_map.get(issue.get("priority", original.get("severity", "medium")), 5)
 
