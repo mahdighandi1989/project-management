@@ -592,6 +592,22 @@ async def auto_setup_project_memory(
                 model_id=best_model
             )
 
+        # 🔴 تابع تشخیص فیلدهای محافظت شده (ایجاد شده توسط گزارش مهندسی)
+        # این تابع باید قبل از if/else باشد تا در هر دو مسیر قابل دسترسی باشد
+        def is_report_field(field: Dict) -> bool:
+            """بررسی آیا فیلد توسط گزارش مهندسی ایجاد شده"""
+            if field.get("created_from_report"):
+                return True
+            if field.get("validation_marker") in ["validated", "pending"]:
+                return True
+            if field.get("validator_model"):
+                return True
+            if field.get("original_issue"):
+                return True
+            if field.get("name", "").startswith("✅"):
+                return True
+            return False
+
         # مرحله ۳: ساخت نتیجه نهایی
         if ai_result and ai_result.get("success"):
             data = ai_result["data"]
@@ -610,21 +626,6 @@ async def auto_setup_project_memory(
             fields_merged_count = 0
             fields_updated_count = 0
             fields_protected_count = 0  # 🔴 تعداد فیلدهای محافظت شده
-
-            # 🔴 تابع تشخیص فیلدهای محافظت شده (ایجاد شده توسط گزارش مهندسی)
-            def is_report_field(field: Dict) -> bool:
-                """بررسی آیا فیلد توسط گزارش مهندسی ایجاد شده"""
-                if field.get("created_from_report"):
-                    return True
-                if field.get("validation_marker") in ["validated", "pending"]:
-                    return True
-                if field.get("validator_model"):
-                    return True
-                if field.get("original_issue"):
-                    return True
-                if field.get("name", "").startswith("✅"):
-                    return True
-                return False
 
             # 1. بایگانی فیلدهای مشخص شده (با محافظت از فیلدهای گزارش)
             fields_to_archive = data.get("fields_to_archive", [])
@@ -784,8 +785,18 @@ async def auto_setup_project_memory(
         else:
             # Fallback به حالت ساده
             result = _create_fallback_setup(project_id, project_name, insights)
-            # حفظ فیلدهای بایگانی شده در fallback هم
-            result["dynamic_fields"] = result.get("dynamic_fields", []) + archived_fields
+            logger.warning("⚠️ AI failed, using fallback setup")
+
+            # 🔴 حفظ فیلدهای محافظت شده (از گزارش مهندسی) که هنوز اجرا نشده‌اند
+            protected_existing = [f for f in existing_fields if is_report_field(f) and not f.get("executed", False)]
+            if protected_existing:
+                logger.info(f"🛡️ Preserving {len(protected_existing)} protected report fields in fallback")
+                for pf in protected_existing:
+                    logger.info(f"   - {pf.get('name')}")
+
+            # حفظ فیلدهای محافظت شده + بایگانی شده در fallback
+            result["dynamic_fields"] = result.get("dynamic_fields", []) + protected_existing + archived_fields
+            result["fields_protected"] = len(protected_existing)
 
         # مرحله ۴: ذخیره در دیتابیس
         if db_session and result.get("success"):
