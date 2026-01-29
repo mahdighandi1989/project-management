@@ -47,7 +47,7 @@ class DynamicFieldRequest(BaseModel):
     # تنظیمات جدید برای اعمال روی GitHub
     action_type: str = "display"  # display, github_commit, github_multi_commit
     target_path: Optional[str] = None  # مسیر فایل در ریپو (مثلاً: backend/models/customer.py)
-    archive_after_run: bool = False  # آیا بعد از اجرای موفق بایگانی شود؟
+    archive_after_run: bool = True  # آیا بعد از اجرای موفق بایگانی شود؟ (پیش‌فرض: بله)
     deploy_after_commit: bool = False  # آیا بعد از commit در Render دیپلوی شود؟
     # 🆕 فیلدهای جدید
     field_type: str = "temporary"  # "permanent" (دائمی/تکرارشونده) یا "temporary" (موقت/یکبار مصرف)
@@ -79,6 +79,7 @@ class BatchExecuteRequest(BaseModel):
     execute_type: str = "selected"  # "selected", "all", "permanent", "temporary"
     auto_prioritize: bool = True  # مرتب‌سازی خودکار براساس اولویت
     run_in_background: bool = False  # اجرا در پس‌زمینه
+    force_archive: bool = True  # بایگانی اجباری همه فیلدهای اجراشده (پیش‌فرض: بله)
 
 
 class BatchDeleteRequest(BaseModel):
@@ -2196,8 +2197,12 @@ async def batch_execute_fields(
 
             if result.get("success"):
                 success_count += 1
-                # 🔴 بایگانی فوری بعد از هر فیلد (نه در انتها)
-                if result.get("should_archive"):
+                # 🔴 بایگانی فوری بعد از هر فیلد موفق
+                # اگر force_archive فعاله (پیش‌فرض) یا فیلد خودش should_archive داره
+                should_archive_now = request.force_archive or result.get("should_archive")
+                logger.info(f"[Batch Execute] Archive decision for {field.get('name')}: force_archive={request.force_archive}, should_archive={result.get('should_archive')}, final={should_archive_now}")
+
+                if should_archive_now:
                     try:
                         # بروزرسانی فوری در دیتابیس
                         current_fields = json.loads(project.dynamic_fields) if project.dynamic_fields else []
@@ -2213,7 +2218,7 @@ async def batch_execute_fields(
                         db.refresh(project)  # refresh برای گرفتن آخرین داده
                         exec_result["archived"] = True
                         archived_count += 1
-                        logger.info(f"[Batch Execute] Field {field.get('name')} archived immediately")
+                        logger.info(f"[Batch Execute] Field {field.get('name')} archived immediately ✅")
                     except Exception as archive_err:
                         logger.error(f"[Batch Execute] Failed to archive field {field.get('id')}: {archive_err}")
                         db.rollback()
@@ -2706,11 +2711,12 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
             except Exception as e:
                 deploy_result = {"success": False, "error": str(e)}
 
-        # 🔴 بایگانی خودکار
+        # 🔴 بایگانی خودکار - اگر اجرا موفق بود و archive_after_run فعاله، بایگانی میشه
         should_archive = False
         if archive_after_run and any_success:
-            if action_type == "display" or any_github_success:
-                should_archive = True
+            # همیشه بایگانی کن اگر اجرای AI موفق بود - مهم نیست GitHub چی شد
+            should_archive = True
+            logger.info(f"[execute_field_internal] Will archive: archive_after_run={archive_after_run}, any_success={any_success}")
 
         logger.info(f"[execute_field_internal] COMPLETED - field_id={field_id}, success={any_success}, github_success={any_github_success}")
         return {
