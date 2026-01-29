@@ -1642,6 +1642,8 @@ async def batch_execute_fields(
     if request.auto_prioritize:
         fields_to_execute.sort(key=lambda x: x.get("priority", 5))
 
+    logger.info(f"[Batch Execute] About to start loop with {len(fields_to_execute)} fields")
+
     # اجرای ترتیبی فیلدها
     execution_results = []
     success_count = 0
@@ -1650,8 +1652,10 @@ async def batch_execute_fields(
     archived_count = 0
     fields_to_archive = []  # لیست ID فیلدهایی که باید بایگانی شوند
 
-    for field in fields_to_execute:
+    for idx, field in enumerate(fields_to_execute):
+        logger.info(f"[Batch Execute] Loop iteration {idx+1}/{len(fields_to_execute)}: field={field.get('name')}, id={field.get('id')}")
         try:
+            logger.info(f"[Batch Execute] Calling execute_field_internal for field: {field.get('name')}")
             # اجرای فیلد با قابلیت کامل (commit + deploy + archive)
             result = await execute_field_internal(
                 project_id=project_id,
@@ -1660,6 +1664,7 @@ async def batch_execute_fields(
                 field_data=field,
                 project=project
             )
+            logger.info(f"[Batch Execute] execute_field_internal returned for {field.get('name')}: success={result.get('success')}")
 
             exec_result = {
                 "field_id": field.get("id"),
@@ -1689,6 +1694,9 @@ async def batch_execute_fields(
             execution_results.append(exec_result)
 
         except Exception as e:
+            logger.error(f"[Batch Execute] Exception in field {field.get('name')}: {type(e).__name__}: {str(e)}")
+            import traceback
+            logger.error(f"[Batch Execute] Traceback: {traceback.format_exc()}")
             execution_results.append({
                 "field_id": field.get("id"),
                 "field_name": field.get("name"),
@@ -1696,6 +1704,8 @@ async def batch_execute_fields(
                 "error": str(e)
             })
             failed_count += 1
+
+    logger.info(f"[Batch Execute] Loop completed: success={success_count}, failed={failed_count}, results={len(execution_results)}")
 
     # 🔴 بروزرسانی و بایگانی فیلدها در دیتابیس
     if fields_to_archive:
@@ -1748,6 +1758,8 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
     import re
     import logging
     logger = logging.getLogger(__name__)
+
+    logger.info(f"[execute_field_internal] STARTED - field_id={field_id}, field_name={field_data.get('name')}")
 
     try:
         target_field = field_data
@@ -2027,6 +2039,7 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
             if action_type == "display" or any_github_success:
                 should_archive = True
 
+        logger.info(f"[execute_field_internal] COMPLETED - field_id={field_id}, success={any_success}, github_success={any_github_success}")
         return {
             "success": any_success,
             "results": results,
@@ -2037,7 +2050,9 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
         }
 
     except Exception as e:
-        logger.error(f"[Batch Execute] Error: {e}")
+        import traceback
+        logger.error(f"[execute_field_internal] EXCEPTION in field_id={field_id}: {type(e).__name__}: {e}")
+        logger.error(f"[execute_field_internal] Traceback: {traceback.format_exc()}")
         return {"success": False, "error": str(e)}
 
 
