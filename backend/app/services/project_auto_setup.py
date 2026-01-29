@@ -592,6 +592,22 @@ async def auto_setup_project_memory(
                 model_id=best_model
             )
 
+        # 🔴 تابع تشخیص فیلدهای محافظت شده (ایجاد شده توسط گزارش مهندسی)
+        # این تابع باید قبل از if/else باشد تا در هر دو مسیر قابل دسترسی باشد
+        def is_report_field(field: Dict) -> bool:
+            """بررسی آیا فیلد توسط گزارش مهندسی ایجاد شده"""
+            if field.get("created_from_report"):
+                return True
+            if field.get("validation_marker") in ["validated", "pending"]:
+                return True
+            if field.get("validator_model"):
+                return True
+            if field.get("original_issue"):
+                return True
+            if field.get("name", "").startswith("✅"):
+                return True
+            return False
+
         # مرحله ۳: ساخت نتیجه نهایی
         if ai_result and ai_result.get("success"):
             data = ai_result["data"]
@@ -609,23 +625,45 @@ async def auto_setup_project_memory(
             fields_archived_count = 0
             fields_merged_count = 0
             fields_updated_count = 0
+            fields_protected_count = 0  # 🔴 تعداد فیلدهای محافظت شده
 
-            # 1. بایگانی فیلدهای مشخص شده
+            # 1. بایگانی فیلدهای مشخص شده (با محافظت از فیلدهای گزارش)
             fields_to_archive = data.get("fields_to_archive", [])
             for field_id in fields_to_archive:
                 for field in updated_existing_fields:
                     if field.get("id") == field_id and not field.get("archived"):
+                        # 🔴 بررسی محافظت - فیلدهای گزارش اجرا نشده بایگانی نشوند
+                        if is_report_field(field) and not field.get("executed", False):
+                            fields_protected_count += 1
+                            logger.warning(f"🛡️ PROTECTED: Cannot archive report field (not executed): {field.get('name')}")
+                            continue
                         field["archived"] = True
                         field["archived_at"] = datetime.utcnow().isoformat()
                         field["archived_reason"] = "auto-setup review"
                         fields_archived_count += 1
                         logger.info(f"Auto-archived field: {field.get('name')}")
 
-            # 2. ادغام فیلدهای مشخص شده
+            # 2. ادغام فیلدهای مشخص شده (با محافظت از فیلدهای گزارش)
             fields_to_merge = data.get("fields_to_merge", [])
             for merge_info in fields_to_merge:
                 source_ids = merge_info.get("source_ids", [])
                 if len(source_ids) >= 2:
+                    # 🔴 بررسی آیا هر یک از فیلدها محافظت شده است
+                    has_protected = False
+                    for sid in source_ids:
+                        for field in updated_existing_fields:
+                            if field.get("id") == sid:
+                                if is_report_field(field) and not field.get("executed", False):
+                                    has_protected = True
+                                    logger.warning(f"🛡️ PROTECTED: Cannot merge report field (not executed): {field.get('name')}")
+                                    break
+                        if has_protected:
+                            break
+
+                    if has_protected:
+                        fields_protected_count += 1
+                        continue  # رد شدن از این ادغام
+
                     # پیدا کردن فیلدهای منبع و جمع‌آوری پیوست‌ها
                     merged_attachments = []
                     for sid in source_ids:
@@ -736,6 +774,7 @@ async def auto_setup_project_memory(
                 "fields_archived": fields_archived_count,
                 "fields_merged": fields_merged_count,
                 "fields_updated": fields_updated_count,
+                "fields_protected": fields_protected_count,  # 🔴 فیلدهای محافظت شده (از گزارش مهندسی)
                 "missing_files": data.get("missing_files", []),
                 "ai_insights": data.get("project_summary"),
                 "recommendations": data.get("key_recommendations", []),
@@ -746,8 +785,18 @@ async def auto_setup_project_memory(
         else:
             # Fallback به حالت ساده
             result = _create_fallback_setup(project_id, project_name, insights)
-            # حفظ فیلدهای بایگانی شده در fallback هم
-            result["dynamic_fields"] = result.get("dynamic_fields", []) + archived_fields
+            logger.warning("⚠️ AI failed, using fallback setup")
+
+            # 🔴 حفظ فیلدهای محافظت شده (از گزارش مهندسی) که هنوز اجرا نشده‌اند
+            protected_existing = [f for f in existing_fields if is_report_field(f) and not f.get("executed", False)]
+            if protected_existing:
+                logger.info(f"🛡️ Preserving {len(protected_existing)} protected report fields in fallback")
+                for pf in protected_existing:
+                    logger.info(f"   - {pf.get('name')}")
+
+            # حفظ فیلدهای محافظت شده + بایگانی شده در fallback
+            result["dynamic_fields"] = result.get("dynamic_fields", []) + protected_existing + archived_fields
+            result["fields_protected"] = len(protected_existing)
 
         # مرحله ۴: ذخیره در دیتابیس
         if db_session and result.get("success"):
@@ -1365,6 +1414,7 @@ async def _manage_dynamic_fields(
     - ادغام هوشمند فیلدهای مشابه
     - بایگانی فقط فیلدهایی که مشکلشان رفع شده
     - مارکرگذاری فیلدهای معتبر
+    - 🔴 حفظ فیلدهای ایجاد شده توسط گزارش مهندسی (created_from_report)
     """
     result = {
         "created": [],
@@ -1372,6 +1422,7 @@ async def _manage_dynamic_fields(
         "merged": [],
         "archived": [],
         "preserved": [],  # 🆕 فیلدهای حفظ شده
+        "protected": [],  # 🆕 فیلدهای محافظت شده (از گزارش مهندسی)
     }
 
     # دریافت فیلدهای موجود
@@ -1387,6 +1438,28 @@ async def _manage_dynamic_fields(
     file_contents = {f.get("path", f.get("file_path", "")).lower(): f.get("content", "") for f in files_data}
 
     # ====================================
+    # 🔴 تابع تشخیص فیلدهای محافظت شده (ایجاد شده توسط گزارش مهندسی)
+    # ====================================
+    def is_protected_field(field: Dict) -> bool:
+        """بررسی آیا فیلد توسط گزارش مهندسی ایجاد شده و نباید حذف شود"""
+        # فیلدهای ایجاد شده توسط گزارش مهندسی
+        if field.get("created_from_report"):
+            return True
+        # فیلدهای با مارکر اعتبارسنجی
+        if field.get("validation_marker") in ["validated", "pending"]:
+            return True
+        # فیلدهای با validator_model (اعتبارسنجی شده توسط مدل)
+        if field.get("validator_model"):
+            return True
+        # فیلدهایی که original_issue دارند (از health analysis آمده)
+        if field.get("original_issue"):
+            return True
+        # فیلدهایی که نامشان با ✅ شروع می‌شود
+        if field.get("name", "").startswith("✅"):
+            return True
+        return False
+
+    # ====================================
     # 🆕 مرحله 1: بررسی فیلدهای موجود - آیا مشکلشان هنوز وجود دارد؟
     # ====================================
     preserved_fields = []
@@ -1398,7 +1471,27 @@ async def _manage_dynamic_fields(
             preserved_fields.append(field)
             continue
 
-        # بررسی فیلدهای اجرا نشده
+        # 🔴 فیلدهای محافظت شده (از گزارش مهندسی) - هرگز بایگانی نشوند مگر اجرا شده باشند
+        if is_protected_field(field):
+            if not field.get("executed", False):
+                # فیلد محافظت شده و اجرا نشده - حتماً حفظ شود
+                preserved_fields.append(field)
+                result["protected"].append(field.get("name", "unknown"))
+                logger.info(f"🛡️ Protected report-generated field (not executed): {field.get('name')}")
+                continue
+            else:
+                # اجرا شده - بررسی archive_after_run
+                if field.get("archive_after_run", False):
+                    field["archived"] = True
+                    field["archived_at"] = datetime.utcnow().isoformat()
+                    field["archived_reason"] = "executed_report_field"
+                    result["archived"].append(field.get("name", "unknown"))
+                    logger.info(f"Archived executed report field: {field.get('name')}")
+                else:
+                    preserved_fields.append(field)
+                continue
+
+        # بررسی فیلدهای عادی اجرا نشده
         if not field.get("executed", False) and field.get("field_type") == "temporary":
             # بررسی آیا مشکل هنوز وجود دارد
             original_issue = field.get("original_issue", {})

@@ -1136,7 +1136,15 @@ async def generate_engineering_report(
             parse_error = report_data.get("parse_error", False)
             has_validation = "health_analysis_validation" in report_data
             logger.warning(f"⚠️ FALLBACK TRIGGERED: parse_error={parse_error}, has_validation={has_validation}")
-            logger.warning(f"⚠️ Creating fields from {len(health_analysis_issues)} health issues directly.")
+            logger.warning(f"⚠️ Processing ALL {len(health_analysis_issues)} health issues directly.")
+
+            # 🆕 گروه‌بندی ایرادات براساس severity
+            critical_issues = [i for i in health_analysis_issues if i.get("severity") == "critical"]
+            high_issues = [i for i in health_analysis_issues if i.get("severity") == "high"]
+            medium_issues = [i for i in health_analysis_issues if i.get("severity") == "medium"]
+            low_issues = [i for i in health_analysis_issues if i.get("severity") == "low"]
+
+            logger.info(f"📊 Issues breakdown: critical={len(critical_issues)}, high={len(high_issues)}, medium={len(medium_issues)}, low={len(low_issues)}")
 
             # ذخیره این به عنوان validation results
             validation_results = {
@@ -1145,43 +1153,48 @@ async def generate_engineering_report(
                 "total_issues_reviewed": len(health_analysis_issues),
                 "validated_count": 0,
                 "rejected_count": 0,
-                "validation_summary": f"AI بخش اعتبارسنجی را برنگرداند. {len(health_analysis_issues)} ایراد مستقیماً پردازش شد.",
+                "pending_count": 0,  # 🆕 ایرادات در انتظار بررسی
+                "validation_summary": "",
                 "validated_issues": [],
+                "pending_issues": [],  # 🆕 ایرادات medium/low که فیلد ایجاد نشد
                 "fallback_mode": True,
             }
 
-            # ایجاد فیلدها مستقیماً از critical و high severity issues
-            critical_high_issues = [
-                i for i in health_analysis_issues
-                if i.get("severity") in ["critical", "high"]
-            ][:10]  # حداکثر 10 فیلد
+            # 🆕 ایجاد فیلد برای تمام critical و high issues (بدون محدودیت 10)
+            issues_for_fields = critical_issues + high_issues
+            logger.info(f"📝 Creating fields for ALL {len(issues_for_fields)} critical+high issues")
 
-            # 🆕 اگر critical/high نبود، از medium هم استفاده کن
-            if not critical_high_issues:
-                logger.info(f"No critical/high issues found, including medium severity...")
-                critical_high_issues = [
-                    i for i in health_analysis_issues
-                    if i.get("severity") in ["critical", "high", "medium"]
-                ][:10]
+            # اگر critical/high نبود، medium با اولویت بالا رو هم اضافه کن (حداکثر 15)
+            if len(issues_for_fields) < 5 and medium_issues:
+                additional_medium = medium_issues[:15 - len(issues_for_fields)]
+                issues_for_fields.extend(additional_medium)
+                logger.info(f"📝 Added {len(additional_medium)} medium issues (total: {len(issues_for_fields)})")
 
-            # 🆕 اگر هنوز نبود، از همه issues (بدون توجه به severity)
-            if not critical_high_issues and health_analysis_issues:
-                logger.info(f"No medium+ issues found, using first 10 issues regardless of severity...")
-                critical_high_issues = health_analysis_issues[:10]
-
-            logger.info(f"Selected {len(critical_high_issues)} issues for field creation")
-
-            for issue in critical_high_issues:
+            # ایجاد validated_issues برای فیلدسازی
+            for issue in issues_for_fields:
                 validation_results["validated_issues"].append({
                     "original_issue": issue,
-                    "validation_score": 70,  # امتیاز پیش‌فرض
-                    "validation_note": "ایجاد خودکار به دلیل عدم پاسخ AI",
+                    "validation_score": 80 if issue.get("severity") in ["critical", "high"] else 70,
+                    "validation_note": "تایید خودکار (Fallback mode) - اولویت بالا",
                     "priority": issue.get("severity"),
                     "create_field": True
                 })
                 validated_issues_count += 1
 
+            # 🆕 بقیه issues رو به عنوان pending ثبت کن (medium/low که فیلد ایجاد نشد)
+            remaining_issues = [i for i in health_analysis_issues if i not in issues_for_fields]
+            for issue in remaining_issues:
+                validation_results["pending_issues"].append({
+                    "original_issue": issue,
+                    "validation_score": 50,
+                    "validation_note": "در انتظار بررسی - فیلد ایجاد نشد (severity پایین)",
+                    "priority": issue.get("severity"),
+                    "create_field": False
+                })
+
             validation_results["validated_count"] = validated_issues_count
+            validation_results["pending_count"] = len(remaining_issues)
+            validation_results["validation_summary"] = f"AI بخش اعتبارسنجی را برنگرداند. از {len(health_analysis_issues)} ایراد: {validated_issues_count} تایید شد (فیلد ایجاد شد)، {len(remaining_issues)} در انتظار بررسی (severity پایین)"
             project.last_validation_results = json.dumps(validation_results, ensure_ascii=False)
 
             # اضافه کردن به report_data برای پردازش بعدی
@@ -1189,7 +1202,7 @@ async def generate_engineering_report(
 
             # 🔴 CRITICAL: Commit validation results immediately
             db.commit()
-            logger.info(f"✅ Fallback: Created {validated_issues_count} validated issues and COMMITTED to DB")
+            logger.info(f"✅ Fallback: {validated_issues_count} validated (fields), {len(remaining_issues)} pending - COMMITTED to DB")
 
         # ====================================
         # 🆕 به‌روزرسانی حالت ایده‌آل جامع
