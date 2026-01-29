@@ -599,6 +599,23 @@ async def generate_engineering_report(
     health_analysis_summary = ""
     partial_results = {}
 
+    # 🔴 DEBUG: Log raw data before extraction
+    logger.info(f"=" * 60)
+    logger.info(f"🔴 DEBUG: Starting health issues extraction for project {project_id}")
+    logger.info(f"🔴 DEBUG: validate_health_issues = {validate_health_issues}")
+    logger.info(f"🔴 DEBUG: project.issues_found type: {type(project.issues_found)}")
+    logger.info(f"🔴 DEBUG: project.issues_found length: {len(project.issues_found or '')}")
+    if project.issues_found:
+        logger.info(f"🔴 DEBUG: project.issues_found preview: {project.issues_found[:500]}...")
+    else:
+        # 🔴 CRITICAL: Try to refresh from database!
+        logger.error(f"🔴🔴🔴 CRITICAL: project.issues_found is None/empty! Trying to refresh from DB...")
+        db.refresh(project)
+        logger.info(f"🔴 DEBUG: After refresh: project.issues_found length: {len(project.issues_found or '')}")
+        if project.issues_found:
+            logger.info(f"🔴 DEBUG: After refresh preview: {project.issues_found[:500]}...")
+    logger.info(f"=" * 60)
+
     def normalize_issue(issue, file_path=None, source_models=None):
         """نرمال‌سازی فرمت ایراد از منابع مختلف"""
         return {
@@ -628,6 +645,8 @@ async def generate_engineering_report(
                                 ))
         except Exception as e:
             logger.warning(f"Error parsing file_health_map: {e}")
+
+    logger.info(f"🔴 DEBUG: After file_health_map extraction: {len(health_analysis_issues)} issues")
 
     # 2. دریافت نتایج از analysis_progress (partial_results)
     if project.analysis_progress:
@@ -665,13 +684,18 @@ async def generate_engineering_report(
         except Exception as e:
             logger.warning(f"Error parsing analysis_progress: {e}")
 
-    # 3. دریافت از issues_found (ذخیره شده از قبل)
+    logger.info(f"🔴 DEBUG: After analysis_progress extraction: {len(health_analysis_issues)} issues")
+
+    # 3. دریافت از issues_found (ذخیره شده از قبل) - این منبع اصلی است!
+    logger.info(f"🔴 DEBUG: Checking project.issues_found...")
     if project.issues_found:
         try:
             stored_issues = json.loads(project.issues_found)
+            logger.info(f"🔴 DEBUG: Parsed issues_found: type={type(stored_issues)}, count={len(stored_issues) if isinstance(stored_issues, list) else 'N/A'}")
             if isinstance(stored_issues, list):
                 # ادغام با issues موجود (بدون تکرار)
                 existing_keys = {f"{i.get('file', '')}:{i.get('line', '')}:{i.get('message', '')[:50]}" for i in health_analysis_issues}
+                added_count = 0
                 for issue in stored_issues:
                     if isinstance(issue, dict):
                         normalized = normalize_issue(issue)
@@ -679,8 +703,16 @@ async def generate_engineering_report(
                         if key not in existing_keys:
                             health_analysis_issues.append(normalized)
                             existing_keys.add(key)
+                            added_count += 1
+                logger.info(f"🔴 DEBUG: Added {added_count} issues from issues_found (after dedup)")
+            else:
+                logger.warning(f"🔴 DEBUG: issues_found is not a list! Content: {str(stored_issues)[:200]}")
         except Exception as e:
             logger.warning(f"Error parsing issues_found: {e}")
+    else:
+        logger.warning(f"🔴 DEBUG: project.issues_found is EMPTY!")
+
+    logger.info(f"🔴 DEBUG: After issues_found extraction: {len(health_analysis_issues)} issues")
 
     # 4. دریافت از health_scores (ممکن است issues داخلش باشد)
     if project.health_scores:
@@ -709,22 +741,31 @@ async def generate_engineering_report(
             severity_counts[sev] = severity_counts.get(sev, 0) + 1
         logger.info(f"📊 Issues by severity: {severity_counts}")
     else:
-        logger.warning(f"⚠️ No health issues found from any source. Checking raw content...")
-        # Additional debug for empty issues
-        if project.file_health_map:
-            try:
-                fhm = json.loads(project.file_health_map)
-                total_issues_in_map = sum(len(fd.get("issues", [])) for fd in fhm.values() if isinstance(fd, dict))
-                total_issues_count = sum(fd.get("issues_count", 0) for fd in fhm.values() if isinstance(fd, dict))
-                logger.info(f"   - file_health_map has {len(fhm)} files, {total_issues_in_map} issues embedded, {total_issues_count} issues_count")
-            except:
-                pass
+        logger.warning(f"⚠️ No health issues found from any source. Attempting recovery...")
+        # 🔴 FAILSAFE: Try to force-load issues from issues_found
         if project.issues_found:
             try:
                 stored = json.loads(project.issues_found)
-                logger.info(f"   - issues_found has {len(stored) if isinstance(stored, list) else 0} issues")
-            except:
-                pass
+                if isinstance(stored, list) and len(stored) > 0:
+                    logger.info(f"🔴 FAILSAFE: Found {len(stored)} issues in issues_found, force-loading...")
+                    for issue in stored:
+                        if isinstance(issue, dict):
+                            health_analysis_issues.append(normalize_issue(issue))
+                    logger.info(f"🔴 FAILSAFE: Loaded {len(health_analysis_issues)} issues from issues_found")
+            except Exception as e:
+                logger.error(f"🔴 FAILSAFE failed: {e}")
+
+        # Additional debug for empty issues
+        if not health_analysis_issues:
+            logger.error(f"🔴🔴🔴 CRITICAL: Still no issues after failsafe!")
+            if project.file_health_map:
+                try:
+                    fhm = json.loads(project.file_health_map)
+                    total_issues_in_map = sum(len(fd.get("issues", [])) for fd in fhm.values() if isinstance(fd, dict))
+                    total_issues_count = sum(fd.get("issues_count", 0) for fd in fhm.values() if isinstance(fd, dict))
+                    logger.info(f"   - file_health_map has {len(fhm)} files, {total_issues_in_map} issues embedded, {total_issues_count} issues_count")
+                except:
+                    pass
 
     # ساخت خلاصه health analysis برای prompt
     if health_analysis_issues:
@@ -943,6 +984,19 @@ async def generate_engineering_report(
         Message(role="user", content=user_prompt),
     ]
 
+    # 🔴 DEBUG: Final summary before AI call
+    logger.info(f"=" * 60)
+    logger.info(f"🔴 DEBUG: FINAL SUMMARY before AI call:")
+    logger.info(f"   - validate_health_issues: {validate_health_issues}")
+    logger.info(f"   - health_analysis_issues count: {len(health_analysis_issues)}")
+    logger.info(f"   - health_analysis_summary length: {len(health_analysis_summary)}")
+    logger.info(f"   - health_analysis_summary included in prompt: {'yes' if (validate_health_issues and len(health_analysis_issues) > 0) else 'NO!'}")
+    logger.info(f"   - user_prompt length: {len(user_prompt)}")
+    logger.info(f"   - system_prompt length: {len(system_prompt)}")
+    if len(health_analysis_issues) == 0:
+        logger.error(f"🔴🔴🔴 CRITICAL: No health issues to validate! Check extraction logic above.")
+    logger.info(f"=" * 60)
+
     try:
         response = await ai_manager.generate(
             model_id=model_id,
@@ -1044,7 +1098,9 @@ async def generate_engineering_report(
             combined_archive = new_rejected_archive + existing_archive
             project.rejected_issues_archive = json.dumps(combined_archive[:100], ensure_ascii=False)
 
-            logger.info(f"Health validation: {validated_issues_count} validated, {rejected_issues_count} rejected")
+            # 🔴 CRITICAL: Commit validation results immediately
+            db.commit()
+            logger.info(f"✅ Health validation: {validated_issues_count} validated, {rejected_issues_count} rejected - COMMITTED to DB")
 
         # 🆕 Fallback: اگر AI بخش health_analysis_validation را برنگرداند، فیلدها را مستقیماً از health issues بساز
         elif validate_health_issues and health_analysis_issues and not report_data.get("raw_content"):
@@ -1099,7 +1155,9 @@ async def generate_engineering_report(
             # اضافه کردن به report_data برای پردازش بعدی
             report_data["health_analysis_validation"] = validation_results
 
-            logger.info(f"Fallback: Created {validated_issues_count} validated issues from critical/high severity health issues")
+            # 🔴 CRITICAL: Commit validation results immediately
+            db.commit()
+            logger.info(f"✅ Fallback: Created {validated_issues_count} validated issues and COMMITTED to DB")
 
         # ====================================
         # 🆕 به‌روزرسانی حالت ایده‌آل جامع
