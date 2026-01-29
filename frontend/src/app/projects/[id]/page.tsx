@@ -297,10 +297,14 @@ export default function ProjectDetailPage() {
   const [selectedFields, setSelectedFields] = useState<string[]>([]);
   const [executingBatch, setExecutingBatch] = useState(false);
   const [batchStatus, setBatchStatus] = useState<{
-    status: 'idle' | 'running' | 'paused' | 'stopped';
+    status: 'idle' | 'running' | 'paused' | 'stopped' | 'completed';
     progress: number;
     current: number;
     total: number;
+    currentFieldName?: string;
+    archivedCount?: number;
+    completedCount?: number;
+    failedCount?: number;
   }>({ status: 'idle', progress: 0, current: 0, total: 0 });
 
   // آپلود پیوست
@@ -366,8 +370,32 @@ export default function ProjectDetailPage() {
       loadProject();
       loadMemory();
       loadSyncSettings();
+      // 🔴 چک کردن وضعیت اجرای گروهی هنگام لود صفحه
+      checkBatchStatusOnLoad();
     }
   }, [projectId]);
+
+  // 🔴 چک کردن وضعیت اجرای گروهی هنگام لود صفحه
+  const checkBatchStatusOnLoad = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields/batch-status`);
+      const data = await res.json();
+      if (data.success && data.is_running) {
+        // اگر اجرا در حال انجامه، state رو ست کن و polling رو شروع کن
+        setBatchStatus({
+          status: data.status,
+          progress: data.progress_percent,
+          current: data.current_index,
+          total: data.total_fields,
+        });
+        if (data.status === 'running' || data.status === 'paused') {
+          setExecutingBatch(true);
+        }
+      }
+    } catch (e) {
+      console.log('Error checking batch status on load:', e);
+    }
+  };
 
   // راه‌اندازی سینک خودکار وقتی تنظیمات تغییر کنه
   useEffect(() => {
@@ -1644,10 +1672,18 @@ export default function ProjectDetailPage() {
           progress: data.progress_percent,
           current: data.current_index,
           total: data.total_fields,
+          currentFieldName: data.current_field_name,
+          archivedCount: data.archived_count,
+          completedCount: data.completed_count,
+          failedCount: data.failed_count,
         });
-        if (data.status === 'idle' && executingBatch) {
+        // وقتی اجرا تمام شد
+        if ((data.status === 'idle' || data.status === 'completed') && executingBatch) {
           setExecutingBatch(false);
-          loadMemory();
+          loadMemory();  // بارگذاری مجدد برای دیدن فیلدهای بایگانی شده
+          if (data.completed_count > 0) {
+            showSuccess(`اجرای گروهی تمام شد: ${data.completed_count} موفق، ${data.archived_count || 0} بایگانی شده`);
+          }
         }
       }
     } catch (e) {
@@ -2971,10 +3007,17 @@ export default function ProjectDetailPage() {
                   {(executingBatch || batchStatus.status === 'running' || batchStatus.status === 'paused') && (
                     <div className="mt-3 p-3 bg-blue-50 dark:bg-blue-900/30 rounded-lg border border-blue-200 dark:border-blue-700">
                       <div className="flex items-center justify-between mb-2">
-                        <span className="text-sm font-medium text-blue-700 dark:text-blue-300">
-                          {batchStatus.status === 'paused' ? '⏸️ متوقف موقت' : '🔄 در حال اجرا'}
-                          {' - '}{batchStatus.current}/{batchStatus.total} فیلد ({batchStatus.progress}%)
-                        </span>
+                        <div>
+                          <span className="text-sm font-medium text-blue-700 dark:text-blue-300">
+                            {batchStatus.status === 'paused' ? '⏸️ متوقف موقت' : '🔄 در حال اجرا'}
+                            {' - '}{batchStatus.current}/{batchStatus.total} فیلد ({batchStatus.progress.toFixed(1)}%)
+                          </span>
+                          {batchStatus.currentFieldName && (
+                            <p className="text-xs text-blue-500 dark:text-blue-400 mt-1">
+                              📝 {batchStatus.currentFieldName}
+                            </p>
+                          )}
+                        </div>
                         <div className="flex items-center gap-2">
                           {batchStatus.status === 'running' && (
                             <button
@@ -3000,15 +3043,35 @@ export default function ProjectDetailPage() {
                           </button>
                         </div>
                       </div>
-                      <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                      <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5">
                         <div
-                          className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                          className="bg-gradient-to-r from-blue-500 to-green-500 h-2.5 rounded-full transition-all duration-300"
                           style={{ width: `${batchStatus.progress}%` }}
                         />
                       </div>
-                      <p className="text-xs text-blue-600 dark:text-blue-400 mt-2">
-                        💡 می‌توانید به صفحات دیگر بروید - اجرا در پس‌زمینه ادامه دارد
-                      </p>
+                      {/* آمار اجرا */}
+                      <div className="flex items-center justify-between mt-2 text-xs">
+                        <div className="flex items-center gap-3">
+                          {batchStatus.completedCount !== undefined && (
+                            <span className="text-green-600 dark:text-green-400">
+                              ✓ {batchStatus.completedCount} موفق
+                            </span>
+                          )}
+                          {batchStatus.archivedCount !== undefined && batchStatus.archivedCount > 0 && (
+                            <span className="text-purple-600 dark:text-purple-400">
+                              📦 {batchStatus.archivedCount} بایگانی شده
+                            </span>
+                          )}
+                          {batchStatus.failedCount !== undefined && batchStatus.failedCount > 0 && (
+                            <span className="text-red-600 dark:text-red-400">
+                              ✗ {batchStatus.failedCount} ناموفق
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-blue-600 dark:text-blue-400">
+                          💡 می‌توانید صفحه را ترک کنید
+                        </span>
+                      </div>
                     </div>
                   )}
 
