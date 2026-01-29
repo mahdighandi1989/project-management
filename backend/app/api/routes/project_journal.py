@@ -693,19 +693,38 @@ async def generate_engineering_report(
         except:
             pass
 
-    # Log sources of issues
-    source_counts = {
-        "file_health_map": 0,
-        "analysis_progress": 0,
-        "issues_found": 0,
-        "health_scores": 0,
-    }
-    logger.info(f"🔍 Health issues extraction:")
-    logger.info(f"   - project.file_health_map exists: {bool(project.file_health_map)}")
-    logger.info(f"   - project.analysis_progress exists: {bool(project.analysis_progress)}")
-    logger.info(f"   - project.issues_found exists: {bool(project.issues_found)}")
-    logger.info(f"   - project.health_scores exists: {bool(project.health_scores)}")
+    # Log detailed extraction stats
+    logger.info(f"🔍 Health issues extraction from project {project_id}:")
+    logger.info(f"   - project.file_health_map: {len(project.file_health_map or '')} chars")
+    logger.info(f"   - project.analysis_progress: {len(project.analysis_progress or '')} chars")
+    logger.info(f"   - project.issues_found: {len(project.issues_found or '')} chars")
+    logger.info(f"   - project.health_scores: {len(project.health_scores or '')} chars")
     logger.info(f"📊 Total health issues found for validation: {len(health_analysis_issues)}")
+
+    # Group issues by severity for logging
+    if health_analysis_issues:
+        severity_counts = {}
+        for issue in health_analysis_issues:
+            sev = issue.get("severity", "unknown")
+            severity_counts[sev] = severity_counts.get(sev, 0) + 1
+        logger.info(f"📊 Issues by severity: {severity_counts}")
+    else:
+        logger.warning(f"⚠️ No health issues found from any source. Checking raw content...")
+        # Additional debug for empty issues
+        if project.file_health_map:
+            try:
+                fhm = json.loads(project.file_health_map)
+                total_issues_in_map = sum(len(fd.get("issues", [])) for fd in fhm.values() if isinstance(fd, dict))
+                total_issues_count = sum(fd.get("issues_count", 0) for fd in fhm.values() if isinstance(fd, dict))
+                logger.info(f"   - file_health_map has {len(fhm)} files, {total_issues_in_map} issues embedded, {total_issues_count} issues_count")
+            except:
+                pass
+        if project.issues_found:
+            try:
+                stored = json.loads(project.issues_found)
+                logger.info(f"   - issues_found has {len(stored) if isinstance(stored, list) else 0} issues")
+            except:
+                pass
 
     # ساخت خلاصه health analysis برای prompt
     if health_analysis_issues:
@@ -1048,6 +1067,21 @@ async def generate_engineering_report(
                 i for i in health_analysis_issues
                 if i.get("severity") in ["critical", "high"]
             ][:10]  # حداکثر 10 فیلد
+
+            # 🆕 اگر critical/high نبود، از medium هم استفاده کن
+            if not critical_high_issues:
+                logger.info(f"No critical/high issues found, including medium severity...")
+                critical_high_issues = [
+                    i for i in health_analysis_issues
+                    if i.get("severity") in ["critical", "high", "medium"]
+                ][:10]
+
+            # 🆕 اگر هنوز نبود، از همه issues (بدون توجه به severity)
+            if not critical_high_issues and health_analysis_issues:
+                logger.info(f"No medium+ issues found, using first 10 issues regardless of severity...")
+                critical_high_issues = health_analysis_issues[:10]
+
+            logger.info(f"Selected {len(critical_high_issues)} issues for field creation")
 
             for issue in critical_high_issues:
                 validation_results["validated_issues"].append({
