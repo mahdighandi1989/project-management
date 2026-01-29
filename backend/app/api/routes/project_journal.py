@@ -599,7 +599,37 @@ async def generate_engineering_report(
     health_analysis_summary = ""
     partial_results = {}
 
-    # دریافت نتایج از analysis_progress (partial_results)
+    def normalize_issue(issue, file_path=None, source_models=None):
+        """نرمال‌سازی فرمت ایراد از منابع مختلف"""
+        return {
+            "file": issue.get("file") or file_path or "unknown",
+            "type": issue.get("type") or issue.get("category") or "code_quality",
+            "severity": issue.get("severity") or "medium",
+            "message": issue.get("message") or issue.get("description") or issue.get("problem") or str(issue),
+            "line": issue.get("line"),
+            "source_models": source_models or issue.get("source_models") or ["unknown"],
+        }
+
+    # 1. دریافت از file_health_map (نتایج تحلیل هر فایل)
+    if project.file_health_map:
+        try:
+            file_map = json.loads(project.file_health_map)
+            for file_path, file_data in file_map.items():
+                if isinstance(file_data, dict):
+                    # استخراج issues از داخل file_data
+                    file_issues = file_data.get("issues", [])
+                    if isinstance(file_issues, list):
+                        for issue in file_issues:
+                            if isinstance(issue, dict):
+                                health_analysis_issues.append(normalize_issue(
+                                    issue,
+                                    file_path=file_path,
+                                    source_models=file_data.get("analyzed_by", ["file_analysis"])
+                                ))
+        except Exception as e:
+            logger.warning(f"Error parsing file_health_map: {e}")
+
+    # 2. دریافت نتایج از analysis_progress (partial_results)
     if project.analysis_progress:
         try:
             progress_data = json.loads(project.analysis_progress)
@@ -608,51 +638,84 @@ async def generate_engineering_report(
             # استخراج issues از micro analysis
             if "micro" in partial_results:
                 micro_results = partial_results["micro"]
-                for file_path, file_data in micro_results.items():
-                    issues = file_data.get("issues", [])
-                    for issue in issues:
-                        health_analysis_issues.append({
-                            "file": file_path,
-                            "type": issue.get("type", "unknown"),
-                            "severity": issue.get("severity", "medium"),
-                            "message": issue.get("message", ""),
-                            "line": issue.get("line"),
-                            "source_models": file_data.get("analyzed_by", []),
-                            "score": file_data.get("score", 50),
-                        })
+                if isinstance(micro_results, dict):
+                    for file_path, file_data in micro_results.items():
+                        if isinstance(file_data, dict):
+                            issues = file_data.get("issues", [])
+                            if isinstance(issues, list):
+                                for issue in issues:
+                                    if isinstance(issue, dict):
+                                        health_analysis_issues.append(normalize_issue(
+                                            issue,
+                                            file_path=file_path,
+                                            source_models=file_data.get("analyzed_by", [])
+                                        ))
 
             # استخراج issues از structural analysis
             if "structural" in partial_results:
                 structural = partial_results["structural"]
-                for issue in structural.get("issues", []):
-                    health_analysis_issues.append({
-                        "file": issue.get("file", "structural"),
-                        "type": issue.get("type", "architecture"),
-                        "severity": issue.get("severity", "medium"),
-                        "message": issue.get("description", issue.get("message", "")),
-                        "source_models": ["structural_analysis"],
-                    })
+                if isinstance(structural, dict):
+                    for issue in structural.get("issues", []):
+                        if isinstance(issue, dict):
+                            health_analysis_issues.append(normalize_issue(
+                                issue,
+                                file_path=issue.get("file", "structural"),
+                                source_models=["structural_analysis"]
+                            ))
         except Exception as e:
             logger.warning(f"Error parsing analysis_progress: {e}")
 
-    # دریافت از issues_found (ذخیره شده از قبل)
+    # 3. دریافت از issues_found (ذخیره شده از قبل)
     if project.issues_found:
         try:
             stored_issues = json.loads(project.issues_found)
-            # ادغام با issues موجود (بدون تکرار)
-            existing_keys = {f"{i['file']}:{i.get('line', '')}:{i['type']}" for i in health_analysis_issues}
-            for issue in stored_issues:
-                key = f"{issue.get('file', '')}:{issue.get('line', '')}:{issue.get('type', '')}"
-                if key not in existing_keys:
-                    health_analysis_issues.append(issue)
+            if isinstance(stored_issues, list):
+                # ادغام با issues موجود (بدون تکرار)
+                existing_keys = {f"{i.get('file', '')}:{i.get('line', '')}:{i.get('message', '')[:50]}" for i in health_analysis_issues}
+                for issue in stored_issues:
+                    if isinstance(issue, dict):
+                        normalized = normalize_issue(issue)
+                        key = f"{normalized['file']}:{normalized.get('line', '')}:{normalized['message'][:50]}"
+                        if key not in existing_keys:
+                            health_analysis_issues.append(normalized)
+                            existing_keys.add(key)
+        except Exception as e:
+            logger.warning(f"Error parsing issues_found: {e}")
+
+    # 4. دریافت از health_scores (ممکن است issues داخلش باشد)
+    if project.health_scores:
+        try:
+            scores = json.loads(project.health_scores)
+            if isinstance(scores, dict) and "issues" in scores:
+                for issue in scores.get("issues", []):
+                    if isinstance(issue, dict):
+                        health_analysis_issues.append(normalize_issue(issue))
         except:
             pass
 
+    logger.info(f"Total health issues found for validation: {len(health_analysis_issues)}")
+
     # ساخت خلاصه health analysis برای prompt
     if health_analysis_issues:
-        health_analysis_summary = f"\n=== 🔍 نتایج آخرین health analysis ({len(health_analysis_issues)} ایراد شناسایی شده) ===\n"
-        health_analysis_summary += "این ایرادات باید توسط شما اعتبارسنجی شوند:\n"
-        health_analysis_summary += json.dumps(health_analysis_issues[:30], ensure_ascii=False, indent=2)  # حداکثر 30
+        health_analysis_summary = f"""
+
+=== 🔍 نتایج آخرین health analysis ({len(health_analysis_issues)} ایراد شناسایی شده) ===
+
+⚠️ بسیار مهم: این ایرادات توسط تحلیل سلامت شناسایی شده‌اند و باید توسط شما اعتبارسنجی شوند!
+- هر ایراد را با کد واقعی مقایسه کن
+- اگر ایراد واقعاً وجود دارد، در validated_issues قرار بده (با create_field=true)
+- اگر ایراد اشتباه است، در rejected_issues با دلیل رد شدن قرار بده
+
+لیست ایرادات برای بررسی:
+{json.dumps(health_analysis_issues[:30], ensure_ascii=False, indent=2)}
+"""
+    else:
+        health_analysis_summary = """
+
+=== 🔍 نتایج تحلیل سلامت ===
+هیچ ایرادی از تحلیل سلامت قبلی یافت نشد.
+در صورتی که مشکلاتی در کد مشاهده می‌کنید، آنها را در بخش bugs_and_issues گزارش کنید.
+"""
 
     # خلاصه فعالیت‌ها
     activities_summary = []
@@ -817,7 +880,7 @@ async def generate_engineering_report(
 
 === کدهای پروژه ({len(code_samples)} فایل، {total_code_chars:,} کاراکتر) ===
 {json.dumps(code_samples, ensure_ascii=False, indent=2)}
-{health_analysis_summary if validate_health_issues and health_analysis_issues else ''}
+{health_analysis_summary if validate_health_issues else ''}
 === فعالیت‌های اخیر ({days} روز) ===
 {json.dumps(activities_summary, ensure_ascii=False, indent=2)}
 
@@ -833,7 +896,12 @@ async def generate_engineering_report(
 === نقشه راه فعلی ===
 {(project.roadmap_content or '')[:2000] if project.roadmap_content else 'تعریف نشده'}
 
-لطفاً گزارش مهندسی جامع تولید کن. اگر health analysis issues ارسال شده، حتماً همه آنها را اعتبارسنجی کن."""
+لطفاً گزارش مهندسی جامع تولید کن.
+
+⚠️ بسیار مهم:
+1. اگر بخش "نتایج آخرین health analysis" بالا وجود دارد، حتماً تمام ایرادات را یک به یک بررسی و اعتبارسنجی کن
+2. بخش health_analysis_validation را حتماً در خروجی JSON قرار بده
+3. برای هر ایراد تایید شده، یک فیلد پویا ایجاد می‌شود تا توسعه‌دهنده آن را رفع کند"""
 
     # فراخوانی AI
     ai_manager = get_ai_manager()
@@ -1007,6 +1075,7 @@ async def generate_engineering_report(
             # 2. 🆕 تولید فیلدهای جدید از validated issues (با مارکر اعتبارسنجی)
             if validate_health_issues and "health_analysis_validation" in report_data:
                 validated_issues = report_data["health_analysis_validation"].get("validated_issues", [])
+                logger.info(f"Creating fields from {len(validated_issues)} validated health issues")
                 for issue in validated_issues:
                     if not issue.get("create_field", True):
                         continue
@@ -1108,6 +1177,7 @@ async def generate_engineering_report(
             if created_fields or archived_count or merged_count or updated_count:
                 project.dynamic_fields = json.dumps(existing_fields, ensure_ascii=False)
                 db.commit()
+                logger.info(f"Field management: created={len(created_fields)}, archived={archived_count}, merged={merged_count}, updated={updated_count}")
 
         # ایجاد گزارش
         total_tokens = sum(log.tokens_used for log in logs) + (response.tokens_used or 0)
