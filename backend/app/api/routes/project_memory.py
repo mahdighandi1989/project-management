@@ -1602,6 +1602,15 @@ async def batch_execute_fields(
     # فیلتر فیلدهای غیربایگانی
     active_fields = [f for f in dynamic_fields if not f.get("archived")]
 
+    # 🔴 لاگ برای دیباگ
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"[Batch Execute] Project: {project_id}")
+    logger.info(f"[Batch Execute] Total fields: {len(dynamic_fields)}, Active: {len(active_fields)}")
+    logger.info(f"[Batch Execute] Request: execute_type={request.execute_type}, field_ids={request.field_ids[:5] if request.field_ids else []}")
+    available_ids = [f.get("id") for f in active_fields]
+    logger.info(f"[Batch Execute] Available field IDs: {available_ids[:5]}")
+
     # انتخاب فیلدها برای اجرا
     fields_to_execute = []
 
@@ -1613,12 +1622,20 @@ async def batch_execute_fields(
         fields_to_execute = [f for f in active_fields if f.get("field_type") == "temporary"]
     elif request.execute_type == "selected":
         fields_to_execute = [f for f in active_fields if f.get("id") in request.field_ids]
+        logger.info(f"[Batch Execute] Selected mode - matched {len(fields_to_execute)} fields")
 
     if not fields_to_execute:
+        logger.warning(f"[Batch Execute] No fields to execute! active={len(active_fields)}, requested_ids={request.field_ids}")
         return {
             "success": False,
             "error": "هیچ فیلدی برای اجرا انتخاب نشده",
-            "executed_count": 0
+            "executed_count": 0,
+            "debug": {
+                "total_fields": len(dynamic_fields),
+                "active_fields": len(active_fields),
+                "requested_ids": request.field_ids[:5] if request.field_ids else [],
+                "available_ids": available_ids[:10]
+            }
         }
 
     # مرتب‌سازی براساس اولویت (1 = بالاترین اولویت)
@@ -1925,7 +1942,7 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
                                 logger.info(f"[Batch Execute] Commit result: {commit_result.get('success')}")
 
                             elif action_type == "github_multi_commit":
-                                code_blocks = extract_code_blocks(response.content)
+                                code_blocks = await extract_code_blocks(response.content)
                                 for block in code_blocks:
                                     logger.info(f"[Batch Execute] Multi-committing: {block['path']}")
                                     commit_result = await commit_to_github(
