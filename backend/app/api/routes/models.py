@@ -2,10 +2,13 @@
 API routes برای مدیریت مدل‌ها
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
+from sqlalchemy.orm import Session
 import logging
+
+from ...core.database import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -74,12 +77,15 @@ def get_capability_value(cap) -> str:
 
 @router.get("", response_model=List[ModelInfo])
 @router.get("/", response_model=List[ModelInfo])
-async def list_models(provider: Optional[str] = None, capability: Optional[str] = None):
+async def list_models(
+    provider: Optional[str] = None,
+    capability: Optional[str] = None,
+    db: Session = Depends(get_db)  # 🔴 اضافه شد
+):
     """لیست همه مدل‌ها"""
     try:
         from ...core.models_registry import MODEL_REGISTRY, ModelCapability
         from ...services.ai_manager import get_ai_manager
-        from ...core.database import get_db
         from ...models.ai_profile import ModelSettings
 
         # Get available providers
@@ -93,9 +99,9 @@ async def list_models(provider: Optional[str] = None, capability: Optional[str] 
         # 🔴 دریافت تنظیمات مدل‌ها از دیتابیس
         db_settings_map = {}
         try:
-            db = next(get_db())
             db_settings = db.query(ModelSettings).all()
             db_settings_map = {s.model_id: s for s in db_settings}
+            logger.info(f"Loaded {len(db_settings_map)} model settings from DB")
         except Exception as e:
             logger.warning(f"Could not load model settings: {e}")
 
@@ -120,8 +126,10 @@ async def list_models(provider: Optional[str] = None, capability: Optional[str] 
                 db_setting = db_settings_map.get(model.id)
                 if db_setting:
                     is_enabled = bool(db_setting.enabled)
+                    logger.debug(f"Model {model.id}: DB setting enabled={db_setting.enabled} -> {is_enabled}")
                 else:
                     is_enabled = model.enabled
+                    logger.debug(f"Model {model.id}: No DB setting, using registry enabled={is_enabled}")
 
                 models.append(ModelInfo(
                     id=model.id,
