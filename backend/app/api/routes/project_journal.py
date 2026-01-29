@@ -693,7 +693,19 @@ async def generate_engineering_report(
         except:
             pass
 
-    logger.info(f"Total health issues found for validation: {len(health_analysis_issues)}")
+    # Log sources of issues
+    source_counts = {
+        "file_health_map": 0,
+        "analysis_progress": 0,
+        "issues_found": 0,
+        "health_scores": 0,
+    }
+    logger.info(f"🔍 Health issues extraction:")
+    logger.info(f"   - project.file_health_map exists: {bool(project.file_health_map)}")
+    logger.info(f"   - project.analysis_progress exists: {bool(project.analysis_progress)}")
+    logger.info(f"   - project.issues_found exists: {bool(project.issues_found)}")
+    logger.info(f"   - project.health_scores exists: {bool(project.health_scores)}")
+    logger.info(f"📊 Total health issues found for validation: {len(health_analysis_issues)}")
 
     # ساخت خلاصه health analysis برای prompt
     if health_analysis_issues:
@@ -922,17 +934,38 @@ async def generate_engineering_report(
         report_content = response.content
         report_data = None
 
-        # استخراج JSON از پاسخ
+        # استخراج JSON از پاسخ - بهبود یافته برای مدیریت markdown code blocks
         import re
-        json_match = re.search(r'\{[\s\S]*\}', report_content)
-        if json_match:
-            try:
-                report_data = json.loads(json_match.group())
-            except json.JSONDecodeError:
-                pass
 
+        # 1. ابتدا تلاش برای استخراج از داخل ```json ... ``` یا ``` ... ```
+        code_block_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', report_content)
+        if code_block_match:
+            json_str = code_block_match.group(1).strip()
+            try:
+                report_data = json.loads(json_str)
+                logger.info(f"Successfully parsed JSON from code block ({len(json_str)} chars)")
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse JSON from code block: {e}")
+
+        # 2. اگر از code block استخراج نشد، تلاش برای پیدا کردن مستقیم JSON
         if not report_data:
-            report_data = {"raw_content": report_content}
+            # پیدا کردن اولین { و آخرین }
+            first_brace = report_content.find('{')
+            last_brace = report_content.rfind('}')
+            if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                json_str = report_content[first_brace:last_brace+1]
+                try:
+                    report_data = json.loads(json_str)
+                    logger.info(f"Successfully parsed JSON directly ({len(json_str)} chars)")
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse JSON directly: {e}")
+
+        # 3. اگر هنوز پارس نشده، محتوای خام را ذخیره کن
+        if not report_data:
+            logger.error(f"Could not parse JSON from AI response. Content preview: {report_content[:500]}")
+            report_data = {"raw_content": report_content, "parse_error": True}
+        else:
+            logger.info(f"Report data parsed successfully. Keys: {list(report_data.keys())}")
 
         # ====================================
         # 🆕 پردازش نتایج اعتبارسنجی health analysis
@@ -1201,6 +1234,34 @@ async def generate_engineering_report(
         )
 
         db.add(report)
+        db.commit()
+
+        # 🆕 ثبت فعالیت در ژورنال
+        activity_log = ActivityLog(
+            id=f"log_{uuid.uuid4().hex[:12]}",
+            project_id=project_id,
+            model_id=model_id,
+            model_provider="anthropic" if "claude" in model_id.lower() else "openai",
+            activity_type="engineering_report",
+            prompt=f"تولید گزارش مهندسی برای {days} روز اخیر",
+            response=report_data.get("executive_summary", "")[:500] if isinstance(report_data, dict) else None,
+            tokens_used=response.tokens_used or 0,
+            latency_ms=int((datetime.utcnow() - since).total_seconds() * 1000) if since else 0,
+            success=True,
+            field_id=None,
+            field_name=f"گزارش مهندسی - {report.id}",
+            extra_data=json.dumps({
+                "report_id": report.id,
+                "files_analyzed": len(files),
+                "health_issues_reviewed": len(health_analysis_issues),
+                "validated_count": validated_issues_count,
+                "rejected_count": rejected_issues_count,
+                "fields_created": len(created_fields),
+                "project_health_score": report_data.get("project_health", {}).get("score") if isinstance(report_data, dict) else None,
+            }, ensure_ascii=False),
+            created_at=datetime.utcnow(),
+        )
+        db.add(activity_log)
         db.commit()
 
         return {
