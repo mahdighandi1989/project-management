@@ -234,6 +234,27 @@ class ModelCapabilityTester:
             نتایج تست با badge ها
         """
         logger.info(f"🧪 Testing model capabilities: {model_id}")
+
+        # 🔴 چک کردن فعال بودن مدل در تنظیمات
+        try:
+            from ..core.database import get_db
+            from ..models.ai_profile import ModelSettings
+            db = next(get_db())
+            db_setting = db.query(ModelSettings).filter(ModelSettings.model_id == model_id).first()
+            if db_setting and not db_setting.enabled:
+                logger.warning(f"Model {model_id} is disabled, skipping test")
+                return {
+                    "model_id": model_id,
+                    "tested_at": datetime.now().isoformat(),
+                    "error": "این مدل غیرفعال است",
+                    "disabled": True,
+                    "overall_score": 0,
+                    "badges": [],
+                    "categories": {}
+                }
+        except Exception as e:
+            logger.debug(f"Could not check model settings: {e}")
+
         start_time = time.time()
 
         results = {

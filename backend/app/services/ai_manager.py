@@ -247,9 +247,27 @@ class AIManager:
         **kwargs
     ) -> AIResponse:
         """تولید پاسخ از یک مدل خاص"""
+        import logging
+        logger = logging.getLogger(__name__)
+
         model = get_model(model_id)
         if not model:
             raise AIServiceError(f"Model {model_id} not found", "manager", model_id)
+
+        # 🔴 چک کردن فعال بودن مدل در دیتابیس
+        try:
+            from ..core.database import get_db
+            from ..models.ai_profile import ModelSettings
+            db = next(get_db())
+            db_setting = db.query(ModelSettings).filter(ModelSettings.model_id == model_id).first()
+            if db_setting and not db_setting.enabled:
+                logger.warning(f"Model {model_id} is disabled in settings, rejecting request")
+                raise AIServiceError(f"Model {model_id} is disabled", "manager", model_id)
+        except AIServiceError:
+            raise
+        except Exception as e:
+            # اگر دیتابیس مشکل داشت، اجازه بده ادامه بده
+            logger.debug(f"Could not check model settings: {e}")
 
         # هندل کردن هر دو حالت enum و string
         provider = model.provider
