@@ -1368,6 +1368,45 @@ async def _run_analysis_task(
         db.commit()
         logger.info(f"💾 Results saved to database for project {project_id}")
 
+        # 🆕 ثبت فعالیت تحلیل سلامت در ژورنال
+        try:
+            from .project_journal import ActivityLog
+            import uuid as uuid_module
+
+            overall_score = analysis_result.get('overall_scores', {}).get('total', 0)
+            issues_count = len(analysis_result.get("issues", []))
+            files_analyzed = len(analysis_result.get("file_health_map", {}))
+
+            activity_log = ActivityLog(
+                id=f"log_{uuid_module.uuid4().hex[:12]}",
+                project_id=project_id,
+                model_id=",".join(model_ids) if model_ids else "unknown",
+                model_provider="multi",
+                activity_type="health_analysis",
+                prompt=f"تحلیل سلامت پروژه با {len(model_ids)} مدل",
+                response=f"نمره کلی: {overall_score:.1f}% | {issues_count} ایراد | {files_analyzed} فایل",
+                tokens_used=0,
+                latency_ms=0,
+                success=analysis_result.get("status") == "completed",
+                error_message=analysis_result.get("error"),
+                field_id=analysis_result.get("analysis_id"),
+                field_name=f"تحلیل سلامت - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
+                extra_data=json.dumps({
+                    "analysis_id": analysis_result.get("analysis_id"),
+                    "models_used": model_ids,
+                    "overall_score": overall_score,
+                    "issues_count": issues_count,
+                    "files_analyzed": files_analyzed,
+                    "scores": analysis_result.get('overall_scores', {}),
+                }, ensure_ascii=False),
+                created_at=datetime.utcnow(),
+            )
+            db.add(activity_log)
+            db.commit()
+            logger.info(f"📝 Activity logged to journal for health analysis")
+        except Exception as log_error:
+            logger.warning(f"Could not log activity to journal: {log_error}")
+
     except Exception as e:
         logger.error(f"❌ Analysis task error for {project_id}: {e}", exc_info=True)
         db.rollback()
