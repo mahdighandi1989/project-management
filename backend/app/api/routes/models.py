@@ -389,53 +389,6 @@ async def get_model_rankings():
         return {"success": False, "rankings": {"by_score": [], "by_accuracy": [], "by_speed": [], "by_cost_efficiency": []}}
 
 
-# ===========================================
-# Dynamic route - MUST be last!
-# ===========================================
-@router.get("/{model_id}", response_model=ModelInfo)
-async def get_model_info(model_id: str):
-    """دریافت اطلاعات یک مدل"""
-    try:
-        from ...core.models_registry import get_model
-        from ...services.ai_manager import get_ai_manager
-
-        model = get_model(model_id)
-        if not model:
-            raise HTTPException(status_code=404, detail="Model not found")
-
-        # Check if available
-        is_available = False
-        try:
-            ai_manager = get_ai_manager()
-            is_available = get_provider_value(model.provider) in ai_manager.get_available_providers()
-        except Exception:
-            pass  # If AI manager not available, mark as unavailable
-
-        return ModelInfo(
-            id=model.id,
-            provider=get_provider_value(model.provider),
-            name=model.name,
-            capabilities=[get_capability_value(c) for c in model.capabilities],
-            max_tokens=model.max_tokens,
-            context_window=model.context_window,
-            strengths=model.strengths,
-            weaknesses=model.weaknesses,
-            cost_per_1k_tokens=model.cost_per_1k_tokens,
-            priority=model.priority,
-            enabled=model.enabled,
-            supports_images=model.supports_images,
-            supports_video=model.supports_video,
-            is_image_generator=model.is_image_generator,
-            is_available=is_available,
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting model {model_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @router.post("/smart-select", response_model=List[ModelInfo])
 async def smart_select_models(request: SmartSelectRequest):
     """انتخاب هوشمند مدل‌ها"""
@@ -1004,3 +957,51 @@ async def reset_model_settings(model_id: str, db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"خطا در بازگردانی تنظیمات: {str(e)}")
+
+
+# ===========================================
+# Dynamic route - MUST be LAST!
+# (This catches any path as model_id, so all specific routes must be defined above)
+# ===========================================
+@router.get("/{model_id}", response_model=ModelInfo)
+async def get_model_info(model_id: str):
+    """دریافت اطلاعات یک مدل"""
+    try:
+        from ...core.models_registry import get_model
+        from ...services.ai_manager import get_ai_manager
+
+        model = get_model(model_id)
+        if not model:
+            raise HTTPException(status_code=404, detail="Model not found")
+
+        # Check if available
+        is_available = False
+        try:
+            ai_manager = get_ai_manager()
+            is_available = get_provider_value(model.provider) in ai_manager.get_available_providers()
+        except Exception:
+            pass  # If AI manager not available, mark as unavailable
+
+        return ModelInfo(
+            id=model.id,
+            provider=get_provider_value(model.provider),
+            name=model.name,
+            capabilities=[get_capability_value(c) for c in model.capabilities],
+            max_tokens=model.max_tokens,
+            context_window=model.context_window,
+            strengths=model.strengths,
+            weaknesses=model.weaknesses,
+            cost_per_1k_tokens=model.cost_per_1k_tokens,
+            priority=model.priority,
+            enabled=model.enabled,
+            supports_images=model.supports_images,
+            supports_video=model.supports_video,
+            is_image_generator=model.is_image_generator,
+            is_available=is_available,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting model {model_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
