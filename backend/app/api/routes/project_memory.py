@@ -1777,6 +1777,10 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
         archive_after_run = target_field.get("archive_after_run", False)
         deploy_after_commit = target_field.get("deploy_after_commit", False)
 
+        # 🔴 لاگ برای دیباگ GitHub commit
+        logger.info(f"[execute_field_internal] action_type={action_type}, target_path={target_path}")
+        logger.info(f"[execute_field_internal] github_info: source={github_info.get('source')}, owner={github_info.get('owner')}, repo={github_info.get('repo')}")
+
         # دریافت فایل‌های پروژه برای context
         from .settings import get_ai_limits_sync
         project_files_context = ""
@@ -1916,6 +1920,7 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
                 }
 
                 # 🔴 GitHub Commit Logic - مهم!
+                logger.info(f"[execute_field_internal] Checking GitHub commit: action_type={action_type}, has_content={bool(response.content)}")
                 if action_type in ["github_commit", "github_multi_commit"] and response.content:
                     if github_info.get("source") == "github":
                         owner = github_info.get("owner")
@@ -1974,6 +1979,10 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
                             logger.warning(f"[Batch Execute] Missing GitHub info: owner={bool(owner)}, repo={bool(repo)}, token={bool(token)}")
                     else:
                         result["github_error"] = "این پروژه از GitHub ایمپورت نشده"
+                        logger.warning(f"[execute_field_internal] GitHub skipped: source={github_info.get('source')} (not 'github')")
+                else:
+                    # action_type is not github_commit or github_multi_commit
+                    logger.info(f"[execute_field_internal] GitHub commit skipped: action_type={action_type} (need 'github_commit' or 'github_multi_commit')")
 
                 results.append(result)
 
