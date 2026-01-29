@@ -1206,7 +1206,16 @@ async def execute_field_trigger(
                     if github_info.get("source") == "github":
                         owner = github_info.get("owner")
                         repo = github_info.get("repo")
+                        # 🔴 بارگذاری توکن از environment یا database
                         token = os.getenv("GITHUB_TOKEN", "")
+                        if not token:
+                            from ...models.setting import Setting
+                            try:
+                                token = Setting.get_value(db, "api_key_github") or ""
+                                if token:
+                                    os.environ["GITHUB_TOKEN"] = token
+                            except:
+                                pass
 
                         if owner and repo and token:
                             if action_type == "github_commit" and target_path:
@@ -1620,11 +1629,13 @@ async def batch_execute_fields(
     execution_results = []
     success_count = 0
     failed_count = 0
+    github_success_count = 0
+    archived_count = 0
+    fields_to_archive = []  # لیست ID فیلدهایی که باید بایگانی شوند
 
     for field in fields_to_execute:
         try:
-            # اجرای فیلد با استفاده از endpoint موجود
-            # صدا زدن تابع execute_field_trigger به صورت مستقیم
+            # اجرای فیلد با قابلیت کامل (commit + deploy + archive)
             result = await execute_field_internal(
                 project_id=project_id,
                 field_id=field.get("id"),
@@ -1633,19 +1644,32 @@ async def batch_execute_fields(
                 project=project
             )
 
-            execution_results.append({
+            exec_result = {
                 "field_id": field.get("id"),
                 "field_name": field.get("name"),
                 "priority": field.get("priority", 5),
                 "field_type": field.get("field_type"),
+                "action_type": field.get("action_type", "display"),
                 "success": result.get("success", False),
                 "error": result.get("error"),
-            })
+                "github_commits": result.get("github_commits"),
+                "deploy_result": result.get("deploy_result"),
+            }
 
             if result.get("success"):
                 success_count += 1
+                # علامت‌گذاری برای بایگانی
+                if result.get("should_archive"):
+                    fields_to_archive.append(field.get("id"))
+                    exec_result["archived"] = True
+                    archived_count += 1
+                # شمارش کامیت‌های موفق
+                if result.get("any_github_success"):
+                    github_success_count += 1
             else:
                 failed_count += 1
+
+            execution_results.append(exec_result)
 
         except Exception as e:
             execution_results.append({
@@ -1656,11 +1680,37 @@ async def batch_execute_fields(
             })
             failed_count += 1
 
+    # 🔴 بروزرسانی و بایگانی فیلدها در دیتابیس
+    if fields_to_archive:
+        try:
+            for field in dynamic_fields:
+                field_id = field.get("id")
+                if field_id in fields_to_archive:
+                    field["archived"] = True
+                    field["archived_at"] = datetime.utcnow().isoformat()
+                    field["executed"] = True
+                    field["last_executed"] = datetime.utcnow().isoformat()
+                # بروزرسانی زمان اجرا برای همه فیلدهای اجرا شده
+                elif field_id in [f.get("id") for f in fields_to_execute]:
+                    if "trigger" not in field:
+                        field["trigger"] = {}
+                    field["trigger"]["last_run"] = datetime.utcnow().isoformat()
+                    field["executed"] = True
+
+            project.dynamic_fields = json.dumps(dynamic_fields, ensure_ascii=False)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            # خطا در بایگانی نباید عملیات کلی را متوقف کند
+            pass
+
     return {
         "success": success_count > 0,
         "executed_count": len(fields_to_execute),
         "success_count": success_count,
         "failed_count": failed_count,
+        "github_commits_count": github_success_count,
+        "archived_count": archived_count,
         "results": execution_results,
         "execution_order": [f.get("name") for f in fields_to_execute],
         "executed_at": datetime.utcnow().isoformat()
@@ -1670,13 +1720,17 @@ async def batch_execute_fields(
 async def execute_field_internal(project_id: str, field_id: str, db: Session, field_data: dict, project: Project):
     """
     اجرای داخلی فیلد برای batch execution
-    نسخه ساده‌تر از execute_field_trigger
+    شامل تمام قابلیت‌های execute_field_trigger: کامیت GitHub، بایگانی، دیپلوی
     """
     from datetime import datetime
     from ...services.ai_manager import get_ai_manager
     from ...services.ai_base import Message
     from ...models.project import ProjectFile
+    from ...models.activity import ActivityLog
     import asyncio
+    import re
+    import logging
+    logger = logging.getLogger(__name__)
 
     try:
         target_field = field_data
@@ -1691,26 +1745,39 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
 
         action_type = target_field.get("action_type", "display")
         target_path = target_field.get("target_path")
+        archive_after_run = target_field.get("archive_after_run", False)
+        deploy_after_commit = target_field.get("deploy_after_commit", False)
 
         # دریافت فایل‌های پروژه برای context
         from .settings import get_ai_limits_sync
         project_files_context = ""
+        target_file_content = None
         try:
-            # دریافت تنظیمات محدودیت‌ها
             ai_limits = get_ai_limits_sync(db)
             limits_enabled = ai_limits.get("limits_enabled", False)
 
-            # مقادیر محدودیت (0 = نامحدود)
             max_files = ai_limits.get("max_files_for_context", 0) if limits_enabled else 0
             max_chars_per_file = ai_limits.get("max_chars_per_file", 0) if limits_enabled else 0
             max_total_chars = ai_limits.get("max_total_context_chars", 0) if limits_enabled else 0
 
             files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
             if files:
+                # خواندن فایل هدف اگر موجود باشد
+                if target_path:
+                    for f in files:
+                        if f.file_path == target_path or f.file_path.endswith(target_path):
+                            target_file_content = f.content
+                            break
+
                 relevant_files = []
                 total_chars = 0
 
-                # اولویت‌بندی فایل‌ها
+                # اضافه کردن فایل هدف
+                if target_file_content and target_path:
+                    content = target_file_content if max_chars_per_file == 0 else target_file_content[:max_chars_per_file]
+                    relevant_files.append({"path": target_path, "content": content})
+                    total_chars += len(content)
+
                 priority_keywords = ['auth', 'login', 'user', 'route', 'api', 'main', 'app', 'index', 'config']
                 code_extensions = ['py', 'ts', 'tsx', 'js', 'jsx', 'vue', 'svelte', 'java', 'go', 'rs', 'rb', 'php']
 
@@ -1724,13 +1791,14 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
 
                 sorted_files = sorted(files, key=file_score, reverse=True)
 
-                files_added = 0
+                files_added = 1 if target_file_content else 0
                 for f in sorted_files:
-                    # چک محدودیت‌ها (0 = نامحدود)
                     if max_files > 0 and files_added >= max_files:
                         break
                     if max_total_chars > 0 and total_chars >= max_total_chars:
                         break
+                    if f.file_path == target_path:
+                        continue
                     if f.content and f.file_type in code_extensions:
                         content = f.content if max_chars_per_file == 0 else f.content[:max_chars_per_file]
                         relevant_files.append({"path": f.file_path, "content": content})
@@ -1751,7 +1819,26 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
         if project_files_context:
             system_prompt += project_files_context
 
-        # اضافه کردن پیوست‌ها به prompt
+        # دستورات حافظه
+        try:
+            if project.memory_instructions:
+                memory = json.loads(project.memory_instructions)
+                if memory.get("content"):
+                    system_prompt += f"\n\nدستورات کلی:\n{memory['content']}"
+        except:
+            pass
+
+        # دستورات خاص برای GitHub commit
+        if action_type in ["github_commit", "github_multi_commit"]:
+            system_prompt += "\n\n⚠️ مهم: کد تولید شده مستقیماً در ریپو commit می‌شود."
+            if action_type == "github_commit" and target_path:
+                system_prompt += f"\nفایل هدف: {target_path}"
+                system_prompt += "\nفقط محتوای کد را بدون توضیحات اضافی تولید کن."
+            else:
+                system_prompt += "\nبرای هر فایل از این فرمت استفاده کن:"
+                system_prompt += "\n```language:path/to/file.ext\nکد\n```"
+
+        # اضافه کردن پیوست‌ها
         attachments = target_field.get("attachments", [])
         if attachments:
             system_prompt += "\n\n=== پیوست‌ها ===\n"
@@ -1770,8 +1857,10 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
 
         ai_manager = get_ai_manager()
         results = []
+        github_commits = []
 
-        for model_id in target_models[:1]:  # فقط یک مدل برای batch
+        for model_id in target_models[:1]:
+            start_time = time.time()
             try:
                 messages = [
                     Message(role="system", content=system_prompt),
@@ -1782,18 +1871,115 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
                     ai_manager.generate(
                         model_id=model_id,
                         messages=messages,
-                        max_tokens=4096,
+                        max_tokens=8192,
                         temperature=0.7,
                     ),
-                    timeout=60.0  # کمتر برای batch
+                    timeout=120.0
                 )
 
+                latency_ms = int((time.time() - start_time) * 1000)
+
+                result = {
+                    "model_id": model_id,
+                    "content": response.content,
+                    "tokens_used": response.tokens_used,
+                    "success": True
+                }
+
+                # 🔴 GitHub Commit Logic - مهم!
+                if action_type in ["github_commit", "github_multi_commit"] and response.content:
+                    if github_info.get("source") == "github":
+                        owner = github_info.get("owner")
+                        repo = github_info.get("repo")
+                        # 🔴 بارگذاری توکن از environment یا database
+                        token = os.getenv("GITHUB_TOKEN", "")
+                        if not token:
+                            from ...models.setting import Setting
+                            try:
+                                token = Setting.get_value(db, "api_key_github") or ""
+                                if token:
+                                    os.environ["GITHUB_TOKEN"] = token
+                                    logger.info("[Batch Execute] GitHub token loaded from database")
+                            except Exception as te:
+                                logger.warning(f"[Batch Execute] Could not load GitHub token: {te}")
+
+                        if owner and repo and token:
+                            if action_type == "github_commit" and target_path:
+                                # استخراج کد از پاسخ
+                                code_content = response.content
+                                code_match = re.search(r'```\w*\n?(.*?)```', code_content, re.DOTALL)
+                                if code_match:
+                                    code_content = code_match.group(1)
+
+                                logger.info(f"[Batch Execute] Committing to GitHub: {target_path}")
+                                commit_result = await commit_to_github(
+                                    owner=owner,
+                                    repo=repo,
+                                    token=token,
+                                    file_path=target_path,
+                                    content=code_content.strip(),
+                                    message=f"AI Generated: {target_field.get('name', 'Update')}",
+                                    branch=github_info.get("branch", "main")
+                                )
+                                github_commits.append(commit_result)
+                                logger.info(f"[Batch Execute] Commit result: {commit_result.get('success')}")
+
+                            elif action_type == "github_multi_commit":
+                                code_blocks = extract_code_blocks(response.content)
+                                for block in code_blocks:
+                                    logger.info(f"[Batch Execute] Multi-committing: {block['path']}")
+                                    commit_result = await commit_to_github(
+                                        owner=owner,
+                                        repo=repo,
+                                        token=token,
+                                        file_path=block["path"],
+                                        content=block["content"],
+                                        message=f"AI Generated: {block['path']}",
+                                        branch=github_info.get("branch", "main")
+                                    )
+                                    github_commits.append(commit_result)
+
+                            result["github_commits"] = github_commits
+                        else:
+                            result["github_error"] = "اطلاعات GitHub ناقص است"
+                            logger.warning(f"[Batch Execute] Missing GitHub info: owner={bool(owner)}, repo={bool(repo)}, token={bool(token)}")
+                    else:
+                        result["github_error"] = "این پروژه از GitHub ایمپورت نشده"
+
+                results.append(result)
+
+                # ثبت در لاگ فعالیت
+                try:
+                    extra_data = None
+                    if github_commits:
+                        extra_data = json.dumps({"github_commits": github_commits}, ensure_ascii=False)
+
+                    log_entry = ActivityLog(
+                        id=f"log_{uuid.uuid4().hex[:12]}",
+                        project_id=project_id,
+                        model_id=model_id,
+                        model_provider=model_id.split("-")[0] if "-" in model_id else model_id,
+                        activity_type="batch_trigger",
+                        prompt=user_prompt[:10000],
+                        response=response.content,
+                        tokens_used=response.tokens_used or 0,
+                        latency_ms=latency_ms,
+                        success=True,
+                        field_id=field_id,
+                        field_name=target_field.get("name"),
+                        extra_data=extra_data,
+                        created_at=datetime.utcnow(),
+                    )
+                    db.add(log_entry)
+                except Exception as log_err:
+                    logger.error(f"[Batch Execute] Error logging: {log_err}")
+
+            except asyncio.TimeoutError:
                 results.append({
                     "model_id": model_id,
-                    "content": response.content[:500] + "..." if len(response.content) > 500 else response.content,
-                    "success": True
+                    "error": "Timeout - پاسخ مدل بیش از 120 ثانیه طول کشید",
+                    "success": False
                 })
-
             except Exception as e:
                 results.append({
                     "model_id": model_id,
@@ -1802,9 +1988,39 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
                 })
 
         any_success = any(r.get("success") for r in results)
-        return {"success": any_success, "results": results}
+        any_github_success = any(c.get("success") for c in github_commits) if github_commits else False
+
+        # 🔴 Trigger Deploy بعد از commit موفق
+        deploy_result = None
+        if deploy_after_commit and any_github_success:
+            try:
+                render_service_id = github_info.get("render_service_id")
+                deploy_result = await trigger_render_deploy(
+                    render_service_id=render_service_id,
+                    project_id=project_id,
+                    db_session=db
+                )
+                logger.info(f"[Batch Execute] Deploy triggered: {deploy_result}")
+            except Exception as e:
+                deploy_result = {"success": False, "error": str(e)}
+
+        # 🔴 بایگانی خودکار
+        should_archive = False
+        if archive_after_run and any_success:
+            if action_type == "display" or any_github_success:
+                should_archive = True
+
+        return {
+            "success": any_success,
+            "results": results,
+            "github_commits": github_commits if github_commits else None,
+            "deploy_result": deploy_result,
+            "should_archive": should_archive,
+            "any_github_success": any_github_success
+        }
 
     except Exception as e:
+        logger.error(f"[Batch Execute] Error: {e}")
         return {"success": False, "error": str(e)}
 
 

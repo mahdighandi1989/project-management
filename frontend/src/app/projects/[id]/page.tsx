@@ -1767,13 +1767,14 @@ export default function ProjectDetailPage() {
     }
   };
 
-  // ذخیره سرویس‌های Render انتخاب شده
+  // ذخیره سرویس‌های Render انتخاب شده و اجرای Deploy
   const saveSelectedRenderServices = async () => {
     if (selectedRenderServices.length === 0) {
       showError('لطفاً حداقل یک سرویس انتخاب کنید');
       return;
     }
 
+    setDeploying(true);
     try {
       // ذخیره سرویس‌های انتخاب شده در پروژه
       const res = await fetch(`${API_BASE}/api/projects/${projectId}/deploy/set-services`, {
@@ -1787,14 +1788,34 @@ export default function ProjectDetailPage() {
       const data = await res.json();
 
       if (data.success) {
-        showSuccess(`✅ ${selectedRenderServices.length} سرویس ذخیره شد. حالا Deploy را بزنید.`);
-        setShowServiceSelector(false);
         setSavedRenderServices(availableRenderServices.filter(s => selectedRenderServices.includes(s.id)));
+        setShowServiceSelector(false);
+        showSuccess(`✅ ${selectedRenderServices.length} سرویس ذخیره شد. در حال Deploy...`);
+
+        // 🔴 بلافاصله Deploy را اجرا کن
+        const deployRes = await fetch(`${API_BASE}/api/projects/${projectId}/deploy/test`, {
+          method: 'POST',
+        });
+        const deployData = await deployRes.json();
+
+        if (deployData.success) {
+          if (deployData.deploy_result?.multiple_services) {
+            const results = deployData.deploy_result.services_deployed;
+            const successCount = results.filter((r: any) => r.success).length;
+            showSuccess(`✅ Deploy شروع شد برای ${successCount}/${results.length} سرویس`);
+          } else {
+            showSuccess('✅ Deploy شروع شد! وضعیت: ' + (deployData.deploy_result?.status || 'pending'));
+          }
+        } else {
+          showError('سرویس‌ها ذخیره شدند ولی Deploy با خطا مواجه شد: ' + (deployData.error || ''));
+        }
       } else {
         showError(data.error || 'خطا در ذخیره');
       }
     } catch {
       showError('خطا در ارتباط');
+    } finally {
+      setDeploying(false);
     }
   };
 

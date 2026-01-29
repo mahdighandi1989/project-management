@@ -147,10 +147,15 @@ export default function ModelProfilesPage() {
         const data = await res.json();
         if (data.success && Object.keys(data.leaderboard || {}).length > 0) {
           setLeaderboard(data.leaderboard);
-          // اگر همه مدل‌ها 0 تسک دارند، نمایشی است
-          const anyActive = Object.values(data.leaderboard).some((l: any) => l.score > 0);
-          if (!anyActive) {
+          // 🔴 چک کن آیا داده واقعی است
+          if (data.is_real_data === false || data.note) {
             setIsFallbackData(true);
+            if (data.note) setDataNote(data.note);
+          } else {
+            const anyActive = Object.values(data.leaderboard).some((l: any) => (l as any).total_tasks > 0);
+            if (!anyActive) {
+              setIsFallbackData(true);
+            }
           }
           return;
         }
@@ -161,6 +166,31 @@ export default function ModelProfilesPage() {
       console.log('Using default leaderboard');
       setLeaderboard(defaultLeaderboard);
       setIsFallbackData(true);
+    }
+  };
+
+  // 🔴 بازسازی رتبه‌بندی از لاگ‌های فعالیت
+  const [refreshing, setRefreshing] = useState(false);
+
+  const refreshRankings = async () => {
+    setRefreshing(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/models/refresh-rankings`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert(`✅ ${data.updated_count} مدل به‌روزرسانی شد`);
+        // بارگذاری مجدد داده‌ها
+        loadProfiles();
+        loadLeaderboard();
+      } else {
+        alert('خطا: ' + (data.error || 'نامشخص'));
+      }
+    } catch (e) {
+      alert('خطا در ارتباط با سرور');
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -285,20 +315,29 @@ export default function ModelProfilesPage() {
       </div>
 
       <div className="max-w-7xl mx-auto px-4 py-6">
-        {/* هشدار داده‌های نمایشی */}
+        {/* هشدار داده‌های نمایشی + دکمه بازسازی */}
         {isFallbackData && (
           <div className="mb-6 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-300 dark:border-yellow-700 rounded-xl p-4">
-            <div className="flex items-center gap-3">
-              <span className="text-2xl">⚠️</span>
-              <div>
-                <h4 className="font-bold text-yellow-800 dark:text-yellow-400">داده‌های نمایشی</h4>
-                <p className="text-sm text-yellow-700 dark:text-yellow-500">
-                  {dataNote || "این داده‌ها نمایشی هستند. برای مشاهده نمرات واقعی، ابتدا تحلیل سلامت را روی یک پروژه اجرا کنید."}
-                </p>
-                <p className="text-xs text-yellow-600 dark:text-yellow-600 mt-1">
-                  نمرات واقعی بر اساس عملکرد مدل‌ها در تحلیل‌های سلامت پروژه محاسبه می‌شوند.
-                </p>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">⚠️</span>
+                <div>
+                  <h4 className="font-bold text-yellow-800 dark:text-yellow-400">داده‌های نمایشی</h4>
+                  <p className="text-sm text-yellow-700 dark:text-yellow-500">
+                    {dataNote || "این داده‌ها نمایشی هستند. برای مشاهده نمرات واقعی، ابتدا تحلیل سلامت را روی یک پروژه اجرا کنید."}
+                  </p>
+                  <p className="text-xs text-yellow-600 dark:text-yellow-600 mt-1">
+                    نمرات واقعی بر اساس عملکرد مدل‌ها در تحلیل‌های سلامت پروژه محاسبه می‌شوند.
+                  </p>
+                </div>
               </div>
+              <button
+                onClick={refreshRankings}
+                disabled={refreshing}
+                className="px-4 py-2 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600 disabled:opacity-50 text-sm"
+              >
+                {refreshing ? '⏳ در حال بازسازی...' : '🔄 بازسازی از لاگ‌ها'}
+              </button>
             </div>
           </div>
         )}
