@@ -744,10 +744,12 @@ async def generate_engineering_report(
     # ساخت prompt برای AI
     system_prompt = """تو یک مهندس ارشد نرم‌افزار هستی که باید یک گزارش مهندسی جامع و حرفه‌ای تولید کنی.
 
-⚠️ مهم‌ترین وظیفه تو: اعتبارسنجی ایرادات شناسایی شده توسط health analysis
-- هر ایراد را بررسی کن و مشخص کن آیا واقعاً وجود دارد یا نه
-- ایرادات معتبر را در validated_issues قرار بده
-- ایرادات نامعتبر یا اشتباه را در rejected_issues با دلیل رد شدن قرار بده
+🔴🔴🔴 بسیار مهم - اعتبارسنجی health analysis 🔴🔴🔴
+اگر در بخش ورودی "نتایج آخرین health analysis" وجود دارد، باید:
+1. هر ایراد را یک به یک بررسی کنی
+2. ایرادات تایید شده را در validated_issues قرار بدی
+3. ایرادات رد شده را در rejected_issues قرار بدی
+4. بخش health_analysis_validation را حتماً در JSON خروجی قرار بدی
 
 گزارش باید شامل بخش‌های زیر باشد (حتماً از این ساختار JSON استفاده کن):
 
@@ -974,6 +976,14 @@ async def generate_engineering_report(
         rejected_issues_count = 0
         new_rejected_archive = []
 
+        # لاگ برای debug
+        logger.info(f"🔍 Checking for health_analysis_validation in report_data...")
+        logger.info(f"   - validate_health_issues param: {validate_health_issues}")
+        logger.info(f"   - 'health_analysis_validation' in report_data: {'health_analysis_validation' in report_data}")
+        logger.info(f"   - Health issues sent to AI: {len(health_analysis_issues)}")
+        if report_data and not report_data.get("raw_content"):
+            logger.info(f"   - Report data keys: {list(report_data.keys())}")
+
         if validate_health_issues and "health_analysis_validation" in report_data:
             validation_data = report_data["health_analysis_validation"]
 
@@ -1016,6 +1026,46 @@ async def generate_engineering_report(
             project.rejected_issues_archive = json.dumps(combined_archive[:100], ensure_ascii=False)
 
             logger.info(f"Health validation: {validated_issues_count} validated, {rejected_issues_count} rejected")
+
+        # 🆕 Fallback: اگر AI بخش health_analysis_validation را برنگرداند، فیلدها را مستقیماً از health issues بساز
+        elif validate_health_issues and health_analysis_issues and not report_data.get("raw_content"):
+            logger.warning(f"⚠️ AI did not return health_analysis_validation section. Creating fields from {len(health_analysis_issues)} health issues directly.")
+
+            # ذخیره این به عنوان validation results
+            validation_results = {
+                "validated_at": datetime.utcnow().isoformat(),
+                "validator_model": model_id,
+                "total_issues_reviewed": len(health_analysis_issues),
+                "validated_count": 0,
+                "rejected_count": 0,
+                "validation_summary": f"AI بخش اعتبارسنجی را برنگرداند. {len(health_analysis_issues)} ایراد مستقیماً پردازش شد.",
+                "validated_issues": [],
+                "fallback_mode": True,
+            }
+
+            # ایجاد فیلدها مستقیماً از critical و high severity issues
+            critical_high_issues = [
+                i for i in health_analysis_issues
+                if i.get("severity") in ["critical", "high"]
+            ][:10]  # حداکثر 10 فیلد
+
+            for issue in critical_high_issues:
+                validation_results["validated_issues"].append({
+                    "original_issue": issue,
+                    "validation_score": 70,  # امتیاز پیش‌فرض
+                    "validation_note": "ایجاد خودکار به دلیل عدم پاسخ AI",
+                    "priority": issue.get("severity"),
+                    "create_field": True
+                })
+                validated_issues_count += 1
+
+            validation_results["validated_count"] = validated_issues_count
+            project.last_validation_results = json.dumps(validation_results, ensure_ascii=False)
+
+            # اضافه کردن به report_data برای پردازش بعدی
+            report_data["health_analysis_validation"] = validation_results
+
+            logger.info(f"Fallback: Created {validated_issues_count} validated issues from critical/high severity health issues")
 
         # ====================================
         # 🆕 به‌روزرسانی حالت ایده‌آل جامع
