@@ -614,3 +614,390 @@ async def get_all_badges():
     except Exception as e:
         logger.error(f"Error getting badges: {e}")
         return {"success": False, "error": str(e)}
+
+
+# ===========================================
+# 🆕 مدیریت تنظیمات مدل‌ها
+# ===========================================
+
+from fastapi import Depends
+from sqlalchemy.orm import Session
+from ...core.database import get_db
+from ...models.ai_profile import (
+    ModelSettings,
+    ModelSettingsSchema,
+    ModelSettingsUpdateRequest,
+    AVAILABLE_TASK_TYPES
+)
+
+
+@router.get("/settings")
+async def get_all_model_settings(db: Session = Depends(get_db)):
+    """
+    دریافت تنظیمات همه مدل‌ها
+    """
+    try:
+        from ...core.models_registry import MODEL_REGISTRY
+
+        # دریافت تنظیمات از دیتابیس
+        db_settings = db.query(ModelSettings).all()
+        settings_map = {s.model_id: s for s in db_settings}
+
+        result = []
+        for model_id, model in MODEL_REGISTRY.items():
+            if model_id in settings_map:
+                setting = settings_map[model_id]
+                result.append({
+                    "model_id": model_id,
+                    "model_name": model.name,
+                    "provider": get_provider_value(model.provider),
+                    "enabled": bool(setting.enabled),
+                    "allowed_tasks": setting.allowed_tasks or ["all"],
+                    "priority": setting.priority or model.priority,
+                    "max_tokens_override": setting.max_tokens_override,
+                    "max_daily_requests": setting.max_daily_requests,
+                    "current_daily_requests": setting.current_daily_requests,
+                    "preferred_for": setting.preferred_for or [],
+                    "fallback_model_id": setting.fallback_model_id,
+                    "max_daily_cost": setting.max_daily_cost,
+                    "current_daily_cost": setting.current_daily_cost,
+                    "notes": setting.notes,
+                    "advanced_settings": setting.advanced_settings or {},
+                    "has_custom_settings": True
+                })
+            else:
+                # مدل بدون تنظیمات سفارشی - استفاده از پیش‌فرض‌ها
+                result.append({
+                    "model_id": model_id,
+                    "model_name": model.name,
+                    "provider": get_provider_value(model.provider),
+                    "enabled": model.enabled,
+                    "allowed_tasks": ["all"],
+                    "priority": model.priority,
+                    "max_tokens_override": None,
+                    "max_daily_requests": 0,
+                    "current_daily_requests": 0,
+                    "preferred_for": [],
+                    "fallback_model_id": None,
+                    "max_daily_cost": 0,
+                    "current_daily_cost": 0,
+                    "notes": None,
+                    "advanced_settings": {},
+                    "has_custom_settings": False
+                })
+
+        return {
+            "success": True,
+            "settings": result,
+            "total": len(result)
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting model settings: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/settings/{model_id}")
+async def get_model_settings(model_id: str, db: Session = Depends(get_db)):
+    """
+    دریافت تنظیمات یک مدل خاص
+    """
+    try:
+        from ...core.models_registry import MODEL_REGISTRY
+
+        if model_id not in MODEL_REGISTRY:
+            raise HTTPException(status_code=404, detail="مدل یافت نشد")
+
+        model = MODEL_REGISTRY[model_id]
+        setting = db.query(ModelSettings).filter(ModelSettings.model_id == model_id).first()
+
+        if setting:
+            return {
+                "success": True,
+                "model_id": model_id,
+                "model_name": model.name,
+                "provider": get_provider_value(model.provider),
+                "enabled": bool(setting.enabled),
+                "allowed_tasks": setting.allowed_tasks or ["all"],
+                "priority": setting.priority or model.priority,
+                "max_tokens_override": setting.max_tokens_override,
+                "max_daily_requests": setting.max_daily_requests,
+                "current_daily_requests": setting.current_daily_requests,
+                "preferred_for": setting.preferred_for or [],
+                "fallback_model_id": setting.fallback_model_id,
+                "max_daily_cost": setting.max_daily_cost,
+                "current_daily_cost": setting.current_daily_cost,
+                "notes": setting.notes,
+                "advanced_settings": setting.advanced_settings or {},
+                "has_custom_settings": True
+            }
+        else:
+            return {
+                "success": True,
+                "model_id": model_id,
+                "model_name": model.name,
+                "provider": get_provider_value(model.provider),
+                "enabled": model.enabled,
+                "allowed_tasks": ["all"],
+                "priority": model.priority,
+                "max_tokens_override": None,
+                "max_daily_requests": 0,
+                "current_daily_requests": 0,
+                "preferred_for": [],
+                "fallback_model_id": None,
+                "max_daily_cost": 0,
+                "current_daily_cost": 0,
+                "notes": None,
+                "advanced_settings": {},
+                "has_custom_settings": False
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting model settings: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@router.put("/settings/{model_id}")
+async def update_model_settings(
+    model_id: str,
+    request: ModelSettingsUpdateRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    بروزرسانی تنظیمات یک مدل
+    """
+    try:
+        from ...core.models_registry import MODEL_REGISTRY
+
+        if model_id not in MODEL_REGISTRY:
+            raise HTTPException(status_code=404, detail="مدل یافت نشد")
+
+        # دریافت یا ایجاد تنظیمات
+        setting = db.query(ModelSettings).filter(ModelSettings.model_id == model_id).first()
+
+        if not setting:
+            setting = ModelSettings(model_id=model_id)
+            db.add(setting)
+
+        # بروزرسانی فیلدها
+        if request.enabled is not None:
+            setting.enabled = 1 if request.enabled else 0
+
+        if request.allowed_tasks is not None:
+            setting.allowed_tasks = request.allowed_tasks
+
+        if request.priority is not None:
+            setting.priority = request.priority
+
+        if request.max_tokens_override is not None:
+            setting.max_tokens_override = request.max_tokens_override
+
+        if request.max_daily_requests is not None:
+            setting.max_daily_requests = request.max_daily_requests
+
+        if request.preferred_for is not None:
+            setting.preferred_for = request.preferred_for
+
+        if request.fallback_model_id is not None:
+            setting.fallback_model_id = request.fallback_model_id
+
+        if request.max_daily_cost is not None:
+            setting.max_daily_cost = request.max_daily_cost
+
+        if request.notes is not None:
+            setting.notes = request.notes
+
+        if request.advanced_settings is not None:
+            setting.advanced_settings = request.advanced_settings
+
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "تنظیمات ذخیره شد",
+            "model_id": model_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error updating model settings: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/settings/{model_id}/toggle")
+async def toggle_model_enabled(model_id: str, db: Session = Depends(get_db)):
+    """
+    تغییر وضعیت فعال/غیرفعال مدل
+    """
+    try:
+        from ...core.models_registry import MODEL_REGISTRY
+
+        if model_id not in MODEL_REGISTRY:
+            raise HTTPException(status_code=404, detail="مدل یافت نشد")
+
+        setting = db.query(ModelSettings).filter(ModelSettings.model_id == model_id).first()
+
+        if not setting:
+            # ایجاد تنظیمات جدید با وضعیت غیرفعال
+            setting = ModelSettings(model_id=model_id, enabled=0)
+            db.add(setting)
+        else:
+            setting.enabled = 0 if setting.enabled else 1
+
+        db.commit()
+
+        return {
+            "success": True,
+            "model_id": model_id,
+            "enabled": bool(setting.enabled)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error toggling model: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/settings/batch-update")
+async def batch_update_model_settings(
+    updates: List[Dict[str, Any]],
+    db: Session = Depends(get_db)
+):
+    """
+    بروزرسانی گروهی تنظیمات مدل‌ها
+    مثال: [{"model_id": "gpt-4o", "enabled": true}, {"model_id": "claude-3", "enabled": false}]
+    """
+    try:
+        from ...core.models_registry import MODEL_REGISTRY
+
+        updated = []
+        for update in updates:
+            model_id = update.get("model_id")
+            if not model_id or model_id not in MODEL_REGISTRY:
+                continue
+
+            setting = db.query(ModelSettings).filter(ModelSettings.model_id == model_id).first()
+            if not setting:
+                setting = ModelSettings(model_id=model_id)
+                db.add(setting)
+
+            if "enabled" in update:
+                setting.enabled = 1 if update["enabled"] else 0
+            if "allowed_tasks" in update:
+                setting.allowed_tasks = update["allowed_tasks"]
+            if "priority" in update:
+                setting.priority = update["priority"]
+
+            updated.append(model_id)
+
+        db.commit()
+
+        return {
+            "success": True,
+            "updated_count": len(updated),
+            "updated_models": updated
+        }
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error batch updating models: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/task-types")
+async def get_available_task_types():
+    """
+    دریافت لیست انواع کارهای قابل تخصیص به مدل‌ها
+    """
+    return {
+        "success": True,
+        "task_types": AVAILABLE_TASK_TYPES
+    }
+
+
+@router.get("/settings/by-task/{task_type}")
+async def get_models_for_task(task_type: str, db: Session = Depends(get_db)):
+    """
+    دریافت مدل‌های مجاز برای یک نوع کار خاص
+    """
+    try:
+        from ...core.models_registry import MODEL_REGISTRY
+        from ...services.ai_manager import get_ai_manager
+
+        ai_manager = get_ai_manager()
+        available_providers = ai_manager.get_available_providers()
+
+        db_settings = db.query(ModelSettings).all()
+        settings_map = {s.model_id: s for s in db_settings}
+
+        allowed_models = []
+        for model_id, model in MODEL_REGISTRY.items():
+            setting = settings_map.get(model_id)
+
+            # بررسی فعال بودن
+            if setting:
+                if not setting.enabled:
+                    continue
+                allowed_tasks = setting.allowed_tasks or ["all"]
+            else:
+                if not model.enabled:
+                    continue
+                allowed_tasks = ["all"]
+
+            # بررسی مجاز بودن برای این task
+            if "all" in allowed_tasks or task_type in allowed_tasks:
+                model_provider = get_provider_value(model.provider)
+                is_available = model_provider in available_providers
+
+                allowed_models.append({
+                    "model_id": model_id,
+                    "model_name": model.name,
+                    "provider": model_provider,
+                    "priority": setting.priority if setting else model.priority,
+                    "is_available": is_available,
+                    "is_preferred": task_type in (setting.preferred_for if setting else [])
+                })
+
+        # مرتب‌سازی بر اساس اولویت
+        allowed_models.sort(key=lambda x: (not x["is_preferred"], x["priority"]))
+
+        return {
+            "success": True,
+            "task_type": task_type,
+            "models": allowed_models,
+            "count": len(allowed_models)
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting models for task: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@router.delete("/settings/{model_id}")
+async def reset_model_settings(model_id: str, db: Session = Depends(get_db)):
+    """
+    بازگردانی تنظیمات مدل به حالت پیش‌فرض
+    """
+    try:
+        setting = db.query(ModelSettings).filter(ModelSettings.model_id == model_id).first()
+
+        if setting:
+            db.delete(setting)
+            db.commit()
+            return {
+                "success": True,
+                "message": "تنظیمات به حالت پیش‌فرض بازگردانده شد",
+                "model_id": model_id
+            }
+        else:
+            return {
+                "success": True,
+                "message": "مدل تنظیمات سفارشی نداشت",
+                "model_id": model_id
+            }
