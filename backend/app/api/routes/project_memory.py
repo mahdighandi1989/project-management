@@ -6,7 +6,8 @@ API routes for Project Memory Management
 import json
 import uuid
 import time
-from fastapi import APIRouter, HTTPException, Depends
+import asyncio
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy.orm import Session
@@ -77,6 +78,17 @@ class BatchExecuteRequest(BaseModel):
     field_ids: List[str]  # لیست آی‌دی فیلدها یا "all" یا "permanent" یا "temporary"
     execute_type: str = "selected"  # "selected", "all", "permanent", "temporary"
     auto_prioritize: bool = True  # مرتب‌سازی خودکار براساس اولویت
+    run_in_background: bool = False  # اجرا در پس‌زمینه
+
+
+class BatchDeleteRequest(BaseModel):
+    """درخواست حذف گروهی فیلدها"""
+    field_ids: List[str]  # لیست آی‌دی فیلدها
+
+
+class BatchControlRequest(BaseModel):
+    """درخواست کنترل اجرای گروهی"""
+    action: str  # "pause", "resume", "stop"
 
 
 class FieldAttachmentRequest(BaseModel):
@@ -718,6 +730,60 @@ async def delete_dynamic_field(
         "success": True,
         "message": "فیلد حذف شد",
         "remaining_fields": len(dynamic_fields)
+    }
+
+
+@router.post("/{project_id}/memory/fields/upgrade-action-types")
+async def upgrade_fields_action_types(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    🔴 ارتقای خودکار action_type فیلدهای موجود
+    فیلدهایی که target_path دارند و نوع مشکل کدی هستند را به github_commit تغییر می‌دهد
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    dynamic_fields = []
+    try:
+        if project.dynamic_fields:
+            dynamic_fields = json.loads(project.dynamic_fields)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # انواع مشکلاتی که نیاز به تغییر کد دارند
+    code_change_keywords = ["security", "bug", "quality", "performance", "error", "warning", "vulnerability", "fix", "اصلاح", "امنیت", "باگ"]
+
+    upgraded_count = 0
+    upgraded_fields = []
+
+    for field in dynamic_fields:
+        # فقط فیلدهایی که display هستند و target_path دارند
+        if field.get("action_type") == "display" and field.get("target_path"):
+            field_name = field.get("name", "").lower()
+            field_value = field.get("value", "").lower()
+
+            # بررسی آیا نوع مشکل کدی است
+            needs_upgrade = any(kw in field_name or kw in field_value for kw in code_change_keywords)
+
+            if needs_upgrade:
+                field["action_type"] = "github_commit"
+                field["deploy_after_commit"] = True
+                field["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+                upgraded_count += 1
+                upgraded_fields.append(field.get("name"))
+
+    if upgraded_count > 0:
+        project.dynamic_fields = json.dumps(dynamic_fields, ensure_ascii=False)
+        db.commit()
+
+    return {
+        "success": True,
+        "upgraded_count": upgraded_count,
+        "upgraded_fields": upgraded_fields[:20],  # فقط 20 تای اول
+        "message": f"{upgraded_count} فیلد به github_commit ارتقا یافت"
     }
 
 
@@ -1644,6 +1710,19 @@ async def batch_execute_fields(
 
     logger.info(f"[Batch Execute] About to start loop with {len(fields_to_execute)} fields")
 
+    # 🔴 مدیریت وضعیت اجرا
+    state = get_execution_state(project_id)
+    state["status"] = "running"
+    state["total_fields"] = len(fields_to_execute)
+    state["started_at"] = datetime.utcnow().isoformat()
+    state["results"] = []
+
+    # بررسی آیا باید از جای قبلی ادامه دهیم
+    start_index = 0
+    if request.execute_type == "resume" and state.get("current_index", 0) > 0:
+        start_index = state["current_index"]
+        logger.info(f"[Batch Execute] Resuming from index {start_index}")
+
     # اجرای ترتیبی فیلدها
     execution_results = []
     success_count = 0
@@ -1653,6 +1732,27 @@ async def batch_execute_fields(
     fields_to_archive = []  # لیست ID فیلدهایی که باید بایگانی شوند
 
     for idx, field in enumerate(fields_to_execute):
+        # 🔴 بررسی وضعیت کنترل (pause/stop)
+        current_state = get_execution_state(project_id)
+        if current_state["status"] == "stopped":
+            logger.info(f"[Batch Execute] Execution stopped by user at index {idx}")
+            break
+        while current_state["status"] == "paused":
+            await asyncio.sleep(1)  # صبر کن تا resume شود
+            current_state = get_execution_state(project_id)
+            if current_state["status"] == "stopped":
+                break
+
+        if current_state["status"] == "stopped":
+            break
+
+        # 🔴 رد کردن فیلدهای قبلی در حالت resume
+        if idx < start_index:
+            continue
+
+        state["current_index"] = idx
+        state["last_field_id"] = field.get("id")
+
         logger.info(f"[Batch Execute] Loop iteration {idx+1}/{len(fields_to_execute)}: field={field.get('name')}, id={field.get('id')}")
         try:
             logger.info(f"[Batch Execute] Calling execute_field_internal for field: {field.get('name')}")
@@ -1707,6 +1807,12 @@ async def batch_execute_fields(
 
     logger.info(f"[Batch Execute] Loop completed: success={success_count}, failed={failed_count}, results={len(execution_results)}")
 
+    # 🔴 بروزرسانی وضعیت نهایی
+    state["status"] = "idle"
+    state["results"] = execution_results
+    state["completed_fields"] = [r["field_id"] for r in execution_results if r.get("success")]
+    state["failed_fields"] = [r["field_id"] for r in execution_results if not r.get("success")]
+
     # 🔴 بروزرسانی و بایگانی فیلدها در دیتابیس
     if fields_to_archive:
         try:
@@ -1744,6 +1850,110 @@ async def batch_execute_fields(
     }
 
 
+# =====================================
+# 🆕 مدیریت اجرای پس‌زمینه
+# =====================================
+
+# وضعیت اجرای هر پروژه
+_batch_execution_state = {}
+
+def get_execution_state(project_id: str):
+    """دریافت وضعیت اجرای پروژه"""
+    if project_id not in _batch_execution_state:
+        _batch_execution_state[project_id] = {
+            "status": "idle",  # idle, running, paused, stopped
+            "current_index": 0,
+            "total_fields": 0,
+            "completed_fields": [],
+            "failed_fields": [],
+            "results": [],
+            "started_at": None,
+            "last_field_id": None,
+        }
+    return _batch_execution_state[project_id]
+
+
+@router.get("/{project_id}/memory/fields/batch-status")
+async def get_batch_execution_status(project_id: str):
+    """دریافت وضعیت اجرای گروهی"""
+    state = get_execution_state(project_id)
+    return {
+        "success": True,
+        "status": state["status"],
+        "current_index": state["current_index"],
+        "total_fields": state["total_fields"],
+        "completed_count": len(state["completed_fields"]),
+        "failed_count": len(state["failed_fields"]),
+        "progress_percent": round((state["current_index"] / state["total_fields"]) * 100, 1) if state["total_fields"] > 0 else 0,
+        "started_at": state["started_at"],
+        "last_field_id": state["last_field_id"],
+    }
+
+
+@router.post("/{project_id}/memory/fields/batch-control")
+async def control_batch_execution(
+    project_id: str,
+    request: BatchControlRequest
+):
+    """کنترل اجرای گروهی (توقف موقت، از سرگیری، توقف کامل)"""
+    state = get_execution_state(project_id)
+
+    if request.action == "pause":
+        if state["status"] == "running":
+            state["status"] = "paused"
+            return {"success": True, "message": "اجرا متوقف شد", "status": "paused"}
+        return {"success": False, "message": "اجرایی در حال انجام نیست"}
+
+    elif request.action == "resume":
+        if state["status"] == "paused":
+            state["status"] = "running"
+            return {"success": True, "message": "اجرا از سر گرفته شد", "status": "running", "resume_from": state["current_index"]}
+        return {"success": False, "message": "اجرا در حالت توقف نیست"}
+
+    elif request.action == "stop":
+        state["status"] = "stopped"
+        return {"success": True, "message": "اجرا کاملاً متوقف شد", "status": "stopped"}
+
+    return {"success": False, "message": "اقدام نامعتبر"}
+
+
+@router.post("/{project_id}/memory/fields/batch-delete")
+async def batch_delete_fields(
+    project_id: str,
+    request: BatchDeleteRequest,
+    db: Session = Depends(get_db)
+):
+    """حذف گروهی فیلدها"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    dynamic_fields = []
+    try:
+        if project.dynamic_fields:
+            dynamic_fields = json.loads(project.dynamic_fields)
+    except:
+        pass
+
+    original_count = len(dynamic_fields)
+    field_ids_to_delete = set(request.field_ids)
+
+    # فیلتر کردن فیلدها (حذف فیلدهای انتخاب شده)
+    remaining_fields = [f for f in dynamic_fields if f.get("id") not in field_ids_to_delete]
+    deleted_count = original_count - len(remaining_fields)
+
+    if deleted_count > 0:
+        project.dynamic_fields = json.dumps(remaining_fields, ensure_ascii=False)
+        db.commit()
+
+    return {
+        "success": True,
+        "deleted_count": deleted_count,
+        "remaining_count": len(remaining_fields),
+        "message": f"{deleted_count} فیلد حذف شد"
+    }
+
+
 async def execute_field_internal(project_id: str, field_id: str, db: Session, field_data: dict, project: Project):
     """
     اجرای داخلی فیلد برای batch execution
@@ -1776,6 +1986,10 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
         target_path = target_field.get("target_path")
         archive_after_run = target_field.get("archive_after_run", False)
         deploy_after_commit = target_field.get("deploy_after_commit", False)
+
+        # 🔴 لاگ برای دیباگ GitHub commit
+        logger.info(f"[execute_field_internal] action_type={action_type}, target_path={target_path}")
+        logger.info(f"[execute_field_internal] github_info: source={github_info.get('source')}, owner={github_info.get('owner')}, repo={github_info.get('repo')}")
 
         # دریافت فایل‌های پروژه برای context
         from .settings import get_ai_limits_sync
@@ -1916,6 +2130,7 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
                 }
 
                 # 🔴 GitHub Commit Logic - مهم!
+                logger.info(f"[execute_field_internal] Checking GitHub commit: action_type={action_type}, has_content={bool(response.content)}")
                 if action_type in ["github_commit", "github_multi_commit"] and response.content:
                     if github_info.get("source") == "github":
                         owner = github_info.get("owner")
@@ -1974,6 +2189,10 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
                             logger.warning(f"[Batch Execute] Missing GitHub info: owner={bool(owner)}, repo={bool(repo)}, token={bool(token)}")
                     else:
                         result["github_error"] = "این پروژه از GitHub ایمپورت نشده"
+                        logger.warning(f"[execute_field_internal] GitHub skipped: source={github_info.get('source')} (not 'github')")
+                else:
+                    # action_type is not github_commit or github_multi_commit
+                    logger.info(f"[execute_field_internal] GitHub commit skipped: action_type={action_type} (need 'github_commit' or 'github_multi_commit')")
 
                 results.append(result)
 
