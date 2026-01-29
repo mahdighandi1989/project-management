@@ -741,22 +741,31 @@ async def generate_engineering_report(
             severity_counts[sev] = severity_counts.get(sev, 0) + 1
         logger.info(f"📊 Issues by severity: {severity_counts}")
     else:
-        logger.warning(f"⚠️ No health issues found from any source. Checking raw content...")
-        # Additional debug for empty issues
-        if project.file_health_map:
-            try:
-                fhm = json.loads(project.file_health_map)
-                total_issues_in_map = sum(len(fd.get("issues", [])) for fd in fhm.values() if isinstance(fd, dict))
-                total_issues_count = sum(fd.get("issues_count", 0) for fd in fhm.values() if isinstance(fd, dict))
-                logger.info(f"   - file_health_map has {len(fhm)} files, {total_issues_in_map} issues embedded, {total_issues_count} issues_count")
-            except:
-                pass
+        logger.warning(f"⚠️ No health issues found from any source. Attempting recovery...")
+        # 🔴 FAILSAFE: Try to force-load issues from issues_found
         if project.issues_found:
             try:
                 stored = json.loads(project.issues_found)
-                logger.info(f"   - issues_found has {len(stored) if isinstance(stored, list) else 0} issues")
-            except:
-                pass
+                if isinstance(stored, list) and len(stored) > 0:
+                    logger.info(f"🔴 FAILSAFE: Found {len(stored)} issues in issues_found, force-loading...")
+                    for issue in stored:
+                        if isinstance(issue, dict):
+                            health_analysis_issues.append(normalize_issue(issue))
+                    logger.info(f"🔴 FAILSAFE: Loaded {len(health_analysis_issues)} issues from issues_found")
+            except Exception as e:
+                logger.error(f"🔴 FAILSAFE failed: {e}")
+
+        # Additional debug for empty issues
+        if not health_analysis_issues:
+            logger.error(f"🔴🔴🔴 CRITICAL: Still no issues after failsafe!")
+            if project.file_health_map:
+                try:
+                    fhm = json.loads(project.file_health_map)
+                    total_issues_in_map = sum(len(fd.get("issues", [])) for fd in fhm.values() if isinstance(fd, dict))
+                    total_issues_count = sum(fd.get("issues_count", 0) for fd in fhm.values() if isinstance(fd, dict))
+                    logger.info(f"   - file_health_map has {len(fhm)} files, {total_issues_in_map} issues embedded, {total_issues_count} issues_count")
+                except:
+                    pass
 
     # ساخت خلاصه health analysis برای prompt
     if health_analysis_issues:
@@ -1089,7 +1098,9 @@ async def generate_engineering_report(
             combined_archive = new_rejected_archive + existing_archive
             project.rejected_issues_archive = json.dumps(combined_archive[:100], ensure_ascii=False)
 
-            logger.info(f"Health validation: {validated_issues_count} validated, {rejected_issues_count} rejected")
+            # 🔴 CRITICAL: Commit validation results immediately
+            db.commit()
+            logger.info(f"✅ Health validation: {validated_issues_count} validated, {rejected_issues_count} rejected - COMMITTED to DB")
 
         # 🆕 Fallback: اگر AI بخش health_analysis_validation را برنگرداند، فیلدها را مستقیماً از health issues بساز
         elif validate_health_issues and health_analysis_issues and not report_data.get("raw_content"):
@@ -1144,7 +1155,9 @@ async def generate_engineering_report(
             # اضافه کردن به report_data برای پردازش بعدی
             report_data["health_analysis_validation"] = validation_results
 
-            logger.info(f"Fallback: Created {validated_issues_count} validated issues from critical/high severity health issues")
+            # 🔴 CRITICAL: Commit validation results immediately
+            db.commit()
+            logger.info(f"✅ Fallback: Created {validated_issues_count} validated issues and COMMITTED to DB")
 
         # ====================================
         # 🆕 به‌روزرسانی حالت ایده‌آل جامع
