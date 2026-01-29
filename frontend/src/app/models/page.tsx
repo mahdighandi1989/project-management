@@ -156,6 +156,10 @@ export default function ModelsPage() {
         setModelSettings(prev => prev.map(s =>
           s.model_id === modelId ? { ...s, enabled: data.enabled } : s
         ));
+        // 🔴 آپدیت لیست models هم برای تب مشاهده
+        setModels(prev => prev.map(m =>
+          m.id === modelId ? { ...m, enabled: data.enabled } : m
+        ));
         showSuccess(`مدل ${data.enabled ? 'فعال' : 'غیرفعال'} شد`);
       } else {
         showError(data.error || 'خطا در تغییر وضعیت');
@@ -178,6 +182,10 @@ export default function ModelsPage() {
       const data = await res.json();
       if (data.success) {
         await loadManagementData();
+        // 🔴 اگر enabled تغییر کرده، لیست models رو هم رفرش کن
+        if ('enabled' in updates) {
+          await loadData();
+        }
         showSuccess('تنظیمات ذخیره شد');
         setEditingModel(null);
       } else {
@@ -785,6 +793,7 @@ export default function ModelsPage() {
                     body: JSON.stringify(updates),
                   });
                   await loadManagementData();
+                  await loadData();  // 🔴 رفرش لیست models برای تب مشاهده
                   showSuccess('همه مدل‌ها فعال شدند');
                 }}
                 className="px-4 py-2 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 rounded-lg text-sm hover:bg-green-200"
@@ -803,6 +812,7 @@ export default function ModelsPage() {
                     body: JSON.stringify(updates),
                   });
                   await loadManagementData();
+                  await loadData();  // 🔴 رفرش لیست models برای تب مشاهده
                   showSuccess('همه مدل‌ها غیرفعال شدند');
                 }}
                 className="px-4 py-2 bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 rounded-lg text-sm hover:bg-red-200"
