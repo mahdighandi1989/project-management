@@ -1313,6 +1313,20 @@ async def generate_engineering_report(
                         priority_map = {"critical": 1, "high": 2, "medium": 5, "low": 7}
                         priority = priority_map.get(issue.get("priority", original.get("severity", "medium")), 5)
 
+                        # 🔴 تعیین هوشمند action_type براساس نوع مشکل و وجود فایل هدف
+                        target_file = original.get("file")
+                        issue_type = original.get("type", "").lower()
+
+                        # انواع مشکلاتی که نیاز به تغییر کد دارند
+                        code_change_types = ["security", "bug", "quality", "performance", "error", "warning", "vulnerability"]
+                        needs_code_change = any(t in issue_type for t in code_change_types)
+
+                        # اگر فایل هدف داریم و مشکل نیاز به تغییر کد دارد -> github_commit
+                        if target_file and needs_code_change:
+                            field_action_type = "github_commit"
+                        else:
+                            field_action_type = "display"
+
                         new_field = {
                             "id": str(uuid.uuid4()),
                             "name": field_name,
@@ -1332,12 +1346,13 @@ async def generate_engineering_report(
 ### امتیاز اعتبارسنجی: {issue.get('validation_score', 0)}/100
 
 ---
-لطفاً این مشکل را بررسی و رفع کنید.
+لطفاً این مشکل را بررسی و رفع کنید. کد اصلاح شده را تولید کن.
 """,
                             "target_models": ["claude"],
-                            "action_type": "display",
-                            "target_path": original.get("file"),
+                            "action_type": field_action_type,
+                            "target_path": target_file,
                             "archive_after_run": True,
+                            "deploy_after_commit": field_action_type == "github_commit",
                             "field_type": "temporary",
                             "priority": priority,
                             "attachments": [],
