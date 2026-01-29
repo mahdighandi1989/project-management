@@ -607,6 +607,13 @@ async def generate_engineering_report(
     logger.info(f"🔴 DEBUG: project.issues_found length: {len(project.issues_found or '')}")
     if project.issues_found:
         logger.info(f"🔴 DEBUG: project.issues_found preview: {project.issues_found[:500]}...")
+    else:
+        # 🔴 CRITICAL: Try to refresh from database!
+        logger.error(f"🔴🔴🔴 CRITICAL: project.issues_found is None/empty! Trying to refresh from DB...")
+        db.refresh(project)
+        logger.info(f"🔴 DEBUG: After refresh: project.issues_found length: {len(project.issues_found or '')}")
+        if project.issues_found:
+            logger.info(f"🔴 DEBUG: After refresh preview: {project.issues_found[:500]}...")
     logger.info(f"=" * 60)
 
     def normalize_issue(issue, file_path=None, source_models=None):
@@ -967,6 +974,19 @@ async def generate_engineering_report(
         Message(role="system", content=system_prompt),
         Message(role="user", content=user_prompt),
     ]
+
+    # 🔴 DEBUG: Final summary before AI call
+    logger.info(f"=" * 60)
+    logger.info(f"🔴 DEBUG: FINAL SUMMARY before AI call:")
+    logger.info(f"   - validate_health_issues: {validate_health_issues}")
+    logger.info(f"   - health_analysis_issues count: {len(health_analysis_issues)}")
+    logger.info(f"   - health_analysis_summary length: {len(health_analysis_summary)}")
+    logger.info(f"   - health_analysis_summary included in prompt: {'yes' if (validate_health_issues and len(health_analysis_issues) > 0) else 'NO!'}")
+    logger.info(f"   - user_prompt length: {len(user_prompt)}")
+    logger.info(f"   - system_prompt length: {len(system_prompt)}")
+    if len(health_analysis_issues) == 0:
+        logger.error(f"🔴🔴🔴 CRITICAL: No health issues to validate! Check extraction logic above.")
+    logger.info(f"=" * 60)
 
     try:
         response = await ai_manager.generate(
