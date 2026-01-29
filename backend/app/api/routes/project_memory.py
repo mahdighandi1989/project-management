@@ -3150,11 +3150,13 @@ async def auto_setup_project(
     db: Session = Depends(get_db)
 ):
     """
-    راه‌اندازی خودکار حافظه و فیلدهای پویا برای پروژه
-    بر اساس تحلیل فایل‌ها و نوع پروژه
+    راه‌اندازی خودکار هوشمند حافظه و فیلدهای پویا برای پروژه
+    🔴 نسخه بهبودیافته: در نظر گرفتن تمام context موجود
     """
     from ...services.project_auto_setup import auto_setup_project_memory
     from ...models.project import ProjectFile
+    import logging
+    logger = logging.getLogger(__name__)
 
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -3167,7 +3169,13 @@ async def auto_setup_project(
         for f in files
     ]
 
-    # اجرای auto-setup
+    # 🔴 جمع‌آوری context کامل از پروژه
+    full_context = await gather_project_context(project_id, project, db)
+    logger.info(f"[Auto-Setup] Gathered context: {len(full_context.get('health_issues', []))} health issues, "
+                f"{len(full_context.get('unexecuted_fields', []))} unexecuted fields, "
+                f"run_count={full_context.get('auto_setup_run_count', 0)}")
+
+    # اجرای auto-setup با context کامل
     try:
         result = await auto_setup_project_memory(
             project_id=project_id,
@@ -3176,9 +3184,11 @@ async def auto_setup_project(
             project_type=project.project_type or "",
             files=files_data,
             use_ai=use_ai,
-            db_session=db
+            db_session=db,
+            full_context=full_context  # 🔴 ارسال context کامل
         )
     except Exception as e:
+        logger.error(f"[Auto-Setup] Error: {e}")
         raise HTTPException(status_code=500, detail=f"خطا در راه‌اندازی: {str(e)}")
 
     if not result.get("success"):
@@ -3196,8 +3206,152 @@ async def auto_setup_project(
         "recommendations": result.get("recommendations", []),
         "tokens_used": result.get("tokens_used", 0),
         "model_used": result.get("model_used"),
-        "fields_created": len(result.get("dynamic_fields", []))
+        "fields_created": len(result.get("dynamic_fields", [])),
+        "context_used": {  # 🔴 اطلاع‌رسانی از context استفاده شده
+            "health_issues_count": len(full_context.get("health_issues", [])),
+            "unexecuted_fields_count": len(full_context.get("unexecuted_fields", [])),
+            "has_roadmap": bool(full_context.get("roadmap_content")),
+            "run_count": full_context.get("auto_setup_run_count", 0)
+        }
     }
+
+
+async def gather_project_context(project_id: str, project, db: Session) -> Dict[str, Any]:
+    """
+    جمع‌آوری تمام context موجود از پروژه برای auto-setup هوشمند
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    context = {}
+
+    try:
+        # 1. فیلدهای موجود (اجرا شده و نشده)
+        existing_fields = []
+        unexecuted_fields = []
+        executed_fields = []
+        if project.dynamic_fields:
+            try:
+                all_fields = json.loads(project.dynamic_fields)
+                for f in all_fields:
+                    if not f.get("archived"):
+                        existing_fields.append(f)
+                        if f.get("executed"):
+                            executed_fields.append(f)
+                        else:
+                            unexecuted_fields.append(f)
+            except:
+                pass
+        context["existing_fields"] = existing_fields
+        context["unexecuted_fields"] = unexecuted_fields
+        context["executed_fields"] = executed_fields
+
+        # 2. حافظه فعلی
+        memory_data = {}
+        if project.memory_instructions:
+            try:
+                memory_data = json.loads(project.memory_instructions)
+            except:
+                memory_data = {"content": project.memory_instructions}
+        context["current_memory"] = memory_data.get("content", "")
+
+        # 3. تعداد دفعات اجرای auto-setup
+        run_count = memory_data.get("auto_setup_run_count", 0) + 1
+        context["auto_setup_run_count"] = run_count
+
+        # 4. ایرادات تب سلامت (از extra_data یا health_analysis)
+        health_issues = []
+        try:
+            if project.extra_data:
+                extra = json.loads(project.extra_data)
+                # از آخرین تحلیل سلامت
+                if extra.get("health_analysis"):
+                    health = extra["health_analysis"]
+                    health_issues = health.get("issues", [])
+                # یا از issues ذخیره شده
+                if extra.get("tracked_issues"):
+                    for issue in extra["tracked_issues"]:
+                        if not issue.get("resolved") and not issue.get("converted_to_field"):
+                            health_issues.append(issue)
+        except:
+            pass
+        context["health_issues"] = health_issues[:20]  # حداکثر 20 تا
+
+        # 5. نقشه راه
+        roadmap_content = ""
+        try:
+            from ...models.project import ProjectFile
+            roadmap_file = db.query(ProjectFile).filter(
+                ProjectFile.project_id == project_id,
+                ProjectFile.file_path.ilike("%roadmap%")
+            ).first()
+            if roadmap_file and roadmap_file.content:
+                roadmap_content = roadmap_file.content[:2000]
+        except:
+            pass
+        context["roadmap_content"] = roadmap_content
+
+        # 6. گزارشات مهندسی (از journal)
+        reports_summary = []
+        try:
+            from ...models.activity import ActivityLog
+            reports = db.query(ActivityLog).filter(
+                ActivityLog.project_id == project_id,
+                ActivityLog.activity_type.in_(["engineering_report", "ai_analysis", "deep_analysis"])
+            ).order_by(ActivityLog.created_at.desc()).limit(5).all()
+
+            for r in reports:
+                try:
+                    data = json.loads(r.activity_data) if r.activity_data else {}
+                    reports_summary.append({
+                        "type": r.activity_type,
+                        "date": r.created_at.isoformat() if r.created_at else "",
+                        "summary": data.get("summary", data.get("title", ""))[:200],
+                        "issues_found": data.get("issues_count", len(data.get("issues", [])))
+                    })
+                except:
+                    pass
+        except Exception as e:
+            logger.debug(f"Could not load reports: {e}")
+        context["recent_reports"] = reports_summary
+
+        # 7. امتیاز فایل‌ها (اگر موجود باشه)
+        file_scores = []
+        try:
+            if project.extra_data:
+                extra = json.loads(project.extra_data)
+                if extra.get("file_scores"):
+                    # فقط فایل‌های با مشکل
+                    for path, score_data in extra["file_scores"].items():
+                        if isinstance(score_data, dict) and score_data.get("score", 100) < 70:
+                            file_scores.append({
+                                "path": path,
+                                "score": score_data.get("score"),
+                                "issues": score_data.get("issues", [])[:3]
+                            })
+        except:
+            pass
+        context["problematic_files"] = file_scores[:10]
+
+        # 8. اطلاعات GitHub (برای تولید فیلدهای commit)
+        github_info = {}
+        try:
+            if project.extra_data:
+                extra = json.loads(project.extra_data)
+                if extra.get("source") == "github":
+                    github_info = {
+                        "source": "github",
+                        "owner": extra.get("owner"),
+                        "repo": extra.get("repo"),
+                        "branch": extra.get("branch", "main")
+                    }
+        except:
+            pass
+        context["github_info"] = github_info
+
+    except Exception as e:
+        logger.error(f"Error gathering context: {e}")
+
+    return context
 
 
 @router.post("/memory/auto-setup-all")

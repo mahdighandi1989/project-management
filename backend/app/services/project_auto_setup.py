@@ -269,12 +269,13 @@ async def generate_intelligent_setup(
     sample_files: List[Dict],
     existing_fields: List[Dict] = None,
     model_id: str = "claude",
-    full_review: bool = True  # 🆕 بررسی کامل و به‌روزرسانی فیلدهای موجود
+    full_review: bool = True,  # بررسی کامل و به‌روزرسانی فیلدهای موجود
+    full_context: Dict[str, Any] = None  # 🔴 context کامل شامل ایرادات، گزارشات، نقشه راه
 ) -> Dict[str, Any]:
     """
     تولید دستورات و فیلدهای کاملاً اختصاصی با AI
     با پشتیبانی از action_type، archive_after_run، field_type و priority
-    🆕 با قابلیت بررسی و به‌روزرسانی فیلدهای موجود
+    🔴 نسخه بهبودیافته: در نظر گرفتن ایرادات، گزارشات، نقشه راه و وضعیت فعلی
     """
     try:
         from .ai_manager import get_ai_manager
@@ -334,6 +335,87 @@ async def generate_intelligent_setup(
 5. فقط فیلدهای **واقعاً جدید** که وجود ندارند در `dynamic_fields` قرار بده
 """
 
+        # 🔴 بخش context کامل (ایرادات، گزارشات، نقشه راه، ...)
+        context_section = ""
+        if full_context:
+            run_count = full_context.get("auto_setup_run_count", 1)
+            context_section = f"""
+## 🔴 وضعیت فعلی پروژه (این بار {run_count}م است که راه‌اندازی خودکار اجرا می‌شود!)
+
+"""
+            # فیلدهای اجرا نشده
+            unexecuted = full_context.get("unexecuted_fields", [])
+            if unexecuted:
+                context_section += f"""### ⏳ فیلدهای اجرا نشده ({len(unexecuted)} عدد) - این‌ها هنوز انجام نشده‌اند!
+"""
+                for uf in unexecuted[:10]:
+                    context_section += f"- **{uf.get('name')}** (اولویت: {uf.get('priority', 5)}, نوع: {uf.get('action_type', 'display')})\n"
+                context_section += "\n"
+
+            # ایرادات تب سلامت
+            health_issues = full_context.get("health_issues", [])
+            if health_issues:
+                context_section += f"""### ⚠️ ایرادات شناسایی شده در تحلیل سلامت ({len(health_issues)} مورد)
+"""
+                for hi in health_issues[:10]:
+                    issue_text = hi.get("issue", hi.get("description", hi.get("title", str(hi))))
+                    severity = hi.get("severity", "medium")
+                    context_section += f"- [{severity}] {issue_text[:100]}\n"
+                context_section += "\n"
+
+            # فایل‌های مشکل‌دار
+            problematic = full_context.get("problematic_files", [])
+            if problematic:
+                context_section += f"""### 📁 فایل‌های با امتیاز پایین ({len(problematic)} فایل)
+"""
+                for pf in problematic[:5]:
+                    context_section += f"- **{pf.get('path')}** (امتیاز: {pf.get('score')})\n"
+                context_section += "\n"
+
+            # گزارشات اخیر
+            reports = full_context.get("recent_reports", [])
+            if reports:
+                context_section += f"""### 📊 گزارشات اخیر ({len(reports)} گزارش)
+"""
+                for rp in reports[:3]:
+                    context_section += f"- {rp.get('type')}: {rp.get('summary', '')[:80]}... ({rp.get('issues_found', 0)} مشکل)\n"
+                context_section += "\n"
+
+            # نقشه راه
+            roadmap = full_context.get("roadmap_content", "")
+            if roadmap:
+                context_section += f"""### 🗺️ خلاصه نقشه راه
+{roadmap[:500]}...
+
+"""
+
+            # حافظه فعلی
+            current_memory = full_context.get("current_memory", "")
+            if current_memory:
+                context_section += f"""### 💾 حافظه فعلی (این را بهبود بده، نه جایگزین!)
+{current_memory[:300]}...
+
+"""
+
+            # اطلاعات GitHub
+            github = full_context.get("github_info", {})
+            if github.get("source") == "github":
+                context_section += f"""### 🔗 اتصال GitHub
+- ریپو: {github.get('owner')}/{github.get('repo')}
+- شاخه: {github.get('branch', 'main')}
+(می‌توانی فیلدهایی با action_type=github_commit برای تغییر مستقیم فایل‌ها ایجاد کنی)
+
+"""
+
+            context_section += """
+## ⚠️ نکات مهم:
+1. **این بار {run_count}م است!** - فیلدهای تکراری نساز، فقط مشکلات واقعی جدید را هدف بگیر
+2. **فیلدهای اجرا نشده را بایگانی نکن** - آنها هنوز کار دارند
+3. **ایرادات سلامت را در اولویت بگذار** - برای هر ایراد مهم یک فیلد بساز
+4. **حافظه را بهبود بده** - اطلاعات مفید بیشتری اضافه کن، چیزهای موجود را حذف نکن
+5. **از نقشه راه پیروی کن** - فیلدها باید در راستای اهداف نقشه راه باشند
+""".format(run_count=run_count)
+
         prompt = f"""تو یک معمار نرم‌افزار و DevOps متخصص هستی. این پروژه را تحلیل کن و دستورات دقیق و اختصاصی برای کار با AI تولید کن.
 
 ## اطلاعات پروژه
@@ -354,6 +436,7 @@ async def generate_intelligent_setup(
 ## نمونه محتوای فایل‌ها
 {files_text}
 {review_section}
+{context_section}
 ## وظیفه تو
 بر اساس تحلیل دقیق این پروژه، یک JSON با این ساختار برگردان:
 
@@ -532,14 +615,20 @@ async def auto_setup_project_memory(
     project_type: str,
     files: List[Dict],
     use_ai: bool = True,
-    db_session=None
+    db_session=None,
+    full_context: Dict[str, Any] = None  # 🔴 context کامل پروژه
 ) -> Dict[str, Any]:
     """
     راه‌اندازی خودکار هوشمند حافظه و فیلدهای پویا
     با حفظ فیلدهای بایگانی شده و به‌روزرسانی هوشمند
+    🔴 نسخه بهبودیافته: در نظر گرفتن ایرادات، گزارشات، و وضعیت فعلی
     """
     try:
         logger.info(f"Starting intelligent auto-setup for project {project_id}")
+        if full_context:
+            logger.info(f"  Context: {len(full_context.get('health_issues', []))} health issues, "
+                       f"{len(full_context.get('unexecuted_fields', []))} unexecuted fields, "
+                       f"run #{full_context.get('auto_setup_run_count', 1)}")
 
         # دریافت فیلدهای فعلی برای حفظ فیلدهای بایگانی شده
         existing_fields = []
@@ -589,7 +678,8 @@ async def auto_setup_project_memory(
                 insights=insights,
                 sample_files=important_files,
                 existing_fields=existing_fields,  # ارسال فیلدهای موجود
-                model_id=best_model
+                model_id=best_model,
+                full_context=full_context  # 🔴 ارسال context کامل
             )
 
         # 🔴 تابع تشخیص فیلدهای محافظت شده (ایجاد شده توسط گزارش مهندسی)
@@ -612,12 +702,18 @@ async def auto_setup_project_memory(
         if ai_result and ai_result.get("success"):
             data = ai_result["data"]
 
+            # 🔴 محاسبه تعداد دفعات اجرا
+            run_count = 1
+            if full_context:
+                run_count = full_context.get("auto_setup_run_count", 1)
+
             memory_instructions = {
                 "content": data.get("memory_instructions", ""),
                 "target_models": ["all"],
                 "auto_generated": True,
                 "generated_at": datetime.utcnow().isoformat(),
-                "model_used": ai_result.get("model_used")
+                "model_used": ai_result.get("model_used"),
+                "auto_setup_run_count": run_count  # 🔴 ذخیره تعداد دفعات اجرا
             }
 
             # 🆕 پردازش فیلدهای موجود براساس دستورات AI
