@@ -721,6 +721,60 @@ async def delete_dynamic_field(
     }
 
 
+@router.post("/{project_id}/memory/fields/upgrade-action-types")
+async def upgrade_fields_action_types(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    🔴 ارتقای خودکار action_type فیلدهای موجود
+    فیلدهایی که target_path دارند و نوع مشکل کدی هستند را به github_commit تغییر می‌دهد
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    dynamic_fields = []
+    try:
+        if project.dynamic_fields:
+            dynamic_fields = json.loads(project.dynamic_fields)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # انواع مشکلاتی که نیاز به تغییر کد دارند
+    code_change_keywords = ["security", "bug", "quality", "performance", "error", "warning", "vulnerability", "fix", "اصلاح", "امنیت", "باگ"]
+
+    upgraded_count = 0
+    upgraded_fields = []
+
+    for field in dynamic_fields:
+        # فقط فیلدهایی که display هستند و target_path دارند
+        if field.get("action_type") == "display" and field.get("target_path"):
+            field_name = field.get("name", "").lower()
+            field_value = field.get("value", "").lower()
+
+            # بررسی آیا نوع مشکل کدی است
+            needs_upgrade = any(kw in field_name or kw in field_value for kw in code_change_keywords)
+
+            if needs_upgrade:
+                field["action_type"] = "github_commit"
+                field["deploy_after_commit"] = True
+                field["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+                upgraded_count += 1
+                upgraded_fields.append(field.get("name"))
+
+    if upgraded_count > 0:
+        project.dynamic_fields = json.dumps(dynamic_fields, ensure_ascii=False)
+        db.commit()
+
+    return {
+        "success": True,
+        "upgraded_count": upgraded_count,
+        "upgraded_fields": upgraded_fields[:20],  # فقط 20 تای اول
+        "message": f"{upgraded_count} فیلد به github_commit ارتقا یافت"
+    }
+
+
 @router.get("/{project_id}/memory/for-model/{model_id}")
 async def get_memory_for_model(
     project_id: str,
