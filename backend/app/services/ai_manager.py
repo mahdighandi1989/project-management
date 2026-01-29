@@ -101,8 +101,29 @@ class AIManager:
         """لیست provider های فعال"""
         return [p.value for p in self._services.keys()]
 
-    def get_available_models(self) -> List[AIModel]:
-        """لیست همه مدل‌های قابل استفاده"""
+    def get_available_models(self, task_type: Optional[str] = None) -> List[AIModel]:
+        """
+        لیست همه مدل‌های قابل استفاده
+        با در نظر گرفتن تنظیمات دیتابیس (فعال/غیرفعال)
+
+        Args:
+            task_type: نوع کار برای فیلتر مدل‌های مجاز (اختیاری)
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        # 🔴 دریافت تنظیمات از دیتابیس
+        db_settings_map = {}
+        try:
+            from ..core.database import get_db
+            from ..models.ai_profile import ModelSettings
+            db = next(get_db())
+            db_settings = db.query(ModelSettings).all()
+            db_settings_map = {s.model_id: s for s in db_settings}
+            logger.debug(f"Loaded {len(db_settings_map)} model settings from DB")
+        except Exception as e:
+            logger.warning(f"Could not load model settings from DB: {e}")
+
         available = []
         for model in get_enabled_models():
             # هندل کردن هر دو حالت enum و string
@@ -116,7 +137,24 @@ class AIManager:
 
             if provider in self._services:
                 if not self._services[provider].is_in_error_state():
+                    # 🔴 چک کردن تنظیمات دیتابیس
+                    db_setting = db_settings_map.get(model.id)
+                    if db_setting:
+                        # اگر در دیتابیس غیرفعال شده، رد شو
+                        if not db_setting.enabled:
+                            logger.debug(f"Model {model.id} is disabled in settings")
+                            continue
+
+                        # اگر task_type مشخص شده، چک کن مجاز هست یا نه
+                        if task_type:
+                            allowed_tasks = db_setting.allowed_tasks or ["all"]
+                            if "all" not in allowed_tasks and task_type not in allowed_tasks:
+                                logger.debug(f"Model {model.id} not allowed for task {task_type}")
+                                continue
+
                     available.append(model)
+
+        logger.debug(f"Available models: {[m.id for m in available]}")
         return available
 
     def smart_select_models(
@@ -125,9 +163,10 @@ class AIManager:
         required_capabilities: Optional[List[ModelCapability]] = None,
         max_models: int = 3,
         prefer_providers: Optional[List[ModelProvider]] = None,
+        task_type: Optional[str] = None,  # 🆕 فیلتر براساس نوع کار
     ) -> List[AIModel]:
         """انتخاب هوشمند مدل‌ها بر اساس نیازها"""
-        available = self.get_available_models()
+        available = self.get_available_models(task_type=task_type)
 
         if not available:
             return []

@@ -119,9 +119,9 @@ class ProjectHealthAnalyzer:
             "ideal_state": None
         }
 
-        # انتخاب مدل
+        # انتخاب مدل (فقط مدل‌های مجاز برای analysis)
         if not model_id:
-            available = self.ai_manager.get_available_models()
+            available = self.ai_manager.get_available_models(task_type="analysis")
             model_id = available[0].id if available else "claude"
 
         # آنالیز ساختار پروژه برای تولید roadmap
@@ -191,7 +191,7 @@ class ProjectHealthAnalyzer:
         }
 
         if not model_id:
-            available = self.ai_manager.get_available_models()
+            available = self.ai_manager.get_available_models(task_type="documentation")
             model_id = available[0].id if available else "claude"
 
         project_structure = self._analyze_project_structure(files)
