@@ -1359,6 +1359,9 @@ async def parse_response_to_dynamic_fields(content: str, model_id: str, auto_det
 
 def create_field_from_section(title: str, content: str, patterns: dict, auto_detect: bool) -> Optional[dict]:
     """ساخت فیلد از یک بخش"""
+    import logging
+    logger = logging.getLogger(__name__)
+
     if not title or not content.strip():
         return None
 
@@ -1377,20 +1380,28 @@ def create_field_from_section(title: str, content: str, patterns: dict, auto_det
                 action_type = pattern_config["action_type"]
                 priority = min(priority, pattern_config["priority"])
                 field_type = pattern_config["field_type"]
+                logger.info(f"[create_field] Detected pattern '{pattern_name}' -> action_type={action_type}")
                 break
 
-        # استخراج مسیر فایل
+        # استخراج مسیر فایل - الگوهای بیشتر
         import re
         file_patterns = [
-            r'(?:فایل|file)[:\s]+([^\s\n]+\.\w+)',
-            r'`([^\s`]+\.\w+)`',
-            r'([^\s]+\.(?:py|js|ts|tsx|jsx|json|yaml|yml|md))',
+            r'(?:فایل|file|path|مسیر)[:\s]+[`"]?([^\s\n`"]+\.\w+)[`"]?',
+            r'`([a-zA-Z0-9_/\\.-]+\.\w{2,4})`',
+            r'(?:در|in|to)\s+[`"]?([a-zA-Z0-9_/\\.-]+\.(?:py|js|ts|tsx|jsx|json|yaml|yml|md|html|css|vue|svelte))[`"]?',
+            r'([a-zA-Z0-9_/\\-]+/[a-zA-Z0-9_/\\-]+\.(?:py|js|ts|tsx|jsx|json|yaml|yml|md))',
         ]
         for pattern in file_patterns:
             match = re.search(pattern, content, re.IGNORECASE)
             if match:
                 target_path = match.group(1)
+                logger.info(f"[create_field] Found target_path: {target_path}")
                 break
+
+        # اگر action_type کامیت هست ولی target_path نداریم، به display تغییر بده
+        if action_type in ["github_commit", "file_edit"] and not target_path:
+            logger.warning(f"[create_field] No target_path found for {action_type}, changing to display")
+            action_type = "display"
 
     return {
         "name": title[:100],
@@ -1401,6 +1412,7 @@ def create_field_from_section(title: str, content: str, patterns: dict, auto_det
         "priority": priority,
         "field_type": field_type,
         "archived": False,
+        "archive_after_run": True,  # 🔴 همیشه بایگانی بشه بعد از اجرا
         "trigger": {
             "enabled": False,
             "interval_minutes": 60,
@@ -2183,15 +2195,25 @@ async def batch_execute_fields(
             )
             logger.info(f"[Batch Execute] execute_field_internal returned for {field.get('name')}: success={result.get('success')}")
 
+            # 🔴 استخراج خطای GitHub از نتایج
+            github_error = None
+            if result.get("results"):
+                for r in result.get("results", []):
+                    if r.get("github_error"):
+                        github_error = r.get("github_error")
+                        break
+
             exec_result = {
                 "field_id": field.get("id"),
                 "field_name": field.get("name"),
                 "priority": field.get("priority", 5),
                 "field_type": field.get("field_type"),
                 "action_type": field.get("action_type", "display"),
+                "target_path": field.get("target_path"),  # 🔴 اضافه شد
                 "success": result.get("success", False),
                 "error": result.get("error"),
                 "github_commits": result.get("github_commits"),
+                "github_error": github_error,  # 🔴 خطای GitHub
                 "deploy_result": result.get("deploy_result"),
             }
 
