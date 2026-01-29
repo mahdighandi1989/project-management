@@ -1399,6 +1399,9 @@ class DeepAnalysisService:
 
             color_info = get_health_color(total_score)
 
+            # 🆕 استخراج issues با اطلاعات کامل
+            file_issues = file_data.get("issues", [])
+
             file_health_map[file_path] = {
                 "score": total_score,
                 "scores_detail": scores,
@@ -1411,7 +1414,9 @@ class DeepAnalysisService:
                     for m, a in file_data.get("model_analyses", {}).items()
                     if isinstance(a, dict) and not a.get("error")
                 },
-                "issues_count": len(file_data.get("issues", [])),
+                "issues_count": len(file_issues),
+                "issues": file_issues[:20],  # 🆕 ذخیره issues واقعی (حداکثر 20 ایراد در هر فایل)
+                "analyzed_by": list(file_data.get("model_analyses", {}).keys()),  # 🆕 مدل‌های تحلیل‌کننده
                 "analyzed_at": file_data.get("analyzed_at")
             }
 

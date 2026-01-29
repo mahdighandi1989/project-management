@@ -693,19 +693,38 @@ async def generate_engineering_report(
         except:
             pass
 
-    # Log sources of issues
-    source_counts = {
-        "file_health_map": 0,
-        "analysis_progress": 0,
-        "issues_found": 0,
-        "health_scores": 0,
-    }
-    logger.info(f"🔍 Health issues extraction:")
-    logger.info(f"   - project.file_health_map exists: {bool(project.file_health_map)}")
-    logger.info(f"   - project.analysis_progress exists: {bool(project.analysis_progress)}")
-    logger.info(f"   - project.issues_found exists: {bool(project.issues_found)}")
-    logger.info(f"   - project.health_scores exists: {bool(project.health_scores)}")
+    # Log detailed extraction stats
+    logger.info(f"🔍 Health issues extraction from project {project_id}:")
+    logger.info(f"   - project.file_health_map: {len(project.file_health_map or '')} chars")
+    logger.info(f"   - project.analysis_progress: {len(project.analysis_progress or '')} chars")
+    logger.info(f"   - project.issues_found: {len(project.issues_found or '')} chars")
+    logger.info(f"   - project.health_scores: {len(project.health_scores or '')} chars")
     logger.info(f"📊 Total health issues found for validation: {len(health_analysis_issues)}")
+
+    # Group issues by severity for logging
+    if health_analysis_issues:
+        severity_counts = {}
+        for issue in health_analysis_issues:
+            sev = issue.get("severity", "unknown")
+            severity_counts[sev] = severity_counts.get(sev, 0) + 1
+        logger.info(f"📊 Issues by severity: {severity_counts}")
+    else:
+        logger.warning(f"⚠️ No health issues found from any source. Checking raw content...")
+        # Additional debug for empty issues
+        if project.file_health_map:
+            try:
+                fhm = json.loads(project.file_health_map)
+                total_issues_in_map = sum(len(fd.get("issues", [])) for fd in fhm.values() if isinstance(fd, dict))
+                total_issues_count = sum(fd.get("issues_count", 0) for fd in fhm.values() if isinstance(fd, dict))
+                logger.info(f"   - file_health_map has {len(fhm)} files, {total_issues_in_map} issues embedded, {total_issues_count} issues_count")
+            except:
+                pass
+        if project.issues_found:
+            try:
+                stored = json.loads(project.issues_found)
+                logger.info(f"   - issues_found has {len(stored) if isinstance(stored, list) else 0} issues")
+            except:
+                pass
 
     # ساخت خلاصه health analysis برای prompt
     if health_analysis_issues:
@@ -744,10 +763,12 @@ async def generate_engineering_report(
     # ساخت prompt برای AI
     system_prompt = """تو یک مهندس ارشد نرم‌افزار هستی که باید یک گزارش مهندسی جامع و حرفه‌ای تولید کنی.
 
-⚠️ مهم‌ترین وظیفه تو: اعتبارسنجی ایرادات شناسایی شده توسط health analysis
-- هر ایراد را بررسی کن و مشخص کن آیا واقعاً وجود دارد یا نه
-- ایرادات معتبر را در validated_issues قرار بده
-- ایرادات نامعتبر یا اشتباه را در rejected_issues با دلیل رد شدن قرار بده
+🔴🔴🔴 بسیار مهم - اعتبارسنجی health analysis 🔴🔴🔴
+اگر در بخش ورودی "نتایج آخرین health analysis" وجود دارد، باید:
+1. هر ایراد را یک به یک بررسی کنی
+2. ایرادات تایید شده را در validated_issues قرار بدی
+3. ایرادات رد شده را در rejected_issues قرار بدی
+4. بخش health_analysis_validation را حتماً در JSON خروجی قرار بدی
 
 گزارش باید شامل بخش‌های زیر باشد (حتماً از این ساختار JSON استفاده کن):
 
@@ -974,6 +995,14 @@ async def generate_engineering_report(
         rejected_issues_count = 0
         new_rejected_archive = []
 
+        # لاگ برای debug
+        logger.info(f"🔍 Checking for health_analysis_validation in report_data...")
+        logger.info(f"   - validate_health_issues param: {validate_health_issues}")
+        logger.info(f"   - 'health_analysis_validation' in report_data: {'health_analysis_validation' in report_data}")
+        logger.info(f"   - Health issues sent to AI: {len(health_analysis_issues)}")
+        if report_data and not report_data.get("raw_content"):
+            logger.info(f"   - Report data keys: {list(report_data.keys())}")
+
         if validate_health_issues and "health_analysis_validation" in report_data:
             validation_data = report_data["health_analysis_validation"]
 
@@ -1016,6 +1045,61 @@ async def generate_engineering_report(
             project.rejected_issues_archive = json.dumps(combined_archive[:100], ensure_ascii=False)
 
             logger.info(f"Health validation: {validated_issues_count} validated, {rejected_issues_count} rejected")
+
+        # 🆕 Fallback: اگر AI بخش health_analysis_validation را برنگرداند، فیلدها را مستقیماً از health issues بساز
+        elif validate_health_issues and health_analysis_issues and not report_data.get("raw_content"):
+            logger.warning(f"⚠️ AI did not return health_analysis_validation section. Creating fields from {len(health_analysis_issues)} health issues directly.")
+
+            # ذخیره این به عنوان validation results
+            validation_results = {
+                "validated_at": datetime.utcnow().isoformat(),
+                "validator_model": model_id,
+                "total_issues_reviewed": len(health_analysis_issues),
+                "validated_count": 0,
+                "rejected_count": 0,
+                "validation_summary": f"AI بخش اعتبارسنجی را برنگرداند. {len(health_analysis_issues)} ایراد مستقیماً پردازش شد.",
+                "validated_issues": [],
+                "fallback_mode": True,
+            }
+
+            # ایجاد فیلدها مستقیماً از critical و high severity issues
+            critical_high_issues = [
+                i for i in health_analysis_issues
+                if i.get("severity") in ["critical", "high"]
+            ][:10]  # حداکثر 10 فیلد
+
+            # 🆕 اگر critical/high نبود، از medium هم استفاده کن
+            if not critical_high_issues:
+                logger.info(f"No critical/high issues found, including medium severity...")
+                critical_high_issues = [
+                    i for i in health_analysis_issues
+                    if i.get("severity") in ["critical", "high", "medium"]
+                ][:10]
+
+            # 🆕 اگر هنوز نبود، از همه issues (بدون توجه به severity)
+            if not critical_high_issues and health_analysis_issues:
+                logger.info(f"No medium+ issues found, using first 10 issues regardless of severity...")
+                critical_high_issues = health_analysis_issues[:10]
+
+            logger.info(f"Selected {len(critical_high_issues)} issues for field creation")
+
+            for issue in critical_high_issues:
+                validation_results["validated_issues"].append({
+                    "original_issue": issue,
+                    "validation_score": 70,  # امتیاز پیش‌فرض
+                    "validation_note": "ایجاد خودکار به دلیل عدم پاسخ AI",
+                    "priority": issue.get("severity"),
+                    "create_field": True
+                })
+                validated_issues_count += 1
+
+            validation_results["validated_count"] = validated_issues_count
+            project.last_validation_results = json.dumps(validation_results, ensure_ascii=False)
+
+            # اضافه کردن به report_data برای پردازش بعدی
+            report_data["health_analysis_validation"] = validation_results
+
+            logger.info(f"Fallback: Created {validated_issues_count} validated issues from critical/high severity health issues")
 
         # ====================================
         # 🆕 به‌روزرسانی حالت ایده‌آل جامع
