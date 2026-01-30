@@ -238,17 +238,128 @@ class AIManager:
 
         return caps
 
+    def find_fallback_model(self, disabled_model_id: str, task_type: Optional[str] = None) -> Optional[str]:
+        """
+        یافتن نزدیک‌ترین مدل فعال به مدل غیرفعال شده
+
+        استراتژی:
+        1. مدل‌های هم‌provider با قابلیت‌های مشابه
+        2. مدل‌های دیگر provider با قابلیت‌های مشابه
+        3. اگر فقط یک مدل فعال بود، همان را برگردان
+
+        Args:
+            disabled_model_id: شناسه مدل غیرفعال
+            task_type: نوع کار برای فیلتر اضافی
+
+        Returns:
+            شناسه مدل fallback یا None
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        # دریافت اطلاعات مدل غیرفعال
+        disabled_model = get_model(disabled_model_id)
+        if not disabled_model:
+            logger.warning(f"Cannot find fallback - disabled model {disabled_model_id} not found")
+            return None
+
+        # دریافت مدل‌های فعال
+        available_models = self.get_available_models(task_type=task_type)
+
+        if not available_models:
+            logger.warning("No available models for fallback")
+            return None
+
+        # اگر فقط یک مدل فعال بود، همان را برگردان
+        if len(available_models) == 1:
+            fallback = available_models[0].id
+            logger.info(f"Only one model available, using {fallback} as fallback for {disabled_model_id}")
+            return fallback
+
+        # قابلیت‌های مدل غیرفعال
+        disabled_caps = set(disabled_model.capabilities)
+        disabled_provider = disabled_model.provider
+
+        # امتیازدهی به مدل‌های فعال
+        scored_models = []
+        for model in available_models:
+            score = 0
+            model_caps = set(model.capabilities)
+
+            # امتیاز برای قابلیت‌های مشترک (هر قابلیت 10 امتیاز)
+            common_caps = disabled_caps & model_caps
+            score += len(common_caps) * 10
+
+            # امتیاز برای هم‌provider بودن (20 امتیاز)
+            if model.provider == disabled_provider:
+                score += 20
+
+            # امتیاز برای اولویت مشابه (5 امتیاز اگر اختلاف کمتر از 2)
+            if abs(model.priority - disabled_model.priority) <= 2:
+                score += 5
+
+            # امتیاز برای context window مشابه
+            if model.context_window >= disabled_model.context_window * 0.8:
+                score += 5
+
+            scored_models.append((model.id, score, model.priority))
+
+        # مرتب‌سازی براساس امتیاز (نزولی) و سپس اولویت (صعودی)
+        scored_models.sort(key=lambda x: (-x[1], x[2]))
+
+        if scored_models:
+            best_fallback = scored_models[0][0]
+            best_score = scored_models[0][1]
+            logger.info(f"Found fallback for {disabled_model_id}: {best_fallback} (score: {best_score})")
+            return best_fallback
+
+        return None
+
+    def get_enabled_status(self, model_id: str) -> bool:
+        """بررسی فعال بودن مدل در دیتابیس"""
+        try:
+            from ..core.database import get_db
+            from ..models.ai_profile import ModelSettings
+            db = next(get_db())
+            db_setting = db.query(ModelSettings).filter(ModelSettings.model_id == model_id).first()
+            if db_setting:
+                return bool(db_setting.enabled)
+            # اگر تنظیمات نداشت، از registry استفاده کن
+            model = get_model(model_id)
+            return model.enabled if model else False
+        except Exception:
+            return True  # در صورت خطا، فرض کن فعال است
+
     async def generate(
         self,
         model_id: str,
         messages: List[Message],
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        task_type: Optional[str] = None,  # 🆕 برای fallback هوشمند
+        allow_fallback: bool = True,  # 🆕 اجازه استفاده از fallback
         **kwargs
     ) -> AIResponse:
-        """تولید پاسخ از یک مدل خاص"""
+        """
+        تولید پاسخ از یک مدل خاص
+
+        🆕 قابلیت fallback هوشمند:
+        - اگر مدل غیرفعال بود، نزدیک‌ترین مدل فعال پیدا می‌شود
+        - اگر فقط یک مدل فعال بود، از همان استفاده می‌شود
+
+        Args:
+            model_id: شناسه مدل
+            messages: لیست پیام‌ها
+            max_tokens: حداکثر توکن خروجی
+            temperature: دمای تولید
+            task_type: نوع کار (برای فیلتر fallback)
+            allow_fallback: آیا اجازه fallback داده شود
+        """
         import logging
         logger = logging.getLogger(__name__)
+
+        original_model_id = model_id
+        used_fallback = False
 
         model = get_model(model_id)
         if not model:
@@ -261,8 +372,23 @@ class AIManager:
             db = next(get_db())
             db_setting = db.query(ModelSettings).filter(ModelSettings.model_id == model_id).first()
             if db_setting and not db_setting.enabled:
-                logger.warning(f"Model {model_id} is disabled in settings, rejecting request")
-                raise AIServiceError(f"Model {model_id} is disabled", "manager", model_id)
+                logger.warning(f"Model {model_id} is disabled in settings")
+
+                # 🆕 استفاده از fallback به جای خطا
+                if allow_fallback:
+                    fallback_model_id = self.find_fallback_model(model_id, task_type=task_type)
+                    if fallback_model_id:
+                        logger.info(f"Using fallback model {fallback_model_id} instead of disabled {model_id}")
+                        model_id = fallback_model_id
+                        model = get_model(model_id)
+                        used_fallback = True
+                    else:
+                        raise AIServiceError(
+                            f"Model {model_id} is disabled and no fallback available",
+                            "manager", model_id
+                        )
+                else:
+                    raise AIServiceError(f"Model {model_id} is disabled", "manager", model_id)
         except AIServiceError:
             raise
         except Exception as e:
@@ -281,7 +407,15 @@ class AIManager:
         if not service:
             raise AIServiceError(f"Provider {provider} not available", "manager", model_id)
 
-        return await service.generate(model_id, messages, max_tokens, temperature, **kwargs)
+        response = await service.generate(model_id, messages, max_tokens, temperature, **kwargs)
+
+        # 🆕 اضافه کردن اطلاعات fallback به response
+        if used_fallback:
+            response.fallback_used = True
+            response.original_model_id = original_model_id
+            logger.info(f"Response generated using fallback: {original_model_id} -> {model_id}")
+
+        return response
 
     async def generate_with_fallback(
         self,

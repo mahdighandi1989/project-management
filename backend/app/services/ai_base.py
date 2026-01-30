@@ -30,6 +30,9 @@ class AIResponse(BaseModel):
     timestamp: datetime = datetime.now()
     error: Optional[str] = None
     metadata: Dict[str, Any] = {}
+    # 🆕 اطلاعات fallback
+    fallback_used: bool = False  # آیا از fallback استفاده شده
+    original_model_id: Optional[str] = None  # مدل اصلی که غیرفعال بود
 
 
 class AIServiceBase(ABC):

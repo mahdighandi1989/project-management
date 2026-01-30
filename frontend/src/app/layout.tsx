@@ -6,6 +6,9 @@ import '@/styles/globals.css';
 export const metadata: Metadata = {
   title: 'سیستم مناظره و همکاری AI',
   description: 'سیستم مناظره و همکاری هوش مصنوعی + مدیریت پروژه',
+  icons: {
+    icon: '/icon.svg',
+  },
 };
 
 // Get API URL for runtime injection
