@@ -317,18 +317,27 @@ class AIManager:
 
     def get_enabled_status(self, model_id: str) -> bool:
         """بررسی فعال بودن مدل در دیتابیس"""
+        import logging
+        logger = logging.getLogger(__name__)
+
         try:
             from ..core.database import get_db
             from ..models.ai_profile import ModelSettings
             db = next(get_db())
             db_setting = db.query(ModelSettings).filter(ModelSettings.model_id == model_id).first()
             if db_setting:
-                return bool(db_setting.enabled)
+                is_enabled = bool(db_setting.enabled)
+                logger.info(f"Model {model_id} enabled status from DB: {is_enabled}")
+                return is_enabled
             # اگر تنظیمات نداشت، از registry استفاده کن
             model = get_model(model_id)
-            return model.enabled if model else False
-        except Exception:
-            return True  # در صورت خطا، فرض کن فعال است
+            is_enabled = model.enabled if model else False
+            logger.info(f"Model {model_id} enabled status from registry: {is_enabled}")
+            return is_enabled
+        except Exception as e:
+            logger.error(f"Error checking model {model_id} enabled status: {e}")
+            # 🔴 در صورت خطا، فرض کن غیرفعال است تا fallback کار کند
+            return False
 
     async def generate(
         self,
