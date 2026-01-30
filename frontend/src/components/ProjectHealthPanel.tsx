@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import HealthDiagram from './HealthDiagram';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -1271,86 +1272,35 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
           </div>
         )}
 
-        {/* تب فایل‌ها */}
+        {/* تب فایل‌ها - 🆕 با دیاگرام رنگی */}
         {activeTab === 'files' && (
           <div className="space-y-4">
-            <h3 className="font-bold">نقشه سلامت فایل‌ها</h3>
-            <p className="text-sm text-gray-500">
-              هر فایل بر اساس نمره سلامت رنگ‌بندی شده است. با hover روی هر فایل جزئیات را ببینید.
-            </p>
-
-            {Object.keys(fileHealthMap).length === 0 ? (
-              <div className="text-center py-8 text-gray-400">
-                <div className="text-5xl mb-4">?</div>
-                <p>هنوز تحلیلی انجام نشده</p>
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-bold">🎨 دیاگرام سلامت فایل‌ها</h3>
+                <p className="text-sm text-gray-500">
+                  ساختار پروژه با رنگ‌بندی براساس نمره سلامت هر فایل
+                </p>
+              </div>
+              {Object.keys(fileHealthMap).length === 0 && (
                 <button
                   onClick={runAnalysis}
-                  className="mt-4 px-4 py-2 bg-blue-500 text-white rounded-lg"
+                  className="px-4 py-2 bg-blue-500 text-white rounded-lg text-sm"
                 >
                   شروع تحلیل
                 </button>
-              </div>
-            ) : (
-              <div className="space-y-2 max-h-[500px] overflow-auto">
-                {Object.entries(fileHealthMap).map(([filePath, health]) => (
-                  <div
-                    key={filePath}
-                    className="group relative p-3 rounded-lg bg-gray-50 dark:bg-gray-700 border-r-4 hover:bg-gray-100 dark:hover:bg-gray-600 transition"
-                    style={{ borderColor: health.hex }}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-mono text-sm truncate max-w-[70%]">{filePath}</span>
-                      <span
-                        className={`px-2 py-1 rounded text-xs font-bold text-white`}
-                        style={{ backgroundColor: health.hex }}
-                      >
-                        {health.score?.toFixed(0) || 0}%
-                      </span>
-                    </div>
-
-                    {/* Hover tooltip */}
-                    <div className="hidden group-hover:block absolute top-full right-0 left-0 z-20 bg-white dark:bg-gray-800 shadow-xl rounded-lg p-4 mt-1 border dark:border-gray-600">
-                      <div className="text-sm space-y-2">
-                        <div className="font-bold text-blue-600 dark:text-blue-400">{filePath}</div>
-                        <div className="grid grid-cols-2 gap-2 text-xs">
-                          <div>نمره کلی: <span className="font-bold">{health.score?.toFixed(1)}%</span></div>
-                          <div>تعداد مدل‌ها: <span className="font-bold">{health.models_analyzed}</span></div>
-                        </div>
-                        {health.analyzed_at && (
-                          <div className="text-xs text-gray-400">
-                            تاریخ: {new Date(health.analyzed_at).toLocaleString('fa-IR')}
-                          </div>
-                        )}
-                        {health.model_scores && Object.keys(health.model_scores).length > 0 && (
-                          <div className="border-t dark:border-gray-600 pt-2 mt-2">
-                            <div className="text-xs text-gray-500 mb-1">نمره هر مدل:</div>
-                            <div className="flex flex-wrap gap-1">
-                              {Object.entries(health.model_scores).map(([model, score]) => (
-                                <span
-                                  key={model}
-                                  className="px-2 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs"
-                                >
-                                  {model}: {(score as number).toFixed(0)}%
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* راهنمای رنگ‌ها */}
-            <div className="flex items-center gap-4 text-xs text-gray-500 pt-4 border-t dark:border-gray-700">
-              <span>راهنما:</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-green-500"></span> 90+</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-yellow-500"></span> 70-90</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-orange-500"></span> 50-70</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-red-500"></span> 0-50</span>
+              )}
             </div>
+
+            {/* 🆕 کامپوننت دیاگرام سلامت */}
+            <HealthDiagram
+              projectId={projectId}
+              fileHealthMap={fileHealthMap}
+              onFileClick={(filePath) => {
+                // نمایش جزئیات فایل در آینده
+                console.log('File clicked:', filePath);
+              }}
+            />
           </div>
         )}
 

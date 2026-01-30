@@ -1723,6 +1723,77 @@ async def generate_engineering_report(
             db.commit()
             logger.info(f"✅ Health validation: {validated_issues_count} validated, {rejected_issues_count} rejected - COMMITTED to DB")
 
+            # ====================================
+            # 🆕🔴 امتیازدهی به مدل‌های تحلیل سلامت
+            # ====================================
+            try:
+                from ...services.model_profiler import ModelProfiler
+                profiler = ModelProfiler()
+
+                # دریافت لیست مدل‌هایی که در تحلیل سلامت شرکت کردند
+                source_models_in_validation = set()
+                for validated in validation_data.get("validated_issues", []):
+                    orig = validated.get("original_issue", {})
+                    if isinstance(orig.get("source_models"), list):
+                        source_models_in_validation.update(orig["source_models"])
+                    elif orig.get("source_model"):
+                        source_models_in_validation.add(orig["source_model"])
+
+                for rejected in validation_data.get("rejected_issues", []):
+                    orig = rejected.get("original_issue", {})
+                    if isinstance(orig.get("source_models"), list):
+                        source_models_in_validation.update(orig["source_models"])
+                    elif orig.get("source_model"):
+                        source_models_in_validation.add(orig["source_model"])
+
+                logger.info(f"🔴 Found {len(source_models_in_validation)} health analysis models to score: {source_models_in_validation}")
+
+                # محاسبه امتیاز برای هر مدل
+                for source_model in source_models_in_validation:
+                    if not source_model or source_model == "unknown":
+                        continue
+
+                    # شمارش ایرادات تایید/رد شده از این مدل
+                    correct_from_model = 0
+                    false_positives_from_model = 0
+
+                    for validated in validation_data.get("validated_issues", []):
+                        orig = validated.get("original_issue", {})
+                        models = orig.get("source_models", [orig.get("source_model")])
+                        if source_model in models:
+                            correct_from_model += 1
+
+                    for rejected in validation_data.get("rejected_issues", []):
+                        orig = rejected.get("original_issue", {})
+                        models = orig.get("source_models", [orig.get("source_model")])
+                        if source_model in models:
+                            false_positives_from_model += 1
+
+                    total_from_model = correct_from_model + false_positives_from_model
+
+                    if total_from_model > 0:
+                        logger.info(f"📊 Model {source_model}: correct={correct_from_model}, false_positives={false_positives_from_model}")
+
+                        # به‌روزرسانی پروفایل مدل
+                        await profiler.update_profile(
+                            model_id=source_model,
+                            task_type="health_analysis",
+                            correct_findings=correct_from_model,
+                            total_expected=total_from_model,  # تعداد کل ایراداتی که گزارش کرده
+                            false_positives=false_positives_from_model,
+                            response_time=0,  # اطلاعات زمان در دسترس نیست
+                            tokens_used=0,
+                            details={
+                                "validated_by": model_id,
+                                "project_id": project_id,
+                                "validation_date": datetime.utcnow().isoformat(),
+                            }
+                        )
+                        logger.info(f"✅ Updated profile for health analysis model: {source_model}")
+
+            except Exception as prof_error:
+                logger.warning(f"⚠️ Could not update model profiles: {prof_error}")
+
         # 🆕 Fallback: اگر AI بخش health_analysis_validation را برنگرداند (یا JSON پارس نشد)، فیلدها را مستقیماً از health issues بساز
         elif validate_health_issues and health_analysis_issues and (report_data.get("parse_error") or "health_analysis_validation" not in report_data):
             parse_error = report_data.get("parse_error", False)
@@ -2556,6 +2627,839 @@ async def update_report_trigger(
             "report_model": trigger.report_model,
             "next_run": trigger.next_run.isoformat() if trigger.next_run else None,
         }
+    }
+
+
+# ===================== 🆕 گزارش مهندسی ۴ مرحله‌ای =====================
+
+@router.post("/{project_id}/engineering/step1-validate-fields")
+async def engineering_step1_validate_fields(
+    project_id: str,
+    model_id: str = Query("claude"),
+    db: Session = Depends(get_db)
+):
+    """
+    🔴 مرحله ۱ گزارش مهندسی: بررسی پروژه و اعتبارسنجی فیلدهای پویای موجود
+
+    عملکرد:
+    - کل پوشه اصلی پروژه بررسی می‌شود
+    - فیلدهای پویای موجود ارزیابی می‌شوند
+    - فیلدهای ضروری تاییدیه می‌گیرند
+    - فیلدهای غیرضروری بایگانی می‌شوند
+    - فیلدهای قابل ادغام ادغام می‌شوند
+    """
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+    import logging
+    logger = logging.getLogger(__name__)
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت فیلدهای موجود
+    existing_fields = []
+    try:
+        if project.dynamic_fields:
+            existing_fields = json.loads(project.dynamic_fields)
+    except:
+        pass
+
+    pending_fields = [f for f in existing_fields if not f.get("archived") and not f.get("engineering_approval")]
+    approved_fields = [f for f in existing_fields if not f.get("archived") and f.get("engineering_approval")]
+
+    # ساخت prompt برای مرحله ۱
+    system_prompt = """تو یک مهندس نرم‌افزار ارشد هستی. وظیفه‌ات بررسی و اعتبارسنجی فیلدهای پویای پروژه است.
+
+برای هر فیلد PENDING تصمیم بگیر:
+1. approve: اگر فیلد ضروری و معتبر است
+2. reject: اگر فیلد غیرضروری، تکراری یا نامعتبر است
+3. merge: اگر با فیلد دیگری قابل ادغام است
+
+خروجی JSON:
+```json
+{
+    "fields_to_approve": ["field_id1", "field_id2"],
+    "fields_to_reject": [{"id": "field_id", "reason": "دلیل رد"}],
+    "fields_to_merge": [{"source_ids": ["id1", "id2"], "merged_name": "نام جدید", "merged_value": "دستور ادغام شده"}],
+    "fields_to_update": [{"id": "field_id", "new_priority": 2, "new_action_type": "github_commit"}],
+    "summary": "خلاصه عملیات"
+}
+```"""
+
+    user_prompt = f"""پروژه: {project.name}
+
+=== فیلدهای PENDING (نیاز به تایید) ===
+{json.dumps([{"id": f.get("id"), "name": f.get("name"), "value": f.get("value", "")[:300], "action_type": f.get("action_type"), "target_path": f.get("target_path"), "priority": f.get("priority", 5)} for f in pending_fields], ensure_ascii=False, indent=2)}
+
+=== فیلدهای تایید شده (برای مقایسه) ===
+{json.dumps([{"id": f.get("id"), "name": f.get("name"), "action_type": f.get("action_type")} for f in approved_fields[:20]], ensure_ascii=False, indent=2)}
+
+لطفاً هر فیلد pending را بررسی و تصمیم بگیر."""
+
+    ai_manager = get_ai_manager()
+
+    # بررسی فعال بودن مدل
+    if not ai_manager.get_enabled_status(model_id):
+        fallback = ai_manager.find_fallback_model(model_id, task_type="engineering_step1")
+        if fallback:
+            model_id = fallback
+
+    messages = [
+        Message(role="system", content=system_prompt),
+        Message(role="user", content=user_prompt),
+    ]
+
+    response = await ai_manager.generate(
+        model_id=model_id,
+        messages=messages,
+        max_tokens=4096,
+        temperature=0.3,
+        task_type="engineering_step1",
+        allow_fallback=True,
+    )
+
+    # پردازش نتایج
+    result_data = {}
+    try:
+        import re
+        content = response.content
+        match = re.search(r'```(?:json)?\s*([\s\S]*?)```', content)
+        if match:
+            result_data = json.loads(match.group(1).strip())
+        else:
+            first = content.find('{')
+            last = content.rfind('}')
+            if first != -1 and last != -1:
+                result_data = json.loads(content[first:last+1])
+    except Exception as e:
+        logger.error(f"Step1 JSON parse error: {e}")
+        result_data = {"error": str(e)}
+
+    # اعمال تغییرات
+    approved_count = 0
+    rejected_count = 0
+    merged_count = 0
+
+    for field_id in result_data.get("fields_to_approve", []):
+        for field in existing_fields:
+            if field.get("id") == field_id and not field.get("archived"):
+                field["engineering_approval"] = {
+                    "approved": True,
+                    "approved_at": datetime.utcnow().isoformat(),
+                    "approved_by": model_id,
+                    "approval_type": "step1_validation",
+                    "step": 1
+                }
+                field["validation_marker"] = "validated"
+                approved_count += 1
+
+    for reject_info in result_data.get("fields_to_reject", []):
+        field_id = reject_info.get("id") if isinstance(reject_info, dict) else reject_info
+        for field in existing_fields:
+            if field.get("id") == field_id and not field.get("archived"):
+                field["archived"] = True
+                field["archived_at"] = datetime.utcnow().isoformat()
+                field["archived_reason"] = reject_info.get("reason", "rejected_step1") if isinstance(reject_info, dict) else "rejected_step1"
+                rejected_count += 1
+
+    for merge_info in result_data.get("fields_to_merge", []):
+        source_ids = merge_info.get("source_ids", [])
+        if len(source_ids) >= 2:
+            for sid in source_ids:
+                for field in existing_fields:
+                    if field.get("id") == sid:
+                        field["archived"] = True
+                        field["archived_at"] = datetime.utcnow().isoformat()
+                        field["archived_reason"] = "merged_step1"
+
+            merged_field = {
+                "id": str(uuid.uuid4()),
+                "name": merge_info.get("merged_name", "فیلد ادغام‌شده"),
+                "value": merge_info.get("merged_value", ""),
+                "target_models": ["claude"],
+                "action_type": "github_commit",
+                "field_type": "temporary",
+                "priority": 3,
+                "engineering_approval": {
+                    "approved": True,
+                    "approved_at": datetime.utcnow().isoformat(),
+                    "approved_by": model_id,
+                    "approval_type": "merged_step1",
+                    "step": 1
+                },
+                "merged_from": source_ids,
+            }
+            existing_fields.append(merged_field)
+            merged_count += 1
+
+    # ذخیره تغییرات
+    project.dynamic_fields = json.dumps(existing_fields, ensure_ascii=False)
+    db.commit()
+
+    # ثبت در ژورنال
+    log_detailed_operation(
+        db, project_id, None,
+        "engineering_step1",
+        f"مرحله ۱ گزارش مهندسی: {approved_count} تایید، {rejected_count} رد، {merged_count} ادغام",
+        details={"approved": approved_count, "rejected": rejected_count, "merged": merged_count},
+        status="completed"
+    )
+    db.commit()
+
+    return {
+        "success": True,
+        "step": 1,
+        "step_name": "validate_fields",
+        "model_used": model_id,
+        "results": {
+            "approved_count": approved_count,
+            "rejected_count": rejected_count,
+            "merged_count": merged_count,
+            "summary": result_data.get("summary", "")
+        }
+    }
+
+
+@router.post("/{project_id}/engineering/step2-health-to-fields")
+async def engineering_step2_health_to_fields(
+    project_id: str,
+    model_id: str = Query("claude"),
+    db: Session = Depends(get_db)
+):
+    """
+    🔴 مرحله ۲ گزارش مهندسی: انطباق با تحلیل سلامت و تولید فیلدهای اقدام‌محور
+
+    عملکرد:
+    - ایرادات شناسایی‌شده در تحلیل سلامت تایید می‌شوند
+    - امکان ادغام چند ایراد در یک فیلد بررسی می‌شود
+    - فیلدهای جدید با تاییدیه گزارش مهندسی ایجاد می‌شوند
+    """
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+    import logging
+    logger = logging.getLogger(__name__)
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت ایرادات سلامت
+    health_issues = []
+    if project.issues_found:
+        try:
+            health_issues = json.loads(project.issues_found)
+            # فقط ایرادات بایگانی نشده
+            health_issues = [i for i in health_issues if not i.get("archived")]
+        except:
+            pass
+
+    if not health_issues:
+        return {
+            "success": True,
+            "step": 2,
+            "step_name": "health_to_fields",
+            "message": "هیچ ایراد سلامت فعالی وجود ندارد",
+            "results": {"fields_created": 0}
+        }
+
+    existing_fields = []
+    try:
+        if project.dynamic_fields:
+            existing_fields = json.loads(project.dynamic_fields)
+    except:
+        pass
+
+    # ساخت prompt
+    system_prompt = """تو یک مهندس نرم‌افزار ارشد هستی. وظیفه‌ات اعتبارسنجی ایرادات سلامت و تبدیل آنها به فیلدهای عملیاتی است.
+
+برای هر ایراد:
+1. اگر معتبر است، create_field=true
+2. اگر نامعتبر است، reject=true با دلیل
+3. اگر چند ایراد قابل ادغام هستند، در یک فیلد ترکیب کن
+
+خروجی JSON:
+```json
+{
+    "validated_issues": [
+        {
+            "original_issue": {...},
+            "validation_score": 85,
+            "create_field": true,
+            "field_details": {
+                "name": "نام فیلد",
+                "value": "دستور کامل برای AI",
+                "action_type": "github_commit",
+                "target_path": "path/to/file.py",
+                "priority": 2
+            }
+        }
+    ],
+    "merged_issues": [
+        {
+            "source_issues": [{...}, {...}],
+            "merged_field": {
+                "name": "فیلد ادغام شده",
+                "value": "دستور جامع",
+                "action_type": "github_multi_commit",
+                "priority": 2
+            }
+        }
+    ],
+    "rejected_issues": [
+        {
+            "original_issue": {...},
+            "rejection_reason": "دلیل رد"
+        }
+    ],
+    "summary": "خلاصه"
+}
+```
+
+⚠️ فقط فیلدهای عملیاتی (github_commit/github_multi_commit) ایجاد کن، نه display!"""
+
+    user_prompt = f"""پروژه: {project.name}
+
+=== ایرادات سلامت ({len(health_issues)} عدد) ===
+{json.dumps(health_issues[:50], ensure_ascii=False, indent=2)}
+
+=== فیلدهای موجود (برای جلوگیری از تکرار) ===
+{json.dumps([{"name": f.get("name"), "target_path": f.get("target_path")} for f in existing_fields if not f.get("archived")][:30], ensure_ascii=False, indent=2)}
+
+ایرادات را بررسی و به فیلدهای عملیاتی تبدیل کن."""
+
+    ai_manager = get_ai_manager()
+
+    if not ai_manager.get_enabled_status(model_id):
+        fallback = ai_manager.find_fallback_model(model_id, task_type="engineering_step2")
+        if fallback:
+            model_id = fallback
+
+    messages = [
+        Message(role="system", content=system_prompt),
+        Message(role="user", content=user_prompt),
+    ]
+
+    response = await ai_manager.generate(
+        model_id=model_id,
+        messages=messages,
+        max_tokens=8192,
+        temperature=0.3,
+        task_type="engineering_step2",
+        allow_fallback=True,
+    )
+
+    # پردازش نتایج
+    result_data = {}
+    try:
+        import re
+        content = response.content
+        match = re.search(r'```(?:json)?\s*([\s\S]*?)```', content)
+        if match:
+            result_data = json.loads(match.group(1).strip())
+        else:
+            first = content.find('{')
+            last = content.rfind('}')
+            if first != -1 and last != -1:
+                result_data = json.loads(content[first:last+1])
+    except Exception as e:
+        logger.error(f"Step2 JSON parse error: {e}")
+        result_data = {"error": str(e)}
+
+    # ایجاد فیلدها از validated_issues
+    created_fields = []
+    for validated in result_data.get("validated_issues", []):
+        if not validated.get("create_field"):
+            continue
+
+        field_details = validated.get("field_details", {})
+        new_field = {
+            "id": str(uuid.uuid4()),
+            "name": field_details.get("name", "فیلد جدید"),
+            "value": field_details.get("value", ""),
+            "target_models": ["claude"],
+            "action_type": field_details.get("action_type", "github_commit"),
+            "target_path": field_details.get("target_path"),
+            "field_type": "temporary",
+            "priority": field_details.get("priority", 3),
+            "archive_after_run": True,
+            "engineering_approval": {
+                "approved": True,
+                "approved_at": datetime.utcnow().isoformat(),
+                "approved_by": model_id,
+                "approval_type": "health_validation_step2",
+                "step": 2
+            },
+            "original_issue": validated.get("original_issue"),
+            "validation_score": validated.get("validation_score", 0),
+        }
+        existing_fields.append(new_field)
+        created_fields.append(new_field["name"])
+
+        # بایگانی ایراد اصلی
+        orig = validated.get("original_issue", {})
+        for issue in health_issues:
+            if (issue.get("file") == orig.get("file") and
+                issue.get("type") == orig.get("type") and
+                issue.get("line") == orig.get("line")):
+                issue["archived"] = True
+                issue["archived_at"] = datetime.utcnow().isoformat()
+                issue["archived_reason"] = "converted_to_field_step2"
+                break
+
+    # ایجاد فیلدهای ادغام شده
+    for merged in result_data.get("merged_issues", []):
+        merged_field_details = merged.get("merged_field", {})
+        new_field = {
+            "id": str(uuid.uuid4()),
+            "name": merged_field_details.get("name", "فیلد ادغام شده"),
+            "value": merged_field_details.get("value", ""),
+            "target_models": ["claude"],
+            "action_type": merged_field_details.get("action_type", "github_multi_commit"),
+            "field_type": "temporary",
+            "priority": merged_field_details.get("priority", 2),
+            "archive_after_run": True,
+            "engineering_approval": {
+                "approved": True,
+                "approved_at": datetime.utcnow().isoformat(),
+                "approved_by": model_id,
+                "approval_type": "merged_health_step2",
+                "step": 2
+            },
+            "source_issues": merged.get("source_issues"),
+        }
+        existing_fields.append(new_field)
+        created_fields.append(new_field["name"])
+
+    # بایگانی ایرادات رد شده
+    rejected_count = 0
+    for rejected in result_data.get("rejected_issues", []):
+        orig = rejected.get("original_issue", {})
+        for issue in health_issues:
+            if (issue.get("file") == orig.get("file") and
+                issue.get("type") == orig.get("type")):
+                issue["archived"] = True
+                issue["archived_at"] = datetime.utcnow().isoformat()
+                issue["archived_reason"] = f"rejected_step2: {rejected.get('rejection_reason', '')}"
+                rejected_count += 1
+                break
+
+    # ذخیره تغییرات
+    project.dynamic_fields = json.dumps(existing_fields, ensure_ascii=False)
+    project.issues_found = json.dumps(health_issues, ensure_ascii=False)
+    db.commit()
+
+    # ثبت در ژورنال
+    log_detailed_operation(
+        db, project_id, None,
+        "engineering_step2",
+        f"مرحله ۲: {len(created_fields)} فیلد ایجاد، {rejected_count} رد شد",
+        details={"created": len(created_fields), "rejected": rejected_count},
+        status="completed"
+    )
+    db.commit()
+
+    return {
+        "success": True,
+        "step": 2,
+        "step_name": "health_to_fields",
+        "model_used": model_id,
+        "results": {
+            "fields_created": len(created_fields),
+            "fields_created_names": created_fields,
+            "rejected_count": rejected_count,
+            "summary": result_data.get("summary", "")
+        }
+    }
+
+
+@router.post("/{project_id}/engineering/step3-evaluate-models")
+async def engineering_step3_evaluate_models(
+    project_id: str,
+    model_id: str = Query("claude"),
+    db: Session = Depends(get_db)
+):
+    """
+    🔴 مرحله ۳ گزارش مهندسی: اعتبارسنجی عملکرد مدل‌های تحلیل سلامت و به‌روزرسانی ساختار
+
+    عملکرد:
+    - عملکرد مدل‌های تحلیل سلامت ارزیابی می‌شود
+    - امتیاز مثبت/منفی به مدل‌ها داده می‌شود
+    - ساختار و رنگ‌بندی به‌روز می‌شود
+    """
+    from ...services.ai_manager import get_ai_manager
+    from ...services.model_profiler import ModelProfiler
+    import logging
+    logger = logging.getLogger(__name__)
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    profiler = ModelProfiler()
+
+    # دریافت نتایج اعتبارسنجی قبلی
+    validation_results = {}
+    if project.last_validation_results:
+        try:
+            validation_results = json.loads(project.last_validation_results)
+        except:
+            pass
+
+    # دریافت ایرادات برای شمارش
+    health_issues = []
+    if project.issues_found:
+        try:
+            health_issues = json.loads(project.issues_found)
+        except:
+            pass
+
+    # شمارش ایرادات هر مدل
+    model_stats = {}
+    for issue in health_issues:
+        source_models = issue.get("source_models", [issue.get("source_model", "unknown")])
+        if isinstance(source_models, str):
+            source_models = [source_models]
+
+        is_valid = not issue.get("archived") or issue.get("archived_reason", "").startswith("converted")
+        is_rejected = issue.get("archived") and "rejected" in issue.get("archived_reason", "")
+
+        for model in source_models:
+            if model not in model_stats:
+                model_stats[model] = {"correct": 0, "false_positive": 0, "total": 0}
+            model_stats[model]["total"] += 1
+            if is_valid:
+                model_stats[model]["correct"] += 1
+            elif is_rejected:
+                model_stats[model]["false_positive"] += 1
+
+    # به‌روزرسانی پروفایل مدل‌ها
+    updated_profiles = []
+    for model_id_stat, stats in model_stats.items():
+        if model_id_stat == "unknown" or stats["total"] == 0:
+            continue
+
+        try:
+            await profiler.update_profile(
+                model_id=model_id_stat,
+                task_type="health_analysis",
+                correct_findings=stats["correct"],
+                total_expected=stats["total"],
+                false_positives=stats["false_positive"],
+                response_time=0,
+                tokens_used=0,
+                details={
+                    "project_id": project_id,
+                    "evaluation_step": 3,
+                    "evaluation_date": datetime.utcnow().isoformat(),
+                }
+            )
+            updated_profiles.append({
+                "model_id": model_id_stat,
+                "correct": stats["correct"],
+                "false_positive": stats["false_positive"],
+                "precision": round(stats["correct"] / stats["total"] * 100, 1) if stats["total"] > 0 else 0
+            })
+            logger.info(f"Updated profile for {model_id_stat}: {stats}")
+        except Exception as e:
+            logger.warning(f"Could not update profile for {model_id_stat}: {e}")
+
+    # به‌روزرسانی file_health_map
+    file_health_map = {}
+    if project.file_health_map:
+        try:
+            file_health_map = json.loads(project.file_health_map)
+        except:
+            pass
+
+    # شمارش ایرادات فعال هر فایل
+    for issue in health_issues:
+        if issue.get("archived"):
+            continue
+        file_path = issue.get("file", "")
+        if file_path not in file_health_map:
+            file_health_map[file_path] = {"score": 100, "issues": 0}
+
+        file_health_map[file_path]["issues"] = file_health_map[file_path].get("issues", 0) + 1
+        # کاهش امتیاز براساس تعداد ایرادات
+        severity = issue.get("severity", "medium")
+        penalty = {"critical": 25, "high": 15, "medium": 10, "low": 5}.get(severity, 10)
+        file_health_map[file_path]["score"] = max(0, file_health_map[file_path].get("score", 100) - penalty)
+
+    # محاسبه رنگ براساس امتیاز
+    for file_path, data in file_health_map.items():
+        score = data.get("score", 100)
+        if score >= 80:
+            data["color"] = "#22c55e"  # سبز
+            data["hex"] = "#22c55e"
+        elif score >= 60:
+            data["color"] = "#eab308"  # زرد
+            data["hex"] = "#eab308"
+        elif score >= 40:
+            data["color"] = "#f97316"  # نارنجی
+            data["hex"] = "#f97316"
+        else:
+            data["color"] = "#ef4444"  # قرمز
+            data["hex"] = "#ef4444"
+
+    project.file_health_map = json.dumps(file_health_map, ensure_ascii=False)
+    db.commit()
+
+    # ثبت در ژورنال
+    log_detailed_operation(
+        db, project_id, None,
+        "engineering_step3",
+        f"مرحله ۳: ارزیابی {len(updated_profiles)} مدل، به‌روزرسانی رنگ {len(file_health_map)} فایل",
+        details={"models_evaluated": len(updated_profiles), "files_updated": len(file_health_map)},
+        status="completed"
+    )
+    db.commit()
+
+    return {
+        "success": True,
+        "step": 3,
+        "step_name": "evaluate_models",
+        "results": {
+            "models_evaluated": updated_profiles,
+            "files_color_updated": len(file_health_map),
+            "file_health_sample": dict(list(file_health_map.items())[:10])
+        }
+    }
+
+
+@router.post("/{project_id}/engineering/step4-update-roadmap")
+async def engineering_step4_update_roadmap(
+    project_id: str,
+    model_id: str = Query("claude"),
+    db: Session = Depends(get_db)
+):
+    """
+    🔴 مرحله ۴ گزارش مهندسی: به‌روزرسانی نقشه راه و تعیین حالت ایده‌آل
+
+    عملکرد:
+    - نقشه راه به‌روز می‌شود با چک‌باکس‌ها
+    - حالت ایده‌آل پروژه تعیین می‌شود
+    - فیلدهای عملیاتی برای آیتم‌های ناقص ایجاد می‌شود
+    """
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+    import logging
+    logger = logging.getLogger(__name__)
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    existing_fields = []
+    try:
+        if project.dynamic_fields:
+            existing_fields = json.loads(project.dynamic_fields)
+    except:
+        pass
+
+    # فیلدهای اجرا شده
+    executed_fields = [f for f in existing_fields if f.get("executed") or (f.get("archived") and "executed" in f.get("archived_reason", ""))]
+
+    # ساخت prompt
+    system_prompt = """تو یک مهندس نرم‌افزار ارشد هستی. وظیفه‌ات به‌روزرسانی نقشه راه و تعیین حالت ایده‌آل است.
+
+خروجی JSON:
+```json
+{
+    "roadmap_updates": [
+        {"item": "نام آیتم", "completed": true, "reason": "فیلد X اجرا شد"},
+        {"item": "آیتم ناقص", "completed": false, "create_field": true, "field_details": {"name": "...", "value": "...", "action_type": "github_commit", "target_path": "...", "priority": 2}}
+    ],
+    "ideal_state": {
+        "description": "توضیح حالت ایده‌آل (3-5 پاراگراف)",
+        "current_deficiencies": ["کمبود 1", "کمبود 2"],
+        "required_actions": ["اقدام 1", "اقدام 2"],
+        "target_architecture": "توضیح ساختار هدف"
+    },
+    "new_roadmap_content": "محتوای کامل نقشه راه به‌روز شده با چک‌باکس‌ها",
+    "summary": "خلاصه"
+}
+```
+
+آیتم‌های تکمیل شده: [x] ✅
+آیتم‌های ناقص: [ ]"""
+
+    user_prompt = f"""پروژه: {project.name}
+نوع: {project.project_type or 'نامشخص'}
+
+=== نقشه راه فعلی ===
+{project.roadmap_content or 'تعریف نشده'}
+
+=== فیلدهای اجرا شده ===
+{json.dumps([{"name": f.get("name"), "target_path": f.get("target_path")} for f in executed_fields[:30]], ensure_ascii=False, indent=2)}
+
+=== حالت ایده‌آل فعلی ===
+{project.ideal_state or 'تعریف نشده'}
+
+نقشه راه را به‌روز کن و حالت ایده‌آل جدید را تعیین کن."""
+
+    ai_manager = get_ai_manager()
+
+    if not ai_manager.get_enabled_status(model_id):
+        fallback = ai_manager.find_fallback_model(model_id, task_type="engineering_step4")
+        if fallback:
+            model_id = fallback
+
+    messages = [
+        Message(role="system", content=system_prompt),
+        Message(role="user", content=user_prompt),
+    ]
+
+    response = await ai_manager.generate(
+        model_id=model_id,
+        messages=messages,
+        max_tokens=8192,
+        temperature=0.3,
+        task_type="engineering_step4",
+        allow_fallback=True,
+    )
+
+    # پردازش نتایج
+    result_data = {}
+    try:
+        import re
+        content = response.content
+        match = re.search(r'```(?:json)?\s*([\s\S]*?)```', content)
+        if match:
+            result_data = json.loads(match.group(1).strip())
+        else:
+            first = content.find('{')
+            last = content.rfind('}')
+            if first != -1 and last != -1:
+                result_data = json.loads(content[first:last+1])
+    except Exception as e:
+        logger.error(f"Step4 JSON parse error: {e}")
+        result_data = {"error": str(e)}
+
+    # به‌روزرسانی نقشه راه
+    new_roadmap = result_data.get("new_roadmap_content")
+    if new_roadmap:
+        project.roadmap_content = new_roadmap
+
+    # به‌روزرسانی حالت ایده‌آل
+    ideal_state = result_data.get("ideal_state", {})
+    if ideal_state:
+        ideal_text = f"""## حالت ایده‌آل پروژه
+
+{ideal_state.get('description', '')}
+
+### کمبودهای فعلی:
+{chr(10).join(['- ' + d for d in ideal_state.get('current_deficiencies', [])])}
+
+### اقدامات مورد نیاز:
+{chr(10).join(['- ' + a for a in ideal_state.get('required_actions', [])])}
+
+### ساختار هدف:
+{ideal_state.get('target_architecture', '')}
+"""
+        project.ideal_state = ideal_text
+
+    # ایجاد فیلد برای آیتم‌های ناقص
+    created_fields = []
+    for update in result_data.get("roadmap_updates", []):
+        if not update.get("completed") and update.get("create_field"):
+            field_details = update.get("field_details", {})
+            new_field = {
+                "id": str(uuid.uuid4()),
+                "name": f"[نقشه راه] {field_details.get('name', update.get('item', 'تسک'))}",
+                "value": field_details.get("value", f"تسک نقشه راه: {update.get('item', '')}"),
+                "target_models": ["claude"],
+                "action_type": field_details.get("action_type", "github_commit"),
+                "target_path": field_details.get("target_path"),
+                "field_type": "temporary",
+                "priority": field_details.get("priority", 3),
+                "archive_after_run": True,
+                "engineering_approval": {
+                    "approved": True,
+                    "approved_at": datetime.utcnow().isoformat(),
+                    "approved_by": model_id,
+                    "approval_type": "roadmap_step4",
+                    "step": 4
+                },
+                "source": "roadmap",
+                "roadmap_item": update.get("item"),
+            }
+            existing_fields.append(new_field)
+            created_fields.append(new_field["name"])
+
+    project.dynamic_fields = json.dumps(existing_fields, ensure_ascii=False)
+    db.commit()
+
+    # ثبت در ژورنال
+    log_detailed_operation(
+        db, project_id, None,
+        "engineering_step4",
+        f"مرحله ۴: نقشه راه به‌روز شد، {len(created_fields)} فیلد از نقشه راه ایجاد شد",
+        details={"fields_created": len(created_fields), "roadmap_updated": bool(new_roadmap), "ideal_state_updated": bool(ideal_state)},
+        status="completed"
+    )
+    db.commit()
+
+    return {
+        "success": True,
+        "step": 4,
+        "step_name": "update_roadmap",
+        "model_used": model_id,
+        "results": {
+            "roadmap_updated": bool(new_roadmap),
+            "ideal_state_updated": bool(ideal_state),
+            "fields_created": len(created_fields),
+            "fields_created_names": created_fields,
+            "summary": result_data.get("summary", "")
+        }
+    }
+
+
+@router.post("/{project_id}/engineering/run-all-steps")
+async def engineering_run_all_steps(
+    project_id: str,
+    model_id: str = Query("claude"),
+    db: Session = Depends(get_db)
+):
+    """
+    🔴 اجرای تمام ۴ مرحله گزارش مهندسی به ترتیب
+    """
+    results = {}
+
+    # مرحله ۱
+    try:
+        step1 = await engineering_step1_validate_fields(project_id, model_id, db)
+        results["step1"] = step1
+    except Exception as e:
+        results["step1"] = {"success": False, "error": str(e)}
+
+    # مرحله ۲
+    try:
+        step2 = await engineering_step2_health_to_fields(project_id, model_id, db)
+        results["step2"] = step2
+    except Exception as e:
+        results["step2"] = {"success": False, "error": str(e)}
+
+    # مرحله ۳
+    try:
+        step3 = await engineering_step3_evaluate_models(project_id, model_id, db)
+        results["step3"] = step3
+    except Exception as e:
+        results["step3"] = {"success": False, "error": str(e)}
+
+    # مرحله ۴
+    try:
+        step4 = await engineering_step4_update_roadmap(project_id, model_id, db)
+        results["step4"] = step4
+    except Exception as e:
+        results["step4"] = {"success": False, "error": str(e)}
+
+    all_success = all(r.get("success", False) for r in results.values())
+
+    return {
+        "success": all_success,
+        "message": "تمام ۴ مرحله گزارش مهندسی اجرا شد" if all_success else "برخی مراحل با خطا مواجه شدند",
+        "steps": results
     }
 
 
