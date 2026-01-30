@@ -3335,6 +3335,7 @@ async def _log_to_journal(
     ثبت یک فعالیت در ژورنال پروژه
     """
     from datetime import datetime
+    from .project_journal import ActivityLog
     log_id = f"log_{uuid.uuid4().hex[:12]}"
 
     log = ActivityLog(
