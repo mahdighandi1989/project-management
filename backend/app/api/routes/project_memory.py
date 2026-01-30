@@ -1231,7 +1231,11 @@ async def enhanced_project_chat(
     db.commit()
 
     # 9. تبدیل به فیلدهای پویا اگر درخواست شده
+    # 🔴 بهبود: بررسی تکراری و ادغام فیلدهای مشابه قبل از افزودن
     created_fields = []
+    merged_fields = []
+    skipped_fields = []
+
     if request.create_dynamic_fields:
         for resp in responses:
             if resp.get("success") and resp.get("content"):
@@ -1241,7 +1245,7 @@ async def enhanced_project_chat(
                     request.auto_detect_actions
                 )
 
-                # ذخیره فیلدها در پروژه
+                # ذخیره فیلدها در پروژه با بررسی تکراری
                 if fields:
                     existing_fields = []
                     try:
@@ -1253,12 +1257,87 @@ async def enhanced_project_chat(
                         field["id"] = f"field_{uuid.uuid4().hex[:8]}"
                         field["created_at"] = datetime.utcnow().isoformat()
                         field["source_model"] = resp["model_id"]
-                        existing_fields.append(field)
-                        created_fields.append(field)
+                        field["source"] = "ai_query"  # 🔴 منبع فیلد
+
+                        # 🔴 بررسی تکراری بودن و امکان ادغام
+                        similar_field = None
+                        for ef in existing_fields:
+                            if ef.get("archived"):
+                                continue
+
+                            # بررسی شباهت نام یا محتوا
+                            name_similarity = _calculate_similarity(field.get("name", ""), ef.get("name", ""))
+                            value_similarity = _calculate_similarity(field.get("value", "")[:200], ef.get("value", "")[:200])
+
+                            # اگر نام یا محتوا خیلی شبیه بود
+                            if name_similarity > 0.7 or value_similarity > 0.6:
+                                similar_field = ef
+                                break
+
+                        if similar_field:
+                            # 🔴 بررسی کدام بهتر است
+                            new_priority = field.get("priority", 5)
+                            existing_priority = similar_field.get("priority", 5)
+
+                            if new_priority < existing_priority:
+                                # فیلد جدید بهتر است - ادغام
+                                similar_field["value"] = f"{similar_field.get('value', '')}\n\n--- ادغام شده از پرسش AI ---\n{field.get('value', '')}"
+                                similar_field["priority"] = new_priority
+                                similar_field["updated_at"] = datetime.utcnow().isoformat()
+                                similar_field["merged_with"] = field.get("name")
+                                merged_fields.append({"original": similar_field.get("name"), "merged": field.get("name")})
+                            else:
+                                # فیلد موجود بهتر است - رد شود
+                                skipped_fields.append({
+                                    "name": field.get("name"),
+                                    "reason": f"فیلد مشابه با اولویت بهتر وجود دارد: {similar_field.get('name')}"
+                                })
+                        else:
+                            # فیلد جدید - اضافه شود
+                            # 🔴 فیلدهای از پرسش AI نیاز به تاییدیه دارند (validation_marker=pending)
+                            field["validation_marker"] = "pending"
+                            field["needs_approval"] = True
+                            existing_fields.append(field)
+                            created_fields.append(field)
 
                     project.dynamic_fields = json.dumps(existing_fields, ensure_ascii=False)
 
         db.commit()
+
+        # 🔴 ثبت در ژورنال
+        if created_fields or merged_fields:
+            ai_query_log = ActivityLog(
+                id=f"log_{uuid.uuid4().hex[:12]}",
+                project_id=project_id,
+                model_id="system",
+                activity_type="ai_query_fields",
+                prompt=f"تولید فیلد از پرسش AI: {request.prompt[:200]}",
+                response=f"ایجاد {len(created_fields)} فیلد، ادغام {len(merged_fields)} فیلد، رد {len(skipped_fields)} فیلد",
+                tokens_used=0,
+                latency_ms=0,
+                success=True,
+                created_at=datetime.utcnow(),
+            )
+            db.add(ai_query_log)
+            db.commit()
+
+
+def _calculate_similarity(str1: str, str2: str) -> float:
+    """محاسبه شباهت دو رشته (0-1)"""
+    if not str1 or not str2:
+        return 0.0
+    str1 = str1.lower().strip()
+    str2 = str2.lower().strip()
+    if str1 == str2:
+        return 1.0
+    # محاسبه ساده با کلمات مشترک
+    words1 = set(str1.split())
+    words2 = set(str2.split())
+    if not words1 or not words2:
+        return 0.0
+    intersection = len(words1 & words2)
+    union = len(words1 | words2)
+    return intersection / union if union > 0 else 0.0
 
     return {
         "success": True,
@@ -1272,7 +1351,15 @@ async def enhanced_project_chat(
             "health_included": request.include_health,
             "memory_included": request.include_memory,
         },
+        # 🔴 اطلاعات کامل فیلدها
         "created_fields": created_fields if request.create_dynamic_fields else None,
+        "merged_fields": merged_fields if request.create_dynamic_fields else None,
+        "skipped_fields": skipped_fields if request.create_dynamic_fields else None,
+        "fields_summary": {
+            "created": len(created_fields),
+            "merged": len(merged_fields),
+            "skipped": len(skipped_fields)
+        } if request.create_dynamic_fields else None,
     }
 
 
@@ -1529,6 +1616,21 @@ async def execute_field_trigger(
         # بررسی بایگانی بودن
         if target_field.get("archived"):
             raise HTTPException(status_code=400, detail="این فیلد بایگانی شده و قابل اجرا نیست")
+
+        # 🔴 بررسی تاییدیه گزارش مهندسی - فقط فیلدهای تایید شده قابل اجرا هستند
+        action_type = target_field.get("action_type", "display")
+        if action_type in ["github_commit", "github_multi_commit", "file_edit"]:
+            engineering_approval = target_field.get("engineering_approval", {})
+            validation_marker = target_field.get("validation_marker")
+
+            # فیلدهای اقدام‌محور باید تاییدیه داشته باشند
+            if not engineering_approval.get("approved") and validation_marker not in ["validated", "approved"]:
+                # بررسی آیا فیلد از گزارش مهندسی آمده (این‌ها به طور پیش‌فرض تایید شده‌اند)
+                if not target_field.get("created_from_report"):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="این فیلد تاییدیه گزارش مهندسی ندارد. ابتدا گزارش مهندسی را اجرا کنید تا فیلدها تایید شوند."
+                    )
 
         # دریافت تنظیمات GitHub از پروژه
         github_info = {}
@@ -2452,6 +2554,22 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
 
     try:
         target_field = field_data
+
+        # 🔴 بررسی تاییدیه گزارش مهندسی
+        action_type = target_field.get("action_type", "display")
+        if action_type in ["github_commit", "github_multi_commit", "file_edit"]:
+            engineering_approval = target_field.get("engineering_approval", {})
+            validation_marker = target_field.get("validation_marker")
+
+            if not engineering_approval.get("approved") and validation_marker not in ["validated", "approved"]:
+                if not target_field.get("created_from_report"):
+                    logger.warning(f"[execute_field_internal] Field {field_id} lacks engineering approval, skipping")
+                    return {
+                        "success": False,
+                        "field_id": field_id,
+                        "error": "فیلد تاییدیه گزارش مهندسی ندارد",
+                        "requires_approval": True
+                    }
 
         # دریافت تنظیمات GitHub از پروژه
         github_info = {}

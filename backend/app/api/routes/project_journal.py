@@ -1569,6 +1569,13 @@ async def generate_engineering_report(
                         "validation_score": issue.get("validation_score", 0),
                         "validator_model": model_id,
                         "original_issue": original,
+                        # 🔴 تاییدیه گزارش مهندسی - فقط فیلدهای دارای این تاییدیه قابل اجرا هستند
+                        "engineering_approval": {
+                            "approved": True,
+                            "approved_at": datetime.utcnow().isoformat(),
+                            "approved_by": model_id,
+                            "approval_type": "health_validation"
+                        }
                     }
                     existing_fields.append(new_field)
                     created_fields.append(new_field["name"])
@@ -1606,6 +1613,13 @@ async def generate_engineering_report(
                             "attachments": [],
                             "trigger": {"enabled": False, "interval_minutes": 60, "interval_type": "minutes"},
                             "created_from_report": True,
+                            # 🔴 تاییدیه گزارش مهندسی
+                            "engineering_approval": {
+                                "approved": True,
+                                "approved_at": datetime.utcnow().isoformat(),
+                                "approved_by": model_id,
+                                "approval_type": "roadmap_task"
+                            }
                         }
                         existing_fields.append(new_field)
                         created_fields.append(new_field["name"])
@@ -1672,6 +1686,13 @@ async def generate_engineering_report(
                             "created_from_report": True,
                             "source": "journal_analysis",
                             "journal_entry_id": finding.get("journal_entry_id"),
+                            # 🔴 تاییدیه گزارش مهندسی
+                            "engineering_approval": {
+                                "approved": True,
+                                "approved_at": datetime.utcnow().isoformat(),
+                                "approved_by": model_id,
+                                "approval_type": "journal_finding"
+                            }
                         }
                         existing_fields.append(new_field)
                         created_fields.append(new_field["name"])
@@ -1902,3 +1923,283 @@ async def get_report_detail(
             "generated_by": report.generated_by,
         }
     }
+
+
+# =====================================
+# 🔴 نقشه راه - منتقل شده از تب تحلیل سلامت
+# =====================================
+
+class RoadmapRequest(BaseModel):
+    """درخواست به‌روزرسانی نقشه راه"""
+    content: Optional[str] = None
+    auto_generate: bool = False
+    model_id: Optional[str] = None
+
+
+@router.get("/{project_id}/roadmap")
+async def get_project_roadmap(project_id: str, db=Depends(get_db)):
+    """
+    دریافت نقشه راه پروژه
+    🔴 این endpoint از تب تحلیل سلامت به تب ژورنال و گزارشات منتقل شده
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    issues = []
+    try:
+        if project.issues_found:
+            issues = json.loads(project.issues_found)
+    except:
+        pass
+
+    # دریافت آخرین گزارش مهندسی برای اطلاعات تکمیلی
+    last_report = db.query(Report).filter(
+        Report.project_id == project_id,
+        Report.report_type == "engineering"
+    ).order_by(desc(Report.created_at)).first()
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "roadmap_exists": bool(project.roadmap_content),
+        "roadmap_content": project.roadmap_content or "",
+        "ideal_state": project.ideal_state or "",
+        "issues_found": issues,
+        "last_engineering_report": {
+            "id": last_report.id,
+            "created_at": last_report.created_at.isoformat() if last_report and last_report.created_at else None,
+            "summary": last_report.summary if last_report else None
+        } if last_report else None
+    }
+
+
+@router.put("/{project_id}/roadmap")
+async def update_project_roadmap(
+    project_id: str,
+    request: RoadmapRequest,
+    db=Depends(get_db)
+):
+    """
+    به‌روزرسانی نقشه راه پروژه
+    🔴 تحلیل سلامت نقشه راه را به‌روزرسانی نمی‌کند - فقط گزارش مهندسی
+    """
+    from ...models.project import ProjectFile
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    if request.content:
+        # ذخیره دستی
+        project.roadmap_content = request.content
+        db.commit()
+
+        # ثبت در ژورنال
+        log_entry = ActivityLog(
+            id=f"log_{uuid.uuid4().hex[:12]}",
+            project_id=project_id,
+            model_id="manual",
+            activity_type="roadmap_update",
+            prompt="به‌روزرسانی دستی نقشه راه",
+            response=f"نقشه راه ذخیره شد ({len(request.content)} کاراکتر)",
+            tokens_used=0,
+            latency_ms=0,
+            success=True,
+            created_at=datetime.utcnow(),
+        )
+        db.add(log_entry)
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "نقشه راه ذخیره شد",
+            "source": "manual"
+        }
+
+    elif request.auto_generate:
+        # تولید خودکار با AI
+        from ...services.ai_manager import get_ai_manager
+        from ...services.ai_base import Message
+
+        ai_manager = get_ai_manager()
+        model_id = request.model_id or "claude"
+
+        files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+        files_list = [f.file_path for f in files[:50]]
+
+        # پرامپت برای تولید نقشه راه
+        prompt = f"""پروژه: {project.name}
+توضیحات: {project.description or 'ندارد'}
+نوع: {project.project_type or 'نامشخص'}
+
+فایل‌های پروژه:
+{chr(10).join(['- ' + f for f in files_list])}
+
+حالت ایده‌آل فعلی:
+{project.ideal_state or 'تعریف نشده'}
+
+یک نقشه راه کامل و حرفه‌ای به زبان فارسی بنویس که شامل:
+1. اهداف کوتاه‌مدت و بلندمدت
+2. فازهای توسعه با جزئیات
+3. موارد انجام شده (با تیک سبز ✅)
+4. موارد در انتظار (با باکس خالی ⬜)
+5. زمان‌بندی تقریبی
+
+فرمت: Markdown با چک‌باکس‌ها"""
+
+        try:
+            response = await ai_manager.generate(
+                model_id=model_id,
+                messages=[Message(role="user", content=prompt)],
+                max_tokens=3000,
+                temperature=0.5
+            )
+
+            content = response.content.strip()
+            if content.startswith("```"):
+                content = content.split("```", 2)[1]
+                if content.startswith("markdown"):
+                    content = content[8:]
+                content = content.strip()
+
+            project.roadmap_content = content
+            db.commit()
+
+            # ثبت در ژورنال
+            log_entry = ActivityLog(
+                id=f"log_{uuid.uuid4().hex[:12]}",
+                project_id=project_id,
+                model_id=model_id,
+                activity_type="roadmap_generation",
+                prompt=prompt[:500],
+                response=content[:1000],
+                tokens_used=response.tokens_used or 0,
+                latency_ms=0,
+                success=True,
+                created_at=datetime.utcnow(),
+            )
+            db.add(log_entry)
+            db.commit()
+
+            return {
+                "success": True,
+                "message": "نقشه راه تولید شد",
+                "source": "auto",
+                "model_used": model_id
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    return {"success": False, "message": "محتوا یا auto_generate لازم است"}
+
+
+# =====================================
+# 🔴 تابع کمکی برای ثبت در ژورنال با پشتیبانی از fallback
+# =====================================
+
+def log_activity_with_fallback(
+    db,
+    project_id: str,
+    model_id: str,
+    activity_type: str,
+    prompt: str,
+    response_content: str,
+    tokens_used: int = 0,
+    latency_ms: int = 0,
+    success: bool = True,
+    error_message: str = None,
+    field_id: str = None,
+    field_name: str = None,
+    fallback_used: bool = False,
+    original_model_id: str = None,
+    extra_data: dict = None
+):
+    """
+    ثبت فعالیت در ژورنال با پشتیبانی از اطلاعات fallback
+
+    🔴 اگر مدلی غیرفعال شده و fallback استفاده شده:
+    - نام مدل جایگزین ثبت می‌شود
+    - توضیح جایگزینی در extra_data ذخیره می‌شود
+    """
+    extra = extra_data or {}
+
+    # 🔴 ثبت اطلاعات fallback
+    if fallback_used and original_model_id:
+        extra["fallback_info"] = {
+            "original_model": original_model_id,
+            "replacement_model": model_id,
+            "reason": "مدل اصلی غیرفعال بود - جایگزین خودکار",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        # 🔴 اصلاح نام مدل در provider برای نمایش صحیح
+        provider = model_id.split("-")[0] if "-" in model_id else model_id
+    else:
+        provider = model_id.split("-")[0] if "-" in model_id else model_id
+
+    log_entry = ActivityLog(
+        id=f"log_{uuid.uuid4().hex[:12]}",
+        project_id=project_id,
+        model_id=model_id,
+        model_provider=provider,
+        activity_type=activity_type,
+        prompt=prompt[:2000] if prompt else None,
+        response=response_content[:5000] if response_content else None,
+        tokens_used=tokens_used,
+        latency_ms=latency_ms,
+        success=success,
+        error_message=error_message[:500] if error_message else None,
+        field_id=field_id,
+        field_name=field_name,
+        created_at=datetime.utcnow(),
+        extra_data=json.dumps(extra, ensure_ascii=False) if extra else None
+    )
+
+    db.add(log_entry)
+    return log_entry
+
+
+# =====================================
+# 🔴 جلوگیری از دور باطل - تابع بررسی تکرار
+# =====================================
+
+def check_cycle_prevention(
+    db,
+    project_id: str,
+    activity_type: str,
+    field_id: str = None,
+    minutes_threshold: int = 5
+) -> bool:
+    """
+    بررسی آیا این فعالیت اخیراً اجرا شده (جلوگیری از دور باطل)
+
+    Returns:
+        True اگر فعالیت مجاز است
+        False اگر فعالیت تکراری است
+    """
+    from datetime import timedelta
+
+    threshold_time = datetime.utcnow() - timedelta(minutes=minutes_threshold)
+
+    # بررسی آیا فعالیت مشابه اخیراً اجرا شده
+    query = db.query(ActivityLog).filter(
+        ActivityLog.project_id == project_id,
+        ActivityLog.activity_type == activity_type,
+        ActivityLog.created_at > threshold_time,
+        ActivityLog.success == True
+    )
+
+    if field_id:
+        query = query.filter(ActivityLog.field_id == field_id)
+
+    recent_activity = query.first()
+
+    if recent_activity:
+        # فعالیت مشابه در بازه زمانی اخیر وجود دارد
+        return False
+
+    return True
