@@ -7,6 +7,7 @@ import json
 import uuid
 import time
 import asyncio
+from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -3258,44 +3259,282 @@ async def list_render_services(
 
 
 # =====================================
-# راه‌اندازی خودکار پروژه
+# راه‌اندازی خودکار پروژه - نسخه جامع
 # =====================================
+
+async def _log_to_journal(
+    db: Session,
+    project_id: str,
+    action_type: str,
+    title: str,
+    description: str,
+    details: Dict[str, Any] = None,
+    success: bool = True
+) -> str:
+    """
+    ثبت یک فعالیت در ژورنال پروژه
+    """
+    from datetime import datetime
+    log_id = f"log_{uuid.uuid4().hex[:12]}"
+
+    log = ActivityLog(
+        id=log_id,
+        project_id=project_id,
+        model_id="system",
+        model_provider="auto-setup",
+        activity_type=action_type,
+        prompt=title,
+        response=description,
+        tokens_used=0,
+        latency_ms=0,
+        success=success,
+        field_name=title,
+        extra_data=json.dumps({
+            "details": details or {},
+            "timestamp": datetime.utcnow().isoformat(),
+            "clickable": True,  # قابل کلیک در UI
+            "full_description": description
+        }, ensure_ascii=False),
+        created_at=datetime.utcnow(),
+    )
+
+    db.add(log)
+    return log_id
+
 
 @router.post("/{project_id}/memory/auto-setup")
 async def auto_setup_project(
     project_id: str,
     use_ai: bool = True,
+    sync_github: bool = True,  # سینک با GitHub قبل از شروع
+    clean_invalid: bool = True,  # حذف محتوای نامعتبر
     db: Session = Depends(get_db)
 ):
     """
-    راه‌اندازی خودکار هوشمند حافظه و فیلدهای پویا برای پروژه
-    🔴 نسخه بهبودیافته: در نظر گرفتن تمام context موجود
+    🚀 راه‌اندازی خودکار جامع پروژه
+
+    قابلیت‌ها:
+    1. بررسی کامل پوشه اصلی پروژه در گیت‌هاب (sync_github=True)
+    2. به‌روزرسانی و سینک داده‌های تب‌های مختلف با محتوای فعلی
+    3. حذف محتوای نامعتبر از تب‌ها (clean_invalid=True)
+    4. ایجاد/به‌روزرسانی فیلدهای پویا با اولویت‌بندی
+    5. بررسی فیلدها: نگه‌داری، بایگانی، ادغام
+    6. ثبت تمام عملیات در ژورنال (سطر به سطر، قابل کلیک)
+    7. به‌روزرسانی دقیق باکس حافظه
     """
     from ...services.project_auto_setup import auto_setup_project_memory
     from ...models.project import ProjectFile
+    from datetime import datetime
     import logging
+    import httpx
+
     logger = logging.getLogger(__name__)
+
+    # نتیجه نهایی با جزئیات کامل
+    result = {
+        "success": False,
+        "project_id": project_id,
+        "journal_entries": [],  # لیست تمام ثبت‌های ژورنال
+        "operations": {
+            "github_sync": {"done": False, "details": {}},
+            "invalid_cleanup": {"done": False, "removed": []},
+            "fields_analysis": {"done": False, "archived": [], "merged": [], "created": [], "updated": [], "preserved": []},
+            "memory_update": {"done": False, "previous": "", "new": ""},
+            "tabs_update": {"done": False, "tabs": []}
+        },
+        "summary": ""
+    }
 
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
 
-    # دریافت فایل‌ها
+    # ========================================
+    # مرحله 1: سینک با GitHub (اگر فعال باشد)
+    # ========================================
+    if sync_github and project.project_type == "github_import":
+        try:
+            log_id = await _log_to_journal(
+                db, project_id, "auto_setup_step",
+                "🔄 شروع سینک با GitHub",
+                "در حال بازیابی آخرین تغییرات از ریپازیتوری GitHub...",
+                {"step": 1, "action": "github_sync_start"}
+            )
+            result["journal_entries"].append(log_id)
+
+            # دریافت اطلاعات GitHub از extra_data
+            extra_data = {}
+            try:
+                if project.extra_data:
+                    extra_data = json.loads(project.extra_data)
+            except:
+                pass
+
+            owner = extra_data.get("owner")
+            repo = extra_data.get("repo")
+            branch = extra_data.get("branch", "main")
+
+            if owner and repo:
+                # فراخوانی API سینک داخلی
+                try:
+                    async with httpx.AsyncClient() as client:
+                        sync_response = await client.post(
+                            f"http://localhost:8000/api/github/imported/{project_id}/refresh",
+                            timeout=60.0
+                        )
+                        sync_data = sync_response.json()
+
+                        if sync_data.get("success"):
+                            files_added = sync_data.get("files_added", 0)
+                            files_updated = sync_data.get("files_updated", 0)
+                            files_removed = sync_data.get("files_removed", 0)
+
+                            result["operations"]["github_sync"] = {
+                                "done": True,
+                                "details": {
+                                    "files_added": files_added,
+                                    "files_updated": files_updated,
+                                    "files_removed": files_removed,
+                                    "owner": owner,
+                                    "repo": repo,
+                                    "branch": branch
+                                }
+                            }
+
+                            log_id = await _log_to_journal(
+                                db, project_id, "auto_setup_step",
+                                "✅ سینک GitHub کامل شد",
+                                f"فایل‌های اضافه شده: {files_added} | به‌روز شده: {files_updated} | حذف شده: {files_removed}",
+                                {"step": 1, "action": "github_sync_complete", "files_added": files_added, "files_updated": files_updated, "files_removed": files_removed}
+                            )
+                            result["journal_entries"].append(log_id)
+                        else:
+                            logger.warning(f"GitHub sync returned error: {sync_data}")
+                except Exception as e:
+                    logger.error(f"GitHub sync error: {e}")
+                    log_id = await _log_to_journal(
+                        db, project_id, "auto_setup_step",
+                        "⚠️ خطا در سینک GitHub",
+                        f"سینک با GitHub انجام نشد: {str(e)}",
+                        {"step": 1, "action": "github_sync_error", "error": str(e)},
+                        success=False
+                    )
+                    result["journal_entries"].append(log_id)
+        except Exception as e:
+            logger.error(f"GitHub sync phase error: {e}")
+
+    # ========================================
+    # مرحله 2: دریافت فایل‌های به‌روز شده
+    # ========================================
     files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+    current_file_paths = set(f.file_path for f in files)
     files_data = [
         {"path": f.file_path, "content": f.content[:2000] if f.content else "", "file_type": f.file_type}
         for f in files
     ]
 
-    # 🔴 جمع‌آوری context کامل از پروژه
-    full_context = await gather_project_context(project_id, project, db)
-    logger.info(f"[Auto-Setup] Gathered context: {len(full_context.get('health_issues', []))} health issues, "
-                f"{len(full_context.get('unexecuted_fields', []))} unexecuted fields, "
-                f"run_count={full_context.get('auto_setup_run_count', 0)}")
+    log_id = await _log_to_journal(
+        db, project_id, "auto_setup_step",
+        "📁 بررسی فایل‌های پروژه",
+        f"تعداد کل فایل‌ها: {len(files)}",
+        {"step": 2, "action": "files_loaded", "total_files": len(files)}
+    )
+    result["journal_entries"].append(log_id)
 
-    # اجرای auto-setup با context کامل
+    # ========================================
+    # مرحله 3: حذف محتوای نامعتبر
+    # ========================================
+    if clean_invalid:
+        removed_items = []
+
+        # بررسی فیلدهای موجود برای target_path نامعتبر
+        existing_fields = []
+        try:
+            if project.dynamic_fields:
+                existing_fields = json.loads(project.dynamic_fields)
+        except:
+            pass
+
+        for field in existing_fields:
+            if field.get("archived"):
+                continue
+            target_path = field.get("target_path")
+            if target_path and target_path not in current_file_paths:
+                # فایل هدف حذف شده - فیلد را بایگانی کن
+                field["archived"] = True
+                field["archived_at"] = datetime.utcnow().isoformat()
+                field["archived_reason"] = "target_file_removed_auto_setup"
+                removed_items.append({
+                    "type": "field",
+                    "name": field.get("name"),
+                    "reason": f"فایل هدف حذف شده: {target_path}"
+                })
+
+                log_id = await _log_to_journal(
+                    db, project_id, "auto_setup_cleanup",
+                    f"🗑️ بایگانی فیلد: {field.get('name')}",
+                    f"فایل هدف ({target_path}) دیگر در پروژه وجود ندارد",
+                    {"field_id": field.get("id"), "field_name": field.get("name"), "target_path": target_path}
+                )
+                result["journal_entries"].append(log_id)
+
+        # ذخیره فیلدهای به‌روز شده
+        if removed_items:
+            project.dynamic_fields = json.dumps(existing_fields, ensure_ascii=False)
+
+        result["operations"]["invalid_cleanup"] = {
+            "done": True,
+            "removed": removed_items
+        }
+
+        if removed_items:
+            log_id = await _log_to_journal(
+                db, project_id, "auto_setup_step",
+                "🧹 پاکسازی محتوای نامعتبر",
+                f"تعداد موارد حذف/بایگانی شده: {len(removed_items)}",
+                {"step": 3, "action": "cleanup_complete", "removed_count": len(removed_items), "items": removed_items}
+            )
+            result["journal_entries"].append(log_id)
+
+    # ========================================
+    # مرحله 4: جمع‌آوری context کامل
+    # ========================================
+    full_context = await gather_project_context(project_id, project, db)
+
+    log_id = await _log_to_journal(
+        db, project_id, "auto_setup_step",
+        "📊 جمع‌آوری اطلاعات پروژه",
+        f"ایرادات سلامت: {len(full_context.get('health_issues', []))} | فیلدهای اجرا نشده: {len(full_context.get('unexecuted_fields', []))}",
+        {"step": 4, "action": "context_gathered",
+         "health_issues": len(full_context.get('health_issues', [])),
+         "unexecuted_fields": len(full_context.get('unexecuted_fields', [])),
+         "has_roadmap": bool(full_context.get('roadmap_content')),
+         "run_count": full_context.get('auto_setup_run_count', 0)}
+    )
+    result["journal_entries"].append(log_id)
+
+    # ========================================
+    # مرحله 5: اجرای auto-setup با AI
+    # ========================================
+    log_id = await _log_to_journal(
+        db, project_id, "auto_setup_step",
+        "🤖 شروع تحلیل هوشمند AI",
+        "در حال تحلیل ساختار پروژه و تولید فیلدهای پویا...",
+        {"step": 5, "action": "ai_analysis_start", "use_ai": use_ai}
+    )
+    result["journal_entries"].append(log_id)
+
+    # ذخیره حافظه قبلی
+    previous_memory = ""
     try:
-        result = await auto_setup_project_memory(
+        if project.memory_instructions:
+            mem_data = json.loads(project.memory_instructions)
+            previous_memory = mem_data.get("content", "")
+    except:
+        previous_memory = project.memory_instructions or ""
+
+    try:
+        setup_result = await auto_setup_project_memory(
             project_id=project_id,
             project_name=project.name,
             project_description=project.description or "",
@@ -3303,35 +3542,230 @@ async def auto_setup_project(
             files=files_data,
             use_ai=use_ai,
             db_session=db,
-            full_context=full_context  # 🔴 ارسال context کامل
+            full_context=full_context
         )
     except Exception as e:
-        logger.error(f"[Auto-Setup] Error: {e}")
+        logger.error(f"[Auto-Setup] AI Error: {e}")
+        log_id = await _log_to_journal(
+            db, project_id, "auto_setup_error",
+            "❌ خطا در تحلیل AI",
+            str(e),
+            {"step": 5, "action": "ai_error", "error": str(e)},
+            success=False
+        )
+        result["journal_entries"].append(log_id)
+        db.commit()
         raise HTTPException(status_code=500, detail=f"خطا در راه‌اندازی: {str(e)}")
 
-    if not result.get("success"):
-        raise HTTPException(status_code=500, detail=result.get("error", "خطا در راه‌اندازی"))
+    if not setup_result.get("success"):
+        error_msg = setup_result.get("error", "خطای ناشناخته")
+        log_id = await _log_to_journal(
+            db, project_id, "auto_setup_error",
+            "❌ راه‌اندازی خودکار ناموفق",
+            error_msg,
+            {"step": 5, "action": "setup_failed", "error": error_msg},
+            success=False
+        )
+        result["journal_entries"].append(log_id)
+        db.commit()
+        raise HTTPException(status_code=500, detail=error_msg)
 
-    # تبدیل به JSON-serializable
-    return {
-        "success": True,
-        "project_id": result.get("project_id"),
-        "detected_type": result.get("detected_type"),
-        "language": result.get("language"),
-        "architecture": result.get("architecture"),
-        "frameworks": result.get("frameworks", []),
-        "ai_insights": result.get("ai_insights"),
-        "recommendations": result.get("recommendations", []),
-        "tokens_used": result.get("tokens_used", 0),
-        "model_used": result.get("model_used"),
-        "fields_created": len(result.get("dynamic_fields", [])),
-        "context_used": {  # 🔴 اطلاع‌رسانی از context استفاده شده
-            "health_issues_count": len(full_context.get("health_issues", [])),
-            "unexecuted_fields_count": len(full_context.get("unexecuted_fields", [])),
-            "has_roadmap": bool(full_context.get("roadmap_content")),
-            "run_count": full_context.get("auto_setup_run_count", 0)
-        }
+    # ========================================
+    # مرحله 6: ثبت جزئیات عملیات فیلدها
+    # ========================================
+
+    # فیلدهای بایگانی شده
+    archived_count = setup_result.get("fields_archived", 0)
+    if archived_count > 0:
+        log_id = await _log_to_journal(
+            db, project_id, "auto_setup_field_op",
+            f"📦 بایگانی {archived_count} فیلد",
+            "فیلدهای انجام شده یا منسوخ بایگانی شدند",
+            {"action": "fields_archived", "count": archived_count}
+        )
+        result["journal_entries"].append(log_id)
+
+    # فیلدهای ادغام شده
+    merged_count = setup_result.get("fields_merged", 0)
+    if merged_count > 0:
+        log_id = await _log_to_journal(
+            db, project_id, "auto_setup_field_op",
+            f"🔗 ادغام {merged_count} فیلد",
+            "فیلدهای مشابه برای عملکرد بهتر ادغام شدند",
+            {"action": "fields_merged", "count": merged_count}
+        )
+        result["journal_entries"].append(log_id)
+
+    # فیلدهای به‌روز شده
+    updated_count = setup_result.get("fields_updated", 0)
+    if updated_count > 0:
+        log_id = await _log_to_journal(
+            db, project_id, "auto_setup_field_op",
+            f"✏️ به‌روزرسانی {updated_count} فیلد",
+            "محتوا و تنظیمات فیلدها به‌روز شد",
+            {"action": "fields_updated", "count": updated_count}
+        )
+        result["journal_entries"].append(log_id)
+
+    # فیلدهای جدید
+    new_count = setup_result.get("new_fields_count", 0)
+    if new_count > 0:
+        log_id = await _log_to_journal(
+            db, project_id, "auto_setup_field_op",
+            f"➕ ایجاد {new_count} فیلد جدید",
+            "فیلدهای جدید بر اساس نیازهای شناسایی شده ایجاد شدند",
+            {"action": "fields_created", "count": new_count}
+        )
+        result["journal_entries"].append(log_id)
+
+    # فیلدهای محافظت شده
+    protected_count = setup_result.get("fields_protected", 0)
+    if protected_count > 0:
+        log_id = await _log_to_journal(
+            db, project_id, "auto_setup_field_op",
+            f"🛡️ محافظت از {protected_count} فیلد",
+            "فیلدهای ایجاد شده توسط گزارش مهندسی محافظت شدند",
+            {"action": "fields_protected", "count": protected_count}
+        )
+        result["journal_entries"].append(log_id)
+
+    result["operations"]["fields_analysis"] = {
+        "done": True,
+        "archived": archived_count,
+        "merged": merged_count,
+        "updated": updated_count,
+        "created": new_count,
+        "protected": protected_count
     }
+
+    # ========================================
+    # مرحله 7: ثبت به‌روزرسانی حافظه
+    # ========================================
+    new_memory = ""
+    try:
+        mem_data = setup_result.get("memory_instructions", {})
+        if isinstance(mem_data, dict):
+            new_memory = mem_data.get("content", "")
+        else:
+            new_memory = str(mem_data)
+    except:
+        pass
+
+    if new_memory and new_memory != previous_memory:
+        log_id = await _log_to_journal(
+            db, project_id, "auto_setup_memory",
+            "💾 به‌روزرسانی باکس حافظه",
+            f"حافظه پروژه با اطلاعات جدید به‌روز شد (طول: {len(new_memory)} کاراکتر)",
+            {"action": "memory_updated", "previous_length": len(previous_memory), "new_length": len(new_memory)}
+        )
+        result["journal_entries"].append(log_id)
+
+    result["operations"]["memory_update"] = {
+        "done": True,
+        "previous_length": len(previous_memory),
+        "new_length": len(new_memory),
+        "changed": new_memory != previous_memory
+    }
+
+    # ========================================
+    # مرحله 8: به‌روزرسانی سایر تب‌ها
+    # ========================================
+    tabs_updated = []
+
+    # به‌روزرسانی اطلاعات تشخیص داده شده در پروژه
+    try:
+        extra_data = json.loads(project.extra_data) if project.extra_data else {}
+    except:
+        extra_data = {}
+
+    extra_data["auto_setup_result"] = {
+        "detected_type": setup_result.get("detected_type"),
+        "language": setup_result.get("language"),
+        "architecture": setup_result.get("architecture"),
+        "frameworks": setup_result.get("frameworks", []),
+        "last_run": datetime.utcnow().isoformat(),
+        "run_count": full_context.get("auto_setup_run_count", 1)
+    }
+
+    # ذخیره توصیه‌ها در extra_data برای تب سلامت
+    if setup_result.get("recommendations"):
+        extra_data["ai_recommendations"] = setup_result.get("recommendations")
+        tabs_updated.append("health")
+
+    # ذخیره missing_files برای تب ساختار
+    if setup_result.get("missing_files"):
+        extra_data["missing_files"] = setup_result.get("missing_files")
+        tabs_updated.append("structure")
+
+    project.extra_data = json.dumps(extra_data, ensure_ascii=False)
+
+    # به‌روزرسانی توضیحات پروژه اگر خالی است
+    if not project.description and setup_result.get("ai_insights"):
+        project.description = setup_result.get("ai_insights")[:500]
+        tabs_updated.append("info")
+
+    result["operations"]["tabs_update"] = {
+        "done": True,
+        "tabs": tabs_updated
+    }
+
+    if tabs_updated:
+        log_id = await _log_to_journal(
+            db, project_id, "auto_setup_tabs",
+            f"📑 به‌روزرسانی تب‌ها: {', '.join(tabs_updated)}",
+            "اطلاعات تب‌های مختلف با داده‌های جدید به‌روز شد",
+            {"action": "tabs_updated", "tabs": tabs_updated}
+        )
+        result["journal_entries"].append(log_id)
+
+    # ========================================
+    # مرحله 9: ثبت خلاصه نهایی
+    # ========================================
+    summary = f"""راه‌اندازی خودکار با موفقیت انجام شد!
+• نوع پروژه: {setup_result.get('detected_type', 'نامشخص')}
+• زبان: {setup_result.get('language', 'نامشخص')}
+• فیلدهای جدید: {new_count}
+• فیلدهای بایگانی شده: {archived_count}
+• فیلدهای به‌روز شده: {updated_count}
+• مدل AI: {setup_result.get('model_used', 'نامشخص')}"""
+
+    log_id = await _log_to_journal(
+        db, project_id, "auto_setup_complete",
+        "✅ راه‌اندازی خودکار کامل شد",
+        summary,
+        {
+            "action": "setup_complete",
+            "detected_type": setup_result.get("detected_type"),
+            "language": setup_result.get("language"),
+            "architecture": setup_result.get("architecture"),
+            "frameworks": setup_result.get("frameworks", []),
+            "total_journal_entries": len(result["journal_entries"]) + 1
+        }
+    )
+    result["journal_entries"].append(log_id)
+
+    # کامیت نهایی
+    db.commit()
+
+    result["success"] = True
+    result["summary"] = summary
+    result["detected_type"] = setup_result.get("detected_type")
+    result["language"] = setup_result.get("language")
+    result["architecture"] = setup_result.get("architecture")
+    result["frameworks"] = setup_result.get("frameworks", [])
+    result["ai_insights"] = setup_result.get("ai_insights")
+    result["recommendations"] = setup_result.get("recommendations", [])
+    result["tokens_used"] = setup_result.get("tokens_used", 0)
+    result["model_used"] = setup_result.get("model_used")
+    result["fields_count"] = len(setup_result.get("dynamic_fields", []))
+    result["context_used"] = {
+        "health_issues_count": len(full_context.get("health_issues", [])),
+        "unexecuted_fields_count": len(full_context.get("unexecuted_fields", [])),
+        "has_roadmap": bool(full_context.get("roadmap_content")),
+        "run_count": full_context.get("auto_setup_run_count", 0)
+    }
+
+    return result
 
 
 async def gather_project_context(project_id: str, project, db: Session) -> Dict[str, Any]:
