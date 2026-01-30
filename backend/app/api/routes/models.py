@@ -811,9 +811,16 @@ async def update_model_settings(
 async def toggle_model_enabled(model_id: str, db: Session = Depends(get_db)):
     """
     تغییر وضعیت فعال/غیرفعال مدل
+
+    🔴 بهبود: وقتی مدل غیرفعال می‌شود:
+    - بررسی می‌شود که آیا در پروژه‌ها استفاده می‌شود
+    - fallback هوشمند پیشنهاد می‌شود
+    - اطلاعات کامل برگردانده می‌شود
     """
     try:
         from ...core.models_registry import MODEL_REGISTRY
+        from ...services.ai_manager import get_ai_manager
+        from ...models.project import Project
 
         if model_id not in MODEL_REGISTRY:
             raise HTTPException(status_code=404, detail="مدل یافت نشد")
@@ -829,10 +836,73 @@ async def toggle_model_enabled(model_id: str, db: Session = Depends(get_db)):
 
         db.commit()
 
+        # 🔴 اگر مدل غیرفعال شد، پیدا کردن fallback و پروژه‌های تأثیرپذیر
+        fallback_info = None
+        affected_projects = []
+
+        if not setting.enabled:
+            ai_manager = get_ai_manager()
+
+            # پیدا کردن بهترین fallback
+            fallback_model_id = ai_manager.find_fallback_model(model_id)
+            if fallback_model_id:
+                fallback_model = MODEL_REGISTRY.get(fallback_model_id)
+                fallback_info = {
+                    "model_id": fallback_model_id,
+                    "name": fallback_model.name if fallback_model else fallback_model_id,
+                    "provider": fallback_model.provider.value if fallback_model else "unknown",
+                    "message": f"کارهای این مدل به {fallback_model.name if fallback_model else fallback_model_id} منتقل خواهد شد"
+                }
+
+            # بررسی پروژه‌هایی که از این مدل استفاده می‌کنند
+            try:
+                projects = db.query(Project).all()
+                for project in projects:
+                    uses_model = False
+
+                    # بررسی فیلدهای پویا
+                    if project.dynamic_fields:
+                        try:
+                            fields = json.loads(project.dynamic_fields)
+                            for field in fields:
+                                if not field.get("archived"):
+                                    target_models = field.get("target_models", [])
+                                    if model_id in target_models:
+                                        uses_model = True
+                                        break
+                        except:
+                            pass
+
+                    # بررسی تنظیمات تحلیل سلامت
+                    if project.health_settings:
+                        try:
+                            health_settings = json.loads(project.health_settings)
+                            if model_id in health_settings.get("target_models", []):
+                                uses_model = True
+                        except:
+                            pass
+
+                    if uses_model:
+                        affected_projects.append({
+                            "id": project.id,
+                            "name": project.name,
+                        })
+            except Exception as e:
+                logger.warning(f"Could not check affected projects: {e}")
+
         return {
             "success": True,
             "model_id": model_id,
-            "enabled": bool(setting.enabled)
+            "enabled": bool(setting.enabled),
+            # 🔴 اطلاعات جدید
+            "fallback": fallback_info,
+            "affected_projects": affected_projects[:20],  # حداکثر 20 پروژه
+            "affected_projects_count": len(affected_projects),
+            "message": f"مدل {'فعال' if setting.enabled else 'غیرفعال'} شد" + (
+                f". {len(affected_projects)} پروژه تحت تأثیر قرار خواهند گرفت و کارها به {fallback_info['name'] if fallback_info else 'مدل پیش‌فرض'} منتقل می‌شود."
+                if not setting.enabled and affected_projects
+                else ""
+            )
         }
 
     except HTTPException:

@@ -242,10 +242,11 @@ class AIManager:
         """
         یافتن نزدیک‌ترین مدل فعال به مدل غیرفعال شده
 
-        استراتژی:
-        1. مدل‌های هم‌provider با قابلیت‌های مشابه
-        2. مدل‌های دیگر provider با قابلیت‌های مشابه
-        3. اگر فقط یک مدل فعال بود، همان را برگردان
+        استراتژی (بهبود یافته):
+        1. 🆕 استفاده از امتیازات واقعی از model_profiler
+        2. مدل‌های هم‌provider با قابلیت‌های مشابه
+        3. مدل‌های دیگر provider با قابلیت‌های مشابه
+        4. اگر فقط یک مدل فعال بود، همان را برگردان
 
         Args:
             disabled_model_id: شناسه مدل غیرفعال
@@ -276,6 +277,37 @@ class AIManager:
             logger.info(f"Only one model available, using {fallback} as fallback for {disabled_model_id}")
             return fallback
 
+        # 🆕 دریافت امتیازات واقعی از model_profiler
+        profile_scores = {}
+        try:
+            from .model_profiler import ModelProfiler
+            profiler = ModelProfiler()
+
+            # دریافت پروفایل مدل غیرفعال برای مقایسه
+            disabled_profile = profiler.get_profile(disabled_model_id)
+            disabled_overall_score = disabled_profile.overall_score if disabled_profile else 50.0
+
+            # دریافت پروفایل همه مدل‌های فعال
+            for model in available_models:
+                profile = profiler.get_profile(model.id)
+                if profile:
+                    profile_scores[model.id] = {
+                        'overall': profile.overall_score,
+                        'accuracy': profile.accuracy_score,
+                        'tier': profile.tier,
+                        # 🆕 امتیاز براساس task_type خاص
+                        'task_score': profile.last_scores_by_task.get(task_type, {}).get('overall', profile.overall_score) if task_type else profile.overall_score
+                    }
+                    logger.debug(f"Profile for {model.id}: overall={profile.overall_score}, tier={profile.tier}")
+                else:
+                    profile_scores[model.id] = {'overall': 50.0, 'accuracy': 50.0, 'tier': 'C', 'task_score': 50.0}
+
+            logger.info(f"🔴 Loaded profiles for {len(profile_scores)} models for smart fallback")
+
+        except Exception as e:
+            logger.warning(f"Could not load model profiles for fallback: {e}")
+            disabled_overall_score = 50.0
+
         # قابلیت‌های مدل غیرفعال
         disabled_caps = set(disabled_model.capabilities)
         disabled_provider = disabled_model.provider
@@ -286,23 +318,43 @@ class AIManager:
             score = 0
             model_caps = set(model.capabilities)
 
+            # 🆕 امتیاز اصلی از پروفایل واقعی (تا 40 امتیاز)
+            if model.id in profile_scores:
+                profile = profile_scores[model.id]
+                # امتیاز براساس نزدیکی به مدل غیرفعال + کیفیت خود مدل
+                task_score = profile.get('task_score', profile['overall'])
+
+                # 20 امتیاز برای مدل با عملکرد مشابه یا بهتر
+                if task_score >= disabled_overall_score * 0.9:
+                    score += 20
+                elif task_score >= disabled_overall_score * 0.7:
+                    score += 15
+                else:
+                    score += 10
+
+                # 20 امتیاز اضافی براساس tier
+                tier_bonus = {'S': 20, 'A': 16, 'B': 12, 'C': 8, 'D': 4, 'F': 0}
+                score += tier_bonus.get(profile['tier'], 0)
+
             # امتیاز برای قابلیت‌های مشترک (هر قابلیت 10 امتیاز)
             common_caps = disabled_caps & model_caps
             score += len(common_caps) * 10
 
-            # امتیاز برای هم‌provider بودن (20 امتیاز)
+            # امتیاز برای هم‌provider بودن (15 امتیاز)
             if model.provider == disabled_provider:
-                score += 20
+                score += 15
 
             # امتیاز برای اولویت مشابه (5 امتیاز اگر اختلاف کمتر از 2)
             if abs(model.priority - disabled_model.priority) <= 2:
                 score += 5
 
-            # امتیاز برای context window مشابه
+            # امتیاز برای context window مشابه یا بیشتر
             if model.context_window >= disabled_model.context_window * 0.8:
                 score += 5
+            if model.context_window >= disabled_model.context_window:
+                score += 5  # امتیاز اضافی برای context بیشتر
 
-            scored_models.append((model.id, score, model.priority))
+            scored_models.append((model.id, score, model.priority, profile_scores.get(model.id, {}).get('tier', 'C')))
 
         # مرتب‌سازی براساس امتیاز (نزولی) و سپس اولویت (صعودی)
         scored_models.sort(key=lambda x: (-x[1], x[2]))
@@ -310,7 +362,11 @@ class AIManager:
         if scored_models:
             best_fallback = scored_models[0][0]
             best_score = scored_models[0][1]
-            logger.info(f"Found fallback for {disabled_model_id}: {best_fallback} (score: {best_score})")
+            best_tier = scored_models[0][3]
+            logger.info(f"🔴 Found smart fallback for {disabled_model_id}: {best_fallback} (score: {best_score}, tier: {best_tier})")
+
+            # لاگ همه گزینه‌ها برای debug
+            logger.debug(f"All fallback options: {[(m[0], m[1], m[3]) for m in scored_models[:5]]}")
             return best_fallback
 
         return None
