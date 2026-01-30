@@ -801,6 +801,69 @@ async def generate_engineering_report(
             "date": log.created_at.strftime("%Y-%m-%d %H:%M"),
         })
 
+    # ====================================
+    # 🆕 استخراج ردیف‌های ژورنال برای بررسی
+    # - فقط ردیف‌هایی که از آخرین گزارش جدیدتر هستند
+    # - شامل محتوای response برای تحلیل نتایج بررسی‌ها
+    # ====================================
+    journal_entries_for_review = []
+    last_report_date = None
+
+    # یافتن آخرین گزارش مهندسی
+    last_eng_report = db.query(Report).filter(
+        Report.project_id == project_id,
+        Report.report_type == "engineering"
+    ).order_by(Report.created_at.desc()).first()
+
+    if last_eng_report:
+        last_report_date = last_eng_report.created_at
+        logger.info(f"📋 Last engineering report: {last_report_date}")
+
+    # فیلتر ژورنال‌های جدید
+    journal_filter = ActivityLog.project_id == project_id
+    if last_report_date:
+        journal_filter = journal_filter & (ActivityLog.created_at > last_report_date)
+
+    new_journal_entries = db.query(ActivityLog).filter(
+        journal_filter
+    ).order_by(ActivityLog.created_at.desc()).limit(50).all()
+
+    logger.info(f"📋 Found {len(new_journal_entries)} new journal entries since last report")
+
+    # استخراج محتوای مهم از ژورنال‌ها
+    for entry in new_journal_entries:
+        # فقط ورودی‌هایی که response دارند و مرتبط با بررسی/تحلیل هستند
+        if entry.response and len(entry.response) > 50:
+            entry_data = {
+                "id": entry.id,
+                "type": entry.activity_type,
+                "model": entry.model_id,
+                "field_name": entry.field_name,
+                "prompt_summary": entry.prompt[:200] if entry.prompt else "",
+                "response_summary": entry.response[:1500],  # 🆕 شامل محتوای response
+                "success": entry.success,
+                "date": entry.created_at.strftime("%Y-%m-%d %H:%M"),
+                "tokens_used": entry.tokens_used,
+            }
+
+            # استخراج نتایج بررسی از response (اگر بررسی/تحلیل بود)
+            if entry.activity_type in ["trigger", "analysis", "engineering_report"]:
+                entry_data["is_review"] = True
+                # جستجوی کلیدواژه‌های نتایج بررسی
+                review_keywords = ["مشکل", "ایراد", "خطا", "پیشنهاد", "اصلاح", "بهبود", "error", "issue", "bug", "fix", "improve"]
+                entry_data["has_findings"] = any(kw in (entry.response or "").lower() for kw in review_keywords)
+            else:
+                entry_data["is_review"] = False
+                entry_data["has_findings"] = False
+
+            journal_entries_for_review.append(entry_data)
+
+    # گروه‌بندی ژورنال‌ها براساس نوع
+    journal_reviews = [e for e in journal_entries_for_review if e.get("is_review") and e.get("has_findings")]
+    journal_other = [e for e in journal_entries_for_review if not e.get("is_review")]
+
+    logger.info(f"📋 Journal entries with review findings: {len(journal_reviews)}")
+
     # ساخت prompt برای AI
     system_prompt = """تو یک مهندس ارشد نرم‌افزار هستی که باید یک گزارش مهندسی جامع و حرفه‌ای تولید کنی.
 
@@ -949,7 +1012,45 @@ async def generate_engineering_report(
 
 🟢 حالت ایده‌آل جامع (comprehensive_ideal_state):
 - وضعیت ایده‌آل باید شامل: کمبودها، تسک‌های اجرا نشده، ساختار سیستم، سیم‌کشی و نقشه راه باشد
-- این بخش برای راهنمایی توسعه‌دهنده بسیار مهم است"""
+- این بخش برای راهنمایی توسعه‌دهنده بسیار مهم است
+
+🔵🔵🔵 بررسی ردیف‌های ژورنال (بسیار مهم):
+- ردیف‌های جدید ژورنال که محتوای بررسی/تحلیل دارند را بخوان
+- نتایج بررسی هر ردیف را استخراج کن (مشکلات شناسایی شده، پیشنهادات)
+- برای هر مشکل مهم شناسایی شده، یک فیلد عملیاتی ایجاد کن
+- فیلدها باید action_type=github_commit یا github_multi_commit داشته باشند (نه display!)
+- فیلدهای صرفاً نمایشی فایده‌ای ندارند - فیلدها باید کار انجام دهند
+
+📝 ایجاد فیلدهای عملیاتی (بسیار مهم):
+- هر فیلد باید action_type داشته باشد: github_commit (برای تغییر یک فایل) یا github_multi_commit (برای چند فایل)
+- target_path حتماً باید مسیر فایل هدف باشد
+- توضیحات فیلد باید آنقدر کامل باشد که AI بتواند مستقیماً کد تولید کند
+- فیلدهای display فقط برای موارد مشاوره‌ای یا تحلیلی که نیاز به کد ندارند
+
+ساختار خروجی journal_analysis (اگر ردیف‌های جدید وجود دارد):
+```json
+"journal_analysis": {
+    "entries_reviewed": 10,
+    "findings": [
+        {
+            "journal_entry_id": 123,
+            "field_name": "نام فیلدی که این بررسی را تولید کرده",
+            "finding_type": "bug|issue|suggestion|improvement",
+            "summary": "خلاصه یافته",
+            "severity": "critical|high|medium|low",
+            "create_actionable_field": true,
+            "suggested_field": {
+                "name": "نام فیلد عملیاتی",
+                "value": "دستور دقیق برای تولید کد و رفع مشکل",
+                "action_type": "github_commit",
+                "target_path": "path/to/file.py",
+                "priority": 2
+            }
+        }
+    ],
+    "summary": "خلاصه بررسی ژورنال‌های جدید"
+}
+```"""
 
     # ساخت خلاصه فیلدهای اجرا نشده برای ideal state
     unexecuted_fields = [
@@ -957,6 +1058,24 @@ async def generate_engineering_report(
         for f in existing_fields
         if not f.get("archived") and f.get("field_type") == "temporary" and not f.get("executed")
     ]
+
+    # 🆕 تهیه متن ژورنال برای پرامپت
+    journal_section = ""
+    if journal_reviews:
+        journal_section = f"""
+
+=== 🔵 ردیف‌های ژورنال جدید با یافته‌های مهم ({len(journal_reviews)} عدد) ===
+این ردیف‌ها از آخرین گزارش مهندسی جدیدتر هستند و نتایج بررسی/تحلیل دارند.
+برای هر یافته مهم، یک فیلد عملیاتی (با action_type=github_commit) ایجاد کن!
+
+{json.dumps(journal_reviews[:15], ensure_ascii=False, indent=2)}
+"""
+    elif new_journal_entries:
+        journal_section = f"""
+
+=== 🔵 ردیف‌های ژورنال جدید ({len(new_journal_entries)} عدد) ===
+{json.dumps([{"id": e.get("id"), "type": e.get("type"), "field_name": e.get("field_name"), "date": e.get("date")} for e in journal_entries_for_review[:20]], ensure_ascii=False, indent=2)}
+"""
 
     user_prompt = f"""پروژه: {project.name}
 توضیحات: {project.description or 'ندارد'}
@@ -970,7 +1089,7 @@ async def generate_engineering_report(
 {health_analysis_summary if validate_health_issues else ''}
 === فعالیت‌های اخیر ({days} روز) ===
 {json.dumps(activities_summary, ensure_ascii=False, indent=2)}
-
+{journal_section}
 === فیلدهای فعلی (غیربایگانی) ===
 {json.dumps([{"id": f.get("id"), "name": f.get("name"), "action_type": f.get("action_type"), "field_type": f.get("field_type"), "executed": f.get("executed", False)} for f in existing_fields if not f.get("archived")], ensure_ascii=False, indent=2)}
 
@@ -991,7 +1110,13 @@ async def generate_engineering_report(
 ⚠️ بسیار مهم:
 1. اگر بخش "نتایج آخرین health analysis" بالا وجود دارد، حتماً تمام ایرادات را یک به یک بررسی و اعتبارسنجی کن
 2. بخش health_analysis_validation را حتماً در خروجی JSON قرار بده
-3. برای هر ایراد تایید شده، یک فیلد پویا ایجاد می‌شود تا توسعه‌دهنده آن را رفع کند"""
+3. برای هر ایراد تایید شده، یک فیلد پویا ایجاد می‌شود تا توسعه‌دهنده آن را رفع کند
+
+🔵 درباره ژورنال:
+4. ردیف‌های ژورنال جدید را بررسی کن و نتایج بررسی آنها را استخراج کن
+5. برای هر یافته مهم از ژورنال، یک فیلد عملیاتی با action_type=github_commit ایجاد کن
+6. فیلدهای صرفاً نمایشی (display) ایجاد نکن - فیلدها باید کار واقعی انجام دهند
+7. بخش journal_analysis را در خروجی JSON قرار بده"""
 
     # فراخوانی AI
     ai_manager = get_ai_manager()
@@ -1351,8 +1476,10 @@ async def generate_engineering_report(
                     if existing_by_name or existing_by_key or already_executed:
                         logger.info(f"Skipping already processed issue: {field_name}")
                         continue
-                        priority_map = {"critical": 1, "high": 2, "medium": 5, "low": 7}
-                        priority = priority_map.get(issue.get("priority", original.get("severity", "medium")), 5)
+
+                    # 🔴 این کد باید بعد از continue باشد، نه داخل if
+                    priority_map = {"critical": 1, "high": 2, "medium": 5, "low": 7}
+                    priority = priority_map.get(issue.get("priority", original.get("severity", "medium")), 5)
 
                         # 🔴 تعیین هوشمند action_type براساس نوع مشکل و محتوای پیام
                         target_file = original.get("file")
@@ -1483,7 +1610,74 @@ async def generate_engineering_report(
                         existing_fields.append(new_field)
                         created_fields.append(new_field["name"])
 
-            # 3. مرتب‌سازی براساس اولویت و ذخیره
+            # 4. 🆕 تولید فیلدهای عملیاتی از journal_analysis
+            if "journal_analysis" in report_data:
+                journal_data = report_data["journal_analysis"]
+                findings = journal_data.get("findings", [])
+                logger.info(f"Processing {len(findings)} journal findings for actionable fields")
+
+                for finding in findings:
+                    if not finding.get("create_actionable_field", False):
+                        continue
+
+                    suggested = finding.get("suggested_field", {})
+                    if not suggested:
+                        continue
+
+                    field_name = suggested.get("name", f"[ژورنال] {finding.get('summary', 'تسک')}")
+                    field_value = suggested.get("value", finding.get("summary", ""))
+                    action_type = suggested.get("action_type", "github_commit")  # 🔴 پیش‌فرض عملیاتی
+                    target_path = suggested.get("target_path")
+                    priority = suggested.get("priority", 3)
+
+                    # اگر action_type نمایشی بود، به github_commit تغییر بده
+                    if action_type == "display" and target_path:
+                        action_type = "github_commit"
+                        logger.info(f"Changed action_type from display to github_commit for: {field_name}")
+
+                    # بررسی تکراری
+                    existing = any(
+                        f.get("name", "").lower() == field_name.lower()
+                        for f in existing_fields if not f.get("archived")
+                    )
+
+                    if not existing and field_value:
+                        new_field = {
+                            "id": str(uuid.uuid4()),
+                            "name": f"📋 {field_name}",
+                            "value": f"""## یافته از ژورنال
+
+**نوع یافته:** {finding.get('finding_type', 'unknown')}
+**شدت:** {finding.get('severity', 'medium')}
+**منبع:** ردیف ژورنال {finding.get('journal_entry_id', 'نامشخص')} - فیلد "{finding.get('field_name', 'نامشخص')}"
+
+### خلاصه یافته:
+{finding.get('summary', '')}
+
+### دستور اجرا:
+{field_value}
+
+---
+این فیلد عملیاتی است و باید کد تولید/اصلاح شود.
+""",
+                            "target_models": ["claude"],
+                            "action_type": action_type,
+                            "target_path": target_path,
+                            "archive_after_run": True,
+                            "deploy_after_commit": action_type.startswith("github_"),
+                            "field_type": "temporary",
+                            "priority": priority,
+                            "attachments": [],
+                            "trigger": {"enabled": False, "interval_minutes": 60, "interval_type": "minutes"},
+                            "created_from_report": True,
+                            "source": "journal_analysis",
+                            "journal_entry_id": finding.get("journal_entry_id"),
+                        }
+                        existing_fields.append(new_field)
+                        created_fields.append(new_field["name"])
+                        logger.info(f"Created actionable field from journal: {new_field['name']} (action: {action_type})")
+
+            # 5. مرتب‌سازی براساس اولویت و ذخیره
             active = [f for f in existing_fields if not f.get("archived")]
             archived = [f for f in existing_fields if f.get("archived")]
             active.sort(key=lambda x: x.get("priority", 5))
@@ -1567,6 +1761,12 @@ async def generate_engineering_report(
                 "fields_created_from_validation": len([f for f in created_fields if "✅" in f]),
             } if validate_health_issues else None,
             "ideal_state_updated": "comprehensive_ideal_state" in report_data,
+            # 🆕 نتایج بررسی ژورنال
+            "journal_analysis": {
+                "entries_reviewed": len(journal_entries_for_review),
+                "entries_with_findings": len(journal_reviews),
+                "fields_created_from_journal": len([f for f in created_fields if "📋" in f]),
+            } if journal_entries_for_review else None,
         }
 
     except Exception as e:

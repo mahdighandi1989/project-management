@@ -221,7 +221,7 @@ export default function ModelsPage() {
   const filteredModels = filter === 'all'
     ? models
     : filter === 'available'
-      ? models.filter(m => m.is_available)
+      ? models.filter(m => m.enabled)  // 🔴 از enabled استفاده می‌کنیم نه is_available
       : models.filter(m => m.provider === filter);
 
   const getProviderColor = (provider: string) => {
@@ -385,7 +385,7 @@ export default function ModelsPage() {
                 : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400'
             }`}
           >
-            فعال ({models.filter(m => m.is_available).length})
+            فعال ({models.filter(m => m.enabled).length})
           </button>
         </div>
       </div>
@@ -396,7 +396,7 @@ export default function ModelsPage() {
           {filteredModels.map((model) => (
             <div
               key={model.id}
-              className={`card ${!model.is_available ? 'opacity-60' : ''}`}
+              className={`card ${!model.enabled ? 'opacity-60' : ''}`}  // 🔴 از enabled استفاده می‌کنیم
             >
               {/* Header */}
               <div className="flex items-start justify-between mb-4">
@@ -462,13 +462,24 @@ export default function ModelsPage() {
                     🎨 تولید تصویر
                   </span>
                 )}
-                {model.is_available ? (
+                {/* 🔴 وضعیت enabled از دیتابیس - نه is_available */}
+                {model.enabled ? (
                   <span className="px-2 py-0.5 rounded bg-green-100 dark:bg-green-900 text-green-600 dark:text-green-300">
                     ✓ فعال
                   </span>
                 ) : (
+                  <span className="px-2 py-0.5 rounded bg-red-100 dark:bg-red-900 text-red-600 dark:text-red-300">
+                    ✕ غیرفعال
+                  </span>
+                )}
+                {/* 🔴 وضعیت دسترسی به API */}
+                {model.is_available ? (
+                  <span className="px-2 py-0.5 rounded bg-cyan-100 dark:bg-cyan-900 text-cyan-600 dark:text-cyan-300">
+                    API ✓
+                  </span>
+                ) : (
                   <span className="px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-500">
-                    غیرفعال
+                    API ✕
                   </span>
                 )}
               </div>
@@ -499,8 +510,8 @@ export default function ModelsPage() {
                 </div>
               )}
 
-              {/* Test Button */}
-              {model.is_available && (
+              {/* Test Button - فقط اگر هم enabled و هم is_available باشد */}
+              {model.enabled && model.is_available && (
                 <button
                   onClick={() => testModelCapability(model.id)}
                   disabled={testingModel === model.id}
