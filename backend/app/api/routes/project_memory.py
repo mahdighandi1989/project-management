@@ -3906,7 +3906,7 @@ async def gather_project_context(project_id: str, project, db: Session) -> Dict[
         # 6. گزارشات مهندسی (از journal)
         reports_summary = []
         try:
-            from ...models.activity import ActivityLog
+            from .project_journal import ActivityLog
             reports = db.query(ActivityLog).filter(
                 ActivityLog.project_id == project_id,
                 ActivityLog.activity_type.in_(["engineering_report", "ai_analysis", "deep_analysis"])
