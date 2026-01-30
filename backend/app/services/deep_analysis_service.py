@@ -1416,7 +1416,7 @@ class DeepAnalysisService:
                     if isinstance(a, dict) and not a.get("error")
                 },
                 "issues_count": len(file_issues),
-                "issues": file_issues[:20],  # 🆕 ذخیره issues واقعی (حداکثر 20 ایراد در هر فایل)
+                "issues": file_issues,  # 🔴 رفع محدودیت - تمام issues بدون محدودیت ذخیره می‌شوند
                 "analyzed_by": list(file_data.get("model_analyses", {}).keys()),  # 🆕 مدل‌های تحلیل‌کننده
                 "analyzed_at": file_data.get("analyzed_at")
             }

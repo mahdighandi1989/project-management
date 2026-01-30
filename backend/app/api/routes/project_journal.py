@@ -56,6 +56,45 @@ class ActivityLog(Base):
     extra_data = Column(Text)
 
 
+class DetailedOperation(Base):
+    """
+    🆕 عملیات جزئی - ثبت سطر به سطر با قابلیت کلیک
+    هر ردیف شامل یک عملیات مجزا است که با کلیک، جزئیات کامل نمایش داده می‌شود
+    """
+    __tablename__ = "detailed_operations"
+
+    id = Column(String(50), primary_key=True)
+    project_id = Column(String(50), nullable=False, index=True)
+    parent_log_id = Column(String(50), index=True)  # لینک به ActivityLog والد
+
+    # شماره ردیف در گروه عملیات
+    sequence_number = Column(Integer, default=0)
+
+    # نوع عملیات
+    operation_type = Column(String(100), nullable=False)  # field_create, field_archive, field_merge, memory_update, etc.
+
+    # خلاصه یک خطی (نمایش در لیست)
+    summary = Column(String(500), nullable=False)
+
+    # جزئیات کامل (نمایش با کلیک)
+    details = Column(Text)  # JSON با تمام جزئیات
+
+    # مقادیر قبل و بعد (برای ردیابی تغییرات)
+    before_value = Column(Text)
+    after_value = Column(Text)
+
+    # فایل/فیلد مرتبط
+    target_type = Column(String(50))  # field, file, memory, config
+    target_id = Column(String(100))
+    target_name = Column(String(300))
+
+    # وضعیت
+    status = Column(String(20), default="completed")  # completed, pending, failed, skipped
+
+    # تاریخ
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Report(Base):
     """گزارشات تولید شده"""
     __tablename__ = "project_reports"
@@ -150,6 +189,99 @@ class ReportTriggerSettings(BaseModel):
     interval_minutes: int = 1440
     interval_type: str = "days"
     report_model: str = "openai"
+
+
+class DetailedOperationResponse(BaseModel):
+    """🆕 پاسخ عملیات جزئی"""
+    id: str
+    project_id: str
+    parent_log_id: Optional[str]
+    sequence_number: int
+    operation_type: str
+    summary: str
+    details: Optional[Dict]
+    before_value: Optional[str]
+    after_value: Optional[str]
+    target_type: Optional[str]
+    target_id: Optional[str]
+    target_name: Optional[str]
+    status: str
+    created_at: datetime
+
+
+# ===================== توابع کمکی برای ثبت عملیات سطر به سطر =====================
+
+def log_detailed_operation(
+    db,
+    project_id: str,
+    parent_log_id: str,
+    operation_type: str,
+    summary: str,
+    details: dict = None,
+    before_value: str = None,
+    after_value: str = None,
+    target_type: str = None,
+    target_id: str = None,
+    target_name: str = None,
+    status: str = "completed",
+    sequence_number: int = None
+) -> DetailedOperation:
+    """
+    🆕 ثبت یک عملیات جزئی در ژورنال
+    این تابع برای ثبت سطر به سطر عملیات استفاده می‌شود
+    """
+    # اگر sequence_number داده نشده، آخرین شماره را پیدا کن
+    if sequence_number is None:
+        last_op = db.query(DetailedOperation).filter(
+            DetailedOperation.parent_log_id == parent_log_id
+        ).order_by(DetailedOperation.sequence_number.desc()).first()
+        sequence_number = (last_op.sequence_number + 1) if last_op else 1
+
+    op = DetailedOperation(
+        id=f"op_{uuid.uuid4().hex[:12]}",
+        project_id=project_id,
+        parent_log_id=parent_log_id,
+        sequence_number=sequence_number,
+        operation_type=operation_type,
+        summary=summary,
+        details=json.dumps(details, ensure_ascii=False) if details else None,
+        before_value=before_value,
+        after_value=after_value,
+        target_type=target_type,
+        target_id=target_id,
+        target_name=target_name,
+        status=status,
+        created_at=datetime.utcnow()
+    )
+    db.add(op)
+    return op
+
+
+def detailed_op_to_response(op: DetailedOperation) -> Dict:
+    """تبدیل عملیات جزئی به دیکشنری"""
+    details = {}
+    try:
+        if op.details:
+            details = json.loads(op.details)
+    except:
+        pass
+
+    return {
+        "id": op.id,
+        "project_id": op.project_id,
+        "parent_log_id": op.parent_log_id,
+        "sequence_number": op.sequence_number,
+        "operation_type": op.operation_type,
+        "summary": op.summary,
+        "details": details,
+        "before_value": op.before_value[:500] if op.before_value and len(op.before_value) > 500 else op.before_value,
+        "after_value": op.after_value[:500] if op.after_value and len(op.after_value) > 500 else op.after_value,
+        "target_type": op.target_type,
+        "target_id": op.target_id,
+        "target_name": op.target_name,
+        "status": op.status,
+        "created_at": op.created_at.isoformat() if op.created_at else None,
+    }
 
 
 # ===================== توابع کمکی =====================
@@ -300,6 +432,95 @@ async def get_activity_journal(
             "page_size": page_size,
             "total": total,
             "total_pages": (total + page_size - 1) // page_size,
+        }
+    }
+
+
+@router.get("/{project_id}/journal/{log_id}/operations")
+async def get_detailed_operations(
+    project_id: str,
+    log_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    🆕 دریافت عملیات جزئی یک ردیف ژورنال
+    با کلیک روی هر ردیف، لیست عملیات جزئی آن نمایش داده می‌شود
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت ردیف اصلی
+    parent_log = db.query(ActivityLog).filter(ActivityLog.id == log_id).first()
+    if not parent_log:
+        raise HTTPException(status_code=404, detail="ردیف ژورنال یافت نشد")
+
+    # دریافت عملیات جزئی
+    operations = db.query(DetailedOperation).filter(
+        DetailedOperation.parent_log_id == log_id
+    ).order_by(DetailedOperation.sequence_number).all()
+
+    return {
+        "success": True,
+        "log_id": log_id,
+        "log_summary": {
+            "activity_type": parent_log.activity_type,
+            "model_id": parent_log.model_id,
+            "field_name": parent_log.field_name,
+            "created_at": parent_log.created_at.isoformat() if parent_log.created_at else None,
+        },
+        "operations": [detailed_op_to_response(op) for op in operations],
+        "total_operations": len(operations)
+    }
+
+
+@router.get("/{project_id}/journal/operation/{operation_id}")
+async def get_operation_details(
+    project_id: str,
+    operation_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    🆕 دریافت جزئیات کامل یک عملیات با کلیک
+    شامل مقادیر قبل و بعد، جزئیات کامل و غیره
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    operation = db.query(DetailedOperation).filter(
+        DetailedOperation.id == operation_id,
+        DetailedOperation.project_id == project_id
+    ).first()
+
+    if not operation:
+        raise HTTPException(status_code=404, detail="عملیات یافت نشد")
+
+    # جزئیات کامل بدون truncate
+    details = {}
+    try:
+        if operation.details:
+            details = json.loads(operation.details)
+    except:
+        pass
+
+    return {
+        "success": True,
+        "operation": {
+            "id": operation.id,
+            "project_id": operation.project_id,
+            "parent_log_id": operation.parent_log_id,
+            "sequence_number": operation.sequence_number,
+            "operation_type": operation.operation_type,
+            "summary": operation.summary,
+            "details": details,
+            "before_value": operation.before_value,  # کامل بدون truncate
+            "after_value": operation.after_value,  # کامل بدون truncate
+            "target_type": operation.target_type,
+            "target_id": operation.target_id,
+            "target_name": operation.target_name,
+            "status": operation.status,
+            "created_at": operation.created_at.isoformat() if operation.created_at else None,
         }
     }
 
@@ -778,8 +999,8 @@ async def generate_engineering_report(
 - اگر ایراد واقعاً وجود دارد، در validated_issues قرار بده (با create_field=true)
 - اگر ایراد اشتباه است، در rejected_issues با دلیل رد شدن قرار بده
 
-لیست ایرادات برای بررسی:
-{json.dumps(health_analysis_issues[:30], ensure_ascii=False, indent=2)}
+لیست ایرادات برای بررسی (تمام {len(health_analysis_issues)} ایراد):
+{json.dumps(health_analysis_issues, ensure_ascii=False, indent=2)}
 """
     else:
         health_analysis_summary = """
@@ -1264,9 +1485,9 @@ async def generate_engineering_report(
                 }
                 new_rejected_archive.append(archive_entry)
 
-            # ادغام با آرشیو موجود (حداکثر 100 آیتم)
+            # 🔴 رفع محدودیت - ادغام با آرشیو موجود بدون محدودیت عددی
             combined_archive = new_rejected_archive + existing_archive
-            project.rejected_issues_archive = json.dumps(combined_archive[:100], ensure_ascii=False)
+            project.rejected_issues_archive = json.dumps(combined_archive, ensure_ascii=False)
 
             # 🔴 CRITICAL: Commit validation results immediately
             db.commit()
@@ -2161,6 +2382,87 @@ def log_activity_with_fallback(
 
     db.add(log_entry)
     return log_entry
+
+
+# =====================================
+# 🆕 جایگزینی خودکار مدل غیرفعال در ژورنال
+# =====================================
+
+@router.post("/{project_id}/journal/fix-disabled-models")
+async def fix_disabled_models_in_journal(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    🆕 بررسی و اصلاح مدل‌های غیرفعال در ژورنال
+
+    اگر مدلی در صفحه مدل‌ها غیرفعال شده اما در ژورنال فعالیت آن مشاهده می‌شود:
+    - سیستم به طور خودکار مدل جایگزین فعال را برای آن عملیات اختصاص می‌دهد
+    - نام مدل قبلی در extra_data ثبت می‌شود
+    - توضیح جایگزینی در ژورنال ذخیره می‌شود
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    from ...services.ai_manager import get_ai_manager
+
+    ai_manager = get_ai_manager()
+    available_models = ai_manager.get_available_models()
+    available_model_ids = {m.id for m in available_models}
+
+    # دریافت همه لاگ‌های اخیر
+    logs = db.query(ActivityLog).filter(
+        ActivityLog.project_id == project_id
+    ).order_by(desc(ActivityLog.created_at)).limit(500).all()
+
+    fixed_count = 0
+    fixed_logs = []
+
+    for log in logs:
+        if log.model_id and log.model_id not in available_model_ids and log.model_id != "system":
+            # مدل غیرفعال است - پیدا کردن جایگزین
+            fallback_model_id = ai_manager.find_fallback_model(log.model_id)
+
+            if fallback_model_id:
+                # ذخیره اطلاعات قدیمی
+                old_model = log.model_id
+                extra = {}
+                try:
+                    if log.extra_data:
+                        extra = json.loads(log.extra_data)
+                except:
+                    pass
+
+                # ثبت اطلاعات جایگزینی
+                extra["model_replacement"] = {
+                    "original_model": old_model,
+                    "replacement_model": fallback_model_id,
+                    "replaced_at": datetime.utcnow().isoformat(),
+                    "reason": "مدل اصلی غیرفعال شده - جایگزینی خودکار"
+                }
+
+                log.extra_data = json.dumps(extra, ensure_ascii=False)
+                fixed_count += 1
+                fixed_logs.append({
+                    "log_id": log.id,
+                    "activity_type": log.activity_type,
+                    "original_model": old_model,
+                    "replacement_model": fallback_model_id,
+                    "created_at": log.created_at.isoformat() if log.created_at else None
+                })
+
+                logger.info(f"Fixed disabled model in journal: {old_model} -> {fallback_model_id}")
+
+    db.commit()
+
+    return {
+        "success": True,
+        "fixed_count": fixed_count,
+        "total_checked": len(logs),
+        "fixed_logs": fixed_logs,
+        "message": f"تعداد {fixed_count} فعالیت با مدل غیرفعال اصلاح شد"
+    }
 
 
 # =====================================

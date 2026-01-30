@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from ...core.database import get_db
 from ...models.project import Project
-from .project_journal import ActivityLog
+# ActivityLog و log_detailed_operation داخل توابع import می‌شوند تا از circular import جلوگیری شود
 
 router = APIRouter(prefix="/projects", tags=["Project Memory"])
 
@@ -532,10 +532,22 @@ async def update_memory_instructions(
     """
     بروزرسانی باکس حافظه (دستورات ثابت)
     این دستورات برای مدل‌های انتخاب شده در کارها اعمال می‌شوند
+
+    🆕 با ردیابی تغییرات - هر تغییر در ژورنال ثبت می‌شود
     """
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # 🆕 ذخیره مقدار قبلی برای ردیابی
+    previous_memory = {}
+    try:
+        if project.memory_instructions:
+            previous_memory = json.loads(project.memory_instructions)
+    except:
+        pass
+
+    previous_content = previous_memory.get("content", "")
 
     memory_data = {
         "content": request.content,
@@ -543,12 +555,61 @@ async def update_memory_instructions(
     }
 
     project.memory_instructions = json.dumps(memory_data, ensure_ascii=False)
+
+    # 🆕 ثبت تغییرات در ژورنال با جزئیات کامل
+    if previous_content != request.content:
+        from .project_journal import ActivityLog, log_detailed_operation
+        import uuid
+
+        # ایجاد لاگ اصلی
+        parent_log = ActivityLog(
+            id=f"log_{uuid.uuid4().hex[:12]}",
+            project_id=project_id,
+            model_id="system",
+            activity_type="memory_update",
+            prompt=f"بروزرسانی باکس حافظه پروژه",
+            response=f"تغییر از {len(previous_content)} کاراکتر به {len(request.content)} کاراکتر",
+            tokens_used=0,
+            latency_ms=0,
+            success=True,
+            field_name="memory_instructions",
+            created_at=datetime.utcnow(),
+            extra_data=json.dumps({
+                "previous_length": len(previous_content),
+                "new_length": len(request.content),
+                "target_models": request.target_models
+            }, ensure_ascii=False)
+        )
+        db.add(parent_log)
+        db.flush()
+
+        # 🆕 ثبت جزئیات تغییر با قابلیت کلیک
+        log_detailed_operation(
+            db=db,
+            project_id=project_id,
+            parent_log_id=parent_log.id,
+            operation_type="memory_content_change",
+            summary=f"تغییر محتوای باکس حافظه ({len(previous_content)} -> {len(request.content)} کاراکتر)",
+            details={
+                "change_type": "update",
+                "previous_length": len(previous_content),
+                "new_length": len(request.content),
+                "target_models_changed": previous_memory.get("target_models") != request.target_models
+            },
+            before_value=previous_content,
+            after_value=request.content,
+            target_type="memory",
+            target_id="memory_instructions",
+            target_name="باکس حافظه"
+        )
+
     db.commit()
 
     return {
         "success": True,
         "message": "باکس حافظه بروزرسانی شد",
-        "memory_instructions": memory_data
+        "memory_instructions": memory_data,
+        "change_tracked": previous_content != request.content  # 🆕 آیا تغییر ردیابی شد
     }
 
 
@@ -1079,8 +1140,9 @@ async def enhanced_project_chat(
         try:
             issues_found = json.loads(project.issues_found) if project.issues_found else []
             if issues_found:
+                # 🔴 رفع محدودیت - تمام ایرادات نمایش داده می‌شوند
                 context_parts.append(f"\n## ایرادات شناسایی شده ({len(issues_found)} مورد):")
-                for i, issue in enumerate(issues_found[:20], 1):  # حداکثر 20 ایراد
+                for i, issue in enumerate(issues_found, 1):
                     issue_text = f"{i}. "
                     if isinstance(issue, dict):
                         issue_text += f"[{issue.get('severity', 'نامشخص')}] {issue.get('title', issue.get('description', str(issue)))}"
@@ -1089,8 +1151,6 @@ async def enhanced_project_chat(
                     else:
                         issue_text += str(issue)
                     context_parts.append(issue_text)
-                if len(issues_found) > 20:
-                    context_parts.append(f"... و {len(issues_found) - 20} ایراد دیگر")
         except:
             pass
 
@@ -3826,7 +3886,8 @@ async def gather_project_context(project_id: str, project, db: Session) -> Dict[
                             health_issues.append(issue)
         except:
             pass
-        context["health_issues"] = health_issues[:20]  # حداکثر 20 تا
+        # 🔴 رفع محدودیت - تمام health_issues بدون محدودیت
+        context["health_issues"] = health_issues
 
         # 5. نقشه راه
         roadmap_content = ""
