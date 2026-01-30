@@ -1694,13 +1694,55 @@ class DeepAnalysisService:
 
         ideal_state = build_comprehensive_ideal_state()
 
+        # 🔴 رفع محدودیت - تمام ایرادات ذخیره می‌شوند (ادغام موارد مشابه قبل از ذخیره)
+        merged_issues = self._merge_similar_issues(all_issues)
+
         return {
             "file_health_map": file_health_map,
             "overall_scores": overall_scores,
-            "issues": all_issues[:100],  # محدود به 100 مشکل
+            "issues": merged_issues,  # بدون محدودیت - همه ایرادات
+            "issues_count": len(merged_issues),
+            "original_issues_count": len(all_issues),
             "recommendations": recommendations,
             "ideal_state": ideal_state
         }
+
+    def _merge_similar_issues(self, issues: List[Dict]) -> List[Dict]:
+        """
+        ادغام ایرادات مشابه برای جلوگیری از تکرار
+
+        قوانین ادغام:
+        - ایرادات با فایل و نوع یکسان ادغام می‌شوند
+        - severity بالاتر حفظ می‌شود
+        - پیام‌ها ترکیب می‌شوند
+        """
+        if not issues:
+            return []
+
+        merged = {}
+        for issue in issues:
+            # ساخت کلید یکتا
+            file_path = issue.get("file", "unknown")
+            issue_type = issue.get("type", "general")
+            line = issue.get("line", "")
+            key = f"{file_path}:{issue_type}:{line}"
+
+            if key in merged:
+                # ادغام با موجود
+                existing = merged[key]
+                # حفظ severity بالاتر
+                severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+                if severity_order.get(issue.get("severity"), 3) < severity_order.get(existing.get("severity"), 3):
+                    existing["severity"] = issue.get("severity")
+                # اضافه کردن منبع
+                if "source_models" not in existing:
+                    existing["source_models"] = []
+                existing["source_models"].extend(issue.get("source_models", []))
+                existing["source_models"] = list(set(existing["source_models"]))
+            else:
+                merged[key] = issue.copy()
+
+        return list(merged.values())
 
     async def _save_analysis_results(self, project_id: str, results: Dict, db_session) -> None:
         """ذخیره نتایج در دیتابیس"""

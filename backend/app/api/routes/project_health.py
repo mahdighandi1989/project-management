@@ -720,8 +720,9 @@ async def run_direct_analysis(project_id: str, db=Depends(get_db)):
                 analysis_result.get("file_health_map", {}),
                 ensure_ascii=False
             )
+            # 🔴 رفع محدودیت - تمام ایرادات ذخیره می‌شوند
             project.issues_found = json.dumps(
-                analysis_result.get("issues", [])[:100],
+                analysis_result.get("issues", []),
                 ensure_ascii=False
             )
             project.last_analysis_at = datetime.utcnow()
@@ -1340,8 +1341,9 @@ async def _run_analysis_task(
             project.last_analysis_models = json.dumps(model_ids, ensure_ascii=False)
 
             # ذخیره مشکلات
+            # 🔴 رفع محدودیت - تمام ایرادات ذخیره می‌شوند
             project.issues_found = json.dumps(
-                analysis_result.get("issues", [])[:100],
+                analysis_result.get("issues", []),
                 ensure_ascii=False
             )
 
@@ -2256,8 +2258,9 @@ async def _run_resumed_analysis_task(
                 analysis_result.get("file_health_map", {}),
                 ensure_ascii=False
             )
+            # 🔴 رفع محدودیت - تمام ایرادات ذخیره می‌شوند
             project.issues_found = json.dumps(
-                analysis_result.get("issues", [])[:100],
+                analysis_result.get("issues", []),
                 ensure_ascii=False
             )
             project.last_analysis_at = datetime.utcnow()
