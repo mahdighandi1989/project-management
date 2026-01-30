@@ -1487,27 +1487,91 @@ export default function ProjectDetailPage() {
     }
   };
 
-  // راه‌اندازی خودکار حافظه و فیلدهای پویا
+  // راه‌اندازی خودکار جامع حافظه و فیلدهای پویا
   const runAutoSetup = async () => {
-    if (!confirm('راه‌اندازی خودکار تنظیمات حافظه و فیلدهای پویا؟\n\nاین عملیات بر اساس تحلیل AI از فایل‌های پروژه انجام می‌شود و تنظیمات فعلی را جایگزین می‌کند.')) {
+    if (!confirm(`🚀 راه‌اندازی خودکار جامع
+
+این عملیات شامل موارد زیر است:
+• سینک کامل با GitHub (بازیابی آخرین تغییرات)
+• حذف محتوای نامعتبر
+• بررسی و به‌روزرسانی فیلدهای موجود
+• ایجاد فیلدهای جدید با اولویت‌بندی
+• به‌روزرسانی باکس حافظه
+• ثبت تمام عملیات در ژورنال
+
+آیا ادامه می‌دهید؟`)) {
       return;
     }
 
     setRunningAutoSetup(true);
     try {
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/auto-setup?use_ai=true`, {
-        method: 'POST',
-      });
+      const res = await fetch(
+        `${API_BASE}/api/projects/${projectId}/memory/auto-setup?use_ai=true&sync_github=true&clean_invalid=true`,
+        { method: 'POST' }
+      );
       const data = await res.json();
+
       if (data.success) {
-        showSuccess(`راه‌اندازی خودکار انجام شد! نوع تشخیص داده شده: ${data.detected_type || 'عمومی'}`);
-        // بارگذاری مجدد اطلاعات حافظه
+        // نمایش خلاصه عملیات
+        const ops = data.operations || {};
+        const fieldsOps = ops.fields_analysis || {};
+
+        let message = `✅ راه‌اندازی خودکار کامل شد!\n\n`;
+        message += `📊 نوع: ${data.detected_type || 'عمومی'}\n`;
+        message += `💻 زبان: ${data.language || 'نامشخص'}\n`;
+        message += `🏗️ معماری: ${data.architecture || 'نامشخص'}\n\n`;
+
+        message += `📋 عملیات انجام شده:\n`;
+
+        if (ops.github_sync?.done) {
+          const gs = ops.github_sync.details || {};
+          message += `• سینک GitHub: ${gs.files_added || 0} اضافه، ${gs.files_updated || 0} به‌روز، ${gs.files_removed || 0} حذف\n`;
+        }
+
+        if (ops.invalid_cleanup?.done && ops.invalid_cleanup.removed?.length > 0) {
+          message += `• پاکسازی: ${ops.invalid_cleanup.removed.length} مورد نامعتبر حذف شد\n`;
+        }
+
+        if (fieldsOps.done) {
+          message += `• فیلدها: ${fieldsOps.created || 0} جدید، ${fieldsOps.updated || 0} به‌روز، ${fieldsOps.archived || 0} بایگانی، ${fieldsOps.merged || 0} ادغام\n`;
+          if (fieldsOps.protected > 0) {
+            message += `• محافظت: ${fieldsOps.protected} فیلد از گزارش مهندسی محافظت شد\n`;
+          }
+        }
+
+        if (ops.memory_update?.done && ops.memory_update.changed) {
+          message += `• حافظه به‌روز شد\n`;
+        }
+
+        if (ops.tabs_update?.tabs?.length > 0) {
+          message += `• تب‌های به‌روز شده: ${ops.tabs_update.tabs.join('، ')}\n`;
+        }
+
+        message += `\n📝 ${data.journal_entries?.length || 0} ردیف در ژورنال ثبت شد`;
+
+        // نمایش توصیه‌ها
+        if (data.recommendations && data.recommendations.length > 0) {
+          message += `\n\n💡 توصیه‌ها:\n`;
+          data.recommendations.slice(0, 3).forEach((rec: string, i: number) => {
+            message += `${i + 1}. ${rec}\n`;
+          });
+        }
+
+        showSuccess(message);
+
+        // بارگذاری مجدد اطلاعات
         loadMemory();
+        loadProject();
+
+        // اگر تنظیمات سینک فعال است، ساختار را هم به‌روز کن
+        if (syncSettings.update_structure_after_sync) {
+          loadStructure();
+        }
       } else {
-        showError(data.detail || 'خطا در راه‌اندازی خودکار');
+        showError(data.detail || data.error || 'خطا در راه‌اندازی خودکار');
       }
-    } catch (e) {
-      showError('خطا در ارتباط');
+    } catch (e: any) {
+      showError(`خطا در ارتباط: ${e.message || e}`);
     } finally {
       setRunningAutoSetup(false);
     }
@@ -2841,23 +2905,62 @@ export default function ProjectDetailPage() {
         {/* محتوای تب حافظه */}
         {activeTab === 'memory' && (
           <div className="space-y-6">
-            {/* دکمه راه‌اندازی خودکار */}
-            <div className="bg-gradient-to-r from-purple-500 to-blue-500 rounded-xl shadow p-4 text-white">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="font-bold text-lg">🤖 راه‌اندازی خودکار با AI</h3>
-                  <p className="text-sm opacity-90">
-                    تحلیل هوشمند پروژه و تولید دستورات و فیلدهای مناسب
-                  </p>
+            {/* دکمه راه‌اندازی خودکار جامع */}
+            <div className="bg-gradient-to-r from-purple-600 via-blue-500 to-cyan-500 rounded-xl shadow-lg p-5 text-white">
+              <div className="flex items-center justify-between flex-wrap gap-4">
+                <div className="flex-1 min-w-[250px]">
+                  <h3 className="font-bold text-lg flex items-center gap-2">
+                    🚀 راه‌اندازی خودکار جامع
+                    <span className="text-xs bg-white/20 px-2 py-0.5 rounded-full">AI + GitHub</span>
+                  </h3>
+                  <ul className="text-sm opacity-90 mt-2 space-y-1">
+                    <li className="flex items-center gap-2">
+                      <span className="w-1.5 h-1.5 bg-white rounded-full"></span>
+                      سینک کامل با GitHub و بررسی تغییرات
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <span className="w-1.5 h-1.5 bg-white rounded-full"></span>
+                      حذف خودکار محتوای نامعتبر و منسوخ
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <span className="w-1.5 h-1.5 bg-white rounded-full"></span>
+                      ایجاد/به‌روزرسانی/ادغام فیلدهای پویا
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <span className="w-1.5 h-1.5 bg-white rounded-full"></span>
+                      ثبت کامل عملیات در ژورنال (قابل کلیک)
+                    </li>
+                  </ul>
                 </div>
                 <button
                   onClick={runAutoSetup}
                   disabled={runningAutoSetup}
-                  className="px-4 py-2 bg-white text-purple-600 rounded-lg font-medium hover:bg-gray-100 disabled:opacity-50"
+                  className="px-6 py-3 bg-white text-purple-600 rounded-xl font-bold hover:bg-gray-100 disabled:opacity-50 shadow-lg transform hover:scale-105 transition-all flex items-center gap-2"
                 >
-                  {runningAutoSetup ? '⏳ در حال تحلیل...' : '✨ راه‌اندازی خودکار'}
+                  {runningAutoSetup ? (
+                    <>
+                      <span className="animate-spin">⚙️</span>
+                      <span>در حال پردازش...</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>✨</span>
+                      <span>راه‌اندازی خودکار</span>
+                    </>
+                  )}
                 </button>
               </div>
+              {runningAutoSetup && (
+                <div className="mt-4 bg-white/10 rounded-lg p-3">
+                  <div className="flex items-center gap-2 text-sm">
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                    <span>در حال تحلیل هوشمند... لطفاً صبر کنید</span>
+                  </div>
+                  <div className="mt-2 h-1 bg-white/20 rounded-full overflow-hidden">
+                    <div className="h-full bg-white/60 rounded-full animate-pulse" style={{ width: '70%' }}></div>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="grid lg:grid-cols-2 gap-6">
