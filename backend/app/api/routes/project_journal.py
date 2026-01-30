@@ -1341,6 +1341,59 @@ async def generate_engineering_report(
 
     # فراخوانی AI
     ai_manager = get_ai_manager()
+
+    # 🔴 بررسی فعال بودن مدل و یافتن جایگزین در صورت نیاز
+    original_model_id = model_id
+    used_fallback = False
+
+    if not ai_manager.get_enabled_status(model_id):
+        logger.warning(f"Model {model_id} is disabled, looking for fallback...")
+        fallback_model = ai_manager.find_fallback_model(model_id, task_type="engineering_report")
+        if fallback_model:
+            logger.info(f"Using fallback model: {fallback_model} instead of {model_id}")
+            model_id = fallback_model
+            used_fallback = True
+        else:
+            # هیچ مدل فعالی نیست - سعی کن با لیست مدل‌های فعال
+            available = ai_manager.get_available_models(task_type="engineering_report")
+            if available:
+                model_id = available[0].id
+                used_fallback = True
+                logger.info(f"No specific fallback, using first available: {model_id}")
+            else:
+                raise HTTPException(status_code=400, detail="هیچ مدل AI فعالی در سیستم وجود ندارد")
+
+    # 🔴 تخمین توکن و کوتاه کردن prompt در صورت نیاز
+    # تقریباً هر 4 کاراکتر = 1 توکن (برای متن فارسی/انگلیسی ترکیبی)
+    estimated_tokens = (len(system_prompt) + len(user_prompt)) // 3
+
+    # دریافت context_window مدل
+    from ...core.models_registry import get_model
+    model_info = get_model(model_id)
+    max_context = model_info.context_window if model_info else 200000
+
+    # حداکثر 80% از context window برای prompt (20% برای output)
+    max_prompt_tokens = int(max_context * 0.80)
+
+    logger.info(f"Estimated tokens: {estimated_tokens}, Max allowed: {max_prompt_tokens}")
+
+    # اگر بیش از حد بود، prompt را کوتاه کن
+    if estimated_tokens > max_prompt_tokens:
+        logger.warning(f"Prompt too long ({estimated_tokens} tokens), truncating...")
+
+        # کوتاه کردن user_prompt (system_prompt را دست نمی‌زنیم)
+        excess_chars = (estimated_tokens - max_prompt_tokens) * 3
+
+        # اول سعی کن code_samples را کوتاه کنی (معمولاً بیشترین حجم)
+        if len(user_prompt) > excess_chars:
+            user_prompt = user_prompt[:len(user_prompt) - excess_chars - 500]
+            user_prompt += "\n\n[... محتوا به دلیل محدودیت توکن کوتاه شد ...]"
+            logger.info(f"Truncated user_prompt to {len(user_prompt)} chars")
+
+        # محاسبه مجدد
+        estimated_tokens = (len(system_prompt) + len(user_prompt)) // 3
+        logger.info(f"After truncation: {estimated_tokens} tokens")
+
     messages = [
         Message(role="system", content=system_prompt),
         Message(role="user", content=user_prompt),
@@ -1349,12 +1402,14 @@ async def generate_engineering_report(
     # 🔴 DEBUG: Final summary before AI call
     logger.info(f"=" * 60)
     logger.info(f"🔴 DEBUG: FINAL SUMMARY before AI call:")
+    logger.info(f"   - model_id: {model_id} (original: {original_model_id}, fallback: {used_fallback})")
     logger.info(f"   - validate_health_issues: {validate_health_issues}")
     logger.info(f"   - health_analysis_issues count: {len(health_analysis_issues)}")
     logger.info(f"   - health_analysis_summary length: {len(health_analysis_summary)}")
     logger.info(f"   - health_analysis_summary included in prompt: {'yes' if (validate_health_issues and len(health_analysis_issues) > 0) else 'NO!'}")
     logger.info(f"   - user_prompt length: {len(user_prompt)}")
     logger.info(f"   - system_prompt length: {len(system_prompt)}")
+    logger.info(f"   - estimated_tokens: {estimated_tokens}")
     if len(health_analysis_issues) == 0:
         logger.error(f"🔴🔴🔴 CRITICAL: No health issues to validate! Check extraction logic above.")
     logger.info(f"=" * 60)
@@ -1365,6 +1420,8 @@ async def generate_engineering_report(
             messages=messages,
             max_tokens=8192,
             temperature=0.3,
+            task_type="engineering_report",
+            allow_fallback=True,
         )
 
         # پارس JSON از پاسخ
@@ -1987,6 +2044,10 @@ async def generate_engineering_report(
             "report_id": report.id,
             "report_type": "engineering",
             "message": f"گزارش مهندسی جامع تولید شد",
+            # 🔴 اطلاعات مدل استفاده شده (fallback handling)
+            "model_used": model_id,
+            "original_model_requested": original_model_id,
+            "used_fallback": used_fallback,
             "fields_created": created_fields,
             "fields_count": len(created_fields),
             "fields_archived": archived_count,
@@ -2014,7 +2075,11 @@ async def generate_engineering_report(
     except Exception as e:
         return {
             "success": False,
-            "error": f"خطا در تولید گزارش: {str(e)}"
+            "error": f"خطا در تولید گزارش: {str(e)}",
+            # 🔴 اطلاعات مدل برای debug
+            "model_attempted": model_id,
+            "original_model_requested": original_model_id,
+            "used_fallback": used_fallback,
         }
 
 

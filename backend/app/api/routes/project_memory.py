@@ -1320,18 +1320,32 @@ async def enhanced_project_chat(
                         field["source_model"] = resp["model_id"]
                         field["source"] = "ai_query"  # 🔴 منبع فیلد
 
-                        # 🔴 بررسی تکراری بودن و امکان ادغام
+                        # 🔴 بررسی تکراری بودن و امکان ادغام (بهبود یافته - جلوگیری از دور باطل)
                         similar_field = None
                         for ef in existing_fields:
                             if ef.get("archived"):
                                 continue
 
-                            # بررسی شباهت نام یا محتوا
+                            # 🔴 بررسی 1: اگر target_path یکسان باشد، قطعاً تکراری است
+                            new_target = field.get("target_path", "")
+                            existing_target = ef.get("target_path", "")
+                            if new_target and existing_target and new_target == existing_target:
+                                similar_field = ef
+                                break
+
+                            # 🔴 بررسی 2: شباهت نام
                             name_similarity = _calculate_similarity(field.get("name", ""), ef.get("name", ""))
+
+                            # 🔴 بررسی 3: شباهت محتوا (200 کاراکتر اول)
                             value_similarity = _calculate_similarity(field.get("value", "")[:200], ef.get("value", "")[:200])
 
-                            # اگر نام یا محتوا خیلی شبیه بود
-                            if name_similarity > 0.7 or value_similarity > 0.6:
+                            # 🔴 بررسی 4: شباهت action_type + target_path (جلوگیری از دور باطل)
+                            same_action = field.get("action_type") == ef.get("action_type")
+                            both_have_target = new_target and existing_target
+                            target_similarity = _calculate_similarity(new_target, existing_target) if both_have_target else 0
+
+                            # اگر نام یا محتوا خیلی شبیه بود، یا action+target مشابه بود
+                            if name_similarity > 0.7 or value_similarity > 0.6 or (same_action and target_similarity > 0.8):
                                 similar_field = ef
                                 break
 
