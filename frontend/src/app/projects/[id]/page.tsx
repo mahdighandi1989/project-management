@@ -221,6 +221,7 @@ export default function ProjectDetailPage() {
     report_model: 'openai',
   });
   const [generatingReport, setGeneratingReport] = useState(false);
+  const [reportProgress, setReportProgress] = useState<{step: number; total: number; message: string; progress: number} | null>(null);
   const [journalSubTab, setJournalSubTab] = useState<'logs' | 'reports' | 'validation' | 'profiles' | 'roadmap'>('logs');
 
   // Roadmap State (در تب ژورنال)
@@ -1248,48 +1249,93 @@ export default function ProjectDetailPage() {
     }
 
     setGeneratingReport(true);
-    showSuccess('در حال تحلیل پروژه و تولید گزارش مهندسی... لطفاً صبر کنید');
+    setReportProgress({ step: 0, total: 8, message: '🚀 شروع تولید گزارش...', progress: 0 });
 
     try {
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/reports/generate-engineering?days=${days}&model_id=claude&auto_create_fields=true&validate_health_issues=true`, {
+      // 🔴 استفاده از endpoint streaming برای نمایش پیشرفت
+      const response = await fetch(`${API_BASE}/api/projects/${projectId}/reports/generate-engineering-stream?days=${days}&model_id=claude&auto_create_fields=true&validate_health_issues=true`, {
         method: 'POST',
       });
-      const data = await res.json();
 
-      if (data.success) {
-        let successMsg = `✅ گزارش مهندسی تولید شد`;
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
 
-        if (data.project_health_score) {
-          successMsg += ` | امتیاز سلامت: ${data.project_health_score}%`;
-        }
-        if (data.bugs_found > 0) {
-          successMsg += ` | ${data.bugs_found} باگ شناسایی شد`;
-        }
-        if (data.fields_count > 0) {
-          successMsg += ` | ${data.fields_count} فیلد جدید ایجاد شد`;
-        }
-        // 🆕 نمایش نتایج اعتبارسنجی health analysis
-        if (data.validation_results) {
-          const vr = data.validation_results;
-          if (vr.issues_reviewed > 0) {
-            successMsg += ` | اعتبارسنجی: ${vr.validated_count} تایید، ${vr.rejected_count} رد`;
+      if (reader) {
+        let finalResult: any = null;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const text = decoder.decode(value);
+          const lines = text.split('\n');
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+
+                // به‌روزرسانی پیشرفت
+                if (data.progress !== undefined) {
+                  setReportProgress({
+                    step: data.step || 0,
+                    total: data.total || 8,
+                    message: data.message || '',
+                    progress: data.progress
+                  });
+                }
+
+                // نتیجه نهایی
+                if (data.result) {
+                  finalResult = data.result;
+                }
+
+                // خطا
+                if (data.error && !data.result) {
+                  showError(data.error);
+                }
+              } catch (e) {
+                // JSON parsing error, ignore
+              }
+            }
           }
         }
 
-        showSuccess(successMsg);
-        loadReports();
+        // پردازش نتیجه نهایی
+        if (finalResult?.success) {
+          let successMsg = `✅ گزارش مهندسی تولید شد`;
 
-        // اگر فیلد جدید ایجاد شد، حافظه رو هم ریلود کن
-        if (data.fields_count > 0) {
-          loadMemory();
+          if (finalResult.project_health_score) {
+            successMsg += ` | امتیاز سلامت: ${finalResult.project_health_score}%`;
+          }
+          if (finalResult.bugs_found > 0) {
+            successMsg += ` | ${finalResult.bugs_found} باگ شناسایی شد`;
+          }
+          if (finalResult.fields_count > 0) {
+            successMsg += ` | ${finalResult.fields_count} فیلد جدید ایجاد شد`;
+          }
+          if (finalResult.validation_results) {
+            const vr = finalResult.validation_results;
+            if (vr.issues_reviewed > 0) {
+              successMsg += ` | اعتبارسنجی: ${vr.validated_count} تایید، ${vr.rejected_count} رد`;
+            }
+          }
+
+          showSuccess(successMsg);
+          loadReports();
+
+          if (finalResult.fields_count > 0) {
+            loadMemory();
+          }
+        } else if (finalResult) {
+          showError(finalResult.error || 'خطا در تولید گزارش');
         }
-      } else {
-        showError(data.error || 'خطا در تولید گزارش');
       }
     } catch (e) {
       showError('خطا در ارتباط');
     } finally {
       setGeneratingReport(false);
+      setReportProgress(null);
     }
   };
 
@@ -4202,6 +4248,31 @@ export default function ProjectDetailPage() {
                       </button>
                     </div>
                   </div>
+
+                  {/* 🔴 نوار پیشرفت گزارش مهندسی */}
+                  {reportProgress && (
+                    <div className="mt-4 p-4 bg-purple-50 dark:bg-purple-900/30 rounded-lg border border-purple-200 dark:border-purple-700">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm font-medium text-purple-700 dark:text-purple-300">
+                          {reportProgress.message}
+                        </span>
+                        <span className="text-xs text-purple-600 dark:text-purple-400">
+                          مرحله {reportProgress.step} از {reportProgress.total}
+                        </span>
+                      </div>
+                      <div className="w-full bg-purple-200 dark:bg-purple-800 rounded-full h-3 overflow-hidden">
+                        <div
+                          className="bg-gradient-to-r from-purple-500 to-purple-600 h-3 rounded-full transition-all duration-300 ease-out"
+                          style={{ width: `${reportProgress.progress}%` }}
+                        />
+                      </div>
+                      <div className="text-center mt-1">
+                        <span className="text-xs text-purple-600 dark:text-purple-400 font-mono">
+                          {reportProgress.progress}%
+                        </span>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="grid md:grid-cols-2 gap-4">
                     <div className="flex items-center gap-2">
