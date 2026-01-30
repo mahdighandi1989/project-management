@@ -2028,12 +2028,39 @@ async def execute_field_trigger(
                 if "trigger" not in field:
                     field["trigger"] = {}
                 field["trigger"]["last_run"] = datetime.utcnow().isoformat()
+                field["executed"] = True  # 🔴 علامت اجرا شده
 
                 # بایگانی خودکار اگر موفق و تنظیم شده
                 if archive_after_run and any_success:
                     if action_type == "display" or any_github_success:
                         field["archived"] = True
                         field["archived_at"] = datetime.utcnow().isoformat()
+                        field["archived_reason"] = "auto_archive_after_execution"
+
+                        # 🔴 ثبت بایگانی در ژورنال
+                        from .project_journal import ActivityLog
+                        archive_log = ActivityLog(
+                            id=f"log_{uuid.uuid4().hex[:12]}",
+                            project_id=project_id,
+                            model_id="system",
+                            model_provider="auto-archive",
+                            activity_type="field_archived",
+                            prompt=f"بایگانی خودکار فیلد: {target_field.get('name')}",
+                            response=f"فیلد '{target_field.get('name')}' پس از اجرای موفق بایگانی شد.",
+                            tokens_used=0,
+                            latency_ms=0,
+                            success=True,
+                            field_id=field_id,
+                            field_name=target_field.get("name"),
+                            extra_data=json.dumps({
+                                "action_type": action_type,
+                                "github_success": any_github_success,
+                                "archived_at": field["archived_at"],
+                                "clickable": True
+                            }, ensure_ascii=False),
+                            created_at=datetime.utcnow(),
+                        )
+                        db.add(archive_log)
                 break
 
         project.dynamic_fields = json.dumps(dynamic_fields, ensure_ascii=False)

@@ -1141,6 +1141,8 @@ async def generate_engineering_report(
 
     "field_management": {
         "fields_to_archive": ["id_فیلدهایی که انجام شده یا دیگر نیاز نیست"],
+        "fields_to_approve": ["id_فیلدهای pending که تایید می‌شوند برای اجرا"],
+        "fields_to_reject": ["id_فیلدهای pending که رد و بایگانی می‌شوند"],
         "fields_to_merge": [
             {"source_ids": ["id1", "id2"], "merged_name": "نام جدید", "merged_value": "دستور ادغام‌شده"}
         ],
@@ -1160,6 +1162,11 @@ async def generate_engineering_report(
             {"task": "کار بلندمدت 1", "description": "توضیحات", "action_type": "display", "priority": 7, "field_type": "permanent"}
         ]
     },
+
+    "roadmap_status_updates": [
+        {"item": "نام آیتم نقشه راه", "completed": true, "reason": "فیلد X اجرا شده و مشکل حل شده"},
+        {"item": "نام آیتم نقشه راه", "completed": false, "create_field": true, "field_details": {"name": "...", "value": "...", "target_path": "...", "action_type": "github_commit"}}
+    ],
 
     "activity_analysis": {
         "success_rate": 75,
@@ -1711,6 +1718,33 @@ async def generate_engineering_report(
                         field["updated_at"] = datetime.utcnow().isoformat()
                         updated_count += 1
 
+            # 🔴 تایید فیلدهای pending (ایجاد شده توسط AI query یا بخش‌های دیگر)
+            approved_count = 0
+            for field_id in field_mgmt.get("fields_to_approve", []):
+                for field in existing_fields:
+                    if field.get("id") == field_id and not field.get("archived"):
+                        field["engineering_approval"] = {
+                            "approved": True,
+                            "approved_at": datetime.utcnow().isoformat(),
+                            "approved_by": model_id,
+                            "approval_type": "engineering_review"
+                        }
+                        field["validation_marker"] = "validated"
+                        field["needs_approval"] = False
+                        approved_count += 1
+                        logger.info(f"Approved pending field: {field.get('name')}")
+
+            # 🔴 رد و بایگانی فیلدهای pending که مورد نیاز نیستند
+            rejected_field_count = 0
+            for field_id in field_mgmt.get("fields_to_reject", []):
+                for field in existing_fields:
+                    if field.get("id") == field_id and not field.get("archived"):
+                        field["archived"] = True
+                        field["archived_at"] = datetime.utcnow().isoformat()
+                        field["archived_reason"] = "rejected_by_engineering_report"
+                        rejected_field_count += 1
+                        logger.info(f"Rejected pending field: {field.get('name')}")
+
             # 2. 🆕 تولید فیلدهای جدید از validated issues (با مارکر اعتبارسنجی)
             if validate_health_issues and "health_analysis_validation" in report_data:
                 validated_issues = report_data["health_analysis_validation"].get("validated_issues", [])
@@ -1858,6 +1892,27 @@ async def generate_engineering_report(
                     existing_fields.append(new_field)
                     created_fields.append(new_field["name"])
 
+                    # 🔴 بایگانی ایراد اصلی در لیست issues_found
+                    try:
+                        issues_found = []
+                        if project.issues_found:
+                            issues_found = json.loads(project.issues_found)
+
+                        # پیدا کردن و بایگانی ایراد
+                        for stored_issue in issues_found:
+                            if (stored_issue.get("file") == original.get("file") and
+                                stored_issue.get("type") == original.get("type") and
+                                stored_issue.get("line") == original.get("line")):
+                                stored_issue["archived"] = True
+                                stored_issue["archived_at"] = datetime.utcnow().isoformat()
+                                stored_issue["archived_reason"] = "converted_to_field"
+                                stored_issue["field_id"] = new_field["id"]
+                                break
+
+                        project.issues_found = json.dumps(issues_found, ensure_ascii=False)
+                    except Exception as e:
+                        logger.warning(f"Could not archive issue: {e}")
+
             # 3. تولید فیلدهای جدید از roadmap
             roadmap = report_data.get("roadmap", {})
 
@@ -1976,13 +2031,67 @@ async def generate_engineering_report(
                         created_fields.append(new_field["name"])
                         logger.info(f"Created actionable field from journal: {new_field['name']} (action: {action_type})")
 
-            # 5. مرتب‌سازی براساس اولویت و ذخیره
+            # 5. 🔴 به‌روزرسانی نقشه راه با چک‌باکس‌ها
+            roadmap_updated = False
+            if "roadmap_status_updates" in report_data:
+                roadmap_updates = report_data["roadmap_status_updates"]
+                current_roadmap = project.roadmap_content or ""
+
+                for update in roadmap_updates:
+                    item_name = update.get("item", "")
+                    completed = update.get("completed", False)
+
+                    if completed:
+                        # ✅ تیک سبز برای موارد انجام شده
+                        # تبدیل [ ] به [x] یا اضافه کردن ✅
+                        if f"[ ] {item_name}" in current_roadmap:
+                            current_roadmap = current_roadmap.replace(f"[ ] {item_name}", f"[x] {item_name} ✅")
+                            roadmap_updated = True
+                        elif item_name in current_roadmap and "[x]" not in current_roadmap.split(item_name)[0][-10:]:
+                            # اگر چک‌باکس ندارد، ✅ اضافه کن
+                            current_roadmap = current_roadmap.replace(item_name, f"{item_name} ✅")
+                            roadmap_updated = True
+
+                    elif update.get("create_field"):
+                        # ایجاد فیلد برای آیتم‌های انجام نشده
+                        field_details = update.get("field_details", {})
+                        new_field = {
+                            "id": str(uuid.uuid4()),
+                            "name": f"[نقشه راه] {field_details.get('name', item_name)}",
+                            "value": field_details.get("value", f"تسک نقشه راه: {item_name}"),
+                            "target_models": ["claude"],
+                            "action_type": field_details.get("action_type", "github_commit"),
+                            "target_path": field_details.get("target_path"),
+                            "archive_after_run": True,
+                            "field_type": "temporary",
+                            "priority": field_details.get("priority", 3),
+                            "attachments": [],
+                            "trigger": {"enabled": False, "interval_minutes": 60, "interval_type": "minutes"},
+                            "created_from_report": True,
+                            "source": "roadmap",
+                            "roadmap_item": item_name,
+                            "engineering_approval": {
+                                "approved": True,
+                                "approved_at": datetime.utcnow().isoformat(),
+                                "approved_by": model_id,
+                                "approval_type": "roadmap_item"
+                            }
+                        }
+                        existing_fields.append(new_field)
+                        created_fields.append(new_field["name"])
+                        logger.info(f"Created field from roadmap: {new_field['name']}")
+
+                if roadmap_updated:
+                    project.roadmap_content = current_roadmap
+                    logger.info(f"Roadmap updated with {len(roadmap_updates)} status changes")
+
+            # 6. مرتب‌سازی براساس اولویت و ذخیره
             active = [f for f in existing_fields if not f.get("archived")]
             archived = [f for f in existing_fields if f.get("archived")]
             active.sort(key=lambda x: x.get("priority", 5))
             existing_fields = active + archived
 
-            if created_fields or archived_count or merged_count or updated_count:
+            if created_fields or archived_count or merged_count or updated_count or roadmap_updated:
                 project.dynamic_fields = json.dumps(existing_fields, ensure_ascii=False)
                 db.commit()
                 logger.info(f"Field management: created={len(created_fields)}, archived={archived_count}, merged={merged_count}, updated={updated_count}")
