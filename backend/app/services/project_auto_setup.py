@@ -2,6 +2,7 @@
 """
 سرویس راه‌اندازی خودکار هوشمند پروژه
 تحلیل عمیق پروژه و تولید دستورات و فیلدهای اختصاصی با AI
+🆕 با ثبت سطر به سطر عملیات در ژورنال
 """
 
 import json
@@ -12,6 +13,52 @@ import logging
 import re
 
 logger = logging.getLogger(__name__)
+
+
+# =====================================
+# 🆕 Helper برای ثبت عملیات جزئی در ژورنال
+# =====================================
+
+def log_auto_setup_operation(
+    db_session,
+    project_id: str,
+    parent_log_id: str,
+    operation_type: str,
+    summary: str,
+    details: dict = None,
+    before_value: str = None,
+    after_value: str = None,
+    target_type: str = None,
+    target_id: str = None,
+    target_name: str = None,
+    status: str = "completed"
+):
+    """
+    🆕 ثبت یک عملیات جزئی auto-setup در ژورنال
+    برای قابلیت کلیک و مشاهده جزئیات هر سطر
+    """
+    if not db_session:
+        return None
+
+    try:
+        from ..api.routes.project_journal import log_detailed_operation
+        return log_detailed_operation(
+            db=db_session,
+            project_id=project_id,
+            parent_log_id=parent_log_id,
+            operation_type=operation_type,
+            summary=summary,
+            details=details,
+            before_value=before_value,
+            after_value=after_value,
+            target_type=target_type,
+            target_id=target_id,
+            target_name=target_name,
+            status=status
+        )
+    except Exception as e:
+        logger.warning(f"Could not log detailed operation: {e}")
+        return None
 
 
 # =====================================
@@ -630,6 +677,46 @@ async def auto_setup_project_memory(
                        f"{len(full_context.get('unexecuted_fields', []))} unexecuted fields, "
                        f"run #{full_context.get('auto_setup_run_count', 1)}")
 
+        # 🆕 ایجاد ActivityLog برای این عملیات auto-setup
+        parent_log_id = None
+        if db_session:
+            try:
+                from ..api.routes.project_journal import ActivityLog
+                parent_log = ActivityLog(
+                    id=f"log_{uuid.uuid4().hex[:12]}",
+                    project_id=project_id,
+                    model_id="system",
+                    activity_type="auto_setup",
+                    prompt=f"راه‌اندازی خودکار پروژه {project_name}",
+                    tokens_used=0,
+                    latency_ms=0,
+                    success=True,
+                    field_name="auto_setup",
+                    created_at=datetime.utcnow()
+                )
+                db_session.add(parent_log)
+                db_session.flush()  # برای دریافت id
+                parent_log_id = parent_log.id
+
+                # 🆕 ثبت شروع عملیات
+                log_auto_setup_operation(
+                    db_session=db_session,
+                    project_id=project_id,
+                    parent_log_id=parent_log_id,
+                    operation_type="auto_setup_start",
+                    summary=f"شروع راه‌اندازی خودکار پروژه {project_name}",
+                    details={
+                        "files_count": len(files) if files else 0,
+                        "has_context": bool(full_context),
+                        "run_count": full_context.get("auto_setup_run_count", 1) if full_context else 1
+                    },
+                    target_type="project",
+                    target_id=project_id,
+                    target_name=project_name
+                )
+            except Exception as e:
+                logger.warning(f"Could not create parent log: {e}")
+
         # دریافت فیلدهای فعلی برای حفظ فیلدهای بایگانی شده
         existing_fields = []
         archived_fields = []
@@ -732,12 +819,41 @@ async def auto_setup_project_memory(
                         if is_report_field(field) and not field.get("executed", False):
                             fields_protected_count += 1
                             logger.warning(f"🛡️ PROTECTED: Cannot archive report field (not executed): {field.get('name')}")
+                            # 🆕 ثبت عملیات محافظت
+                            log_auto_setup_operation(
+                                db_session=db_session,
+                                project_id=project_id,
+                                parent_log_id=parent_log_id,
+                                operation_type="field_protected",
+                                summary=f"محافظت از فیلد گزارش: {field.get('name')}",
+                                details={"reason": "فیلد توسط گزارش مهندسی ایجاد شده و هنوز اجرا نشده"},
+                                target_type="field",
+                                target_id=field_id,
+                                target_name=field.get("name"),
+                                status="skipped"
+                            )
                             continue
+                        # ذخیره مقدار قبلی برای ردیابی
+                        before_value = json.dumps(field, ensure_ascii=False)
                         field["archived"] = True
                         field["archived_at"] = datetime.utcnow().isoformat()
                         field["archived_reason"] = "auto-setup review"
                         fields_archived_count += 1
                         logger.info(f"Auto-archived field: {field.get('name')}")
+                        # 🆕 ثبت عملیات بایگانی
+                        log_auto_setup_operation(
+                            db_session=db_session,
+                            project_id=project_id,
+                            parent_log_id=parent_log_id,
+                            operation_type="field_archive",
+                            summary=f"بایگانی فیلد: {field.get('name')}",
+                            details={"reason": "auto-setup review", "archived_at": field["archived_at"]},
+                            before_value=before_value,
+                            after_value=json.dumps(field, ensure_ascii=False),
+                            target_type="field",
+                            target_id=field_id,
+                            target_name=field.get("name")
+                        )
 
             # 2. ادغام فیلدهای مشخص شده (با محافظت از فیلدهای گزارش)
             fields_to_merge = data.get("fields_to_merge", [])
@@ -791,6 +907,24 @@ async def auto_setup_project_memory(
                     updated_existing_fields.append(merged_field)
                     fields_merged_count += 1
                     logger.info(f"Merged fields {source_ids} into: {merged_field['name']}")
+                    # 🆕 ثبت عملیات ادغام
+                    log_auto_setup_operation(
+                        db_session=db_session,
+                        project_id=project_id,
+                        parent_log_id=parent_log_id,
+                        operation_type="field_merge",
+                        summary=f"ادغام {len(source_ids)} فیلد به: {merged_field['name']}",
+                        details={
+                            "source_ids": source_ids,
+                            "merged_field_id": merged_field["id"],
+                            "merged_name": merged_field["name"],
+                            "attachments_count": len(merged_attachments)
+                        },
+                        after_value=json.dumps(merged_field, ensure_ascii=False),
+                        target_type="field",
+                        target_id=merged_field["id"],
+                        target_name=merged_field["name"]
+                    )
 
             # 3. به‌روزرسانی فیلدهای مشخص شده
             fields_to_update = data.get("fields_to_update", [])
@@ -798,6 +932,7 @@ async def auto_setup_project_memory(
                 field_id = update_info.get("id")
                 for field in updated_existing_fields:
                     if field.get("id") == field_id and not field.get("archived"):
+                        before_value = json.dumps(field, ensure_ascii=False)
                         if update_info.get("new_value"):
                             field["value"] = update_info["new_value"]
                         if update_info.get("new_priority"):
@@ -808,6 +943,23 @@ async def auto_setup_project_memory(
                         field["update_reason"] = update_info.get("reason", "auto-setup review")
                         fields_updated_count += 1
                         logger.info(f"Updated field: {field.get('name')}")
+                        # 🆕 ثبت عملیات به‌روزرسانی
+                        log_auto_setup_operation(
+                            db_session=db_session,
+                            project_id=project_id,
+                            parent_log_id=parent_log_id,
+                            operation_type="field_update",
+                            summary=f"به‌روزرسانی فیلد: {field.get('name')}",
+                            details={
+                                "reason": update_info.get("reason", "auto-setup review"),
+                                "changed_fields": list(update_info.keys())
+                            },
+                            before_value=before_value,
+                            after_value=json.dumps(field, ensure_ascii=False),
+                            target_type="field",
+                            target_id=field_id,
+                            target_name=field.get("name")
+                        )
 
             # 4. فیلدهای کاملاً جدید از AI
             new_dynamic_fields = []
@@ -848,6 +1000,25 @@ async def auto_setup_project_memory(
                     "is_one_time": ai_field.get("is_one_time", ai_field.get("archive_after_run", False))
                 }
                 new_dynamic_fields.append(field)
+                # 🆕 ثبت عملیات ایجاد فیلد جدید
+                log_auto_setup_operation(
+                    db_session=db_session,
+                    project_id=project_id,
+                    parent_log_id=parent_log_id,
+                    operation_type="field_create",
+                    summary=f"ایجاد فیلد جدید: {field['name']}",
+                    details={
+                        "action_type": action_type,
+                        "field_type": field_type,
+                        "priority": priority,
+                        "reason": ai_field.get("why", ""),
+                        "has_trigger": ai_field.get("needs_trigger", False)
+                    },
+                    after_value=json.dumps(field, ensure_ascii=False),
+                    target_type="field",
+                    target_id=field["id"],
+                    target_name=field["name"]
+                )
 
             # ترکیب همه فیلدها و مرتب‌سازی براساس اولویت
             all_fields = updated_existing_fields + new_dynamic_fields
@@ -893,6 +1064,28 @@ async def auto_setup_project_memory(
             # حفظ فیلدهای محافظت شده + بایگانی شده در fallback
             result["dynamic_fields"] = result.get("dynamic_fields", []) + protected_existing + archived_fields
             result["fields_protected"] = len(protected_existing)
+
+        # 🆕 ثبت خلاصه پایانی عملیات
+        if db_session and parent_log_id:
+            log_auto_setup_operation(
+                db_session=db_session,
+                project_id=project_id,
+                parent_log_id=parent_log_id,
+                operation_type="auto_setup_complete",
+                summary=f"پایان راه‌اندازی خودکار: {result.get('new_fields_count', 0)} فیلد جدید، {result.get('fields_archived', 0)} بایگانی، {result.get('fields_merged', 0)} ادغام، {result.get('fields_updated', 0)} به‌روزرسانی",
+                details={
+                    "new_fields_count": result.get("new_fields_count", 0),
+                    "fields_archived": result.get("fields_archived", 0),
+                    "fields_merged": result.get("fields_merged", 0),
+                    "fields_updated": result.get("fields_updated", 0),
+                    "fields_protected": result.get("fields_protected", 0),
+                    "model_used": result.get("model_used"),
+                    "tokens_used": result.get("tokens_used", 0)
+                },
+                target_type="project",
+                target_id=project_id,
+                target_name=project_name
+            )
 
         # مرحله ۴: ذخیره در دیتابیس
         if db_session and result.get("success"):

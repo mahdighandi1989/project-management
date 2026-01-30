@@ -840,8 +840,9 @@ async def run_streaming_analysis(
                                 final_result.get("file_health_map", {}),
                                 ensure_ascii=False
                             )
+                            # 🔴 رفع محدودیت - تمام ایرادات بدون محدودیت عددی ذخیره می‌شوند
                             proj.issues_found = json.dumps(
-                                final_result.get("issues", [])[:100],
+                                final_result.get("issues", []),
                                 ensure_ascii=False
                             )
                             proj.last_analysis_at = datetime.utcnow()
