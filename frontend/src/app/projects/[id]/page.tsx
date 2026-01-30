@@ -221,7 +221,21 @@ export default function ProjectDetailPage() {
     report_model: 'openai',
   });
   const [generatingReport, setGeneratingReport] = useState(false);
-  const [journalSubTab, setJournalSubTab] = useState<'logs' | 'reports' | 'validation' | 'profiles'>('logs');
+  const [journalSubTab, setJournalSubTab] = useState<'logs' | 'reports' | 'validation' | 'profiles' | 'roadmap'>('logs');
+
+  // Roadmap State (در تب ژورنال)
+  const [roadmapContent, setRoadmapContent] = useState<string>('');
+  const [roadmapItems, setRoadmapItems] = useState<Array<{
+    id: string;
+    text: string;
+    completed: boolean;
+    priority: 'immediate' | 'short_term' | 'long_term';
+    has_field?: boolean;
+    field_id?: string;
+  }>>([]);
+  const [roadmapLoading, setRoadmapLoading] = useState(false);
+  const [idealState, setIdealState] = useState<string>('');
+  const [generatingRoadmapFields, setGeneratingRoadmapFields] = useState(false);
 
   // Validation & Model Profiles State
   const [modelProfiles, setModelProfiles] = useState<any[]>([]);
@@ -429,6 +443,13 @@ export default function ProjectDetailPage() {
       loadLeaderboard();
     }
   }, [activeTab, journalSubTab]);
+
+  // بارگذاری نقشه راه وقتی سابتب تغییر کنه
+  useEffect(() => {
+    if (activeTab === 'journal' && journalSubTab === 'roadmap' && projectId) {
+      loadRoadmap();
+    }
+  }, [activeTab, journalSubTab, projectId]);
 
   // بروزرسانی استایل نودها و لبه‌ها وقتی workflow فعال میشه
   useEffect(() => {
@@ -998,6 +1019,121 @@ export default function ProjectDetailPage() {
       }
     } catch (e) {
       console.error('Error loading stats:', e);
+    }
+  };
+
+  // بارگذاری نقشه راه برای تب ژورنال
+  const loadRoadmap = async () => {
+    setRoadmapLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/roadmap`);
+      if (res.ok) {
+        const data = await res.json();
+        setRoadmapContent(data.roadmap_content || '');
+        setIdealState(data.ideal_state || '');
+
+        // پارس کردن نقشه راه به آیتم‌های چک‌باکسی
+        const items: typeof roadmapItems = [];
+        const content = data.roadmap_content || '';
+
+        // پیدا کردن خطوطی که با - یا * شروع می‌شوند
+        const lines = content.split('\n');
+        let currentPriority: 'immediate' | 'short_term' | 'long_term' = 'immediate';
+
+        lines.forEach((line: string, index: number) => {
+          const trimmed = line.trim();
+
+          // تشخیص بخش‌ها
+          if (trimmed.includes('فوری') || trimmed.includes('immediate') || trimmed.includes('کوتاه‌مدت فوری')) {
+            currentPriority = 'immediate';
+          } else if (trimmed.includes('کوتاه‌مدت') || trimmed.includes('short') || trimmed.includes('میان‌مدت')) {
+            currentPriority = 'short_term';
+          } else if (trimmed.includes('بلندمدت') || trimmed.includes('long') || trimmed.includes('آینده')) {
+            currentPriority = 'long_term';
+          }
+
+          // پیدا کردن آیتم‌ها
+          if (trimmed.startsWith('- ') || trimmed.startsWith('* ') || trimmed.match(/^\d+\./)) {
+            const text = trimmed.replace(/^[-*]\s*/, '').replace(/^\d+\.\s*/, '');
+            const isCompleted = trimmed.includes('[x]') || trimmed.includes('✅') || trimmed.includes('✓');
+
+            items.push({
+              id: `roadmap_${index}`,
+              text: text.replace(/\[x\]|\[✓\]|\[✅\]/gi, '').trim(),
+              completed: isCompleted,
+              priority: currentPriority,
+              has_field: false,
+            });
+          }
+        });
+
+        setRoadmapItems(items);
+      }
+    } catch (e) {
+      console.error('Error loading roadmap:', e);
+    } finally {
+      setRoadmapLoading(false);
+    }
+  };
+
+  // تغییر وضعیت چک‌باکس نقشه راه
+  const toggleRoadmapItem = async (itemId: string) => {
+    const updatedItems = roadmapItems.map(item =>
+      item.id === itemId ? { ...item, completed: !item.completed } : item
+    );
+    setRoadmapItems(updatedItems);
+
+    // به‌روزرسانی در سرور
+    try {
+      await fetch(`${API_BASE}/api/projects/${projectId}/roadmap/items/${itemId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ completed: !roadmapItems.find(i => i.id === itemId)?.completed }),
+      });
+    } catch (e) {
+      console.error('Error updating roadmap item:', e);
+    }
+  };
+
+  // تولید فیلد برای آیتم‌های خالی نقشه راه
+  const generateFieldsForPendingItems = async () => {
+    setGeneratingRoadmapFields(true);
+    try {
+      const pendingItems = roadmapItems.filter(item => !item.completed && !item.has_field);
+
+      for (const item of pendingItems) {
+        const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: `[نقشه راه] ${item.text.slice(0, 60)}`,
+            value: `هدف نقشه راه:\n${item.text}\n\nاولویت: ${item.priority === 'immediate' ? 'فوری' : item.priority === 'short_term' ? 'کوتاه‌مدت' : 'بلندمدت'}`,
+            target_models: ['all'],
+            field_type: 'temporary',
+            priority: item.priority === 'immediate' ? 1 : item.priority === 'short_term' ? 4 : 7,
+            action_type: 'github_commit',
+            archive_after_run: true,
+            source: 'roadmap',
+            roadmap_item_id: item.id,
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          setRoadmapItems(prev => prev.map(i =>
+            i.id === item.id ? { ...i, has_field: true, field_id: data.field_id } : i
+          ));
+        }
+
+        // کمی تاخیر بین درخواست‌ها
+        await new Promise(r => setTimeout(r, 300));
+      }
+
+      showSuccess(`${pendingItems.length} فیلد برای موارد انتظار ایجاد شد`);
+    } catch (e) {
+      showError('خطا در تولید فیلدها');
+    } finally {
+      setGeneratingRoadmapFields(false);
     }
   };
 
@@ -3787,6 +3923,16 @@ export default function ProjectDetailPage() {
               >
                 🤖 پروفایل مدل‌ها
               </button>
+              <button
+                onClick={() => setJournalSubTab('roadmap')}
+                className={`flex-1 py-2 px-4 rounded-lg font-medium transition ${
+                  journalSubTab === 'roadmap'
+                    ? 'bg-green-500 text-white'
+                    : 'hover:bg-gray-100 dark:hover:bg-gray-700'
+                }`}
+              >
+                🗺️ نقشه راه
+              </button>
             </div>
 
             {/* آمار کلی */}
@@ -4473,6 +4619,217 @@ export default function ProjectDetailPage() {
                     </button>
                   </div>
                 </div>
+              </div>
+            )}
+
+            {/* تب نقشه راه */}
+            {journalSubTab === 'roadmap' && (
+              <div className="space-y-6">
+                {/* هدر و دکمه‌ها */}
+                <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <div>
+                      <h2 className="font-bold text-lg flex items-center gap-2">
+                        <span className="text-xl">🗺️</span>
+                        نقشه راه پروژه
+                      </h2>
+                      <p className="text-sm text-gray-500 mt-1">
+                        موارد انجام‌شده با تیک سبز و موارد در انتظار با باکس خالی نمایش داده می‌شوند
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={generateFieldsForPendingItems}
+                        disabled={generatingRoadmapFields || roadmapItems.filter(i => !i.completed && !i.has_field).length === 0}
+                        className="px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 disabled:opacity-50 flex items-center gap-2"
+                      >
+                        {generatingRoadmapFields ? (
+                          <>
+                            <span className="animate-spin">⏳</span>
+                            در حال تولید...
+                          </>
+                        ) : (
+                          <>
+                            <span>⚡</span>
+                            تولید فیلد برای موارد خالی ({roadmapItems.filter(i => !i.completed && !i.has_field).length})
+                          </>
+                        )}
+                      </button>
+                      <button
+                        onClick={loadRoadmap}
+                        disabled={roadmapLoading}
+                        className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50"
+                      >
+                        🔄 بروزرسانی
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* آمار نقشه راه */}
+                  <div className="grid grid-cols-4 gap-4 mb-6">
+                    <div className="text-center p-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
+                      <div className="text-2xl font-bold text-green-600">
+                        {roadmapItems.filter(i => i.completed).length}
+                      </div>
+                      <div className="text-xs text-gray-500">انجام شده</div>
+                    </div>
+                    <div className="text-center p-3 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg">
+                      <div className="text-2xl font-bold text-yellow-600">
+                        {roadmapItems.filter(i => !i.completed).length}
+                      </div>
+                      <div className="text-xs text-gray-500">در انتظار</div>
+                    </div>
+                    <div className="text-center p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+                      <div className="text-2xl font-bold text-blue-600">
+                        {roadmapItems.filter(i => i.has_field).length}
+                      </div>
+                      <div className="text-xs text-gray-500">دارای فیلد</div>
+                    </div>
+                    <div className="text-center p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg">
+                      <div className="text-2xl font-bold text-purple-600">
+                        {roadmapItems.length > 0 ? Math.round((roadmapItems.filter(i => i.completed).length / roadmapItems.length) * 100) : 0}%
+                      </div>
+                      <div className="text-xs text-gray-500">پیشرفت</div>
+                    </div>
+                  </div>
+                </div>
+
+                {roadmapLoading ? (
+                  <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-8 text-center text-gray-400">
+                    <div className="animate-spin text-3xl mb-2">⏳</div>
+                    در حال بارگذاری...
+                  </div>
+                ) : roadmapItems.length === 0 ? (
+                  <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-8 text-center text-gray-400">
+                    <div className="text-4xl mb-2">📭</div>
+                    <p>نقشه راه تعریف نشده</p>
+                    <p className="text-sm mt-2">از تب تحلیل سلامت، گزارش مهندسی را اجرا کنید تا نقشه راه تولید شود</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {/* بخش فوری */}
+                    {roadmapItems.filter(i => i.priority === 'immediate').length > 0 && (
+                      <div className="bg-white dark:bg-gray-800 rounded-xl shadow overflow-hidden">
+                        <div className="p-4 bg-red-50 dark:bg-red-900/20 border-b dark:border-gray-700">
+                          <h3 className="font-bold text-red-700 dark:text-red-400 flex items-center gap-2">
+                            <span>🔴</span> اقدامات فوری
+                          </h3>
+                        </div>
+                        <div className="divide-y dark:divide-gray-700">
+                          {roadmapItems.filter(i => i.priority === 'immediate').map((item) => (
+                            <div
+                              key={item.id}
+                              className="p-4 flex items-center gap-3 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer"
+                              onClick={() => toggleRoadmapItem(item.id)}
+                            >
+                              <div className={`w-6 h-6 rounded border-2 flex items-center justify-center ${
+                                item.completed
+                                  ? 'bg-green-500 border-green-500 text-white'
+                                  : 'border-gray-300 dark:border-gray-600'
+                              }`}>
+                                {item.completed && '✓'}
+                              </div>
+                              <span className={`flex-1 ${item.completed ? 'line-through text-gray-400' : ''}`}>
+                                {item.text}
+                              </span>
+                              {item.has_field && (
+                                <span className="text-xs bg-blue-100 text-blue-600 px-2 py-1 rounded">
+                                  فیلد ایجاد شده
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* بخش کوتاه‌مدت */}
+                    {roadmapItems.filter(i => i.priority === 'short_term').length > 0 && (
+                      <div className="bg-white dark:bg-gray-800 rounded-xl shadow overflow-hidden">
+                        <div className="p-4 bg-yellow-50 dark:bg-yellow-900/20 border-b dark:border-gray-700">
+                          <h3 className="font-bold text-yellow-700 dark:text-yellow-400 flex items-center gap-2">
+                            <span>🟡</span> اقدامات کوتاه‌مدت
+                          </h3>
+                        </div>
+                        <div className="divide-y dark:divide-gray-700">
+                          {roadmapItems.filter(i => i.priority === 'short_term').map((item) => (
+                            <div
+                              key={item.id}
+                              className="p-4 flex items-center gap-3 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer"
+                              onClick={() => toggleRoadmapItem(item.id)}
+                            >
+                              <div className={`w-6 h-6 rounded border-2 flex items-center justify-center ${
+                                item.completed
+                                  ? 'bg-green-500 border-green-500 text-white'
+                                  : 'border-gray-300 dark:border-gray-600'
+                              }`}>
+                                {item.completed && '✓'}
+                              </div>
+                              <span className={`flex-1 ${item.completed ? 'line-through text-gray-400' : ''}`}>
+                                {item.text}
+                              </span>
+                              {item.has_field && (
+                                <span className="text-xs bg-blue-100 text-blue-600 px-2 py-1 rounded">
+                                  فیلد ایجاد شده
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* بخش بلندمدت */}
+                    {roadmapItems.filter(i => i.priority === 'long_term').length > 0 && (
+                      <div className="bg-white dark:bg-gray-800 rounded-xl shadow overflow-hidden">
+                        <div className="p-4 bg-blue-50 dark:bg-blue-900/20 border-b dark:border-gray-700">
+                          <h3 className="font-bold text-blue-700 dark:text-blue-400 flex items-center gap-2">
+                            <span>🔵</span> اقدامات بلندمدت
+                          </h3>
+                        </div>
+                        <div className="divide-y dark:divide-gray-700">
+                          {roadmapItems.filter(i => i.priority === 'long_term').map((item) => (
+                            <div
+                              key={item.id}
+                              className="p-4 flex items-center gap-3 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer"
+                              onClick={() => toggleRoadmapItem(item.id)}
+                            >
+                              <div className={`w-6 h-6 rounded border-2 flex items-center justify-center ${
+                                item.completed
+                                  ? 'bg-green-500 border-green-500 text-white'
+                                  : 'border-gray-300 dark:border-gray-600'
+                              }`}>
+                                {item.completed && '✓'}
+                              </div>
+                              <span className={`flex-1 ${item.completed ? 'line-through text-gray-400' : ''}`}>
+                                {item.text}
+                              </span>
+                              {item.has_field && (
+                                <span className="text-xs bg-blue-100 text-blue-600 px-2 py-1 rounded">
+                                  فیلد ایجاد شده
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* حالت ایده‌آل */}
+                {idealState && (
+                  <div className="bg-gradient-to-r from-purple-50 to-blue-50 dark:from-purple-900/20 dark:to-blue-900/20 rounded-xl shadow p-6">
+                    <h3 className="font-bold text-lg mb-3 flex items-center gap-2">
+                      <span>✨</span> حالت ایده‌آل پروژه
+                    </h3>
+                    <div className="prose dark:prose-invert max-w-none text-sm">
+                      <pre className="whitespace-pre-wrap bg-white/50 dark:bg-gray-800/50 p-4 rounded-lg">
+                        {idealState}
+                      </pre>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 

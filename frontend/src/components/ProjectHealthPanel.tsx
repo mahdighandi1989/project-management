@@ -59,7 +59,7 @@ interface Props {
 }
 
 export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'settings' | 'files' | 'roadmap' | 'issues' | 'validation'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'settings' | 'files' | 'issues' | 'validation'>('overview');
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
 
@@ -917,9 +917,9 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
           { id: 'overview', label: 'نمای کلی', icon: '*' },
           { id: 'settings', label: 'تنظیمات', icon: '+' },
           { id: 'files', label: 'فایل‌ها', icon: '-' },
-          { id: 'roadmap', label: 'نقشه راه', icon: '#' },
           { id: 'issues', label: `ایرادات (${issues.length})`, icon: '!' },
           { id: 'validation', label: 'زنجیره اعتبارسنجی', icon: '✓' },
+          // نقشه راه به تب ژورنال منتقل شد
         ].map((tab) => (
           <button
             key={tab.id}
@@ -1354,48 +1354,7 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
           </div>
         )}
 
-        {/* تب نقشه راه */}
-        {activeTab === 'roadmap' && (
-          <div className="space-y-4">
-            <div className="flex justify-between items-center">
-              <h3 className="font-bold">نقشه راه پروژه (ROADMAP)</h3>
-              <button
-                onClick={async () => {
-                  try {
-                    const res = await fetch(`${API_BASE}/api/projects/${projectId}/roadmap`, {
-                      method: 'PUT',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ auto_generate: true })
-                    });
-                    if (res.ok) {
-                      showSuccess('نقشه راه تولید شد');
-                      loadRoadmap();
-                    }
-                  } catch (e) {
-                    showError('خطا');
-                  }
-                }}
-                className="px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600"
-              >
-                تولید/به‌روزرسانی خودکار
-              </button>
-            </div>
-
-            {roadmap ? (
-              <div className="prose dark:prose-invert max-w-none">
-                <pre className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg overflow-auto max-h-[400px] text-sm whitespace-pre-wrap">
-                  {roadmap}
-                </pre>
-              </div>
-            ) : (
-              <div className="text-center py-8 text-gray-400">
-                <div className="text-5xl mb-4">#</div>
-                <p>نقشه راه وجود ندارد</p>
-                <p className="text-sm">با کلیک روی دکمه بالا، نقشه راه تولید می‌شود</p>
-              </div>
-            )}
-          </div>
-        )}
+        {/* نقشه راه به تب ژورنال منتقل شد */}
 
         {/* تب ایرادات */}
         {activeTab === 'issues' && (
