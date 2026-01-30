@@ -1689,17 +1689,92 @@ async def update_project_readme(
     return {"success": False, "message": "محتوا یا auto_generate لازم است"}
 
 
+def _merge_similar_issues(issues: list) -> list:
+    """
+    🔴 ادغام ایرادات مشابه
+    - ایرادات با نوع و فایل یکسان ادغام می‌شوند
+    - ایرادات با پیام‌های مشابه (>70%) ادغام می‌شوند
+    - تعداد ادغام شده در merged_count ذخیره می‌شود
+    """
+    if len(issues) <= 1:
+        return issues
+
+    merged = []
+    used_indices = set()
+
+    for i, issue in enumerate(issues):
+        if i in used_indices:
+            continue
+
+        merged_issue = issue.copy()
+        merged_messages = [issue.get("message", "")]
+        merged_count = 1
+
+        for j in range(i + 1, len(issues)):
+            if j in used_indices:
+                continue
+
+            other = issues[j]
+
+            # بررسی شباهت
+            same_file = issue.get("file") == other.get("file")
+            same_type = issue.get("type") == other.get("type")
+            same_severity = issue.get("severity") == other.get("severity")
+
+            # اگر فایل و نوع یکسان باشد
+            if same_file and same_type:
+                merged_messages.append(other.get("message", ""))
+                merged_count += 1
+                used_indices.add(j)
+            # یا اگر پیام‌ها خیلی شبیه باشند
+            elif same_severity and same_type:
+                msg1 = issue.get("message", "")[:100].lower()
+                msg2 = other.get("message", "")[:100].lower()
+                # بررسی شباهت ساده
+                common_words = set(msg1.split()) & set(msg2.split())
+                total_words = max(len(set(msg1.split())), 1)
+                similarity = len(common_words) / total_words
+                if similarity > 0.6:
+                    merged_messages.append(other.get("message", ""))
+                    merged_count += 1
+                    used_indices.add(j)
+
+        if merged_count > 1:
+            merged_issue["merged_count"] = merged_count
+            merged_issue["merged_messages"] = merged_messages[:5]  # حداکثر 5 پیام
+            merged_issue["message"] = f"[{merged_count} ایراد مشابه] " + merged_issue.get("message", "")
+
+        merged.append(merged_issue)
+
+    return merged
+
+
 @router.get("/{project_id}/health/issues")
-async def get_project_issues(project_id: str, db=Depends(get_db)):
-    """دریافت لیست ایرادات شناسایی شده"""
+async def get_project_issues(
+    project_id: str,
+    merge_similar: bool = True,  # 🔴 ادغام ایرادات مشابه
+    db=Depends(get_db)
+):
+    """
+    دریافت لیست ایرادات شناسایی شده
+
+    پارامترها:
+    - merge_similar: اگر True باشد، ایرادات مشابه ادغام می‌شوند (پیش‌فرض: True)
+    """
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
 
     issues = []
+    original_count = 0
     try:
         if project.issues_found:
             issues = json.loads(project.issues_found)
+            original_count = len(issues)
+
+            # 🔴 ادغام ایرادات مشابه
+            if merge_similar and len(issues) > 1:
+                issues = _merge_similar_issues(issues)
     except:
         pass
 
@@ -1717,6 +1792,8 @@ async def get_project_issues(project_id: str, db=Depends(get_db)):
         "project_id": project_id,
         "issues": issues,
         "total_count": len(issues),
+        "original_count": original_count,  # 🔴 تعداد قبل از ادغام
+        "merged_count": original_count - len(issues) if merge_similar else 0,  # 🔴 تعداد ادغام شده
         "grouped": grouped,
         "counts": {k: len(v) for k, v in grouped.items()}
     }
