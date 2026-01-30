@@ -5,6 +5,7 @@ API برای ژورنال فعالیت‌ها و گزارشات پروژه
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import Column, String, Text, DateTime, Integer, Boolean, desc, asc
 from pydantic import BaseModel
@@ -12,6 +13,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 import json
 import uuid
+import asyncio
 
 from ...core.database import get_db, Base, engine
 from ...models.project import Project
@@ -1468,33 +1470,47 @@ async def generate_engineering_report(
 === فعالیت‌های اخیر ({days} روز) ===
 {json.dumps(activities_summary, ensure_ascii=False, indent=2)}
 {journal_section}
-=== فیلدهای فعلی (غیربایگانی) ===
-{json.dumps([{"id": f.get("id"), "name": f.get("name"), "action_type": f.get("action_type"), "field_type": f.get("field_type"), "executed": f.get("executed", False)} for f in existing_fields if not f.get("archived")], ensure_ascii=False, indent=2)}
+=== 🔴 فیلدهای PENDING (نیاز به تایید مهندسی - بسیار مهم!) ===
+{json.dumps([{"id": f.get("id"), "name": f.get("name"), "value": f.get("value", "")[:300], "action_type": f.get("action_type"), "target_path": f.get("target_path"), "source": f.get("source", "unknown"), "priority": f.get("priority", 5)} for f in existing_fields if not f.get("archived") and not f.get("engineering_approval")], ensure_ascii=False, indent=2)}
 
-=== فیلدهای بایگانی/اجرا شده (برای تأیید اصلاحات) ===
-{json.dumps([{"id": f.get("id"), "name": f.get("name"), "target_path": f.get("target_path"), "original_issue": f.get("original_issue", {})} for f in existing_fields if f.get("archived") or f.get("executed")][:20], ensure_ascii=False, indent=2)}
+=== فیلدهای تایید شده (دارای تاییدیه مهندسی) ===
+{json.dumps([{"id": f.get("id"), "name": f.get("name"), "action_type": f.get("action_type"), "executed": f.get("executed", False)} for f in existing_fields if not f.get("archived") and f.get("engineering_approval")], ensure_ascii=False, indent=2)}
 
-=== فیلدهای اجرا نشده (برای ideal state) ===
-{json.dumps(unexecuted_fields, ensure_ascii=False, indent=2)}
+=== فیلدهای بایگانی/اجرا شده ===
+{json.dumps([{"id": f.get("id"), "name": f.get("name"), "target_path": f.get("target_path")} for f in existing_fields if f.get("archived") or f.get("executed")][:15], ensure_ascii=False, indent=2)}
 
 === حالت ایده‌آل فعلی ===
 {project.ideal_state or 'تعریف نشده'}
 
-=== نقشه راه فعلی ===
-{(project.roadmap_content or '')[:2000] if project.roadmap_content else 'تعریف نشده'}
+=== 🗺️ نقشه راه (آیتم‌های ناقص باید به فیلد تبدیل شوند!) ===
+{(project.roadmap_content or '')[:3000] if project.roadmap_content else 'تعریف نشده'}
 
 لطفاً گزارش مهندسی جامع تولید کن.
 
-⚠️ بسیار مهم:
-1. اگر بخش "نتایج آخرین health analysis" بالا وجود دارد، حتماً تمام ایرادات را یک به یک بررسی و اعتبارسنجی کن
-2. بخش health_analysis_validation را حتماً در خروجی JSON قرار بده
-3. برای هر ایراد تایید شده، یک فیلد پویا ایجاد می‌شود تا توسعه‌دهنده آن را رفع کند
+🔴🔴🔴 وظایف اجباری - حتماً انجام بده:
 
-🔵 درباره ژورنال:
-4. ردیف‌های ژورنال جدید را بررسی کن و نتایج بررسی آنها را استخراج کن
-5. برای هر یافته مهم از ژورنال، یک فیلد عملیاتی با action_type=github_commit ایجاد کن
-6. فیلدهای صرفاً نمایشی (display) ایجاد نکن - فیلدها باید کار واقعی انجام دهند
-7. بخش journal_analysis را در خروجی JSON قرار بده"""
+1️⃣ **اعتبارسنجی فیلدهای PENDING:**
+   - هر فیلد pending را بررسی کن
+   - اگر لازم است: id را در fields_to_approve قرار بده
+   - اگر غیرضروری/تکراری: id را در fields_to_reject قرار بده
+   - اگر قابل ادغام با فیلد دیگر: در fields_to_merge قرار بده
+
+2️⃣ **اعتبارسنجی health analysis:**
+   - اگر بخش "نتایج health analysis" بالا وجود دارد، تمام ایرادات را بررسی کن
+   - ایرادات تایید شده در validated_issues
+   - ایرادات رد شده در rejected_issues
+
+3️⃣ **بررسی نقشه راه:**
+   - آیتم‌های انجام شده را با ✅ علامت بزن (در roadmap_status_updates با completed=true)
+   - برای آیتم‌های انجام نشده، یک فیلد عملیاتی ایجاد کن (create_field=true)
+
+4️⃣ **بررسی ژورنال:**
+   - ردیف‌های جدید ژورنال را بررسی کن
+   - برای یافته‌های مهم، فیلد عملیاتی با action_type=github_commit ایجاد کن
+
+⚠️ یادآوری:
+- فیلدهای display ایجاد نکن - فقط فیلدهای عملیاتی (github_commit/github_multi_commit)
+- بدون تاییدیه مهندسی، هیچ فیلدی قابل اجرا نیست"""
 
     # فراخوانی AI
     ai_manager = get_ai_manager()
@@ -2342,6 +2358,120 @@ async def generate_engineering_report(
             "original_model_requested": original_model_id,
             "used_fallback": used_fallback,
         }
+
+
+# ===================== گزارش مهندسی با نوار پیشرفت =====================
+
+@router.post("/{project_id}/reports/generate-engineering-stream")
+async def generate_engineering_report_stream(
+    project_id: str,
+    days: int = Query(7, ge=1, le=30),
+    model_id: str = Query("claude"),
+    auto_create_fields: bool = Query(True),
+    validate_health_issues: bool = Query(True),
+    db: Session = Depends(get_db)
+):
+    """
+    🔴 گزارش مهندسی با نوار پیشرفت (Streaming)
+    ارسال بلادرنگ وضعیت پیشرفت در حین تولید گزارش
+    """
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+    from ...models.project import ProjectFile
+    import logging
+    logger = logging.getLogger(__name__)
+
+    async def progress_generator():
+        """Generator برای ارسال پیشرفت"""
+        try:
+            # مرحله 1: بررسی پروژه
+            yield f"data: {json.dumps({'step': 1, 'total': 8, 'message': '🔍 بررسی پروژه...', 'progress': 5}, ensure_ascii=False)}\n\n"
+            await asyncio.sleep(0.1)
+
+            project = db.query(Project).filter(Project.id == project_id).first()
+            if not project:
+                yield f"data: {json.dumps({'error': 'پروژه یافت نشد'}, ensure_ascii=False)}\n\n"
+                return
+
+            # مرحله 2: دریافت فایل‌ها
+            yield f"data: {json.dumps({'step': 2, 'total': 8, 'message': '📂 دریافت فایل‌های پروژه...', 'progress': 15}, ensure_ascii=False)}\n\n"
+            await asyncio.sleep(0.1)
+
+            files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+            for i, f in enumerate(files[:10]):
+                yield f"data: {json.dumps({'step': 2, 'message': f'📄 بررسی: {f.file_path}', 'progress': 15 + (i * 2)}, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(0.05)
+
+            # مرحله 3: دریافت فیلدها
+            yield f"data: {json.dumps({'step': 3, 'total': 8, 'message': '📋 بررسی فیلدهای پویا...', 'progress': 30}, ensure_ascii=False)}\n\n"
+            await asyncio.sleep(0.1)
+
+            existing_fields = []
+            try:
+                if project.dynamic_fields:
+                    existing_fields = json.loads(project.dynamic_fields)
+            except:
+                pass
+
+            pending_fields = [f for f in existing_fields if not f.get("archived") and not f.get("engineering_approval")]
+            yield f"data: {json.dumps({'step': 3, 'message': f'🔴 {len(pending_fields)} فیلد pending برای اعتبارسنجی', 'progress': 35}, ensure_ascii=False)}\n\n"
+
+            # مرحله 4: بررسی health issues
+            yield f"data: {json.dumps({'step': 4, 'total': 8, 'message': '🔍 بررسی ایرادات سلامت...', 'progress': 40}, ensure_ascii=False)}\n\n"
+            await asyncio.sleep(0.1)
+
+            health_issues = []
+            if project.issues_found:
+                try:
+                    health_issues = json.loads(project.issues_found)
+                except:
+                    pass
+
+            yield f"data: {json.dumps({'step': 4, 'message': f'⚠️ {len(health_issues)} ایراد برای اعتبارسنجی', 'progress': 45}, ensure_ascii=False)}\n\n"
+
+            # مرحله 5: بررسی نقشه راه
+            yield f"data: {json.dumps({'step': 5, 'total': 8, 'message': '🗺️ بررسی نقشه راه...', 'progress': 50}, ensure_ascii=False)}\n\n"
+            await asyncio.sleep(0.1)
+
+            # مرحله 6: آماده‌سازی برای AI
+            yield f"data: {json.dumps({'step': 6, 'total': 8, 'message': '🤖 آماده‌سازی درخواست AI...', 'progress': 55}, ensure_ascii=False)}\n\n"
+            await asyncio.sleep(0.1)
+
+            # مرحله 7: فراخوانی AI
+            yield f"data: {json.dumps({'step': 7, 'total': 8, 'message': f'🧠 در حال تحلیل توسط {model_id}...', 'progress': 60}, ensure_ascii=False)}\n\n"
+
+            # فراخوانی گزارش اصلی
+            result = await generate_engineering_report(
+                project_id=project_id,
+                days=days,
+                model_id=model_id,
+                auto_create_fields=auto_create_fields,
+                validate_health_issues=validate_health_issues,
+                db=db
+            )
+
+            # مرحله 8: اتمام
+            if result.get("success"):
+                success_msg = json.dumps({'step': 8, 'total': 8, 'message': '✅ گزارش با موفقیت تولید شد', 'progress': 100, 'result': result}, ensure_ascii=False)
+                yield f"data: {success_msg}\n\n"
+            else:
+                error_text = result.get('error', 'خطای نامشخص')
+                error_msg = json.dumps({'step': 8, 'message': f'❌ خطا: {error_text}', 'progress': 100, 'error': error_text}, ensure_ascii=False)
+                yield f"data: {error_msg}\n\n"
+
+        except Exception as e:
+            exc_msg = json.dumps({'error': str(e), 'progress': 100}, ensure_ascii=False)
+            yield f"data: {exc_msg}\n\n"
+
+    return StreamingResponse(
+        progress_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 
 # ===================== تریگر گزارش =====================
