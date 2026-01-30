@@ -393,9 +393,15 @@ async def get_activity_journal(
     success: Optional[bool] = None,
     sort_by: str = Query("created_at", regex="^(created_at|tokens_used|latency_ms)$"),
     sort_order: str = Query("desc", regex="^(asc|desc)$"),
+    include_roadmap: bool = Query(False, description="اگر True باشد، اطلاعات نقشه راه هم برمی‌گردد"),  # 🔴 نقشه راه
     db: Session = Depends(get_db)
 ):
-    """دریافت ژورنال فعالیت‌های پروژه با فیلتر و صفحه‌بندی"""
+    """
+    دریافت ژورنال فعالیت‌های پروژه با فیلتر و صفحه‌بندی
+
+    🔴 نقشه راه فقط در تب ژورنال نمایش داده می‌شود.
+    با پارامتر include_roadmap=true اطلاعات نقشه راه هم برمی‌گردد.
+    """
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
@@ -424,7 +430,7 @@ async def get_activity_journal(
     offset = (page - 1) * page_size
     logs = query.offset(offset).limit(page_size).all()
 
-    return {
+    result = {
         "success": True,
         "journal": [log_to_response(log) for log in logs],
         "pagination": {
@@ -433,6 +439,110 @@ async def get_activity_journal(
             "total": total,
             "total_pages": (total + page_size - 1) // page_size,
         }
+    }
+
+    # 🔴 اگر نقشه راه درخواست شده، آن را هم اضافه کن
+    if include_roadmap and project.roadmap_content:
+        roadmap_items = []
+        lines = project.roadmap_content.split("\n")
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            is_completed = "[x]" in line.lower() or "✅" in line
+            if "[ ]" in line or "[x]" in line.lower() or line.startswith("-"):
+                clean_text = line
+                for prefix in ["- [ ]", "- [x]", "- [X]", "-", "[ ]", "[x]", "[X]"]:
+                    clean_text = clean_text.replace(prefix, "")
+                clean_text = clean_text.replace("✅", "").strip()
+                if clean_text:
+                    roadmap_items.append({"text": clean_text, "completed": is_completed})
+
+        completed_count = sum(1 for i in roadmap_items if i["completed"])
+        result["roadmap"] = {
+            "items": roadmap_items,
+            "total": len(roadmap_items),
+            "completed": completed_count,
+            "progress": round((completed_count / len(roadmap_items) * 100), 1) if roadmap_items else 0,
+            "note": "نقشه راه فقط در تب ژورنال نمایش داده می‌شود"
+        }
+
+    return result
+
+
+@router.get("/{project_id}/journal/roadmap")
+async def get_roadmap_for_journal(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    🔴 دریافت نقشه راه برای نمایش در تب ژورنال
+    نقشه راه فقط در تب ژورنال نمایش داده می‌شود (نه تب سلامت)
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    roadmap_content = project.roadmap_content or ""
+
+    # پارس نقشه راه به آیتم‌های مجزا
+    items = []
+    lines = roadmap_content.split("\n")
+    current_category = "general"
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        # شناسایی دسته‌بندی
+        if line.startswith("###") or line.startswith("##"):
+            current_category = line.lstrip("#").strip()
+            continue
+
+        # شناسایی آیتم‌های چک‌لیست
+        is_completed = "[x]" in line.lower() or "✅" in line
+        is_checkbox = "[ ]" in line or "[x]" in line.lower()
+
+        if is_checkbox or line.startswith("-") or line.startswith("*"):
+            # پاکسازی متن
+            clean_text = line
+            for prefix in ["- [ ]", "- [x]", "- [X]", "-", "*", "[ ]", "[x]", "[X]"]:
+                clean_text = clean_text.replace(prefix, "")
+            clean_text = clean_text.replace("✅", "").strip()
+
+            if clean_text:
+                items.append({
+                    "text": clean_text,
+                    "completed": is_completed,
+                    "category": current_category,
+                })
+
+    # تعداد آیتم‌ها
+    completed_count = sum(1 for i in items if i["completed"])
+    total_count = len(items)
+    progress = round((completed_count / total_count * 100), 1) if total_count > 0 else 0
+
+    # دریافت آخرین به‌روزرسانی نقشه راه از ژورنال
+    last_roadmap_update = db.query(ActivityLog).filter(
+        ActivityLog.project_id == project_id,
+        ActivityLog.activity_type.in_(["engineering_report", "auto_setup_complete"])
+    ).order_by(desc(ActivityLog.created_at)).first()
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "roadmap": {
+            "raw_content": roadmap_content,
+            "items": items,
+            "total_items": total_count,
+            "completed_items": completed_count,
+            "progress_percent": progress,
+            "last_updated": last_roadmap_update.created_at.isoformat() if last_roadmap_update else None,
+            "last_updated_by": last_roadmap_update.model_id if last_roadmap_update else None,
+        },
+        "categories": list(set(i["category"] for i in items)),
+        "note": "نقشه راه فقط در تب ژورنال نمایش داده می‌شود"
     }
 
 
@@ -760,6 +870,46 @@ async def generate_engineering_report(
     files_summary = []
     code_samples = []
     total_code_chars = 0
+
+    # 🔴 بررسی عمیق GitHub: اگر پروژه از GitHub است، فایل‌های جدید را دریافت کن
+    github_deep_inspection = False
+    github_inspection_result = None
+    if project.project_type == "github_import":
+        try:
+            extra_data = json.loads(project.extra_data) if project.extra_data else {}
+            owner = extra_data.get("owner")
+            repo = extra_data.get("repo")
+            if owner and repo:
+                logger.info(f"🔍 Deep GitHub inspection for {owner}/{repo}")
+
+                # دریافت محتوای جدید از GitHub با API
+                import httpx
+                try:
+                    async with httpx.AsyncClient() as client:
+                        # اول سینک کن تا فایل‌های جدید دریافت شوند
+                        sync_response = await client.post(
+                            f"http://localhost:8000/api/github/imported/{project_id}/refresh",
+                            timeout=30.0
+                        )
+                        if sync_response.status_code == 200:
+                            sync_data = sync_response.json()
+                            github_deep_inspection = True
+                            github_inspection_result = {
+                                "synced": True,
+                                "files_added": sync_data.get("files_added", 0),
+                                "files_updated": sync_data.get("files_updated", 0),
+                                "files_removed": sync_data.get("files_removed", 0),
+                            }
+                            logger.info(f"✅ GitHub sync completed: {github_inspection_result}")
+
+                            # دوباره فایل‌ها را بخوان چون ممکنه به‌روز شده باشند
+                            db.expire_all()
+                            files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+                except Exception as e:
+                    logger.warning(f"GitHub deep inspection failed: {e}")
+                    github_inspection_result = {"synced": False, "error": str(e)}
+        except Exception as e:
+            logger.warning(f"Error checking GitHub info: {e}")
 
     # اولویت‌بندی فایل‌ها - فایل‌های مهم‌تر اول
     priority_files = ['auth', 'login', 'user', 'route', 'api', 'main', 'app', 'index', 'config', 'setting']
@@ -2179,6 +2329,8 @@ async def generate_engineering_report(
                 "entries_with_findings": len(journal_reviews),
                 "fields_created_from_journal": len([f for f in created_fields if "📋" in f]),
             } if journal_entries_for_review else None,
+            # 🔴 نتایج بررسی عمیق GitHub
+            "github_deep_inspection": github_inspection_result,
         }
 
     except Exception as e:

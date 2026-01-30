@@ -1247,7 +1247,7 @@ async def enhanced_project_chat(
             }
             responses.append(model_response)
 
-            # ثبت در ژورنال
+            # 🔴 ثبت کامل جزئیات در ژورنال (بهبود یافته)
             log_entry = ActivityLog(
                 id=f"log_{uuid.uuid4().hex[:12]}",
                 project_id=project_id,
@@ -1259,6 +1259,18 @@ async def enhanced_project_chat(
                 tokens_used=tokens_used,
                 latency_ms=latency_ms,
                 success=True,
+                field_name=f"AI Query: {request.prompt[:50]}...",  # 🔴 نام قابل شناسایی
+                extra_data=json.dumps({
+                    "full_prompt": request.prompt,
+                    "model_requested": model_id,
+                    "model_used": response.model_id,
+                    "create_dynamic_fields": request.create_dynamic_fields,
+                    "auto_detect_actions": request.auto_detect_actions,
+                    "files_included_count": len(files_data),
+                    "context_length": len(full_context),
+                    "response_length": len(response.content) if response.content else 0,
+                    "clickable": True,  # 🔴 قابل کلیک در UI
+                }, ensure_ascii=False),
                 created_at=datetime.utcnow(),
             )
             db.add(log_entry)
@@ -1274,7 +1286,7 @@ async def enhanced_project_chat(
             }
             responses.append(model_response)
 
-            # ثبت خطا در ژورنال
+            # 🔴 ثبت کامل جزئیات خطا در ژورنال (بهبود یافته)
             log_entry = ActivityLog(
                 id=f"log_{uuid.uuid4().hex[:12]}",
                 project_id=project_id,
@@ -1285,6 +1297,15 @@ async def enhanced_project_chat(
                 latency_ms=latency_ms,
                 success=False,
                 error_message=str(e)[:500],
+                field_name=f"AI Query Error: {request.prompt[:40]}...",  # 🔴 نام قابل شناسایی
+                extra_data=json.dumps({
+                    "full_prompt": request.prompt,
+                    "model_requested": model_id,
+                    "error_details": str(e),
+                    "create_dynamic_fields": request.create_dynamic_fields,
+                    "files_included_count": len(files_data),
+                    "clickable": True,  # 🔴 قابل کلیک در UI
+                }, ensure_ascii=False),
                 created_at=datetime.utcnow(),
             )
             db.add(log_entry)
@@ -3584,16 +3605,52 @@ async def auto_setup_project(
         if removed_items:
             project.dynamic_fields = json.dumps(existing_fields, ensure_ascii=False)
 
+        # 🔴 سینک تب‌ها: پاکسازی health issues که به فایل‌های حذف شده اشاره می‌کنند
+        health_issues_cleaned = []
+        try:
+            if project.issues_found:
+                issues = json.loads(project.issues_found)
+                valid_issues = []
+                for issue in issues:
+                    issue_file = issue.get("file", "")
+                    # اگر فایل هنوز وجود دارد یا issue مربوط به کل پروژه است
+                    if not issue_file or issue_file in current_file_paths or issue_file.startswith("/"):
+                        valid_issues.append(issue)
+                    else:
+                        health_issues_cleaned.append({
+                            "file": issue_file,
+                            "type": issue.get("type"),
+                            "message": issue.get("message", "")[:100]
+                        })
+                        removed_items.append({
+                            "type": "health_issue",
+                            "name": f"Issue in {issue_file}",
+                            "reason": f"فایل مرتبط حذف شده: {issue_file}"
+                        })
+
+                if health_issues_cleaned:
+                    project.issues_found = json.dumps(valid_issues, ensure_ascii=False)
+                    log_id = await _log_to_journal(
+                        db, project_id, "auto_setup_cleanup",
+                        f"🧹 پاکسازی {len(health_issues_cleaned)} ایراد نامعتبر",
+                        f"ایرادات مربوط به فایل‌های حذف شده از لیست برداشته شدند",
+                        {"cleaned_issues": health_issues_cleaned[:10], "total_cleaned": len(health_issues_cleaned)}
+                    )
+                    result["journal_entries"].append(log_id)
+        except Exception as e:
+            logger.warning(f"Error cleaning health issues: {e}")
+
         result["operations"]["invalid_cleanup"] = {
             "done": True,
-            "removed": removed_items
+            "removed": removed_items,
+            "health_issues_cleaned": len(health_issues_cleaned)
         }
 
         if removed_items:
             log_id = await _log_to_journal(
                 db, project_id, "auto_setup_step",
                 "🧹 پاکسازی محتوای نامعتبر",
-                f"تعداد موارد حذف/بایگانی شده: {len(removed_items)}",
+                f"تعداد موارد حذف/بایگانی شده: {len(removed_items)} (فیلدها + ایرادات سلامت)",
                 {"step": 3, "action": "cleanup_complete", "removed_count": len(removed_items), "items": removed_items}
             )
             result["journal_entries"].append(log_id)
