@@ -1555,6 +1555,71 @@ async def update_project_roadmap(
     return {"success": False, "message": "محتوا یا auto_generate لازم است"}
 
 
+class RoadmapItemUpdateRequest(BaseModel):
+    """به‌روزرسانی آیتم نقشه راه"""
+    completed: bool
+
+
+@router.patch("/{project_id}/roadmap/items/{item_id}")
+async def update_roadmap_item(
+    project_id: str,
+    item_id: str,
+    request: RoadmapItemUpdateRequest,
+    db=Depends(get_db)
+):
+    """به‌روزرسانی وضعیت یک آیتم نقشه راه (چک‌باکس)"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # پارس کردن roadmap موجود
+    roadmap_content = project.roadmap_content or ""
+    lines = roadmap_content.split('\n')
+
+    # استخراج شماره خط از item_id (مثلاً roadmap_5 -> خط 5)
+    try:
+        line_index = int(item_id.replace('roadmap_', ''))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="شناسه آیتم نامعتبر است")
+
+    # به‌روزرسانی خط مورد نظر
+    if 0 <= line_index < len(lines):
+        line = lines[line_index]
+        trimmed = line.strip()
+
+        # اگر خط یک آیتم لیست است
+        import re
+        if trimmed.startswith('- ') or trimmed.startswith('* ') or re.match(r'^\d+\.', trimmed):
+            # حذف علامت‌های قبلی
+            clean_line = trimmed.replace('[x]', '').replace('[✓]', '').replace('[✅]', '').replace('✅', '').replace('✓', '')
+
+            if request.completed:
+                # اضافه کردن علامت تیک
+                if clean_line.startswith('- '):
+                    lines[line_index] = line.replace(trimmed, f"- [x] {clean_line[2:].strip()}")
+                elif clean_line.startswith('* '):
+                    lines[line_index] = line.replace(trimmed, f"* [x] {clean_line[2:].strip()}")
+            else:
+                # حذف علامت تیک
+                lines[line_index] = line.replace(trimmed, clean_line)
+
+            # ذخیره
+            project.roadmap_content = '\n'.join(lines)
+            db.commit()
+
+            return {
+                "success": True,
+                "item_id": item_id,
+                "completed": request.completed,
+                "message": "آیتم به‌روزرسانی شد"
+            }
+
+    return {
+        "success": False,
+        "message": "آیتم پیدا نشد"
+    }
+
+
 @router.get("/{project_id}/readme")
 async def get_project_readme(project_id: str, db=Depends(get_db)):
     """دریافت محتوای README پروژه"""
