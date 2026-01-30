@@ -589,7 +589,7 @@ async def refresh_rankings_from_logs(db=Depends(get_db)):
         return {"success": False, "error": "Database not available"}
 
     try:
-        from ...models.activity import ActivityLog
+        from .project_journal import ActivityLog
         from sqlalchemy import func
 
         # دریافت آمار از لاگ‌های فعالیت با query ساده‌تر
