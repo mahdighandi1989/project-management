@@ -374,35 +374,37 @@ class AIManager:
         if not model:
             raise AIServiceError(f"Model {model_id} not found", "manager", model_id)
 
-        # 🔴 چک کردن فعال بودن مدل در دیتابیس
-        try:
-            from ..core.database import get_db
-            from ..models.ai_profile import ModelSettings
-            db = next(get_db())
-            db_setting = db.query(ModelSettings).filter(ModelSettings.model_id == model_id).first()
-            if db_setting and not db_setting.enabled:
-                logger.warning(f"Model {model_id} is disabled in settings")
+        # 🔴🔴🔴 بررسی فعال بودن مدل - استفاده از متد get_enabled_status
+        # این متد هم دیتابیس و هم registry را چک می‌کند
+        model_is_enabled = self.get_enabled_status(model_id)
+        logger.info(f"🔴 Model {model_id} enabled check: {model_is_enabled}")
 
-                # 🆕 استفاده از fallback به جای خطا
-                if allow_fallback:
-                    fallback_model_id = self.find_fallback_model(model_id, task_type=task_type)
-                    if fallback_model_id:
-                        logger.info(f"Using fallback model {fallback_model_id} instead of disabled {model_id}")
-                        model_id = fallback_model_id
+        if not model_is_enabled:
+            logger.warning(f"🔴 Model {model_id} is DISABLED - looking for fallback...")
+
+            # 🆕 استفاده از fallback به جای خطا
+            if allow_fallback:
+                fallback_model_id = self.find_fallback_model(model_id, task_type=task_type)
+                if fallback_model_id:
+                    logger.info(f"✅ Using fallback model {fallback_model_id} instead of disabled {model_id}")
+                    model_id = fallback_model_id
+                    model = get_model(model_id)
+                    used_fallback = True
+                else:
+                    # سعی کن اولین مدل فعال را پیدا کنی
+                    available = self.get_available_models(task_type=task_type)
+                    if available:
+                        model_id = available[0].id
                         model = get_model(model_id)
                         used_fallback = True
+                        logger.info(f"✅ No specific fallback, using first available: {model_id}")
                     else:
                         raise AIServiceError(
-                            f"Model {model_id} is disabled and no fallback available",
-                            "manager", model_id
+                            f"Model {original_model_id} is disabled and no fallback available",
+                            "manager", original_model_id
                         )
-                else:
-                    raise AIServiceError(f"Model {model_id} is disabled", "manager", model_id)
-        except AIServiceError:
-            raise
-        except Exception as e:
-            # اگر دیتابیس مشکل داشت، اجازه بده ادامه بده
-            logger.debug(f"Could not check model settings: {e}")
+            else:
+                raise AIServiceError(f"Model {model_id} is disabled", "manager", model_id)
 
         # هندل کردن هر دو حالت enum و string
         provider = model.provider
