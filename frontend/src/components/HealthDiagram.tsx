@@ -29,6 +29,37 @@ interface TreeNode {
  * 🔴 کامپوننت دیاگرام سلامت
  * نمایش ساختار پروژه با رنگ‌بندی براساس نمره سلامت هر فایل
  */
+
+// تابع رنگ براساس امتیاز - باید قبل از استفاده تعریف شود
+const getColorForScore = (score: number): string => {
+  if (score >= 80) return '#22c55e'; // سبز
+  if (score >= 60) return '#eab308'; // زرد
+  if (score >= 40) return '#f97316'; // نارنجی
+  return '#ef4444'; // قرمز
+};
+
+// آیکون فایل براساس پسوند
+const getFileIcon = (ext: string): string => {
+  const icons: Record<string, string> = {
+    ts: '📘',
+    tsx: '⚛️',
+    js: '📒',
+    jsx: '⚛️',
+    py: '🐍',
+    json: '📋',
+    md: '📝',
+    css: '🎨',
+    html: '🌐',
+    sql: '🗃️',
+    yml: '⚙️',
+    yaml: '⚙️',
+    sh: '🖥️',
+    env: '🔐',
+    lock: '🔒',
+  };
+  return icons[ext.toLowerCase()] || '📄';
+};
+
 export default function HealthDiagram({ projectId, fileHealthMap, onFileClick }: Props) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [viewMode, setViewMode] = useState<'tree' | 'grid' | 'mermaid'>('tree');
@@ -109,14 +140,6 @@ export default function HealthDiagram({ projectId, fileHealthMap, onFileClick }:
 
     return root;
   }, [fileHealthMap]);
-
-  // تابع رنگ براساس امتیاز
-  const getColorForScore = (score: number): string => {
-    if (score >= 80) return '#22c55e'; // سبز
-    if (score >= 60) return '#eab308'; // زرد
-    if (score >= 40) return '#f97316'; // نارنجی
-    return '#ef4444'; // قرمز
-  };
 
   // toggle پوشه
   const toggleFolder = (path: string) => {
@@ -235,28 +258,6 @@ export default function HealthDiagram({ projectId, fileHealthMap, onFileClick }:
     }
 
     return node.children.map(child => renderTreeNode(child, depth));
-  };
-
-  // آیکون فایل براساس پسوند
-  const getFileIcon = (ext: string): string => {
-    const icons: Record<string, string> = {
-      ts: '📘',
-      tsx: '⚛️',
-      js: '📒',
-      jsx: '⚛️',
-      py: '🐍',
-      json: '📋',
-      md: '📝',
-      css: '🎨',
-      html: '🌐',
-      sql: '🗃️',
-      yml: '⚙️',
-      yaml: '⚙️',
-      sh: '🖥️',
-      env: '🔐',
-      lock: '🔒',
-    };
-    return icons[ext.toLowerCase()] || '📄';
   };
 
   // رندر نمای گرید
