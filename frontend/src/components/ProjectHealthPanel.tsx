@@ -34,6 +34,7 @@ interface AnalysisSettings {
   trigger_interval_minutes: number;
   trigger_interval_type: string;
   criteria_weights: Record<string, number>;
+  depth: 'quick' | 'standard' | 'deep' | 'thorough';  // 🆕 عمق تحلیل
 }
 
 interface Issue {
@@ -312,6 +313,7 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
       const selectedModels = (settings?.target_models || []).filter(m => m !== 'all');
 
       // شروع تحلیل با API معمولی (پس‌زمینه)
+      // 🆕 اضافه کردن depth به درخواست
       const response = await fetch(`${API_BASE}/api/projects/${projectId}/health/analyze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -319,7 +321,8 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
           model_ids: selectedModels,
           full_analysis: true,
           update_roadmap: true,
-          update_readme: true
+          update_readme: true,
+          depth: settings?.depth || 'standard'  // 🆕 عمق تحلیل
         })
       });
 
@@ -614,7 +617,8 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
           model_ids: settings?.target_models || [],
           full_analysis: true,
           update_roadmap: true,
-          update_readme: true
+          update_readme: true,
+          depth: settings?.depth || 'standard'  // 🆕 عمق تحلیل
         })
       });
 
@@ -1074,7 +1078,18 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-3 gap-4">
+                      <div className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                        <div className="text-sm text-gray-500 mb-1">عمق تحلیل</div>
+                        <p className="font-medium">
+                          {{
+                            'quick': '⚡ سریع (۱-۲ دقیقه)',
+                            'standard': '📊 استاندارد (۳-۵ دقیقه)',
+                            'deep': '🔬 عمیق (۱۰-۲۰ دقیقه)',
+                            'thorough': '🔍 کامل (۳۰+ دقیقه)'
+                          }[settings.depth] || '📊 استاندارد'}
+                        </p>
+                      </div>
                       <div className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
                         <div className="text-sm text-gray-500 mb-1">زمان‌بندی</div>
                         <p>
@@ -1231,6 +1246,36 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                           </div>
                         </>
                       )}
+                    </div>
+
+                    {/* 🆕 انتخاب عمق تحلیل */}
+                    <div className="mb-4">
+                      <label className="block text-sm font-medium mb-2">عمق تحلیل</label>
+                      <div className="grid grid-cols-4 gap-2">
+                        {[
+                          { value: 'quick', label: '⚡ سریع', desc: '۱-۲ دقیقه' },
+                          { value: 'standard', label: '📊 استاندارد', desc: '۳-۵ دقیقه' },
+                          { value: 'deep', label: '🔬 عمیق', desc: '۱۰-۲۰ دقیقه' },
+                          { value: 'thorough', label: '🔍 کامل', desc: '۳۰+ دقیقه' }
+                        ].map(option => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => setTempSettings({ ...tempSettings, depth: option.value as any })}
+                            className={`p-3 rounded-lg border text-center transition-all ${
+                              tempSettings.depth === option.value
+                                ? 'bg-blue-600 text-white border-blue-600'
+                                : 'bg-gray-50 dark:bg-gray-700 border-gray-300 dark:border-gray-600 hover:border-blue-400'
+                            }`}
+                          >
+                            <div className="font-medium">{option.label}</div>
+                            <div className="text-xs mt-1 opacity-75">{option.desc}</div>
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-xs text-gray-500 mt-2">
+                        عمق بیشتر = بررسی دقیق‌تر فایل‌ها، شناسایی مشکلات بیشتر، زمان بیشتر
+                      </p>
                     </div>
 
                     <div className="grid grid-cols-2 gap-4">
