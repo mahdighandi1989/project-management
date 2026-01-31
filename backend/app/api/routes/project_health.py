@@ -2794,3 +2794,702 @@ async def get_validation_chain_status(
             }
         }
     }
+
+
+# =====================================
+# 🆕 نمایشگر فایل با هایلایت ایرادات
+# =====================================
+
+class FileIssue(BaseModel):
+    """ایراد در یک فایل"""
+    line: Optional[int] = None
+    start_line: Optional[int] = None
+    end_line: Optional[int] = None
+    message: str
+    severity: str = "medium"
+    suggestion: Optional[str] = None
+    fix_code: Optional[str] = None
+    issue_type: str = "general"
+
+
+@router.get("/{project_id}/health/file/{file_path:path}/view")
+async def get_file_with_issues(
+    project_id: str,
+    file_path: str,
+    include_suggestions: bool = True,
+    db=Depends(get_db)
+):
+    """
+    دریافت محتوای فایل با ایرادات هایلایت شده
+
+    - محتوای کامل فایل
+    - لیست ایرادات با شماره خط
+    - پیشنهادات AI به صورت کامنت
+    - نمره سلامت فایل
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت فایل
+    file_record = db.query(ProjectFile).filter(
+        ProjectFile.project_id == project_id,
+        ProjectFile.file_path == file_path
+    ).first()
+
+    if not file_record:
+        raise HTTPException(status_code=404, detail="فایل یافت نشد")
+
+    content = file_record.content or ""
+
+    # دریافت ایرادات مربوط به این فایل
+    issues = []
+    file_health = None
+    try:
+        if project.issues_found:
+            all_issues = json.loads(project.issues_found)
+            issues = [i for i in all_issues if i.get("file") == file_path]
+
+        # دریافت نمره سلامت فایل
+        if project.health_scores:
+            health_data = json.loads(project.health_scores)
+            file_scores = health_data.get("file_scores", {})
+            file_health = file_scores.get(file_path, {})
+    except:
+        pass
+
+    # ساخت محتوای با کامنت‌های پیشنهادی
+    annotated_content = content
+    if include_suggestions and issues:
+        annotated_content = _add_issue_comments_to_content(
+            content,
+            issues,
+            file_path
+        )
+
+    # تشخیص زبان برنامه‌نویسی
+    language = _detect_language(file_path)
+
+    return {
+        "success": True,
+        "file_path": file_path,
+        "language": language,
+        "original_content": content,
+        "annotated_content": annotated_content,
+        "line_count": len(content.split('\n')),
+        "issues": issues,
+        "issues_count": len(issues),
+        "health": file_health,
+        "validation_stamp": file_health.get("validated") if file_health else None
+    }
+
+
+def _detect_language(file_path: str) -> str:
+    """تشخیص زبان برنامه‌نویسی از پسوند فایل"""
+    ext_map = {
+        '.py': 'python',
+        '.js': 'javascript',
+        '.ts': 'typescript',
+        '.tsx': 'tsx',
+        '.jsx': 'jsx',
+        '.html': 'html',
+        '.css': 'css',
+        '.json': 'json',
+        '.yaml': 'yaml',
+        '.yml': 'yaml',
+        '.md': 'markdown',
+        '.sql': 'sql',
+        '.sh': 'bash',
+        '.go': 'go',
+        '.rs': 'rust',
+        '.java': 'java',
+        '.cpp': 'cpp',
+        '.c': 'c',
+        '.rb': 'ruby',
+        '.php': 'php',
+    }
+    import os
+    ext = os.path.splitext(file_path)[1].lower()
+    return ext_map.get(ext, 'text')
+
+
+def _get_comment_syntax(language: str) -> tuple:
+    """دریافت سینتکس کامنت برای هر زبان"""
+    comment_styles = {
+        'python': ('#', '"""', '"""'),
+        'javascript': ('//', '/*', '*/'),
+        'typescript': ('//', '/*', '*/'),
+        'tsx': ('//', '{/*', '*/}'),
+        'jsx': ('//', '{/*', '*/}'),
+        'html': ('<!--', '<!--', '-->'),
+        'css': ('/*', '/*', '*/'),
+        'sql': ('--', '/*', '*/'),
+        'bash': ('#', ': \'', '\''),
+        'go': ('//', '/*', '*/'),
+        'rust': ('//', '/*', '*/'),
+        'java': ('//', '/*', '*/'),
+        'cpp': ('//', '/*', '*/'),
+        'c': ('//', '/*', '*/'),
+        'ruby': ('#', '=begin', '=end'),
+        'php': ('//', '/*', '*/'),
+    }
+    return comment_styles.get(language, ('#', '/*', '*/'))
+
+
+def _add_issue_comments_to_content(content: str, issues: list, file_path: str) -> str:
+    """
+    افزودن کامنت‌های پیشنهادی AI به محتوای فایل
+
+    - ایرادات با رنگ قرمز مشخص می‌شوند (به صورت کامنت)
+    - پیشنهادات به صورت کامنت در کنار کد اضافه می‌شوند
+    - کد اصلی دست نخورده می‌ماند
+    """
+    if not issues:
+        return content
+
+    language = _detect_language(file_path)
+    single_comment, multi_start, multi_end = _get_comment_syntax(language)
+
+    lines = content.split('\n')
+    annotated_lines = []
+
+    # گروه‌بندی ایرادات براساس شماره خط
+    issues_by_line = {}
+    for issue in issues:
+        line_num = issue.get('line') or issue.get('start_line')
+        if line_num:
+            if line_num not in issues_by_line:
+                issues_by_line[line_num] = []
+            issues_by_line[line_num].append(issue)
+
+    for i, line in enumerate(lines, 1):
+        # اضافه کردن خط اصلی
+        annotated_lines.append(line)
+
+        # اگر این خط ایراد دارد، کامنت اضافه کن
+        if i in issues_by_line:
+            for issue in issues_by_line[i]:
+                severity = issue.get('severity', 'medium')
+                severity_icon = '🔴' if severity == 'critical' else '🟠' if severity == 'high' else '🟡' if severity == 'medium' else '🔵'
+
+                # کامنت ایراد
+                issue_comment = f"{single_comment} {severity_icon} [ایراد - {issue.get('type', 'general')}]: {issue.get('message', '')}"
+                annotated_lines.append(issue_comment)
+
+                # پیشنهاد اصلاح
+                if issue.get('suggestion'):
+                    suggestion_comment = f"{single_comment} 💡 [پیشنهاد]: {issue.get('suggestion')}"
+                    annotated_lines.append(suggestion_comment)
+
+                # کد پیشنهادی
+                if issue.get('fix_code'):
+                    annotated_lines.append(f"{single_comment} ✅ [کد پیشنهادی]:")
+                    for fix_line in issue.get('fix_code', '').split('\n'):
+                        annotated_lines.append(f"{single_comment}     {fix_line}")
+
+    return '\n'.join(annotated_lines)
+
+
+@router.post("/{project_id}/health/file/{file_path:path}/generate-suggestions")
+async def generate_file_suggestions(
+    project_id: str,
+    file_path: str,
+    model_id: str = "claude",
+    db=Depends(get_db)
+):
+    """
+    تولید پیشنهادات AI برای ایرادات فایل
+
+    - بررسی هر ایراد توسط AI
+    - تولید کد اصلاحی
+    - افزودن به عنوان کامنت
+    """
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    file_record = db.query(ProjectFile).filter(
+        ProjectFile.project_id == project_id,
+        ProjectFile.file_path == file_path
+    ).first()
+
+    if not file_record:
+        raise HTTPException(status_code=404, detail="فایل یافت نشد")
+
+    content = file_record.content or ""
+
+    # دریافت ایرادات این فایل
+    issues = []
+    try:
+        if project.issues_found:
+            all_issues = json.loads(project.issues_found)
+            issues = [i for i in all_issues if i.get("file") == file_path and not i.get("fix_code")]
+    except:
+        pass
+
+    if not issues:
+        return {"success": True, "message": "ایرادی برای بررسی وجود ندارد", "updated_issues": 0}
+
+    ai_manager = get_ai_manager()
+    language = _detect_language(file_path)
+    updated_count = 0
+
+    for issue in issues[:10]:  # حداکثر 10 ایراد در هر بار
+        try:
+            line_num = issue.get('line') or issue.get('start_line', 1)
+            # استخراج چند خط اطراف ایراد
+            lines = content.split('\n')
+            start = max(0, line_num - 5)
+            end = min(len(lines), line_num + 5)
+            context_lines = lines[start:end]
+            context = '\n'.join(f"{i+start+1}: {l}" for i, l in enumerate(context_lines))
+
+            prompt = f"""
+فایل: {file_path}
+زبان: {language}
+ایراد در خط {line_num}: {issue.get('message', '')}
+نوع ایراد: {issue.get('type', 'general')}
+شدت: {issue.get('severity', 'medium')}
+
+کد اطراف ایراد:
+```{language}
+{context}
+```
+
+لطفاً:
+1. توضیح بده چرا این یک ایراد است
+2. پیشنهاد اصلاح بده
+3. کد اصلاح شده را بنویس (فقط قسمت مربوطه)
+
+پاسخ را به این فرمت JSON بده:
+{{
+    "explanation": "توضیح ایراد",
+    "suggestion": "پیشنهاد اصلاح",
+    "fix_code": "کد اصلاح شده"
+}}
+"""
+            response = await ai_manager.generate_response(
+                model_id=model_id,
+                messages=[Message(role="user", content=prompt)],
+                temperature=0.3
+            )
+
+            # پارس پاسخ
+            try:
+                import re
+                json_match = re.search(r'\{[\s\S]*\}', response.content)
+                if json_match:
+                    fix_data = json.loads(json_match.group())
+                    issue['suggestion'] = fix_data.get('suggestion', issue.get('suggestion'))
+                    issue['fix_code'] = fix_data.get('fix_code')
+                    issue['explanation'] = fix_data.get('explanation')
+                    issue['ai_reviewed'] = True
+                    issue['reviewed_by'] = model_id
+                    updated_count += 1
+            except:
+                pass
+
+        except Exception as e:
+            logger.warning(f"Error generating suggestion for issue: {e}")
+
+    # ذخیره ایرادات بروز شده
+    try:
+        all_issues = json.loads(project.issues_found) if project.issues_found else []
+        # بروزرسانی ایرادات
+        for updated_issue in issues:
+            for i, stored_issue in enumerate(all_issues):
+                if (stored_issue.get('file') == updated_issue.get('file') and
+                    stored_issue.get('line') == updated_issue.get('line') and
+                    stored_issue.get('message') == updated_issue.get('message')):
+                    all_issues[i] = updated_issue
+                    break
+
+        project.issues_found = json.dumps(all_issues, ensure_ascii=False)
+        db.commit()
+    except Exception as e:
+        logger.error(f"Error saving updated issues: {e}")
+
+    return {
+        "success": True,
+        "updated_issues": updated_count,
+        "total_issues": len(issues)
+    }
+
+
+# =====================================
+# 🆕 دانلود فایل‌ها
+# =====================================
+
+class FileDownloadRequest(BaseModel):
+    """درخواست دانلود فایل‌ها"""
+    file_paths: List[str]
+    include_suggestions: bool = True
+    format: str = "zip"  # zip, tar
+
+
+@router.get("/{project_id}/health/file/{file_path:path}/download")
+async def download_single_file(
+    project_id: str,
+    file_path: str,
+    include_suggestions: bool = True,
+    db=Depends(get_db)
+):
+    """
+    دانلود یک فایل با یا بدون کامنت‌های پیشنهادی
+    """
+    from fastapi.responses import Response
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    file_record = db.query(ProjectFile).filter(
+        ProjectFile.project_id == project_id,
+        ProjectFile.file_path == file_path
+    ).first()
+
+    if not file_record:
+        raise HTTPException(status_code=404, detail="فایل یافت نشد")
+
+    content = file_record.content or ""
+
+    if include_suggestions:
+        issues = []
+        try:
+            if project.issues_found:
+                all_issues = json.loads(project.issues_found)
+                issues = [i for i in all_issues if i.get("file") == file_path]
+        except:
+            pass
+
+        if issues:
+            content = _add_issue_comments_to_content(content, issues, file_path)
+
+    filename = file_path.split('/')[-1]
+
+    return Response(
+        content=content,
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{filename}"
+        }
+    )
+
+
+@router.post("/{project_id}/health/files/download-batch")
+async def download_batch_files(
+    project_id: str,
+    request: FileDownloadRequest,
+    db=Depends(get_db)
+):
+    """
+    دانلود چند فایل به صورت ZIP
+    """
+    import io
+    import zipfile
+    from fastapi.responses import StreamingResponse
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت ایرادات
+    all_issues = []
+    try:
+        if project.issues_found:
+            all_issues = json.loads(project.issues_found)
+    except:
+        pass
+
+    # ساخت ZIP
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for file_path in request.file_paths:
+            file_record = db.query(ProjectFile).filter(
+                ProjectFile.project_id == project_id,
+                ProjectFile.file_path == file_path
+            ).first()
+
+            if file_record:
+                content = file_record.content or ""
+
+                if request.include_suggestions:
+                    file_issues = [i for i in all_issues if i.get("file") == file_path]
+                    if file_issues:
+                        content = _add_issue_comments_to_content(content, file_issues, file_path)
+
+                zip_file.writestr(file_path, content.encode('utf-8'))
+
+    zip_buffer.seek(0)
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename={project.name}_health_files.zip"
+        }
+    )
+
+
+@router.get("/{project_id}/health/files/download-all")
+async def download_all_analyzed_files(
+    project_id: str,
+    include_suggestions: bool = True,
+    only_with_issues: bool = False,
+    db=Depends(get_db)
+):
+    """
+    دانلود همه فایل‌های تحلیل شده
+    """
+    import io
+    import zipfile
+    from fastapi.responses import StreamingResponse
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت ایرادات
+    all_issues = []
+    files_with_issues = set()
+    try:
+        if project.issues_found:
+            all_issues = json.loads(project.issues_found)
+            files_with_issues = set(i.get("file") for i in all_issues if i.get("file"))
+    except:
+        pass
+
+    # دریافت همه فایل‌ها
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for file_record in files:
+            # اگر فقط فایل‌های دارای ایراد می‌خواهیم
+            if only_with_issues and file_record.file_path not in files_with_issues:
+                continue
+
+            content = file_record.content or ""
+
+            if include_suggestions:
+                file_issues = [i for i in all_issues if i.get("file") == file_record.file_path]
+                if file_issues:
+                    content = _add_issue_comments_to_content(content, file_issues, file_record.file_path)
+
+            zip_file.writestr(file_record.file_path, content.encode('utf-8'))
+
+    zip_buffer.seek(0)
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename={project.name}_all_files.zip"
+        }
+    )
+
+
+# =====================================
+# 🆕 برچسب تاییدیه (Validation Stamp)
+# =====================================
+
+@router.post("/{project_id}/health/file/{file_path:path}/validate")
+async def validate_file_issues(
+    project_id: str,
+    file_path: str,
+    model_id: str = "claude",
+    db=Depends(get_db)
+):
+    """
+    اعتبارسنجی ایرادات یک فایل توسط گزارش مهندسی
+
+    - بررسی صحت ایرادات
+    - بررسی صحت پیشنهادات
+    - افزودن برچسب تاییدیه
+    """
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    file_record = db.query(ProjectFile).filter(
+        ProjectFile.project_id == project_id,
+        ProjectFile.file_path == file_path
+    ).first()
+
+    if not file_record:
+        raise HTTPException(status_code=404, detail="فایل یافت نشد")
+
+    content = file_record.content or ""
+
+    # دریافت ایرادات این فایل
+    all_issues = []
+    file_issues = []
+    try:
+        if project.issues_found:
+            all_issues = json.loads(project.issues_found)
+            file_issues = [i for i in all_issues if i.get("file") == file_path]
+    except:
+        pass
+
+    if not file_issues:
+        return {"success": True, "message": "ایرادی برای اعتبارسنجی وجود ندارد"}
+
+    ai_manager = get_ai_manager()
+    language = _detect_language(file_path)
+
+    # ساخت خلاصه ایرادات
+    issues_summary = "\n".join([
+        f"- خط {i.get('line', '?')}: [{i.get('severity', 'medium')}] {i.get('message', '')} | پیشنهاد: {i.get('suggestion', 'ندارد')}"
+        for i in file_issues[:20]
+    ])
+
+    prompt = f"""
+به عنوان مهندس ارشد نرم‌افزار، ایرادات شناسایی شده در فایل زیر را اعتبارسنجی کن.
+
+فایل: {file_path}
+زبان: {language}
+
+محتوای فایل:
+```{language}
+{content[:5000]}
+```
+
+ایرادات شناسایی شده:
+{issues_summary}
+
+برای هر ایراد بررسی کن:
+1. آیا ایراد واقعی و صحیح است؟
+2. آیا پیشنهاد اصلاح درست است؟
+3. آیا خط ایراد درست شناسایی شده؟
+
+پاسخ را به این فرمت JSON بده:
+{{
+    "file_score": 85,
+    "validation_passed": true,
+    "issues_validated": [
+        {{"line": 10, "is_valid": true, "notes": "ایراد صحیح است"}},
+        {{"line": 25, "is_valid": false, "notes": "این ایراد نادرست است چون..."}}
+    ],
+    "overall_notes": "خلاصه نتیجه اعتبارسنجی",
+    "stamp_text": "✅ تایید شده توسط {model_id} در {{date}}"
+}}
+"""
+
+    try:
+        response = await ai_manager.generate_response(
+            model_id=model_id,
+            messages=[Message(role="user", content=prompt)],
+            temperature=0.2
+        )
+
+        import re
+        json_match = re.search(r'\{[\s\S]*\}', response.content)
+        if json_match:
+            validation_result = json.loads(json_match.group())
+
+            # بروزرسانی ایرادات با نتیجه اعتبارسنجی
+            for validated in validation_result.get('issues_validated', []):
+                for issue in file_issues:
+                    if issue.get('line') == validated.get('line'):
+                        issue['validated'] = validated.get('is_valid', True)
+                        issue['validation_notes'] = validated.get('notes', '')
+                        issue['validated_by'] = model_id
+                        issue['validated_at'] = datetime.utcnow().isoformat()
+
+            # بروزرسانی all_issues
+            for updated_issue in file_issues:
+                for i, stored_issue in enumerate(all_issues):
+                    if (stored_issue.get('file') == updated_issue.get('file') and
+                        stored_issue.get('line') == updated_issue.get('line')):
+                        all_issues[i] = updated_issue
+                        break
+
+            project.issues_found = json.dumps(all_issues, ensure_ascii=False)
+
+            # بروزرسانی نمره سلامت فایل با برچسب تایید
+            try:
+                health_scores = json.loads(project.health_scores) if project.health_scores else {}
+                if 'file_scores' not in health_scores:
+                    health_scores['file_scores'] = {}
+
+                health_scores['file_scores'][file_path] = {
+                    'score': validation_result.get('file_score', 0),
+                    'validated': True,
+                    'validated_by': model_id,
+                    'validated_at': datetime.utcnow().isoformat(),
+                    'stamp': validation_result.get('stamp_text', '').replace('{date}', datetime.utcnow().strftime('%Y-%m-%d %H:%M'))
+                }
+                project.health_scores = json.dumps(health_scores, ensure_ascii=False)
+            except:
+                pass
+
+            db.commit()
+
+            return {
+                "success": True,
+                "file_path": file_path,
+                "validation_result": validation_result,
+                "issues_updated": len(file_issues)
+            }
+
+    except Exception as e:
+        logger.error(f"Error validating file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"success": False, "error": "اعتبارسنجی ناموفق"}
+
+
+@router.post("/{project_id}/health/validate-all")
+async def validate_all_files(
+    project_id: str,
+    model_id: str = "claude",
+    db=Depends(get_db)
+):
+    """
+    اعتبارسنجی همه فایل‌های دارای ایراد
+
+    این endpoint به صورت streaming پیشرفت را گزارش می‌دهد
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت فایل‌های دارای ایراد
+    files_with_issues = set()
+    try:
+        if project.issues_found:
+            all_issues = json.loads(project.issues_found)
+            files_with_issues = set(i.get("file") for i in all_issues if i.get("file"))
+    except:
+        pass
+
+    if not files_with_issues:
+        return {"success": True, "message": "فایلی برای اعتبارسنجی وجود ندارد"}
+
+    async def validation_generator():
+        validated_count = 0
+        total = len(files_with_issues)
+
+        for file_path in files_with_issues:
+            try:
+                # اعتبارسنجی هر فایل
+                result = await validate_file_issues(project_id, file_path, model_id, db)
+                validated_count += 1
+
+                yield f"data: {json.dumps({'file': file_path, 'progress': validated_count, 'total': total, 'status': 'validated'}, ensure_ascii=False)}\n\n"
+
+            except Exception as e:
+                yield f"data: {json.dumps({'file': file_path, 'progress': validated_count, 'total': total, 'status': 'error', 'error': str(e)}, ensure_ascii=False)}\n\n"
+
+        yield f"data: {json.dumps({'status': 'completed', 'validated_count': validated_count, 'total': total}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        validation_generator(),
+        media_type="text/event-stream"
+    )
