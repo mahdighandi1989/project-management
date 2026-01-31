@@ -2936,6 +2936,80 @@ def _get_comment_syntax(language: str) -> tuple:
     return comment_styles.get(language, ('#', '/*', '*/'))
 
 
+def _create_validation_stamp_comment(
+    file_path: str,
+    model_id: str,
+    score: int,
+    validation_passed: bool,
+    notes: str,
+    language: str
+) -> str:
+    """
+    🆕 ایجاد کامنت برچسب تاییدیه برای درج در فایل
+
+    این کامنت در ابتدای فایل اضافه می‌شود و شامل:
+    - نام مدل تایید کننده
+    - تاریخ و ساعت تایید
+    - نمره سلامت
+    - وضعیت تایید
+    - یادداشت‌های مهندسی
+    """
+    from datetime import datetime
+
+    single_comment, multi_start, multi_end = _get_comment_syntax(language)
+    timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+
+    status_icon = "✅" if validation_passed else "⚠️"
+    status_text = "تایید شده" if validation_passed else "نیاز به بررسی"
+
+    # ساخت کامنت چندخطی
+    if language in ['python', 'ruby', 'bash']:
+        # زبان‌هایی که کامنت چندخطی با علامت متفاوت دارند
+        stamp = f'''{multi_start}
+🔬 ENGINEERING VALIDATION STAMP
+{'=' * 50}
+{status_icon} وضعیت: {status_text}
+📊 نمره سلامت: {score}%
+🤖 تایید کننده: {model_id}
+📅 تاریخ: {timestamp}
+📁 فایل: {file_path}
+{'=' * 50}
+📝 یادداشت: {notes[:200] if notes else 'بدون یادداشت'}
+{'=' * 50}
+⚠️ این کامنت توسط سیستم گزارش مهندسی تولید شده است
+{multi_end}'''
+    elif language in ['html']:
+        stamp = f'''{multi_start}
+🔬 ENGINEERING VALIDATION STAMP
+{'=' * 50}
+{status_icon} وضعیت: {status_text}
+📊 نمره سلامت: {score}%
+🤖 تایید کننده: {model_id}
+📅 تاریخ: {timestamp}
+📁 فایل: {file_path}
+{'=' * 50}
+📝 یادداشت: {notes[:200] if notes else 'بدون یادداشت'}
+⚠️ این کامنت توسط سیستم گزارش مهندسی تولید شده است
+{multi_end}'''
+    else:
+        # زبان‌های C-style (JavaScript, TypeScript, Java, etc.)
+        stamp = f'''{multi_start}
+ * 🔬 ENGINEERING VALIDATION STAMP
+ * {'=' * 48}
+ * {status_icon} وضعیت: {status_text}
+ * 📊 نمره سلامت: {score}%
+ * 🤖 تایید کننده: {model_id}
+ * 📅 تاریخ: {timestamp}
+ * 📁 فایل: {file_path}
+ * {'=' * 48}
+ * 📝 یادداشت: {notes[:200] if notes else 'بدون یادداشت'}
+ * {'=' * 48}
+ * ⚠️ این کامنت توسط سیستم گزارش مهندسی تولید شده است
+ {multi_end}'''
+
+    return stamp
+
+
 def _add_issue_comments_to_content(content: str, issues: list, file_path: str) -> str:
     """
     افزودن کامنت‌های پیشنهادی AI به محتوای فایل
@@ -3413,6 +3487,10 @@ async def validate_file_issues(
             project.issues_found = json.dumps(all_issues, ensure_ascii=False)
 
             # بروزرسانی نمره سلامت فایل با برچسب تایید
+            validation_stamp_text = validation_result.get('stamp_text', '').replace('{date}', datetime.utcnow().strftime('%Y-%m-%d %H:%M'))
+            if not validation_stamp_text:
+                validation_stamp_text = f"✅ تایید شده توسط {model_id} در {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+
             try:
                 health_scores = json.loads(project.health_scores) if project.health_scores else {}
                 if 'file_scores' not in health_scores:
@@ -3423,11 +3501,37 @@ async def validate_file_issues(
                     'validated': True,
                     'validated_by': model_id,
                     'validated_at': datetime.utcnow().isoformat(),
-                    'stamp': validation_result.get('stamp_text', '').replace('{date}', datetime.utcnow().strftime('%Y-%m-%d %H:%M'))
+                    'stamp': validation_stamp_text
                 }
                 project.health_scores = json.dumps(health_scores, ensure_ascii=False)
             except:
                 pass
+
+            # 🆕 افزودن کامنت تاییدیه داخل فایل
+            # این کامنت در ابتدای فایل اضافه می‌شود بدون تغییر در کد اصلی
+            comment_syntax = _get_comment_syntax(language)
+            validation_comment = _create_validation_stamp_comment(
+                file_path=file_path,
+                model_id=model_id,
+                score=validation_result.get('file_score', 0),
+                validation_passed=validation_result.get('validation_passed', True),
+                notes=validation_result.get('overall_notes', ''),
+                language=language
+            )
+
+            # ذخیره محتوای به‌روز شده با کامنت تاییدیه
+            # فقط اگر کامنت قبلاً اضافه نشده باشد
+            if "🔬 ENGINEERING VALIDATION STAMP" not in content:
+                validated_content = validation_comment + "\n\n" + content
+            else:
+                # به‌روزرسانی کامنت موجود
+                import re
+                stamp_pattern = r'(?s)(?:\/\*|#|//|<!--|--)\s*🔬 ENGINEERING VALIDATION STAMP.*?(?:\*\/|-->|\n\n|\n#|\n\/\/)'
+                validated_content = re.sub(stamp_pattern, validation_comment + "\n", content)
+                if validated_content == content:
+                    validated_content = validation_comment + "\n\n" + content
+
+            file_record.content = validated_content
 
             db.commit()
 
@@ -3435,7 +3539,9 @@ async def validate_file_issues(
                 "success": True,
                 "file_path": file_path,
                 "validation_result": validation_result,
-                "issues_updated": len(file_issues)
+                "issues_updated": len(file_issues),
+                "stamp_added": True,
+                "stamp_text": validation_stamp_text
             }
 
     except Exception as e:
