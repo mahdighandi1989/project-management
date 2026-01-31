@@ -82,6 +82,12 @@ interface DynamicField {
   archived?: boolean;
   action_type?: string;
   target_path?: string;
+  engineering_approval?: {
+    approved: boolean;
+    approved_at?: string;
+    approved_by?: string;
+    approval_type?: string;
+  };
 }
 
 interface AIModel {
@@ -208,6 +214,23 @@ export default function ProjectDetailPage() {
   const [journalStats, setJournalStats] = useState<JournalStats | null>(null);
   const [journalLoading, setJournalLoading] = useState(false);
   const [journalPage, setJournalPage] = useState(1);
+
+  // 🆕 DetailedOperation State - نمایش عملیات سطر به سطر
+  const [selectedLogId, setSelectedLogId] = useState<string | null>(null);
+  const [detailedOperations, setDetailedOperations] = useState<Array<{
+    id: string;
+    operation_number: number;
+    operation_type: string;
+    summary: string;
+    details: any;
+    target_type?: string;
+    target_name?: string;
+    before_value?: string;
+    after_value?: string;
+    status: string;
+    created_at: string;
+  }>>([]);
+  const [loadingOperations, setLoadingOperations] = useState(false);
   const [journalTotal, setJournalTotal] = useState(0);
   const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
   const [selectedLog, setSelectedLog] = useState<ActivityLog | null>(null);
@@ -223,6 +246,11 @@ export default function ProjectDetailPage() {
   const [generatingReport, setGeneratingReport] = useState(false);
   const [reportProgress, setReportProgress] = useState<{step: number; total: number; message: string; progress: number} | null>(null);
   const [journalSubTab, setJournalSubTab] = useState<'logs' | 'reports' | 'validation' | 'profiles' | 'roadmap'>('logs');
+
+  // 🆕 انتخاب مدل برای گزارش مهندسی (دستی)
+  const [selectedEngineeringModels, setSelectedEngineeringModels] = useState<string[]>(['claude']);
+  const [showEngineeringModelSelector, setShowEngineeringModelSelector] = useState(false);
+  const [engineeringReportDepth, setEngineeringReportDepth] = useState<'quick' | 'standard' | 'deep'>('standard');
 
   // Roadmap State (در تب ژورنال)
   const [roadmapContent, setRoadmapContent] = useState<string>('');
@@ -1141,15 +1169,37 @@ export default function ProjectDetailPage() {
   // بارگذاری جزئیات یک فعالیت
   const loadActivityDetail = async (logId: string) => {
     try {
+      setSelectedLogId(logId);
       const res = await fetch(`${API_BASE}/api/projects/${projectId}/journal/${logId}`);
       if (res.ok) {
         const data = await res.json();
         if (data.success) {
           setSelectedLog(data.activity);
+
+          // 🆕 بارگذاری عملیات جزئی
+          loadDetailedOperations(logId);
         }
       }
     } catch (e) {
       showError('خطا در بارگذاری جزئیات');
+    }
+  };
+
+  // 🆕 بارگذاری عملیات جزئی (DetailedOperation)
+  const loadDetailedOperations = async (logId: string) => {
+    setLoadingOperations(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/journal/${logId}/operations`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setDetailedOperations(data.operations || []);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading detailed operations:', e);
+    } finally {
+      setLoadingOperations(false);
     }
   };
 
@@ -1244,16 +1294,31 @@ export default function ProjectDetailPage() {
 
   // تولید گزارش مهندسی جامع
   const generateEngineeringReport = async (days: number = 7) => {
-    if (!confirm('تولید گزارش مهندسی جامع؟\n\nاین گزارش شامل:\n• تحلیل کامل ساختار پروژه\n• 🔍 اعتبارسنجی نتایج تحلیل سلامت (تایید/رد ایرادات)\n• شناسایی باگ‌ها و مشکلات\n• پیشنهادات بهبود\n• نقشه راه توسعه\n• تولید خودکار فیلدها برای ایرادات تایید شده\n\nاین عملیات ممکن است چند دقیقه طول بکشد.')) {
+    // نمایش پنجره انتخاب مدل و عمق گزارش
+    setShowEngineeringModelSelector(true);
+  };
+
+  // اجرای واقعی گزارش مهندسی بعد از انتخاب مدل و عمق
+  const executeEngineeringReport = async (days: number = 7) => {
+    setShowEngineeringModelSelector(false);
+
+    const depthLabels = { quick: 'سریع (۱-۲ دقیقه)', standard: 'استاندارد (۳-۵ دقیقه)', deep: 'عمیق و جامع (۱۰-۲۰ دقیقه)' };
+    const modelsText = selectedEngineeringModels.length > 1
+      ? `${selectedEngineeringModels.length} مدل`
+      : availableModels.find(m => m.id === selectedEngineeringModels[0])?.name || selectedEngineeringModels[0];
+
+    if (!confirm(`تولید گزارش مهندسی جامع؟\n\n📊 مدل‌های انتخابی: ${modelsText}\n⏱️ عمق گزارش: ${depthLabels[engineeringReportDepth]}\n\nاین گزارش شامل:\n• تحلیل کامل ساختار پروژه\n• 🔍 اعتبارسنجی نتایج تحلیل سلامت (تایید/رد ایرادات)\n• شناسایی باگ‌ها و مشکلات\n• پیشنهادات بهبود\n• نقشه راه توسعه\n• تولید خودکار فیلدها برای ایرادات تایید شده`)) {
       return;
     }
 
     setGeneratingReport(true);
-    setReportProgress({ step: 0, total: 8, message: '🚀 شروع تولید گزارش...', progress: 0 });
+    const totalSteps = engineeringReportDepth === 'deep' ? 12 : (engineeringReportDepth === 'standard' ? 8 : 4);
+    setReportProgress({ step: 0, total: totalSteps, message: '🚀 شروع تولید گزارش...', progress: 0 });
 
     try {
-      // 🔴 استفاده از endpoint streaming برای نمایش پیشرفت
-      const response = await fetch(`${API_BASE}/api/projects/${projectId}/reports/generate-engineering-stream?days=${days}&model_id=claude&auto_create_fields=true&validate_health_issues=true`, {
+      // 🔴 ارسال مدل‌های انتخابی و عمق گزارش
+      const modelIds = selectedEngineeringModels.join(',');
+      const response = await fetch(`${API_BASE}/api/projects/${projectId}/reports/generate-engineering-stream?days=${days}&model_ids=${modelIds}&depth=${engineeringReportDepth}&auto_create_fields=true&validate_health_issues=true`, {
         method: 'POST',
       });
 
@@ -3366,20 +3431,49 @@ export default function ProjectDetailPage() {
                 </div>
               )}
 
-              {/* فیلتر و لیست فیلدها */}
-              {dynamicFields.some((f: any) => f.archived) && (
-                <div className="mb-3 flex items-center gap-2">
-                  <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
-                    <input
-                      type="checkbox"
-                      checked={showArchivedFields}
-                      onChange={(e) => setShowArchivedFields(e.target.checked)}
-                      className="rounded"
-                    />
-                    📦 نمایش فیلدهای بایگانی شده ({dynamicFields.filter((f: any) => f.archived).length})
-                  </label>
+              {/* 🆕 دکمه‌های دانلود و فیلتر */}
+              <div className="mb-3 flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  {dynamicFields.some((f: any) => f.archived) && (
+                    <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
+                      <input
+                        type="checkbox"
+                        checked={showArchivedFields}
+                        onChange={(e) => setShowArchivedFields(e.target.checked)}
+                        className="rounded"
+                      />
+                      📦 نمایش بایگانی ({dynamicFields.filter((f: any) => f.archived).length})
+                    </label>
+                  )}
                 </div>
-              )}
+
+                {/* دکمه‌های دانلود مارک‌داون */}
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => window.open(`${API_BASE}/api/projects/${projectId}/export/fields/markdown?field_ids=active`, '_blank')}
+                    className="px-2 py-1 text-xs bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300 rounded hover:bg-blue-200 dark:hover:bg-blue-800 flex items-center gap-1"
+                    title="دانلود فیلدهای فعال به مارک‌داون"
+                  >
+                    📥 فعال
+                  </button>
+                  <button
+                    onClick={() => window.open(`${API_BASE}/api/projects/${projectId}/export/fields/markdown?field_ids=all`, '_blank')}
+                    className="px-2 py-1 text-xs bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300 rounded hover:bg-gray-200 dark:hover:bg-gray-600 flex items-center gap-1"
+                    title="دانلود همه فیلدها به مارک‌داون"
+                  >
+                    📥 همه
+                  </button>
+                  {selectedFields.length > 0 && (
+                    <button
+                      onClick={() => window.open(`${API_BASE}/api/projects/${projectId}/export/fields/markdown?field_ids=${selectedFields.join(',')}`, '_blank')}
+                      className="px-2 py-1 text-xs bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300 rounded hover:bg-green-200 dark:hover:bg-green-800 flex items-center gap-1"
+                      title="دانلود فیلدهای انتخاب شده"
+                    >
+                      📥 انتخابی ({selectedFields.length})
+                    </button>
+                  )}
+                </div>
+              </div>
 
               <div className="space-y-3 max-h-[50vh] overflow-auto">
                 {dynamicFields.filter((f: any) => !f.archived || showArchivedFields).length === 0 ? (
@@ -3600,6 +3694,16 @@ export default function ProjectDetailPage() {
                                   📦 بایگانی
                                 </span>
                               )}
+                              {/* نشانگر تاییدیه گزارش مهندسی */}
+                              {field.engineering_approval?.approved ? (
+                                <span className="px-2 py-0.5 bg-emerald-100 dark:bg-emerald-900 text-emerald-700 dark:text-emerald-300 text-xs rounded" title={`تایید شده توسط ${field.engineering_approval.approved_by || 'AI'} در ${field.engineering_approval.approved_at || ''}`}>
+                                  ✅ تایید مهندسی
+                                </span>
+                              ) : field.action_type && field.action_type !== 'display' && !field.archived ? (
+                                <span className="px-2 py-0.5 bg-amber-100 dark:bg-amber-900 text-amber-700 dark:text-amber-300 text-xs rounded" title="برای اجرا نیاز به تایید گزارش مهندسی دارد">
+                                  ⚠️ نیاز به تایید
+                                </span>
+                              ) : null}
                             </div>
                             <div className="flex gap-1">
                               {field.archived ? (
@@ -4274,6 +4378,109 @@ export default function ProjectDetailPage() {
                     </div>
                   )}
 
+                  {/* 🆕 پنجره انتخاب مدل و عمق گزارش مهندسی */}
+                  {showEngineeringModelSelector && (
+                    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+                      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl p-6 max-w-lg w-full mx-4">
+                        <h3 className="font-bold text-xl mb-4 flex items-center gap-2">
+                          <span className="text-2xl">🔬</span>
+                          تنظیمات گزارش مهندسی
+                        </h3>
+
+                        {/* انتخاب مدل‌ها */}
+                        <div className="mb-4">
+                          <label className="text-sm font-medium block mb-2">📊 انتخاب مدل(ها):</label>
+                          <div className="grid grid-cols-2 gap-2 max-h-40 overflow-y-auto p-2 bg-gray-50 dark:bg-gray-900 rounded-lg">
+                            {availableModels.filter(m => m.id !== 'all').map(model => (
+                              <label key={model.id} className="flex items-center gap-2 p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedEngineeringModels.includes(model.id)}
+                                  onChange={(e) => {
+                                    if (e.target.checked) {
+                                      setSelectedEngineeringModels([...selectedEngineeringModels, model.id]);
+                                    } else {
+                                      setSelectedEngineeringModels(selectedEngineeringModels.filter(id => id !== model.id));
+                                    }
+                                  }}
+                                  className="rounded"
+                                />
+                                <span className="text-sm">{model.icon} {model.name}</span>
+                              </label>
+                            ))}
+                          </div>
+                          {selectedEngineeringModels.length === 0 && (
+                            <p className="text-xs text-red-500 mt-1">حداقل یک مدل انتخاب کنید</p>
+                          )}
+                        </div>
+
+                        {/* انتخاب عمق گزارش */}
+                        <div className="mb-6">
+                          <label className="text-sm font-medium block mb-2">⏱️ عمق و دقت گزارش:</label>
+                          <div className="space-y-2">
+                            <label className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-all ${engineeringReportDepth === 'quick' ? 'bg-blue-50 dark:bg-blue-900/30 border-blue-500' : 'border-gray-200 dark:border-gray-600 hover:border-blue-300'}`}>
+                              <input
+                                type="radio"
+                                name="depth"
+                                checked={engineeringReportDepth === 'quick'}
+                                onChange={() => setEngineeringReportDepth('quick')}
+                                className="text-blue-500"
+                              />
+                              <div>
+                                <div className="font-medium">⚡ سریع</div>
+                                <div className="text-xs text-gray-500">۱-۲ دقیقه | بررسی سطحی</div>
+                              </div>
+                            </label>
+                            <label className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-all ${engineeringReportDepth === 'standard' ? 'bg-purple-50 dark:bg-purple-900/30 border-purple-500' : 'border-gray-200 dark:border-gray-600 hover:border-purple-300'}`}>
+                              <input
+                                type="radio"
+                                name="depth"
+                                checked={engineeringReportDepth === 'standard'}
+                                onChange={() => setEngineeringReportDepth('standard')}
+                                className="text-purple-500"
+                              />
+                              <div>
+                                <div className="font-medium">📊 استاندارد</div>
+                                <div className="text-xs text-gray-500">۳-۵ دقیقه | تحلیل متوسط</div>
+                              </div>
+                            </label>
+                            <label className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-all ${engineeringReportDepth === 'deep' ? 'bg-green-50 dark:bg-green-900/30 border-green-500' : 'border-gray-200 dark:border-gray-600 hover:border-green-300'}`}>
+                              <input
+                                type="radio"
+                                name="depth"
+                                checked={engineeringReportDepth === 'deep'}
+                                onChange={() => setEngineeringReportDepth('deep')}
+                                className="text-green-500"
+                              />
+                              <div>
+                                <div className="font-medium">🔬 عمیق و جامع</div>
+                                <div className="text-xs text-gray-500">۱۰-۲۰ دقیقه | بررسی فایل به فایل، اعتبارسنجی کامل</div>
+                              </div>
+                            </label>
+                          </div>
+                        </div>
+
+                        {/* دکمه‌ها */}
+                        <div className="flex gap-3 justify-end">
+                          <button
+                            onClick={() => setShowEngineeringModelSelector(false)}
+                            className="px-4 py-2 text-gray-600 hover:text-gray-800 dark:text-gray-400"
+                          >
+                            انصراف
+                          </button>
+                          <button
+                            onClick={() => executeEngineeringReport(7)}
+                            disabled={selectedEngineeringModels.length === 0}
+                            className="px-6 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                          >
+                            <span>🚀</span>
+                            شروع گزارش‌گیری
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="grid md:grid-cols-2 gap-4">
                     <div className="flex items-center gap-2">
                       <label className="flex items-center gap-2 cursor-pointer">
@@ -4385,17 +4592,37 @@ export default function ProjectDetailPage() {
                       {reports.map((report) => (
                         <div
                           key={report.id}
-                          onClick={() => loadReportDetail(report.id)}
-                          className="p-4 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer"
+                          className="p-4 hover:bg-gray-50 dark:hover:bg-gray-700"
                         >
                           <div className="flex items-center justify-between mb-2">
-                            <h3 className="font-medium">{report.title}</h3>
-                            <span className="text-xs text-gray-500">
-                              {report.created_at ? new Date(report.created_at).toLocaleString('fa-IR') : ''}
-                            </span>
+                            <h3
+                              className="font-medium cursor-pointer hover:text-purple-600"
+                              onClick={() => loadReportDetail(report.id)}
+                            >
+                              {report.title}
+                            </h3>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-gray-500">
+                                {report.created_at ? new Date(report.created_at).toLocaleString('fa-IR') : ''}
+                              </span>
+                              {/* 🆕 دکمه دانلود مارک‌داون */}
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  window.open(`${API_BASE}/api/projects/${projectId}/export/report/${report.id}/markdown`, '_blank');
+                                }}
+                                className="px-2 py-1 text-xs bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300 rounded hover:bg-blue-200 dark:hover:bg-blue-800"
+                                title="دانلود گزارش به مارک‌داون"
+                              >
+                                📥 MD
+                              </button>
+                            </div>
                           </div>
                           {report.summary && (
-                            <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
+                            <p
+                              className="text-sm text-gray-600 dark:text-gray-400 mb-2 cursor-pointer"
+                              onClick={() => loadReportDetail(report.id)}
+                            >
                               {report.summary}
                             </p>
                           )}
@@ -5066,6 +5293,65 @@ export default function ProjectDetailPage() {
                         </pre>
                       </div>
                     )}
+
+                    {/* 🆕 عملیات جزئی (DetailedOperation) */}
+                    <div className="border-t dark:border-gray-700 pt-4">
+                      <h4 className="font-medium text-sm text-gray-500 mb-2 flex items-center gap-2">
+                        <span>📋</span>
+                        عملیات جزئی ({detailedOperations.length})
+                        {loadingOperations && <span className="animate-spin">⏳</span>}
+                      </h4>
+
+                      {detailedOperations.length === 0 && !loadingOperations ? (
+                        <div className="text-center py-4 text-gray-400 text-sm">
+                          عملیات جزئی ثبت نشده
+                        </div>
+                      ) : (
+                        <div className="space-y-2 max-h-64 overflow-auto">
+                          {detailedOperations.map((op, idx) => (
+                            <div
+                              key={op.id}
+                              className={`p-3 rounded-lg border text-sm ${
+                                op.status === 'success' ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800' :
+                                op.status === 'error' ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800' :
+                                'bg-gray-50 dark:bg-gray-700 border-gray-200 dark:border-gray-600'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between mb-1">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs font-mono bg-gray-200 dark:bg-gray-600 px-1 rounded">
+                                    #{op.operation_number}
+                                  </span>
+                                  <span className="font-medium">{op.operation_type}</span>
+                                  {op.target_name && (
+                                    <span className="text-xs text-gray-500">
+                                      ({op.target_type}: {op.target_name})
+                                    </span>
+                                  )}
+                                </div>
+                                <span className={`text-xs ${
+                                  op.status === 'success' ? 'text-green-600' :
+                                  op.status === 'error' ? 'text-red-600' : 'text-gray-500'
+                                }`}>
+                                  {op.status === 'success' ? '✓' : op.status === 'error' ? '✗' : '○'}
+                                </span>
+                              </div>
+                              <p className="text-gray-600 dark:text-gray-400">{op.summary}</p>
+                              {op.before_value && op.after_value && (
+                                <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                                  <div className="p-2 bg-red-100 dark:bg-red-900/30 rounded">
+                                    <span className="text-red-600">قبل:</span> {op.before_value.substring(0, 100)}...
+                                  </div>
+                                  <div className="p-2 bg-green-100 dark:bg-green-900/30 rounded">
+                                    <span className="text-green-600">بعد:</span> {op.after_value.substring(0, 100)}...
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>

@@ -1,6 +1,9 @@
 'use client';
 
 import { useState, useEffect, useMemo } from 'react';
+import FileViewer from './FileViewer';
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 interface FileHealth {
   score: number;
@@ -29,10 +32,43 @@ interface TreeNode {
  * 🔴 کامپوننت دیاگرام سلامت
  * نمایش ساختار پروژه با رنگ‌بندی براساس نمره سلامت هر فایل
  */
+
+// تابع رنگ براساس امتیاز - باید قبل از استفاده تعریف شود
+const getColorForScore = (score: number): string => {
+  if (score >= 80) return '#22c55e'; // سبز
+  if (score >= 60) return '#eab308'; // زرد
+  if (score >= 40) return '#f97316'; // نارنجی
+  return '#ef4444'; // قرمز
+};
+
+// آیکون فایل براساس پسوند
+const getFileIcon = (ext: string): string => {
+  const icons: Record<string, string> = {
+    ts: '📘',
+    tsx: '⚛️',
+    js: '📒',
+    jsx: '⚛️',
+    py: '🐍',
+    json: '📋',
+    md: '📝',
+    css: '🎨',
+    html: '🌐',
+    sql: '🗃️',
+    yml: '⚙️',
+    yaml: '⚙️',
+    sh: '🖥️',
+    env: '🔐',
+    lock: '🔒',
+  };
+  return icons[ext.toLowerCase()] || '📄';
+};
+
 export default function HealthDiagram({ projectId, fileHealthMap, onFileClick }: Props) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [viewMode, setViewMode] = useState<'tree' | 'grid' | 'mermaid'>('tree');
   const [filterScore, setFilterScore] = useState<number>(0); // 0 = همه
+  const [selectedFile, setSelectedFile] = useState<string | null>(null); // فایل انتخاب شده برای نمایش
+  const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set()); // فایل‌های انتخاب شده برای دانلود
 
   // ساخت درخت از فایل‌ها
   const fileTree = useMemo(() => {
@@ -206,21 +242,42 @@ export default function HealthDiagram({ projectId, fileHealthMap, onFileClick }:
     if (node.type === 'file') {
       const ext = node.name.split('.').pop() || '';
       const fileIcon = getFileIcon(ext);
+      const isSelected = selectedFiles.has(node.path);
 
       return (
         <div
           key={node.path}
-          className="flex items-center py-1 px-2 hover:bg-gray-700 cursor-pointer rounded group"
+          className={`flex items-center py-1 px-2 hover:bg-gray-700 cursor-pointer rounded group ${isSelected ? 'bg-blue-900/30' : ''}`}
           style={{ paddingRight: `${indent + 16}px`, direction: 'ltr' }}
-          onClick={() => onFileClick?.(node.path)}
         >
-          <span className="ml-1">{fileIcon}</span>
-          <span
-            className="ml-2 flex-1 font-medium"
-            style={{ color: textColor }}  // 🔴 استفاده از رنگ متن روشن‌تر
+          {/* چک‌باکس انتخاب */}
+          <input
+            type="checkbox"
+            checked={isSelected}
+            onChange={(e) => {
+              e.stopPropagation();
+              const newSelected = new Set(selectedFiles);
+              if (e.target.checked) {
+                newSelected.add(node.path);
+              } else {
+                newSelected.delete(node.path);
+              }
+              setSelectedFiles(newSelected);
+            }}
+            className="mr-2 rounded"
+            onClick={(e) => e.stopPropagation()}
+          />
+          <div
+            className="flex items-center flex-1"
+            onClick={() => setSelectedFile(node.path)}
           >
-            {node.name}
-          </span>
+            <span className="ml-1">{fileIcon}</span>
+            <span
+              className="ml-2 flex-1 font-medium"
+              style={{ color: textColor }}  // 🔴 استفاده از رنگ متن روشن‌تر
+            >
+              {node.name}
+            </span>
           {score !== undefined && (
             <div className="flex items-center gap-2">
               {/* نوار پیشرفت کوچک */}
@@ -235,39 +292,18 @@ export default function HealthDiagram({ projectId, fileHealthMap, onFileClick }:
               </div>
               <span
                 className="text-xs font-mono"
-                style={{ color: healthColor }}
+                style={{ color: textColor }}
               >
                 {score}
               </span>
             </div>
           )}
+          </div>
         </div>
       );
     }
 
     return node.children.map(child => renderTreeNode(child, depth));
-  };
-
-  // آیکون فایل براساس پسوند
-  const getFileIcon = (ext: string): string => {
-    const icons: Record<string, string> = {
-      ts: '📘',
-      tsx: '⚛️',
-      js: '📒',
-      jsx: '⚛️',
-      py: '🐍',
-      json: '📋',
-      md: '📝',
-      css: '🎨',
-      html: '🌐',
-      sql: '🗃️',
-      yml: '⚙️',
-      yaml: '⚙️',
-      sh: '🖥️',
-      env: '🔐',
-      lock: '🔒',
-    };
-    return icons[ext.toLowerCase()] || '📄';
   };
 
   // رندر نمای گرید
@@ -497,6 +533,57 @@ export default function HealthDiagram({ projectId, fileHealthMap, onFileClick }:
             </button>
           </div>
         )}
+
+        {/* دکمه‌های دانلود */}
+        <div className="flex gap-1 mr-auto">
+          {selectedFiles.size > 0 && (
+            <>
+              <button
+                className="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded flex items-center gap-1"
+                onClick={async () => {
+                  const files = Array.from(selectedFiles);
+                  try {
+                    const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/files/download-batch`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ file_paths: files, include_suggestions: true }),
+                    });
+                    if (res.ok) {
+                      const blob = await res.blob();
+                      const url = window.URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = 'selected_files.zip';
+                      a.click();
+                      window.URL.revokeObjectURL(url);
+                    }
+                  } catch (err) {
+                    console.error('Error downloading files:', err);
+                  }
+                }}
+              >
+                📥 دانلود انتخاب شده ({selectedFiles.size})
+              </button>
+              <button
+                className="px-2 py-1 text-xs bg-gray-600 hover:bg-gray-500 text-white rounded"
+                onClick={() => setSelectedFiles(new Set())}
+              >
+                ✕ لغو انتخاب
+              </button>
+            </>
+          )}
+          <button
+            className="px-2 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded flex items-center gap-1"
+            onClick={() => {
+              window.open(
+                `${API_BASE}/api/projects/${projectId}/health/files/download-all?include_suggestions=true`,
+                '_blank'
+              );
+            }}
+          >
+            📦 دانلود همه
+          </button>
+        </div>
       </div>
 
       {/* محتوا */}
@@ -536,6 +623,15 @@ export default function HealthDiagram({ projectId, fileHealthMap, onFileClick }:
           </span>
         </div>
       </div>
+
+      {/* نمایشگر فایل */}
+      {selectedFile && (
+        <FileViewer
+          projectId={projectId}
+          filePath={selectedFile}
+          onClose={() => setSelectedFile(null)}
+        />
+      )}
     </div>
   );
 }

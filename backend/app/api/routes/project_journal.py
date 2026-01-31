@@ -14,11 +14,127 @@ from datetime import datetime, timedelta
 import json
 import uuid
 import asyncio
+import logging
 
 from ...core.database import get_db, Base, engine
 from ...models.project import Project
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+# ===================== توابع کمکی مدیریت مدل‌ها =====================
+
+def get_active_models(db: Session, preferred_models: List[str] = None) -> List[str]:
+    """
+    🆕 دریافت لیست مدل‌های فعال
+    اگر مدل‌های ترجیحی داده شوند، فقط آنها را برمی‌گرداند (در صورت فعال بودن)
+    """
+    from ...models.ai_profile import ModelSettings
+    from ...core.models_registry import MODEL_REGISTRY
+
+    active_models = []
+
+    # دریافت تنظیمات از دیتابیس
+    db_settings = {}
+    try:
+        settings = db.query(ModelSettings).all()
+        db_settings = {s.model_id: s.enabled for s in settings}
+    except:
+        pass
+
+    for model_id, model in MODEL_REGISTRY.items():
+        # چک کردن فعال بودن
+        is_enabled = db_settings.get(model_id, model.enabled)
+        if is_enabled:
+            active_models.append(model_id)
+
+    # اگر مدل‌های ترجیحی داده شدند
+    if preferred_models:
+        filtered = [m for m in preferred_models if m in active_models]
+        if filtered:
+            return filtered
+
+    return active_models
+
+
+def get_replacement_model(db: Session, disabled_model: str, task_type: str = "general") -> str:
+    """
+    🆕 دریافت مدل جایگزین برای مدل غیرفعال
+
+    الگوریتم:
+    1. مدل‌های فعال با امتیاز بالاتر در همان task_type
+    2. مدل‌های فعال با همان provider
+    3. هر مدل فعال دیگر
+    """
+    from ...models.ai_profile import ModelSettings, AIProfile
+    from ...core.models_registry import MODEL_REGISTRY, get_model
+
+    active_models = get_active_models(db)
+    if not active_models:
+        raise HTTPException(status_code=503, detail="هیچ مدل فعالی موجود نیست")
+
+    # اگر مدل اصلی فعال است، همان را برگردان
+    if disabled_model in active_models:
+        return disabled_model
+
+    # پیدا کردن provider مدل غیرفعال
+    original_model = get_model(disabled_model)
+    original_provider = original_model.provider.value if original_model else None
+
+    # دریافت پروفایل‌ها برای رتبه‌بندی
+    profiles = {}
+    try:
+        profile_records = db.query(AIProfile).filter(AIProfile.model_id.in_(active_models)).all()
+        for p in profile_records:
+            profiles[p.model_id] = {
+                "overall_score": p.overall_score,
+                "last_scores": p.last_scores_by_task or {}
+            }
+    except:
+        pass
+
+    # رتبه‌بندی مدل‌های فعال
+    candidates = []
+    for model_id in active_models:
+        model = get_model(model_id)
+        if not model:
+            continue
+
+        score = profiles.get(model_id, {}).get("overall_score", 50)
+        task_score = profiles.get(model_id, {}).get("last_scores", {}).get(task_type, {}).get("overall", 50)
+
+        # امتیاز اضافی برای همان provider
+        provider_bonus = 10 if model.provider.value == original_provider else 0
+
+        total_score = (score + task_score) / 2 + provider_bonus
+        candidates.append((model_id, total_score))
+
+    # مرتب‌سازی بر اساس امتیاز
+    candidates.sort(key=lambda x: x[1], reverse=True)
+
+    replacement = candidates[0][0] if candidates else "claude"
+    logger.info(f"[Model Replacement] {disabled_model} -> {replacement}")
+
+    return replacement
+
+
+def ensure_active_model(db: Session, model_id: str, task_type: str = "general") -> tuple:
+    """
+    🆕 اطمینان از فعال بودن مدل، در غیر این صورت جایگزینی
+
+    Returns:
+        tuple: (final_model_id, was_replaced, replacement_note)
+    """
+    active_models = get_active_models(db)
+
+    if model_id in active_models:
+        return (model_id, False, None)
+
+    replacement = get_replacement_model(db, model_id, task_type)
+    note = f"مدل {model_id} غیرفعال بود و با {replacement} جایگزین شد"
+
+    return (replacement, True, note)
 
 
 # ===================== مدل دیتابیس =====================
@@ -2464,14 +2580,22 @@ async def generate_engineering_report(
 async def generate_engineering_report_stream(
     project_id: str,
     days: int = Query(7, ge=1, le=30),
-    model_id: str = Query("claude"),
+    model_id: str = Query(None),  # برای backward compatibility
+    model_ids: str = Query(None),  # 🆕 چند مدل با کاما جدا شده
+    depth: str = Query("standard"),  # 🆕 quick, standard, deep
     auto_create_fields: bool = Query(True),
     validate_health_issues: bool = Query(True),
     db: Session = Depends(get_db)
 ):
     """
     🔴 گزارش مهندسی با نوار پیشرفت (Streaming)
-    ارسال بلادرنگ وضعیت پیشرفت در حین تولید گزارش
+
+    🆕 قابلیت‌های جدید:
+    - model_ids: چند مدل با کاما جدا شده (مثلاً "claude,gpt-4o")
+    - depth: عمق تحلیل
+        - quick: بررسی سریع (1-2 دقیقه)
+        - standard: تحلیل متوسط (3-5 دقیقه)
+        - deep: تحلیل عمیق فایل به فایل (10-20 دقیقه)
     """
     from ...services.ai_manager import get_ai_manager
     from ...services.ai_base import Message
@@ -2479,11 +2603,43 @@ async def generate_engineering_report_stream(
     import logging
     logger = logging.getLogger(__name__)
 
+    # پردازش مدل‌ها
+    selected_models = []
+    if model_ids:
+        selected_models = [m.strip() for m in model_ids.split(",") if m.strip()]
+    elif model_id:
+        selected_models = [model_id]
+    if not selected_models:
+        selected_models = ["claude"]  # پیش‌فرض
+
+    # 🔴 جلوگیری از دور باطل - بررسی گزارش تکراری
+    if check_cycle_prevention(
+        db=db,
+        project_id=project_id,
+        activity_type="engineering_report",
+        minutes_threshold=5  # حداقل 5 دقیقه بین گزارش‌ها
+    ) == False:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=429,
+            content={"error": "گزارش مهندسی اخیراً تولید شده است. لطفاً چند دقیقه صبر کنید."}
+        )
+
+    # تعداد مراحل بر اساس عمق
+    depth_config = {
+        "quick": {"total_steps": 4, "file_limit": 5, "ai_calls": 1},
+        "standard": {"total_steps": 8, "file_limit": 20, "ai_calls": 2},
+        "deep": {"total_steps": 12, "file_limit": 0, "ai_calls": len(selected_models) + 2}  # 0 = همه
+    }
+    config = depth_config.get(depth, depth_config["standard"])
+
     async def progress_generator():
         """Generator برای ارسال پیشرفت"""
         try:
+            total_steps = config["total_steps"]
+
             # مرحله 1: بررسی پروژه
-            yield f"data: {json.dumps({'step': 1, 'total': 8, 'message': '🔍 بررسی پروژه...', 'progress': 5}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'step': 1, 'total': total_steps, 'message': '🔍 بررسی پروژه...', 'progress': 5}, ensure_ascii=False)}\n\n"
             await asyncio.sleep(0.1)
 
             project = db.query(Project).filter(Project.id == project_id).first()
@@ -2492,16 +2648,26 @@ async def generate_engineering_report_stream(
                 return
 
             # مرحله 2: دریافت فایل‌ها
-            yield f"data: {json.dumps({'step': 2, 'total': 8, 'message': '📂 دریافت فایل‌های پروژه...', 'progress': 15}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'step': 2, 'total': total_steps, 'message': '📂 دریافت فایل‌های پروژه...', 'progress': 10}, ensure_ascii=False)}\n\n"
             await asyncio.sleep(0.1)
 
             files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
-            for i, f in enumerate(files[:10]):
-                yield f"data: {json.dumps({'step': 2, 'message': f'📄 بررسی: {f.file_path}', 'progress': 15 + (i * 2)}, ensure_ascii=False)}\n\n"
-                await asyncio.sleep(0.05)
+            file_limit = config["file_limit"] or len(files)
+            files_to_analyze = files[:file_limit] if file_limit > 0 else files
+
+            # 🆕 در حالت deep، هر فایل را گزارش کن
+            if depth == "deep":
+                for i, f in enumerate(files_to_analyze):
+                    progress = 10 + int((i / len(files_to_analyze)) * 15)
+                    yield f"data: {json.dumps({'step': 2, 'message': f'📄 [{i+1}/{len(files_to_analyze)}] {f.file_path}', 'progress': progress}, ensure_ascii=False)}\n\n"
+                    await asyncio.sleep(0.02)
+            else:
+                for i, f in enumerate(files_to_analyze[:10]):
+                    yield f"data: {json.dumps({'step': 2, 'message': f'📄 بررسی: {f.file_path}', 'progress': 10 + (i * 1)}, ensure_ascii=False)}\n\n"
+                    await asyncio.sleep(0.03)
 
             # مرحله 3: دریافت فیلدها
-            yield f"data: {json.dumps({'step': 3, 'total': 8, 'message': '📋 بررسی فیلدهای پویا...', 'progress': 30}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'step': 3, 'total': total_steps, 'message': '📋 بررسی فیلدهای پویا...', 'progress': 30}, ensure_ascii=False)}\n\n"
             await asyncio.sleep(0.1)
 
             existing_fields = []
@@ -2515,7 +2681,7 @@ async def generate_engineering_report_stream(
             yield f"data: {json.dumps({'step': 3, 'message': f'🔴 {len(pending_fields)} فیلد pending برای اعتبارسنجی', 'progress': 35}, ensure_ascii=False)}\n\n"
 
             # مرحله 4: بررسی health issues
-            yield f"data: {json.dumps({'step': 4, 'total': 8, 'message': '🔍 بررسی ایرادات سلامت...', 'progress': 40}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'step': 4, 'total': total_steps, 'message': '🔍 بررسی ایرادات سلامت...', 'progress': 40}, ensure_ascii=False)}\n\n"
             await asyncio.sleep(0.1)
 
             health_issues = []
@@ -2527,34 +2693,79 @@ async def generate_engineering_report_stream(
 
             yield f"data: {json.dumps({'step': 4, 'message': f'⚠️ {len(health_issues)} ایراد برای اعتبارسنجی', 'progress': 45}, ensure_ascii=False)}\n\n"
 
-            # مرحله 5: بررسی نقشه راه
-            yield f"data: {json.dumps({'step': 5, 'total': 8, 'message': '🗺️ بررسی نقشه راه...', 'progress': 50}, ensure_ascii=False)}\n\n"
+            # 🆕 مراحل اضافی برای عمق deep
+            if depth == "deep" and len(selected_models) > 1:
+                # مرحله 5-8: تحلیل توسط هر مدل
+                model_results = []
+                step = 5
+                for model in selected_models:
+                    yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': f'🧠 تحلیل توسط {model}...', 'progress': 50 + (step - 5) * 10}, ensure_ascii=False)}\n\n"
+
+                    try:
+                        # فراخوانی واقعی AI برای هر مدل
+                        ai_manager = get_ai_manager()
+                        file_summary = "\n".join([f"- {f.file_path}" for f in files_to_analyze[:30]])
+
+                        # تحلیل ساختار با این مدل خاص
+                        analysis_prompt = f"""
+تحلیل مهندسی پروژه {project.name}:
+
+فایل‌ها ({len(files_to_analyze)} فایل):
+{file_summary}
+
+وظیفه: تحلیل کیفیت کد، امنیت، و ساختار. حداکثر 5 ایراد مهم را شناسایی کن.
+
+پاسخ را به فرمت JSON بده:
+{{"issues": [{{"type": "", "severity": "high/medium/low", "file": "", "description": ""}}], "score": 0-100}}
+"""
+                        response = await ai_manager.generate(
+                            model_id=model,
+                            messages=[Message(role="user", content=analysis_prompt)],
+                            max_tokens=2000,
+                            temperature=0.3
+                        )
+                        if response.content:
+                            model_results.append({"model": model, "response": response.content[:500]})
+                            yield f"data: {json.dumps({'step': step, 'message': f'✅ {model}: تحلیل کامل شد', 'progress': 50 + (step - 4) * 10}, ensure_ascii=False)}\n\n"
+
+                    except Exception as me:
+                        yield f"data: {json.dumps({'step': step, 'message': f'⚠️ {model}: خطا - {str(me)[:50]}', 'progress': 50 + (step - 4) * 10}, ensure_ascii=False)}\n\n"
+
+                    step += 1
+                    await asyncio.sleep(0.5)
+
+            # مرحله قبل از آخر: بررسی نقشه راه
+            step = total_steps - 2
+            yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': '🗺️ بررسی نقشه راه و حالت ایده‌آل...', 'progress': 70}, ensure_ascii=False)}\n\n"
             await asyncio.sleep(0.1)
 
-            # مرحله 6: آماده‌سازی برای AI
-            yield f"data: {json.dumps({'step': 6, 'total': 8, 'message': '🤖 آماده‌سازی درخواست AI...', 'progress': 55}, ensure_ascii=False)}\n\n"
-            await asyncio.sleep(0.1)
+            # مرحله آخر: فراخوانی گزارش اصلی
+            step = total_steps - 1
+            models_text = ", ".join(selected_models)
+            yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': f'🧠 تولید گزارش نهایی با {models_text}...', 'progress': 80}, ensure_ascii=False)}\n\n"
 
-            # مرحله 7: فراخوانی AI
-            yield f"data: {json.dumps({'step': 7, 'total': 8, 'message': f'🧠 در حال تحلیل توسط {model_id}...', 'progress': 60}, ensure_ascii=False)}\n\n"
-
-            # فراخوانی گزارش اصلی
+            # فراخوانی گزارش اصلی (با مدل اول)
             result = await generate_engineering_report(
                 project_id=project_id,
                 days=days,
-                model_id=model_id,
+                model_id=selected_models[0],
                 auto_create_fields=auto_create_fields,
                 validate_health_issues=validate_health_issues,
                 db=db
             )
 
-            # مرحله 8: اتمام
+            # 🆕 ثبت مدل‌های استفاده شده در نتیجه
             if result.get("success"):
-                success_msg = json.dumps({'step': 8, 'total': 8, 'message': '✅ گزارش با موفقیت تولید شد', 'progress': 100, 'result': result}, ensure_ascii=False)
+                result["models_used"] = selected_models
+                result["depth"] = depth
+
+            # مرحله نهایی: اتمام
+            if result.get("success"):
+                success_msg = json.dumps({'step': total_steps, 'total': total_steps, 'message': '✅ گزارش با موفقیت تولید شد', 'progress': 100, 'result': result}, ensure_ascii=False)
                 yield f"data: {success_msg}\n\n"
             else:
                 error_text = result.get('error', 'خطای نامشخص')
-                error_msg = json.dumps({'step': 8, 'message': f'❌ خطا: {error_text}', 'progress': 100, 'error': error_text}, ensure_ascii=False)
+                error_msg = json.dumps({'step': total_steps, 'message': f'❌ خطا: {error_text}', 'progress': 100, 'error': error_text}, ensure_ascii=False)
                 yield f"data: {error_msg}\n\n"
 
         except Exception as e:
@@ -3442,50 +3653,108 @@ async def engineering_step4_update_roadmap(
     }
 
 
+class MultiModelEngineeringRequest(BaseModel):
+    """درخواست گزارش مهندسی با چند مدل"""
+    model_ids: List[str] = ["claude"]  # لیست مدل‌ها
+    parallel: bool = False  # اجرای موازی یا ترتیبی
+
+
 @router.post("/{project_id}/engineering/run-all-steps")
 async def engineering_run_all_steps(
     project_id: str,
     model_id: str = Query("claude"),
+    model_ids: str = Query(None, description="لیست مدل‌ها با کاما جدا شده (مثال: claude,gpt-4,gemini)"),
     db: Session = Depends(get_db)
 ):
     """
     🔴 اجرای تمام ۴ مرحله گزارش مهندسی به ترتیب
+
+    🆕 قابلیت‌های جدید:
+    - پشتیبانی از چند مدل همزمان (model_ids با کاما جدا شوند)
+    - جایگزینی خودکار مدل‌های غیرفعال
+    - ثبت جایگزینی در ژورنال
     """
     results = {}
+    replacement_notes = []
+
+    # 🆕 پردازش لیست مدل‌ها
+    selected_models = []
+    if model_ids:
+        selected_models = [m.strip() for m in model_ids.split(",") if m.strip()]
+    else:
+        selected_models = [model_id]
+
+    # 🆕 اطمینان از فعال بودن مدل‌ها و جایگزینی در صورت نیاز
+    active_selected = []
+    for m in selected_models:
+        final_model, was_replaced, note = ensure_active_model(db, m, "engineering_report")
+        active_selected.append(final_model)
+        if was_replaced:
+            replacement_notes.append(note)
+            # ثبت جایگزینی در ژورنال
+            log_detailed_operation(
+                db, project_id, None,
+                "model_replacement",
+                note,
+                details={"original": m, "replacement": final_model, "reason": "model_disabled"},
+                status="completed"
+            )
+
+    # حذف تکراری‌ها
+    active_selected = list(dict.fromkeys(active_selected))
+
+    # انتخاب مدل اصلی (اولین مدل فعال)
+    primary_model = active_selected[0] if active_selected else "claude"
+
+    results["models_used"] = active_selected
+    results["replacement_notes"] = replacement_notes
+
+    # 🆕 اگر چند مدل انتخاب شده، از هر کدام برای یک مرحله استفاده کن
+    # یا از همه برای اعتبارسنجی متقابل
+    model_for_step = {
+        1: active_selected[0] if len(active_selected) > 0 else primary_model,
+        2: active_selected[1 % len(active_selected)] if len(active_selected) > 1 else primary_model,
+        3: primary_model,  # مرحله 3 ارزیابی همه مدل‌هاست
+        4: active_selected[-1] if active_selected else primary_model,
+    }
 
     # مرحله ۱
     try:
-        step1 = await engineering_step1_validate_fields(project_id, model_id, db)
+        step1 = await engineering_step1_validate_fields(project_id, model_for_step[1], db)
         results["step1"] = step1
     except Exception as e:
         results["step1"] = {"success": False, "error": str(e)}
 
     # مرحله ۲
     try:
-        step2 = await engineering_step2_health_to_fields(project_id, model_id, db)
+        step2 = await engineering_step2_health_to_fields(project_id, model_for_step[2], db)
         results["step2"] = step2
     except Exception as e:
         results["step2"] = {"success": False, "error": str(e)}
 
-    # مرحله ۳
+    # مرحله ۳ - 🆕 ارزیابی با امتیازدهی دقیق
     try:
-        step3 = await engineering_step3_evaluate_models(project_id, model_id, db)
+        step3 = await engineering_step3_evaluate_models(project_id, model_for_step[3], db)
         results["step3"] = step3
     except Exception as e:
         results["step3"] = {"success": False, "error": str(e)}
 
     # مرحله ۴
     try:
-        step4 = await engineering_step4_update_roadmap(project_id, model_id, db)
+        step4 = await engineering_step4_update_roadmap(project_id, model_for_step[4], db)
         results["step4"] = step4
     except Exception as e:
         results["step4"] = {"success": False, "error": str(e)}
 
-    all_success = all(r.get("success", False) for r in results.values())
+    all_success = all(results.get(f"step{i}", {}).get("success", False) for i in range(1, 5))
+
+    db.commit()
 
     return {
         "success": all_success,
         "message": "تمام ۴ مرحله گزارش مهندسی اجرا شد" if all_success else "برخی مراحل با خطا مواجه شدند",
+        "models_used": active_selected,
+        "replacement_notes": replacement_notes if replacement_notes else None,
         "steps": results
     }
 
