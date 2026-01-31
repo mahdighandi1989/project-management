@@ -61,6 +61,7 @@ class RunAnalysisRequest(BaseModel):
     full_analysis: bool = True  # بررسی همه فایل‌ها
     update_roadmap: bool = True  # به‌روزرسانی roadmap
     update_readme: bool = True  # به‌روزرسانی readme
+    depth: str = "standard"  # 🆕 عمق تحلیل: quick, standard, deep, thorough
 
 
 # =====================================
@@ -1298,6 +1299,10 @@ async def _run_analysis_task(
         _active_progress_managers[project_id] = progress_manager
 
         try:
+            # 🆕 استفاده از عمق تحلیل از request
+            depth = getattr(request, 'depth', 'standard')
+            logger.info(f"🔬 Analysis depth: {depth}")
+
             analysis_result = await deep_analyzer.run_full_analysis(
                 project_id=project_id,
                 files=files_data,
@@ -1306,7 +1311,8 @@ async def _run_analysis_task(
                 model_ids=model_ids,
                 instruction=instruction,
                 db_session=db,
-                progress_manager=progress_manager
+                progress_manager=progress_manager,
+                depth=depth  # 🆕 پاس دادن عمق
             )
             logger.info(f"📊 Analysis result status: {analysis_result.get('status')}")
             logger.info(f"📊 Files analyzed: {analysis_result.get('analyzed_files', 0)}")
