@@ -248,7 +248,8 @@ class DeepAnalysisService:
         model_ids: List[str] = None,
         instruction: str = "",
         db_session=None,
-        progress_manager=None
+        progress_manager=None,
+        depth: str = "standard"  # 🆕 quick, standard, deep, thorough
     ) -> Dict[str, Any]:
         """
         اجرای تحلیل کامل سه‌مرحله‌ای
@@ -262,11 +263,59 @@ class DeepAnalysisService:
             instruction: دستورات اضافی
             db_session: session دیتابیس
             progress_manager: مدیر پیشرفت برای ذخیره وضعیت و pause/resume/stop
+            depth: عمق تحلیل (quick, standard, deep, thorough)
 
         Returns:
             نتایج کامل تحلیل
         """
         self._progress_manager = progress_manager
+
+        # 🆕 تنظیمات عمق تحلیل
+        depth_config = {
+            "quick": {
+                "batch_size": 10,       # بزرگتر = سریعتر
+                "batch_delay": 0,       # بدون تاخیر
+                "max_files": 30,        # حداکثر فایل
+                "content_limit": 5000,  # محدودیت محتوا
+                "models_limit": 1,      # فقط یک مدل
+                "prompt_detail": "minimal",
+                "skip_macro": False,
+                "skip_structural": True,
+            },
+            "standard": {
+                "batch_size": 5,
+                "batch_delay": 0.5,
+                "max_files": 100,
+                "content_limit": 10000,
+                "models_limit": 2,
+                "prompt_detail": "standard",
+                "skip_macro": False,
+                "skip_structural": False,
+            },
+            "deep": {
+                "batch_size": 2,        # کوچکتر = دقیق‌تر
+                "batch_delay": 1.0,     # تاخیر برای جلوگیری از rate limit
+                "max_files": 500,
+                "content_limit": 15000,
+                "models_limit": 3,
+                "prompt_detail": "detailed",
+                "skip_macro": False,
+                "skip_structural": False,
+            },
+            "thorough": {
+                "batch_size": 1,        # هر فایل جداگانه
+                "batch_delay": 2.0,     # تاخیر بیشتر
+                "max_files": 1000,
+                "content_limit": 20000,
+                "models_limit": None,   # همه مدل‌ها
+                "prompt_detail": "comprehensive",
+                "skip_macro": False,
+                "skip_structural": False,
+            }
+        }
+
+        self._depth_config = depth_config.get(depth, depth_config["standard"])
+        logger.info(f"🔬 Analysis depth: {depth} - config: {self._depth_config}")
         analysis_id = str(uuid.uuid4())[:8]
         start_time = datetime.now()
         start_time_unix = time.time()
@@ -480,8 +529,17 @@ class DeepAnalysisService:
             logger.info(f"🔍 [MICRO ANALYSIS] Skipped files: {skipped_files}")
 
         # تحلیل فایل‌ها (با پشتیبانی pause/stop)
-        # به جای اجرای همه موازی، در دسته‌های کوچکتر اجرا می‌کنیم
-        batch_size = 3  # تعداد فایل در هر دسته
+        # استفاده از تنظیمات عمق تحلیل
+        batch_size = getattr(self, '_depth_config', {}).get('batch_size', 3)
+        batch_delay = getattr(self, '_depth_config', {}).get('batch_delay', 0.5)
+        max_files = getattr(self, '_depth_config', {}).get('max_files', 100)
+
+        # محدود کردن تعداد فایل‌ها بر اساس عمق
+        if len(files_to_analyze) > max_files:
+            logger.info(f"🔍 [MICRO ANALYSIS] Limiting files from {len(files_to_analyze)} to {max_files} based on depth settings")
+            files_to_analyze = files_to_analyze[:max_files]
+
+        logger.info(f"🔍 [MICRO ANALYSIS] Batch size: {batch_size}, Delay: {batch_delay}s, Max files: {max_files}")
 
         for i in range(0, len(files_to_analyze), batch_size):
             # بررسی درخواست توقف
@@ -536,6 +594,11 @@ class DeepAnalysisService:
                             )
 
                         logger.info(f"✅ [MICRO ANALYSIS] File {file_path}: score={result.get('aggregated_scores', {}).get('total', 'N/A')}")
+
+            # 🆕 تاخیر بین دسته‌ها برای جلوگیری از rate limit و تحلیل عمیق‌تر
+            if batch_delay > 0 and i + batch_size < len(files_to_analyze):
+                logger.info(f"⏳ [MICRO ANALYSIS] Batch delay: {batch_delay}s")
+                await asyncio.sleep(batch_delay)
 
         elapsed = time.time() - start_time
         logger.info(f"🔍 [MICRO ANALYSIS] Completed in {elapsed:.2f}s. Analyzed {results['summary']['analyzed']} files, found {results['summary']['issues_found']} issues")
@@ -635,16 +698,53 @@ class DeepAnalysisService:
     ) -> str:
         """ساخت پرامپت تحلیل جزئی"""
 
+        # 🆕 تشخیص نوع فایل برای تحلیل هدفمند
+        file_type = self._get_file_type(file_path)
+        is_frontend = file_type in ["typescript-react", "javascript-react", "typescript", "javascript", "css"]
+        is_backend = file_type in ["python", "golang", "java", "rust"]
+
+        # 🆕 دستورات اضافی بر اساس نوع فایل
+        type_specific_instructions = ""
+        if is_frontend:
+            type_specific_instructions = """
+### 📱 بررسی‌های خاص فرانت‌اند:
+- **ساختار کامپوننت**: آیا از الگوهای صحیح React/Vue/Angular استفاده شده؟
+- **State Management**: آیا state به درستی مدیریت شده؟ (useState, useReducer, Context, Redux)
+- **Props و TypeScript**: آیا تایپ‌ها به درستی تعریف شده‌اند؟
+- **Hooks**: استفاده صحیح از useEffect, useMemo, useCallback
+- **Performance**: آیا re-render های غیرضروری وجود دارد؟
+- **Accessibility (a11y)**: آیا ARIA labels و semantic HTML رعایت شده؟
+- **Styling**: آیا استایل‌ها modular و قابل نگهداری هستند؟
+- **ارتباط با Backend**: آیا API calls به درستی انجام می‌شوند؟ Error handling؟
+- **Loading States**: آیا حالت‌های loading و error به کاربر نمایش داده می‌شوند؟
+"""
+        elif is_backend:
+            type_specific_instructions = """
+### 🖥️ بررسی‌های خاص بک‌اند:
+- **معماری**: آیا از اصول SOLID و Clean Architecture پیروی شده؟
+- **امنیت**: بررسی SQL injection, XSS, CSRF, authentication
+- **Validation**: آیا ورودی‌ها به درستی اعتبارسنجی می‌شوند؟
+- **Error Handling**: آیا خطاها به درستی مدیریت می‌شوند؟
+- **Database**: آیا کوئری‌ها بهینه هستند؟ N+1 problem؟
+- **Logging**: آیا لاگ‌گذاری مناسب انجام شده؟
+- **Testing**: آیا کد قابل تست است؟
+"""
+
+        content_limit = getattr(self, '_depth_config', {}).get('content_limit', 15000)
+
         prompt = f"""# تحلیل جزئی فایل (Micro Analysis)
 
 ## فایل: {file_path}
+## نوع فایل: {file_type} {'(فرانت‌اند)' if is_frontend else '(بک‌اند)' if is_backend else ''}
 
 ## دستورات:
 {instruction if instruction else "تحلیل کامل و دقیق فایل را انجام بده."}
 
+{type_specific_instructions}
+
 ## محتوای فایل:
 ```
-{content[:15000]}  # محدودیت برای مدل‌ها
+{content[:content_limit]}
 ```
 
 {f'''## نقشه‌راه پروژه (برای تطبیق):
@@ -657,6 +757,7 @@ class DeepAnalysisService:
 3. **بررسی کیفیت**: نام‌گذاری، ساختار، خوانایی
 4. **تطبیق با نقشه‌راه**: آیا این فایل با نقشه‌راه همخوانی دارد؟
 5. **نمره‌دهی دقیق**: برای هر فاکتور نمره 0-100 بده
+{f'6. **بررسی ارتباط فرانت-بک**: آیا ارتباط با API صحیح است؟' if is_frontend else ''}
 
 ## فرمت خروجی (JSON):
 ```json
@@ -667,20 +768,20 @@ class DeepAnalysisService:
         "roadmap_compliance": 0-100,
         "security": 0-100,
         "efficiency": 0-100,
-        "standards_compliance": 0-100
+        "standards_compliance": 0-100{', "component_structure": 0-100' if is_frontend else ''}{', "api_integration": 0-100' if is_frontend else ''}
     }},
     "issues": [
         {{
             "line": شماره خط,
             "severity": "critical|high|medium|low",
-            "type": "bug|security|quality|performance",
+            "type": "bug|security|quality|performance|accessibility|api",
             "message": "توضیح مشکل",
             "suggestion": "پیشنهاد رفع"
         }}
     ],
     "summary": "خلاصه یک خطی وضعیت فایل",
     "strengths": ["نقاط قوت"],
-    "weaknesses": ["نقاط ضعف"]
+    "weaknesses": ["نقاط ضعف"]{', "api_calls": ["لیست API endpoints استفاده شده"]' if is_frontend else ''}
 }}
 ```
 
@@ -989,10 +1090,13 @@ class DeepAnalysisService:
         """ساخت نمای کلی پروژه"""
         overview = []
 
-        # دسته‌بندی فایل‌ها
+        # دسته‌بندی فایل‌ها - با تشخیص بهتر فرانت‌اند
         categories = {
             "backend": [],
-            "frontend": [],
+            "frontend_components": [],  # 🆕 کامپوننت‌های UI
+            "frontend_pages": [],       # 🆕 صفحات
+            "frontend_hooks": [],       # 🆕 hooks و contexts
+            "frontend_other": [],       # 🆕 سایر فایل‌های فرانت‌اند
             "config": [],
             "tests": [],
             "docs": [],
@@ -1001,27 +1105,75 @@ class DeepAnalysisService:
 
         for file_data in files:
             path = file_data.get("path", file_data.get("file_path", "")).lower()
+            ext = os.path.splitext(path)[1]
 
-            if any(x in path for x in ["api", "routes", "services", "models", "backend"]):
+            # تشخیص دقیق‌تر فایل‌های فرانت‌اند
+            is_react = ext in [".tsx", ".jsx"]
+            is_frontend_file = is_react or ext in [".ts", ".js", ".css", ".scss"] and any(
+                x in path for x in ["frontend/", "src/", "components/", "pages/", "app/"]
+            )
+
+            if any(x in path for x in ["api", "routes", "services", "models", "backend", "controllers"]) and not is_react:
                 categories["backend"].append(path)
-            elif any(x in path for x in ["components", "pages", "frontend", "src/app"]):
-                categories["frontend"].append(path)
-            elif any(x in path for x in ["config", ".env", "settings", "package.json", "requirements"]):
+            elif is_frontend_file:
+                if any(x in path for x in ["components/", "/ui/", "component"]):
+                    categories["frontend_components"].append(path)
+                elif any(x in path for x in ["pages/", "app/", "/page."]):
+                    categories["frontend_pages"].append(path)
+                elif any(x in path for x in ["hooks/", "contexts/", "context/", "store/", "use"]):
+                    categories["frontend_hooks"].append(path)
+                else:
+                    categories["frontend_other"].append(path)
+            elif any(x in path for x in ["config", ".env", "settings", "package.json", "requirements", "tsconfig"]):
                 categories["config"].append(path)
-            elif "test" in path:
+            elif "test" in path or "spec" in path:
                 categories["tests"].append(path)
             elif any(x in path for x in ["readme", "doc", ".md"]):
                 categories["docs"].append(path)
             else:
                 categories["other"].append(path)
 
+        # نمایش با نام‌های فارسی بهتر
+        category_labels = {
+            "backend": "🖥️ بک‌اند",
+            "frontend_components": "📱 کامپوننت‌های فرانت‌اند",
+            "frontend_pages": "📄 صفحات فرانت‌اند",
+            "frontend_hooks": "🔗 Hooks و Contexts",
+            "frontend_other": "🎨 سایر فایل‌های فرانت‌اند",
+            "config": "⚙️ تنظیمات",
+            "tests": "🧪 تست‌ها",
+            "docs": "📚 مستندات",
+            "other": "📁 سایر"
+        }
+
         for cat, cat_files in categories.items():
             if cat_files:
-                overview.append(f"\n### {cat.upper()} ({len(cat_files)} فایل):")
+                label = category_labels.get(cat, cat.upper())
+                overview.append(f"\n### {label} ({len(cat_files)} فایل):")
                 for f in cat_files[:20]:
-                    micro = micro_results.get("files", {}).get(f, {})
-                    score = micro.get("aggregated_scores", {}).get("total", "?")
+                    # جستجوی case-insensitive در micro_results
+                    micro = None
+                    for key in micro_results.get("files", {}).keys():
+                        if key.lower() == f.lower():
+                            micro = micro_results["files"][key]
+                            break
+                    score = micro.get("aggregated_scores", {}).get("total", "?") if micro else "?"
                     overview.append(f"  - {f} (نمره: {score})")
+
+        # 🆕 خلاصه آماری
+        total_frontend = len(categories["frontend_components"]) + len(categories["frontend_pages"]) + len(categories["frontend_hooks"]) + len(categories["frontend_other"])
+        total_backend = len(categories["backend"])
+
+        overview.insert(0, f"""
+## 📊 خلاصه آماری پروژه
+- **فایل‌های بک‌اند:** {total_backend}
+- **فایل‌های فرانت‌اند:** {total_frontend}
+  - کامپوننت‌ها: {len(categories["frontend_components"])}
+  - صفحات: {len(categories["frontend_pages"])}
+  - Hooks/Contexts: {len(categories["frontend_hooks"])}
+- **تست‌ها:** {len(categories["tests"])}
+- **مستندات:** {len(categories["docs"])}
+""")
 
         return "\n".join(overview)
 
@@ -1711,38 +1863,80 @@ class DeepAnalysisService:
         """
         ادغام ایرادات مشابه برای جلوگیری از تکرار
 
-        قوانین ادغام:
-        - ایرادات با فایل و نوع یکسان ادغام می‌شوند
+        قوانین ادغام پایدار:
+        - ایرادات با فایل، نوع و پیام مشابه ادغام می‌شوند
         - severity بالاتر حفظ می‌شود
-        - پیام‌ها ترکیب می‌شوند
+        - شناسه یکتا و پایدار برای هر issue تولید می‌شود
+        - مدل‌های منبع جمع‌آوری می‌شوند
         """
         if not issues:
             return []
 
+        import hashlib
+
         merged = {}
         for issue in issues:
-            # ساخت کلید یکتا
-            file_path = issue.get("file", "unknown")
+            # استخراج اطلاعات پایدار
+            file_path = issue.get("file", issue.get("file_path", "unknown"))
             issue_type = issue.get("type", "general")
-            line = issue.get("line", "")
-            key = f"{file_path}:{issue_type}:{line}"
+            line = issue.get("line", 0)
+            message = issue.get("message", issue.get("description", ""))
 
-            if key in merged:
+            # نرمال‌سازی پیام برای مقایسه پایدار
+            normalized_message = message.lower().strip()[:100] if message else ""
+
+            # ساخت کلید پایدار با hash
+            # استفاده از file + type + normalized_message برای ادغام پایدارتر
+            key_parts = f"{file_path}:{issue_type}:{normalized_message}"
+            stable_key = hashlib.md5(key_parts.encode()).hexdigest()[:16]
+
+            if stable_key in merged:
                 # ادغام با موجود
-                existing = merged[key]
+                existing = merged[stable_key]
                 # حفظ severity بالاتر
                 severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
                 if severity_order.get(issue.get("severity"), 3) < severity_order.get(existing.get("severity"), 3):
                     existing["severity"] = issue.get("severity")
+
+                # ادغام خطوط (در صورت تفاوت)
+                existing_lines = existing.get("lines", [existing.get("line", 0)])
+                if line and line not in existing_lines:
+                    existing_lines.append(line)
+                existing["lines"] = existing_lines
+                existing["line"] = min(existing_lines) if existing_lines else 0
+
                 # اضافه کردن منبع
                 if "source_models" not in existing:
-                    existing["source_models"] = []
-                existing["source_models"].extend(issue.get("source_models", []))
-                existing["source_models"] = list(set(existing["source_models"]))
-            else:
-                merged[key] = issue.copy()
+                    existing["source_models"] = [existing.get("model", "unknown")]
+                model = issue.get("model", issue.get("source_model", "unknown"))
+                if model not in existing["source_models"]:
+                    existing["source_models"].append(model)
 
-        return list(merged.values())
+                # افزایش تعداد تأیید
+                existing["confirmation_count"] = existing.get("confirmation_count", 1) + 1
+            else:
+                # ایجاد ایراد جدید با شناسه پایدار
+                new_issue = issue.copy()
+                new_issue["stable_id"] = stable_key
+                new_issue["file"] = file_path
+                new_issue["confirmation_count"] = 1
+                model = issue.get("model", issue.get("source_model", "unknown"))
+                new_issue["source_models"] = [model] if model else []
+                merged[stable_key] = new_issue
+
+        # مرتب‌سازی بر اساس تعداد تأیید (بیشترین تأیید = مهم‌تر) و severity
+        result = list(merged.values())
+        severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        result.sort(key=lambda x: (
+            -x.get("confirmation_count", 1),  # بیشترین تأیید اول
+            severity_order.get(x.get("severity"), 3),  # severity بالاتر
+            x.get("file", ""),
+            x.get("line", 0)
+        ))
+
+        logger.info(f"🔀 [MERGE] Merged {len(issues)} issues into {len(result)} unique issues")
+
+        return result
 
     async def _save_analysis_results(self, project_id: str, results: Dict, db_session) -> None:
         """ذخیره نتایج در دیتابیس"""

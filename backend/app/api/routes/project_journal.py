@@ -2245,24 +2245,51 @@ async def generate_engineering_report(
                     existing_fields.append(new_field)
                     created_fields.append(new_field["name"])
 
-                    # 🔴 بایگانی ایراد اصلی در لیست issues_found
+                    # 🔴 بایگانی ایراد اصلی در لیست issues_found (با پشتیبانی stable_id)
                     try:
                         issues_found = []
                         if project.issues_found:
                             issues_found = json.loads(project.issues_found)
 
-                        # پیدا کردن و بایگانی ایراد
+                        # استخراج اطلاعات برای تطبیق
+                        orig_file = original.get("file", original.get("file_path", ""))
+                        orig_type = original.get("type", "")
+                        orig_message = (original.get("message", original.get("description", "")) or "").lower().strip()[:100]
+                        orig_stable_id = original.get("stable_id")
+
+                        # پیدا کردن و بایگانی ایراد با روش‌های مختلف
+                        archived_count = 0
                         for stored_issue in issues_found:
-                            if (stored_issue.get("file") == original.get("file") and
-                                stored_issue.get("type") == original.get("type") and
-                                stored_issue.get("line") == original.get("line")):
+                            if stored_issue.get("archived"):
+                                continue
+
+                            # روش 1: تطبیق با stable_id
+                            if orig_stable_id and stored_issue.get("stable_id") == orig_stable_id:
                                 stored_issue["archived"] = True
                                 stored_issue["archived_at"] = datetime.utcnow().isoformat()
                                 stored_issue["archived_reason"] = "converted_to_field"
                                 stored_issue["field_id"] = new_field["id"]
-                                break
+                                archived_count += 1
+                                continue
+
+                            # روش 2: تطبیق با فایل + نوع + پیام نرمال شده
+                            stored_file = stored_issue.get("file", stored_issue.get("file_path", ""))
+                            stored_type = stored_issue.get("type", "")
+                            stored_message = (stored_issue.get("message", stored_issue.get("description", "")) or "").lower().strip()[:100]
+
+                            if (stored_file == orig_file and
+                                stored_type == orig_type and
+                                stored_message and orig_message and
+                                (stored_message in orig_message or orig_message in stored_message)):
+                                stored_issue["archived"] = True
+                                stored_issue["archived_at"] = datetime.utcnow().isoformat()
+                                stored_issue["archived_reason"] = "converted_to_field"
+                                stored_issue["field_id"] = new_field["id"]
+                                archived_count += 1
 
                         project.issues_found = json.dumps(issues_found, ensure_ascii=False)
+                        if archived_count > 0:
+                            logger.info(f"Archived {archived_count} matching issues for field: {new_field['name']}")
                     except Exception as e:
                         logger.warning(f"Could not archive issue: {e}")
 
