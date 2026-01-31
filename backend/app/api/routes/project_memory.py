@@ -1713,6 +1713,23 @@ async def execute_field_trigger(
         if target_field.get("archived"):
             raise HTTPException(status_code=400, detail="این فیلد بایگانی شده و قابل اجرا نیست")
 
+        # 🔴 جلوگیری از دور باطل - بررسی اجرای تکراری
+        try:
+            from .project_journal import check_cycle_prevention
+            if not check_cycle_prevention(
+                db=db,
+                project_id=project_id,
+                activity_type="field_execution",
+                field_id=field_id,
+                minutes_threshold=3  # حداقل 3 دقیقه بین اجراها
+            ):
+                raise HTTPException(
+                    status_code=429,
+                    detail="این فیلد اخیراً اجرا شده است. لطفاً چند دقیقه صبر کنید."
+                )
+        except ImportError:
+            pass  # اگر ایمپورت ناموفق بود، ادامه بده
+
         # 🔴 بررسی تاییدیه گزارش مهندسی - فقط فیلدهای تایید شده قابل اجرا هستند
         action_type = target_field.get("action_type", "display")
         if action_type in ["github_commit", "github_multi_commit", "file_edit"]:
@@ -2408,6 +2425,29 @@ async def batch_execute_fields(
         state["last_field_id"] = field.get("id")
 
         logger.info(f"[Batch Execute] Loop iteration {idx+1}/{len(fields_to_execute)}: field={field.get('name')}, id={field.get('id')}")
+
+        # 🔴 جلوگیری از دور باطل - بررسی اجرای تکراری برای هر فیلد
+        try:
+            from .project_journal import check_cycle_prevention
+            if not check_cycle_prevention(
+                db=db,
+                project_id=project_id,
+                activity_type="field_execution",
+                field_id=field.get("id"),
+                minutes_threshold=3
+            ):
+                logger.info(f"[Batch Execute] Skipping field {field.get('name')} - cycle prevention (recently executed)")
+                results.append({
+                    "field_id": field.get("id"),
+                    "field_name": field.get("name"),
+                    "success": False,
+                    "error": "اخیراً اجرا شده - رد شد برای جلوگیری از تکرار",
+                    "skipped_cycle": True
+                })
+                continue
+        except ImportError:
+            pass
+
         try:
             logger.info(f"[Batch Execute] Calling execute_field_internal for field: {field.get('name')}")
             # اجرای فیلد با قابلیت کامل (commit + deploy + archive)
@@ -4354,3 +4394,420 @@ async def get_sync_intervals():
         "success": True,
         "intervals": SYNC_INTERVALS
     }
+
+
+# =====================================
+# 🆕 دانلود مارک‌داون
+# =====================================
+
+from fastapi.responses import Response
+
+def _format_field_to_markdown(field: dict, include_details: bool = True) -> str:
+    """تبدیل یک فیلد به فرمت مارک‌داون"""
+    md = []
+
+    # عنوان
+    status_icon = "✅" if field.get("executed") else ("📦" if field.get("archived") else "📋")
+    engineering_badge = " 🔬" if field.get("engineering_approval") else ""
+    md.append(f"## {status_icon} {field.get('name', 'بدون نام')}{engineering_badge}")
+    md.append("")
+
+    if include_details:
+        # متادیتا
+        md.append("### مشخصات")
+        md.append(f"- **شناسه:** `{field.get('id', '-')}`")
+        md.append(f"- **نوع فیلد:** {field.get('field_type', 'temporary')}")
+        md.append(f"- **نوع اقدام:** {field.get('action_type', 'display')}")
+        md.append(f"- **اولویت:** {field.get('priority', 5)}")
+        if field.get('target_path'):
+            md.append(f"- **مسیر هدف:** `{field.get('target_path')}`")
+        if field.get('target_models'):
+            models = ', '.join(field.get('target_models', []))
+            md.append(f"- **مدل‌ها:** {models}")
+        md.append("")
+
+    # محتوا/دستور
+    md.append("### دستور")
+    md.append("```")
+    md.append(field.get("value", ""))
+    md.append("```")
+    md.append("")
+
+    # وضعیت
+    if field.get("executed"):
+        md.append(f"✅ **اجرا شده:** {field.get('executed_at', '-')}")
+    if field.get("archived"):
+        md.append(f"📦 **بایگانی شده:** {field.get('archived_at', '-')}")
+
+    md.append("")
+    md.append("---")
+    md.append("")
+
+    return "\n".join(md)
+
+
+def _format_issue_to_markdown(issue: dict, include_details: bool = True) -> str:
+    """تبدیل یک ایراد به فرمت مارک‌داون"""
+    md = []
+
+    # آیکون severity
+    severity_icons = {
+        "critical": "🔴",
+        "high": "🟠",
+        "medium": "🟡",
+        "low": "🟢",
+        "info": "ℹ️"
+    }
+    severity = issue.get("severity", "medium")
+    icon = severity_icons.get(severity, "⚪")
+
+    md.append(f"## {icon} {issue.get('type', 'ایراد')} ({severity})")
+    md.append("")
+
+    if include_details:
+        if issue.get("file"):
+            md.append(f"**فایل:** `{issue.get('file')}`")
+        if issue.get("line"):
+            md.append(f"**خط:** {issue.get('line')}")
+        md.append("")
+
+    # پیام/توضیحات
+    md.append("### توضیحات")
+    md.append(issue.get("message", issue.get("description", "-")))
+    md.append("")
+
+    # راه حل پیشنهادی
+    if issue.get("suggested_fix") or issue.get("recommendation"):
+        md.append("### راه حل پیشنهادی")
+        md.append(issue.get("suggested_fix") or issue.get("recommendation"))
+        md.append("")
+
+    # منبع شناسایی
+    if issue.get("source_models"):
+        models = ', '.join(issue.get("source_models", []))
+        md.append(f"*شناسایی شده توسط: {models}*")
+        md.append("")
+
+    md.append("---")
+    md.append("")
+
+    return "\n".join(md)
+
+
+@router.get("/{project_id}/export/fields/markdown")
+async def export_fields_to_markdown(
+    project_id: str,
+    field_ids: str = None,  # کاما جدا شده، یا "all", "active", "archived"
+    include_details: bool = True,
+    db: Session = Depends(get_db)
+):
+    """
+    دانلود فیلدهای پویا به فرمت مارک‌داون
+
+    پارامترها:
+    - field_ids: لیست شناسه‌ها با کاما جدا شده، یا "all", "active", "archived"
+    - include_details: شامل جزئیات کامل باشد؟
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    dynamic_fields = []
+    try:
+        if project.dynamic_fields:
+            dynamic_fields = json.loads(project.dynamic_fields)
+    except:
+        pass
+
+    # فیلتر فیلدها
+    if field_ids:
+        if field_ids == "all":
+            selected_fields = dynamic_fields
+        elif field_ids == "active":
+            selected_fields = [f for f in dynamic_fields if not f.get("archived")]
+        elif field_ids == "archived":
+            selected_fields = [f for f in dynamic_fields if f.get("archived")]
+        else:
+            ids = [id.strip() for id in field_ids.split(",")]
+            selected_fields = [f for f in dynamic_fields if f.get("id") in ids]
+    else:
+        selected_fields = [f for f in dynamic_fields if not f.get("archived")]
+
+    # ساخت مارک‌داون
+    md_content = []
+    md_content.append(f"# 📋 فیلدهای پویا - {project.name}")
+    md_content.append("")
+    md_content.append(f"*تاریخ استخراج: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC*")
+    md_content.append("")
+    md_content.append(f"**تعداد فیلدها:** {len(selected_fields)}")
+    md_content.append("")
+    md_content.append("---")
+    md_content.append("")
+
+    # گروه‌بندی بر اساس اولویت
+    selected_fields.sort(key=lambda x: x.get("priority", 5))
+
+    for field in selected_fields:
+        md_content.append(_format_field_to_markdown(field, include_details))
+
+    content = "\n".join(md_content)
+
+    # ارسال به عنوان فایل دانلودی
+    filename = f"{project.name}_fields_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.md"
+
+    return Response(
+        content=content,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{filename}"
+        }
+    )
+
+
+@router.get("/{project_id}/export/issues/markdown")
+async def export_issues_to_markdown(
+    project_id: str,
+    issue_ids: str = None,  # کاما جدا شده، یا "all", "validated", "rejected"
+    include_details: bool = True,
+    db: Session = Depends(get_db)
+):
+    """
+    دانلود ایرادات شناسایی شده به فرمت مارک‌داون
+
+    پارامترها:
+    - issue_ids: لیست شناسه‌ها، یا "all", "validated", "rejected"
+    - include_details: شامل جزئیات کامل باشد؟
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    all_issues = []
+    rejected_issues = []
+
+    # ایرادات شناسایی شده
+    try:
+        if project.issues_found:
+            all_issues = json.loads(project.issues_found)
+    except:
+        pass
+
+    # ایرادات رد شده
+    try:
+        if project.rejected_issues_archive:
+            rejected_issues = json.loads(project.rejected_issues_archive)
+    except:
+        pass
+
+    # فیلتر
+    if issue_ids:
+        if issue_ids == "all":
+            selected_issues = all_issues + rejected_issues
+        elif issue_ids == "validated":
+            selected_issues = all_issues
+        elif issue_ids == "rejected":
+            selected_issues = rejected_issues
+        else:
+            # فیلتر بر اساس شناسه یا ایندکس
+            ids = [id.strip() for id in issue_ids.split(",")]
+            selected_issues = []
+            for idx, issue in enumerate(all_issues):
+                if str(idx) in ids or issue.get("id") in ids:
+                    selected_issues.append(issue)
+    else:
+        selected_issues = all_issues
+
+    # ساخت مارک‌داون
+    md_content = []
+    md_content.append(f"# 🔍 ایرادات شناسایی شده - {project.name}")
+    md_content.append("")
+    md_content.append(f"*تاریخ استخراج: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC*")
+    md_content.append("")
+
+    # آمار
+    severity_counts = {}
+    for issue in selected_issues:
+        sev = issue.get("severity", "medium")
+        severity_counts[sev] = severity_counts.get(sev, 0) + 1
+
+    md_content.append("## آمار")
+    md_content.append(f"- **تعداد کل:** {len(selected_issues)}")
+    for sev, count in sorted(severity_counts.items()):
+        md_content.append(f"- **{sev}:** {count}")
+    md_content.append("")
+    md_content.append("---")
+    md_content.append("")
+
+    # مرتب‌سازی بر اساس severity
+    severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    selected_issues.sort(key=lambda x: severity_order.get(x.get("severity", "medium"), 2))
+
+    for issue in selected_issues:
+        md_content.append(_format_issue_to_markdown(issue, include_details))
+
+    content = "\n".join(md_content)
+
+    filename = f"{project.name}_issues_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.md"
+
+    return Response(
+        content=content,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{filename}"
+        }
+    )
+
+
+@router.get("/{project_id}/export/report/{report_id}/markdown")
+async def export_report_to_markdown(
+    project_id: str,
+    report_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    دانلود گزارش مهندسی به فرمت مارک‌داون
+    """
+    from ...models.journal import Report
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    report = db.query(Report).filter(
+        Report.id == report_id,
+        Report.project_id == project_id
+    ).first()
+
+    if not report:
+        raise HTTPException(status_code=404, detail="گزارش یافت نشد")
+
+    # ساخت مارک‌داون
+    md_content = []
+    md_content.append(f"# 📊 {report.title}")
+    md_content.append("")
+    md_content.append(f"**پروژه:** {project.name}")
+    md_content.append(f"**تاریخ تولید:** {report.created_at.strftime('%Y-%m-%d %H:%M:%S') if report.created_at else '-'}")
+    md_content.append(f"**مدل:** {report.generated_by or '-'}")
+    md_content.append("")
+    md_content.append("---")
+    md_content.append("")
+
+    # خلاصه
+    if report.summary:
+        md_content.append("## خلاصه اجرایی")
+        md_content.append(report.summary)
+        md_content.append("")
+
+    # محتوای کامل
+    if report.content:
+        try:
+            content_data = json.loads(report.content)
+
+            # سلامت پروژه
+            if "project_health" in content_data:
+                health = content_data["project_health"]
+                md_content.append("## 🏥 سلامت پروژه")
+                md_content.append(f"- **امتیاز کلی:** {health.get('score', '-')}%")
+                md_content.append(f"- **وضعیت:** {health.get('status', '-')}")
+                if "key_metrics" in health:
+                    md_content.append("### معیارها")
+                    for key, val in health["key_metrics"].items():
+                        md_content.append(f"- **{key}:** {val}")
+                md_content.append("")
+
+            # تحلیل فنی
+            if "technical_analysis" in content_data:
+                tech = content_data["technical_analysis"]
+                md_content.append("## 🔧 تحلیل فنی")
+                if tech.get("strengths"):
+                    md_content.append("### نقاط قوت")
+                    for s in tech["strengths"]:
+                        md_content.append(f"- ✅ {s}")
+                if tech.get("weaknesses"):
+                    md_content.append("### نقاط ضعف")
+                    for w in tech["weaknesses"]:
+                        md_content.append(f"- ⚠️ {w}")
+                md_content.append("")
+
+            # باگ‌ها
+            if "bugs_and_issues" in content_data:
+                bugs = content_data["bugs_and_issues"]
+                md_content.append(f"## 🐛 باگ‌ها و ایرادات ({len(bugs)} مورد)")
+                for bug in bugs:
+                    md_content.append(f"### {bug.get('title', 'ایراد')}")
+                    md_content.append(f"- **شدت:** {bug.get('severity', '-')}")
+                    if bug.get("file"):
+                        md_content.append(f"- **فایل:** `{bug.get('file')}`")
+                    md_content.append(f"- **توضیحات:** {bug.get('description', '-')}")
+                    if bug.get("suggested_fix"):
+                        md_content.append(f"- **راه حل:** {bug.get('suggested_fix')}")
+                    md_content.append("")
+
+            # امنیت
+            if "security_review" in content_data:
+                sec = content_data["security_review"]
+                md_content.append("## 🔒 بررسی امنیتی")
+                if sec.get("vulnerabilities"):
+                    for vuln in sec["vulnerabilities"]:
+                        md_content.append(f"- **{vuln.get('type', 'آسیب‌پذیری')}:** {vuln.get('location', '-')} (ریسک: {vuln.get('risk', '-')})")
+                if sec.get("recommendations"):
+                    md_content.append("### توصیه‌های امنیتی")
+                    for rec in sec["recommendations"]:
+                        md_content.append(f"- {rec}")
+                md_content.append("")
+
+            # پیشنهادات
+            if "recommendations" in content_data:
+                recs = content_data["recommendations"]
+                md_content.append(f"## 💡 پیشنهادات ({len(recs)} مورد)")
+                for rec in recs:
+                    md_content.append(f"### [{rec.get('priority', '-')}] {rec.get('title', 'پیشنهاد')}")
+                    md_content.append(f"{rec.get('description', '-')}")
+                    md_content.append(f"*تلاش مورد نیاز: {rec.get('effort', '-')}*")
+                    md_content.append("")
+
+            # نقشه راه
+            if "roadmap" in content_data:
+                roadmap = content_data["roadmap"]
+                md_content.append("## 🗺️ نقشه راه")
+                if roadmap.get("immediate"):
+                    md_content.append("### فوری")
+                    for item in roadmap["immediate"]:
+                        md_content.append(f"- [ ] {item.get('task', '-')}: {item.get('description', '')}")
+                if roadmap.get("short_term"):
+                    md_content.append("### کوتاه‌مدت")
+                    for item in roadmap["short_term"]:
+                        md_content.append(f"- [ ] {item.get('task', '-')}: {item.get('description', '')}")
+                if roadmap.get("long_term"):
+                    md_content.append("### بلندمدت")
+                    for item in roadmap["long_term"]:
+                        md_content.append(f"- [ ] {item.get('task', '-')}: {item.get('description', '')}")
+                md_content.append("")
+
+            # حالت ایده‌آل
+            if "comprehensive_ideal_state" in content_data:
+                ideal = content_data["comprehensive_ideal_state"]
+                md_content.append("## ⭐ حالت ایده‌آل")
+                md_content.append(ideal.get("description", "-"))
+                md_content.append("")
+
+        except json.JSONDecodeError:
+            # اگر JSON نبود، محتوا را مستقیم اضافه کن
+            md_content.append("## محتوای گزارش")
+            md_content.append(report.content)
+
+    md_content.append("")
+    md_content.append("---")
+    md_content.append(f"*تولید شده توسط سیستم گزارش مهندسی*")
+
+    content = "\n".join(md_content)
+
+    filename = f"{project.name}_report_{report_id}_{datetime.utcnow().strftime('%Y%m%d')}.md"
+
+    return Response(
+        content=content,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{filename}"
+        }
+    )
