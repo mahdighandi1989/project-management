@@ -9,6 +9,7 @@ import time
 import asyncio
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
@@ -3014,12 +3015,24 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
             except Exception as e:
                 deploy_result = {"success": False, "error": str(e)}
 
-        # 🔴 بایگانی خودکار - اگر اجرا موفق بود و archive_after_run فعاله، بایگانی میشه
+        # 🔴 بایگانی خودکار - منطق اصلاح شده
+        # برای فیلدهای GitHub: فقط اگر commit واقعاً موفق باشد بایگانی کن
+        # برای فیلدهای display: اگر AI موفق بود بایگانی کن
         should_archive = False
         if archive_after_run and any_success:
-            # همیشه بایگانی کن اگر اجرای AI موفق بود - مهم نیست GitHub چی شد
-            should_archive = True
-            logger.info(f"[execute_field_internal] Will archive: archive_after_run={archive_after_run}, any_success={any_success}")
+            if action_type in ["github_commit", "github_multi_commit"]:
+                # 🆕 برای اکشن‌های GitHub، فقط اگر commit واقعی موفق بود بایگانی کن
+                if any_github_success:
+                    should_archive = True
+                    logger.info(f"[execute_field_internal] Will archive (GitHub success): action_type={action_type}, github_success={any_github_success}")
+                else:
+                    # اگر commit نشد، بایگانی نکن - این خیلی مهمه!
+                    should_archive = False
+                    logger.warning(f"[execute_field_internal] NOT archiving (GitHub failed): action_type={action_type}, github_success={any_github_success}")
+            else:
+                # برای display یا سایر action_type ها، اگر AI موفق بود کافیه
+                should_archive = True
+                logger.info(f"[execute_field_internal] Will archive (AI success): action_type={action_type}, any_success={any_success}")
 
         logger.info(f"[execute_field_internal] COMPLETED - field_id={field_id}, success={any_success}, github_success={any_github_success}")
         return {
@@ -4667,7 +4680,7 @@ async def export_report_to_markdown(
     """
     دانلود گزارش مهندسی به فرمت مارک‌داون
     """
-    from ...models.journal import Report
+    from .project_journal import Report
 
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:

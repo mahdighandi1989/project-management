@@ -1359,10 +1359,15 @@ async def _run_analysis_task(
 
             # ذخیره مشکلات
             # 🔴 رفع محدودیت - تمام ایرادات ذخیره می‌شوند
-            project.issues_found = json.dumps(
-                analysis_result.get("issues", []),
-                ensure_ascii=False
-            )
+            # 🆕 ادغام ایرادات مشابه قبل از ذخیره برای کاهش حجم
+            raw_issues = analysis_result.get("issues", [])
+            if len(raw_issues) > 100:
+                # ادغام اولیه در زمان ذخیره
+                merged_issues = _merge_similar_issues(raw_issues, aggressive=len(raw_issues) > 500)
+                logger.info(f"[Health Analysis] Merged {len(raw_issues)} issues to {len(merged_issues)} before storing")
+                project.issues_found = json.dumps(merged_issues, ensure_ascii=False)
+            else:
+                project.issues_found = json.dumps(raw_issues, ensure_ascii=False)
 
             # ذخیره حالت ایده‌آل
             if analysis_result.get("ideal_state"):
@@ -1705,62 +1710,134 @@ async def update_project_readme(
     return {"success": False, "message": "محتوا یا auto_generate لازم است"}
 
 
-def _merge_similar_issues(issues: list) -> list:
+def _merge_similar_issues(issues: list, aggressive: bool = False) -> list:
     """
-    🔴 ادغام ایرادات مشابه
-    - ایرادات با نوع و فایل یکسان ادغام می‌شوند
-    - ایرادات با پیام‌های مشابه (>70%) ادغام می‌شوند
-    - تعداد ادغام شده در merged_count ذخیره می‌شود
+    🔴 ادغام ایرادات مشابه - نسخه بهبود یافته
+    - مرحله 1: ادغام دقیق (فایل + نوع یکسان)
+    - مرحله 2: ادغام براساس نوع و severity مشابه
+    - مرحله 3: ادغام براساس شباهت پیام (>50%)
+    - مرحله 4 (aggressive): ادغام براساس دسته‌بندی کلی (max 100 نتیجه)
     """
     if len(issues) <= 1:
         return issues
 
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"[Merge Issues] Starting with {len(issues)} issues, aggressive={aggressive}")
+
+    # مرحله 1: گروه‌بندی براساس فایل + نوع
+    file_type_groups = {}
+    for issue in issues:
+        key = f"{issue.get('file', '')}|{issue.get('type', '')}"
+        if key not in file_type_groups:
+            file_type_groups[key] = []
+        file_type_groups[key].append(issue)
+
+    # تبدیل گروه‌ها به ایرادات ادغام شده
+    step1_merged = []
+    for key, group in file_type_groups.items():
+        if len(group) == 1:
+            step1_merged.append(group[0])
+        else:
+            # ادغام گروه
+            merged_issue = group[0].copy()
+            merged_issue["merged_count"] = len(group)
+            merged_issue["merged_messages"] = [g.get("message", "") for g in group[:5]]
+            merged_issue["merged_lines"] = [g.get("line") for g in group if g.get("line")]
+            merged_issue["message"] = f"[{len(group)} مورد] " + merged_issue.get("message", "")
+            step1_merged.append(merged_issue)
+
+    logger.info(f"[Merge Issues] After step 1 (file+type): {len(step1_merged)} issues")
+
+    # مرحله 2: ادغام براساس نوع + severity
+    type_severity_groups = {}
+    for issue in step1_merged:
+        key = f"{issue.get('type', '')}|{issue.get('severity', 'medium')}"
+        if key not in type_severity_groups:
+            type_severity_groups[key] = []
+        type_severity_groups[key].append(issue)
+
+    step2_merged = []
+    for key, group in type_severity_groups.items():
+        # اگر گروه بزرگ باشد، ادغام کن
+        if len(group) > 10:
+            # ادغام با نگه داشتن نمونه‌های مهم
+            merged_issue = group[0].copy()
+            total = sum(g.get("merged_count", 1) for g in group)
+            merged_issue["merged_count"] = total
+            merged_issue["sub_groups"] = len(group)
+            merged_issue["affected_files"] = list(set(g.get("file", "") for g in group))[:10]
+            merged_issue["message"] = f"[{total} ایراد در {len(group)} محل] " + merged_issue.get("type", "ایراد")
+            step2_merged.append(merged_issue)
+        else:
+            step2_merged.extend(group)
+
+    logger.info(f"[Merge Issues] After step 2 (type+severity): {len(step2_merged)} issues")
+
+    # مرحله 3: ادغام براساس شباهت پیام
     merged = []
     used_indices = set()
 
-    for i, issue in enumerate(issues):
+    for i, issue in enumerate(step2_merged):
         if i in used_indices:
             continue
 
         merged_issue = issue.copy()
-        merged_messages = [issue.get("message", "")]
-        merged_count = 1
+        current_count = issue.get("merged_count", 1)
 
-        for j in range(i + 1, len(issues)):
+        for j in range(i + 1, len(step2_merged)):
             if j in used_indices:
                 continue
 
-            other = issues[j]
+            other = step2_merged[j]
 
-            # بررسی شباهت
-            same_file = issue.get("file") == other.get("file")
-            same_type = issue.get("type") == other.get("type")
-            same_severity = issue.get("severity") == other.get("severity")
+            # بررسی شباهت پیام
+            msg1 = issue.get("type", "") + " " + issue.get("message", "")[:80]
+            msg2 = other.get("type", "") + " " + other.get("message", "")[:80]
+            msg1 = msg1.lower()
+            msg2 = msg2.lower()
 
-            # اگر فایل و نوع یکسان باشد
-            if same_file and same_type:
-                merged_messages.append(other.get("message", ""))
-                merged_count += 1
+            common_words = set(msg1.split()) & set(msg2.split())
+            all_words = set(msg1.split()) | set(msg2.split())
+            similarity = len(common_words) / max(len(all_words), 1)
+
+            if similarity > 0.5:
+                current_count += other.get("merged_count", 1)
                 used_indices.add(j)
-            # یا اگر پیام‌ها خیلی شبیه باشند
-            elif same_severity and same_type:
-                msg1 = issue.get("message", "")[:100].lower()
-                msg2 = other.get("message", "")[:100].lower()
-                # بررسی شباهت ساده
-                common_words = set(msg1.split()) & set(msg2.split())
-                total_words = max(len(set(msg1.split())), 1)
-                similarity = len(common_words) / total_words
-                if similarity > 0.6:
-                    merged_messages.append(other.get("message", ""))
-                    merged_count += 1
-                    used_indices.add(j)
 
-        if merged_count > 1:
-            merged_issue["merged_count"] = merged_count
-            merged_issue["merged_messages"] = merged_messages[:5]  # حداکثر 5 پیام
-            merged_issue["message"] = f"[{merged_count} ایراد مشابه] " + merged_issue.get("message", "")
-
+        merged_issue["merged_count"] = current_count
+        if current_count > 1:
+            merged_issue["message"] = f"[{current_count} ایراد مشابه] " + merged_issue.get("message", "")
         merged.append(merged_issue)
+
+    logger.info(f"[Merge Issues] After step 3 (similarity): {len(merged)} issues")
+
+    # مرحله 4 (aggressive): اگر هنوز بیش از 100 تاست، فقط دسته‌بندی کلی نگه دار
+    if aggressive and len(merged) > 100:
+        category_groups = {}
+        for issue in merged:
+            category = issue.get("type", "other")
+            if category not in category_groups:
+                category_groups[category] = {"count": 0, "issues": [], "severity": issue.get("severity", "medium")}
+            category_groups[category]["count"] += issue.get("merged_count", 1)
+            if len(category_groups[category]["issues"]) < 3:
+                category_groups[category]["issues"].append(issue)
+
+        merged = []
+        for category, data in category_groups.items():
+            summary_issue = {
+                "type": category,
+                "severity": data["severity"],
+                "merged_count": data["count"],
+                "message": f"[{data['count']} ایراد از نوع {category}]",
+                "sample_issues": data["issues"][:3],
+                "is_summary": True
+            }
+            merged.append(summary_issue)
+
+        # مرتب‌سازی براساس تعداد
+        merged.sort(key=lambda x: x.get("merged_count", 0), reverse=True)
+        logger.info(f"[Merge Issues] After step 4 (aggressive): {len(merged)} categories")
 
     return merged
 
@@ -1769,6 +1846,7 @@ def _merge_similar_issues(issues: list) -> list:
 async def get_project_issues(
     project_id: str,
     merge_similar: bool = True,  # 🔴 ادغام ایرادات مشابه
+    aggressive_merge: bool = False,  # 🆕 ادغام تهاجمی (برای >100 ایراد)
     db=Depends(get_db)
 ):
     """
@@ -1776,6 +1854,7 @@ async def get_project_issues(
 
     پارامترها:
     - merge_similar: اگر True باشد، ایرادات مشابه ادغام می‌شوند (پیش‌فرض: True)
+    - aggressive_merge: اگر True باشد، ادغام تهاجمی انجام می‌شود (برای لیست‌های بزرگ)
     """
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -1790,7 +1869,9 @@ async def get_project_issues(
 
             # 🔴 ادغام ایرادات مشابه
             if merge_similar and len(issues) > 1:
-                issues = _merge_similar_issues(issues)
+                # اگر بیش از 200 ایراد باشد، ادغام تهاجمی خودکار فعال شود
+                auto_aggressive = original_count > 200
+                issues = _merge_similar_issues(issues, aggressive=aggressive_merge or auto_aggressive)
     except:
         pass
 

@@ -82,6 +82,12 @@ interface DynamicField {
   archived?: boolean;
   action_type?: string;
   target_path?: string;
+  engineering_approval?: {
+    approved: boolean;
+    approved_at?: string;
+    approved_by?: string;
+    approval_type?: string;
+  };
 }
 
 interface AIModel {
@@ -3688,6 +3694,16 @@ export default function ProjectDetailPage() {
                                   📦 بایگانی
                                 </span>
                               )}
+                              {/* نشانگر تاییدیه گزارش مهندسی */}
+                              {field.engineering_approval?.approved ? (
+                                <span className="px-2 py-0.5 bg-emerald-100 dark:bg-emerald-900 text-emerald-700 dark:text-emerald-300 text-xs rounded" title={`تایید شده توسط ${field.engineering_approval.approved_by || 'AI'} در ${field.engineering_approval.approved_at || ''}`}>
+                                  ✅ تایید مهندسی
+                                </span>
+                              ) : field.action_type && field.action_type !== 'display' && !field.archived ? (
+                                <span className="px-2 py-0.5 bg-amber-100 dark:bg-amber-900 text-amber-700 dark:text-amber-300 text-xs rounded" title="برای اجرا نیاز به تایید گزارش مهندسی دارد">
+                                  ⚠️ نیاز به تایید
+                                </span>
+                              ) : null}
                             </div>
                             <div className="flex gap-1">
                               {field.archived ? (
