@@ -1372,22 +1372,29 @@ async def enhanced_project_chat(
                                 break
 
                         if similar_field:
-                            # 🔴 بررسی کدام بهتر است
-                            new_priority = field.get("priority", 5)
-                            existing_priority = similar_field.get("priority", 5)
+                            # 🆕 استفاده از ادغام هوشمند
+                            should_merge, confidence, reason = _should_merge_fields(similar_field, field)
 
-                            if new_priority < existing_priority:
-                                # فیلد جدید بهتر است - ادغام
-                                similar_field["value"] = f"{similar_field.get('value', '')}\n\n--- ادغام شده از پرسش AI ---\n{field.get('value', '')}"
-                                similar_field["priority"] = new_priority
-                                similar_field["updated_at"] = datetime.utcnow().isoformat()
-                                similar_field["merged_with"] = field.get("name")
-                                merged_fields.append({"original": similar_field.get("name"), "merged": field.get("name")})
+                            if should_merge and confidence > 0.5:
+                                # ادغام هوشمند فیلدها
+                                merged_field = _smart_merge_fields(similar_field, field)
+
+                                # بروزرسانی فیلد موجود با نسخه ادغام شده
+                                for key, value in merged_field.items():
+                                    similar_field[key] = value
+
+                                merged_fields.append({
+                                    "original": similar_field.get("name"),
+                                    "merged": field.get("name"),
+                                    "confidence": round(confidence, 2),
+                                    "reason": reason
+                                })
                             else:
-                                # فیلد موجود بهتر است - رد شود
+                                # شباهت کم - رد شود اما با جزئیات
                                 skipped_fields.append({
                                     "name": field.get("name"),
-                                    "reason": f"فیلد مشابه با اولویت بهتر وجود دارد: {similar_field.get('name')}"
+                                    "reason": f"فیلد مشابه با اولویت بهتر وجود دارد: {similar_field.get('name')}",
+                                    "similarity": round(confidence, 2)
                                 })
                         else:
                             # فیلد جدید - اضافه شود
@@ -1420,21 +1427,162 @@ async def enhanced_project_chat(
 
 
 def _calculate_similarity(str1: str, str2: str) -> float:
-    """محاسبه شباهت دو رشته (0-1)"""
+    """
+    🆕 محاسبه شباهت دو رشته - نسخه بهبود یافته
+
+    الگوریتم ترکیبی:
+    1. شباهت Jaccard (کلمات مشترک)
+    2. شباهت توالی (n-gram)
+    3. شباهت معنایی (کلمات کلیدی)
+    """
     if not str1 or not str2:
         return 0.0
+
     str1 = str1.lower().strip()
     str2 = str2.lower().strip()
+
     if str1 == str2:
         return 1.0
-    # محاسبه ساده با کلمات مشترک
+
+    # 1. شباهت Jaccard (کلمات مشترک)
     words1 = set(str1.split())
     words2 = set(str2.split())
-    if not words1 or not words2:
-        return 0.0
-    intersection = len(words1 & words2)
-    union = len(words1 | words2)
-    return intersection / union if union > 0 else 0.0
+    if words1 and words2:
+        jaccard = len(words1 & words2) / len(words1 | words2)
+    else:
+        jaccard = 0.0
+
+    # 2. شباهت n-gram (3-gram)
+    def get_ngrams(s, n=3):
+        return set(s[i:i+n] for i in range(max(0, len(s)-n+1)))
+
+    ngrams1 = get_ngrams(str1.replace(' ', ''))
+    ngrams2 = get_ngrams(str2.replace(' ', ''))
+    if ngrams1 and ngrams2:
+        ngram_sim = len(ngrams1 & ngrams2) / len(ngrams1 | ngrams2)
+    else:
+        ngram_sim = 0.0
+
+    # 3. شباهت معنایی (کلمات کلیدی مشترک)
+    key_terms = {
+        'action': ['اصلاح', 'تغییر', 'حذف', 'اضافه', 'بهبود', 'fix', 'change', 'remove', 'add', 'improve'],
+        'file': ['فایل', 'کلاس', 'تابع', 'متد', 'file', 'class', 'function', 'method'],
+        'severity': ['مهم', 'بحرانی', 'فوری', 'جزئی', 'critical', 'important', 'urgent', 'minor'],
+    }
+
+    semantic_score = 0.0
+    for category, terms in key_terms.items():
+        has1 = any(term in str1 for term in terms)
+        has2 = any(term in str2 for term in terms)
+        if has1 and has2:
+            semantic_score += 0.15
+
+    # ترکیب نمرات با وزن
+    final_score = (jaccard * 0.5) + (ngram_sim * 0.3) + min(semantic_score, 0.3)
+
+    return min(final_score, 1.0)
+
+
+def _smart_merge_fields(existing_field: dict, new_field: dict) -> dict:
+    """
+    🆕 ادغام هوشمند دو فیلد مشابه
+
+    - ترکیب محتوا با جداکننده مناسب
+    - حفظ اولویت بالاتر
+    - ترکیب مسیرهای هدف
+    - تاریخچه ادغام
+    """
+    merged = existing_field.copy()
+
+    # ترکیب محتوا
+    existing_value = existing_field.get('value', '')
+    new_value = new_field.get('value', '')
+
+    # جلوگیری از تکرار محتوا
+    if new_value and new_value not in existing_value:
+        separator = "\n\n" + "─" * 40 + "\n"
+        merged['value'] = f"{existing_value}{separator}🔄 ادغام شده از: {new_field.get('name', 'فیلد جدید')}\n{new_value}"
+
+    # حفظ اولویت بالاتر (عدد کمتر = اولویت بالاتر)
+    merged['priority'] = min(
+        existing_field.get('priority', 5),
+        new_field.get('priority', 5)
+    )
+
+    # ترکیب مسیرهای هدف
+    existing_path = existing_field.get('target_path', '')
+    new_path = new_field.get('target_path', '')
+    if new_path and new_path != existing_path:
+        if existing_path:
+            # اگر هر دو مسیر دارند، به multi_commit تبدیل کن
+            merged['action_type'] = 'github_multi_commit'
+            paths = merged.get('target_paths', [existing_path])
+            if new_path not in paths:
+                paths.append(new_path)
+            merged['target_paths'] = paths
+        else:
+            merged['target_path'] = new_path
+
+    # ارتقا action_type اگر لازم است
+    action_priority = {'github_multi_commit': 1, 'github_commit': 2, 'file_edit': 3, 'display': 4}
+    existing_action = existing_field.get('action_type', 'display')
+    new_action = new_field.get('action_type', 'display')
+    if action_priority.get(new_action, 4) < action_priority.get(existing_action, 4):
+        merged['action_type'] = new_action
+
+    # بروزرسانی متادیتا
+    merged['updated_at'] = datetime.utcnow().isoformat()
+    merge_history = merged.get('merge_history', [])
+    merge_history.append({
+        'merged_field': new_field.get('name'),
+        'merged_at': datetime.utcnow().isoformat(),
+        'source': new_field.get('source', 'unknown')
+    })
+    merged['merge_history'] = merge_history
+    merged['merge_count'] = len(merge_history)
+
+    return merged
+
+
+def _should_merge_fields(field1: dict, field2: dict) -> tuple:
+    """
+    🆕 تشخیص اینکه آیا دو فیلد باید ادغام شوند
+
+    Returns:
+        tuple: (should_merge: bool, confidence: float, reason: str)
+    """
+    # بررسی مسیر یکسان
+    path1 = field1.get('target_path', '')
+    path2 = field2.get('target_path', '')
+    if path1 and path2 and path1 == path2:
+        return (True, 1.0, "مسیر هدف یکسان")
+
+    # بررسی نام
+    name_sim = _calculate_similarity(field1.get('name', ''), field2.get('name', ''))
+    if name_sim > 0.8:
+        return (True, name_sim, "نام بسیار مشابه")
+
+    # بررسی محتوا
+    value_sim = _calculate_similarity(
+        field1.get('value', '')[:300],
+        field2.get('value', '')[:300]
+    )
+    if value_sim > 0.7:
+        return (True, value_sim, "محتوای مشابه")
+
+    # بررسی action_type + path similarity
+    same_action = field1.get('action_type') == field2.get('action_type')
+    if path1 and path2:
+        path_sim = _calculate_similarity(path1, path2)
+        if same_action and path_sim > 0.6:
+            return (True, path_sim, "اکشن یکسان با مسیر مشابه")
+
+    # بررسی ترکیبی
+    combined_score = (name_sim * 0.4) + (value_sim * 0.4) + (0.2 if same_action else 0)
+    if combined_score > 0.6:
+        return (True, combined_score, "شباهت ترکیبی بالا")
+
+    return (False, combined_score, None)
 
     return {
         "success": True,

@@ -14,11 +14,127 @@ from datetime import datetime, timedelta
 import json
 import uuid
 import asyncio
+import logging
 
 from ...core.database import get_db, Base, engine
 from ...models.project import Project
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+# ===================== توابع کمکی مدیریت مدل‌ها =====================
+
+def get_active_models(db: Session, preferred_models: List[str] = None) -> List[str]:
+    """
+    🆕 دریافت لیست مدل‌های فعال
+    اگر مدل‌های ترجیحی داده شوند، فقط آنها را برمی‌گرداند (در صورت فعال بودن)
+    """
+    from ...models.ai_profile import ModelSettings
+    from ...core.models_registry import MODEL_REGISTRY
+
+    active_models = []
+
+    # دریافت تنظیمات از دیتابیس
+    db_settings = {}
+    try:
+        settings = db.query(ModelSettings).all()
+        db_settings = {s.model_id: s.enabled for s in settings}
+    except:
+        pass
+
+    for model_id, model in MODEL_REGISTRY.items():
+        # چک کردن فعال بودن
+        is_enabled = db_settings.get(model_id, model.enabled)
+        if is_enabled:
+            active_models.append(model_id)
+
+    # اگر مدل‌های ترجیحی داده شدند
+    if preferred_models:
+        filtered = [m for m in preferred_models if m in active_models]
+        if filtered:
+            return filtered
+
+    return active_models
+
+
+def get_replacement_model(db: Session, disabled_model: str, task_type: str = "general") -> str:
+    """
+    🆕 دریافت مدل جایگزین برای مدل غیرفعال
+
+    الگوریتم:
+    1. مدل‌های فعال با امتیاز بالاتر در همان task_type
+    2. مدل‌های فعال با همان provider
+    3. هر مدل فعال دیگر
+    """
+    from ...models.ai_profile import ModelSettings, AIProfile
+    from ...core.models_registry import MODEL_REGISTRY, get_model
+
+    active_models = get_active_models(db)
+    if not active_models:
+        raise HTTPException(status_code=503, detail="هیچ مدل فعالی موجود نیست")
+
+    # اگر مدل اصلی فعال است، همان را برگردان
+    if disabled_model in active_models:
+        return disabled_model
+
+    # پیدا کردن provider مدل غیرفعال
+    original_model = get_model(disabled_model)
+    original_provider = original_model.provider.value if original_model else None
+
+    # دریافت پروفایل‌ها برای رتبه‌بندی
+    profiles = {}
+    try:
+        profile_records = db.query(AIProfile).filter(AIProfile.model_id.in_(active_models)).all()
+        for p in profile_records:
+            profiles[p.model_id] = {
+                "overall_score": p.overall_score,
+                "last_scores": p.last_scores_by_task or {}
+            }
+    except:
+        pass
+
+    # رتبه‌بندی مدل‌های فعال
+    candidates = []
+    for model_id in active_models:
+        model = get_model(model_id)
+        if not model:
+            continue
+
+        score = profiles.get(model_id, {}).get("overall_score", 50)
+        task_score = profiles.get(model_id, {}).get("last_scores", {}).get(task_type, {}).get("overall", 50)
+
+        # امتیاز اضافی برای همان provider
+        provider_bonus = 10 if model.provider.value == original_provider else 0
+
+        total_score = (score + task_score) / 2 + provider_bonus
+        candidates.append((model_id, total_score))
+
+    # مرتب‌سازی بر اساس امتیاز
+    candidates.sort(key=lambda x: x[1], reverse=True)
+
+    replacement = candidates[0][0] if candidates else "claude"
+    logger.info(f"[Model Replacement] {disabled_model} -> {replacement}")
+
+    return replacement
+
+
+def ensure_active_model(db: Session, model_id: str, task_type: str = "general") -> tuple:
+    """
+    🆕 اطمینان از فعال بودن مدل، در غیر این صورت جایگزینی
+
+    Returns:
+        tuple: (final_model_id, was_replaced, replacement_note)
+    """
+    active_models = get_active_models(db)
+
+    if model_id in active_models:
+        return (model_id, False, None)
+
+    replacement = get_replacement_model(db, model_id, task_type)
+    note = f"مدل {model_id} غیرفعال بود و با {replacement} جایگزین شد"
+
+    return (replacement, True, note)
 
 
 # ===================== مدل دیتابیس =====================
@@ -3510,50 +3626,108 @@ async def engineering_step4_update_roadmap(
     }
 
 
+class MultiModelEngineeringRequest(BaseModel):
+    """درخواست گزارش مهندسی با چند مدل"""
+    model_ids: List[str] = ["claude"]  # لیست مدل‌ها
+    parallel: bool = False  # اجرای موازی یا ترتیبی
+
+
 @router.post("/{project_id}/engineering/run-all-steps")
 async def engineering_run_all_steps(
     project_id: str,
     model_id: str = Query("claude"),
+    model_ids: str = Query(None, description="لیست مدل‌ها با کاما جدا شده (مثال: claude,gpt-4,gemini)"),
     db: Session = Depends(get_db)
 ):
     """
     🔴 اجرای تمام ۴ مرحله گزارش مهندسی به ترتیب
+
+    🆕 قابلیت‌های جدید:
+    - پشتیبانی از چند مدل همزمان (model_ids با کاما جدا شوند)
+    - جایگزینی خودکار مدل‌های غیرفعال
+    - ثبت جایگزینی در ژورنال
     """
     results = {}
+    replacement_notes = []
+
+    # 🆕 پردازش لیست مدل‌ها
+    selected_models = []
+    if model_ids:
+        selected_models = [m.strip() for m in model_ids.split(",") if m.strip()]
+    else:
+        selected_models = [model_id]
+
+    # 🆕 اطمینان از فعال بودن مدل‌ها و جایگزینی در صورت نیاز
+    active_selected = []
+    for m in selected_models:
+        final_model, was_replaced, note = ensure_active_model(db, m, "engineering_report")
+        active_selected.append(final_model)
+        if was_replaced:
+            replacement_notes.append(note)
+            # ثبت جایگزینی در ژورنال
+            log_detailed_operation(
+                db, project_id, None,
+                "model_replacement",
+                note,
+                details={"original": m, "replacement": final_model, "reason": "model_disabled"},
+                status="completed"
+            )
+
+    # حذف تکراری‌ها
+    active_selected = list(dict.fromkeys(active_selected))
+
+    # انتخاب مدل اصلی (اولین مدل فعال)
+    primary_model = active_selected[0] if active_selected else "claude"
+
+    results["models_used"] = active_selected
+    results["replacement_notes"] = replacement_notes
+
+    # 🆕 اگر چند مدل انتخاب شده، از هر کدام برای یک مرحله استفاده کن
+    # یا از همه برای اعتبارسنجی متقابل
+    model_for_step = {
+        1: active_selected[0] if len(active_selected) > 0 else primary_model,
+        2: active_selected[1 % len(active_selected)] if len(active_selected) > 1 else primary_model,
+        3: primary_model,  # مرحله 3 ارزیابی همه مدل‌هاست
+        4: active_selected[-1] if active_selected else primary_model,
+    }
 
     # مرحله ۱
     try:
-        step1 = await engineering_step1_validate_fields(project_id, model_id, db)
+        step1 = await engineering_step1_validate_fields(project_id, model_for_step[1], db)
         results["step1"] = step1
     except Exception as e:
         results["step1"] = {"success": False, "error": str(e)}
 
     # مرحله ۲
     try:
-        step2 = await engineering_step2_health_to_fields(project_id, model_id, db)
+        step2 = await engineering_step2_health_to_fields(project_id, model_for_step[2], db)
         results["step2"] = step2
     except Exception as e:
         results["step2"] = {"success": False, "error": str(e)}
 
-    # مرحله ۳
+    # مرحله ۳ - 🆕 ارزیابی با امتیازدهی دقیق
     try:
-        step3 = await engineering_step3_evaluate_models(project_id, model_id, db)
+        step3 = await engineering_step3_evaluate_models(project_id, model_for_step[3], db)
         results["step3"] = step3
     except Exception as e:
         results["step3"] = {"success": False, "error": str(e)}
 
     # مرحله ۴
     try:
-        step4 = await engineering_step4_update_roadmap(project_id, model_id, db)
+        step4 = await engineering_step4_update_roadmap(project_id, model_for_step[4], db)
         results["step4"] = step4
     except Exception as e:
         results["step4"] = {"success": False, "error": str(e)}
 
-    all_success = all(r.get("success", False) for r in results.values())
+    all_success = all(results.get(f"step{i}", {}).get("success", False) for i in range(1, 5))
+
+    db.commit()
 
     return {
         "success": all_success,
         "message": "تمام ۴ مرحله گزارش مهندسی اجرا شد" if all_success else "برخی مراحل با خطا مواجه شدند",
+        "models_used": active_selected,
+        "replacement_notes": replacement_notes if replacement_notes else None,
         "steps": results
     }
 
