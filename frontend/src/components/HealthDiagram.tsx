@@ -33,12 +33,20 @@ interface TreeNode {
  * نمایش ساختار پروژه با رنگ‌بندی براساس نمره سلامت هر فایل
  */
 
-// تابع رنگ براساس امتیاز - باید قبل از استفاده تعریف شود
+// تابع رنگ براساس امتیاز - رنگ‌های روشن‌تر برای خوانایی بهتر
 const getColorForScore = (score: number): string => {
-  if (score >= 80) return '#22c55e'; // سبز
-  if (score >= 60) return '#eab308'; // زرد
-  if (score >= 40) return '#f97316'; // نارنجی
-  return '#ef4444'; // قرمز
+  if (score >= 80) return '#4ade80'; // سبز روشن
+  if (score >= 60) return '#facc15'; // زرد روشن
+  if (score >= 40) return '#fb923c'; // نارنجی روشن
+  return '#f87171'; // قرمز روشن
+};
+
+// تابع رنگ متن - همیشه خوانا روی پس‌زمینه تاریک
+const getTextColorForScore = (score: number): string => {
+  if (score >= 80) return '#86efac'; // سبز خیلی روشن
+  if (score >= 60) return '#fef08a'; // زرد خیلی روشن
+  if (score >= 40) return '#fdba74'; // نارنجی خیلی روشن
+  return '#fca5a5'; // قرمز خیلی روشن
 };
 
 // آیکون فایل براساس پسوند
@@ -145,23 +153,6 @@ export default function HealthDiagram({ projectId, fileHealthMap, onFileClick }:
 
     return root;
   }, [fileHealthMap]);
-
-  // تابع رنگ براساس امتیاز - رنگ‌های روشن‌تر برای خوانایی بهتر
-  const getColorForScore = (score: number): string => {
-    if (score >= 80) return '#4ade80'; // سبز روشن
-    if (score >= 60) return '#facc15'; // زرد روشن
-    if (score >= 40) return '#fb923c'; // نارنجی روشن
-    return '#f87171'; // قرمز روشن
-  };
-
-  // تابع رنگ متن - همیشه خوانا روی پس‌زمینه تاریک
-  const getTextColorForScore = (score: number): string => {
-    // رنگ‌های روشن‌تر برای متن که روی bg-gray-800 خوانا باشند
-    if (score >= 80) return '#86efac'; // سبز خیلی روشن
-    if (score >= 60) return '#fef08a'; // زرد خیلی روشن
-    if (score >= 40) return '#fdba74'; // نارنجی خیلی روشن
-    return '#fca5a5'; // قرمز خیلی روشن
-  };
 
   // toggle پوشه
   const toggleFolder = (path: string) => {
