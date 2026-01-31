@@ -1085,6 +1085,22 @@ async def run_health_analysis(
     if not project:
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
 
+    # 🔴 جلوگیری از دور باطل - بررسی تحلیل تکراری
+    try:
+        from .project_journal import check_cycle_prevention
+        if not check_cycle_prevention(
+            db=db,
+            project_id=project_id,
+            activity_type="health_analysis",
+            minutes_threshold=5  # حداقل 5 دقیقه بین تحلیل‌ها
+        ):
+            raise HTTPException(
+                status_code=429,
+                detail="تحلیل سلامت اخیراً اجرا شده است. لطفاً چند دقیقه صبر کنید."
+            )
+    except ImportError:
+        pass
+
     # دریافت فایل‌های پروژه
     files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
     files_data = [

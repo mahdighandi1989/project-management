@@ -1309,13 +1309,28 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
         {/* تب ایرادات */}
         {activeTab === 'issues' && (
           <div className="space-y-4">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between flex-wrap gap-2">
               <h3 className="font-bold">ایرادات شناسایی شده ({issues.length})</h3>
               {issues.length > 0 && (
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-xs text-gray-500">
                     {issues.filter(i => i.converted_to_field).length} تبدیل شده
                   </span>
+                  {/* 🆕 دکمه‌های دانلود مارک‌داون */}
+                  <button
+                    onClick={() => window.open(`${API_BASE}/api/projects/${projectId}/export/issues/markdown?issue_ids=validated`, '_blank')}
+                    className="px-2 py-1 bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300 text-xs rounded hover:bg-blue-200 dark:hover:bg-blue-800 flex items-center gap-1"
+                    title="دانلود ایرادات تایید شده"
+                  >
+                    📥 MD
+                  </button>
+                  <button
+                    onClick={() => window.open(`${API_BASE}/api/projects/${projectId}/export/issues/markdown?issue_ids=all`, '_blank')}
+                    className="px-2 py-1 bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300 text-xs rounded hover:bg-gray-200 dark:hover:bg-gray-600 flex items-center gap-1"
+                    title="دانلود همه ایرادات (تایید و رد شده)"
+                  >
+                    📥 همه
+                  </button>
                   <button
                     onClick={convertAllIssuesToFields}
                     disabled={convertingIssue === 'all' || issues.every(i => i.converted_to_field)}

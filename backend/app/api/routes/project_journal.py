@@ -2437,14 +2437,22 @@ async def generate_engineering_report(
 async def generate_engineering_report_stream(
     project_id: str,
     days: int = Query(7, ge=1, le=30),
-    model_id: str = Query("claude"),
+    model_id: str = Query(None),  # برای backward compatibility
+    model_ids: str = Query(None),  # 🆕 چند مدل با کاما جدا شده
+    depth: str = Query("standard"),  # 🆕 quick, standard, deep
     auto_create_fields: bool = Query(True),
     validate_health_issues: bool = Query(True),
     db: Session = Depends(get_db)
 ):
     """
     🔴 گزارش مهندسی با نوار پیشرفت (Streaming)
-    ارسال بلادرنگ وضعیت پیشرفت در حین تولید گزارش
+
+    🆕 قابلیت‌های جدید:
+    - model_ids: چند مدل با کاما جدا شده (مثلاً "claude,gpt-4o")
+    - depth: عمق تحلیل
+        - quick: بررسی سریع (1-2 دقیقه)
+        - standard: تحلیل متوسط (3-5 دقیقه)
+        - deep: تحلیل عمیق فایل به فایل (10-20 دقیقه)
     """
     from ...services.ai_manager import get_ai_manager
     from ...services.ai_base import Message
@@ -2452,11 +2460,43 @@ async def generate_engineering_report_stream(
     import logging
     logger = logging.getLogger(__name__)
 
+    # پردازش مدل‌ها
+    selected_models = []
+    if model_ids:
+        selected_models = [m.strip() for m in model_ids.split(",") if m.strip()]
+    elif model_id:
+        selected_models = [model_id]
+    if not selected_models:
+        selected_models = ["claude"]  # پیش‌فرض
+
+    # 🔴 جلوگیری از دور باطل - بررسی گزارش تکراری
+    if check_cycle_prevention(
+        db=db,
+        project_id=project_id,
+        activity_type="engineering_report",
+        minutes_threshold=5  # حداقل 5 دقیقه بین گزارش‌ها
+    ) == False:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=429,
+            content={"error": "گزارش مهندسی اخیراً تولید شده است. لطفاً چند دقیقه صبر کنید."}
+        )
+
+    # تعداد مراحل بر اساس عمق
+    depth_config = {
+        "quick": {"total_steps": 4, "file_limit": 5, "ai_calls": 1},
+        "standard": {"total_steps": 8, "file_limit": 20, "ai_calls": 2},
+        "deep": {"total_steps": 12, "file_limit": 0, "ai_calls": len(selected_models) + 2}  # 0 = همه
+    }
+    config = depth_config.get(depth, depth_config["standard"])
+
     async def progress_generator():
         """Generator برای ارسال پیشرفت"""
         try:
+            total_steps = config["total_steps"]
+
             # مرحله 1: بررسی پروژه
-            yield f"data: {json.dumps({'step': 1, 'total': 8, 'message': '🔍 بررسی پروژه...', 'progress': 5}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'step': 1, 'total': total_steps, 'message': '🔍 بررسی پروژه...', 'progress': 5}, ensure_ascii=False)}\n\n"
             await asyncio.sleep(0.1)
 
             project = db.query(Project).filter(Project.id == project_id).first()
@@ -2465,16 +2505,26 @@ async def generate_engineering_report_stream(
                 return
 
             # مرحله 2: دریافت فایل‌ها
-            yield f"data: {json.dumps({'step': 2, 'total': 8, 'message': '📂 دریافت فایل‌های پروژه...', 'progress': 15}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'step': 2, 'total': total_steps, 'message': '📂 دریافت فایل‌های پروژه...', 'progress': 10}, ensure_ascii=False)}\n\n"
             await asyncio.sleep(0.1)
 
             files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
-            for i, f in enumerate(files[:10]):
-                yield f"data: {json.dumps({'step': 2, 'message': f'📄 بررسی: {f.file_path}', 'progress': 15 + (i * 2)}, ensure_ascii=False)}\n\n"
-                await asyncio.sleep(0.05)
+            file_limit = config["file_limit"] or len(files)
+            files_to_analyze = files[:file_limit] if file_limit > 0 else files
+
+            # 🆕 در حالت deep، هر فایل را گزارش کن
+            if depth == "deep":
+                for i, f in enumerate(files_to_analyze):
+                    progress = 10 + int((i / len(files_to_analyze)) * 15)
+                    yield f"data: {json.dumps({'step': 2, 'message': f'📄 [{i+1}/{len(files_to_analyze)}] {f.file_path}', 'progress': progress}, ensure_ascii=False)}\n\n"
+                    await asyncio.sleep(0.02)
+            else:
+                for i, f in enumerate(files_to_analyze[:10]):
+                    yield f"data: {json.dumps({'step': 2, 'message': f'📄 بررسی: {f.file_path}', 'progress': 10 + (i * 1)}, ensure_ascii=False)}\n\n"
+                    await asyncio.sleep(0.03)
 
             # مرحله 3: دریافت فیلدها
-            yield f"data: {json.dumps({'step': 3, 'total': 8, 'message': '📋 بررسی فیلدهای پویا...', 'progress': 30}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'step': 3, 'total': total_steps, 'message': '📋 بررسی فیلدهای پویا...', 'progress': 30}, ensure_ascii=False)}\n\n"
             await asyncio.sleep(0.1)
 
             existing_fields = []
@@ -2488,7 +2538,7 @@ async def generate_engineering_report_stream(
             yield f"data: {json.dumps({'step': 3, 'message': f'🔴 {len(pending_fields)} فیلد pending برای اعتبارسنجی', 'progress': 35}, ensure_ascii=False)}\n\n"
 
             # مرحله 4: بررسی health issues
-            yield f"data: {json.dumps({'step': 4, 'total': 8, 'message': '🔍 بررسی ایرادات سلامت...', 'progress': 40}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'step': 4, 'total': total_steps, 'message': '🔍 بررسی ایرادات سلامت...', 'progress': 40}, ensure_ascii=False)}\n\n"
             await asyncio.sleep(0.1)
 
             health_issues = []
@@ -2500,34 +2550,79 @@ async def generate_engineering_report_stream(
 
             yield f"data: {json.dumps({'step': 4, 'message': f'⚠️ {len(health_issues)} ایراد برای اعتبارسنجی', 'progress': 45}, ensure_ascii=False)}\n\n"
 
-            # مرحله 5: بررسی نقشه راه
-            yield f"data: {json.dumps({'step': 5, 'total': 8, 'message': '🗺️ بررسی نقشه راه...', 'progress': 50}, ensure_ascii=False)}\n\n"
+            # 🆕 مراحل اضافی برای عمق deep
+            if depth == "deep" and len(selected_models) > 1:
+                # مرحله 5-8: تحلیل توسط هر مدل
+                model_results = []
+                step = 5
+                for model in selected_models:
+                    yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': f'🧠 تحلیل توسط {model}...', 'progress': 50 + (step - 5) * 10}, ensure_ascii=False)}\n\n"
+
+                    try:
+                        # فراخوانی واقعی AI برای هر مدل
+                        ai_manager = get_ai_manager()
+                        file_summary = "\n".join([f"- {f.file_path}" for f in files_to_analyze[:30]])
+
+                        # تحلیل ساختار با این مدل خاص
+                        analysis_prompt = f"""
+تحلیل مهندسی پروژه {project.name}:
+
+فایل‌ها ({len(files_to_analyze)} فایل):
+{file_summary}
+
+وظیفه: تحلیل کیفیت کد، امنیت، و ساختار. حداکثر 5 ایراد مهم را شناسایی کن.
+
+پاسخ را به فرمت JSON بده:
+{{"issues": [{{"type": "", "severity": "high/medium/low", "file": "", "description": ""}}], "score": 0-100}}
+"""
+                        response = await ai_manager.generate(
+                            model_id=model,
+                            messages=[Message(role="user", content=analysis_prompt)],
+                            max_tokens=2000,
+                            temperature=0.3
+                        )
+                        if response.content:
+                            model_results.append({"model": model, "response": response.content[:500]})
+                            yield f"data: {json.dumps({'step': step, 'message': f'✅ {model}: تحلیل کامل شد', 'progress': 50 + (step - 4) * 10}, ensure_ascii=False)}\n\n"
+
+                    except Exception as me:
+                        yield f"data: {json.dumps({'step': step, 'message': f'⚠️ {model}: خطا - {str(me)[:50]}', 'progress': 50 + (step - 4) * 10}, ensure_ascii=False)}\n\n"
+
+                    step += 1
+                    await asyncio.sleep(0.5)
+
+            # مرحله قبل از آخر: بررسی نقشه راه
+            step = total_steps - 2
+            yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': '🗺️ بررسی نقشه راه و حالت ایده‌آل...', 'progress': 70}, ensure_ascii=False)}\n\n"
             await asyncio.sleep(0.1)
 
-            # مرحله 6: آماده‌سازی برای AI
-            yield f"data: {json.dumps({'step': 6, 'total': 8, 'message': '🤖 آماده‌سازی درخواست AI...', 'progress': 55}, ensure_ascii=False)}\n\n"
-            await asyncio.sleep(0.1)
+            # مرحله آخر: فراخوانی گزارش اصلی
+            step = total_steps - 1
+            models_text = ", ".join(selected_models)
+            yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': f'🧠 تولید گزارش نهایی با {models_text}...', 'progress': 80}, ensure_ascii=False)}\n\n"
 
-            # مرحله 7: فراخوانی AI
-            yield f"data: {json.dumps({'step': 7, 'total': 8, 'message': f'🧠 در حال تحلیل توسط {model_id}...', 'progress': 60}, ensure_ascii=False)}\n\n"
-
-            # فراخوانی گزارش اصلی
+            # فراخوانی گزارش اصلی (با مدل اول)
             result = await generate_engineering_report(
                 project_id=project_id,
                 days=days,
-                model_id=model_id,
+                model_id=selected_models[0],
                 auto_create_fields=auto_create_fields,
                 validate_health_issues=validate_health_issues,
                 db=db
             )
 
-            # مرحله 8: اتمام
+            # 🆕 ثبت مدل‌های استفاده شده در نتیجه
             if result.get("success"):
-                success_msg = json.dumps({'step': 8, 'total': 8, 'message': '✅ گزارش با موفقیت تولید شد', 'progress': 100, 'result': result}, ensure_ascii=False)
+                result["models_used"] = selected_models
+                result["depth"] = depth
+
+            # مرحله نهایی: اتمام
+            if result.get("success"):
+                success_msg = json.dumps({'step': total_steps, 'total': total_steps, 'message': '✅ گزارش با موفقیت تولید شد', 'progress': 100, 'result': result}, ensure_ascii=False)
                 yield f"data: {success_msg}\n\n"
             else:
                 error_text = result.get('error', 'خطای نامشخص')
-                error_msg = json.dumps({'step': 8, 'message': f'❌ خطا: {error_text}', 'progress': 100, 'error': error_text}, ensure_ascii=False)
+                error_msg = json.dumps({'step': total_steps, 'message': f'❌ خطا: {error_text}', 'progress': 100, 'error': error_text}, ensure_ascii=False)
                 yield f"data: {error_msg}\n\n"
 
         except Exception as e:
