@@ -261,7 +261,9 @@ class RenderAPIService:
                     data = await response.json()
 
                     logs = []
-                    for log_entry in data.get("logs", []):
+                    # 🔧 Fix: Handle null/None logs response
+                    logs_data = data.get("logs") or []
+                    for log_entry in logs_data:
                         # تشخیص سطح لاگ
                         message = log_entry.get("message", "")
                         level = self._detect_log_level(message)
