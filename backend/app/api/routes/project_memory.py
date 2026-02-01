@@ -4061,8 +4061,13 @@ async def auto_setup_project(
             except Exception as e:
                 logger.warning(f"  ⚠️ Could not load {db_key}: {e}")
 
+        # 🔴 اگه هیچ کلیدی از دیتابیس لود نشد
+        if not keys_loaded:
+            logger.warning("⚠️ No API keys found in database!")
+            logger.warning("   💡 Please add API keys in Settings page first")
+
         # 🔴 همیشه AI manager رو ریست کن تا کلیدهای جدید لود بشن
-        logger.info("🔄 Resetting AI manager to ensure fresh API keys...")
+        logger.info(f"🔄 Resetting AI manager... (keys_loaded: {keys_loaded})")
         ai_manager = await reset_ai_manager()
         available_providers = ai_manager.get_available_providers()
         logger.info(f"📊 AI providers after reset: {available_providers}")
