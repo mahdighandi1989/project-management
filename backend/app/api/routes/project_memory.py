@@ -4022,11 +4022,57 @@ async def auto_setup_project(
     """
     from ...services.project_auto_setup import auto_setup_project_memory
     from ...models.project import ProjectFile
+    from ...models.setting import Setting
+    from ...services.ai_manager import get_ai_manager, reset_ai_manager
     from datetime import datetime
     import logging
     import httpx
+    import os
 
     logger = logging.getLogger(__name__)
+
+    # ========================================
+    # 🔴 مرحله 0: بارگذاری API keys از دیتابیس و ریست AI manager
+    # ========================================
+    if use_ai:
+        logger.info("🔑 Loading API keys from database for auto-setup...")
+
+        # بارگذاری کلیدها از دیتابیس
+        key_mapping = [
+            ("api_key_openai", "OPENAI_API_KEY"),
+            ("api_key_claude", "CLAUDE_API_KEY"),
+            ("api_key_gemini", "GEMINI_API_KEY"),
+            ("api_key_deepseek", "DEEPSEEK_API_KEY"),
+            ("api_key_perplexity", "PERPLEXITY_API_KEY"),
+        ]
+
+        keys_loaded = []
+        for db_key, env_key in key_mapping:
+            try:
+                value = Setting.get_value(db, db_key)
+                if value and value.strip():
+                    os.environ[env_key] = value
+                    keys_loaded.append(env_key.replace("_API_KEY", "").lower())
+                    logger.info(f"  ✅ {env_key} loaded from database")
+            except Exception as e:
+                logger.warning(f"  ⚠️ Could not load {db_key}: {e}")
+
+        # بررسی وضعیت فعلی AI manager
+        ai_manager = get_ai_manager()
+        available_providers = ai_manager.get_available_providers()
+        logger.info(f"📊 Current AI providers: {available_providers}")
+
+        # اگر هیچ provider فعالی نیست ولی کلید از دیتابیس لود شده، ریست کن
+        if keys_loaded and not available_providers:
+            logger.info("🔄 Resetting AI manager to load new API keys...")
+            ai_manager = await reset_ai_manager()
+            available_providers = ai_manager.get_available_providers()
+            logger.info(f"📊 AI providers after reset: {available_providers}")
+
+        if not available_providers:
+            logger.warning("⚠️ No AI providers available! Auto-setup will use fallback mode.")
+        else:
+            logger.info(f"✅ Available AI providers: {available_providers}")
 
     # نتیجه نهایی با جزئیات کامل
     result = {
@@ -4038,7 +4084,8 @@ async def auto_setup_project(
             "invalid_cleanup": {"done": False, "removed": []},
             "fields_analysis": {"done": False, "archived": [], "merged": [], "created": [], "updated": [], "preserved": []},
             "memory_update": {"done": False, "previous": "", "new": ""},
-            "tabs_update": {"done": False, "tabs": []}
+            "tabs_update": {"done": False, "tabs": []},
+            "ai_status": {"keys_loaded": keys_loaded if use_ai else [], "providers_available": available_providers if use_ai else []}
         },
         "summary": ""
     }
