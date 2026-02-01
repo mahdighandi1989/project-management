@@ -608,7 +608,77 @@ async def generate_intelligent_setup(
             if end != -1:
                 content = content[:end + 1]
 
-        result = json.loads(content)
+        # 🔴 تلاش برای parse با اصلاح خطاهای رایج JSON
+        result = None
+        parse_error = None
+
+        # تلاش اول: parse مستقیم
+        try:
+            result = json.loads(content)
+        except json.JSONDecodeError as e:
+            parse_error = e
+            logger.warning(f"⚠️ First JSON parse attempt failed: {e}")
+
+        # تلاش دوم: اصلاح trailing commas
+        if result is None:
+            try:
+                import re
+                # حذف کاماهای اضافی قبل از ] یا }
+                fixed = re.sub(r',\s*([}\]])', r'\1', content)
+                result = json.loads(fixed)
+                logger.info("✅ JSON parsed after removing trailing commas")
+            except json.JSONDecodeError:
+                pass
+
+        # تلاش سوم: اصلاح newlines در strings
+        if result is None:
+            try:
+                # جایگزینی newlines واقعی با \\n در داخل strings
+                fixed = content.replace('\n', '\\n').replace('\r', '\\r')
+                # اما { و } و [ و ] نباید escape بشن
+                fixed = fixed.replace('\\n{', '\n{').replace('\\n}', '\n}')
+                fixed = fixed.replace('\\n[', '\n[').replace('\\n]', '\n]')
+                fixed = fixed.replace('}\\n', '}\n').replace(']\\n', ']\n')
+                result = json.loads(fixed)
+                logger.info("✅ JSON parsed after fixing newlines")
+            except json.JSONDecodeError:
+                pass
+
+        # تلاش چهارم: استخراج فقط memory_instructions با regex
+        if result is None:
+            try:
+                import re
+                # استخراج memory_instructions
+                mem_match = re.search(r'"memory_instructions"\s*:\s*"([^"]*(?:\\"[^"]*)*)"', content, re.DOTALL)
+                memory_content = mem_match.group(1) if mem_match else ""
+
+                # استخراج dynamic_fields با regex ساده
+                fields = []
+                field_pattern = r'"name"\s*:\s*"([^"]+)"[^}]*"value"\s*:\s*"([^"]*(?:\\"[^"]*)*)"'
+                for match in re.finditer(field_pattern, content):
+                    fields.append({
+                        "name": match.group(1),
+                        "value": match.group(2).replace('\\"', '"'),
+                        "priority": 5,
+                        "field_type": "temporary",
+                        "action_type": "display"
+                    })
+
+                if memory_content or fields:
+                    result = {
+                        "memory_instructions": memory_content.replace('\\"', '"').replace('\\n', '\n'),
+                        "dynamic_fields": fields if fields else [],
+                        "fields_to_archive": [],
+                        "fields_to_merge": [],
+                        "fields_to_update": []
+                    }
+                    logger.info(f"✅ JSON partially extracted via regex: {len(fields)} fields")
+            except Exception as regex_err:
+                logger.warning(f"⚠️ Regex extraction failed: {regex_err}")
+
+        # اگه هنوز result نیست، خطا بده
+        if result is None:
+            raise json.JSONDecodeError(str(parse_error), content, 0) if parse_error else ValueError("Could not parse AI response")
 
         # اعتبارسنجی و تکمیل فیلدها
         if "dynamic_fields" in result:
