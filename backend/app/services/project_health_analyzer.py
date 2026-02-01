@@ -906,15 +906,24 @@ README باید شامل این بخش‌ها باشد:
 
         scores = overall_scores.get('file_scores', {})
 
-        if scores.get('code_quality', 0) < 70:
+        # 🔴 تبدیل امن به عدد برای جلوگیری از خطای مقایسه str/int
+        def safe_score(val, default=0):
+            if isinstance(val, (int, float)):
+                return val
+            try:
+                return float(val) if val else default
+            except (ValueError, TypeError):
+                return default
+
+        if safe_score(scores.get('code_quality', 0)) < 70:
             recommendations.append("بهبود کیفیت کد: رعایت استانداردها و اصول SOLID")
-        if scores.get('documentation', 0) < 70:
+        if safe_score(scores.get('documentation', 0)) < 70:
             recommendations.append("افزودن مستندات: docstrings و کامنت‌های توضیحی")
-        if scores.get('security', 0) < 70:
+        if safe_score(scores.get('security', 0)) < 70:
             recommendations.append("بررسی امنیتی: رفع آسیب‌پذیری‌های شناسایی‌شده")
-        if overall_scores.get('structure_score', 0) < 70:
+        if safe_score(overall_scores.get('structure_score', 0)) < 70:
             recommendations.append("بهبود ساختار: سازماندهی بهتر فایل‌ها و پوشه‌ها")
-        if scores.get('roadmap_compliance', 0) < 70:
+        if safe_score(scores.get('roadmap_compliance', 0)) < 70:
             recommendations.append("هماهنگی با نقشه راه: تکمیل آیتم‌های باقی‌مانده")
 
         # از تحلیل ساختار

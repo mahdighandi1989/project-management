@@ -1032,7 +1032,7 @@ async def auto_setup_project_memory(
             # فیلدهای غیربایگانی رو مرتب کن
             active_fields = [f for f in all_fields if not f.get("archived")]
             archived_fields_final = [f for f in all_fields if f.get("archived")]
-            active_fields.sort(key=lambda x: x.get("priority", 5))
+            active_fields.sort(key=lambda x: int(x.get("priority", 5)) if str(x.get("priority", 5)).isdigit() else 5)
             all_fields = active_fields + archived_fields_final
 
             result = {
@@ -1936,7 +1936,7 @@ async def _manage_dynamic_fields(
     active_fields.extend(new_fields)
 
     # مرتب‌سازی براساس اولویت
-    active_fields.sort(key=lambda x: x.get("priority", 5))
+    active_fields.sort(key=lambda x: int(x.get("priority", 5)) if str(x.get("priority", 5)).isdigit() else 5)
 
     # ترکیب نهایی
     all_fields = active_fields + archived_fields
