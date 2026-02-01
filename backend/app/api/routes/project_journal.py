@@ -3108,17 +3108,18 @@ async def engineering_step2_health_to_fields(
     if not project:
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
 
-    # دریافت ایرادات سلامت
-    health_issues = []
+    # دریافت ایرادات سلامت - 🔴 نگه داشتن همه ایرادات (شامل بایگانی شده‌ها)
+    all_health_issues = []
     if project.issues_found:
         try:
-            health_issues = json.loads(project.issues_found)
-            # فقط ایرادات بایگانی نشده
-            health_issues = [i for i in health_issues if not i.get("archived")]
+            all_health_issues = json.loads(project.issues_found)
         except:
             pass
 
-    if not health_issues:
+    # فقط ایرادات بایگانی نشده برای پردازش
+    active_issues = [i for i in all_health_issues if not i.get("archived")]
+
+    if not active_issues:
         return {
             "success": True,
             "step": 2,
@@ -3184,8 +3185,8 @@ async def engineering_step2_health_to_fields(
 
     user_prompt = f"""پروژه: {project.name}
 
-=== ایرادات سلامت ({len(health_issues)} عدد) ===
-{json.dumps(health_issues[:50], ensure_ascii=False, indent=2)}
+=== ایرادات سلامت ({len(active_issues)} عدد) ===
+{json.dumps(active_issues[:50], ensure_ascii=False, indent=2)}
 
 === فیلدهای موجود (برای جلوگیری از تکرار) ===
 {json.dumps([{"name": f.get("name"), "target_path": f.get("target_path")} for f in existing_fields if not f.get("archived")][:30], ensure_ascii=False, indent=2)}
@@ -3267,7 +3268,7 @@ async def engineering_step2_health_to_fields(
         orig_line = orig.get("line") or orig.get("start_line")
         orig_msg = (orig.get("message") or orig.get("description") or "")[:50]
 
-        for issue in health_issues:
+        for issue in all_health_issues:
             issue_file = issue.get("file") or issue.get("file_path") or ""
             issue_type = issue.get("type") or issue.get("severity") or ""
             issue_line = issue.get("line") or issue.get("start_line")
@@ -3319,7 +3320,7 @@ async def engineering_step2_health_to_fields(
         orig_file = orig.get("file") or orig.get("file_path") or ""
         orig_msg = (orig.get("message") or orig.get("description") or "")[:50]
 
-        for issue in health_issues:
+        for issue in all_health_issues:
             issue_file = issue.get("file") or issue.get("file_path") or ""
             issue_msg = (issue.get("message") or issue.get("description") or "")[:50]
 
@@ -3336,7 +3337,7 @@ async def engineering_step2_health_to_fields(
 
     # ذخیره تغییرات
     project.dynamic_fields = json.dumps(existing_fields, ensure_ascii=False)
-    project.issues_found = json.dumps(health_issues, ensure_ascii=False)
+    project.issues_found = json.dumps(all_health_issues, ensure_ascii=False)
     db.commit()
 
     # ثبت در ژورنال
@@ -3631,6 +3632,57 @@ async def engineering_step4_update_roadmap(
     new_roadmap = result_data.get("new_roadmap_content")
     if new_roadmap:
         project.roadmap_content = new_roadmap
+    else:
+        # 🆕 اگر AI محتوای نقشه راه را برنگرداند، خودمان از updates بسازیم
+        roadmap_updates = result_data.get("roadmap_updates", [])
+        if roadmap_updates:
+            roadmap_lines = [f"# نقشه راه پروژه {project.name}\n"]
+            roadmap_lines.append(f"*به‌روزرسانی: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}*\n")
+            for update in roadmap_updates:
+                status = "[x] ✅" if update.get("completed") else "[ ]"
+                roadmap_lines.append(f"{status} {update.get('item', 'آیتم')}")
+                if update.get("reason"):
+                    roadmap_lines.append(f"   - {update.get('reason')}")
+            project.roadmap_content = "\n".join(roadmap_lines)
+            new_roadmap = project.roadmap_content
+            logger.info(f"Generated roadmap from updates: {len(roadmap_updates)} items")
+        else:
+            # 🆕 Fallback نهایی: ساخت نقشه راه از وضعیت فعلی پروژه
+            roadmap_lines = [f"# نقشه راه پروژه {project.name}\n"]
+            roadmap_lines.append(f"*تولید خودکار: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}*\n")
+            roadmap_lines.append("\n## وضعیت فعلی\n")
+
+            # فیلدهای تایید شده
+            approved_count = len([f for f in existing_fields if f.get("engineering_approval", {}).get("approved")])
+            executed_count = len(executed_fields)
+            pending_count = len([f for f in existing_fields if not f.get("archived") and not f.get("engineering_approval")])
+
+            if approved_count > 0:
+                roadmap_lines.append(f"[x] ✅ {approved_count} فیلد تایید شده توسط گزارش مهندسی")
+            if executed_count > 0:
+                roadmap_lines.append(f"[x] ✅ {executed_count} فیلد اجرا شده")
+            if pending_count > 0:
+                roadmap_lines.append(f"[ ] {pending_count} فیلد در انتظار بررسی")
+
+            # ایرادات
+            health_issues = []
+            try:
+                if project.issues_found:
+                    health_issues = json.loads(project.issues_found)
+            except:
+                pass
+            active_issues = [i for i in health_issues if not i.get("archived")]
+            if active_issues:
+                roadmap_lines.append(f"[ ] {len(active_issues)} ایراد سلامت نیاز به رسیدگی")
+
+            roadmap_lines.append("\n## مراحل بعدی\n")
+            roadmap_lines.append("[ ] اجرای فیلدهای تایید شده")
+            roadmap_lines.append("[ ] رفع ایرادات سلامت شناسایی شده")
+            roadmap_lines.append("[ ] اجرای مجدد گزارش مهندسی پس از تغییرات")
+
+            project.roadmap_content = "\n".join(roadmap_lines)
+            new_roadmap = project.roadmap_content
+            logger.info(f"Generated fallback roadmap from project state")
 
     # به‌روزرسانی حالت ایده‌آل
     ideal_state = result_data.get("ideal_state", {})
@@ -3769,12 +3821,14 @@ async def engineering_run_all_steps(
     results["depth"] = depth
 
     # 🆕 تنظیمات بر اساس عمق تحلیل
+    import asyncio
     depth_settings = {
-        "quick": {"iterations": 1, "skip_steps": [2, 3], "max_tokens": 2048},
-        "normal": {"iterations": 1, "skip_steps": [], "max_tokens": 4096},
-        "deep": {"iterations": 2, "skip_steps": [], "max_tokens": 8192},
+        "quick": {"iterations": 1, "skip_steps": [2, 3], "max_tokens": 2048, "pause_seconds": 1},
+        "normal": {"iterations": 1, "skip_steps": [], "max_tokens": 4096, "pause_seconds": 2},
+        "deep": {"iterations": 3, "skip_steps": [], "max_tokens": 8192, "pause_seconds": 8},  # 🆕 3 تکرار با توقف 8 ثانیه
     }
     settings = depth_settings.get(depth, depth_settings["normal"])
+    pause_seconds = settings.get("pause_seconds", 2)
 
     # 🆕 اگر چند مدل انتخاب شده، از هر کدام برای یک مرحله استفاده کن
     # یا از همه برای اعتبارسنجی متقابل
@@ -3785,8 +3839,13 @@ async def engineering_run_all_steps(
         4: active_selected[-1] if active_selected else primary_model,
     }
 
+    # 🆕 در حالت deep، تحلیل چندمرحله‌ای واقعی انجام می‌شود
+    total_steps_done = 0
+
     # 🆕 اجرای مراحل بر اساس عمق تحلیل
     for iteration in range(settings["iterations"]):
+        iteration_results = {}
+
         if settings["iterations"] > 1:
             log_detailed_operation(
                 db, project_id, None,
@@ -3794,20 +3853,37 @@ async def engineering_run_all_steps(
                 f"شروع تکرار {iteration + 1} از {settings['iterations']} (حالت: {depth})",
                 status="in_progress"
             )
+            db.commit()
+            # 🆕 توقف واقعی بین تکرارها
+            await asyncio.sleep(pause_seconds)
 
         # مرحله ۱
         if 1 not in settings["skip_steps"]:
             try:
+                log_detailed_operation(db, project_id, None, "step1_progress", f"شروع مرحله ۱ - تکرار {iteration+1}", status="in_progress")
+                db.commit()
                 step1 = await engineering_step1_validate_fields(project_id, model_for_step[1], depth, db)
+                iteration_results["step1"] = step1
                 results["step1"] = step1
+                total_steps_done += 1
+                # 🆕 توقف بعد از هر مرحله در حالت deep
+                if depth == "deep":
+                    await asyncio.sleep(pause_seconds // 2)
             except Exception as e:
                 results["step1"] = {"success": False, "error": str(e)}
 
         # مرحله ۲
         if 2 not in settings["skip_steps"]:
             try:
+                log_detailed_operation(db, project_id, None, "step2_progress", f"شروع مرحله ۲ - تکرار {iteration+1}", status="in_progress")
+                db.commit()
                 step2 = await engineering_step2_health_to_fields(project_id, model_for_step[2], depth, db)
+                iteration_results["step2"] = step2
                 results["step2"] = step2
+                total_steps_done += 1
+                # 🆕 توقف بعد از هر مرحله در حالت deep
+                if depth == "deep":
+                    await asyncio.sleep(pause_seconds // 2)
             except Exception as e:
                 results["step2"] = {"success": False, "error": str(e)}
         else:
@@ -3816,25 +3892,46 @@ async def engineering_run_all_steps(
         # مرحله ۳ - 🆕 ارزیابی با امتیازدهی دقیق
         if 3 not in settings["skip_steps"]:
             try:
+                log_detailed_operation(db, project_id, None, "step3_progress", f"شروع مرحله ۳ - تکرار {iteration+1}", status="in_progress")
+                db.commit()
                 step3 = await engineering_step3_evaluate_models(project_id, model_for_step[3], depth, db)
+                iteration_results["step3"] = step3
                 results["step3"] = step3
+                total_steps_done += 1
+                # 🆕 توقف بعد از هر مرحله در حالت deep
+                if depth == "deep":
+                    await asyncio.sleep(pause_seconds // 2)
             except Exception as e:
                 results["step3"] = {"success": False, "error": str(e)}
         else:
             results["step3"] = {"success": True, "skipped": True, "message": "رد شده در حالت quick"}
 
-        # 🆕 در حالت deep، بین تکرارها pause طولانی‌تر کن
+        # 🆕 در حالت deep، بین تکرارها توقف طولانی‌تر کن
         if iteration < settings["iterations"] - 1:
-            import asyncio
-            wait_time = {"quick": 1, "normal": 2, "deep": 5}
-            await asyncio.sleep(wait_time.get(depth, 2))
+            log_detailed_operation(
+                db, project_id, None,
+                "engineering_pause",
+                f"تکرار {iteration + 1} تکمیل شد - آماده‌سازی تکرار بعدی...",
+                status="completed"
+            )
+            db.commit()
+            await asyncio.sleep(pause_seconds)
 
-    # مرحله ۴ (همیشه اجرا می‌شود)
+    # مرحله ۴ (همیشه اجرا می‌شود) - 🆕 با توقف قبل از آن در حالت deep
+    if depth == "deep":
+        log_detailed_operation(db, project_id, None, "step4_prep", "آماده‌سازی مرحله نهایی نقشه راه...", status="in_progress")
+        db.commit()
+        await asyncio.sleep(pause_seconds // 2)
+
     try:
         step4 = await engineering_step4_update_roadmap(project_id, model_for_step[4], db)
         results["step4"] = step4
+        total_steps_done += 1
     except Exception as e:
         results["step4"] = {"success": False, "error": str(e)}
+
+    results["total_steps_executed"] = total_steps_done
+    results["iterations_completed"] = settings["iterations"]
 
     all_success = all(results.get(f"step{i}", {}).get("success", False) for i in range(1, 5))
 
