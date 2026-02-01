@@ -255,6 +255,23 @@ def migrate_db():
                 cursor.execute("ALTER TABLE project_files ADD COLUMN storage_path VARCHAR(500)")
                 logger.info("Added 'storage_path' column to project_files table")
 
+        # Migration برای جدول render_logs
+        if "render_logs" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
+            existing_cols = get_columns("render_logs")
+
+            # اضافه کردن ستون‌های انتقال به ایرادات
+            if "transferred_to_issues" not in existing_cols:
+                cursor.execute("ALTER TABLE render_logs ADD COLUMN transferred_to_issues BOOLEAN DEFAULT 0")
+                logger.info("Added 'transferred_to_issues' column to render_logs table")
+
+            if "transferred_at" not in existing_cols:
+                cursor.execute("ALTER TABLE render_logs ADD COLUMN transferred_at DATETIME")
+                logger.info("Added 'transferred_at' column to render_logs table")
+
+            if "transferred_to_project" not in existing_cols:
+                cursor.execute("ALTER TABLE render_logs ADD COLUMN transferred_to_project VARCHAR(100)")
+                logger.info("Added 'transferred_to_project' column to render_logs table")
+
         conn.commit()
         logger.info("Database migration completed")
 

@@ -162,9 +162,11 @@ async def update_service_settings(
 @router.get("/logs")
 async def get_logs(
     service_id: Optional[str] = None,
+    service_ids: Optional[List[str]] = Query(None),
     level: Optional[str] = None,
     search: Optional[str] = None,
     minutes: int = 30,
+    hours: Optional[int] = None,
     limit: int = 200,
     offset: int = 0,
     db: Session = Depends(get_db)
@@ -173,15 +175,18 @@ async def get_logs(
     دریافت لاگ‌ها از دیتابیس
 
     Args:
-        service_id: فیلتر بر اساس سرویس
+        service_id: فیلتر بر اساس سرویس (تک سرویس)
+        service_ids: فیلتر بر اساس چند سرویس
         level: فیلتر سطح (info,warn,error,debug)
         search: جستجو در متن
         minutes: لاگ‌های X دقیقه اخیر
+        hours: لاگ‌های X ساعت اخیر (اولویت بالاتر)
         limit: تعداد
         offset: صفحه‌بندی
     """
     slog.api_request("GET", "/render/logs",
         service_id=service_id,
+        service_ids=service_ids,
         log_level=level,
         minutes=minutes
     )
@@ -190,11 +195,16 @@ async def get_logs(
     query = db.query(RenderLog)
 
     # فیلتر زمانی
-    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    if hours:
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+    else:
+        cutoff = datetime.utcnow() - timedelta(minutes=minutes)
     query = query.filter(RenderLog.timestamp >= cutoff)
 
-    # فیلتر سرویس
-    if service_id:
+    # فیلتر سرویس - پشتیبانی از چند سرویس
+    if service_ids and len(service_ids) > 0:
+        query = query.filter(RenderLog.service_id.in_(service_ids))
+    elif service_id:
         query = query.filter(RenderLog.service_id == service_id)
 
     # فیلتر سطح
@@ -516,6 +526,128 @@ async def update_log_settings(
 
 
 # =====================================
+# Download Endpoint
+# =====================================
+
+from fastapi.responses import Response
+import csv
+import io
+
+@router.get("/logs/download")
+async def download_logs(
+    service_ids: Optional[List[str]] = Query(None),
+    hours: Optional[int] = None,
+    limit: Optional[int] = None,
+    level: Optional[str] = None,
+    after_deploy: bool = False,
+    format: str = "json",
+    db: Session = Depends(get_db)
+):
+    """
+    دانلود لاگ‌ها با فیلترهای مختلف
+
+    Args:
+        service_ids: لیست سرویس‌ها
+        hours: بازه زمانی (ساعت)
+        limit: تعداد لاگ
+        level: سطح لاگ (error, warn, info)
+        after_deploy: فقط لاگ‌های بعد از آخرین دیپلوی
+        format: فرمت خروجی (json, txt, csv)
+    """
+    slog.api_request("GET", "/render/logs/download",
+        service_ids=service_ids,
+        hours=hours,
+        limit=limit,
+        level=level,
+        format=format
+    )
+
+    query = db.query(RenderLog)
+
+    # فیلتر سرویس
+    if service_ids and len(service_ids) > 0:
+        query = query.filter(RenderLog.service_id.in_(service_ids))
+
+    # فیلتر زمانی
+    if hours:
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        query = query.filter(RenderLog.timestamp >= cutoff)
+
+    # فیلتر سطح
+    if level:
+        if level == "error":
+            query = query.filter(RenderLog.level == "error")
+        elif level == "warn":
+            query = query.filter(RenderLog.level.in_(["error", "warn"]))
+
+    # فیلتر بعد از آخرین دیپلوی
+    if after_deploy:
+        # پیدا کردن آخرین دیپلوی موفق
+        last_deploy = db.query(RenderLog).filter(
+            RenderLog.message.ilike("%deploy%success%")
+        ).order_by(desc(RenderLog.timestamp)).first()
+        if last_deploy:
+            query = query.filter(RenderLog.timestamp >= last_deploy.timestamp)
+
+    # مرتب‌سازی
+    query = query.order_by(RenderLog.timestamp)
+
+    # محدود کردن تعداد
+    if limit:
+        query = query.limit(limit)
+    else:
+        query = query.limit(10000)  # حداکثر 10000 لاگ
+
+    logs = query.all()
+
+    # تبدیل به فرمت مناسب
+    if format == "json":
+        import json
+        content = json.dumps([
+            {
+                "timestamp": log.timestamp.isoformat(),
+                "level": log.level,
+                "service": log.service_name or log.service_id,
+                "message": log.message,
+                "deploy_id": log.deploy_id
+            }
+            for log in logs
+        ], ensure_ascii=False, indent=2)
+        media_type = "application/json"
+
+    elif format == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["timestamp", "level", "service", "message", "deploy_id"])
+        for log in logs:
+            writer.writerow([
+                log.timestamp.isoformat(),
+                log.level,
+                log.service_name or log.service_id,
+                log.message,
+                log.deploy_id or ""
+            ])
+        content = output.getvalue()
+        media_type = "text/csv"
+
+    else:  # txt
+        lines = []
+        for log in logs:
+            ts = log.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            lines.append(f"[{ts}] [{log.level.upper()}] [{log.service_name or log.service_id}] {log.message}")
+        content = "\n".join(lines)
+        media_type = "text/plain"
+
+    return Response(
+        content=content.encode("utf-8"),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="render-logs.{format}"'
+        }
+    )
+
+
+# =====================================
 # Cleanup & Archive Endpoints
 # =====================================
 
@@ -545,12 +677,16 @@ async def cleanup_old_logs(
 @router.get("/archives")
 async def get_archives(
     service_id: Optional[str] = None,
+    service_ids: Optional[List[str]] = Query(None),
     db: Session = Depends(get_db)
 ):
     """دریافت لیست آرشیوها"""
     query = db.query(RenderLogArchive)
 
-    if service_id:
+    # پشتیبانی از چند سرویس
+    if service_ids and len(service_ids) > 0:
+        query = query.filter(RenderLogArchive.service_id.in_(service_ids))
+    elif service_id:
         query = query.filter(RenderLogArchive.service_id == service_id)
 
     archives = query.order_by(desc(RenderLogArchive.archived_at)).limit(100).all()
@@ -599,6 +735,76 @@ async def get_archive_content(
         "start_time": archive.start_time.isoformat(),
         "end_time": archive.end_time.isoformat(),
         "logs": logs
+    }
+
+
+# =====================================
+# Log to Issues Transfer
+# =====================================
+
+from ...services.log_to_issues_service import get_log_to_issues_service
+
+@router.post("/transfer-errors")
+async def transfer_errors_to_issues(
+    service_ids: Optional[List[str]] = Query(None),
+    hours: int = 24,
+    db: Session = Depends(get_db)
+):
+    """
+    انتقال لاگ‌های خطا به تب ایرادات پروژه‌ها
+
+    - فقط پروژه‌های ایمپورت شده
+    - تحلیل AI برای توضیح خطا
+    - جستجوی ایرادات مشابه و ادغام
+    """
+    slog.api_request("POST", "/render/transfer-errors",
+        service_ids=service_ids,
+        hours=hours
+    )
+
+    service = get_log_to_issues_service()
+    result = await service.transfer_error_logs(
+        service_ids=service_ids,
+        hours=hours,
+        auto_mode=False,
+        db=db
+    )
+
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=500,
+            detail=result.get("error", "خطا در انتقال لاگ‌ها")
+        )
+
+    return result
+
+
+@router.get("/transfer-status")
+async def get_transfer_status(
+    db: Session = Depends(get_db)
+):
+    """
+    وضعیت انتقال لاگ‌های خطا
+
+    - تعداد لاگ‌های منتقل شده
+    - تعداد لاگ‌های در انتظار
+    """
+    # لاگ‌های خطای منتقل نشده
+    pending_count = db.query(RenderLog).filter(
+        RenderLog.level.in_(["error", "fatal", "critical"]),
+        RenderLog.transferred_to_issues == False
+    ).count()
+
+    # لاگ‌های منتقل شده
+    transferred_count = db.query(RenderLog).filter(
+        RenderLog.transferred_to_issues == True
+    ).count()
+
+    return {
+        "success": True,
+        "pending_errors": pending_count,
+        "transferred_errors": transferred_count,
+        "can_transfer": pending_count > 0
     }
 
 

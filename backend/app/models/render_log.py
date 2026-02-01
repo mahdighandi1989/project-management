@@ -45,6 +45,11 @@ class RenderLog(Base):
     # زمان دریافت و ذخیره
     fetched_at = Column(DateTime, server_default=func.now())
 
+    # انتقال به ایرادات
+    transferred_to_issues = Column(Boolean, default=False, index=True)  # آیا به تب ایرادات منتقل شده
+    transferred_at = Column(DateTime)  # زمان انتقال
+    transferred_to_project = Column(String(100))  # ID پروژه مقصد
+
     # ایندکس‌های ترکیبی برای جستجوی سریع
     __table_args__ = (
         Index('ix_render_logs_service_timestamp', 'service_id', 'timestamp'),
