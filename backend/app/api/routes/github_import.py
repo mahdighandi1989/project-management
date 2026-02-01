@@ -372,3 +372,249 @@ async def parse_github_url(url: str):
         "full_name": f"{parsed['owner']}/{parsed['repo']}",
         "url": f"https://github.com/{parsed['owner']}/{parsed['repo']}"
     }
+
+
+# ===========================================
+# Pull Request Endpoints
+# ===========================================
+
+class CreatePRRequest(BaseModel):
+    """درخواست ایجاد Pull Request"""
+    github_path: str  # owner/repo یا full URL
+    branch_name: str
+    title: str
+    description: str
+    files: List[dict]  # [{path: str, content: str}]
+    token: Optional[str] = None
+    use_global_token: bool = True
+
+
+class PushIssuesRequest(BaseModel):
+    """درخواست push ایرادات به GitHub Issues"""
+    github_path: str
+    issues: List[dict]  # لیست ایرادات
+    token: Optional[str] = None
+    use_global_token: bool = True
+
+
+@router.post("/pr/create")
+async def create_pull_request(request: CreatePRRequest):
+    """
+    ایجاد Pull Request با تغییرات
+
+    1. ایجاد branch جدید
+    2. Commit فایل‌ها
+    3. ایجاد PR
+    """
+    from ...services.github_pr_service import get_github_pr_service
+
+    slog.api_request("POST", "/github/pr/create", branch=request.branch_name)
+
+    token = get_effective_token(request.token, request.use_global_token)
+    if not token:
+        return {
+            "success": False,
+            "error": "توکن GitHub مورد نیاز است"
+        }
+
+    service = get_github_pr_service()
+    result = await service.create_pr_with_changes(
+        github_path=request.github_path,
+        branch_name=request.branch_name,
+        title=request.title,
+        description=request.description,
+        files=request.files,
+        token=token
+    )
+
+    return result
+
+
+@router.post("/issues/push")
+async def push_issues_to_github(request: PushIssuesRequest):
+    """
+    Push ایرادات محلی به GitHub Issues
+
+    هر ایراد یک Issue جدید در GitHub ایجاد می‌کند
+    """
+    from ...services.github_pr_service import get_github_pr_service
+
+    slog.api_request("POST", "/github/issues/push",
+        issues_count=len(request.issues)
+    )
+
+    token = get_effective_token(request.token, request.use_global_token)
+    if not token:
+        return {
+            "success": False,
+            "error": "توکن GitHub مورد نیاز است"
+        }
+
+    service = get_github_pr_service()
+    result = await service.push_issues_to_github(
+        github_path=request.github_path,
+        issues=request.issues,
+        token=token
+    )
+
+    return result
+
+
+@router.get("/issues/{owner}/{repo}")
+async def get_github_issues(
+    owner: str,
+    repo: str,
+    state: str = "open",
+    labels: Optional[str] = None,
+    use_global_token: bool = True
+):
+    """
+    دریافت Issues یک repository
+    """
+    from ...services.github_pr_service import get_github_pr_service
+
+    token = get_effective_token(None, use_global_token)
+
+    service = get_github_pr_service()
+    result = await service.get_repo_issues(
+        owner=owner,
+        repo=repo,
+        state=state,
+        labels=labels,
+        token=token if token else None
+    )
+
+    return result
+
+
+@router.post("/pr/from-project/{project_id}")
+async def create_pr_from_project(
+    project_id: str,
+    branch_name: str,
+    title: str,
+    description: str,
+    file_paths: Optional[List[str]] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    ایجاد PR از فایل‌های پروژه
+
+    اگر file_paths مشخص نشده، همه فایل‌های پروژه را شامل می‌شود
+    """
+    from ...services.github_pr_service import get_github_pr_service
+
+    slog.api_request("POST", f"/github/pr/from-project/{project_id}")
+
+    # دریافت پروژه
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        return {"success": False, "error": "پروژه یافت نشد"}
+
+    if not project.github_path:
+        return {"success": False, "error": "پروژه GitHub path ندارد"}
+
+    # دریافت فایل‌ها
+    query = db.query(ProjectFile).filter(ProjectFile.project_id == project_id)
+    if file_paths:
+        query = query.filter(ProjectFile.file_path.in_(file_paths))
+
+    files = query.all()
+    if not files:
+        return {"success": False, "error": "فایلی یافت نشد"}
+
+    # آماده‌سازی فایل‌ها
+    files_data = [
+        {"path": f.file_path, "content": f.content or ""}
+        for f in files
+        if f.content
+    ]
+
+    token = get_effective_token(None, True)
+    if not token:
+        return {"success": False, "error": "توکن GitHub تنظیم نشده"}
+
+    service = get_github_pr_service()
+    result = await service.create_pr_with_changes(
+        github_path=project.github_path,
+        branch_name=branch_name,
+        title=title,
+        description=description,
+        files=files_data,
+        token=token
+    )
+
+    return result
+
+
+@router.post("/issues/from-project/{project_id}")
+async def push_project_issues_to_github(
+    project_id: str,
+    issue_ids: Optional[List[str]] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Push ایرادات پروژه به GitHub Issues
+
+    اگر issue_ids مشخص نشده، همه ایرادات را push می‌کند
+    """
+    from ...services.github_pr_service import get_github_pr_service
+    import json
+
+    slog.api_request("POST", f"/github/issues/from-project/{project_id}")
+
+    # دریافت پروژه
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        return {"success": False, "error": "پروژه یافت نشد"}
+
+    if not project.github_path:
+        return {"success": False, "error": "پروژه GitHub path ندارد"}
+
+    # دریافت ایرادات
+    issues = []
+    if project.issues_found:
+        try:
+            all_issues = json.loads(project.issues_found)
+            if issue_ids:
+                issues = [i for i in all_issues if i.get("id") in issue_ids]
+            else:
+                issues = all_issues
+        except json.JSONDecodeError:
+            return {"success": False, "error": "فرمت ایرادات نامعتبر"}
+
+    if not issues:
+        return {"success": False, "error": "ایرادی یافت نشد"}
+
+    token = get_effective_token(None, True)
+    if not token:
+        return {"success": False, "error": "توکن GitHub تنظیم نشده"}
+
+    service = get_github_pr_service()
+    result = await service.push_issues_to_github(
+        github_path=project.github_path,
+        issues=issues,
+        token=token
+    )
+
+    # به‌روزرسانی ایرادات با شناسه GitHub
+    if result.get("success") and result.get("issues"):
+        try:
+            all_issues = json.loads(project.issues_found)
+            github_map = {i["local_id"]: i for i in result.get("issues", [])}
+
+            for issue in all_issues:
+                if issue.get("id") in github_map:
+                    issue["github_issue_number"] = github_map[issue["id"]].get("github_issue")
+                    issue["github_issue_url"] = github_map[issue["id"]].get("url")
+                    issue["pushed_to_github"] = True
+                    issue["pushed_at"] = datetime.utcnow().isoformat()
+
+            project.issues_found = json.dumps(all_issues, ensure_ascii=False)
+            db.commit()
+        except Exception as e:
+            slog.warning("Failed to update issues with GitHub info", exception=e)
+
+    return result
+
+
+from datetime import datetime

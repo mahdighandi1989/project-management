@@ -70,10 +70,16 @@ async def lifespan(app: FastAPI):
     # بارگذاری داده‌ها از GitHub (مهم برای persistence)
     await initialize_persistent_data()
 
+    # 🆕 Start Background Scheduler
+    await start_background_scheduler()
+
     yield
 
     # Shutdown
     logger.info("👋 Shutting down...")
+
+    # 🆕 Stop Background Scheduler
+    stop_background_scheduler()
 
     # Stop all running project containers
     try:
@@ -275,6 +281,28 @@ async def load_workflows_from_github(github_storage, orchestrator):
 
     except Exception as e:
         logger.error(f"Error loading workflows from GitHub: {e}")
+
+
+async def start_background_scheduler():
+    """شروع scheduler برای کارهای پس‌زمینه"""
+    try:
+        from .services.background_scheduler import get_background_scheduler
+        scheduler = get_background_scheduler()
+        scheduler.start()
+        logger.info("🕐 Background scheduler started")
+    except Exception as e:
+        logger.error(f"❌ Failed to start background scheduler: {e}")
+
+
+def stop_background_scheduler():
+    """توقف scheduler"""
+    try:
+        from .services.background_scheduler import get_background_scheduler
+        scheduler = get_background_scheduler()
+        scheduler.stop()
+        logger.info("🕐 Background scheduler stopped")
+    except Exception as e:
+        logger.error(f"❌ Error stopping background scheduler: {e}")
 
 
 async def initialize_runtime_services(github_storage):
