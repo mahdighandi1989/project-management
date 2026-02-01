@@ -72,10 +72,28 @@ export default function RenderLogsPanel() {
   });
 
   // Filters
-  const [selectedService, setSelectedService] = useState<string>('all');
+  const [selectedServices, setSelectedServices] = useState<string[]>([]); // Multi-select services
   const [selectedLevels, setSelectedLevels] = useState<string[]>(['info', 'warn', 'error']);
   const [searchTerm, setSearchTerm] = useState('');
   const [timeRange, setTimeRange] = useState(30); // minutes
+
+  // Download modal
+  const [showDownloadModal, setShowDownloadModal] = useState(false);
+  const [downloadOptions, setDownloadOptions] = useState({
+    type: 'time_range' as 'time_range' | 'count' | 'level' | 'after_deploy',
+    timeRangeHours: 24,
+    logCount: 1000,
+    logLevel: 'error',
+    format: 'json' as 'json' | 'txt' | 'csv',
+  });
+
+  // Transfer to issues
+  const [transferStatus, setTransferStatus] = useState<{
+    pending_errors: number;
+    transferred_errors: number;
+    can_transfer: boolean;
+  } | null>(null);
+  const [transferring, setTransferring] = useState(false);
 
   // Archive State
   const [archives, setArchives] = useState<LogArchive[]>([]);
@@ -140,6 +158,7 @@ export default function RenderLogsPanel() {
         loadServices(),
         loadSettings(),
         loadStats(),
+        loadTransferStatus(),
       ]);
       await fetchNewLogs();
       await loadLogs();
@@ -230,9 +249,9 @@ export default function RenderLogsPanel() {
   const loadArchives = async () => {
     try {
       const params = new URLSearchParams();
-      if (selectedService !== 'all') {
-        params.append('service_id', selectedService);
-      }
+      selectedServices.forEach(sid => {
+        params.append('service_ids', sid);
+      });
       const res = await fetch(`${API_BASE}/api/render/archives?${params}`);
       if (res.ok) {
         const data = await res.json();
@@ -307,9 +326,12 @@ export default function RenderLogsPanel() {
         limit: '500',
         level: selectedLevels.join(','),
       });
-      if (selectedService !== 'all') {
-        params.append('service_id', selectedService);
-      }
+
+      // Add multiple service IDs
+      selectedServices.forEach(sid => {
+        params.append('service_ids', sid);
+      });
+
       if (searchTerm) {
         params.append('search', searchTerm);
       }
@@ -317,9 +339,11 @@ export default function RenderLogsPanel() {
       const res = await fetch(`${API_BASE}/api/render/logs?${params}`);
       if (res.ok) {
         const data = await res.json();
-        setLogs(data.logs || []);
-        if (data.logs?.length > 0) {
-          lastTimestampRef.current = data.logs[0].timestamp;
+        // Reverse to show oldest first, newest at bottom
+        const reversedLogs = (data.logs || []).reverse();
+        setLogs(reversedLogs);
+        if (reversedLogs.length > 0) {
+          lastTimestampRef.current = reversedLogs[reversedLogs.length - 1].timestamp;
         }
       }
     } catch (e) {
@@ -331,8 +355,8 @@ export default function RenderLogsPanel() {
     setFetching(true);
     try {
       const params: Record<string, string> = { limit: '100' };
-      if (selectedService !== 'all') {
-        params.service_id = selectedService;
+      if (selectedServices.length === 1) {
+        params.service_id = selectedServices[0];
       }
 
       const res = await fetch(`${API_BASE}/api/render/logs/fetch`, {
@@ -345,8 +369,8 @@ export default function RenderLogsPanel() {
         const data = await res.json();
         if (data.saved > 0) {
           showSuccess(`${data.saved} لاگ جدید ذخیره شد`);
-          await loadLogs();
         }
+        await loadLogs();
       }
     } catch (e) {
       console.error('Error fetching new logs:', e);
@@ -355,31 +379,154 @@ export default function RenderLogsPanel() {
     }
   };
 
-  const pollForNewLogs = useCallback(async () => {
-    if (!lastTimestampRef.current) return;
+  const toggleService = (serviceId: string) => {
+    setSelectedServices(prev =>
+      prev.includes(serviceId)
+        ? prev.filter(id => id !== serviceId)
+        : [...prev, serviceId]
+    );
+  };
 
+  const selectAllServices = () => {
+    setSelectedServices(services.map(s => s.id));
+  };
+
+  const clearServiceSelection = () => {
+    setSelectedServices([]);
+  };
+
+  const downloadLogs = async () => {
     try {
-      const params = new URLSearchParams({
-        since_timestamp: lastTimestampRef.current,
-        levels: selectedLevels.join(','),
-        limit: '50',
+      const params = new URLSearchParams();
+
+      // Add selected services
+      selectedServices.forEach(sid => {
+        params.append('service_ids', sid);
       });
-      if (selectedService !== 'all') {
-        params.append('service_id', selectedService);
+
+      switch (downloadOptions.type) {
+        case 'time_range':
+          params.append('hours', downloadOptions.timeRangeHours.toString());
+          break;
+        case 'count':
+          params.append('limit', downloadOptions.logCount.toString());
+          break;
+        case 'level':
+          params.append('level', downloadOptions.logLevel);
+          break;
+        case 'after_deploy':
+          params.append('after_deploy', 'true');
+          break;
       }
 
-      const res = await fetch(`${API_BASE}/api/render/logs/live?${params}`);
+      params.append('format', downloadOptions.format);
+
+      const res = await fetch(`${API_BASE}/api/render/logs/download?${params}`);
+      if (res.ok) {
+        const contentType = res.headers.get('content-type');
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `render-logs-${new Date().toISOString().slice(0, 10)}.${downloadOptions.format}`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+        setShowDownloadModal(false);
+        showSuccess('لاگ‌ها دانلود شد');
+      } else {
+        showError('خطا در دانلود لاگ‌ها');
+      }
+    } catch (e) {
+      console.error('Error downloading logs:', e);
+      showError('خطا در ارتباط با سرور');
+    }
+  };
+
+  const loadTransferStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/render/transfer-status`);
       if (res.ok) {
         const data = await res.json();
-        if (data.logs?.length > 0) {
-          setLogs(prev => [...prev, ...data.logs]);
-          lastTimestampRef.current = data.latest_timestamp;
+        setTransferStatus(data);
+      }
+    } catch (e) {
+      console.error('Error loading transfer status:', e);
+    }
+  };
+
+  const transferErrorsToIssues = async () => {
+    setTransferring(true);
+    try {
+      const params = new URLSearchParams();
+      selectedServices.forEach(sid => {
+        params.append('service_ids', sid);
+      });
+      params.append('hours', '24');
+
+      const res = await fetch(`${API_BASE}/api/render/transfer-errors?${params}`, {
+        method: 'POST',
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        const msg = `${data.transferred} خطا منتقل شد، ${data.merged} ادغام شد`;
+        showSuccess(msg);
+        await loadTransferStatus();
+      } else {
+        const err = await res.json();
+        showError(err.detail || 'خطا در انتقال');
+      }
+    } catch (e) {
+      console.error('Error transferring errors:', e);
+      showError('خطا در ارتباط با سرور');
+    } finally {
+      setTransferring(false);
+    }
+  };
+
+  const pollForNewLogs = useCallback(async () => {
+    try {
+      // First, fetch new logs from Render API and save to DB
+      const fetchParams: Record<string, string> = { limit: '50' };
+      if (selectedServices.length === 1) {
+        fetchParams.service_id = selectedServices[0];
+      }
+
+      await fetch(`${API_BASE}/api/render/logs/fetch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(fetchParams),
+      });
+
+      // Then, get the latest logs from database
+      const params = new URLSearchParams({
+        minutes: timeRange.toString(),
+        limit: '500',
+        level: selectedLevels.join(','),
+      });
+
+      // Add multiple service IDs
+      selectedServices.forEach(sid => {
+        params.append('service_ids', sid);
+      });
+
+      const res = await fetch(`${API_BASE}/api/render/logs?${params}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.logs) {
+          // Reverse to show oldest first, newest at bottom
+          setLogs(data.logs.reverse());
+          if (data.logs.length > 0) {
+            lastTimestampRef.current = data.logs[data.logs.length - 1].timestamp;
+          }
         }
       }
     } catch (e) {
       console.error('Error polling logs:', e);
     }
-  }, [selectedService, selectedLevels]);
+  }, [selectedServices, selectedLevels, timeRange]);
 
   const startPolling = () => {
     if (pollingIntervalRef.current) return;
@@ -503,101 +650,141 @@ export default function RenderLogsPanel() {
       {activeTab === 'live' && (
         <>
           {/* فیلترها */}
-          <div className="flex flex-wrap gap-3 items-center bg-gray-50 dark:bg-gray-800 p-4 rounded-lg">
-            {/* انتخاب سرویس */}
-            <div className="flex items-center gap-2">
-              <label className="text-sm font-medium">سرویس:</label>
-              <select
-                value={selectedService}
-                onChange={(e) => {
-                  setSelectedService(e.target.value);
-                  setTimeout(loadLogs, 100);
-                }}
-                className="p-2 border rounded dark:bg-gray-700"
-              >
-                <option value="all">همه سرویس‌ها</option>
+          <div className="space-y-3 bg-gray-50 dark:bg-gray-800 p-4 rounded-lg">
+            {/* ردیف اول: انتخاب سرویس‌ها */}
+            <div className="flex flex-wrap items-start gap-3">
+              <label className="text-sm font-medium pt-2">سرویس‌ها:</label>
+              <div className="flex flex-wrap gap-2 flex-1">
                 {services.map(s => (
-                  <option key={s.id} value={s.id}>{s.name}</option>
+                  <button
+                    key={s.id}
+                    onClick={() => {
+                      toggleService(s.id);
+                      setTimeout(loadLogs, 100);
+                    }}
+                    className={`px-3 py-1 rounded text-sm border transition ${
+                      selectedServices.includes(s.id)
+                        ? 'bg-blue-500 text-white border-blue-600'
+                        : 'bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 hover:bg-gray-100'
+                    }`}
+                  >
+                    {s.name}
+                  </button>
                 ))}
-              </select>
-              <button
-                onClick={refreshServices}
-                disabled={fetching}
-                className="p-2 text-blue-500 hover:bg-blue-50 rounded"
-                title="بروزرسانی سرویس‌ها"
-              >
-                🔄
-              </button>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => { selectAllServices(); setTimeout(loadLogs, 100); }}
+                  className="px-3 py-1 text-xs bg-gray-200 dark:bg-gray-600 rounded hover:bg-gray-300"
+                >
+                  انتخاب همه
+                </button>
+                <button
+                  onClick={() => { clearServiceSelection(); setTimeout(loadLogs, 100); }}
+                  className="px-3 py-1 text-xs bg-gray-200 dark:bg-gray-600 rounded hover:bg-gray-300"
+                >
+                  پاک کردن
+                </button>
+                <button
+                  onClick={refreshServices}
+                  disabled={fetching}
+                  className="px-3 py-1 text-xs text-blue-500 hover:bg-blue-50 rounded"
+                  title="بروزرسانی لیست سرویس‌ها"
+                >
+                  🔄
+                </button>
+              </div>
             </div>
 
-            {/* سطوح لاگ */}
-            <div className="flex items-center gap-2">
-              <label className="text-sm font-medium">سطح:</label>
-              {['info', 'warn', 'error', 'debug'].map(level => (
+            {/* ردیف دوم: سطوح، بازه، جستجو و دکمه‌ها */}
+            <div className="flex flex-wrap gap-3 items-center">
+              {/* سطوح لاگ */}
+              <div className="flex items-center gap-2">
+                <label className="text-sm font-medium">سطح:</label>
+                {['info', 'warn', 'error', 'debug'].map(level => (
+                  <button
+                    key={level}
+                    onClick={() => toggleLevel(level)}
+                    className={`px-3 py-1 rounded text-sm ${
+                      selectedLevels.includes(level)
+                        ? getLevelColor(level)
+                        : 'bg-gray-200 dark:bg-gray-600 opacity-50'
+                    }`}
+                  >
+                    {level}
+                  </button>
+                ))}
+              </div>
+
+              {/* بازه زمانی */}
+              <div className="flex items-center gap-2">
+                <label className="text-sm font-medium">بازه:</label>
+                <select
+                  value={timeRange}
+                  onChange={(e) => {
+                    setTimeRange(parseInt(e.target.value));
+                    setTimeout(loadLogs, 100);
+                  }}
+                  className="p-2 border rounded dark:bg-gray-700"
+                >
+                  <option value={10}>10 دقیقه</option>
+                  <option value={30}>30 دقیقه</option>
+                  <option value={60}>1 ساعت</option>
+                  <option value={180}>3 ساعت</option>
+                  <option value={720}>12 ساعت</option>
+                  <option value={1440}>24 ساعت</option>
+                </select>
+              </div>
+
+              {/* جستجو */}
+              <div className="flex-1 min-w-[200px]">
+                <input
+                  type="text"
+                  placeholder="جستجو در لاگ‌ها..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="w-full p-2 border rounded dark:bg-gray-700"
+                />
+              </div>
+
+              {/* دکمه‌های کنترل */}
+              <div className="flex gap-2">
                 <button
-                  key={level}
-                  onClick={() => toggleLevel(level)}
-                  className={`px-3 py-1 rounded text-sm ${
-                    selectedLevels.includes(level)
-                      ? getLevelColor(level)
-                      : 'bg-gray-200 dark:bg-gray-600 opacity-50'
+                  onClick={fetchNewLogs}
+                  disabled={fetching}
+                  className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
+                >
+                  {fetching ? '...' : '🔄 بروزرسانی'}
+                </button>
+                <button
+                  onClick={() => isPolling ? stopPolling() : startPolling()}
+                  className={`px-4 py-2 rounded ${
+                    isPolling
+                      ? 'bg-green-500 text-white'
+                      : 'bg-gray-200 dark:bg-gray-600'
                   }`}
                 >
-                  {level}
+                  {isPolling ? '⏸️ توقف' : '▶️ زنده'}
                 </button>
-              ))}
-            </div>
-
-            {/* بازه زمانی */}
-            <div className="flex items-center gap-2">
-              <label className="text-sm font-medium">بازه:</label>
-              <select
-                value={timeRange}
-                onChange={(e) => {
-                  setTimeRange(parseInt(e.target.value));
-                  setTimeout(loadLogs, 100);
-                }}
-                className="p-2 border rounded dark:bg-gray-700"
-              >
-                <option value={10}>10 دقیقه</option>
-                <option value={30}>30 دقیقه</option>
-                <option value={60}>1 ساعت</option>
-                <option value={180}>3 ساعت</option>
-                <option value={720}>12 ساعت</option>
-                <option value={1440}>24 ساعت</option>
-              </select>
-            </div>
-
-            {/* جستجو */}
-            <div className="flex-1 min-w-[200px]">
-              <input
-                type="text"
-                placeholder="جستجو در لاگ‌ها..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full p-2 border rounded dark:bg-gray-700"
-              />
-            </div>
-
-            {/* دکمه‌های کنترل */}
-            <div className="flex gap-2">
-              <button
-                onClick={fetchNewLogs}
-                disabled={fetching}
-                className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
-              >
-                {fetching ? '...' : '🔄 بروزرسانی'}
-              </button>
-              <button
-                onClick={() => settings.polling_enabled ? stopPolling() : startPolling()}
-                className={`px-4 py-2 rounded ${
-                  isPolling
-                    ? 'bg-green-500 text-white'
-                    : 'bg-gray-200 dark:bg-gray-600'
-                }`}
-              >
-                {isPolling ? '⏸️ توقف' : '▶️ زنده'}
-              </button>
+                <button
+                  onClick={() => setShowDownloadModal(true)}
+                  className="px-4 py-2 bg-purple-500 text-white rounded hover:bg-purple-600"
+                >
+                  📥 دانلود
+                </button>
+                <button
+                  onClick={transferErrorsToIssues}
+                  disabled={transferring || !transferStatus?.can_transfer}
+                  className={`px-4 py-2 rounded ${
+                    transferStatus?.can_transfer
+                      ? 'bg-red-500 text-white hover:bg-red-600'
+                      : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  }`}
+                  title="انتقال خطاها به تب ایرادات پروژه‌ها"
+                >
+                  {transferring ? '...' : `🚨 انتقال خطاها (${transferStatus?.pending_errors || 0})`}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -786,21 +973,24 @@ export default function RenderLogsPanel() {
         <div className="space-y-4">
           {/* هدر آرشیو */}
           <div className="flex flex-wrap gap-3 items-center bg-gray-50 dark:bg-gray-800 p-4 rounded-lg">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <label className="text-sm font-medium">سرویس:</label>
-              <select
-                value={selectedService}
-                onChange={(e) => {
-                  setSelectedService(e.target.value);
-                  setTimeout(loadArchives, 100);
-                }}
-                className="p-2 border rounded dark:bg-gray-700"
-              >
-                <option value="all">همه سرویس‌ها</option>
-                {services.map(s => (
-                  <option key={s.id} value={s.id}>{s.name}</option>
-                ))}
-              </select>
+              {services.map(s => (
+                <button
+                  key={s.id}
+                  onClick={() => {
+                    toggleService(s.id);
+                    setTimeout(loadArchives, 100);
+                  }}
+                  className={`px-3 py-1 rounded text-sm border ${
+                    selectedServices.includes(s.id)
+                      ? 'bg-amber-500 text-white border-amber-600'
+                      : 'bg-white dark:bg-gray-700 border-gray-300'
+                  }`}
+                >
+                  {s.name}
+                </button>
+              ))}
             </div>
 
             <div className="flex-1"></div>
@@ -927,6 +1117,149 @@ export default function RenderLogsPanel() {
               <li>می‌توانید با دکمه "آرشیو لاگ‌های قدیمی" به صورت دستی آرشیو کنید</li>
               <li>آرشیوها تا {settings.archive_enabled ? '30 روز' : 'غیرفعال'} نگهداری می‌شوند</li>
             </ul>
+          </div>
+        </div>
+      )}
+
+      {/* Download Modal */}
+      {showDownloadModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl p-6 w-full max-w-md mx-4">
+            <h3 className="font-bold text-lg mb-4 flex items-center gap-2">
+              📥 دانلود لاگ‌ها
+            </h3>
+
+            {/* انتخاب نوع فیلتر */}
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium mb-2">نوع انتخاب:</label>
+                <select
+                  value={downloadOptions.type}
+                  onChange={(e) => setDownloadOptions(prev => ({
+                    ...prev,
+                    type: e.target.value as any
+                  }))}
+                  className="w-full p-2 border rounded dark:bg-gray-700"
+                >
+                  <option value="time_range">بازه زمانی</option>
+                  <option value="count">تعداد لاگ اخیر</option>
+                  <option value="level">نوع لاگ</option>
+                  <option value="after_deploy">بعد از آخرین دیپلوی</option>
+                </select>
+              </div>
+
+              {downloadOptions.type === 'time_range' && (
+                <div>
+                  <label className="block text-sm font-medium mb-2">
+                    بازه زمانی: {downloadOptions.timeRangeHours} ساعت
+                  </label>
+                  <input
+                    type="range"
+                    min="1"
+                    max="168"
+                    value={downloadOptions.timeRangeHours}
+                    onChange={(e) => setDownloadOptions(prev => ({
+                      ...prev,
+                      timeRangeHours: parseInt(e.target.value)
+                    }))}
+                    className="w-full"
+                  />
+                  <div className="flex justify-between text-xs text-gray-500">
+                    <span>1 ساعت</span>
+                    <span>7 روز</span>
+                  </div>
+                </div>
+              )}
+
+              {downloadOptions.type === 'count' && (
+                <div>
+                  <label className="block text-sm font-medium mb-2">تعداد لاگ:</label>
+                  <input
+                    type="number"
+                    min="100"
+                    max="10000"
+                    step="100"
+                    value={downloadOptions.logCount}
+                    onChange={(e) => setDownloadOptions(prev => ({
+                      ...prev,
+                      logCount: parseInt(e.target.value)
+                    }))}
+                    className="w-full p-2 border rounded dark:bg-gray-700"
+                  />
+                </div>
+              )}
+
+              {downloadOptions.type === 'level' && (
+                <div>
+                  <label className="block text-sm font-medium mb-2">سطح لاگ:</label>
+                  <select
+                    value={downloadOptions.logLevel}
+                    onChange={(e) => setDownloadOptions(prev => ({
+                      ...prev,
+                      logLevel: e.target.value
+                    }))}
+                    className="w-full p-2 border rounded dark:bg-gray-700"
+                  >
+                    <option value="error">فقط خطاها (error)</option>
+                    <option value="warn">خطا و هشدار (error + warn)</option>
+                    <option value="info">همه لاگ‌ها</option>
+                  </select>
+                </div>
+              )}
+
+              {downloadOptions.type === 'after_deploy' && (
+                <div className="text-sm text-gray-600 dark:text-gray-400 bg-blue-50 dark:bg-blue-900/20 p-3 rounded">
+                  تمام لاگ‌های بعد از آخرین دیپلوی موفق سرویس‌های انتخاب شده دانلود می‌شود.
+                </div>
+              )}
+
+              {/* فرمت خروجی */}
+              <div>
+                <label className="block text-sm font-medium mb-2">فرمت خروجی:</label>
+                <div className="flex gap-2">
+                  {['json', 'txt', 'csv'].map(fmt => (
+                    <button
+                      key={fmt}
+                      onClick={() => setDownloadOptions(prev => ({ ...prev, format: fmt as any }))}
+                      className={`flex-1 py-2 rounded border ${
+                        downloadOptions.format === fmt
+                          ? 'bg-purple-500 text-white border-purple-600'
+                          : 'bg-white dark:bg-gray-700 border-gray-300'
+                      }`}
+                    >
+                      {fmt.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* سرویس‌های انتخاب شده */}
+              <div className="text-sm text-gray-600 dark:text-gray-400">
+                سرویس‌های انتخاب شده: {
+                  selectedServices.length === 0
+                    ? 'همه سرویس‌ها'
+                    : selectedServices.length === 1
+                    ? services.find(s => s.id === selectedServices[0])?.name
+                    : `${selectedServices.length} سرویس`
+                }
+              </div>
+            </div>
+
+            {/* دکمه‌ها */}
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => setShowDownloadModal(false)}
+                className="flex-1 py-2 bg-gray-200 dark:bg-gray-600 rounded hover:bg-gray-300"
+              >
+                انصراف
+              </button>
+              <button
+                onClick={downloadLogs}
+                className="flex-1 py-2 bg-purple-500 text-white rounded hover:bg-purple-600"
+              >
+                📥 دانلود
+              </button>
+            </div>
           </div>
         </div>
       )}

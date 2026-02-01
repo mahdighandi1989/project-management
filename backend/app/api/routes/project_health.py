@@ -1123,7 +1123,7 @@ async def get_project_health(project_id: str, db=Depends(get_db)):
                 # تبدیل نام کلیدها به فرمت مورد انتظار frontend
                 "overall": health_scores.get("total", health_scores.get("overall", 0)),
                 "overall_color": _get_score_color(health_scores.get("total", 0)),
-                "structure_score": health_scores.get("structural", 0),
+                "structure_score": health_scores.get("structure_score", health_scores.get("structural", 0)),
                 "file_scores": {
                     "code_quality": health_scores.get("code_quality", health_scores.get("micro", 0)),
                     "documentation": health_scores.get("documentation", 0),  # 🆕 از 50 به 0 تغییر کرد
