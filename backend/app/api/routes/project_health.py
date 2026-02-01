@@ -20,6 +20,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ...core.database import get_db
+from ...core.logging_utils import StructuredLogger
 from ...models.project import Project, ProjectFile
 from ...services.project_health_analyzer import get_project_health_analyzer
 from ...services.report_validator import get_report_validator
@@ -35,6 +36,8 @@ from ...services.security_scanner import get_security_scanner
 from ...services.test_coverage_analyzer import get_test_coverage_analyzer
 
 logger = logging.getLogger(__name__)
+# لاگر ساختاریافته
+slog = StructuredLogger(__name__, "HEALTH")
 
 # ذخیره progress managers فعال برای کنترل pause/resume/stop
 _active_progress_managers: dict = {}
@@ -1244,8 +1247,14 @@ async def run_health_analysis(
     - به‌روزرسانی roadmap و readme
     - نمره‌گذاری و رنگ‌بندی
     """
+    slog.api_request("POST", f"/{project_id}/health/analyze",
+        depth=request.depth,
+        models=request.model_ids
+    )
+
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
+        slog.error("Project not found", project_id=project_id)
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
 
     # 🔴 جلوگیری از دور باطل - بررسی تحلیل تکراری
@@ -1309,7 +1318,10 @@ async def run_health_analysis(
         if not model_ids:
             model_ids = [m.id for m in available_models]
 
-    logger.info(f"📊 Selected models for analysis: {model_ids}")
+    slog.info("Selected models for analysis",
+        models=model_ids,
+        files_count=len(files_data)
+    )
 
     # اگر هیچ مدلی در دسترس نیست، خطا بده (نه fallback!)
     if not model_ids and not available_models:
@@ -1367,11 +1379,12 @@ async def _run_analysis_task(
     from ...core.database import SessionLocal
     from ...services.deep_analysis_service import get_deep_analysis_service
     from ...services.ai_manager import get_ai_manager
-    import logging
 
-    logger = logging.getLogger(__name__)
-    logger.info(f"🚀 Starting analysis task for project {project_id}")
-    logger.info(f"📁 Files count: {len(files_data)}, Models: {model_ids}")
+    slog.start("Health analysis task",
+        project_id=project_id,
+        files_count=len(files_data),
+        models=model_ids
+    )
 
     db = SessionLocal()
 
@@ -1383,11 +1396,13 @@ async def _run_analysis_task(
         available_providers = ai_manager.get_available_providers()
         available_models = ai_manager.get_available_models()
 
-        logger.info(f"🤖 Available providers: {available_providers}")
-        logger.info(f"🤖 Available models: {[m.id for m in available_models]}")
+        slog.info("AI manager status",
+            providers=available_providers,
+            models=[m.id for m in available_models]
+        )
 
         if not available_models:
-            logger.error("❌ No AI models available! Check API keys in .env file")
+            slog.error("No AI models available - check API keys")
             # ذخیره خطا در پروژه
             project = db.query(Project).filter(Project.id == project_id).first()
             if project:
@@ -1406,12 +1421,12 @@ async def _run_analysis_task(
 
         # دریافت سرویس تحلیل عمیق
         deep_analyzer = get_deep_analysis_service(ai_manager)
-        logger.info(f"✅ Deep analyzer initialized with AI manager: {deep_analyzer.ai_manager is not None}")
+        slog.success("Deep analyzer initialized")
 
         # دریافت پروژه
         project = db.query(Project).filter(Project.id == project_id).first()
         if not project:
-            logger.error(f"Project {project_id} not found")
+            slog.error("Project not found in analysis task", project_id=project_id)
             return
 
         # دریافت محتوای roadmap و readme
@@ -1444,7 +1459,7 @@ async def _run_analysis_task(
                 project.roadmap_content = roadmap_content
                 project.ideal_state = roadmap_result.get("ideal_state", "")
             except Exception as e:
-                logger.warning(f"Roadmap update failed: {e}")
+                slog.warning("Roadmap update failed", error=str(e)[:100])
 
         # 2. بررسی و به‌روزرسانی README (اختیاری)
         if request.update_readme:
@@ -1462,10 +1477,13 @@ async def _run_analysis_task(
                 readme_content = readme_result.get("readme_content", "")
                 project.readme_content = readme_content
             except Exception as e:
-                logger.warning(f"README update failed: {e}")
+                slog.warning("README update failed", error=str(e)[:100])
 
         # 3. اجرای تحلیل عمیق سه‌مرحله‌ای
-        logger.info(f"🔬 Starting deep analysis for project {project_id} with models: {model_ids}")
+        slog.step(1, "Starting deep analysis",
+            project_id=project_id,
+            models=model_ids
+        )
 
         # ایجاد progress manager برای ذخیره وضعیت
         progress_manager = AnalysisProgressManager(project_id, db)
@@ -1479,7 +1497,7 @@ async def _run_analysis_task(
         try:
             # 🆕 استفاده از عمق تحلیل از request
             depth = getattr(request, 'depth', 'standard')
-            logger.info(f"🔬 Analysis depth: {depth}")
+            slog.info("Running full analysis", depth=depth)
 
             analysis_result = await deep_analyzer.run_full_analysis(
                 project_id=project_id,
@@ -1492,11 +1510,13 @@ async def _run_analysis_task(
                 progress_manager=progress_manager,
                 depth=depth  # 🆕 پاس دادن عمق
             )
-            logger.info(f"📊 Analysis result status: {analysis_result.get('status')}")
-            logger.info(f"📊 Files analyzed: {analysis_result.get('analyzed_files', 0)}")
-            logger.info(f"📊 Overall scores: {analysis_result.get('overall_scores', {})}")
+            slog.success("Analysis completed",
+                status=analysis_result.get('status'),
+                files_analyzed=analysis_result.get('analyzed_files', 0),
+                overall_score=analysis_result.get('overall_scores', {}).get('overall', 0)
+            )
         except Exception as analysis_error:
-            logger.error(f"❌ Deep analysis failed: {analysis_error}", exc_info=True)
+            slog.error("Deep analysis failed", exception=analysis_error)
             # ذخیره خطا
             project.health_scores = json.dumps({
                 "error": str(analysis_error),

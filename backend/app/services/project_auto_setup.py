@@ -12,7 +12,14 @@ from datetime import datetime
 import logging
 import re
 
+# استفاده از لاگر ساختاریافته
+from ..core.logging_utils import StructuredLogger
+
+# لاگر قدیمی برای سازگاری
 logger = logging.getLogger(__name__)
+
+# لاگر ساختاریافته جدید
+slog = StructuredLogger(__name__, "AUTO-SETUP")
 
 
 # =====================================
@@ -565,23 +572,25 @@ async def generate_intelligent_setup(
         last_error = None
         for try_model in [model_id, "claude", "openai", "deepseek"]:
             try:
-                logger.info(f"🤖 Trying AI model: {try_model} for auto-setup")
+                slog.ai_call(try_model, "generating setup",
+                    prompt_length=len(prompt)
+                )
                 response = await ai_manager.generate(
                     model_id=try_model,
                     messages=messages,
                     max_tokens=2000,
                     temperature=0.7
                 )
-                logger.info(f"✅ AI model {try_model} responded successfully")
+                slog.success(f"AI model responded", model=try_model)
                 break
             except Exception as e:
                 last_error = str(e)
-                logger.warning(f"⚠️ AI model {try_model} failed: {e}")
+                slog.warning(f"AI model failed", model=try_model, error=str(e)[:100])
                 continue
 
         if not response:
             error_msg = f"هیچ مدل AI در دسترس نیست. آخرین خطا: {last_error}"
-            logger.error(f"❌ {error_msg}")
+            slog.error("No AI model available", last_error=str(last_error)[:100])
             return {"success": False, "error": error_msg}
 
         # پارس JSON از پاسخ
@@ -700,13 +709,13 @@ async def generate_intelligent_setup(
         }
 
     except json.JSONDecodeError as e:
-        logger.error(f"❌ JSON parse error: {e}")
-        logger.error(f"   Raw content (first 500 chars): {content[:500] if content else 'empty'}")
+        slog.error("JSON parse error from AI response",
+            exception=e,
+            content_preview=content[:200] if content else "empty"
+        )
         return {"success": False, "error": f"خطا در پارس پاسخ AI: {e}"}
     except Exception as e:
-        logger.error(f"❌ Error generating AI instructions: {e}")
-        import traceback
-        logger.error(f"   Traceback: {traceback.format_exc()}")
+        slog.error("Error generating AI instructions", exception=e)
         return {"success": False, "error": str(e)}
 
 
@@ -761,11 +770,20 @@ async def auto_setup_project_memory(
     🔴 نسخه بهبودیافته: در نظر گرفتن ایرادات، گزارشات، و وضعیت فعلی
     """
     try:
-        logger.info(f"Starting intelligent auto-setup for project {project_id}")
+        # 🔴 لاگ ساختاریافته - شروع عملیات
+        slog.start("intelligent auto-setup",
+            project_id=project_id,
+            project_name=project_name,
+            files_count=len(files) if files else 0,
+            use_ai=use_ai
+        )
+
         if full_context:
-            logger.info(f"  Context: {len(full_context.get('health_issues', []))} health issues, "
-                       f"{len(full_context.get('unexecuted_fields', []))} unexecuted fields, "
-                       f"run #{full_context.get('auto_setup_run_count', 1)}")
+            slog.info("Context loaded",
+                health_issues=len(full_context.get('health_issues', [])),
+                unexecuted_fields=len(full_context.get('unexecuted_fields', [])),
+                run_number=full_context.get('auto_setup_run_count', 1)
+            )
 
         # 🆕 ایجاد ActivityLog برای این عملیات auto-setup
         parent_log_id = None
@@ -823,8 +841,15 @@ async def auto_setup_project_memory(
                     pass
 
         # مرحله ۱: تحلیل عمیق پروژه
+        slog.step(1, "Analyzing project structure",
+            existing_fields=len(existing_fields),
+            archived_fields=len(archived_fields)
+        )
         insights = extract_project_insights(files)
-        logger.info(f"Project insights: {insights.get('domain')}, {insights.get('architecture')}")
+        slog.data("Project insights",
+            {"domain": insights.get('domain'), "architecture": insights.get('architecture'),
+             "language": insights.get('language'), "frameworks": insights.get('frameworks', [])}
+        )
 
         # انتخاب فایل‌های مهم برای نمایش به AI
         important_files = []
@@ -846,9 +871,16 @@ async def auto_setup_project_memory(
             important_files = important_files[:12]
 
         # مرحله ۲: تولید دستورات با AI
+        slog.step(2, "Generating setup with AI",
+            use_ai=use_ai,
+            important_files_count=len(important_files)
+        )
         ai_result = None
         if use_ai and important_files:
             best_model = select_best_model("analysis", insights.get("domain", ""))
+            slog.ai_call(best_model, "generating intelligent setup",
+                files_to_analyze=len(important_files)
+            )
             ai_result = await generate_intelligent_setup(
                 project_name=project_name,
                 project_description=project_description,
@@ -883,12 +915,20 @@ async def auto_setup_project_memory(
             return False
 
         # مرحله ۳: ساخت نتیجه نهایی
+        slog.step(3, "Building final result")
+
         if ai_result and ai_result.get("success"):
-            logger.info(f"✅ Using AI-generated setup (model: {ai_result.get('model_used')})")
+            slog.success("AI generated setup successfully",
+                model=ai_result.get('model_used'),
+                tokens_used=ai_result.get('tokens_used', 0)
+            )
             data = ai_result["data"]
-            logger.info(f"   AI suggested: {len(data.get('dynamic_fields', []))} new fields, "
-                       f"{len(data.get('fields_to_archive', []))} to archive, "
-                       f"{len(data.get('fields_to_update', []))} to update")
+            slog.data("AI suggestions", {
+                "new_fields": len(data.get('dynamic_fields', [])),
+                "to_archive": len(data.get('fields_to_archive', [])),
+                "to_update": len(data.get('fields_to_update', [])),
+                "to_merge": len(data.get('fields_to_merge', []))
+            })
 
             # 🔴 محاسبه تعداد دفعات اجرا
             run_count = 1
@@ -1153,8 +1193,10 @@ async def auto_setup_project_memory(
         else:
             # Fallback به حالت ساده
             ai_error_msg = ai_result.get("error", "پاسخ نامعتبر") if ai_result else "AI call failed"
+            slog.warning(f"AI failed, using fallback setup",
+                error=ai_error_msg[:100] if ai_error_msg else "unknown"
+            )
             result = _create_fallback_setup(project_id, project_name, insights)
-            logger.warning(f"⚠️ AI failed ({ai_error_msg}), using fallback setup")
 
             # 🆕 ثبت خطای AI در ژورنال
             if db_session and parent_log_id:
@@ -1172,9 +1214,10 @@ async def auto_setup_project_memory(
             # فیلدهای موجود غیربایگانی رو حفظ کن
             active_existing = [f for f in existing_fields if not f.get("archived")]
             if active_existing:
-                logger.info(f"🛡️ Preserving {len(active_existing)} existing active fields in fallback")
-                for ef in active_existing[:5]:  # فقط 5 تا رو لاگ کن
-                    logger.info(f"   - {ef.get('name')}")
+                slog.info(f"Preserving existing active fields in fallback",
+                    count=len(active_existing),
+                    sample_names=[f.get('name') for f in active_existing[:3]]
+                )
 
             # فیلدهای fallback رو فقط اگه قبلاً وجود نداشته باشن اضافه کن
             existing_names = [f.get("name", "").lower() for f in active_existing]
@@ -1185,7 +1228,7 @@ async def auto_setup_project_memory(
                 if ff_name not in existing_names:
                     new_fallback_fields.append(ff)
                 else:
-                    logger.info(f"   ⏭️ Skipping duplicate fallback field: {ff.get('name')}")
+                    slog.debug(f"Skipping duplicate fallback field", field_name=ff.get('name'))
 
             # ترکیب: فیلدهای موجود + فیلدهای جدید fallback + بایگانی شده‌ها
             result["dynamic_fields"] = active_existing + new_fallback_fields + archived_fields
@@ -1215,6 +1258,7 @@ async def auto_setup_project_memory(
             )
 
         # مرحله ۴: ذخیره در دیتابیس
+        slog.step(4, "Saving to database")
         if db_session and result.get("success"):
             try:
                 from ..models.project import Project
@@ -1224,15 +1268,28 @@ async def auto_setup_project_memory(
                     project.memory_instructions = json.dumps(result["memory_instructions"], ensure_ascii=False)
                     project.dynamic_fields = json.dumps(result["dynamic_fields"], ensure_ascii=False)
                     db_session.commit()
-                    logger.info(f"Intelligent auto-setup saved for project {project_id}")
+                    slog.db_operation("save", "projects",
+                        project_id=project_id,
+                        fields_count=len(result.get("dynamic_fields", []))
+                    )
             except Exception as e:
-                logger.error(f"Error saving auto-setup: {e}")
+                slog.error("Failed to save auto-setup to database", exception=e)
                 db_session.rollback()
 
+        # 🔴 لاگ پایان عملیات
+        slog.end("intelligent auto-setup",
+            new_fields=result.get("new_fields_count", 0),
+            archived=result.get("fields_archived", 0),
+            merged=result.get("fields_merged", 0),
+            updated=result.get("fields_updated", 0),
+            protected=result.get("fields_protected", 0),
+            model=result.get("model_used", "fallback"),
+            tokens=result.get("tokens_used", 0)
+        )
         return result
 
     except Exception as e:
-        logger.error(f"Error in auto_setup_project_memory: {e}")
+        slog.error("Auto-setup failed with exception", exception=e)
         return {"success": False, "error": str(e)}
 
 

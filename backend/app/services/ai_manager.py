@@ -20,6 +20,10 @@ from ..core.models_registry import (
     MODEL_REGISTRY, get_model, get_models_by_capability,
     get_enabled_models
 )
+from ..core.logging_utils import StructuredLogger
+
+# لاگر ساختاریافته
+slog = StructuredLogger(__name__, "AI-MANAGER")
 
 
 class AIManager:
@@ -32,70 +36,39 @@ class AIManager:
 
     def _initialize_services(self):
         """راه‌اندازی سرویس‌های موجود بر اساس API keys"""
-        import logging
-        logger = logging.getLogger(__name__)
+        slog.start("Initializing AI services")
 
         available = settings.get_available_providers()
-        logger.info(f"🔑 Available providers from settings: {available}")
+        slog.info("Available providers from settings",
+            providers=list(available.keys()),
+            enabled=[k for k, v in available.items() if v]
+        )
 
-        if available.get("openai"):
-            try:
-                self._services[ModelProvider.OPENAI] = OpenAIService()
-                logger.info("✅ OpenAI service initialized")
-            except AIServiceError as e:
-                self._init_errors["openai"] = str(e)
-                logger.warning(f"⚠️ OpenAI init failed: {e}")
-            except Exception as e:
-                self._init_errors["openai"] = str(e)
-                logger.error(f"❌ OpenAI init error: {e}")
+        provider_configs = [
+            ("openai", ModelProvider.OPENAI, OpenAIService),
+            ("claude", ModelProvider.CLAUDE, ClaudeService),
+            ("gemini", ModelProvider.GEMINI, GeminiService),
+            ("deepseek", ModelProvider.DEEPSEEK, DeepSeekService),
+            ("perplexity", ModelProvider.PERPLEXITY, PerplexityService),
+        ]
 
-        if available.get("claude"):
-            try:
-                self._services[ModelProvider.CLAUDE] = ClaudeService()
-                logger.info("✅ Claude service initialized")
-            except AIServiceError as e:
-                self._init_errors["claude"] = str(e)
-                logger.warning(f"⚠️ Claude init failed: {e}")
-            except Exception as e:
-                self._init_errors["claude"] = str(e)
-                logger.error(f"❌ Claude init error: {e}")
+        for name, provider, service_class in provider_configs:
+            if available.get(name):
+                try:
+                    self._services[provider] = service_class()
+                    slog.success(f"{name.capitalize()} service initialized")
+                except AIServiceError as e:
+                    self._init_errors[name] = str(e)
+                    slog.warning(f"{name.capitalize()} init failed", error=str(e)[:100])
+                except Exception as e:
+                    self._init_errors[name] = str(e)
+                    slog.error(f"{name.capitalize()} init error", exception=e)
 
-        if available.get("gemini"):
-            try:
-                self._services[ModelProvider.GEMINI] = GeminiService()
-                logger.info("✅ Gemini service initialized")
-            except AIServiceError as e:
-                self._init_errors["gemini"] = str(e)
-                logger.warning(f"⚠️ Gemini init failed: {e}")
-            except Exception as e:
-                self._init_errors["gemini"] = str(e)
-                logger.error(f"❌ Gemini init error: {e}")
-
-        if available.get("deepseek"):
-            try:
-                self._services[ModelProvider.DEEPSEEK] = DeepSeekService()
-                logger.info("✅ DeepSeek service initialized")
-            except AIServiceError as e:
-                self._init_errors["deepseek"] = str(e)
-                logger.warning(f"⚠️ DeepSeek init failed: {e}")
-            except Exception as e:
-                self._init_errors["deepseek"] = str(e)
-                logger.error(f"❌ DeepSeek init error: {e}")
-
-        if available.get("perplexity"):
-            try:
-                self._services[ModelProvider.PERPLEXITY] = PerplexityService()
-                logger.info("✅ Perplexity service initialized")
-            except AIServiceError as e:
-                self._init_errors["perplexity"] = str(e)
-                logger.warning(f"⚠️ Perplexity init failed: {e}")
-            except Exception as e:
-                self._init_errors["perplexity"] = str(e)
-                logger.error(f"❌ Perplexity init error: {e}")
-
-        logger.info(f"📊 Initialized {len(self._services)} services: {list(self._services.keys())}")
-        if self._init_errors:
-            logger.warning(f"⚠️ Init errors: {self._init_errors}")
+        slog.end("AI services initialization",
+            services_count=len(self._services),
+            services=list(self._services.keys()),
+            errors=list(self._init_errors.keys()) if self._init_errors else None
+        )
 
     def get_available_providers(self) -> List[str]:
         """لیست provider های فعال"""
@@ -255,26 +228,31 @@ class AIManager:
         Returns:
             شناسه مدل fallback یا None
         """
-        import logging
-        logger = logging.getLogger(__name__)
+        slog.info("Finding fallback model",
+            disabled_model=disabled_model_id,
+            task_type=task_type
+        )
 
         # دریافت اطلاعات مدل غیرفعال
         disabled_model = get_model(disabled_model_id)
         if not disabled_model:
-            logger.warning(f"Cannot find fallback - disabled model {disabled_model_id} not found")
+            slog.warning("Cannot find fallback - disabled model not found", model_id=disabled_model_id)
             return None
 
         # دریافت مدل‌های فعال
         available_models = self.get_available_models(task_type=task_type)
 
         if not available_models:
-            logger.warning("No available models for fallback")
+            slog.warning("No available models for fallback")
             return None
 
         # اگر فقط یک مدل فعال بود، همان را برگردان
         if len(available_models) == 1:
             fallback = available_models[0].id
-            logger.info(f"Only one model available, using {fallback} as fallback for {disabled_model_id}")
+            slog.info("Only one model available as fallback",
+                fallback=fallback,
+                disabled=disabled_model_id
+            )
             return fallback
 
         # 🆕 دریافت امتیازات واقعی از model_profiler
@@ -298,14 +276,13 @@ class AIManager:
                         # 🆕 امتیاز براساس task_type خاص
                         'task_score': profile.last_scores_by_task.get(task_type, {}).get('overall', profile.overall_score) if task_type else profile.overall_score
                     }
-                    logger.debug(f"Profile for {model.id}: overall={profile.overall_score}, tier={profile.tier}")
                 else:
                     profile_scores[model.id] = {'overall': 50.0, 'accuracy': 50.0, 'tier': 'C', 'task_score': 50.0}
 
-            logger.info(f"🔴 Loaded profiles for {len(profile_scores)} models for smart fallback")
+            slog.debug("Loaded model profiles for fallback", profiles_count=len(profile_scores))
 
         except Exception as e:
-            logger.warning(f"Could not load model profiles for fallback: {e}")
+            slog.warning("Could not load model profiles for fallback", error=str(e)[:100])
             disabled_overall_score = 50.0
 
         # قابلیت‌های مدل غیرفعال
@@ -363,19 +340,19 @@ class AIManager:
             best_fallback = scored_models[0][0]
             best_score = scored_models[0][1]
             best_tier = scored_models[0][3]
-            logger.info(f"🔴 Found smart fallback for {disabled_model_id}: {best_fallback} (score: {best_score}, tier: {best_tier})")
-
-            # لاگ همه گزینه‌ها برای debug
-            logger.debug(f"All fallback options: {[(m[0], m[1], m[3]) for m in scored_models[:5]]}")
+            slog.success("Found smart fallback",
+                disabled=disabled_model_id,
+                fallback=best_fallback,
+                score=best_score,
+                tier=best_tier
+            )
             return best_fallback
 
+        slog.warning("No suitable fallback found", disabled_model=disabled_model_id)
         return None
 
     def get_enabled_status(self, model_id: str) -> bool:
         """بررسی فعال بودن مدل در دیتابیس"""
-        import logging
-        logger = logging.getLogger(__name__)
-
         try:
             from ..core.database import get_db
             from ..models.ai_profile import ModelSettings
@@ -383,15 +360,15 @@ class AIManager:
             db_setting = db.query(ModelSettings).filter(ModelSettings.model_id == model_id).first()
             if db_setting:
                 is_enabled = bool(db_setting.enabled)
-                logger.info(f"Model {model_id} enabled status from DB: {is_enabled}")
                 return is_enabled
             # اگر تنظیمات نداشت، از registry استفاده کن
             model = get_model(model_id)
-            is_enabled = model.enabled if model else False
-            logger.info(f"Model {model_id} enabled status from registry: {is_enabled}")
-            return is_enabled
+            return model.enabled if model else False
         except Exception as e:
-            logger.error(f"Error checking model {model_id} enabled status: {e}")
+            slog.error("Error checking model enabled status",
+                model_id=model_id,
+                exception=e
+            )
             # 🔴 در صورت خطا، فرض کن غیرفعال است تا fallback کار کند
             return False
 
@@ -420,29 +397,34 @@ class AIManager:
             task_type: نوع کار (برای فیلتر fallback)
             allow_fallback: آیا اجازه fallback داده شود
         """
-        import logging
-        logger = logging.getLogger(__name__)
-
         original_model_id = model_id
         used_fallback = False
 
+        slog.ai_call(model_id, "generate request",
+            messages_count=len(messages),
+            max_tokens=max_tokens,
+            task_type=task_type
+        )
+
         model = get_model(model_id)
         if not model:
+            slog.error("Model not found", model_id=model_id)
             raise AIServiceError(f"Model {model_id} not found", "manager", model_id)
 
         # 🔴🔴🔴 بررسی فعال بودن مدل - استفاده از متد get_enabled_status
-        # این متد هم دیتابیس و هم registry را چک می‌کند
         model_is_enabled = self.get_enabled_status(model_id)
-        logger.info(f"🔴 Model {model_id} enabled check: {model_is_enabled}")
 
         if not model_is_enabled:
-            logger.warning(f"🔴 Model {model_id} is DISABLED - looking for fallback...")
+            slog.warning("Model is disabled, looking for fallback", model_id=model_id)
 
             # 🆕 استفاده از fallback به جای خطا
             if allow_fallback:
                 fallback_model_id = self.find_fallback_model(model_id, task_type=task_type)
                 if fallback_model_id:
-                    logger.info(f"✅ Using fallback model {fallback_model_id} instead of disabled {model_id}")
+                    slog.info("Using fallback model",
+                        original=model_id,
+                        fallback=fallback_model_id
+                    )
                     model_id = fallback_model_id
                     model = get_model(model_id)
                     used_fallback = True
@@ -453,8 +435,9 @@ class AIManager:
                         model_id = available[0].id
                         model = get_model(model_id)
                         used_fallback = True
-                        logger.info(f"✅ No specific fallback, using first available: {model_id}")
+                        slog.info("Using first available model as fallback", model_id=model_id)
                     else:
+                        slog.error("No fallback available", original_model=original_model_id)
                         raise AIServiceError(
                             f"Model {original_model_id} is disabled and no fallback available",
                             "manager", original_model_id
@@ -472,6 +455,7 @@ class AIManager:
 
         service = self._services.get(provider)
         if not service:
+            slog.error("Provider not available", provider=str(provider))
             raise AIServiceError(f"Provider {provider} not available", "manager", model_id)
 
         response = await service.generate(model_id, messages, max_tokens, temperature, **kwargs)
@@ -480,7 +464,16 @@ class AIManager:
         if used_fallback:
             response.fallback_used = True
             response.original_model_id = original_model_id
-            logger.info(f"Response generated using fallback: {original_model_id} -> {model_id}")
+            slog.info("Response generated using fallback",
+                original=original_model_id,
+                actual=model_id,
+                tokens_used=response.tokens_used
+            )
+        else:
+            slog.success("AI response generated",
+                model=model_id,
+                tokens_used=response.tokens_used
+            )
 
         return response
 
@@ -561,13 +554,17 @@ def get_ai_manager() -> AIManager:
 async def reset_ai_manager():
     """ریست کردن AI manager برای بارگذاری مجدد API keys"""
     global _ai_manager
+    slog.start("Resetting AI manager")
     if _ai_manager is not None:
         try:
             await _ai_manager.close()
+            slog.info("Previous AI manager closed")
         except Exception as e:
-            # Log the error but continue with reset
-            import logging
-            logging.getLogger(__name__).warning(f"Error closing AI manager during reset: {e}")
+            slog.warning("Error closing AI manager during reset", error=str(e)[:100])
     _ai_manager = None
     # ایجاد instance جدید
-    return get_ai_manager()
+    new_manager = get_ai_manager()
+    slog.end("AI manager reset",
+        providers=new_manager.get_available_providers()
+    )
+    return new_manager
