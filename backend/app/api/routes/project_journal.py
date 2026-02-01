@@ -509,8 +509,8 @@ async def get_activity_journal(
     activity_type: Optional[str] = None,
     model_id: Optional[str] = None,
     success: Optional[bool] = None,
-    sort_by: str = Query("created_at", regex="^(created_at|tokens_used|latency_ms)$"),
-    sort_order: str = Query("desc", regex="^(asc|desc)$"),
+    sort_by: str = Query("created_at", pattern="^(created_at|tokens_used|latency_ms)$"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     include_roadmap: bool = Query(False, description="اگر True باشد، اطلاعات نقشه راه هم برمی‌گردد"),  # 🔴 نقشه راه
     db: Session = Depends(get_db)
 ):
