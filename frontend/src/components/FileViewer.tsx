@@ -193,7 +193,7 @@ export default function FileViewer({ projectId, filePath, onClose }: Props) {
           <span className="w-12 text-right pr-2 text-gray-500 select-none border-l border-gray-700 flex-shrink-0">
             {lineNum}
           </span>
-          <pre className={`flex-1 px-2 whitespace-pre-wrap break-all ${textColor}`}>
+          <pre className={`flex-1 px-2 whitespace-pre-wrap break-all ${textColor || 'text-gray-300'}`}>
             {line || ' '}
           </pre>
           {hasIssue && !showAnnotated && (

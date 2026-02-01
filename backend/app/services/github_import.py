@@ -414,12 +414,37 @@ class GitHubImportService:
                     "Makefile", "CMakeLists.txt",
                 ]
 
-                for file_info in filtered_files[:50]:  # حداکثر 50 فایل
+                # 🆕 مرتب‌سازی هوشمند: اول فایل‌های frontend و backend را قرار بده
+                def sort_priority(f):
+                    path = f.get("path", "")
+                    # اولویت فایل‌های frontend
+                    if "frontend/" in path or "src/components/" in path or "src/app/" in path:
+                        return 0
+                    # اولویت فایل‌های backend
+                    if "backend/" in path or "/api/" in path or "/routes/" in path:
+                        return 1
+                    # فایل‌های کد
+                    if path.endswith((".tsx", ".jsx", ".ts", ".js", ".py")):
+                        return 2
+                    return 3
+
+                sorted_files = sorted(filtered_files, key=sort_priority)
+
+                for file_info in sorted_files[:100]:  # 🔴 افزایش از 50 به 100 فایل
                     path = file_info["path"]
                     filename = path.split("/")[-1]
 
+                    # 🆕 همیشه فایل‌های frontend را دانلود کن
+                    is_frontend = (
+                        "frontend/" in path or
+                        "/components/" in path or
+                        "/src/app/" in path or
+                        path.endswith((".tsx", ".jsx"))
+                    )
+
                     # فقط فایل‌های مهم و کد رو دانلود کن
                     should_download = (
+                        is_frontend or  # 🆕 فایل‌های frontend همیشه
                         filename in important_files or
                         path.endswith((".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".c", ".cpp", ".h")) or
                         file_info["size"] < 50000  # فایل‌های کوچک

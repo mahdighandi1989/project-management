@@ -1855,6 +1855,7 @@ async def get_project_issues(
     project_id: str,
     merge_similar: bool = True,  # 🔴 ادغام ایرادات مشابه
     aggressive_merge: bool = False,  # 🆕 ادغام تهاجمی (برای >100 ایراد)
+    persist_merge: bool = True,  # 🆕 ذخیره ادغام در دیتابیس (رفع ناپایداری)
     db=Depends(get_db)
 ):
     """
@@ -1863,6 +1864,7 @@ async def get_project_issues(
     پارامترها:
     - merge_similar: اگر True باشد، ایرادات مشابه ادغام می‌شوند (پیش‌فرض: True)
     - aggressive_merge: اگر True باشد، ادغام تهاجمی انجام می‌شود (برای لیست‌های بزرگ)
+    - persist_merge: اگر True باشد، نتیجه ادغام در دیتابیس ذخیره می‌شود (پیش‌فرض: True)
     """
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -1870,6 +1872,7 @@ async def get_project_issues(
 
     issues = []
     original_count = 0
+    merge_persisted = False
     try:
         if project.issues_found:
             issues = json.loads(project.issues_found)
@@ -1879,8 +1882,18 @@ async def get_project_issues(
             if merge_similar and len(issues) > 1:
                 # اگر بیش از 200 ایراد باشد، ادغام تهاجمی خودکار فعال شود
                 auto_aggressive = original_count > 200
-                issues = _merge_similar_issues(issues, aggressive=aggressive_merge or auto_aggressive)
-    except:
+                merged_issues = _merge_similar_issues(issues, aggressive=aggressive_merge or auto_aggressive)
+
+                # 🆕 ذخیره نتیجه ادغام در دیتابیس برای پایداری
+                if persist_merge and len(merged_issues) < original_count:
+                    project.issues_found = json.dumps(merged_issues, ensure_ascii=False)
+                    db.commit()
+                    merge_persisted = True
+                    logger.info(f"🔀 Merged issues persisted: {original_count} -> {len(merged_issues)}")
+
+                issues = merged_issues
+    except Exception as e:
+        logger.error(f"Error getting issues: {e}")
         pass
 
     # گروه‌بندی بر اساس severity
@@ -1899,6 +1912,7 @@ async def get_project_issues(
         "total_count": len(issues),
         "original_count": original_count,  # 🔴 تعداد قبل از ادغام
         "merged_count": original_count - len(issues) if merge_similar else 0,  # 🔴 تعداد ادغام شده
+        "merge_persisted": merge_persisted,  # 🆕 آیا ادغام ذخیره شد؟
         "grouped": grouped,
         "counts": {k: len(v) for k, v in grouped.items()}
     }
