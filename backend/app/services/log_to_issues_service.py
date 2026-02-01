@@ -187,9 +187,9 @@ class LogToIssuesService:
             ).first()
 
             if not project:
-                # استراتژی ۲: جستجو در repo URL
+                # استراتژی ۲: جستجو در GitHub path
                 project = db.query(Project).filter(
-                    Project.repo_url.ilike(f"%{service.name}%")
+                    Project.github_path.ilike(f"%{service.name}%")
                 ).first()
 
             if not project:
