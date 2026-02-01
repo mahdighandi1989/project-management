@@ -3234,15 +3234,32 @@ async def engineering_step2_health_to_fields(
         existing_fields.append(new_field)
         created_fields.append(new_field["name"])
 
-        # بایگانی ایراد اصلی
+        # بایگانی ایراد اصلی - 🆕 منطق تطبیق بهبود یافته
         orig = validated.get("original_issue", {})
+        orig_file = orig.get("file") or orig.get("file_path") or ""
+        orig_type = orig.get("type") or orig.get("severity") or ""
+        orig_line = orig.get("line") or orig.get("start_line")
+        orig_msg = (orig.get("message") or orig.get("description") or "")[:50]
+
         for issue in health_issues:
-            if (issue.get("file") == orig.get("file") and
-                issue.get("type") == orig.get("type") and
-                issue.get("line") == orig.get("line")):
+            issue_file = issue.get("file") or issue.get("file_path") or ""
+            issue_type = issue.get("type") or issue.get("severity") or ""
+            issue_line = issue.get("line") or issue.get("start_line")
+            issue_msg = (issue.get("message") or issue.get("description") or "")[:50]
+
+            # تطبیق انعطاف‌پذیر:
+            # 1. فایل یکسان و پیام مشابه
+            # 2. یا فایل یکسان و خط یکسان
+            # 3. یا پیام کاملاً یکسان
+            file_match = orig_file and issue_file and (orig_file in issue_file or issue_file in orig_file)
+            line_match = orig_line and issue_line and orig_line == issue_line
+            msg_match = orig_msg and issue_msg and (orig_msg in issue_msg or issue_msg in orig_msg)
+
+            if (file_match and line_match) or (file_match and msg_match) or (issue.get("id") == orig.get("id")):
                 issue["archived"] = True
                 issue["archived_at"] = datetime.utcnow().isoformat()
                 issue["archived_reason"] = "converted_to_field_step2"
+                issue["converted_to_field"] = new_field["id"]
                 break
 
     # ایجاد فیلدهای ادغام شده
@@ -3269,13 +3286,22 @@ async def engineering_step2_health_to_fields(
         existing_fields.append(new_field)
         created_fields.append(new_field["name"])
 
-    # بایگانی ایرادات رد شده
+    # بایگانی ایرادات رد شده - 🆕 منطق تطبیق بهبود یافته
     rejected_count = 0
     for rejected in result_data.get("rejected_issues", []):
         orig = rejected.get("original_issue", {})
+        orig_file = orig.get("file") or orig.get("file_path") or ""
+        orig_msg = (orig.get("message") or orig.get("description") or "")[:50]
+
         for issue in health_issues:
-            if (issue.get("file") == orig.get("file") and
-                issue.get("type") == orig.get("type")):
+            issue_file = issue.get("file") or issue.get("file_path") or ""
+            issue_msg = (issue.get("message") or issue.get("description") or "")[:50]
+
+            # تطبیق انعطاف‌پذیر
+            file_match = orig_file and issue_file and (orig_file in issue_file or issue_file in orig_file)
+            msg_match = orig_msg and issue_msg and (orig_msg in issue_msg or issue_msg in orig_msg)
+
+            if (file_match and msg_match) or (issue.get("id") == orig.get("id")):
                 issue["archived"] = True
                 issue["archived_at"] = datetime.utcnow().isoformat()
                 issue["archived_reason"] = f"rejected_step2: {rejected.get('rejection_reason', '')}"
@@ -3664,6 +3690,7 @@ async def engineering_run_all_steps(
     project_id: str,
     model_id: str = Query("claude"),
     model_ids: str = Query(None, description="لیست مدل‌ها با کاما جدا شده (مثال: claude,gpt-4,gemini)"),
+    depth: str = Query("normal", description="عمق تحلیل: quick, normal, deep"),
     db: Session = Depends(get_db)
 ):
     """
@@ -3673,6 +3700,10 @@ async def engineering_run_all_steps(
     - پشتیبانی از چند مدل همزمان (model_ids با کاما جدا شوند)
     - جایگزینی خودکار مدل‌های غیرفعال
     - ثبت جایگزینی در ژورنال
+    - 🆕 پارامتر depth برای تعیین عمق تحلیل:
+      - quick: بررسی سریع (فقط مراحل 1 و 4)
+      - normal: بررسی معمول (تمام مراحل)
+      - deep: بررسی عمیق (تمام مراحل + چندین تکرار)
     """
     results = {}
     replacement_notes = []
@@ -3708,6 +3739,15 @@ async def engineering_run_all_steps(
 
     results["models_used"] = active_selected
     results["replacement_notes"] = replacement_notes
+    results["depth"] = depth
+
+    # 🆕 تنظیمات بر اساس عمق تحلیل
+    depth_settings = {
+        "quick": {"iterations": 1, "skip_steps": [2, 3], "max_tokens": 2048},
+        "normal": {"iterations": 1, "skip_steps": [], "max_tokens": 4096},
+        "deep": {"iterations": 2, "skip_steps": [], "max_tokens": 8192},
+    }
+    settings = depth_settings.get(depth, depth_settings["normal"])
 
     # 🆕 اگر چند مدل انتخاب شده، از هر کدام برای یک مرحله استفاده کن
     # یا از همه برای اعتبارسنجی متقابل
@@ -3718,28 +3758,50 @@ async def engineering_run_all_steps(
         4: active_selected[-1] if active_selected else primary_model,
     }
 
-    # مرحله ۱
-    try:
-        step1 = await engineering_step1_validate_fields(project_id, model_for_step[1], db)
-        results["step1"] = step1
-    except Exception as e:
-        results["step1"] = {"success": False, "error": str(e)}
+    # 🆕 اجرای مراحل بر اساس عمق تحلیل
+    for iteration in range(settings["iterations"]):
+        if settings["iterations"] > 1:
+            log_detailed_operation(
+                db, project_id, None,
+                "engineering_iteration",
+                f"شروع تکرار {iteration + 1} از {settings['iterations']} (حالت: {depth})",
+                status="in_progress"
+            )
 
-    # مرحله ۲
-    try:
-        step2 = await engineering_step2_health_to_fields(project_id, model_for_step[2], db)
-        results["step2"] = step2
-    except Exception as e:
-        results["step2"] = {"success": False, "error": str(e)}
+        # مرحله ۱
+        if 1 not in settings["skip_steps"]:
+            try:
+                step1 = await engineering_step1_validate_fields(project_id, model_for_step[1], db)
+                results["step1"] = step1
+            except Exception as e:
+                results["step1"] = {"success": False, "error": str(e)}
 
-    # مرحله ۳ - 🆕 ارزیابی با امتیازدهی دقیق
-    try:
-        step3 = await engineering_step3_evaluate_models(project_id, model_for_step[3], db)
-        results["step3"] = step3
-    except Exception as e:
-        results["step3"] = {"success": False, "error": str(e)}
+        # مرحله ۲
+        if 2 not in settings["skip_steps"]:
+            try:
+                step2 = await engineering_step2_health_to_fields(project_id, model_for_step[2], db)
+                results["step2"] = step2
+            except Exception as e:
+                results["step2"] = {"success": False, "error": str(e)}
+        else:
+            results["step2"] = {"success": True, "skipped": True, "message": "رد شده در حالت quick"}
 
-    # مرحله ۴
+        # مرحله ۳ - 🆕 ارزیابی با امتیازدهی دقیق
+        if 3 not in settings["skip_steps"]:
+            try:
+                step3 = await engineering_step3_evaluate_models(project_id, model_for_step[3], db)
+                results["step3"] = step3
+            except Exception as e:
+                results["step3"] = {"success": False, "error": str(e)}
+        else:
+            results["step3"] = {"success": True, "skipped": True, "message": "رد شده در حالت quick"}
+
+        # 🆕 در حالت deep، بین تکرارها pause کن
+        if iteration < settings["iterations"] - 1:
+            import asyncio
+            await asyncio.sleep(2)  # صبر برای پردازش نتایج
+
+    # مرحله ۴ (همیشه اجرا می‌شود)
     try:
         step4 = await engineering_step4_update_roadmap(project_id, model_for_step[4], db)
         results["step4"] = step4

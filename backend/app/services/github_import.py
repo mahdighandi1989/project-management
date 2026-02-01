@@ -473,8 +473,17 @@ class GitHubImportService:
                     path = file_info["path"]
                     filename = path.split("/")[-1]
 
+                    # 🆕 همیشه فایل‌های frontend را دانلود کن
+                    is_frontend = (
+                        "frontend/" in path or
+                        "/components/" in path or
+                        "/src/app/" in path or
+                        path.endswith((".tsx", ".jsx"))
+                    )
+
                     # فقط فایل‌های مهم و کد رو دانلود کن
                     should_download = (
+                        is_frontend or  # 🆕 فایل‌های frontend همیشه
                         filename in important_files or
                         path.endswith((".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".css", ".scss")) or
                         file_info["size"] < 50000  # فایل‌های کوچک
