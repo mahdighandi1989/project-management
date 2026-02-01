@@ -554,22 +554,178 @@ async def clear_analysis_data(project_id: str, db=Depends(get_db)):
     """
     پاک کردن همه داده‌های تحلیل یک پروژه
 
+    🔴 قبل از پاک کردن، همه داده‌ها در بایگانی عمومی ذخیره می‌شوند
     برای شروع از صفر و رفع سردرگمی درباره داده‌های قدیمی
     """
     import logging
+    import uuid
+    from datetime import datetime
+
     logger = logging.getLogger(__name__)
+    logger.info(f"🗑️ [CLEAR] Starting clear analysis data for project {project_id}")
 
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
+        logger.warning(f"🗑️ [CLEAR] Project not found: {project_id}")
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
 
-    # پاک کردن همه داده‌های تحلیل
-    old_data = {
-        "health_scores": project.health_scores,
-        "file_health_map": project.file_health_map,
-        "issues_found": project.issues_found,
-        "last_analysis_at": str(project.last_analysis_at) if project.last_analysis_at else None
-    }
+    # ====================================
+    # 🔴 مرحله ۱: ذخیره در بایگانی عمومی قبل از پاک کردن
+    # ====================================
+    logger.info(f"🗑️ [CLEAR] Step 1: Saving data to general archive...")
+
+    # دریافت بایگانی فعلی
+    general_archive = []
+    try:
+        if project.general_archive:
+            general_archive = json.loads(project.general_archive) if isinstance(project.general_archive, str) else project.general_archive
+    except:
+        general_archive = []
+
+    archive_timestamp = datetime.utcnow().isoformat()
+    archived_items = []
+
+    # 1. بایگانی health_scores
+    if project.health_scores:
+        try:
+            health_data = json.loads(project.health_scores) if isinstance(project.health_scores, str) else project.health_scores
+            archive_item = {
+                "id": str(uuid.uuid4()),
+                "type": "health_analysis",
+                "category": "امتیازات سلامت",
+                "title": f"تحلیل سلامت - {project.last_analysis_at.strftime('%Y/%m/%d %H:%M') if project.last_analysis_at else 'تاریخ نامشخص'}",
+                "content": health_data,
+                "summary": f"امتیاز کلی: {health_data.get('overall', 'نامشخص')}",
+                "archived_at": archive_timestamp,
+                "archived_reason": "clear_button",
+                "archived_by": "user",
+                "metadata": {
+                    "original_created_at": project.last_analysis_at.isoformat() if project.last_analysis_at else None,
+                    "models_used": json.loads(project.last_analysis_models) if project.last_analysis_models else []
+                }
+            }
+            general_archive.append(archive_item)
+            archived_items.append("health_scores")
+            logger.info(f"🗑️ [CLEAR] Archived health_scores")
+        except Exception as e:
+            logger.warning(f"🗑️ [CLEAR] Could not archive health_scores: {e}")
+
+    # 2. بایگانی file_health_map
+    if project.file_health_map:
+        try:
+            file_map = json.loads(project.file_health_map) if isinstance(project.file_health_map, str) else project.file_health_map
+            files_count = len(file_map) if isinstance(file_map, dict) else 0
+            archive_item = {
+                "id": str(uuid.uuid4()),
+                "type": "file_health",
+                "category": "نقشه سلامت فایل‌ها",
+                "title": f"نقشه سلامت {files_count} فایل",
+                "content": file_map,
+                "summary": f"{files_count} فایل تحلیل شده",
+                "archived_at": archive_timestamp,
+                "archived_reason": "clear_button",
+                "archived_by": "user",
+                "metadata": {
+                    "files_count": files_count,
+                    "original_created_at": project.last_analysis_at.isoformat() if project.last_analysis_at else None
+                }
+            }
+            general_archive.append(archive_item)
+            archived_items.append("file_health_map")
+            logger.info(f"🗑️ [CLEAR] Archived file_health_map ({files_count} files)")
+        except Exception as e:
+            logger.warning(f"🗑️ [CLEAR] Could not archive file_health_map: {e}")
+
+    # 3. بایگانی issues_found
+    if project.issues_found:
+        try:
+            issues = json.loads(project.issues_found) if isinstance(project.issues_found, str) else project.issues_found
+            issues_count = len(issues) if isinstance(issues, list) else 0
+            if issues_count > 0:
+                # دسته‌بندی بر اساس severity
+                severity_breakdown = {}
+                for issue in issues:
+                    sev = issue.get("severity", "unknown")
+                    severity_breakdown[sev] = severity_breakdown.get(sev, 0) + 1
+
+                archive_item = {
+                    "id": str(uuid.uuid4()),
+                    "type": "issues",
+                    "category": "ایرادات شناسایی شده",
+                    "title": f"{issues_count} ایراد شناسایی شده",
+                    "content": issues,
+                    "summary": f"ایرادات: {', '.join([f'{k}: {v}' for k, v in severity_breakdown.items()])}",
+                    "archived_at": archive_timestamp,
+                    "archived_reason": "clear_button",
+                    "archived_by": "user",
+                    "metadata": {
+                        "issues_count": issues_count,
+                        "severity_breakdown": severity_breakdown,
+                        "original_created_at": project.last_analysis_at.isoformat() if project.last_analysis_at else None
+                    }
+                }
+                general_archive.append(archive_item)
+                archived_items.append("issues_found")
+                logger.info(f"🗑️ [CLEAR] Archived issues_found ({issues_count} issues)")
+        except Exception as e:
+            logger.warning(f"🗑️ [CLEAR] Could not archive issues_found: {e}")
+
+    # 4. بایگانی ideal_state
+    if project.ideal_state:
+        try:
+            archive_item = {
+                "id": str(uuid.uuid4()),
+                "type": "ideal_state",
+                "category": "وضعیت ایده‌آل",
+                "title": "توضیحات وضعیت ایده‌آل پروژه",
+                "content": {"text": project.ideal_state},
+                "summary": project.ideal_state[:100] + "..." if len(project.ideal_state) > 100 else project.ideal_state,
+                "archived_at": archive_timestamp,
+                "archived_reason": "clear_button",
+                "archived_by": "user",
+                "metadata": {}
+            }
+            general_archive.append(archive_item)
+            archived_items.append("ideal_state")
+            logger.info(f"🗑️ [CLEAR] Archived ideal_state")
+        except Exception as e:
+            logger.warning(f"🗑️ [CLEAR] Could not archive ideal_state: {e}")
+
+    # 5. بایگانی last_validation_results
+    if project.last_validation_results:
+        try:
+            validation = json.loads(project.last_validation_results) if isinstance(project.last_validation_results, str) else project.last_validation_results
+            archive_item = {
+                "id": str(uuid.uuid4()),
+                "type": "validation",
+                "category": "نتایج اعتبارسنجی",
+                "title": f"اعتبارسنجی - {validation.get('validated_at', 'تاریخ نامشخص')[:10]}",
+                "content": validation,
+                "summary": f"تایید: {validation.get('validated_count', 0)}, رد: {validation.get('rejected_count', 0)}",
+                "archived_at": archive_timestamp,
+                "archived_reason": "clear_button",
+                "archived_by": "user",
+                "metadata": {
+                    "validator_model": validation.get("validator_model"),
+                    "validated_count": validation.get("validated_count", 0),
+                    "rejected_count": validation.get("rejected_count", 0)
+                }
+            }
+            general_archive.append(archive_item)
+            archived_items.append("last_validation_results")
+            logger.info(f"🗑️ [CLEAR] Archived last_validation_results")
+        except Exception as e:
+            logger.warning(f"🗑️ [CLEAR] Could not archive last_validation_results: {e}")
+
+    # ذخیره بایگانی عمومی
+    if archived_items:
+        project.general_archive = json.dumps(general_archive, ensure_ascii=False)
+        logger.info(f"🗑️ [CLEAR] Saved {len(archived_items)} items to general archive")
+
+    # ====================================
+    # 🔴 مرحله ۲: پاک کردن داده‌ها
+    # ====================================
+    logger.info(f"🗑️ [CLEAR] Step 2: Clearing analysis data...")
 
     project.health_scores = None
     project.file_health_map = None
@@ -578,16 +734,20 @@ async def clear_analysis_data(project_id: str, db=Depends(get_db)):
     project.last_analysis_id = None
     project.last_analysis_at = None
     project.last_analysis_models = None
+    # نکته: last_validation_results و rejected_issues_archive رو نگه میداریم چون بخش validation هستن
 
     db.commit()
 
-    logger.info(f"🗑️ Cleared all analysis data for project {project_id}")
+    logger.info(f"🗑️ [CLEAR] ✅ Successfully cleared analysis data for project {project_id}")
+    logger.info(f"🗑️ [CLEAR] Archived items: {archived_items}")
 
     return {
         "success": True,
-        "message": "همه داده‌های تحلیل پاک شدند",
+        "message": "همه داده‌های تحلیل پاک شدند و در بایگانی ذخیره شدند",
         "project_id": project_id,
-        "cleared_data_existed": bool(old_data.get("health_scores") or old_data.get("file_health_map"))
+        "archived_items": archived_items,
+        "archive_count": len(archived_items),
+        "total_archive_size": len(general_archive)
     }
 
 
@@ -2575,6 +2735,211 @@ async def _run_resumed_analysis_task(
         if project_id in _active_progress_managers:
             del _active_progress_managers[project_id]
         db.close()
+
+
+# =====================================
+# 🆕 API Endpoints برای بایگانی عمومی
+# General Archive Endpoints
+# =====================================
+
+@router.get("/{project_id}/health/general-archive")
+async def get_general_archive(
+    project_id: str,
+    type_filter: str = None,  # فیلتر بر اساس نوع: health_analysis, issues, file_health, validation, ideal_state
+    page: int = 1,
+    page_size: int = 20,
+    db=Depends(get_db)
+):
+    """
+    دریافت بایگانی عمومی پروژه
+
+    شامل همه داده‌های پاک شده:
+    - health_analysis: امتیازات سلامت
+    - issues: ایرادات شناسایی شده
+    - file_health: نقشه سلامت فایل‌ها
+    - validation: نتایج اعتبارسنجی
+    - ideal_state: وضعیت ایده‌آل
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"📦 [ARCHIVE] Getting general archive for project {project_id}")
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    archive = []
+    if project.general_archive:
+        try:
+            archive = json.loads(project.general_archive) if isinstance(project.general_archive, str) else project.general_archive
+        except:
+            pass
+
+    # فیلتر بر اساس نوع
+    if type_filter:
+        archive = [item for item in archive if item.get("type") == type_filter]
+
+    # مرتب‌سازی بر اساس تاریخ بایگانی (جدیدترین اول)
+    archive.sort(key=lambda x: x.get("archived_at", ""), reverse=True)
+
+    # صفحه‌بندی
+    total = len(archive)
+    start = (page - 1) * page_size
+    end = start + page_size
+    paginated = archive[start:end]
+
+    # آمار دسته‌بندی
+    type_breakdown = {}
+    category_breakdown = {}
+    for item in archive:
+        t = item.get("type", "unknown")
+        c = item.get("category", "نامشخص")
+        type_breakdown[t] = type_breakdown.get(t, 0) + 1
+        category_breakdown[c] = category_breakdown.get(c, 0) + 1
+
+    logger.info(f"📦 [ARCHIVE] Found {total} archived items, returning page {page}")
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "archive": paginated,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size if page_size > 0 else 0,
+        "type_breakdown": type_breakdown,
+        "category_breakdown": category_breakdown
+    }
+
+
+@router.get("/{project_id}/health/general-archive/{item_id}")
+async def get_archive_item_detail(
+    project_id: str,
+    item_id: str,
+    db=Depends(get_db)
+):
+    """
+    دریافت جزئیات کامل یک آیتم بایگانی شده
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"📦 [ARCHIVE] Getting archive item detail: {item_id}")
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    archive = []
+    if project.general_archive:
+        try:
+            archive = json.loads(project.general_archive) if isinstance(project.general_archive, str) else project.general_archive
+        except:
+            pass
+
+    # پیدا کردن آیتم
+    item = next((x for x in archive if x.get("id") == item_id), None)
+    if not item:
+        raise HTTPException(status_code=404, detail="آیتم بایگانی یافت نشد")
+
+    logger.info(f"📦 [ARCHIVE] Found archive item: {item.get('title')}")
+
+    return {
+        "success": True,
+        "item": item
+    }
+
+
+@router.delete("/{project_id}/health/general-archive/{item_id}")
+async def delete_archive_item(
+    project_id: str,
+    item_id: str,
+    db=Depends(get_db)
+):
+    """
+    حذف دائمی یک آیتم از بایگانی
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"📦 [ARCHIVE] Deleting archive item: {item_id}")
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    archive = []
+    if project.general_archive:
+        try:
+            archive = json.loads(project.general_archive) if isinstance(project.general_archive, str) else project.general_archive
+        except:
+            pass
+
+    # پیدا کردن و حذف آیتم
+    original_count = len(archive)
+    archive = [x for x in archive if x.get("id") != item_id]
+
+    if len(archive) == original_count:
+        raise HTTPException(status_code=404, detail="آیتم بایگانی یافت نشد")
+
+    project.general_archive = json.dumps(archive, ensure_ascii=False)
+    db.commit()
+
+    logger.info(f"📦 [ARCHIVE] ✅ Deleted archive item: {item_id}")
+
+    return {
+        "success": True,
+        "message": "آیتم از بایگانی حذف شد",
+        "remaining_count": len(archive)
+    }
+
+
+@router.delete("/{project_id}/health/general-archive")
+async def clear_general_archive(
+    project_id: str,
+    type_filter: str = None,  # اگر مشخص شد فقط آن نوع پاک شود
+    db=Depends(get_db)
+):
+    """
+    پاک کردن بایگانی عمومی (همه یا یک نوع خاص)
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"📦 [ARCHIVE] Clearing general archive for project {project_id}, type_filter={type_filter}")
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    archive = []
+    if project.general_archive:
+        try:
+            archive = json.loads(project.general_archive) if isinstance(project.general_archive, str) else project.general_archive
+        except:
+            pass
+
+    original_count = len(archive)
+
+    if type_filter:
+        # فقط نوع مشخص شده رو پاک کن
+        archive = [x for x in archive if x.get("type") != type_filter]
+        deleted_count = original_count - len(archive)
+        project.general_archive = json.dumps(archive, ensure_ascii=False)
+        message = f"{deleted_count} آیتم از نوع {type_filter} حذف شد"
+    else:
+        # همه رو پاک کن
+        project.general_archive = None
+        deleted_count = original_count
+        message = f"همه {deleted_count} آیتم بایگانی حذف شدند"
+
+    db.commit()
+
+    logger.info(f"📦 [ARCHIVE] ✅ Cleared archive: {deleted_count} items deleted")
+
+    return {
+        "success": True,
+        "message": message,
+        "deleted_count": deleted_count,
+        "remaining_count": len(archive) if type_filter else 0
+    }
 
 
 # =====================================

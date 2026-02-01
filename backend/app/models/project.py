@@ -124,6 +124,26 @@ class Project(Base):
     #   "validation_score": 25,  # امتیاز اعتبارسنجی (0-100)
     # }]
 
+    # ====================================
+    # 🆕 آرشیو عمومی - همه موارد پاک شده
+    # ====================================
+    general_archive = Column(Text)  # JSON: [{
+    #   "id": "uuid",
+    #   "type": "health_analysis" | "issues" | "file_health" | "validation" | "other",
+    #   "category": "دسته‌بندی",
+    #   "title": "عنوان آیتم",
+    #   "content": {...},  # محتوای کامل آیتم
+    #   "summary": "خلاصه کوتاه",
+    #   "archived_at": "timestamp",
+    #   "archived_reason": "clear_button" | "manual" | "auto_cleanup",
+    #   "archived_by": "user" | "system",
+    #   "metadata": {
+    #       "original_created_at": "...",
+    #       "related_files": [...],
+    #       "severity": "...",
+    #   }
+    # }]
+
     # آخرین نتایج اعتبارسنجی سلامت
     last_validation_results = Column(Text)  # JSON: {
     #   "validated_at": "...",
@@ -243,6 +263,14 @@ class Project(Base):
         except (json.JSONDecodeError, TypeError):
             pass
 
+        # Parse general archive
+        general_archive = []
+        try:
+            if self.general_archive:
+                general_archive = json.loads(self.general_archive) if isinstance(self.general_archive, str) else self.general_archive
+        except (json.JSONDecodeError, TypeError):
+            pass
+
         return {
             "id": self.id,
             "name": self.name,
@@ -276,6 +304,8 @@ class Project(Base):
             # 🆕 Validation chain fields
             "rejected_issues_archive": rejected_issues_archive,
             "last_validation_results": last_validation_results,
+            # 🆕 General archive
+            "general_archive": general_archive,
             # Timestamps
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
