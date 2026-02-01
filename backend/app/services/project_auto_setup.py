@@ -330,6 +330,14 @@ async def generate_intelligent_setup(
 
         ai_manager = get_ai_manager()
 
+        # 🔴 بررسی اولیه وضعیت AI
+        available_providers = ai_manager.get_available_providers()
+        logger.info(f"🤖 generate_intelligent_setup - Available AI providers: {available_providers}")
+
+        if not available_providers:
+            logger.error("❌ No AI providers available in generate_intelligent_setup!")
+            return {"success": False, "error": "هیچ مدل AI در دسترس نیست. لطفاً API key را در تنظیمات وارد کنید."}
+
         # ساخت خلاصه فایل‌های نمونه با محتوا
         files_detail = []
         for f in sample_files[:10]:
