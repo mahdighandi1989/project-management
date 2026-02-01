@@ -2777,48 +2777,65 @@ async def generate_engineering_report_stream(
             if use_4step:
                 # مرحله 1: اعتبارسنجی فیلدها
                 step = total_steps - 5
-                yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': '🔬 مرحله ۱: اعتبارسنجی فیلدهای موجود...', 'progress': 60}, ensure_ascii=False)}\n\n"
+                msg1_start = json.dumps({'step': step, 'total': total_steps, 'message': '🔬 مرحله ۱: اعتبارسنجی فیلدهای موجود...', 'progress': 60}, ensure_ascii=False)
+                yield f"data: {msg1_start}\n\n"
                 await asyncio.sleep(delay_factor)
                 try:
                     step1_result = await engineering_step1_validate_fields(project_id, selected_models[0], depth, db)
-                    yield f"data: {json.dumps({'step': step, 'message': f'✅ مرحله ۱ تکمیل: {step1_result.get(\"validated_count\", 0)} فیلد بررسی شد', 'progress': 65}, ensure_ascii=False)}\n\n"
+                    validated_count = step1_result.get('validated_count', 0)
+                    msg1_done = json.dumps({'step': step, 'message': f'✅ مرحله ۱ تکمیل: {validated_count} فیلد بررسی شد', 'progress': 65}, ensure_ascii=False)
+                    yield f"data: {msg1_done}\n\n"
                 except Exception as e:
-                    yield f"data: {json.dumps({'step': step, 'message': f'⚠️ مرحله ۱: {str(e)[:50]}', 'progress': 65}, ensure_ascii=False)}\n\n"
+                    err_msg = str(e)[:50]
+                    msg1_err = json.dumps({'step': step, 'message': f'⚠️ مرحله ۱: {err_msg}', 'progress': 65}, ensure_ascii=False)
+                    yield f"data: {msg1_err}\n\n"
                 await asyncio.sleep(delay_factor)
 
                 # مرحله 2: تبدیل ایرادات سلامت به فیلد
                 step = total_steps - 4
-                yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': '🔄 مرحله ۲: تبدیل ایرادات سلامت به فیلد...', 'progress': 70}, ensure_ascii=False)}\n\n"
+                msg2_start = json.dumps({'step': step, 'total': total_steps, 'message': '🔄 مرحله ۲: تبدیل ایرادات سلامت به فیلد...', 'progress': 70}, ensure_ascii=False)
+                yield f"data: {msg2_start}\n\n"
                 await asyncio.sleep(delay_factor)
                 try:
                     step2_result = await engineering_step2_health_to_fields(project_id, selected_models[0], depth, db)
-                    created = step2_result.get("created_count", 0)
-                    archived = step2_result.get("archived_count", 0)
-                    yield f"data: {json.dumps({'step': step, 'message': f'✅ مرحله ۲: {created} فیلد ایجاد، {archived} ایراد بایگانی', 'progress': 75}, ensure_ascii=False)}\n\n"
+                    created = step2_result.get('created_count', 0)
+                    archived = step2_result.get('archived_count', 0)
+                    msg2_done = json.dumps({'step': step, 'message': f'✅ مرحله ۲: {created} فیلد ایجاد، {archived} ایراد بایگانی', 'progress': 75}, ensure_ascii=False)
+                    yield f"data: {msg2_done}\n\n"
                 except Exception as e:
-                    yield f"data: {json.dumps({'step': step, 'message': f'⚠️ مرحله ۲: {str(e)[:50]}', 'progress': 75}, ensure_ascii=False)}\n\n"
+                    err_msg = str(e)[:50]
+                    msg2_err = json.dumps({'step': step, 'message': f'⚠️ مرحله ۲: {err_msg}', 'progress': 75}, ensure_ascii=False)
+                    yield f"data: {msg2_err}\n\n"
                 await asyncio.sleep(delay_factor)
 
                 # مرحله 3: ارزیابی مدل‌ها
                 step = total_steps - 3
-                yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': '📊 مرحله ۳: ارزیابی عملکرد مدل‌ها...', 'progress': 80}, ensure_ascii=False)}\n\n"
+                msg3_start = json.dumps({'step': step, 'total': total_steps, 'message': '📊 مرحله ۳: ارزیابی عملکرد مدل‌ها...', 'progress': 80}, ensure_ascii=False)
+                yield f"data: {msg3_start}\n\n"
                 await asyncio.sleep(delay_factor)
                 try:
                     step3_result = await engineering_step3_evaluate_models(project_id, selected_models[0], depth, db)
-                    yield f"data: {json.dumps({'step': step, 'message': '✅ مرحله ۳: ارزیابی مدل‌ها تکمیل شد', 'progress': 85}, ensure_ascii=False)}\n\n"
+                    msg3_done = json.dumps({'step': step, 'message': '✅ مرحله ۳: ارزیابی مدل‌ها تکمیل شد', 'progress': 85}, ensure_ascii=False)
+                    yield f"data: {msg3_done}\n\n"
                 except Exception as e:
-                    yield f"data: {json.dumps({'step': step, 'message': f'⚠️ مرحله ۳: {str(e)[:50]}', 'progress': 85}, ensure_ascii=False)}\n\n"
+                    err_msg = str(e)[:50]
+                    msg3_err = json.dumps({'step': step, 'message': f'⚠️ مرحله ۳: {err_msg}', 'progress': 85}, ensure_ascii=False)
+                    yield f"data: {msg3_err}\n\n"
                 await asyncio.sleep(delay_factor)
 
                 # مرحله 4: به‌روزرسانی نقشه راه
                 step = total_steps - 2
-                yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': '🗺️ مرحله ۴: به‌روزرسانی نقشه راه...', 'progress': 90}, ensure_ascii=False)}\n\n"
+                msg4_start = json.dumps({'step': step, 'total': total_steps, 'message': '🗺️ مرحله ۴: به‌روزرسانی نقشه راه...', 'progress': 90}, ensure_ascii=False)
+                yield f"data: {msg4_start}\n\n"
                 await asyncio.sleep(delay_factor)
                 try:
                     step4_result = await engineering_step4_update_roadmap(project_id, selected_models[0], db)
-                    yield f"data: {json.dumps({'step': step, 'message': '✅ مرحله ۴: نقشه راه به‌روزرسانی شد', 'progress': 95}, ensure_ascii=False)}\n\n"
+                    msg4_done = json.dumps({'step': step, 'message': '✅ مرحله ۴: نقشه راه به‌روزرسانی شد', 'progress': 95}, ensure_ascii=False)
+                    yield f"data: {msg4_done}\n\n"
                 except Exception as e:
-                    yield f"data: {json.dumps({'step': step, 'message': f'⚠️ مرحله ۴: {str(e)[:50]}', 'progress': 95}, ensure_ascii=False)}\n\n"
+                    err_msg = str(e)[:50]
+                    msg4_err = json.dumps({'step': step, 'message': f'⚠️ مرحله ۴: {err_msg}', 'progress': 95}, ensure_ascii=False)
+                    yield f"data: {msg4_err}\n\n"
                 await asyncio.sleep(delay_factor)
 
                 result = {
@@ -2832,7 +2849,8 @@ async def generate_engineering_report_stream(
                 # حالت quick/standard: یک فراخوانی
                 step = total_steps - 1
                 models_text = ", ".join(selected_models)
-                yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': f'🧠 تولید گزارش نهایی با {models_text}...', 'progress': 80}, ensure_ascii=False)}\n\n"
+                msg_final = json.dumps({'step': step, 'total': total_steps, 'message': f'🧠 تولید گزارش نهایی با {models_text}...', 'progress': 80}, ensure_ascii=False)
+                yield f"data: {msg_final}\n\n"
 
                 # فراخوانی گزارش اصلی (با مدل اول)
                 result = await generate_engineering_report(
