@@ -31,6 +31,8 @@ from ...services.analysis_progress_manager import (
     resume_analysis as resume_analysis_helper,
     stop_analysis as stop_analysis_helper
 )
+from ...services.security_scanner import get_security_scanner
+from ...services.test_coverage_analyzer import get_test_coverage_analyzer
 
 logger = logging.getLogger(__name__)
 
@@ -1765,7 +1767,12 @@ def _merge_similar_issues(issues: list, aggressive: bool = False) -> list:
 
     # مرتب‌سازی براساس اهمیت
     severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    merged_issues.sort(key=lambda x: (severity_order.get(x.get("severity", "medium"), 2), -x.get("merged_count", 1)))
+    # 🔴 تبدیل امن برای جلوگیری از خطای NoneType comparison
+    def safe_issue_sort(x):
+        sev = x.get("severity") if x.get("severity") else "medium"
+        merged_count = x.get("merged_count") if x.get("merged_count") is not None else 1
+        return (severity_order.get(sev, 2), -merged_count)
+    merged_issues.sort(key=safe_issue_sort)
 
     return merged_issues
 
@@ -3636,3 +3643,282 @@ async def validate_all_files(
         validation_generator(),
         media_type="text/event-stream"
     )
+
+
+# =====================================
+# Security Scan Endpoints
+# =====================================
+
+@router.get("/{project_id}/security/scan")
+async def run_security_scan(
+    project_id: int,
+    db=Depends(get_db)
+):
+    """
+    اجرای اسکن امنیتی کامل پروژه
+
+    شامل:
+    - تشخیص Secrets (API keys, passwords, tokens)
+    - تشخیص لایسنس
+    - بررسی فایل‌های حساس
+    - بررسی آسیب‌پذیری وابستگی‌ها
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت فایل‌های پروژه
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+
+    # تبدیل به فرمت مورد نیاز اسکنر
+    file_data = []
+    for f in files:
+        file_data.append({
+            "path": f.path,
+            "name": f.path.split("/")[-1] if "/" in f.path else f.path,
+            "content": f.content or ""
+        })
+
+    # اجرای اسکن امنیتی
+    scanner = get_security_scanner()
+    scan_result = scanner.full_security_scan(file_data)
+
+    # ذخیره نتایج در پروژه
+    try:
+        existing_metadata = json.loads(project.metadata or "{}")
+    except:
+        existing_metadata = {}
+
+    existing_metadata["security_scan"] = {
+        "last_scan": datetime.utcnow().isoformat(),
+        "score": scan_result["security_score"],
+        "summary": scan_result["summary"]
+    }
+    project.metadata = json.dumps(existing_metadata, ensure_ascii=False)
+    db.commit()
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "scan_result": scan_result
+    }
+
+
+@router.get("/{project_id}/security/secrets")
+async def scan_secrets_only(
+    project_id: int,
+    db=Depends(get_db)
+):
+    """
+    اسکن فقط برای Secrets
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+
+    scanner = get_security_scanner()
+    all_secrets = []
+
+    for f in files:
+        if f.content:
+            secrets = scanner.scan_content_for_secrets(f.content, f.path)
+            all_secrets.extend(secrets)
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "secrets_count": len(all_secrets),
+        "findings": all_secrets
+    }
+
+
+@router.get("/{project_id}/security/license")
+async def detect_project_license(
+    project_id: int,
+    db=Depends(get_db)
+):
+    """
+    تشخیص لایسنس پروژه
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+
+    file_data = []
+    for f in files:
+        file_data.append({
+            "path": f.path,
+            "name": f.path.split("/")[-1] if "/" in f.path else f.path,
+            "content": f.content or ""
+        })
+
+    scanner = get_security_scanner()
+    license_info = scanner.detect_license(file_data)
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "license": license_info
+    }
+
+
+@router.get("/{project_id}/security/dependencies")
+async def scan_dependencies(
+    project_id: int,
+    db=Depends(get_db)
+):
+    """
+    بررسی آسیب‌پذیری وابستگی‌ها
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+
+    file_data = []
+    for f in files:
+        file_data.append({
+            "path": f.path,
+            "name": f.path.split("/")[-1] if "/" in f.path else f.path,
+            "content": f.content or ""
+        })
+
+    scanner = get_security_scanner()
+    dep_result = scanner.scan_dependencies(file_data)
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "dependencies": dep_result
+    }
+
+
+# =====================================
+# Test Coverage Endpoints
+# =====================================
+
+@router.get("/{project_id}/test-coverage")
+async def analyze_test_coverage(
+    project_id: int,
+    db=Depends(get_db)
+):
+    """
+    تحلیل پوشش تست پروژه
+
+    شامل:
+    - شناسایی فایل‌های تست
+    - تحلیل توابع و کلاس‌های تست شده
+    - محاسبه درصد پوشش
+    - توصیه‌ها برای بهبود
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت فایل‌های پروژه
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+
+    # تبدیل به فرمت مورد نیاز تحلیلگر
+    file_data = []
+    for f in files:
+        file_data.append({
+            "path": f.path,
+            "name": f.path.split("/")[-1] if "/" in f.path else f.path,
+            "content": f.content or ""
+        })
+
+    # اجرای تحلیل پوشش تست
+    analyzer = get_test_coverage_analyzer()
+    coverage_result = analyzer.analyze_project(file_data)
+
+    # ذخیره نتایج در پروژه
+    try:
+        existing_metadata = json.loads(project.metadata or "{}")
+    except:
+        existing_metadata = {}
+
+    existing_metadata["test_coverage"] = {
+        "last_analysis": datetime.utcnow().isoformat(),
+        "coverage_percent": coverage_result["summary"]["coverage_percent"],
+        "health_score": coverage_result["health_score"],
+        "total_tests": coverage_result["summary"]["total_tests"]
+    }
+    project.metadata = json.dumps(existing_metadata, ensure_ascii=False)
+    db.commit()
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "coverage": coverage_result
+    }
+
+
+@router.get("/{project_id}/test-coverage/summary")
+async def get_test_coverage_summary(
+    project_id: int,
+    db=Depends(get_db)
+):
+    """
+    دریافت خلاصه پوشش تست (سریع‌تر)
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت از metadata اگر موجود باشد
+    try:
+        metadata = json.loads(project.metadata or "{}")
+        if "test_coverage" in metadata:
+            return {
+                "success": True,
+                "project_id": project_id,
+                "cached": True,
+                "summary": metadata["test_coverage"]
+            }
+    except:
+        pass
+
+    # در غیر این صورت تحلیل جدید
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+
+    analyzer = get_test_coverage_analyzer()
+    file_data = [{"path": f.path, "content": f.content or ""} for f in files]
+    coverage_result = analyzer.analyze_project(file_data)
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "cached": False,
+        "summary": coverage_result["summary"]
+    }
+
+
+@router.get("/{project_id}/test-coverage/untested")
+async def get_untested_files(
+    project_id: int,
+    db=Depends(get_db)
+):
+    """
+    لیست فایل‌های بدون تست
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+
+    analyzer = get_test_coverage_analyzer()
+    file_data = [{"path": f.path, "content": f.content or ""} for f in files]
+    coverage_result = analyzer.analyze_project(file_data)
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "untested_files": coverage_result["untested_files"],
+        "recommendations": coverage_result["recommendations"]
+    }

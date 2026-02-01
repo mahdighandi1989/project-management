@@ -7,6 +7,7 @@ import json
 import uuid
 import time
 import asyncio
+import difflib
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import Response
@@ -55,6 +56,9 @@ class DynamicFieldRequest(BaseModel):
     field_type: str = "temporary"  # "permanent" (دائمی/تکرارشونده) یا "temporary" (موقت/یکبار مصرف)
     priority: int = 5  # اولویت از 1 (بالاترین) تا 10 (پایین‌ترین)
     attachments: Optional[List[str]] = None  # لیست فایل‌های پیوست (آدرس فایل یا base64)
+    # 🆕 وابستگی فیلدها
+    depends_on: Optional[List[str]] = None  # فیلدهایی که باید قبل از این اجرا شوند
+    blocked_by: Optional[List[str]] = None  # فیلدهایی که اجرای این را بلوکه می‌کنند
 
 
 class UpdateDynamicFieldRequest(BaseModel):
@@ -73,6 +77,9 @@ class UpdateDynamicFieldRequest(BaseModel):
     field_type: Optional[str] = None  # "permanent" یا "temporary"
     priority: Optional[int] = None  # اولویت از 1 تا 10
     attachments: Optional[List[str]] = None  # لیست پیوست‌ها
+    # 🆕 وابستگی فیلدها
+    depends_on: Optional[List[str]] = None  # فیلدهایی که باید قبل از این اجرا شوند
+    blocked_by: Optional[List[str]] = None  # فیلدهایی که اجرای این را بلوکه می‌کنند
 
 
 class BatchExecuteRequest(BaseModel):
@@ -125,6 +132,113 @@ PRIORITY_LEVELS = [
     {"value": 7, "name": "پایین", "icon": "🔵"},
     {"value": 10, "name": "خیلی پایین", "icon": "⚪", "description": "در صورت فرصت"},
 ]
+
+
+# =====================================
+# توابع کمکی برای وابستگی فیلدها
+# =====================================
+
+def check_field_dependencies(field: dict, all_fields: list) -> dict:
+    """
+    بررسی وابستگی‌های یک فیلد
+    برمی‌گرداند: {"can_execute": bool, "blocking_fields": list, "pending_dependencies": list}
+    """
+    depends_on = field.get("depends_on", []) or []
+    blocked_by = field.get("blocked_by", []) or []
+
+    pending_dependencies = []
+    blocking_fields = []
+
+    # ساخت دیکشنری برای دسترسی سریع به فیلدها
+    field_map = {f.get("id"): f for f in all_fields}
+
+    # بررسی depends_on: فیلدهایی که باید اجرا شده باشند
+    for dep_id in depends_on:
+        dep_field = field_map.get(dep_id)
+        if dep_field:
+            # فیلد باید بایگانی شده باشد (یعنی اجرا شده)
+            if not dep_field.get("archived"):
+                pending_dependencies.append({
+                    "id": dep_id,
+                    "name": dep_field.get("name", "فیلد ناشناخته"),
+                    "status": "pending"
+                })
+
+    # بررسی blocked_by: فیلدهایی که نباید فعال باشند
+    for block_id in blocked_by:
+        block_field = field_map.get(block_id)
+        if block_field:
+            # اگر فیلد بلوکه‌کننده هنوز فعال است (بایگانی نشده)
+            if not block_field.get("archived"):
+                blocking_fields.append({
+                    "id": block_id,
+                    "name": block_field.get("name", "فیلد ناشناخته"),
+                    "status": "blocking"
+                })
+
+    can_execute = len(pending_dependencies) == 0 and len(blocking_fields) == 0
+
+    return {
+        "can_execute": can_execute,
+        "pending_dependencies": pending_dependencies,
+        "blocking_fields": blocking_fields,
+        "message": None if can_execute else _get_dependency_message(pending_dependencies, blocking_fields)
+    }
+
+
+def _get_dependency_message(pending: list, blocking: list) -> str:
+    """تولید پیام خطای وابستگی"""
+    messages = []
+
+    if pending:
+        names = ", ".join([p["name"] for p in pending])
+        messages.append(f"ابتدا این فیلدها باید اجرا شوند: {names}")
+
+    if blocking:
+        names = ", ".join([b["name"] for b in blocking])
+        messages.append(f"این فیلدها مانع اجرا هستند: {names}")
+
+    return " | ".join(messages)
+
+
+def sort_fields_by_dependencies(fields: list) -> list:
+    """
+    مرتب‌سازی فیلدها براساس وابستگی‌ها (توپولوژیکی)
+    فیلدهایی که وابستگی ندارند اول می‌آیند
+    """
+    sorted_fields = []
+    remaining = fields.copy()
+    executed_ids = set()
+
+    # حداکثر تعداد تکرار برای جلوگیری از حلقه بی‌نهایت
+    max_iterations = len(fields) * 2
+    iteration = 0
+
+    while remaining and iteration < max_iterations:
+        iteration += 1
+        made_progress = False
+
+        for field in remaining[:]:
+            depends_on = field.get("depends_on", []) or []
+            blocked_by = field.get("blocked_by", []) or []
+
+            # بررسی آیا همه وابستگی‌ها برآورده شده‌اند
+            deps_satisfied = all(dep_id in executed_ids for dep_id in depends_on)
+            not_blocked = all(block_id in executed_ids or block_id not in [f.get("id") for f in remaining] for block_id in blocked_by)
+
+            if deps_satisfied and not_blocked:
+                sorted_fields.append(field)
+                executed_ids.add(field.get("id"))
+                remaining.remove(field)
+                made_progress = True
+
+        # اگر پیشرفتی نداشتیم، ممکن است وابستگی دایره‌ای وجود داشته باشد
+        if not made_progress:
+            # باقی‌مانده‌ها را به انتها اضافه کن
+            sorted_fields.extend(remaining)
+            break
+
+    return sorted_fields
 
 
 # =====================================
@@ -1820,6 +1934,257 @@ async def toggle_field_trigger(
     }
 
 
+@router.get("/{project_id}/memory/fields/{field_id}/dependencies")
+async def get_field_dependencies(
+    project_id: str,
+    field_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    بررسی وضعیت وابستگی‌های یک فیلد
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    dynamic_fields = []
+    try:
+        if project.dynamic_fields:
+            dynamic_fields = json.loads(project.dynamic_fields)
+    except:
+        pass
+
+    target_field = None
+    for field in dynamic_fields:
+        if field.get("id") == field_id:
+            target_field = field
+            break
+
+    if not target_field:
+        raise HTTPException(status_code=404, detail="فیلد یافت نشد")
+
+    dep_check = check_field_dependencies(target_field, dynamic_fields)
+
+    # اطلاعات کامل وابستگی‌ها
+    depends_on_details = []
+    blocked_by_details = []
+    field_map = {f.get("id"): f for f in dynamic_fields}
+
+    for dep_id in (target_field.get("depends_on") or []):
+        dep_field = field_map.get(dep_id)
+        if dep_field:
+            depends_on_details.append({
+                "id": dep_id,
+                "name": dep_field.get("name"),
+                "archived": dep_field.get("archived", False),
+                "status": "completed" if dep_field.get("archived") else "pending"
+            })
+
+    for block_id in (target_field.get("blocked_by") or []):
+        block_field = field_map.get(block_id)
+        if block_field:
+            blocked_by_details.append({
+                "id": block_id,
+                "name": block_field.get("name"),
+                "archived": block_field.get("archived", False),
+                "status": "cleared" if block_field.get("archived") else "blocking"
+            })
+
+    return {
+        "success": True,
+        "field_id": field_id,
+        "field_name": target_field.get("name"),
+        "can_execute": dep_check["can_execute"],
+        "depends_on": depends_on_details,
+        "blocked_by": blocked_by_details,
+        "pending_dependencies": dep_check["pending_dependencies"],
+        "blocking_fields": dep_check["blocking_fields"],
+        "message": dep_check.get("message")
+    }
+
+
+@router.post("/{project_id}/memory/fields/{field_id}/preview")
+async def preview_field_changes(
+    project_id: str,
+    field_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    پیش‌نمایش تغییراتی که فیلد ایجاد می‌کند (Diff View)
+    بدون اجرای واقعی یا commit
+    """
+    import re
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+    from ...models.project import ProjectFile
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    dynamic_fields = []
+    try:
+        if project.dynamic_fields:
+            dynamic_fields = json.loads(project.dynamic_fields)
+    except:
+        pass
+
+    target_field = None
+    for field in dynamic_fields:
+        if field.get("id") == field_id:
+            target_field = field
+            break
+
+    if not target_field:
+        raise HTTPException(status_code=404, detail="فیلد یافت نشد")
+
+    action_type = target_field.get("action_type", "display")
+    target_path = target_field.get("target_path")
+
+    # دریافت محتوای فعلی فایل هدف
+    original_content = ""
+    if target_path:
+        file = db.query(ProjectFile).filter(
+            ProjectFile.project_id == project_id,
+            ProjectFile.path == target_path
+        ).first()
+        if file:
+            original_content = file.content or ""
+
+    # ساخت prompt برای AI
+    system_prompt = f"تو یک دستیار هوشمند برای پروژه '{project.name}' هستی."
+    if project.description:
+        system_prompt += f"\nتوضیحات پروژه: {project.description}"
+
+    if original_content:
+        system_prompt += f"\n\n=== محتوای فعلی فایل {target_path} ===\n```\n{original_content}\n```"
+
+    if action_type in ["github_commit", "github_multi_commit"]:
+        system_prompt += "\n\n⚠️ کد کامل فایل را تولید کن (نه فقط تغییرات)."
+        if action_type == "github_commit" and target_path:
+            system_prompt += f"\nفایل هدف: {target_path}"
+            system_prompt += "\nفقط محتوای کد را بدون توضیحات اضافی تولید کن."
+        else:
+            system_prompt += "\nبرای هر فایل از این فرمت استفاده کن:"
+            system_prompt += "\n```language:path/to/file.ext\nکد\n```"
+
+    user_prompt = f"دستور: {target_field.get('name', 'فیلد')}\n\n{target_field.get('value', '')}"
+
+    # ارسال به AI
+    ai_manager = get_ai_manager()
+    target_models = target_field.get("target_models", ["claude"])
+    if "all" in target_models:
+        target_models = ["claude"]
+
+    try:
+        messages = [
+            Message(role="system", content=system_prompt),
+            Message(role="user", content=user_prompt),
+        ]
+
+        response = await asyncio.wait_for(
+            ai_manager.generate(
+                model_id=target_models[0],
+                messages=messages,
+                max_tokens=8192,
+                temperature=0.7,
+            ),
+            timeout=120.0
+        )
+
+        new_content = response.content
+
+        # استخراج کد از پاسخ
+        if action_type == "github_commit":
+            code_match = re.search(r'```\w*\n?(.*?)```', new_content, re.DOTALL)
+            if code_match:
+                new_content = code_match.group(1).strip()
+
+        # تولید diff
+        original_lines = original_content.splitlines(keepends=True) if original_content else []
+        new_lines = new_content.splitlines(keepends=True) if new_content else []
+
+        diff_generator = difflib.unified_diff(
+            original_lines,
+            new_lines,
+            fromfile=f"a/{target_path or 'original'}",
+            tofile=f"b/{target_path or 'modified'}",
+            lineterm=""
+        )
+        diff_text = "".join(diff_generator)
+
+        # تولید HTML diff برای نمایش رنگی
+        html_diff = difflib.HtmlDiff()
+        html_table = html_diff.make_table(
+            original_lines,
+            new_lines,
+            fromdesc="قبل",
+            todesc="بعد",
+            context=True,
+            numlines=3
+        )
+
+        # استخراج فایل‌های چندگانه برای multi_commit
+        file_changes = []
+        if action_type == "github_multi_commit":
+            blocks = re.findall(r'```(\w+)?:([^\n]+)\n(.*?)```', response.content, re.DOTALL)
+            for lang, path, code in blocks:
+                # دریافت محتوای فعلی این فایل
+                file = db.query(ProjectFile).filter(
+                    ProjectFile.project_id == project_id,
+                    ProjectFile.path == path.strip()
+                ).first()
+                orig = file.content if file else ""
+
+                orig_lines = orig.splitlines(keepends=True) if orig else []
+                code_lines = code.strip().splitlines(keepends=True) if code else []
+
+                file_diff = "".join(difflib.unified_diff(
+                    orig_lines,
+                    code_lines,
+                    fromfile=f"a/{path.strip()}",
+                    tofile=f"b/{path.strip()}",
+                    lineterm=""
+                ))
+
+                file_changes.append({
+                    "path": path.strip(),
+                    "language": lang or "text",
+                    "original_content": orig[:1000] + "..." if len(orig) > 1000 else orig,
+                    "new_content": code.strip()[:1000] + "..." if len(code.strip()) > 1000 else code.strip(),
+                    "diff": file_diff,
+                    "lines_added": sum(1 for l in file_diff.splitlines() if l.startswith("+")),
+                    "lines_removed": sum(1 for l in file_diff.splitlines() if l.startswith("-")),
+                })
+        else:
+            file_changes.append({
+                "path": target_path or "unknown",
+                "original_content": original_content[:1000] + "..." if len(original_content) > 1000 else original_content,
+                "new_content": new_content[:1000] + "..." if len(new_content) > 1000 else new_content,
+                "diff": diff_text,
+                "lines_added": sum(1 for l in diff_text.splitlines() if l.startswith("+")),
+                "lines_removed": sum(1 for l in diff_text.splitlines() if l.startswith("-")),
+            })
+
+        return {
+            "success": True,
+            "preview_mode": True,
+            "field_id": field_id,
+            "field_name": target_field.get("name"),
+            "action_type": action_type,
+            "file_changes": file_changes,
+            "unified_diff": diff_text,
+            "html_diff": html_table,
+            "tokens_used": response.tokens_used,
+            "warning": "این پیش‌نمایش است و هیچ تغییری اعمال نشده است. برای اعمال تغییرات از دکمه اجرا استفاده کنید."
+        }
+
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="زمان پاسخگویی مدل بیش از حد طول کشید")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"خطا در تولید پیش‌نمایش: {str(e)}")
+
+
 @router.post("/{project_id}/memory/fields/{field_id}/trigger/execute")
 async def execute_field_trigger(
     project_id: str,
@@ -1861,6 +2226,15 @@ async def execute_field_trigger(
         # بررسی بایگانی بودن
         if target_field.get("archived"):
             raise HTTPException(status_code=400, detail="این فیلد بایگانی شده و قابل اجرا نیست")
+
+        # 🆕 بررسی وابستگی‌های فیلد
+        dep_check = check_field_dependencies(target_field, dynamic_fields)
+        if not dep_check["can_execute"]:
+            raise HTTPException(
+                status_code=409,
+                detail=dep_check["message"],
+                headers={"X-Dependency-Error": "true"}
+            )
 
         # 🔴 جلوگیری از دور باطل - بررسی اجرای تکراری
         try:
@@ -4806,7 +5180,8 @@ async def export_issues_to_markdown(
 
     # مرتب‌سازی بر اساس severity
     severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    selected_issues.sort(key=lambda x: severity_order.get(x.get("severity", "medium"), 2))
+    # 🔴 تبدیل امن برای جلوگیری از خطای NoneType comparison
+    selected_issues.sort(key=lambda x: severity_order.get(x.get("severity") if x.get("severity") else "medium", 2))
 
     for issue in selected_issues:
         md_content.append(_format_issue_to_markdown(issue, include_details))

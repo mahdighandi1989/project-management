@@ -64,7 +64,7 @@ interface Props {
 }
 
 export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'settings' | 'files' | 'issues' | 'archive' | 'validation'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'settings' | 'files' | 'issues' | 'archive' | 'validation' | 'security' | 'coverage'>('overview');
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
 
@@ -91,6 +91,29 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
   const [rejectedIssues, setRejectedIssues] = useState<any[]>([]);
   const [loadingValidation, setLoadingValidation] = useState(false);
   const [convertingIssue, setConvertingIssue] = useState<string | null>(null);  // شناسه issue در حال تبدیل
+
+  // Security & Coverage states
+  const [securityData, setSecurityData] = useState<{
+    security_score: number;
+    secrets: { count: number; findings: any[] };
+    license: { has_license: boolean; licenses: any[] };
+    sensitive_files: { count: number; findings: any[] };
+    dependencies: { vulnerability_count: number; vulnerabilities: any[] };
+  } | null>(null);
+  const [coverageData, setCoverageData] = useState<{
+    summary: {
+      total_test_files: number;
+      total_source_files: number;
+      total_tests: number;
+      coverage_percent: number;
+      untested_file_count: number;
+    };
+    untested_files: any[];
+    recommendations: any[];
+    health_score: number;
+  } | null>(null);
+  const [loadingSecurity, setLoadingSecurity] = useState(false);
+  const [loadingCoverage, setLoadingCoverage] = useState(false);
 
   // Edit states
   const [editingSettings, setEditingSettings] = useState(false);
@@ -928,7 +951,8 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
           { id: 'issues', label: `ایرادات (${issues.filter(i => !i.archived).length})`, icon: '!' },
           { id: 'archive', label: `بایگانی (${issues.filter(i => i.archived).length})`, icon: '📦' },
           { id: 'validation', label: 'زنجیره اعتبارسنجی', icon: '✓' },
-          // نقشه راه به تب ژورنال منتقل شد
+          { id: 'security', label: 'امنیت', icon: '🔒' },
+          { id: 'coverage', label: 'پوشش تست', icon: '🧪' },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -1767,6 +1791,232 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                       {validationChainStatus.ideal_state.preview}
                       {validationChainStatus.ideal_state.preview.length >= 500 && '...'}
                     </p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* تب امنیت */}
+        {activeTab === 'security' && (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-bold">اسکن امنیتی پروژه</h3>
+              <button
+                onClick={async () => {
+                  setLoadingSecurity(true);
+                  try {
+                    const res = await fetch(`${API_BASE}/api/projects/${projectId}/security/scan`);
+                    const data = await res.json();
+                    if (data.success) {
+                      setSecurityData(data.scan_result);
+                    }
+                  } catch (err) {
+                    console.error('Security scan error:', err);
+                  }
+                  setLoadingSecurity(false);
+                }}
+                disabled={loadingSecurity}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+              >
+                {loadingSecurity ? 'در حال اسکن...' : 'اسکن امنیتی'}
+              </button>
+            </div>
+
+            {securityData && (
+              <div className="space-y-4">
+                {/* امتیاز امنیتی */}
+                <div className={`p-4 rounded-xl ${securityData.security_score >= 80 ? 'bg-green-100 dark:bg-green-900/30' : securityData.security_score >= 50 ? 'bg-yellow-100 dark:bg-yellow-900/30' : 'bg-red-100 dark:bg-red-900/30'}`}>
+                  <div className="flex items-center gap-4">
+                    <div className={`w-16 h-16 rounded-xl flex items-center justify-center text-2xl font-bold text-white ${securityData.security_score >= 80 ? 'bg-green-500' : securityData.security_score >= 50 ? 'bg-yellow-500' : 'bg-red-500'}`}>
+                      {securityData.security_score}
+                    </div>
+                    <div>
+                      <h4 className="font-bold">امتیاز امنیتی</h4>
+                      <p className="text-sm opacity-75">
+                        {securityData.security_score >= 80 ? 'وضعیت امنیتی خوب' : securityData.security_score >= 50 ? 'نیاز به بهبود' : 'مشکلات جدی امنیتی'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Secrets */}
+                {securityData.secrets.count > 0 && (
+                  <div className="p-4 bg-red-50 dark:bg-red-900/20 rounded-xl border border-red-200 dark:border-red-800">
+                    <h4 className="font-bold text-red-700 dark:text-red-400 mb-2">
+                      🔑 Secrets یافت شده ({securityData.secrets.count})
+                    </h4>
+                    <div className="space-y-2 max-h-64 overflow-y-auto">
+                      {securityData.secrets.findings.map((finding: any, idx: number) => (
+                        <div key={idx} className="p-2 bg-white dark:bg-gray-800 rounded text-sm">
+                          <div className="flex justify-between">
+                            <span className="font-mono text-red-600">{finding.file}:{finding.line}</span>
+                            <span className={`px-2 py-0.5 rounded text-xs ${finding.severity === 'critical' ? 'bg-red-600 text-white' : 'bg-orange-500 text-white'}`}>
+                              {finding.severity}
+                            </span>
+                          </div>
+                          <p className="text-gray-600 dark:text-gray-400 mt-1">{finding.message}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* لایسنس */}
+                <div className={`p-4 rounded-xl ${securityData.license.has_license ? 'bg-green-50 dark:bg-green-900/20' : 'bg-yellow-50 dark:bg-yellow-900/20'}`}>
+                  <h4 className="font-bold mb-2">📄 لایسنس پروژه</h4>
+                  {securityData.license.has_license ? (
+                    <div className="space-y-1">
+                      {securityData.license.licenses.map((lic: any, idx: number) => (
+                        <div key={idx} className="flex items-center gap-2">
+                          <span className="px-2 py-1 bg-green-200 dark:bg-green-800 rounded text-sm">{lic.license}</span>
+                          <span className="text-sm text-gray-600">{lic.file}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-yellow-700 dark:text-yellow-400">پروژه فاقد فایل لایسنس است</p>
+                  )}
+                </div>
+
+                {/* آسیب‌پذیری وابستگی‌ها */}
+                {securityData.dependencies.vulnerability_count > 0 && (
+                  <div className="p-4 bg-orange-50 dark:bg-orange-900/20 rounded-xl border border-orange-200 dark:border-orange-800">
+                    <h4 className="font-bold text-orange-700 dark:text-orange-400 mb-2">
+                      ⚠️ آسیب‌پذیری وابستگی‌ها ({securityData.dependencies.vulnerability_count})
+                    </h4>
+                    <div className="space-y-2">
+                      {securityData.dependencies.vulnerabilities.map((vuln: any, idx: number) => (
+                        <div key={idx} className="p-2 bg-white dark:bg-gray-800 rounded text-sm">
+                          <div className="flex justify-between items-center">
+                            <span className="font-mono font-bold">{vuln.package}</span>
+                            <span className="text-xs text-gray-500">{vuln.cve}</span>
+                          </div>
+                          <p className="text-gray-600 dark:text-gray-400">{vuln.message}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* فایل‌های حساس */}
+                {securityData.sensitive_files.count > 0 && (
+                  <div className="p-4 bg-red-50 dark:bg-red-900/20 rounded-xl border border-red-200 dark:border-red-800">
+                    <h4 className="font-bold text-red-700 dark:text-red-400 mb-2">
+                      🚨 فایل‌های حساس ({securityData.sensitive_files.count})
+                    </h4>
+                    <div className="space-y-1">
+                      {securityData.sensitive_files.findings.map((file: any, idx: number) => (
+                        <div key={idx} className="flex items-center gap-2 text-sm">
+                          <span className="font-mono text-red-600">{file.file}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* تب پوشش تست */}
+        {activeTab === 'coverage' && (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-bold">تحلیل پوشش تست</h3>
+              <button
+                onClick={async () => {
+                  setLoadingCoverage(true);
+                  try {
+                    const res = await fetch(`${API_BASE}/api/projects/${projectId}/test-coverage`);
+                    const data = await res.json();
+                    if (data.success) {
+                      setCoverageData(data.coverage);
+                    }
+                  } catch (err) {
+                    console.error('Coverage analysis error:', err);
+                  }
+                  setLoadingCoverage(false);
+                }}
+                disabled={loadingCoverage}
+                className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50"
+              >
+                {loadingCoverage ? 'در حال تحلیل...' : 'تحلیل پوشش'}
+              </button>
+            </div>
+
+            {coverageData && (
+              <div className="space-y-4">
+                {/* خلاصه پوشش */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="p-4 bg-blue-50 dark:bg-blue-900/30 rounded-xl text-center">
+                    <div className="text-3xl font-bold text-blue-600">{coverageData.summary.coverage_percent}%</div>
+                    <div className="text-sm text-gray-600">پوشش کد</div>
+                  </div>
+                  <div className="p-4 bg-green-50 dark:bg-green-900/30 rounded-xl text-center">
+                    <div className="text-3xl font-bold text-green-600">{coverageData.summary.total_tests}</div>
+                    <div className="text-sm text-gray-600">تعداد تست</div>
+                  </div>
+                  <div className="p-4 bg-purple-50 dark:bg-purple-900/30 rounded-xl text-center">
+                    <div className="text-3xl font-bold text-purple-600">{coverageData.summary.total_test_files}</div>
+                    <div className="text-sm text-gray-600">فایل تست</div>
+                  </div>
+                  <div className="p-4 bg-orange-50 dark:bg-orange-900/30 rounded-xl text-center">
+                    <div className="text-3xl font-bold text-orange-600">{coverageData.summary.untested_file_count}</div>
+                    <div className="text-sm text-gray-600">فایل بدون تست</div>
+                  </div>
+                </div>
+
+                {/* امتیاز سلامت */}
+                <div className={`p-4 rounded-xl ${coverageData.health_score >= 70 ? 'bg-green-100 dark:bg-green-900/30' : coverageData.health_score >= 40 ? 'bg-yellow-100 dark:bg-yellow-900/30' : 'bg-red-100 dark:bg-red-900/30'}`}>
+                  <div className="flex items-center gap-4">
+                    <div className={`w-16 h-16 rounded-xl flex items-center justify-center text-2xl font-bold text-white ${coverageData.health_score >= 70 ? 'bg-green-500' : coverageData.health_score >= 40 ? 'bg-yellow-500' : 'bg-red-500'}`}>
+                      {coverageData.health_score}
+                    </div>
+                    <div>
+                      <h4 className="font-bold">امتیاز سلامت تست</h4>
+                      <p className="text-sm opacity-75">
+                        {coverageData.health_score >= 70 ? 'پوشش تست مناسب' : coverageData.health_score >= 40 ? 'نیاز به تست بیشتر' : 'پوشش تست بسیار پایین'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* توصیه‌ها */}
+                {coverageData.recommendations.length > 0 && (
+                  <div className="p-4 bg-yellow-50 dark:bg-yellow-900/20 rounded-xl">
+                    <h4 className="font-bold text-yellow-700 dark:text-yellow-400 mb-2">💡 توصیه‌ها</h4>
+                    <div className="space-y-2">
+                      {coverageData.recommendations.map((rec: any, idx: number) => (
+                        <div key={idx} className="flex items-start gap-2 text-sm">
+                          <span className={`px-2 py-0.5 rounded text-xs ${rec.severity === 'critical' ? 'bg-red-600 text-white' : rec.severity === 'high' ? 'bg-orange-500 text-white' : 'bg-yellow-500 text-white'}`}>
+                            {rec.severity}
+                          </span>
+                          <div>
+                            <p className="font-medium">{rec.message}</p>
+                            <p className="text-gray-600">{rec.recommendation}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* فایل‌های بدون تست */}
+                {coverageData.untested_files.length > 0 && (
+                  <div className="p-4 bg-gray-50 dark:bg-gray-800 rounded-xl">
+                    <h4 className="font-bold mb-2">📁 فایل‌های بدون تست ({coverageData.untested_files.length})</h4>
+                    <div className="space-y-2 max-h-64 overflow-y-auto">
+                      {coverageData.untested_files.map((file: any, idx: number) => (
+                        <div key={idx} className="p-2 bg-white dark:bg-gray-700 rounded text-sm">
+                          <div className="font-mono text-purple-600">{file.path}</div>
+                          <div className="text-xs text-gray-500 mt-1">
+                            {file.entity_count} موجودیت | نمونه: {file.entities?.slice(0, 3).join(', ')}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
