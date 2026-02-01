@@ -182,7 +182,7 @@ async def get_logs(
     """
     slog.api_request("GET", "/render/logs",
         service_id=service_id,
-        level=level,
+        log_level=level,
         minutes=minutes
     )
 
