@@ -112,6 +112,14 @@ class Project(Base):
     issues_found = Column(Text)  # JSON: لیست ایرادات شناسایی شده
 
     # ====================================
+    # 🆕 نتایج تحلیل امنیتی و کیفیت کد
+    # ====================================
+    security_scan_result = Column(Text)  # JSON: نتایج اسکن امنیتی (secrets, vulnerabilities)
+    security_scan_at = Column(DateTime)  # زمان آخرین اسکن امنیتی
+    license_analysis_result = Column(Text)  # JSON: نتایج تحلیل مجوز
+    test_coverage_result = Column(Text)  # JSON: نتایج تحلیل پوشش تست
+
+    # ====================================
     # 🆕 آرشیو مسائل رد شده (زنجیره اعتبارسنجی)
     # ====================================
     rejected_issues_archive = Column(Text)  # JSON: [{

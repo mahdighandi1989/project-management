@@ -5396,3 +5396,216 @@ async def export_report_to_markdown(
             "Content-Disposition": f"attachment; filename*=UTF-8''{filename}"
         }
     )
+
+
+# ==============================================
+# 🆕 دانلود تکی فیلد و ایراد به مارک‌داون
+# ==============================================
+
+@router.get("/{project_id}/export/field/{field_id}/markdown")
+async def export_single_field_to_markdown(
+    project_id: str,
+    field_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    دانلود یک فیلد پویا به فرمت مارک‌داون
+
+    پارامترها:
+    - field_id: شناسه فیلد یا ایندکس آن
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    dynamic_fields = []
+    try:
+        if project.dynamic_fields:
+            dynamic_fields = json.loads(project.dynamic_fields)
+    except:
+        pass
+
+    # یافتن فیلد
+    target_field = None
+    for idx, field in enumerate(dynamic_fields):
+        if field.get("id") == field_id or str(idx) == field_id:
+            target_field = field
+            break
+
+    if not target_field:
+        raise HTTPException(status_code=404, detail="فیلد یافت نشد")
+
+    # ساخت مارک‌داون
+    md_content = []
+    md_content.append(f"# 📝 فیلد پویا: {target_field.get('name', 'بدون نام')}")
+    md_content.append("")
+    md_content.append(f"**پروژه:** {project.name}")
+    md_content.append(f"**شناسه:** `{target_field.get('id', '-')}`")
+    md_content.append(f"**تاریخ ایجاد:** {target_field.get('created_at', '-')}")
+    md_content.append("")
+    md_content.append("---")
+    md_content.append("")
+
+    # اطلاعات اصلی
+    md_content.append("## مشخصات فیلد")
+    md_content.append("")
+    md_content.append(f"| ویژگی | مقدار |")
+    md_content.append(f"|--------|-------|")
+    md_content.append(f"| نوع | {target_field.get('type', 'text')} |")
+    md_content.append(f"| اولویت | {target_field.get('priority', '-')} |")
+    md_content.append(f"| مدل‌های هدف | {', '.join(target_field.get('target_models', ['all']))} |")
+    md_content.append(f"| تریگر | {target_field.get('trigger', 'manual')} |")
+    md_content.append(f"| وضعیت | {'✅ فعال' if not target_field.get('archived') else '📦 بایگانی'} |")
+
+    # تاییدیه مهندسی
+    approval = target_field.get('engineering_approval', {})
+    if approval:
+        md_content.append(f"| تایید مهندسی | {'✅' if approval.get('approved') else '❌'} |")
+        md_content.append(f"| تایید کننده | {approval.get('approved_by', '-')} |")
+
+    md_content.append("")
+
+    # محتوای فیلد
+    md_content.append("## محتوا")
+    md_content.append("")
+    value = target_field.get('value', '')
+    if isinstance(value, dict):
+        md_content.append("```json")
+        md_content.append(json.dumps(value, ensure_ascii=False, indent=2))
+        md_content.append("```")
+    else:
+        md_content.append(str(value))
+    md_content.append("")
+
+    # توضیحات
+    if target_field.get('description'):
+        md_content.append("## توضیحات")
+        md_content.append("")
+        md_content.append(target_field.get('description'))
+        md_content.append("")
+
+    # تاریخچه اجرا
+    if target_field.get('execution_history'):
+        md_content.append("## تاریخچه اجرا")
+        md_content.append("")
+        for exec_record in target_field.get('execution_history', [])[-5:]:
+            md_content.append(f"- **{exec_record.get('executed_at', '-')}**: {exec_record.get('result', '-')}")
+        md_content.append("")
+
+    content = '\n'.join(md_content)
+    filename = f"field_{target_field.get('id', 'unknown')}_{datetime.utcnow().strftime('%Y%m%d')}.md"
+
+    return Response(
+        content=content,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{filename}"
+        }
+    )
+
+
+@router.get("/{project_id}/export/issue/{issue_index}/markdown")
+async def export_single_issue_to_markdown(
+    project_id: str,
+    issue_index: str,  # می‌تواند شناسه یا ایندکس باشد
+    db: Session = Depends(get_db)
+):
+    """
+    دانلود یک ایراد به فرمت مارک‌داون
+
+    پارامترها:
+    - issue_index: ایندکس ایراد (0-based) یا شناسه آن
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    all_issues = []
+    try:
+        if project.issues_found:
+            all_issues = json.loads(project.issues_found)
+    except:
+        pass
+
+    # یافتن ایراد
+    target_issue = None
+    try:
+        idx = int(issue_index)
+        if 0 <= idx < len(all_issues):
+            target_issue = all_issues[idx]
+    except ValueError:
+        # شناسه
+        for issue in all_issues:
+            if issue.get("id") == issue_index:
+                target_issue = issue
+                break
+
+    if not target_issue:
+        raise HTTPException(status_code=404, detail="ایراد یافت نشد")
+
+    # نگاشت شدت
+    severity_map = {
+        "critical": "🔴 بحرانی",
+        "high": "🟠 بالا",
+        "medium": "🟡 متوسط",
+        "low": "🟢 پایین",
+        "info": "ℹ️ اطلاعاتی"
+    }
+
+    severity = target_issue.get("severity", "medium")
+    severity_text = severity_map.get(severity, severity)
+
+    # ساخت مارک‌داون
+    md_content = []
+    md_content.append(f"# 🐛 ایراد: {target_issue.get('message', target_issue.get('description', 'بدون توضیح'))[:80]}")
+    md_content.append("")
+    md_content.append(f"**پروژه:** {project.name}")
+    md_content.append(f"**شدت:** {severity_text}")
+    md_content.append("")
+    md_content.append("---")
+    md_content.append("")
+
+    # اطلاعات فایل
+    md_content.append("## موقعیت")
+    md_content.append("")
+    file_path = target_issue.get("file_path", target_issue.get("file", "-"))
+    line = target_issue.get("line", target_issue.get("line_number", "-"))
+    md_content.append(f"- **فایل:** `{file_path}`")
+    md_content.append(f"- **خط:** {line}")
+    md_content.append("")
+
+    # توضیحات ایراد
+    md_content.append("## توضیحات")
+    md_content.append("")
+    md_content.append(target_issue.get("description", target_issue.get("message", "توضیحی ثبت نشده")))
+    md_content.append("")
+
+    # پیشنهاد رفع
+    if target_issue.get("suggestion") or target_issue.get("fix"):
+        md_content.append("## پیشنهاد رفع")
+        md_content.append("")
+        suggestion = target_issue.get("suggestion") or target_issue.get("fix", "")
+        if suggestion:
+            md_content.append("```")
+            md_content.append(suggestion)
+            md_content.append("```")
+        md_content.append("")
+
+    # مدل شناسایی‌کننده
+    if target_issue.get("detected_by") or target_issue.get("model_id"):
+        md_content.append("## اطلاعات تکمیلی")
+        md_content.append("")
+        md_content.append(f"- **شناسایی توسط:** {target_issue.get('detected_by', target_issue.get('model_id', '-'))}")
+        md_content.append(f"- **تاریخ شناسایی:** {target_issue.get('detected_at', '-')}")
+        md_content.append("")
+
+    content = '\n'.join(md_content)
+    filename = f"issue_{issue_index}_{datetime.utcnow().strftime('%Y%m%d')}.md"
+
+    return Response(
+        content=content,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{filename}"
+        }
+    )

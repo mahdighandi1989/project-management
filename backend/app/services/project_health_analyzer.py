@@ -643,10 +643,16 @@ README باید شامل این بخش‌ها باشد:
         model_ids: List[str],
         roadmap_content: str
     ) -> Dict:
-        """تحلیل ساختار کلی و سیم‌کشی"""
+        """
+        تحلیل ساختار کلی و سیم‌کشی
+
+        🔧 بهبود: اگر AI در دسترس نباشد، از تحلیل هیوریستیک استفاده می‌کند
+        """
 
         structure = self._analyze_project_structure(files)
         file_list = [f.get("path", "") for f in files[:100]]
+
+        logger.info(f"Structure analysis starting | files={len(files)} | models={model_ids}")
 
         prompt = f"""تو یک معمار نرم‌افزار متخصص هستی. ساختار کلی این پروژه را بررسی کن.
 
@@ -688,26 +694,137 @@ README باید شامل این بخش‌ها باشد:
     "recommendations": ["پیشنهاد ۱", "پیشنهاد ۲"]
 }}"""
 
-        # تحلیل توسط اولین مدل (ساختار یکبار تحلیل میشه)
-        try:
-            response = await self.ai_manager.generate(
-                model_id=model_ids[0] if model_ids else "claude",
-                messages=[Message(role="user", content=prompt)],
-                max_tokens=2500,
-                temperature=0.4
-            )
+        # تلاش با چندین مدل
+        models_to_try = model_ids.copy() if model_ids else []
+        if not models_to_try:
+            # سعی کن مدل‌های در دسترس را پیدا کن
+            try:
+                available = self.ai_manager.get_available_models(task_type="analysis")
+                models_to_try = [m.id for m in available[:3]] if available else ["claude", "gpt-4o-mini", "deepseek"]
+            except:
+                models_to_try = ["claude", "gpt-4o-mini", "deepseek"]
 
-            return self._extract_json(response.content)
+        last_error = None
+        for model_id in models_to_try:
+            try:
+                logger.info(f"Trying structure analysis with model: {model_id}")
 
-        except Exception as e:
-            logger.error(f"Structure analysis failed: {e}")
-            return {
-                "wiring_score": 50,
-                "structure_score": 50,
-                "overall_score": 50,
-                "ideal_state": "",
-                "error": str(e)
-            }
+                response = await self.ai_manager.generate(
+                    model_id=model_id,
+                    messages=[Message(role="user", content=prompt)],
+                    max_tokens=2500,
+                    temperature=0.4
+                )
+
+                result = self._extract_json(response.content)
+
+                # بررسی اعتبار نتیجه
+                if result and result.get("overall_score") and not result.get("error"):
+                    logger.info(f"Structure analysis success | model={model_id} | score={result.get('overall_score')}")
+                    result["analyzed_by"] = model_id
+                    return result
+                else:
+                    logger.warning(f"Invalid structure analysis result from {model_id}: {result.get('error', 'invalid format')}")
+                    last_error = result.get("error", "Invalid JSON response")
+
+            except Exception as e:
+                logger.warning(f"Structure analysis failed with {model_id}: {e}")
+                last_error = str(e)
+                continue
+
+        # 🆕 Fallback: تحلیل هیوریستیک اگر همه مدل‌ها fail شدند
+        logger.warning(f"All AI models failed for structure analysis, using heuristic fallback. Last error: {last_error}")
+        return self._heuristic_structure_analysis(files, structure)
+
+    def _heuristic_structure_analysis(self, files: List[Dict], structure: Dict) -> Dict:
+        """
+        تحلیل هیوریستیک ساختار بدون AI
+
+        بر اساس الگوهای معروف و best practices امتیاز می‌دهد
+        """
+        score = 70  # امتیاز پایه
+        recommendations = []
+        missing_files = []
+        wiring_issues = []
+
+        # 1. بررسی فایل‌های ضروری
+        file_paths = [f.get("path", "").lower() for f in files]
+        file_names = [os.path.basename(p) for p in file_paths]
+
+        # README
+        if not any(f in ['readme.md', 'readme.txt', 'readme'] for f in file_names):
+            score -= 10
+            missing_files.append({"path": "README.md", "description": "فایل راهنمای پروژه", "priority": "high"})
+            recommendations.append("ایجاد فایل README.md")
+
+        # .gitignore
+        if not any('.gitignore' in f for f in file_names):
+            score -= 5
+            missing_files.append({"path": ".gitignore", "description": "فایل ignore برای Git", "priority": "medium"})
+
+        # LICENSE
+        if not any(f in ['license', 'license.md', 'license.txt', 'copying'] for f in file_names):
+            score -= 5
+            missing_files.append({"path": "LICENSE", "description": "فایل مجوز", "priority": "medium"})
+            recommendations.append("افزودن فایل LICENSE")
+
+        # 2. بررسی ساختار پوشه‌ها
+        has_src = any('/src/' in p or p.startswith('src/') for p in file_paths)
+        has_tests = any('/test' in p or '/spec' in p or '_test.' in p or '.test.' in p for p in file_paths)
+        has_config = any('config' in p.lower() for p in file_paths)
+
+        if has_tests:
+            score += 10
+        else:
+            score -= 5
+            recommendations.append("افزودن تست‌های واحد")
+
+        # 3. بررسی تکنولوژی‌های خاص
+        if structure.get("language") == "Python":
+            if not any('requirements.txt' in f or 'pyproject.toml' in f or 'setup.py' in f for f in file_names):
+                score -= 5
+                missing_files.append({"path": "requirements.txt", "description": "لیست وابستگی‌ها", "priority": "high"})
+
+        if structure.get("language") in ["JavaScript", "TypeScript"]:
+            if not any('package.json' in f for f in file_names):
+                score -= 10
+                missing_files.append({"path": "package.json", "description": "تنظیمات npm", "priority": "high"})
+
+        # 4. بررسی سازماندهی
+        directories = structure.get("directories", [])
+        if len(directories) > 3:
+            score += 5  # ساختار خوب پوشه‌بندی
+
+        # محدود کردن امتیاز
+        score = max(30, min(95, score))
+
+        # محاسبه امتیازهای جزئی
+        wiring_score = score + 5 if has_src else score - 5
+        organization_score = score + 5 if len(directories) > 5 else score
+
+        return {
+            "wiring_score": max(30, min(100, wiring_score)),
+            "structure_score": score,
+            "organization_score": max(30, min(100, organization_score)),
+            "overall_score": score,
+            "missing_files": missing_files,
+            "redundant_files": [],
+            "wiring_issues": wiring_issues,
+            "ideal_state": f"""این پروژه {structure.get('language', 'نامشخص')} با فریم‌ورک‌های {', '.join(structure.get('frameworks', ['نامشخص']))} ساخته شده است.
+
+حالت ایده‌آل شامل موارد زیر است:
+- ساختار پوشه‌بندی استاندارد (src/, tests/, docs/)
+- مستندات کامل (README.md, CONTRIBUTING.md)
+- تست‌های جامع با پوشش بالا
+- CI/CD pipeline
+- مجوز مشخص
+
+امتیاز فعلی: {score}/100
+این امتیاز بر اساس بررسی هیوریستیک (بدون AI) محاسبه شده است.""",
+            "recommendations": recommendations,
+            "analyzed_by": "heuristic_fallback",
+            "note": "تحلیل بدون AI انجام شد - برای تحلیل دقیق‌تر مدل AI فعال کنید"
+        }
 
     # =================================================
     # بخش ۳: محاسبه نمرات و رنگ‌بندی
