@@ -47,6 +47,9 @@ interface Issue {
   converted_to_field?: boolean;  // آیا به فیلد پویا تبدیل شده؟
   converted_field_id?: string;  // شناسه فیلد ایجاد شده
   converted_at?: string;  // زمان تبدیل
+  archived?: boolean;  // آیا بایگانی شده؟
+  archived_at?: string;  // زمان بایگانی
+  archived_reason?: string;  // دلیل بایگانی: approved, rejected, engineering_report_completed, etc.
 }
 
 interface AvailableModel {
@@ -61,7 +64,7 @@ interface Props {
 }
 
 export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'settings' | 'files' | 'issues' | 'validation'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'settings' | 'files' | 'issues' | 'archive' | 'validation'>('overview');
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
 
@@ -922,7 +925,8 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
           { id: 'overview', label: 'نمای کلی', icon: '*' },
           { id: 'settings', label: 'تنظیمات', icon: '+' },
           { id: 'files', label: 'فایل‌ها', icon: '-' },
-          { id: 'issues', label: `ایرادات (${issues.length})`, icon: '!' },
+          { id: 'issues', label: `ایرادات (${issues.filter(i => !i.archived).length})`, icon: '!' },
+          { id: 'archive', label: `بایگانی (${issues.filter(i => i.archived).length})`, icon: '📦' },
           { id: 'validation', label: 'زنجیره اعتبارسنجی', icon: '✓' },
           // نقشه راه به تب ژورنال منتقل شد
         ].map((tab) => (
@@ -1351,122 +1355,249 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
 
         {/* نقشه راه به تب ژورنال منتقل شد */}
 
-        {/* تب ایرادات */}
-        {activeTab === 'issues' && (
-          <div className="space-y-4">
-            <div className="flex items-center justify-between flex-wrap gap-2">
-              <h3 className="font-bold">ایرادات شناسایی شده ({issues.length})</h3>
-              {issues.length > 0 && (
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-xs text-gray-500">
-                    {issues.filter(i => i.converted_to_field).length} تبدیل شده
-                  </span>
-                  {/* 🆕 دکمه‌های دانلود مارک‌داون */}
-                  <button
-                    onClick={() => window.open(`${API_BASE}/api/projects/${projectId}/export/issues/markdown?issue_ids=validated`, '_blank')}
-                    className="px-2 py-1 bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300 text-xs rounded hover:bg-blue-200 dark:hover:bg-blue-800 flex items-center gap-1"
-                    title="دانلود ایرادات تایید شده"
-                  >
-                    📥 MD
-                  </button>
-                  <button
-                    onClick={() => window.open(`${API_BASE}/api/projects/${projectId}/export/issues/markdown?issue_ids=all`, '_blank')}
-                    className="px-2 py-1 bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300 text-xs rounded hover:bg-gray-200 dark:hover:bg-gray-600 flex items-center gap-1"
-                    title="دانلود همه ایرادات (تایید و رد شده)"
-                  >
-                    📥 همه
-                  </button>
-                  <button
-                    onClick={convertAllIssuesToFields}
-                    disabled={convertingIssue === 'all' || issues.every(i => i.converted_to_field)}
-                    className="px-3 py-1 bg-purple-500 text-white text-xs rounded-lg hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
-                  >
-                    {convertingIssue === 'all' ? (
-                      <>
-                        <span className="animate-spin">⏳</span>
-                        در حال تبدیل...
-                      </>
-                    ) : (
-                      <>
-                        <span>✨</span>
-                        تبدیل همه به فیلد پویا
-                      </>
-                    )}
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {issues.length === 0 ? (
-              <div className="text-center py-8 text-gray-400">
-                <div className="text-5xl mb-4">✓</div>
-                <p>ایرادی شناسایی نشده</p>
-              </div>
-            ) : (
-              <div className="space-y-2 max-h-[400px] overflow-auto">
-                {issues.map((issue, idx) => {
-                  const issueId = issue.id || `issue_${idx}`;
-                  const isConverting = convertingIssue === issueId;
-
-                  return (
-                    <div
-                      key={idx}
-                      className={`p-3 rounded-lg border-r-4 transition-all ${
-                        issue.converted_to_field
-                          ? 'bg-green-50 dark:bg-green-900/20 opacity-70'
-                          : 'bg-gray-50 dark:bg-gray-700'
-                      }`}
-                      style={{
-                        borderColor: issue.converted_to_field ? '#22c55e' :
-                                    issue.severity === 'critical' ? '#ef4444' :
-                                    issue.severity === 'high' ? '#f97316' :
-                                    issue.severity === 'medium' ? '#eab308' : '#3b82f6'
-                      }}
+        {/* تب ایرادات - فقط ایرادات فعال (غیر بایگانی) */}
+        {activeTab === 'issues' && (() => {
+          const activeIssues = issues.filter(i => !i.archived);
+          return (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <h3 className="font-bold">ایرادات فعال ({activeIssues.length})</h3>
+                {activeIssues.length > 0 && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs text-gray-500">
+                      {activeIssues.filter(i => i.converted_to_field).length} تبدیل شده
+                    </span>
+                    {/* 🆕 دکمه‌های دانلود مارک‌داون */}
+                    <button
+                      onClick={() => window.open(`${API_BASE}/api/projects/${projectId}/export/issues/markdown?issue_ids=validated`, '_blank')}
+                      className="px-2 py-1 bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300 text-xs rounded hover:bg-blue-200 dark:hover:bg-blue-800 flex items-center gap-1"
+                      title="دانلود ایرادات تایید شده"
                     >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex-1">
-                          {issue.file && (
-                            <div className="text-xs font-mono text-blue-500 mb-1">{issue.file}</div>
-                          )}
-                          <p className="text-sm">{issue.message}</p>
-                          <div className="flex items-center gap-2 mt-1">
-                            {issue.line && (
-                              <span className="text-xs text-gray-400">خط {issue.line}</span>
+                      📥 MD
+                    </button>
+                    <button
+                      onClick={() => window.open(`${API_BASE}/api/projects/${projectId}/export/issues/markdown?issue_ids=all`, '_blank')}
+                      className="px-2 py-1 bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300 text-xs rounded hover:bg-gray-200 dark:hover:bg-gray-600 flex items-center gap-1"
+                      title="دانلود همه ایرادات (تایید و رد شده)"
+                    >
+                      📥 همه
+                    </button>
+                    <button
+                      onClick={convertAllIssuesToFields}
+                      disabled={convertingIssue === 'all' || activeIssues.every(i => i.converted_to_field)}
+                      className="px-3 py-1 bg-purple-500 text-white text-xs rounded-lg hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                    >
+                      {convertingIssue === 'all' ? (
+                        <>
+                          <span className="animate-spin">⏳</span>
+                          در حال تبدیل...
+                        </>
+                      ) : (
+                        <>
+                          <span>✨</span>
+                          تبدیل همه به فیلد پویا
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {activeIssues.length === 0 ? (
+                <div className="text-center py-8 text-gray-400">
+                  <div className="text-5xl mb-4">✓</div>
+                  <p>ایرادی فعال وجود ندارد</p>
+                  {issues.filter(i => i.archived).length > 0 && (
+                    <p className="text-sm mt-2">
+                      {issues.filter(i => i.archived).length} ایراد در تب بایگانی
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-[400px] overflow-auto">
+                  {activeIssues.map((issue, idx) => {
+                    const issueId = issue.id || `issue_${idx}`;
+                    const isConverting = convertingIssue === issueId;
+
+                    return (
+                      <div
+                        key={idx}
+                        className={`p-3 rounded-lg border-r-4 transition-all ${
+                          issue.converted_to_field
+                            ? 'bg-green-50 dark:bg-green-900/20 opacity-70'
+                            : 'bg-gray-50 dark:bg-gray-700'
+                        }`}
+                        style={{
+                          borderColor: issue.converted_to_field ? '#22c55e' :
+                                      issue.severity === 'critical' ? '#ef4444' :
+                                      issue.severity === 'high' ? '#f97316' :
+                                      issue.severity === 'medium' ? '#eab308' : '#3b82f6'
+                        }}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1">
+                            {issue.file && (
+                              <div className="text-xs font-mono text-blue-500 mb-1">{issue.file}</div>
                             )}
-                            {issue.converted_to_field && (
-                              <span className="text-xs text-green-600 dark:text-green-400 flex items-center gap-1">
-                                <span>✓</span>
-                                تبدیل شده به فیلد
-                              </span>
+                            <p className="text-sm">{issue.message}</p>
+                            <div className="flex items-center gap-2 mt-1">
+                              {issue.line && (
+                                <span className="text-xs text-gray-400">خط {issue.line}</span>
+                              )}
+                              {issue.converted_to_field && (
+                                <span className="text-xs text-green-600 dark:text-green-400 flex items-center gap-1">
+                                  <span>✓</span>
+                                  تبدیل شده به فیلد
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex flex-col items-end gap-1">
+                            <span className={`px-2 py-0.5 rounded text-xs ${getSeverityColor(issue.severity)}`}>
+                              {issue.severity}
+                            </span>
+                            {issue.model && (
+                              <span className="text-xs text-gray-400">{issue.model}</span>
+                            )}
+                            {!issue.converted_to_field && (
+                              <button
+                                onClick={() => convertIssueToField(issue, issues.indexOf(issue))}
+                                disabled={isConverting}
+                                className="mt-1 px-2 py-0.5 bg-purple-100 dark:bg-purple-900/50 text-purple-600 dark:text-purple-300 text-xs rounded hover:bg-purple-200 disabled:opacity-50"
+                                title="تبدیل به فیلد پویا"
+                              >
+                                {isConverting ? '⏳' : '➜ فیلد'}
+                              </button>
                             )}
                           </div>
                         </div>
-                        <div className="flex flex-col items-end gap-1">
-                          <span className={`px-2 py-0.5 rounded text-xs ${getSeverityColor(issue.severity)}`}>
-                            {issue.severity}
-                          </span>
-                          {issue.model && (
-                            <span className="text-xs text-gray-400">{issue.model}</span>
-                          )}
-                          {!issue.converted_to_field && (
-                            <button
-                              onClick={() => convertIssueToField(issue, idx)}
-                              disabled={isConverting}
-                              className="mt-1 px-2 py-0.5 bg-purple-100 dark:bg-purple-900/50 text-purple-600 dark:text-purple-300 text-xs rounded hover:bg-purple-200 disabled:opacity-50"
-                              title="تبدیل به فیلد پویا"
-                            >
-                              {isConverting ? '⏳' : '➜ فیلد'}
-                            </button>
-                          )}
-                        </div>
                       </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* 🆕 تب بایگانی - ایرادات بایگانی شده با برچسب */}
+        {activeTab === 'archive' && (() => {
+          const archivedIssues = issues.filter(i => i.archived);
+
+          // تابع برای گرفتن برچسب فارسی از دلیل بایگانی
+          const getArchiveLabel = (reason?: string): { text: string; color: string } => {
+            if (!reason) return { text: 'بایگانی شده', color: 'bg-gray-500' };
+
+            if (reason.includes('approved') || reason.includes('converted') || reason.includes('validated') || reason.includes('field')) {
+              return { text: 'تایید شده ✓', color: 'bg-green-500' };
+            }
+            if (reason.includes('rejected') || reason.includes('invalid')) {
+              return { text: 'رد شده ✗', color: 'bg-red-500' };
+            }
+            if (reason.includes('engineering_report') || reason.includes('4step')) {
+              return { text: 'گزارش مهندسی', color: 'bg-blue-500' };
+            }
+            if (reason.includes('duplicate')) {
+              return { text: 'تکراری', color: 'bg-yellow-500' };
+            }
+            return { text: 'بایگانی شده', color: 'bg-gray-500' };
+          };
+
+          return (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <h3 className="font-bold">ایرادات بایگانی شده ({archivedIssues.length})</h3>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="px-2 py-1 bg-green-100 text-green-700 rounded">
+                    تایید شده: {archivedIssues.filter(i =>
+                      i.archived_reason?.includes('approved') ||
+                      i.archived_reason?.includes('converted') ||
+                      i.archived_reason?.includes('validated') ||
+                      i.archived_reason?.includes('field')
+                    ).length}
+                  </span>
+                  <span className="px-2 py-1 bg-red-100 text-red-700 rounded">
+                    رد شده: {archivedIssues.filter(i =>
+                      i.archived_reason?.includes('rejected') ||
+                      i.archived_reason?.includes('invalid')
+                    ).length}
+                  </span>
+                </div>
               </div>
-            )}
-          </div>
-        )}
+
+              {archivedIssues.length === 0 ? (
+                <div className="text-center py-8 text-gray-400">
+                  <div className="text-5xl mb-4">📦</div>
+                  <p>هیچ ایرادی بایگانی نشده</p>
+                  <p className="text-sm mt-2">
+                    ایرادات پس از گزارش مهندسی به اینجا منتقل می‌شوند
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-[400px] overflow-auto">
+                  {archivedIssues.map((issue, idx) => {
+                    const label = getArchiveLabel(issue.archived_reason);
+
+                    return (
+                      <div
+                        key={idx}
+                        className="p-3 rounded-lg border-r-4 bg-gray-50 dark:bg-gray-700/50 opacity-80"
+                        style={{
+                          borderColor: label.color.includes('green') ? '#22c55e' :
+                                      label.color.includes('red') ? '#ef4444' :
+                                      label.color.includes('blue') ? '#3b82f6' : '#6b7280'
+                        }}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1">
+                            {issue.file && (
+                              <div className="text-xs font-mono text-blue-500 mb-1">{issue.file}</div>
+                            )}
+                            <p className="text-sm">{issue.message}</p>
+                            <div className="flex items-center gap-2 mt-1 flex-wrap">
+                              {issue.line && (
+                                <span className="text-xs text-gray-400">خط {issue.line}</span>
+                              )}
+                              {issue.archived_at && (
+                                <span className="text-xs text-gray-400">
+                                  بایگانی: {new Date(issue.archived_at).toLocaleString('fa-IR')}
+                                </span>
+                              )}
+                              {issue.converted_to_field && (
+                                <span className="text-xs text-green-600 flex items-center gap-1">
+                                  <span>✓</span>
+                                  تبدیل به فیلد
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex flex-col items-end gap-1">
+                            {/* برچسب وضعیت بایگانی */}
+                            <span className={`px-2 py-0.5 rounded text-xs text-white ${label.color}`}>
+                              {label.text}
+                            </span>
+                            <span className={`px-2 py-0.5 rounded text-xs ${getSeverityColor(issue.severity)}`}>
+                              {issue.severity}
+                            </span>
+                            {issue.model && (
+                              <span className="text-xs text-gray-400">{issue.model}</span>
+                            )}
+                          </div>
+                        </div>
+                        {/* نمایش دلیل بایگانی */}
+                        {issue.archived_reason && (
+                          <div className="mt-2 text-xs text-gray-500 bg-gray-100 dark:bg-gray-600 px-2 py-1 rounded">
+                            دلیل: {issue.archived_reason}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* 🆕 تب زنجیره اعتبارسنجی */}
         {activeTab === 'validation' && (

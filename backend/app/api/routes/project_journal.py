@@ -2851,6 +2851,23 @@ async def generate_engineering_report_stream(
                                 issue["archived_reason"] = "engineering_report_4step_completed"
                                 archived_count += 1
 
+                                # 🆕 ثبت در ژورنال برای هر ایراد بایگانی شده
+                                log_detailed_operation(
+                                    db, project_id, None,
+                                    "issue_archived",
+                                    f"ایراد بایگانی شد (گزارش مهندسی عمیق): {issue.get('message', '')[:60]}",
+                                    details={
+                                        "issue_id": issue.get("id"),
+                                        "file": issue.get("file"),
+                                        "severity": issue.get("severity"),
+                                        "archive_reason": "engineering_report_4step_completed",
+                                    },
+                                    target_type="issue",
+                                    target_id=issue.get("id"),
+                                    target_name=issue.get("message", "")[:60],
+                                    status="completed"
+                                )
+
                         if archived_count > 0:
                             project_fresh.issues_found = json.dumps(all_issues, ensure_ascii=False)
                             db.commit()
@@ -2904,6 +2921,23 @@ async def generate_engineering_report_stream(
                                 issue["archived_at"] = datetime.utcnow().isoformat()
                                 issue["archived_reason"] = "engineering_report_completed"
                                 archived_count += 1
+
+                                # 🆕 ثبت در ژورنال برای هر ایراد بایگانی شده
+                                log_detailed_operation(
+                                    db, project_id, None,
+                                    "issue_archived",
+                                    f"ایراد بایگانی شد (گزارش مهندسی): {issue.get('message', '')[:60]}",
+                                    details={
+                                        "issue_id": issue.get("id"),
+                                        "file": issue.get("file"),
+                                        "severity": issue.get("severity"),
+                                        "archive_reason": "engineering_report_completed",
+                                    },
+                                    target_type="issue",
+                                    target_id=issue.get("id"),
+                                    target_name=issue.get("message", "")[:60],
+                                    status="completed"
+                                )
 
                         if archived_count > 0:
                             project_fresh.issues_found = json.dumps(all_issues, ensure_ascii=False)
@@ -3443,6 +3477,26 @@ async def engineering_step2_health_to_fields(
                 issue["archived_at"] = datetime.utcnow().isoformat()
                 issue["archived_reason"] = "converted_to_field_step2"
                 issue["converted_to_field"] = new_field["id"]
+
+                # 🆕 ثبت در ژورنال برای هر ایراد بایگانی شده
+                log_detailed_operation(
+                    db, project_id, None,
+                    "issue_archived",
+                    f"ایراد تایید و تبدیل به فیلد شد: {issue.get('message', '')[:60]}",
+                    details={
+                        "issue_id": issue.get("id"),
+                        "file": issue.get("file"),
+                        "severity": issue.get("severity"),
+                        "archive_reason": "approved_converted_to_field",
+                        "created_field_id": new_field["id"],
+                        "created_field_name": new_field["name"],
+                        "validation_score": validated.get("validation_score", 0),
+                    },
+                    target_type="issue",
+                    target_id=issue.get("id"),
+                    target_name=issue.get("message", "")[:60],
+                    status="completed"
+                )
                 break
 
     # ایجاد فیلدهای ادغام شده
@@ -3487,8 +3541,27 @@ async def engineering_step2_health_to_fields(
             if (file_match and msg_match) or (issue.get("id") == orig.get("id")):
                 issue["archived"] = True
                 issue["archived_at"] = datetime.utcnow().isoformat()
-                issue["archived_reason"] = f"rejected_step2: {rejected.get('rejection_reason', '')}"
+                rejection_reason = rejected.get('rejection_reason', '')
+                issue["archived_reason"] = f"rejected_step2: {rejection_reason}"
                 rejected_count += 1
+
+                # 🆕 ثبت در ژورنال برای هر ایراد رد شده
+                log_detailed_operation(
+                    db, project_id, None,
+                    "issue_rejected",
+                    f"ایراد رد شد: {issue.get('message', '')[:60]}",
+                    details={
+                        "issue_id": issue.get("id"),
+                        "file": issue.get("file"),
+                        "severity": issue.get("severity"),
+                        "archive_reason": "rejected",
+                        "rejection_reason": rejection_reason,
+                    },
+                    target_type="issue",
+                    target_id=issue.get("id"),
+                    target_name=issue.get("message", "")[:60],
+                    status="completed"
+                )
                 break
 
     # 🔴 FALLBACK: اگر هیچ ایرادی بایگانی نشده ولی فیلد ایجاد شده، همه active_issues را بایگانی کن
@@ -3504,6 +3577,23 @@ async def engineering_step2_health_to_fields(
                 issue["archived_at"] = datetime.utcnow().isoformat()
                 issue["archived_reason"] = "fallback_bulk_archive_step2"
                 archived_by_fallback += 1
+
+                # 🆕 ثبت در ژورنال برای هر ایراد بایگانی شده در fallback
+                log_detailed_operation(
+                    db, project_id, None,
+                    "issue_archived",
+                    f"ایراد بایگانی شد (fallback): {issue.get('message', '')[:60]}",
+                    details={
+                        "issue_id": issue.get("id"),
+                        "file": issue.get("file"),
+                        "severity": issue.get("severity"),
+                        "archive_reason": "fallback_engineering_report",
+                    },
+                    target_type="issue",
+                    target_id=issue.get("id"),
+                    target_name=issue.get("message", "")[:60],
+                    status="completed"
+                )
         logger.info(f"✅ Fallback archived {archived_by_fallback} issues")
 
     total_archived = newly_archived + rejected_count + archived_by_fallback
@@ -3609,6 +3699,24 @@ async def engineering_step3_evaluate_models(
             continue
 
         try:
+            # محاسبه precision قبل از به‌روزرسانی
+            precision = round(stats["correct"] / stats["total"] * 100, 1) if stats["total"] > 0 else 0
+            false_positive_rate = round(stats["false_positive"] / stats["total"] * 100, 1) if stats["total"] > 0 else 0
+
+            # تعیین تغییر امتیاز (مثبت یا منفی)
+            if stats["false_positive"] > stats["correct"]:
+                score_change = "منفی"
+                score_reason = f"تعداد ایرادات نادرست ({stats['false_positive']}) بیشتر از صحیح ({stats['correct']})"
+            elif precision >= 80:
+                score_change = "مثبت"
+                score_reason = f"دقت بالا ({precision}%) - عملکرد عالی"
+            elif precision >= 60:
+                score_change = "خنثی"
+                score_reason = f"دقت متوسط ({precision}%) - قابل بهبود"
+            else:
+                score_change = "منفی"
+                score_reason = f"دقت پایین ({precision}%) - نیاز به بازبینی"
+
             await profiler.update_profile(
                 model_id=model_id_stat,
                 task_type="health_analysis",
@@ -3627,9 +3735,31 @@ async def engineering_step3_evaluate_models(
                 "model_id": model_id_stat,
                 "correct": stats["correct"],
                 "false_positive": stats["false_positive"],
-                "precision": round(stats["correct"] / stats["total"] * 100, 1) if stats["total"] > 0 else 0
+                "precision": precision
             })
             logger.info(f"Updated profile for {model_id_stat}: {stats}")
+
+            # 🆕 ثبت در ژورنال برای هر تغییر امتیاز مدل
+            log_detailed_operation(
+                db, project_id, None,
+                "model_score_updated",
+                f"امتیاز مدل {model_id_stat}: {score_change} - دقت {precision}%",
+                details={
+                    "model_id": model_id_stat,
+                    "score_change_type": score_change,
+                    "precision": precision,
+                    "false_positive_rate": false_positive_rate,
+                    "correct_findings": stats["correct"],
+                    "false_positives": stats["false_positive"],
+                    "total_issues": stats["total"],
+                    "reason": score_reason,
+                    "evaluation_step": 3,
+                },
+                target_type="model",
+                target_id=model_id_stat,
+                target_name=model_id_stat,
+                status="completed"
+            )
         except Exception as e:
             logger.warning(f"Could not update profile for {model_id_stat}: {e}")
 
