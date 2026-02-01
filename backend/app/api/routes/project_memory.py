@@ -4061,20 +4061,20 @@ async def auto_setup_project(
             except Exception as e:
                 logger.warning(f"  ⚠️ Could not load {db_key}: {e}")
 
-        # بررسی وضعیت فعلی AI manager
-        ai_manager = get_ai_manager()
-        available_providers = ai_manager.get_available_providers()
-        logger.info(f"📊 Current AI providers: {available_providers}")
+        # 🔴 اگه هیچ کلیدی از دیتابیس لود نشد
+        if not keys_loaded:
+            logger.warning("⚠️ No API keys found in database!")
+            logger.warning("   💡 Please add API keys in Settings page first")
 
-        # اگر هیچ provider فعالی نیست ولی کلید از دیتابیس لود شده، ریست کن
-        if keys_loaded and not available_providers:
-            logger.info("🔄 Resetting AI manager to load new API keys...")
-            ai_manager = await reset_ai_manager()
-            available_providers = ai_manager.get_available_providers()
-            logger.info(f"📊 AI providers after reset: {available_providers}")
+        # 🔴 همیشه AI manager رو ریست کن تا کلیدهای جدید لود بشن
+        logger.info(f"🔄 Resetting AI manager... (keys_loaded: {keys_loaded})")
+        ai_manager = await reset_ai_manager()
+        available_providers = ai_manager.get_available_providers()
+        logger.info(f"📊 AI providers after reset: {available_providers}")
 
         if not available_providers:
             logger.warning("⚠️ No AI providers available! Auto-setup will use fallback mode.")
+            logger.warning("   💡 Please add API keys in Settings page")
         else:
             logger.info(f"✅ Available AI providers: {available_providers}")
 
