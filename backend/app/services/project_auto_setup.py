@@ -773,6 +773,9 @@ async def auto_setup_project_memory(
         # این تابع باید قبل از if/else باشد تا در هر دو مسیر قابل دسترسی باشد
         def is_report_field(field: Dict) -> bool:
             """بررسی آیا فیلد توسط گزارش مهندسی ایجاد شده"""
+            # 🆕 بررسی engineering_approval (مهم‌ترین شاخص)
+            if field.get("engineering_approval", {}).get("approved"):
+                return True
             if field.get("created_from_report"):
                 return True
             if field.get("validation_marker") in ["validated", "pending"]:
@@ -782,6 +785,10 @@ async def auto_setup_project_memory(
             if field.get("original_issue"):
                 return True
             if field.get("name", "").startswith("✅"):
+                return True
+            # 🆕 بررسی approval_type
+            approval_type = field.get("engineering_approval", {}).get("approval_type", "")
+            if approval_type in ["step1_validation", "step2_validation", "health_validation_step2", "merged_health_step2"]:
                 return True
             return False
 

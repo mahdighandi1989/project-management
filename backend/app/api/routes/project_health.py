@@ -1365,11 +1365,19 @@ async def _run_analysis_task(
 
             # ذخیره مشکلات
             # 🔴 رفع محدودیت - تمام ایرادات ذخیره می‌شوند
-            # 🆕 ادغام ایرادات مشابه قبل از ذخیره برای کاهش حجم
+            # 🆕 همیشه ادغام ایرادات قبل از ذخیره (رفع مشکل ۳ و ۴)
             raw_issues = analysis_result.get("issues", [])
-            if len(raw_issues) > 100:
-                # ادغام اولیه در زمان ذخیره
-                merged_issues = _merge_similar_issues(raw_issues, aggressive=len(raw_issues) > 500)
+
+            # همیشه ادغام انجام بشه (نه فقط وقتی > 100)
+            if len(raw_issues) > 1:
+                # تنظیم سطح ادغام بر اساس تعداد
+                aggressive = len(raw_issues) > 200
+                merged_issues = _merge_similar_issues(raw_issues, aggressive=aggressive)
+
+                # علامت‌گذاری که ایرادات ادغام شده‌اند
+                for issue in merged_issues:
+                    issue["_merged_at_save"] = True  # جلوگیری از ادغام مجدد در زمان خواندن
+
                 logger.info(f"[Health Analysis] Merged {len(raw_issues)} issues to {len(merged_issues)} before storing")
                 project.issues_found = json.dumps(merged_issues, ensure_ascii=False)
             else:
@@ -1879,16 +1887,24 @@ async def get_project_issues(
     issues = []
     original_count = 0
     merge_persisted = False
+    already_merged = False
     try:
         if project.issues_found:
             issues = json.loads(project.issues_found)
             original_count = len(issues)
 
-            # 🔴 ادغام ایرادات مشابه
-            if merge_similar and len(issues) > 1:
+            # 🆕 بررسی آیا قبلاً در زمان ذخیره ادغام شده (رفع مشکل ۴ - ناپایداری)
+            already_merged = any(issue.get("_merged_at_save") for issue in issues)
+
+            # 🔴 ادغام ایرادات مشابه - فقط اگر قبلاً ادغام نشده
+            if merge_similar and len(issues) > 1 and not already_merged:
                 # اگر بیش از 200 ایراد باشد، ادغام تهاجمی خودکار فعال شود
                 auto_aggressive = original_count > 200
                 merged_issues = _merge_similar_issues(issues, aggressive=aggressive_merge or auto_aggressive)
+
+                # علامت‌گذاری ایرادات ادغام شده
+                for issue in merged_issues:
+                    issue["_merged_at_save"] = True
 
                 # 🆕 ذخیره نتیجه ادغام در دیتابیس برای پایداری
                 if persist_merge and len(merged_issues) < original_count:
@@ -1917,8 +1933,9 @@ async def get_project_issues(
         "issues": issues,
         "total_count": len(issues),
         "original_count": original_count,  # 🔴 تعداد قبل از ادغام
-        "merged_count": original_count - len(issues) if merge_similar else 0,  # 🔴 تعداد ادغام شده
+        "merged_count": original_count - len(issues) if merge_similar and not already_merged else 0,
         "merge_persisted": merge_persisted,  # 🆕 آیا ادغام ذخیره شد؟
+        "already_merged": already_merged,  # 🆕 آیا قبلاً ادغام شده بود؟
         "grouped": grouped,
         "counts": {k: len(v) for k, v in grouped.items()}
     }

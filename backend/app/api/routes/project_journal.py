@@ -2874,6 +2874,7 @@ async def update_report_trigger(
 async def engineering_step1_validate_fields(
     project_id: str,
     model_id: str = Query("claude"),
+    depth: str = Query("normal", description="عمق بررسی: quick, normal, deep"),
     db: Session = Depends(get_db)
 ):
     """
@@ -2906,8 +2907,24 @@ async def engineering_step1_validate_fields(
     pending_fields = [f for f in existing_fields if not f.get("archived") and not f.get("engineering_approval")]
     approved_fields = [f for f in existing_fields if not f.get("archived") and f.get("engineering_approval")]
 
-    # ساخت prompt برای مرحله ۱
-    system_prompt = """تو یک مهندس نرم‌افزار ارشد هستی. وظیفه‌ات بررسی و اعتبارسنجی فیلدهای پویای پروژه است.
+    # 🆕 ساخت prompt بر اساس عمق بررسی
+    depth_instructions = {
+        "quick": "بررسی سریع و خلاصه انجام بده. فقط موارد واضح را تایید یا رد کن.",
+        "normal": "بررسی متعادل انجام بده. هر فیلد را بررسی کن اما وارد جزئیات نشو.",
+        "deep": """بررسی بسیار عمیق و دقیق انجام بده:
+- هر فیلد را خط به خط بررسی کن
+- منطق و هدف هر فیلد را تحلیل کن
+- تکراری بودن با فیلدهای موجود را دقیق بررسی کن
+- امکان ادغام فیلدها را بررسی کن
+- اولویت‌بندی را با دقت تعیین کن
+- دلایل مفصل برای هر تصمیم بنویس
+- کیفیت نوشتار و دستورات فیلدها را ارزیابی کن"""
+    }
+
+    system_prompt = f"""تو یک مهندس نرم‌افزار ارشد هستی. وظیفه‌ات بررسی و اعتبارسنجی فیلدهای پویای پروژه است.
+
+🔴 سطح بررسی: {depth.upper()}
+{depth_instructions.get(depth, depth_instructions["normal"])}
 
 برای هر فیلد PENDING تصمیم بگیر:
 1. approve: اگر فیلد ضروری و معتبر است
@@ -2916,24 +2933,29 @@ async def engineering_step1_validate_fields(
 
 خروجی JSON:
 ```json
-{
+{{
     "fields_to_approve": ["field_id1", "field_id2"],
-    "fields_to_reject": [{"id": "field_id", "reason": "دلیل رد"}],
-    "fields_to_merge": [{"source_ids": ["id1", "id2"], "merged_name": "نام جدید", "merged_value": "دستور ادغام شده"}],
-    "fields_to_update": [{"id": "field_id", "new_priority": 2, "new_action_type": "github_commit"}],
+    "fields_to_reject": [{{"id": "field_id", "reason": "دلیل رد"}}],
+    "fields_to_merge": [{{"source_ids": ["id1", "id2"], "merged_name": "نام جدید", "merged_value": "دستور ادغام شده"}}],
+    "fields_to_update": [{{"id": "field_id", "new_priority": 2, "new_action_type": "github_commit"}}],
+    "analysis_details": {{"field_id": "تحلیل جزئی فیلد"}} if depth=="deep" else null,
     "summary": "خلاصه عملیات"
-}
+}}
 ```"""
 
+    # 🆕 برای حالت deep، محتوای کامل‌تر فیلدها را نشان بده
+    value_limit = 300 if depth != "deep" else 1000
+
     user_prompt = f"""پروژه: {project.name}
+سطح بررسی: {depth.upper()}
 
 === فیلدهای PENDING (نیاز به تایید) ===
-{json.dumps([{"id": f.get("id"), "name": f.get("name"), "value": f.get("value", "")[:300], "action_type": f.get("action_type"), "target_path": f.get("target_path"), "priority": f.get("priority", 5)} for f in pending_fields], ensure_ascii=False, indent=2)}
+{json.dumps([{"id": f.get("id"), "name": f.get("name"), "value": f.get("value", "")[:value_limit], "action_type": f.get("action_type"), "target_path": f.get("target_path"), "priority": f.get("priority", 5)} for f in pending_fields], ensure_ascii=False, indent=2)}
 
 === فیلدهای تایید شده (برای مقایسه) ===
 {json.dumps([{"id": f.get("id"), "name": f.get("name"), "action_type": f.get("action_type")} for f in approved_fields[:20]], ensure_ascii=False, indent=2)}
 
-لطفاً هر فیلد pending را بررسی و تصمیم بگیر."""
+{"🔴 حالت DEEP: لطفاً هر فیلد را به صورت جداگانه و با جزئیات کامل تحلیل کن و دلیل تصمیمت را بنویس." if depth == "deep" else "لطفاً هر فیلد pending را بررسی و تصمیم بگیر."}"""
 
     ai_manager = get_ai_manager()
 
@@ -2948,11 +2970,14 @@ async def engineering_step1_validate_fields(
         Message(role="user", content=user_prompt),
     ]
 
+    # 🆕 تنظیم max_tokens بر اساس عمق
+    depth_tokens = {"quick": 2048, "normal": 4096, "deep": 8192}
+
     response = await ai_manager.generate(
         model_id=model_id,
         messages=messages,
-        max_tokens=4096,
-        temperature=0.3,
+        max_tokens=depth_tokens.get(depth, 4096),
+        temperature=0.3 if depth != "deep" else 0.2,  # دقت بیشتر در deep
         task_type="engineering_step1",
         allow_fallback=True,
     )
@@ -3063,6 +3088,7 @@ async def engineering_step1_validate_fields(
 async def engineering_step2_health_to_fields(
     project_id: str,
     model_id: str = Query("claude"),
+    depth: str = Query("normal", description="عمق بررسی: quick, normal, deep"),
     db: Session = Depends(get_db)
 ):
     """
@@ -3341,6 +3367,7 @@ async def engineering_step2_health_to_fields(
 async def engineering_step3_evaluate_models(
     project_id: str,
     model_id: str = Query("claude"),
+    depth: str = Query("normal", description="عمق بررسی: quick, normal, deep"),
     db: Session = Depends(get_db)
 ):
     """
@@ -3771,7 +3798,7 @@ async def engineering_run_all_steps(
         # مرحله ۱
         if 1 not in settings["skip_steps"]:
             try:
-                step1 = await engineering_step1_validate_fields(project_id, model_for_step[1], db)
+                step1 = await engineering_step1_validate_fields(project_id, model_for_step[1], depth, db)
                 results["step1"] = step1
             except Exception as e:
                 results["step1"] = {"success": False, "error": str(e)}
@@ -3779,7 +3806,7 @@ async def engineering_run_all_steps(
         # مرحله ۲
         if 2 not in settings["skip_steps"]:
             try:
-                step2 = await engineering_step2_health_to_fields(project_id, model_for_step[2], db)
+                step2 = await engineering_step2_health_to_fields(project_id, model_for_step[2], depth, db)
                 results["step2"] = step2
             except Exception as e:
                 results["step2"] = {"success": False, "error": str(e)}
@@ -3789,17 +3816,18 @@ async def engineering_run_all_steps(
         # مرحله ۳ - 🆕 ارزیابی با امتیازدهی دقیق
         if 3 not in settings["skip_steps"]:
             try:
-                step3 = await engineering_step3_evaluate_models(project_id, model_for_step[3], db)
+                step3 = await engineering_step3_evaluate_models(project_id, model_for_step[3], depth, db)
                 results["step3"] = step3
             except Exception as e:
                 results["step3"] = {"success": False, "error": str(e)}
         else:
             results["step3"] = {"success": True, "skipped": True, "message": "رد شده در حالت quick"}
 
-        # 🆕 در حالت deep، بین تکرارها pause کن
+        # 🆕 در حالت deep، بین تکرارها pause طولانی‌تر کن
         if iteration < settings["iterations"] - 1:
             import asyncio
-            await asyncio.sleep(2)  # صبر برای پردازش نتایج
+            wait_time = {"quick": 1, "normal": 2, "deep": 5}
+            await asyncio.sleep(wait_time.get(depth, 2))
 
     # مرحله ۴ (همیشه اجرا می‌شود)
     try:
