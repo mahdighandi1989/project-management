@@ -207,6 +207,25 @@ def migrate_db():
                 cursor.execute("ALTER TABLE projects ADD COLUMN general_archive TEXT")
                 logger.info("Added 'general_archive' column to projects table")
 
+            # =====================================================
+            # 🆕 ستون‌های تحلیل امنیتی و کیفیت کد
+            # =====================================================
+            if "security_scan_result" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN security_scan_result TEXT")
+                logger.info("Added 'security_scan_result' column to projects table")
+
+            if "security_scan_at" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN security_scan_at DATETIME")
+                logger.info("Added 'security_scan_at' column to projects table")
+
+            if "license_analysis_result" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN license_analysis_result TEXT")
+                logger.info("Added 'license_analysis_result' column to projects table")
+
+            if "test_coverage_result" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN test_coverage_result TEXT")
+                logger.info("Added 'test_coverage_result' column to projects table")
+
         # Migration برای جدول project_files
         if "project_files" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
             existing_cols = get_columns("project_files")
