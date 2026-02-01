@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import RenderLogsPanel from '@/components/RenderLogsPanel';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -23,7 +24,7 @@ const DEPLOY_SERVICES = [
 ];
 
 export default function SettingsPage() {
-  const [activeTab, setActiveTab] = useState<'api' | 'deploy' | 'config' | 'limits'>('api');
+  const [activeTab, setActiveTab] = useState<'api' | 'deploy' | 'config' | 'limits' | 'logs'>('api');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -299,6 +300,16 @@ export default function SettingsPage() {
             }`}
           >
             📊 محدودیت AI
+          </button>
+          <button
+            onClick={() => setActiveTab('logs')}
+            className={`px-4 py-2 rounded-lg font-medium transition ${
+              activeTab === 'logs'
+                ? 'bg-cyan-500 text-white'
+                : 'bg-white dark:bg-gray-800 hover:bg-gray-100'
+            }`}
+          >
+            📋 لاگ رندر
           </button>
         </div>
 
@@ -684,6 +695,9 @@ export default function SettingsPage() {
               {saving ? 'در حال ذخیره...' : '💾 ذخیره تنظیمات'}
             </button>
           </div>
+        ) : activeTab === 'logs' ? (
+          // لاگ‌های Render
+          <RenderLogsPanel />
         ) : null}
 
         {/* لینک‌ها */}
