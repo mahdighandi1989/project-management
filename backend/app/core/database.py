@@ -272,6 +272,27 @@ def migrate_db():
                 cursor.execute("ALTER TABLE render_logs ADD COLUMN transferred_to_project VARCHAR(100)")
                 logger.info("Added 'transferred_to_project' column to render_logs table")
 
+        # Migration برای جدول render_log_settings
+        if "render_log_settings" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
+            existing_cols = get_columns("render_log_settings")
+
+            # اضافه کردن ستون‌های انتقال خودکار
+            if "auto_transfer_enabled" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN auto_transfer_enabled BOOLEAN DEFAULT 0")
+                logger.info("Added 'auto_transfer_enabled' column to render_log_settings table")
+
+            if "auto_transfer_interval_minutes" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN auto_transfer_interval_minutes INTEGER DEFAULT 30")
+                logger.info("Added 'auto_transfer_interval_minutes' column to render_log_settings table")
+
+            if "auto_transfer_hours_back" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN auto_transfer_hours_back INTEGER DEFAULT 24")
+                logger.info("Added 'auto_transfer_hours_back' column to render_log_settings table")
+
+            if "last_auto_transfer" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN last_auto_transfer DATETIME")
+                logger.info("Added 'last_auto_transfer' column to render_log_settings table")
+
         conn.commit()
         logger.info("Database migration completed")
 

@@ -52,6 +52,10 @@ class LogSettingsRequest(BaseModel):
     archive_retention_days: int = 30
     default_log_levels: str = "info,warn,error"
     auto_scroll: bool = True
+    # تنظیمات انتقال خودکار
+    auto_transfer_enabled: bool = False
+    auto_transfer_interval_minutes: int = 30
+    auto_transfer_hours_back: int = 24
 
 
 # =====================================
@@ -486,7 +490,12 @@ async def get_log_settings(db: Session = Depends(get_db)):
             "archive_enabled": settings.archive_enabled,
             "archive_retention_days": settings.archive_retention_days,
             "default_log_levels": settings.default_log_levels,
-            "auto_scroll": settings.auto_scroll
+            "auto_scroll": settings.auto_scroll,
+            # تنظیمات انتقال خودکار
+            "auto_transfer_enabled": getattr(settings, 'auto_transfer_enabled', False),
+            "auto_transfer_interval_minutes": getattr(settings, 'auto_transfer_interval_minutes', 30),
+            "auto_transfer_hours_back": getattr(settings, 'auto_transfer_hours_back', 24),
+            "last_auto_transfer": settings.last_auto_transfer.isoformat() if getattr(settings, 'last_auto_transfer', None) else None
         }
     }
 
@@ -511,12 +520,17 @@ async def update_log_settings(
     settings.archive_retention_days = request.archive_retention_days
     settings.default_log_levels = request.default_log_levels
     settings.auto_scroll = request.auto_scroll
+    # تنظیمات انتقال خودکار
+    settings.auto_transfer_enabled = request.auto_transfer_enabled
+    settings.auto_transfer_interval_minutes = request.auto_transfer_interval_minutes
+    settings.auto_transfer_hours_back = request.auto_transfer_hours_back
 
     db.commit()
 
     slog.success("Log settings updated",
         polling_interval=request.polling_interval_seconds,
-        retention_hours=request.retention_hours
+        retention_hours=request.retention_hours,
+        auto_transfer_enabled=request.auto_transfer_enabled
     )
 
     return {
@@ -605,10 +619,10 @@ async def download_logs(
         import json
         content = json.dumps([
             {
-                "timestamp": log.timestamp.isoformat(),
-                "level": log.level,
-                "service": log.service_name or log.service_id,
-                "message": log.message,
+                "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+                "level": log.level or "unknown",
+                "service": log.service_name or log.service_id or "unknown",
+                "message": log.message or "",
                 "deploy_id": log.deploy_id
             }
             for log in logs
@@ -621,10 +635,10 @@ async def download_logs(
         writer.writerow(["timestamp", "level", "service", "message", "deploy_id"])
         for log in logs:
             writer.writerow([
-                log.timestamp.isoformat(),
-                log.level,
-                log.service_name or log.service_id,
-                log.message,
+                log.timestamp.isoformat() if log.timestamp else "",
+                log.level or "unknown",
+                log.service_name or log.service_id or "unknown",
+                log.message or "",
                 log.deploy_id or ""
             ])
         content = output.getvalue()
@@ -633,8 +647,11 @@ async def download_logs(
     else:  # txt
         lines = []
         for log in logs:
-            ts = log.timestamp.strftime("%Y-%m-%d %H:%M:%S")
-            lines.append(f"[{ts}] [{log.level.upper()}] [{log.service_name or log.service_id}] {log.message}")
+            ts = log.timestamp.strftime("%Y-%m-%d %H:%M:%S") if log.timestamp else "N/A"
+            level = (log.level or "unknown").upper()
+            service = log.service_name or log.service_id or "unknown"
+            message = log.message or ""
+            lines.append(f"[{ts}] [{level}] [{service}] {message}")
         content = "\n".join(lines)
         media_type = "text/plain"
 
