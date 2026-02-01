@@ -318,7 +318,7 @@ export default function HealthDiagram({ projectId, fileHealthMap, onFileClick }:
                 borderColor: bgColor,
                 backgroundColor: bgColor + '15',
               }}
-              onClick={() => onFileClick?.(path)}
+              onClick={() => setSelectedFile(path)}
             >
               <div className="text-xs text-gray-400 truncate" dir="ltr">
                 {path.split('/').slice(0, -1).join('/')}
