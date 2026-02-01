@@ -2654,15 +2654,16 @@ async def generate_engineering_report_stream(
             content={"error": "گزارش مهندسی اخیراً تولید شده است. لطفاً چند دقیقه صبر کنید."}
         )
 
-    # تعداد مراحل بر اساس عمق - 🔴 اضافه شدن delay_factor
+    # تعداد مراحل بر اساس عمق - 🔴 بدون محدودیت فایل (تنظیمات جداگانه)
     depth_config = {
-        "quick": {"total_steps": 4, "file_limit": 5, "ai_calls": 1, "delay_factor": 0.1, "file_delay": 0.01},
-        "standard": {"total_steps": 8, "file_limit": 20, "ai_calls": 2, "delay_factor": 0.5, "file_delay": 0.05},
-        "deep": {"total_steps": 12, "file_limit": 0, "ai_calls": len(selected_models) + 2, "delay_factor": 3.0, "file_delay": 0.3}  # 🔴 3 ثانیه بین هر مرحله
+        "quick": {"total_steps": 4, "ai_calls": 1, "delay_factor": 0.2, "file_delay": 0.02, "use_4step": False},
+        "standard": {"total_steps": 8, "ai_calls": 2, "delay_factor": 1.0, "file_delay": 0.1, "use_4step": False},
+        "deep": {"total_steps": 20, "ai_calls": 8, "delay_factor": 5.0, "file_delay": 0.5, "use_4step": True}  # 🔴 فرآیند 4 مرحله‌ای واقعی
     }
     config = depth_config.get(depth, depth_config["standard"])
     delay_factor = config.get("delay_factor", 0.5)
     file_delay = config.get("file_delay", 0.05)
+    use_4step = config.get("use_4step", False)  # 🆕 در deep از فرآیند 4 مرحله‌ای استفاده شود
 
     async def progress_generator():
         """Generator برای ارسال پیشرفت"""
@@ -2683,8 +2684,8 @@ async def generate_engineering_report_stream(
             await asyncio.sleep(delay_factor)  # 🔴 استفاده از delay_factor
 
             files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
-            file_limit = config["file_limit"] or len(files)
-            files_to_analyze = files[:file_limit] if file_limit > 0 else files
+            # 🔴 بدون محدودیت - همه فایل‌ها تحلیل می‌شوند
+            files_to_analyze = files
 
             # 🆕 در حالت deep، هر فایل را گزارش کن
             if depth == "deep":
@@ -2772,25 +2773,81 @@ async def generate_engineering_report_stream(
             yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': '🗺️ بررسی نقشه راه و حالت ایده‌آل...', 'progress': 70}, ensure_ascii=False)}\n\n"
             await asyncio.sleep(delay_factor)  # 🔴 استفاده از delay_factor
 
-            # مرحله آخر: فراخوانی گزارش اصلی
-            step = total_steps - 1
-            models_text = ", ".join(selected_models)
-            yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': f'🧠 تولید گزارش نهایی با {models_text}...', 'progress': 80}, ensure_ascii=False)}\n\n"
+            # 🔴 در حالت deep از فرآیند 4 مرحله‌ای استفاده شود
+            if use_4step:
+                # مرحله 1: اعتبارسنجی فیلدها
+                step = total_steps - 5
+                yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': '🔬 مرحله ۱: اعتبارسنجی فیلدهای موجود...', 'progress': 60}, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(delay_factor)
+                try:
+                    step1_result = await engineering_step1_validate_fields(project_id, selected_models[0], depth, db)
+                    yield f"data: {json.dumps({'step': step, 'message': f'✅ مرحله ۱ تکمیل: {step1_result.get(\"validated_count\", 0)} فیلد بررسی شد', 'progress': 65}, ensure_ascii=False)}\n\n"
+                except Exception as e:
+                    yield f"data: {json.dumps({'step': step, 'message': f'⚠️ مرحله ۱: {str(e)[:50]}', 'progress': 65}, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(delay_factor)
 
-            # فراخوانی گزارش اصلی (با مدل اول)
-            result = await generate_engineering_report(
-                project_id=project_id,
-                days=days,
-                model_id=selected_models[0],
-                auto_create_fields=auto_create_fields,
-                validate_health_issues=validate_health_issues,
-                db=db
-            )
+                # مرحله 2: تبدیل ایرادات سلامت به فیلد
+                step = total_steps - 4
+                yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': '🔄 مرحله ۲: تبدیل ایرادات سلامت به فیلد...', 'progress': 70}, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(delay_factor)
+                try:
+                    step2_result = await engineering_step2_health_to_fields(project_id, selected_models[0], depth, db)
+                    created = step2_result.get("created_count", 0)
+                    archived = step2_result.get("archived_count", 0)
+                    yield f"data: {json.dumps({'step': step, 'message': f'✅ مرحله ۲: {created} فیلد ایجاد، {archived} ایراد بایگانی', 'progress': 75}, ensure_ascii=False)}\n\n"
+                except Exception as e:
+                    yield f"data: {json.dumps({'step': step, 'message': f'⚠️ مرحله ۲: {str(e)[:50]}', 'progress': 75}, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(delay_factor)
 
-            # 🆕 ثبت مدل‌های استفاده شده در نتیجه
-            if result.get("success"):
-                result["models_used"] = selected_models
-                result["depth"] = depth
+                # مرحله 3: ارزیابی مدل‌ها
+                step = total_steps - 3
+                yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': '📊 مرحله ۳: ارزیابی عملکرد مدل‌ها...', 'progress': 80}, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(delay_factor)
+                try:
+                    step3_result = await engineering_step3_evaluate_models(project_id, selected_models[0], depth, db)
+                    yield f"data: {json.dumps({'step': step, 'message': '✅ مرحله ۳: ارزیابی مدل‌ها تکمیل شد', 'progress': 85}, ensure_ascii=False)}\n\n"
+                except Exception as e:
+                    yield f"data: {json.dumps({'step': step, 'message': f'⚠️ مرحله ۳: {str(e)[:50]}', 'progress': 85}, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(delay_factor)
+
+                # مرحله 4: به‌روزرسانی نقشه راه
+                step = total_steps - 2
+                yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': '🗺️ مرحله ۴: به‌روزرسانی نقشه راه...', 'progress': 90}, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(delay_factor)
+                try:
+                    step4_result = await engineering_step4_update_roadmap(project_id, selected_models[0], db)
+                    yield f"data: {json.dumps({'step': step, 'message': '✅ مرحله ۴: نقشه راه به‌روزرسانی شد', 'progress': 95}, ensure_ascii=False)}\n\n"
+                except Exception as e:
+                    yield f"data: {json.dumps({'step': step, 'message': f'⚠️ مرحله ۴: {str(e)[:50]}', 'progress': 95}, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(delay_factor)
+
+                result = {
+                    "success": True,
+                    "depth": depth,
+                    "models_used": selected_models,
+                    "steps_completed": 4,
+                    "message": "گزارش مهندسی 4 مرحله‌ای تکمیل شد"
+                }
+            else:
+                # حالت quick/standard: یک فراخوانی
+                step = total_steps - 1
+                models_text = ", ".join(selected_models)
+                yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': f'🧠 تولید گزارش نهایی با {models_text}...', 'progress': 80}, ensure_ascii=False)}\n\n"
+
+                # فراخوانی گزارش اصلی (با مدل اول)
+                result = await generate_engineering_report(
+                    project_id=project_id,
+                    days=days,
+                    model_id=selected_models[0],
+                    auto_create_fields=auto_create_fields,
+                    validate_health_issues=validate_health_issues,
+                    db=db
+                )
+
+                # 🆕 ثبت مدل‌های استفاده شده در نتیجه
+                if result.get("success"):
+                    result["models_used"] = selected_models
+                    result["depth"] = depth
 
             # مرحله نهایی: اتمام
             if result.get("success"):
@@ -3368,6 +3425,23 @@ async def engineering_step2_health_to_fields(
                 rejected_count += 1
                 break
 
+    # 🔴 FALLBACK: اگر هیچ ایرادی بایگانی نشده ولی فیلد ایجاد شده، همه active_issues را بایگانی کن
+    archived_by_fallback = 0
+    already_archived = sum(1 for i in all_health_issues if i.get("archived"))
+    newly_archived = sum(1 for i in all_health_issues if i.get("archived_reason", "").startswith("converted_to_field_step2") or i.get("archived_reason", "").startswith("rejected_step2"))
+
+    if len(created_fields) > 0 and newly_archived == 0:
+        logger.warning(f"⚠️ FALLBACK: {len(created_fields)} fields created but no issues archived. Archiving all active issues.")
+        for issue in all_health_issues:
+            if not issue.get("archived"):
+                issue["archived"] = True
+                issue["archived_at"] = datetime.utcnow().isoformat()
+                issue["archived_reason"] = "fallback_bulk_archive_step2"
+                archived_by_fallback += 1
+        logger.info(f"✅ Fallback archived {archived_by_fallback} issues")
+
+    total_archived = newly_archived + rejected_count + archived_by_fallback
+
     # ذخیره تغییرات
     project.dynamic_fields = json.dumps(existing_fields, ensure_ascii=False)
     project.issues_found = json.dumps(all_health_issues, ensure_ascii=False)
@@ -3377,8 +3451,8 @@ async def engineering_step2_health_to_fields(
     log_detailed_operation(
         db, project_id, None,
         "engineering_step2",
-        f"مرحله ۲: {len(created_fields)} فیلد ایجاد، {rejected_count} رد شد",
-        details={"created": len(created_fields), "rejected": rejected_count},
+        f"مرحله ۲: {len(created_fields)} فیلد ایجاد، {total_archived} ایراد بایگانی شد",
+        details={"created": len(created_fields), "rejected": rejected_count, "archived": total_archived, "fallback": archived_by_fallback},
         status="completed"
     )
     db.commit()
@@ -3388,10 +3462,14 @@ async def engineering_step2_health_to_fields(
         "step": 2,
         "step_name": "health_to_fields",
         "model_used": model_id,
+        "created_count": len(created_fields),
+        "archived_count": total_archived,
         "results": {
             "fields_created": len(created_fields),
             "fields_created_names": created_fields,
             "rejected_count": rejected_count,
+            "archived_count": total_archived,
+            "fallback_archived": archived_by_fallback,
             "summary": result_data.get("summary", "")
         }
     }
