@@ -33,12 +33,20 @@ interface TreeNode {
  * نمایش ساختار پروژه با رنگ‌بندی براساس نمره سلامت هر فایل
  */
 
-// تابع رنگ براساس امتیاز - باید قبل از استفاده تعریف شود
+// تابع رنگ براساس امتیاز - رنگ‌های روشن‌تر برای خوانایی بهتر
 const getColorForScore = (score: number): string => {
-  if (score >= 80) return '#22c55e'; // سبز
-  if (score >= 60) return '#eab308'; // زرد
-  if (score >= 40) return '#f97316'; // نارنجی
-  return '#ef4444'; // قرمز
+  if (score >= 80) return '#4ade80'; // سبز روشن
+  if (score >= 60) return '#facc15'; // زرد روشن
+  if (score >= 40) return '#fb923c'; // نارنجی روشن
+  return '#f87171'; // قرمز روشن
+};
+
+// تابع رنگ متن - همیشه خوانا روی پس‌زمینه تاریک
+const getTextColorForScore = (score: number): string => {
+  if (score >= 80) return '#86efac'; // سبز خیلی روشن
+  if (score >= 60) return '#fef08a'; // زرد خیلی روشن
+  if (score >= 40) return '#fdba74'; // نارنجی خیلی روشن
+  return '#fca5a5'; // قرمز خیلی روشن
 };
 
 // آیکون فایل براساس پسوند
@@ -180,8 +188,10 @@ export default function HealthDiagram({ projectId, fileHealthMap, onFileClick }:
   // رندر درخت
   const renderTreeNode = (node: TreeNode, depth: number = 0): React.ReactNode => {
     const isExpanded = expandedFolders.has(node.path);
-    const healthColor = node.health?.hex || '#6b7280';
-    const score = node.health?.score;
+    const score = node.health?.score ?? 50;
+    // استفاده از رنگ‌های روشن‌تر برای خوانایی بهتر
+    const healthColor = getColorForScore(score);
+    const textColor = getTextColorForScore(score);
     const issues = node.health?.issues || 0;
 
     // فیلتر براساس امتیاز
@@ -254,8 +264,8 @@ export default function HealthDiagram({ projectId, fileHealthMap, onFileClick }:
           >
             <span className="ml-1">{fileIcon}</span>
             <span
-              className="ml-2 flex-1"
-              style={{ color: healthColor }}
+              className="ml-2 flex-1 font-medium"
+              style={{ color: textColor }}  // 🔴 استفاده از رنگ متن روشن‌تر
             >
               {node.name}
             </span>
@@ -273,7 +283,7 @@ export default function HealthDiagram({ projectId, fileHealthMap, onFileClick }:
               </div>
               <span
                 className="text-xs font-mono"
-                style={{ color: healthColor }}
+                style={{ color: textColor }}
               >
                 {score}
               </span>
@@ -295,43 +305,49 @@ export default function HealthDiagram({ projectId, fileHealthMap, onFileClick }:
 
     return (
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 p-2">
-        {files.map(([path, health]) => (
-          <div
-            key={path}
-            className="p-3 rounded-lg border cursor-pointer hover:scale-105 transition-transform"
-            style={{
-              borderColor: health.hex,
-              backgroundColor: health.hex + '15',
-            }}
-            onClick={() => onFileClick?.(path)}
-          >
-            <div className="text-xs text-gray-400 truncate" dir="ltr">
-              {path.split('/').slice(0, -1).join('/')}
-            </div>
-            <div className="font-medium truncate" style={{ color: health.hex }}>
-              {path.split('/').pop()}
-            </div>
-            <div className="mt-2 flex items-center gap-2">
-              <div className="flex-1 h-2 bg-gray-700 rounded-full overflow-hidden">
-                <div
-                  className="h-full rounded-full"
-                  style={{
-                    width: `${health.score}%`,
-                    backgroundColor: health.hex,
-                  }}
-                />
+        {files.map(([path, health]) => {
+          // 🔴 استفاده از رنگ‌های روشن‌تر برای خوانایی بهتر
+          const bgColor = getColorForScore(health.score);
+          const txtColor = getTextColorForScore(health.score);
+
+          return (
+            <div
+              key={path}
+              className="p-3 rounded-lg border cursor-pointer hover:scale-105 transition-transform"
+              style={{
+                borderColor: bgColor,
+                backgroundColor: bgColor + '15',
+              }}
+              onClick={() => onFileClick?.(path)}
+            >
+              <div className="text-xs text-gray-400 truncate" dir="ltr">
+                {path.split('/').slice(0, -1).join('/')}
               </div>
-              <span className="text-sm font-bold" style={{ color: health.hex }}>
-                {health.score}%
-              </span>
-            </div>
-            {health.issues && health.issues > 0 && (
-              <div className="mt-1 text-xs text-red-400">
-                ⚠ {health.issues} ایراد
+              <div className="font-medium truncate" style={{ color: txtColor }}>
+                {path.split('/').pop()}
               </div>
-            )}
-          </div>
-        ))}
+              <div className="mt-2 flex items-center gap-2">
+                <div className="flex-1 h-2 bg-gray-700 rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full"
+                    style={{
+                      width: `${health.score}%`,
+                      backgroundColor: bgColor,
+                    }}
+                  />
+                </div>
+                <span className="text-sm font-bold" style={{ color: txtColor }}>
+                  {health.score}%
+                </span>
+              </div>
+              {health.issues && health.issues > 0 && (
+                <div className="mt-1 text-xs text-red-400">
+                  ⚠ {health.issues} ایراد
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     );
   };
@@ -577,23 +593,23 @@ export default function HealthDiagram({ projectId, fileHealthMap, onFileClick }:
         )}
       </div>
 
-      {/* راهنما */}
+      {/* راهنما - با رنگ‌های روشن‌تر */}
       <div className="p-3 bg-gray-700/30 border-t border-gray-700">
-        <div className="flex items-center gap-4 text-xs text-gray-400">
+        <div className="flex items-center gap-4 text-xs text-gray-300">
           <span className="flex items-center gap-1">
-            <span className="w-3 h-3 rounded" style={{ backgroundColor: '#22c55e' }}></span>
+            <span className="w-3 h-3 rounded" style={{ backgroundColor: '#4ade80' }}></span>
             80-100 (عالی)
           </span>
           <span className="flex items-center gap-1">
-            <span className="w-3 h-3 rounded" style={{ backgroundColor: '#eab308' }}></span>
+            <span className="w-3 h-3 rounded" style={{ backgroundColor: '#facc15' }}></span>
             60-79 (خوب)
           </span>
           <span className="flex items-center gap-1">
-            <span className="w-3 h-3 rounded" style={{ backgroundColor: '#f97316' }}></span>
+            <span className="w-3 h-3 rounded" style={{ backgroundColor: '#fb923c' }}></span>
             40-59 (متوسط)
           </span>
           <span className="flex items-center gap-1">
-            <span className="w-3 h-3 rounded" style={{ backgroundColor: '#ef4444' }}></span>
+            <span className="w-3 h-3 rounded" style={{ backgroundColor: '#f87171' }}></span>
             0-39 (بحرانی)
           </span>
         </div>

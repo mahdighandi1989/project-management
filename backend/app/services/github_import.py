@@ -412,25 +412,64 @@ class GitHubImportService:
                     "Dockerfile", "docker-compose.yml", "docker-compose.yaml",
                     ".env.example", "config.json", "config.yaml",
                     "Makefile", "CMakeLists.txt",
+                    # 🆕 فایل‌های مهم فرانت‌اند
+                    "tsconfig.json", "next.config.js", "next.config.ts",
+                    "tailwind.config.js", "tailwind.config.ts",
+                    "vite.config.ts", "vite.config.js",
                 ]
 
-                # 🆕 مرتب‌سازی هوشمند: اول فایل‌های frontend و backend را قرار بده
-                def sort_priority(f):
-                    path = f.get("path", "")
-                    # اولویت فایل‌های frontend
-                    if "frontend/" in path or "src/components/" in path or "src/app/" in path:
-                        return 0
-                    # اولویت فایل‌های backend
-                    if "backend/" in path or "/api/" in path or "/routes/" in path:
-                        return 1
-                    # فایل‌های کد
-                    if path.endswith((".tsx", ".jsx", ".ts", ".js", ".py")):
-                        return 2
-                    return 3
+                # 🆕 اولویت‌بندی فایل‌ها - فرانت‌اند و بک‌اند جدا
+                frontend_files = []
+                backend_files = []
+                other_files = []
 
-                sorted_files = sorted(filtered_files, key=sort_priority)
+                for file_info in filtered_files:
+                    path = file_info["path"].lower()
+                    # تشخیص فایل‌های فرانت‌اند
+                    is_frontend = any(x in path for x in [
+                        "frontend/", "src/components", "src/pages", "src/app",
+                        "components/", "pages/", ".tsx", ".jsx", "/hooks/",
+                        "/contexts/", "/store/", "/styles/", "/ui/"
+                    ]) or path.endswith((".tsx", ".jsx", ".css", ".scss"))
 
-                for file_info in sorted_files[:100]:  # 🔴 افزایش از 50 به 100 فایل
+                    # تشخیص فایل‌های بک‌اند
+                    is_backend = any(x in path for x in [
+                        "backend/", "api/", "routes/", "services/", "models/",
+                        "controllers/", "middleware/"
+                    ]) or path.endswith(".py")
+
+                    if is_frontend:
+                        frontend_files.append(file_info)
+                    elif is_backend:
+                        backend_files.append(file_info)
+                    else:
+                        other_files.append(file_info)
+
+                # 🆕 ترکیب با اولویت: backend + frontend + other
+                # حداکثر 100 فایل با توزیع متعادل
+                max_files = 100
+                max_per_category = max_files // 3
+
+                prioritized_files = (
+                    backend_files[:max_per_category] +
+                    frontend_files[:max_per_category] +
+                    other_files[:max_per_category]
+                )
+
+                # اگر یک دسته کمتر از حد داشت، از بقیه بگیر
+                if len(prioritized_files) < max_files:
+                    remaining = max_files - len(prioritized_files)
+                    all_remaining = (
+                        backend_files[max_per_category:] +
+                        frontend_files[max_per_category:] +
+                        other_files[max_per_category:]
+                    )
+                    prioritized_files.extend(all_remaining[:remaining])
+
+                logger.info(f"📁 File distribution: {len(backend_files)} backend, {len(frontend_files)} frontend, {len(other_files)} other")
+                logger.info(f"📁 Downloading content for {len(prioritized_files)} prioritized files")
+
+                for file_info in prioritized_files:
                     path = file_info["path"]
                     filename = path.split("/")[-1]
 
@@ -446,7 +485,7 @@ class GitHubImportService:
                     should_download = (
                         is_frontend or  # 🆕 فایل‌های frontend همیشه
                         filename in important_files or
-                        path.endswith((".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".c", ".cpp", ".h")) or
+                        path.endswith((".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".css", ".scss")) or
                         file_info["size"] < 50000  # فایل‌های کوچک
                     )
 
