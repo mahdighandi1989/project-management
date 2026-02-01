@@ -57,7 +57,7 @@ class RenderAPIService:
         try:
             db = SessionLocal()
             from ..models.setting import Setting
-            setting = db.query(Setting).filter(Setting.key == "render_api_key").first()
+            setting = db.query(Setting).filter(Setting.key == "api_key_render").first()
             db.close()
 
             if setting and setting.value:
