@@ -1665,7 +1665,11 @@ class DeepAnalysisService:
 
         # مرتب‌سازی بر اساس شدت
         severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-        all_issues.sort(key=lambda x: severity_order.get(x.get("severity", "low"), 4))
+        # 🔴 تبدیل امن برای جلوگیری از خطای NoneType comparison
+        def safe_severity(x):
+            sev = x.get("severity") if x.get("severity") else "low"
+            return severity_order.get(sev, 4)
+        all_issues.sort(key=safe_severity)
 
         # پیشنهادات
         recommendations = []
@@ -1895,7 +1899,10 @@ class DeepAnalysisService:
                 existing = merged[stable_key]
                 # حفظ severity بالاتر
                 severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-                if severity_order.get(issue.get("severity"), 3) < severity_order.get(existing.get("severity"), 3):
+                # 🔴 تبدیل امن برای جلوگیری از خطای NoneType comparison
+                issue_sev = issue.get("severity") if issue.get("severity") else "low"
+                existing_sev = existing.get("severity") if existing.get("severity") else "low"
+                if severity_order.get(issue_sev, 3) < severity_order.get(existing_sev, 3):
                     existing["severity"] = issue.get("severity")
 
                 # ادغام خطوط (در صورت تفاوت)
@@ -1927,12 +1934,14 @@ class DeepAnalysisService:
         # مرتب‌سازی بر اساس تعداد تأیید (بیشترین تأیید = مهم‌تر) و severity
         result = list(merged.values())
         severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-        result.sort(key=lambda x: (
-            -x.get("confirmation_count", 1),  # بیشترین تأیید اول
-            severity_order.get(x.get("severity"), 3),  # severity بالاتر
-            x.get("file", ""),
-            x.get("line", 0)
-        ))
+        # 🔴 تبدیل امن برای جلوگیری از خطای NoneType comparison
+        def safe_sort_key(x):
+            conf_count = x.get("confirmation_count") if x.get("confirmation_count") is not None else 1
+            sev = x.get("severity") if x.get("severity") else "low"
+            file_path = x.get("file") if x.get("file") else ""
+            line_num = x.get("line") if x.get("line") is not None else 0
+            return (-conf_count, severity_order.get(sev, 3), file_path, line_num)
+        result.sort(key=safe_sort_key)
 
         logger.info(f"🔀 [MERGE] Merged {len(issues)} issues into {len(result)} unique issues")
 
