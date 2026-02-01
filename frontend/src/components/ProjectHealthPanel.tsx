@@ -89,6 +89,14 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
     roadmap: { defined: boolean; preview: string };
   } | null>(null);
   const [rejectedIssues, setRejectedIssues] = useState<any[]>([]);
+  const [generalArchive, setGeneralArchive] = useState<{
+    archive: any[];
+    total: number;
+    type_breakdown: Record<string, number>;
+    category_breakdown: Record<string, number>;
+  } | null>(null);
+  const [loadingGeneralArchive, setLoadingGeneralArchive] = useState(false);
+  const [expandedArchiveItem, setExpandedArchiveItem] = useState<string | null>(null);
   const [loadingValidation, setLoadingValidation] = useState(false);
   const [convertingIssue, setConvertingIssue] = useState<string | null>(null);  // شناسه issue در حال تبدیل
 
@@ -179,6 +187,13 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
       }
     }
   }, [progressData?.status]);
+
+  // لود بایگانی عمومی وقتی تب archive باز شد
+  useEffect(() => {
+    if (activeTab === 'archive' && !generalArchive && !loadingGeneralArchive) {
+      loadGeneralArchive();
+    }
+  }, [activeTab]);
 
   const checkAnalysisStatus = async () => {
     if (!projectId) return;
@@ -431,6 +446,50 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
       console.error('Error loading rejected issues:', e);
     } finally {
       setLoadingValidation(false);
+    }
+  };
+
+  // 🆕 بارگذاری بایگانی عمومی
+  const loadGeneralArchive = async () => {
+    if (!projectId) return;
+    setLoadingGeneralArchive(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/general-archive`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setGeneralArchive({
+            archive: data.archive || [],
+            total: data.total || 0,
+            type_breakdown: data.type_breakdown || {},
+            category_breakdown: data.category_breakdown || {}
+          });
+        }
+      }
+    } catch (e) {
+      console.error('Error loading general archive:', e);
+    } finally {
+      setLoadingGeneralArchive(false);
+    }
+  };
+
+  // 🆕 حذف آیتم از بایگانی عمومی
+  const deleteArchiveItem = async (itemId: string) => {
+    if (!projectId) return;
+    if (!confirm('آیا مطمئنید؟ این آیتم برای همیشه حذف خواهد شد.')) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/general-archive/${itemId}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        showSuccess('آیتم از بایگانی حذف شد');
+        loadGeneralArchive();
+      } else {
+        showError('خطا در حذف آیتم');
+      }
+    } catch (e) {
+      showError('خطا در حذف آیتم');
     }
   };
 
@@ -1504,14 +1563,13 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
           );
         })()}
 
-        {/* 🆕 تب بایگانی - ایرادات بایگانی شده با برچسب */}
+        {/* 🆕 تب بایگانی - شامل همه موارد بایگانی شده */}
         {activeTab === 'archive' && (() => {
           const archivedIssues = issues.filter(i => i.archived);
 
           // تابع برای گرفتن برچسب فارسی از دلیل بایگانی
           const getArchiveLabel = (reason?: string): { text: string; color: string } => {
             if (!reason) return { text: 'بایگانی شده', color: 'bg-gray-500' };
-
             if (reason.includes('approved') || reason.includes('converted') || reason.includes('validated') || reason.includes('field')) {
               return { text: 'تایید شده ✓', color: 'bg-green-500' };
             }
@@ -1527,98 +1585,181 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
             return { text: 'بایگانی شده', color: 'bg-gray-500' };
           };
 
+          // آیکون برای نوع بایگانی
+          const getTypeIcon = (type: string) => {
+            switch (type) {
+              case 'health_analysis': return '📊';
+              case 'issues': return '⚠️';
+              case 'file_health': return '📁';
+              case 'validation': return '✓';
+              case 'ideal_state': return '🎯';
+              default: return '📦';
+            }
+          };
+
+          // رنگ برای نوع بایگانی
+          const getTypeColor = (type: string) => {
+            switch (type) {
+              case 'health_analysis': return 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300';
+              case 'issues': return 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300';
+              case 'file_health': return 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300';
+              case 'validation': return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300';
+              case 'ideal_state': return 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300';
+              default: return 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300';
+            }
+          };
+
           return (
-            <div className="space-y-4">
+            <div className="space-y-6">
+              {/* هدر و دکمه‌ها */}
               <div className="flex items-center justify-between flex-wrap gap-2">
-                <h3 className="font-bold">ایرادات بایگانی شده ({archivedIssues.length})</h3>
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="px-2 py-1 bg-green-100 text-green-700 rounded">
-                    تایید شده: {archivedIssues.filter(i =>
-                      i.archived_reason?.includes('approved') ||
-                      i.archived_reason?.includes('converted') ||
-                      i.archived_reason?.includes('validated') ||
-                      i.archived_reason?.includes('field')
-                    ).length}
-                  </span>
-                  <span className="px-2 py-1 bg-red-100 text-red-700 rounded">
-                    رد شده: {archivedIssues.filter(i =>
-                      i.archived_reason?.includes('rejected') ||
-                      i.archived_reason?.includes('invalid')
-                    ).length}
-                  </span>
-                </div>
+                <h3 className="font-bold text-lg">بایگانی عمومی</h3>
+                <button
+                  onClick={loadGeneralArchive}
+                  disabled={loadingGeneralArchive}
+                  className="px-3 py-1 bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300 disabled:opacity-50"
+                >
+                  {loadingGeneralArchive ? '...' : '🔄 بروزرسانی'}
+                </button>
               </div>
 
-              {archivedIssues.length === 0 ? (
-                <div className="text-center py-8 text-gray-400">
-                  <div className="text-5xl mb-4">📦</div>
-                  <p>هیچ ایرادی بایگانی نشده</p>
-                  <p className="text-sm mt-2">
-                    ایرادات پس از گزارش مهندسی به اینجا منتقل می‌شوند
-                  </p>
+              {/* آمار دسته‌بندی */}
+              {generalArchive && generalArchive.total > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {Object.entries(generalArchive.type_breakdown).map(([type, count]) => (
+                    <span key={type} className={`px-2 py-1 rounded text-xs ${getTypeColor(type)}`}>
+                      {getTypeIcon(type)} {type === 'health_analysis' ? 'تحلیل سلامت' :
+                        type === 'issues' ? 'ایرادات' :
+                        type === 'file_health' ? 'سلامت فایل' :
+                        type === 'validation' ? 'اعتبارسنجی' :
+                        type === 'ideal_state' ? 'وضعیت ایده‌آل' : type}: {count}
+                    </span>
+                  ))}
                 </div>
-              ) : (
-                <div className="space-y-2 max-h-[400px] overflow-auto">
-                  {archivedIssues.map((issue, idx) => {
-                    const label = getArchiveLabel(issue.archived_reason);
+              )}
 
-                    return (
+              {/* بایگانی عمومی (داده‌های پاک شده) */}
+              {loadingGeneralArchive ? (
+                <div className="text-center py-8 text-gray-400">در حال بارگذاری...</div>
+              ) : generalArchive && generalArchive.archive.length > 0 ? (
+                <div className="space-y-3">
+                  <h4 className="font-semibold text-sm text-gray-600 dark:text-gray-400">
+                    داده‌های پاک شده ({generalArchive.total} مورد)
+                  </h4>
+                  <div className="space-y-2 max-h-[300px] overflow-auto">
+                    {generalArchive.archive.map((item: any) => (
                       <div
-                        key={idx}
-                        className="p-3 rounded-lg border-r-4 bg-gray-50 dark:bg-gray-700/50 opacity-80"
-                        style={{
-                          borderColor: label.color.includes('green') ? '#22c55e' :
-                                      label.color.includes('red') ? '#ef4444' :
-                                      label.color.includes('blue') ? '#3b82f6' : '#6b7280'
-                        }}
+                        key={item.id}
+                        className="p-3 rounded-lg border border-gray-200 dark:border-gray-600 bg-gray-50 dark:bg-gray-700/50"
                       >
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1">
-                            {issue.file && (
-                              <div className="text-xs font-mono text-blue-500 mb-1">{issue.file}</div>
-                            )}
-                            <p className="text-sm">{issue.message}</p>
-                            <div className="flex items-center gap-2 mt-1 flex-wrap">
-                              {issue.line && (
-                                <span className="text-xs text-gray-400">خط {issue.line}</span>
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className={`px-2 py-0.5 rounded text-xs ${getTypeColor(item.type)}`}>
+                                {getTypeIcon(item.type)} {item.category}
+                              </span>
+                            </div>
+                            <p className="font-medium text-sm">{item.title}</p>
+                            <p className="text-xs text-gray-500 mt-1">{item.summary}</p>
+                            <div className="flex items-center gap-3 mt-2 text-xs text-gray-400">
+                              <span>📅 {new Date(item.archived_at).toLocaleString('fa-IR')}</span>
+                              {item.metadata?.issues_count && (
+                                <span>⚠️ {item.metadata.issues_count} ایراد</span>
                               )}
-                              {issue.archived_at && (
-                                <span className="text-xs text-gray-400">
-                                  بایگانی: {new Date(issue.archived_at).toLocaleString('fa-IR')}
-                                </span>
-                              )}
-                              {issue.converted_to_field && (
-                                <span className="text-xs text-green-600 flex items-center gap-1">
-                                  <span>✓</span>
-                                  تبدیل به فیلد
-                                </span>
+                              {item.metadata?.files_count && (
+                                <span>📁 {item.metadata.files_count} فایل</span>
                               )}
                             </div>
                           </div>
-                          <div className="flex flex-col items-end gap-1">
-                            {/* برچسب وضعیت بایگانی */}
-                            <span className={`px-2 py-0.5 rounded text-xs text-white ${label.color}`}>
-                              {label.text}
-                            </span>
-                            <span className={`px-2 py-0.5 rounded text-xs ${getSeverityColor(issue.severity)}`}>
-                              {issue.severity}
-                            </span>
-                            {issue.model && (
-                              <span className="text-xs text-gray-400">{issue.model}</span>
-                            )}
+                          <div className="flex flex-col gap-1">
+                            <button
+                              onClick={() => setExpandedArchiveItem(expandedArchiveItem === item.id ? null : item.id)}
+                              className="px-2 py-1 text-xs bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 rounded hover:bg-blue-200"
+                            >
+                              {expandedArchiveItem === item.id ? '📖 بستن' : '👁️ مشاهده'}
+                            </button>
+                            <button
+                              onClick={() => deleteArchiveItem(item.id)}
+                              className="px-2 py-1 text-xs bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300 rounded hover:bg-red-200"
+                            >
+                              🗑️ حذف
+                            </button>
                           </div>
                         </div>
-                        {/* نمایش دلیل بایگانی */}
-                        {issue.archived_reason && (
-                          <div className="mt-2 text-xs text-gray-500 bg-gray-100 dark:bg-gray-600 px-2 py-1 rounded">
-                            دلیل: {issue.archived_reason}
+
+                        {/* نمایش محتوای کامل */}
+                        {expandedArchiveItem === item.id && (
+                          <div className="mt-3 p-3 bg-white dark:bg-gray-800 rounded border text-xs overflow-auto max-h-[300px]">
+                            <pre className="whitespace-pre-wrap font-mono text-xs">
+                              {JSON.stringify(item.content, null, 2)}
+                            </pre>
                           </div>
                         )}
                       </div>
-                    );
-                  })}
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center py-4 text-gray-400 text-sm">
+                  <p>هیچ داده پاک شده‌ای در بایگانی نیست</p>
+                  <p className="text-xs mt-1">با زدن دکمه "پاک کردن" در بالای صفحه، داده‌ها به اینجا منتقل می‌شوند</p>
                 </div>
               )}
+
+              {/* جداکننده */}
+              <hr className="border-gray-200 dark:border-gray-700" />
+
+              {/* ایرادات بایگانی شده (قبلی) */}
+              <div>
+                <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+                  <h4 className="font-semibold text-sm text-gray-600 dark:text-gray-400">
+                    ایرادات بایگانی شده ({archivedIssues.length})
+                  </h4>
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="px-2 py-1 bg-green-100 text-green-700 rounded">
+                      تایید: {archivedIssues.filter(i => i.archived_reason?.includes('approved') || i.archived_reason?.includes('validated')).length}
+                    </span>
+                    <span className="px-2 py-1 bg-red-100 text-red-700 rounded">
+                      رد: {archivedIssues.filter(i => i.archived_reason?.includes('rejected')).length}
+                    </span>
+                  </div>
+                </div>
+
+                {archivedIssues.length === 0 ? (
+                  <div className="text-center py-4 text-gray-400 text-sm">
+                    <p>هیچ ایرادی بایگانی نشده</p>
+                  </div>
+                ) : (
+                  <div className="space-y-2 max-h-[250px] overflow-auto">
+                    {archivedIssues.map((issue, idx) => {
+                      const label = getArchiveLabel(issue.archived_reason);
+                      return (
+                        <div
+                          key={idx}
+                          className="p-2 rounded border-r-4 bg-gray-50 dark:bg-gray-700/50 opacity-80 text-sm"
+                          style={{
+                            borderColor: label.color.includes('green') ? '#22c55e' :
+                                        label.color.includes('red') ? '#ef4444' : '#6b7280'
+                          }}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex-1">
+                              {issue.file && <div className="text-xs font-mono text-blue-500">{issue.file}</div>}
+                              <p className="text-sm">{issue.message}</p>
+                              <div className="text-xs text-gray-400 mt-1">
+                                {issue.archived_at && new Date(issue.archived_at).toLocaleString('fa-IR')}
+                              </div>
+                            </div>
+                            <span className={`px-2 py-0.5 rounded text-xs text-white ${label.color}`}>
+                              {label.text}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
           );
         })()}
