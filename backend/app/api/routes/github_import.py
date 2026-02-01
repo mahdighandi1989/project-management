@@ -10,8 +10,10 @@ from sqlalchemy.orm import Session
 from ...core.database import get_db
 from ...services.github_import import get_github_import_service
 from ...models.project import Project, ProjectFile
+from ...core.logging_utils import StructuredLogger
 
 router = APIRouter(prefix="/github", tags=["GitHub Import"])
+slog = StructuredLogger("github_import")
 
 
 # ===========================================
@@ -162,17 +164,20 @@ async def list_imported_projects(db: Session = Depends(get_db)):
     """
     لیست پروژه‌های import شده از GitHub
     """
+    slog.api_request("GET", "/github/imported")
     try:
         projects = db.query(Project).filter(
             Project.project_type == "github_import"
         ).order_by(Project.created_at.desc()).all()
 
+        slog.info("Listed imported projects", count=len(projects))
         return {
             "success": True,
             "projects": [p.to_dict() for p in projects],
             "count": len(projects)
         }
     except Exception as e:
+        slog.error("Failed to list imported projects", exception=e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
