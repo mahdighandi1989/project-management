@@ -200,6 +200,13 @@ def migrate_db():
                 cursor.execute("ALTER TABLE projects ADD COLUMN last_validation_results TEXT")
                 logger.info("Added 'last_validation_results' column to projects table")
 
+            # =====================================================
+            # 🆕 آرشیو عمومی برای همه موارد پاک شده
+            # =====================================================
+            if "general_archive" not in existing_cols:
+                cursor.execute("ALTER TABLE projects ADD COLUMN general_archive TEXT")
+                logger.info("Added 'general_archive' column to projects table")
+
         # Migration برای جدول project_files
         if "project_files" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
             existing_cols = get_columns("project_files")
