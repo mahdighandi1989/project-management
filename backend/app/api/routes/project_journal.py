@@ -2497,7 +2497,7 @@ async def generate_engineering_report(
             # 6. مرتب‌سازی براساس اولویت و ذخیره
             active = [f for f in existing_fields if not f.get("archived")]
             archived = [f for f in existing_fields if f.get("archived")]
-            active.sort(key=lambda x: x.get("priority", 5))
+            active.sort(key=lambda x: int(x.get("priority", 5)) if str(x.get("priority", 5)).isdigit() else 5)
             existing_fields = active + archived
 
             if created_fields or archived_count or merged_count or updated_count or roadmap_updated:

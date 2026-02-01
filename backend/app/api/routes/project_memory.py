@@ -2432,7 +2432,7 @@ async def get_fields_by_type(
 
     # مرتب‌سازی بر اساس اولویت
     if sort_by_priority:
-        dynamic_fields.sort(key=lambda x: x.get("priority", 5))
+        dynamic_fields.sort(key=lambda x: int(x.get("priority", 5)) if str(x.get("priority", 5)).isdigit() else 5)
 
     # گروه‌بندی
     permanent_fields = [f for f in dynamic_fields if f.get("field_type") == "permanent"]
@@ -2526,7 +2526,7 @@ async def batch_execute_fields(
 
     # مرتب‌سازی براساس اولویت (1 = بالاترین اولویت)
     if request.auto_prioritize:
-        fields_to_execute.sort(key=lambda x: x.get("priority", 5))
+        fields_to_execute.sort(key=lambda x: int(x.get("priority", 5)) if str(x.get("priority", 5)).isdigit() else 5)
 
     logger.info(f"[Batch Execute] About to start loop with {len(fields_to_execute)} fields")
 
@@ -4235,7 +4235,12 @@ async def gather_project_context(project_id: str, project, db: Session) -> Dict[
                 if extra.get("file_scores"):
                     # فقط فایل‌های با مشکل
                     for path, score_data in extra["file_scores"].items():
-                        if isinstance(score_data, dict) and score_data.get("score", 100) < 70:
+                        score_val = score_data.get("score", 100) if isinstance(score_data, dict) else 100
+                        try:
+                            score_val = float(score_val) if score_val else 100
+                        except (ValueError, TypeError):
+                            score_val = 100
+                        if isinstance(score_data, dict) and score_val < 70:
                             file_scores.append({
                                 "path": path,
                                 "score": score_data.get("score"),
@@ -4706,7 +4711,7 @@ async def export_fields_to_markdown(
     md_content.append("")
 
     # گروه‌بندی بر اساس اولویت
-    selected_fields.sort(key=lambda x: x.get("priority", 5))
+    selected_fields.sort(key=lambda x: int(x.get("priority", 5)) if str(x.get("priority", 5)).isdigit() else 5)
 
     for field in selected_fields:
         md_content.append(_format_field_to_markdown(field, include_details))
