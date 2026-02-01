@@ -572,8 +572,8 @@ async def download_logs(
         service_ids=service_ids,
         hours=hours,
         limit=limit,
-        level=level,
-        format=format
+        log_level=level,
+        output_format=format
     )
 
     query = db.query(RenderLog)
