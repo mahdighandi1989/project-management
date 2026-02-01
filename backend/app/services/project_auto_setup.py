@@ -553,19 +553,28 @@ async def generate_intelligent_setup(
         ]
 
         # اول claude امتحان کن، بعد openai
+        response = None
+        last_error = None
         for try_model in [model_id, "claude", "openai", "deepseek"]:
             try:
+                logger.info(f"🤖 Trying AI model: {try_model} for auto-setup")
                 response = await ai_manager.generate(
                     model_id=try_model,
                     messages=messages,
                     max_tokens=2000,
                     temperature=0.7
                 )
+                logger.info(f"✅ AI model {try_model} responded successfully")
                 break
-            except Exception:
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"⚠️ AI model {try_model} failed: {e}")
                 continue
-        else:
-            return {"success": False, "error": "هیچ مدل AI در دسترس نیست"}
+
+        if not response:
+            error_msg = f"هیچ مدل AI در دسترس نیست. آخرین خطا: {last_error}"
+            logger.error(f"❌ {error_msg}")
+            return {"success": False, "error": error_msg}
 
         # پارس JSON از پاسخ
         content = response.content
@@ -613,10 +622,13 @@ async def generate_intelligent_setup(
         }
 
     except json.JSONDecodeError as e:
-        logger.error(f"JSON parse error: {e}")
+        logger.error(f"❌ JSON parse error: {e}")
+        logger.error(f"   Raw content (first 500 chars): {content[:500] if content else 'empty'}")
         return {"success": False, "error": f"خطا در پارس پاسخ AI: {e}"}
     except Exception as e:
-        logger.error(f"Error generating AI instructions: {e}")
+        logger.error(f"❌ Error generating AI instructions: {e}")
+        import traceback
+        logger.error(f"   Traceback: {traceback.format_exc()}")
         return {"success": False, "error": str(e)}
 
 
@@ -794,7 +806,11 @@ async def auto_setup_project_memory(
 
         # مرحله ۳: ساخت نتیجه نهایی
         if ai_result and ai_result.get("success"):
+            logger.info(f"✅ Using AI-generated setup (model: {ai_result.get('model_used')})")
             data = ai_result["data"]
+            logger.info(f"   AI suggested: {len(data.get('dynamic_fields', []))} new fields, "
+                       f"{len(data.get('fields_to_archive', []))} to archive, "
+                       f"{len(data.get('fields_to_update', []))} to update")
 
             # 🔴 محاسبه تعداد دفعات اجرا
             run_count = 1
@@ -1058,19 +1074,45 @@ async def auto_setup_project_memory(
 
         else:
             # Fallback به حالت ساده
+            ai_error_msg = ai_result.get("error", "پاسخ نامعتبر") if ai_result else "AI call failed"
             result = _create_fallback_setup(project_id, project_name, insights)
-            logger.warning("⚠️ AI failed, using fallback setup")
+            logger.warning(f"⚠️ AI failed ({ai_error_msg}), using fallback setup")
 
-            # 🔴 حفظ فیلدهای محافظت شده (از گزارش مهندسی) که هنوز اجرا نشده‌اند
-            protected_existing = [f for f in existing_fields if is_report_field(f) and not f.get("executed", False)]
-            if protected_existing:
-                logger.info(f"🛡️ Preserving {len(protected_existing)} protected report fields in fallback")
-                for pf in protected_existing:
-                    logger.info(f"   - {pf.get('name')}")
+            # 🆕 ثبت خطای AI در ژورنال
+            if db_session and parent_log_id:
+                log_auto_setup_operation(
+                    db_session=db_session,
+                    project_id=project_id,
+                    parent_log_id=parent_log_id,
+                    operation_type="ai_fallback",
+                    summary=f"⚠️ استفاده از حالت پیش‌فرض (AI ناموفق)",
+                    details={"ai_error": ai_error_msg, "fallback_reason": "AI response was invalid or failed"},
+                    status="warning"
+                )
 
-            # حفظ فیلدهای محافظت شده + بایگانی شده در fallback
-            result["dynamic_fields"] = result.get("dynamic_fields", []) + protected_existing + archived_fields
-            result["fields_protected"] = len(protected_existing)
+            # 🔴 اصلاح: حفظ تمام فیلدهای فعال موجود (نه فقط report fields)
+            # فیلدهای موجود غیربایگانی رو حفظ کن
+            active_existing = [f for f in existing_fields if not f.get("archived")]
+            if active_existing:
+                logger.info(f"🛡️ Preserving {len(active_existing)} existing active fields in fallback")
+                for ef in active_existing[:5]:  # فقط 5 تا رو لاگ کن
+                    logger.info(f"   - {ef.get('name')}")
+
+            # فیلدهای fallback رو فقط اگه قبلاً وجود نداشته باشن اضافه کن
+            existing_names = [f.get("name", "").lower() for f in active_existing]
+            fallback_fields = result.get("dynamic_fields", [])
+            new_fallback_fields = []
+            for ff in fallback_fields:
+                ff_name = ff.get("name", "").lower()
+                if ff_name not in existing_names:
+                    new_fallback_fields.append(ff)
+                else:
+                    logger.info(f"   ⏭️ Skipping duplicate fallback field: {ff.get('name')}")
+
+            # ترکیب: فیلدهای موجود + فیلدهای جدید fallback + بایگانی شده‌ها
+            result["dynamic_fields"] = active_existing + new_fallback_fields + archived_fields
+            result["fields_protected"] = len(active_existing)
+            result["new_fields_count"] = len(new_fallback_fields)
 
         # 🆕 ثبت خلاصه پایانی عملیات
         if db_session and parent_log_id:
