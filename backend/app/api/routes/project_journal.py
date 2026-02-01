@@ -2838,6 +2838,28 @@ async def generate_engineering_report_stream(
                     yield f"data: {msg4_err}\n\n"
                 await asyncio.sleep(delay_factor)
 
+                # 🔴🔴🔴 بایگانی قطعی همه ایرادات فعال در حالت deep
+                try:
+                    project_fresh = db.query(Project).filter(Project.id == project_id).first()
+                    if project_fresh and project_fresh.issues_found:
+                        all_issues = json.loads(project_fresh.issues_found)
+                        archived_count = 0
+                        for issue in all_issues:
+                            if not issue.get("archived"):
+                                issue["archived"] = True
+                                issue["archived_at"] = datetime.utcnow().isoformat()
+                                issue["archived_reason"] = "engineering_report_4step_completed"
+                                archived_count += 1
+
+                        if archived_count > 0:
+                            project_fresh.issues_found = json.dumps(all_issues, ensure_ascii=False)
+                            db.commit()
+                            archive_msg = json.dumps({'step': total_steps - 1, 'message': f'🗂️ {archived_count} ایراد بایگانی شد', 'progress': 98}, ensure_ascii=False)
+                            yield f"data: {archive_msg}\n\n"
+                except Exception as arch_err:
+                    import logging
+                    logging.getLogger(__name__).error(f"Deep mode: Failed to archive issues: {arch_err}")
+
                 result = {
                     "success": True,
                     "depth": depth,
@@ -2866,6 +2888,32 @@ async def generate_engineering_report_stream(
                 if result.get("success"):
                     result["models_used"] = selected_models
                     result["depth"] = depth
+
+            # 🔴🔴🔴 مرحله نهایی و قطعی: بایگانی همه ایرادات فعال
+            # این مرحله تضمین می‌کند که همه ایرادات بعد از گزارش مهندسی بایگانی شوند
+            if result.get("success"):
+                try:
+                    # دریافت مجدد پروژه برای اطمینان از آخرین داده‌ها
+                    project_fresh = db.query(Project).filter(Project.id == project_id).first()
+                    if project_fresh and project_fresh.issues_found:
+                        all_issues = json.loads(project_fresh.issues_found)
+                        archived_count = 0
+                        for issue in all_issues:
+                            if not issue.get("archived"):
+                                issue["archived"] = True
+                                issue["archived_at"] = datetime.utcnow().isoformat()
+                                issue["archived_reason"] = "engineering_report_completed"
+                                archived_count += 1
+
+                        if archived_count > 0:
+                            project_fresh.issues_found = json.dumps(all_issues, ensure_ascii=False)
+                            db.commit()
+                            result["issues_archived"] = archived_count
+                            archive_msg = json.dumps({'step': total_steps, 'message': f'🗂️ {archived_count} ایراد بایگانی شد', 'progress': 99}, ensure_ascii=False)
+                            yield f"data: {archive_msg}\n\n"
+                except Exception as arch_err:
+                    import logging
+                    logging.getLogger(__name__).error(f"Failed to archive issues: {arch_err}")
 
             # مرحله نهایی: اتمام
             if result.get("success"):
