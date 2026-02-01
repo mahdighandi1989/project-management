@@ -4031,6 +4031,10 @@ async def auto_setup_project(
 
     logger = logging.getLogger(__name__)
 
+    # مقادیر پیش‌فرض
+    keys_loaded = []
+    available_providers = []
+
     # ========================================
     # 🔴 مرحله 0: بارگذاری API keys از دیتابیس و ریست AI manager
     # ========================================
