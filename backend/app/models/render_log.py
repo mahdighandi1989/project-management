@@ -76,6 +76,12 @@ class RenderLogSettings(Base):
     default_log_levels = Column(String(200), default="info,warn,error")  # سطوح نمایش پیش‌فرض
     auto_scroll = Column(Boolean, default=True)  # اسکرول خودکار به آخرین لاگ
 
+    # تنظیمات انتقال خودکار خطاها به ایرادات
+    auto_transfer_enabled = Column(Boolean, default=False)  # آیا انتقال خودکار فعال باشه
+    auto_transfer_interval_minutes = Column(Integer, default=30)  # هر چند دقیقه یکبار
+    auto_transfer_hours_back = Column(Integer, default=24)  # چند ساعت به عقب برگرده
+    last_auto_transfer = Column(DateTime)  # آخرین زمان انتقال خودکار
+
     # آخرین بروزرسانی
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

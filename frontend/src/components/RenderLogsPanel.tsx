@@ -30,6 +30,11 @@ interface LogSettings {
   archive_enabled: boolean;
   default_log_levels: string;
   auto_scroll: boolean;
+  // Auto transfer settings
+  auto_transfer_enabled: boolean;
+  auto_transfer_interval_minutes: number;
+  auto_transfer_hours_back: number;
+  last_auto_transfer?: string;
 }
 
 interface LogStats {
@@ -69,6 +74,9 @@ export default function RenderLogsPanel() {
     archive_enabled: true,
     default_log_levels: 'info,warn,error',
     auto_scroll: true,
+    auto_transfer_enabled: false,
+    auto_transfer_interval_minutes: 30,
+    auto_transfer_hours_back: 24,
   });
 
   // Filters
@@ -958,6 +966,91 @@ export default function RenderLogsPanel() {
                 settings.auto_scroll ? 'translate-x-6' : 'translate-x-1'
               }`} />
             </button>
+          </div>
+
+          {/* Auto Transfer to Issues */}
+          <div className="border-t pt-6 mt-6">
+            <h4 className="font-bold text-lg mb-4 flex items-center gap-2">
+              🚨 انتقال خودکار خطاها به ایرادات
+            </h4>
+
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <label className="font-medium">فعال‌سازی انتقال خودکار</label>
+                <button
+                  onClick={() => setSettings(s => ({ ...s, auto_transfer_enabled: !s.auto_transfer_enabled }))}
+                  className={`w-12 h-6 rounded-full transition ${
+                    settings.auto_transfer_enabled ? 'bg-red-500' : 'bg-gray-300'
+                  }`}
+                >
+                  <div className={`w-5 h-5 rounded-full bg-white shadow transition transform ${
+                    settings.auto_transfer_enabled ? 'translate-x-6' : 'translate-x-1'
+                  }`} />
+                </button>
+              </div>
+
+              <div>
+                <label className="block text-sm mb-2">
+                  فاصله بررسی: هر {settings.auto_transfer_interval_minutes} دقیقه
+                </label>
+                <input
+                  type="range"
+                  min="5"
+                  max="120"
+                  step="5"
+                  value={settings.auto_transfer_interval_minutes}
+                  onChange={(e) => setSettings(s => ({
+                    ...s,
+                    auto_transfer_interval_minutes: parseInt(e.target.value)
+                  }))}
+                  className="w-full"
+                  disabled={!settings.auto_transfer_enabled}
+                />
+                <div className="flex justify-between text-xs text-gray-500">
+                  <span>5 دقیقه</span>
+                  <span>2 ساعت</span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm mb-2">
+                  بازه زمانی بررسی: {settings.auto_transfer_hours_back} ساعت گذشته
+                </label>
+                <input
+                  type="range"
+                  min="1"
+                  max="72"
+                  step="1"
+                  value={settings.auto_transfer_hours_back}
+                  onChange={(e) => setSettings(s => ({
+                    ...s,
+                    auto_transfer_hours_back: parseInt(e.target.value)
+                  }))}
+                  className="w-full"
+                  disabled={!settings.auto_transfer_enabled}
+                />
+                <div className="flex justify-between text-xs text-gray-500">
+                  <span>1 ساعت</span>
+                  <span>3 روز</span>
+                </div>
+              </div>
+
+              {settings.last_auto_transfer && (
+                <div className="text-sm text-gray-500 bg-gray-100 dark:bg-gray-700 p-3 rounded">
+                  آخرین انتقال خودکار: {new Date(settings.last_auto_transfer).toLocaleString('fa-IR')}
+                </div>
+              )}
+
+              <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4 text-sm">
+                <p className="font-medium mb-2">توضیحات:</p>
+                <ul className="text-gray-600 dark:text-gray-300 space-y-1 list-disc list-inside">
+                  <li>خطاهای لاگ به صورت خودکار به تب ایرادات پروژه‌های مرتبط منتقل می‌شوند</li>
+                  <li>AI توضیح علت خطا و راه‌حل پیشنهادی را تولید می‌کند</li>
+                  <li>خطاهای تکراری با ایرادات موجود ادغام می‌شوند</li>
+                  <li>فقط پروژه‌های ایمپورت شده پشتیبانی می‌شوند</li>
+                </ul>
+              </div>
+            </div>
           </div>
 
           <button
