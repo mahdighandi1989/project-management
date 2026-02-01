@@ -1381,7 +1381,7 @@ async def enhanced_project_chat(
                     "model_used": response.model_id,
                     "create_dynamic_fields": request.create_dynamic_fields,
                     "auto_detect_actions": request.auto_detect_actions,
-                    "files_included_count": len(files_data),
+                    "files_included_count": len(files) if request.include_files else 0,
                     "context_length": len(full_context),
                     "response_length": len(response.content) if response.content else 0,
                     "clickable": True,  # 🔴 قابل کلیک در UI
@@ -1418,7 +1418,7 @@ async def enhanced_project_chat(
                     "model_requested": model_id,
                     "error_details": str(e),
                     "create_dynamic_fields": request.create_dynamic_fields,
-                    "files_included_count": len(files_data),
+                    "files_included_count": len(files) if request.include_files else 0,
                     "clickable": True,  # 🔴 قابل کلیک در UI
                 }, ensure_ascii=False),
                 created_at=datetime.utcnow(),
@@ -1427,117 +1427,133 @@ async def enhanced_project_chat(
 
     db.commit()
 
-    # 9. تبدیل به فیلدهای پویا اگر درخواست شده
-    # 🔴 بهبود: بررسی تکراری و ادغام فیلدهای مشابه قبل از افزودن
+    # 9. تبدیل به فیلدهای پویا با سرویس هوشمند
+    # 🆕 استفاده از IntelligentFieldCreator برای:
+    # - بررسی قابلیت‌های موجود (فیلد + نقشه راه)
+    # - تعیین وابستگی و اولویت هوشمند
+    # - اضافه کردن خودکار به نقشه راه
     created_fields = []
     merged_fields = []
     skipped_fields = []
+    roadmap_items_added = []
+    existing_capabilities = []
 
     if request.create_dynamic_fields:
+        from ...services.intelligent_field_creator import get_intelligent_field_creator
+
+        field_creator = get_intelligent_field_creator(project_id, db)
+
         for resp in responses:
             if resp.get("success") and resp.get("content"):
+                # پارس پاسخ AI به بخش‌های قابل تبدیل به فیلد
                 fields = await parse_response_to_dynamic_fields(
                     resp["content"],
                     resp["model_id"],
                     request.auto_detect_actions
                 )
 
-                # ذخیره فیلدها در پروژه با بررسی تکراری
-                if fields:
-                    existing_fields = []
-                    try:
-                        existing_fields = json.loads(project.dynamic_fields) if project.dynamic_fields else []
-                    except:
-                        pass
+                for field in fields:
+                    # 🆕 ایجاد هوشمند فیلد با بررسی کامل
+                    result = await field_creator.create_intelligent_field(
+                        name=field.get("name", "فیلد جدید"),
+                        value=field.get("value", ""),
+                        source_prompt=request.prompt,
+                        ai_response_context=resp["content"][:500],
+                        force_create=False
+                    )
 
-                    for field in fields:
-                        field["id"] = f"field_{uuid.uuid4().hex[:8]}"
-                        field["created_at"] = datetime.utcnow().isoformat()
-                        field["source_model"] = resp["model_id"]
-                        field["source"] = "ai_query"  # 🔴 منبع فیلد
+                    if result["success"]:
+                        if result["action"] == "created":
+                            result["field"]["source_model"] = resp["model_id"]
+                            result["field"]["validation_marker"] = "pending"
+                            result["field"]["needs_approval"] = True
+                            created_fields.append(result["field"])
 
-                        # 🔴 بررسی تکراری بودن و امکان ادغام (بهبود یافته - جلوگیری از دور باطل)
-                        similar_field = None
-                        for ef in existing_fields:
-                            if ef.get("archived"):
-                                continue
+                            if result.get("roadmap_item_added"):
+                                roadmap_items_added.append(field.get("name"))
 
-                            # 🔴 بررسی 1: اگر target_path یکسان باشد، قطعاً تکراری است
-                            new_target = field.get("target_path", "")
-                            existing_target = ef.get("target_path", "")
-                            if new_target and existing_target and new_target == existing_target:
-                                similar_field = ef
-                                break
-
-                            # 🔴 بررسی 2: شباهت نام
-                            name_similarity = _calculate_similarity(field.get("name", ""), ef.get("name", ""))
-
-                            # 🔴 بررسی 3: شباهت محتوا (200 کاراکتر اول)
-                            value_similarity = _calculate_similarity(field.get("value", "")[:200], ef.get("value", "")[:200])
-
-                            # 🔴 بررسی 4: شباهت action_type + target_path (جلوگیری از دور باطل)
-                            same_action = field.get("action_type") == ef.get("action_type")
-                            both_have_target = new_target and existing_target
-                            target_similarity = _calculate_similarity(new_target, existing_target) if both_have_target else 0
-
-                            # اگر نام یا محتوا خیلی شبیه بود، یا action+target مشابه بود
-                            if name_similarity > 0.7 or value_similarity > 0.6 or (same_action and target_similarity > 0.8):
-                                similar_field = ef
-                                break
-
-                        if similar_field:
-                            # 🆕 استفاده از ادغام هوشمند
-                            should_merge, confidence, reason = _should_merge_fields(similar_field, field)
-
-                            if should_merge and confidence > 0.5:
-                                # ادغام هوشمند فیلدها
-                                merged_field = _smart_merge_fields(similar_field, field)
-
-                                # بروزرسانی فیلد موجود با نسخه ادغام شده
-                                for key, value in merged_field.items():
-                                    similar_field[key] = value
-
-                                merged_fields.append({
-                                    "original": similar_field.get("name"),
-                                    "merged": field.get("name"),
-                                    "confidence": round(confidence, 2),
-                                    "reason": reason
-                                })
-                            else:
-                                # شباهت کم - رد شود اما با جزئیات
-                                skipped_fields.append({
-                                    "name": field.get("name"),
-                                    "reason": f"فیلد مشابه با اولویت بهتر وجود دارد: {similar_field.get('name')}",
-                                    "similarity": round(confidence, 2)
-                                })
-                        else:
-                            # فیلد جدید - اضافه شود
-                            # 🔴 فیلدهای از پرسش AI نیاز به تاییدیه دارند (validation_marker=pending)
-                            field["validation_marker"] = "pending"
-                            field["needs_approval"] = True
-                            existing_fields.append(field)
-                            created_fields.append(field)
-
-                    project.dynamic_fields = json.dumps(existing_fields, ensure_ascii=False)
-
-        db.commit()
+                        elif result["action"] == "merged":
+                            merged_fields.append({
+                                "name": field.get("name"),
+                                "merged_with": result.get("existing_match", {}).get("match", {}).get("name"),
+                                "message": result.get("message")
+                            })
+                    else:
+                        # فیلد رد شد - قابلیت مشابه وجود دارد
+                        if result.get("existing_match"):
+                            existing_capabilities.append({
+                                "requested": field.get("name"),
+                                "existing_type": result["existing_match"].get("type"),
+                                "existing_name": result["existing_match"].get("match", {}).get("name") or result["existing_match"].get("match", {}).get("text"),
+                                "similarity": result["existing_match"].get("similarity"),
+                                "suggestion": result["existing_match"].get("suggestion")
+                            })
+                        skipped_fields.append({
+                            "name": field.get("name"),
+                            "reason": result.get("message", "قابلیت مشابه وجود دارد")
+                        })
 
         # 🔴 ثبت در ژورنال
-        if created_fields or merged_fields:
+        if created_fields or merged_fields or existing_capabilities:
+            summary_parts = []
+            if created_fields:
+                summary_parts.append(f"ایجاد {len(created_fields)} فیلد")
+            if merged_fields:
+                summary_parts.append(f"ادغام {len(merged_fields)} فیلد")
+            if skipped_fields:
+                summary_parts.append(f"رد {len(skipped_fields)} فیلد")
+            if roadmap_items_added:
+                summary_parts.append(f"اضافه به نقشه راه: {len(roadmap_items_added)} آیتم")
+
             ai_query_log = ActivityLog(
                 id=f"log_{uuid.uuid4().hex[:12]}",
                 project_id=project_id,
                 model_id="system",
-                activity_type="ai_query_fields",
-                prompt=f"تولید فیلد از پرسش AI: {request.prompt[:200]}",
-                response=f"ایجاد {len(created_fields)} فیلد، ادغام {len(merged_fields)} فیلد، رد {len(skipped_fields)} فیلد",
+                activity_type="ai_query_fields_intelligent",
+                prompt=f"تولید هوشمند فیلد از پرسش AI: {request.prompt[:200]}",
+                response=", ".join(summary_parts) if summary_parts else "بدون تغییر",
                 tokens_used=0,
                 latency_ms=0,
                 success=True,
+                extra_data=json.dumps({
+                    "created_count": len(created_fields),
+                    "merged_count": len(merged_fields),
+                    "skipped_count": len(skipped_fields),
+                    "roadmap_added": roadmap_items_added,
+                    "existing_capabilities": existing_capabilities[:5]  # فقط 5 تا اول
+                }, ensure_ascii=False),
                 created_at=datetime.utcnow(),
             )
             db.add(ai_query_log)
             db.commit()
+
+    # 🆕 برگرداندن نتیجه با اطلاعات کامل
+    return {
+        "success": True,
+        "project_id": project_id,
+        "responses": responses,
+        "total_tokens": total_tokens,
+        "models_used": len(request.model_ids),
+        "context_summary": {
+            "files_included": len(files) if request.include_files else 0,
+            "health_included": request.include_health,
+            "memory_included": request.include_memory,
+        },
+        # 🔴 اطلاعات کامل فیلدها
+        "created_fields": created_fields if request.create_dynamic_fields else None,
+        "merged_fields": merged_fields if request.create_dynamic_fields else None,
+        "skipped_fields": skipped_fields if request.create_dynamic_fields else None,
+        # 🆕 اطلاعات جدید از سرویس هوشمند
+        "existing_capabilities": existing_capabilities if request.create_dynamic_fields else None,
+        "roadmap_items_added": roadmap_items_added if request.create_dynamic_fields else None,
+        "fields_summary": {
+            "created": len(created_fields),
+            "merged": len(merged_fields),
+            "skipped": len(skipped_fields),
+            "roadmap_added": len(roadmap_items_added),
+            "existing_found": len(existing_capabilities)
+        } if request.create_dynamic_fields else None,
+    }
 
 
 def _calculate_similarity(str1: str, str2: str) -> float:
@@ -1697,29 +1713,6 @@ def _should_merge_fields(field1: dict, field2: dict) -> tuple:
         return (True, combined_score, "شباهت ترکیبی بالا")
 
     return (False, combined_score, None)
-
-    return {
-        "success": True,
-        "project_id": project_id,
-        "responses": responses,
-        "total_tokens": total_tokens,
-        "models_used": len(request.model_ids),
-        "context_summary": {
-            "files_included": len(files) if request.include_files else 0,
-            "issues_included": len(issues_found) if request.include_issues and 'issues_found' in locals() else 0,
-            "health_included": request.include_health,
-            "memory_included": request.include_memory,
-        },
-        # 🔴 اطلاعات کامل فیلدها
-        "created_fields": created_fields if request.create_dynamic_fields else None,
-        "merged_fields": merged_fields if request.create_dynamic_fields else None,
-        "skipped_fields": skipped_fields if request.create_dynamic_fields else None,
-        "fields_summary": {
-            "created": len(created_fields),
-            "merged": len(merged_fields),
-            "skipped": len(skipped_fields)
-        } if request.create_dynamic_fields else None,
-    }
 
 
 async def parse_response_to_dynamic_fields(content: str, model_id: str, auto_detect: bool = True) -> List[dict]:
