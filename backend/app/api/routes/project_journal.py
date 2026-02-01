@@ -2245,17 +2245,22 @@ async def generate_engineering_report(
                     existing_fields.append(new_field)
                     created_fields.append(new_field["name"])
 
-                    # 🔴 بایگانی ایراد اصلی در لیست issues_found (با پشتیبانی stable_id)
+                    # 🔴 بایگانی ایراد اصلی در لیست issues_found - 🆕 منطق بهبود یافته
                     try:
                         issues_found = []
                         if project.issues_found:
                             issues_found = json.loads(project.issues_found)
 
                         # استخراج اطلاعات برای تطبیق
-                        orig_file = original.get("file", original.get("file_path", ""))
-                        orig_type = original.get("type", "")
-                        orig_message = (original.get("message", original.get("description", "")) or "").lower().strip()[:100]
+                        orig_file = (original.get("file", original.get("file_path", "")) or "").lower()
+                        orig_type = (original.get("type", "") or "").lower()
+                        orig_message = (original.get("message", original.get("description", "")) or "").lower().strip()
+                        orig_line = original.get("line") or original.get("start_line")
                         orig_stable_id = original.get("stable_id")
+                        orig_id = original.get("id")
+
+                        # استخراج کلمات کلیدی از پیام برای تطبیق fuzzy
+                        orig_words = set(w for w in orig_message.split() if len(w) > 3)
 
                         # پیدا کردن و بایگانی ایراد با روش‌های مختلف
                         archived_count = 0
@@ -2263,33 +2268,57 @@ async def generate_engineering_report(
                             if stored_issue.get("archived"):
                                 continue
 
+                            stored_file = (stored_issue.get("file", stored_issue.get("file_path", "")) or "").lower()
+                            stored_type = (stored_issue.get("type", "") or "").lower()
+                            stored_message = (stored_issue.get("message", stored_issue.get("description", "")) or "").lower().strip()
+                            stored_line = stored_issue.get("line") or stored_issue.get("start_line")
+                            stored_words = set(w for w in stored_message.split() if len(w) > 3)
+
+                            match_found = False
+
                             # روش 1: تطبیق با stable_id
                             if orig_stable_id and stored_issue.get("stable_id") == orig_stable_id:
+                                match_found = True
+
+                            # روش 2: تطبیق با id
+                            elif orig_id and stored_issue.get("id") == orig_id:
+                                match_found = True
+
+                            # روش 3: تطبیق دقیق فایل + نوع + خط
+                            elif orig_file and stored_file and orig_file == stored_file:
+                                if orig_type == stored_type:
+                                    match_found = True
+                                elif orig_line and stored_line and orig_line == stored_line:
+                                    match_found = True
+
+                            # روش 4: تطبیق فایل (substring) + تطبیق fuzzy پیام
+                            elif orig_file and stored_file:
+                                file_match = (orig_file in stored_file or stored_file in orig_file or
+                                             orig_file.split('/')[-1] == stored_file.split('/')[-1])
+                                if file_match and orig_words and stored_words:
+                                    common_words = orig_words.intersection(stored_words)
+                                    # اگر حداقل 30% کلمات مشترک باشند
+                                    if len(common_words) >= max(1, min(len(orig_words), len(stored_words)) * 0.3):
+                                        match_found = True
+
+                            # روش 5: تطبیق پیام (برای ایراداتی که فایل ندارند)
+                            elif not orig_file and not stored_file and orig_message and stored_message:
+                                if orig_message in stored_message or stored_message in orig_message:
+                                    match_found = True
+
+                            if match_found:
                                 stored_issue["archived"] = True
                                 stored_issue["archived_at"] = datetime.utcnow().isoformat()
                                 stored_issue["archived_reason"] = "converted_to_field"
                                 stored_issue["field_id"] = new_field["id"]
                                 archived_count += 1
-                                continue
-
-                            # روش 2: تطبیق با فایل + نوع + پیام نرمال شده
-                            stored_file = stored_issue.get("file", stored_issue.get("file_path", ""))
-                            stored_type = stored_issue.get("type", "")
-                            stored_message = (stored_issue.get("message", stored_issue.get("description", "")) or "").lower().strip()[:100]
-
-                            if (stored_file == orig_file and
-                                stored_type == orig_type and
-                                stored_message and orig_message and
-                                (stored_message in orig_message or orig_message in stored_message)):
-                                stored_issue["archived"] = True
-                                stored_issue["archived_at"] = datetime.utcnow().isoformat()
-                                stored_issue["archived_reason"] = "converted_to_field"
-                                stored_issue["field_id"] = new_field["id"]
-                                archived_count += 1
+                                logger.info(f"Archived issue: {stored_file}:{stored_type} -> {new_field['name']}")
 
                         project.issues_found = json.dumps(issues_found, ensure_ascii=False)
                         if archived_count > 0:
-                            logger.info(f"Archived {archived_count} matching issues for field: {new_field['name']}")
+                            logger.info(f"✅ Archived {archived_count} matching issues for field: {new_field['name']}")
+                        else:
+                            logger.warning(f"⚠️ No matching issues found for: {orig_file}:{orig_type}")
                     except Exception as e:
                         logger.warning(f"Could not archive issue: {e}")
 
@@ -2625,13 +2654,15 @@ async def generate_engineering_report_stream(
             content={"error": "گزارش مهندسی اخیراً تولید شده است. لطفاً چند دقیقه صبر کنید."}
         )
 
-    # تعداد مراحل بر اساس عمق
+    # تعداد مراحل بر اساس عمق - 🔴 اضافه شدن delay_factor
     depth_config = {
-        "quick": {"total_steps": 4, "file_limit": 5, "ai_calls": 1},
-        "standard": {"total_steps": 8, "file_limit": 20, "ai_calls": 2},
-        "deep": {"total_steps": 12, "file_limit": 0, "ai_calls": len(selected_models) + 2}  # 0 = همه
+        "quick": {"total_steps": 4, "file_limit": 5, "ai_calls": 1, "delay_factor": 0.1, "file_delay": 0.01},
+        "standard": {"total_steps": 8, "file_limit": 20, "ai_calls": 2, "delay_factor": 0.5, "file_delay": 0.05},
+        "deep": {"total_steps": 12, "file_limit": 0, "ai_calls": len(selected_models) + 2, "delay_factor": 3.0, "file_delay": 0.3}  # 🔴 3 ثانیه بین هر مرحله
     }
     config = depth_config.get(depth, depth_config["standard"])
+    delay_factor = config.get("delay_factor", 0.5)
+    file_delay = config.get("file_delay", 0.05)
 
     async def progress_generator():
         """Generator برای ارسال پیشرفت"""
@@ -2640,7 +2671,7 @@ async def generate_engineering_report_stream(
 
             # مرحله 1: بررسی پروژه
             yield f"data: {json.dumps({'step': 1, 'total': total_steps, 'message': '🔍 بررسی پروژه...', 'progress': 5}, ensure_ascii=False)}\n\n"
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(delay_factor)  # 🔴 استفاده از delay_factor
 
             project = db.query(Project).filter(Project.id == project_id).first()
             if not project:
@@ -2649,7 +2680,7 @@ async def generate_engineering_report_stream(
 
             # مرحله 2: دریافت فایل‌ها
             yield f"data: {json.dumps({'step': 2, 'total': total_steps, 'message': '📂 دریافت فایل‌های پروژه...', 'progress': 10}, ensure_ascii=False)}\n\n"
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(delay_factor)  # 🔴 استفاده از delay_factor
 
             files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
             file_limit = config["file_limit"] or len(files)
@@ -2658,17 +2689,17 @@ async def generate_engineering_report_stream(
             # 🆕 در حالت deep، هر فایل را گزارش کن
             if depth == "deep":
                 for i, f in enumerate(files_to_analyze):
-                    progress = 10 + int((i / len(files_to_analyze)) * 15)
+                    progress = 10 + int((i / max(len(files_to_analyze), 1)) * 15)
                     yield f"data: {json.dumps({'step': 2, 'message': f'📄 [{i+1}/{len(files_to_analyze)}] {f.file_path}', 'progress': progress}, ensure_ascii=False)}\n\n"
-                    await asyncio.sleep(0.02)
+                    await asyncio.sleep(file_delay)  # 🔴 0.3 ثانیه برای هر فایل در deep
             else:
                 for i, f in enumerate(files_to_analyze[:10]):
                     yield f"data: {json.dumps({'step': 2, 'message': f'📄 بررسی: {f.file_path}', 'progress': 10 + (i * 1)}, ensure_ascii=False)}\n\n"
-                    await asyncio.sleep(0.03)
+                    await asyncio.sleep(file_delay)
 
             # مرحله 3: دریافت فیلدها
             yield f"data: {json.dumps({'step': 3, 'total': total_steps, 'message': '📋 بررسی فیلدهای پویا...', 'progress': 30}, ensure_ascii=False)}\n\n"
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(delay_factor)  # 🔴 استفاده از delay_factor
 
             existing_fields = []
             try:
@@ -2682,7 +2713,7 @@ async def generate_engineering_report_stream(
 
             # مرحله 4: بررسی health issues
             yield f"data: {json.dumps({'step': 4, 'total': total_steps, 'message': '🔍 بررسی ایرادات سلامت...', 'progress': 40}, ensure_ascii=False)}\n\n"
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(delay_factor)  # 🔴 استفاده از delay_factor
 
             health_issues = []
             if project.issues_found:
@@ -2691,7 +2722,9 @@ async def generate_engineering_report_stream(
                 except:
                     pass
 
-            yield f"data: {json.dumps({'step': 4, 'message': f'⚠️ {len(health_issues)} ایراد برای اعتبارسنجی', 'progress': 45}, ensure_ascii=False)}\n\n"
+            # 🔴 فیلتر ایرادات غیربایگانی
+            active_issues = [i for i in health_issues if not i.get("archived")]
+            yield f"data: {json.dumps({'step': 4, 'message': f'⚠️ {len(active_issues)} ایراد فعال برای اعتبارسنجی (کل: {len(health_issues)})', 'progress': 45}, ensure_ascii=False)}\n\n"
 
             # 🆕 مراحل اضافی برای عمق deep
             if depth == "deep" and len(selected_models) > 1:
@@ -2732,12 +2765,12 @@ async def generate_engineering_report_stream(
                         yield f"data: {json.dumps({'step': step, 'message': f'⚠️ {model}: خطا - {str(me)[:50]}', 'progress': 50 + (step - 4) * 10}, ensure_ascii=False)}\n\n"
 
                     step += 1
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(delay_factor * 2)  # 🔴 6 ثانیه بین هر مدل در deep
 
             # مرحله قبل از آخر: بررسی نقشه راه
             step = total_steps - 2
             yield f"data: {json.dumps({'step': step, 'total': total_steps, 'message': '🗺️ بررسی نقشه راه و حالت ایده‌آل...', 'progress': 70}, ensure_ascii=False)}\n\n"
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(delay_factor)  # 🔴 استفاده از delay_factor
 
             # مرحله آخر: فراخوانی گزارش اصلی
             step = total_steps - 1
