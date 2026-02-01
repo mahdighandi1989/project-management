@@ -32,6 +32,7 @@ class RenderAPIService:
     def __init__(self, api_key: str = None):
         self.api_key = api_key
         self._session: Optional[aiohttp.ClientSession] = None
+        self._owner_id: Optional[str] = None  # 🆕 Owner ID برای API لاگ
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """دریافت session HTTP"""
@@ -110,6 +111,13 @@ class RenderAPIService:
                     services = []
                     for item in data:
                         service = item.get("service", {})
+
+                        # 🆕 استخراج و ذخیره owner ID
+                        owner_id = service.get("ownerId")
+                        if owner_id and not self._owner_id:
+                            self._owner_id = owner_id
+                            slog.info("Owner ID extracted", owner_id=owner_id)
+
                         services.append({
                             "id": service.get("id"),
                             "name": service.get("name"),
@@ -118,6 +126,7 @@ class RenderAPIService:
                             "status": service.get("suspended") == "not_suspended" and "deployed" or service.get("suspended"),
                             "created_at": service.get("createdAt"),
                             "updated_at": service.get("updatedAt"),
+                            "owner_id": owner_id,
                             "dashboard_url": f"https://dashboard.render.com/{service.get('type', 'web')}/{service.get('id')}"
                         })
 
@@ -219,8 +228,22 @@ class RenderAPIService:
         try:
             session = await self._get_session()
 
+            # 🆕 اگر owner_id نداریم، اول سرویس‌ها را بگیر
+            if not self._owner_id:
+                slog.info("Owner ID not cached, fetching services first")
+                await self.get_services()
+
+            if not self._owner_id:
+                slog.error("Could not determine owner ID")
+                return {
+                    "success": False,
+                    "logs": [],
+                    "error": "شناسه مالک سرویس‌ها یافت نشد"
+                }
+
             # ساخت پارامترها
             params = {
+                "ownerId": self._owner_id,  # 🆕 اضافه شد
                 "resource": service_id,
                 "limit": min(limit, 500),  # حداکثر Render
                 "direction": direction
