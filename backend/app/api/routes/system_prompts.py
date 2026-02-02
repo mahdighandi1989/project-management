@@ -13,6 +13,7 @@ import logging
 
 from ...core.database import get_db
 from ...models.system_prompt import SystemPrompt, PromptExecution
+from ...services.prompt_helper import PromptHelper
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +251,9 @@ async def create_prompt(
         db.add(prompt)
         db.commit()
 
-        logger.info(f"✅ Created new prompt: {prompt.name} ({prompt.category})")
+        # 🔴 پاک کردن کش پرامپت برای اعمال فوری تغییرات
+        PromptHelper.clear_cache(category=prompt.category)
+        logger.info(f"✅ Created new prompt: {prompt.name} ({prompt.category}) - cache cleared")
 
         return {
             "success": True,
@@ -310,7 +313,9 @@ async def update_prompt(
 
         db.commit()
 
-        logger.info(f"✅ Updated prompt: {prompt.name}")
+        # 🔴 پاک کردن کش پرامپت برای اعمال فوری تغییرات
+        PromptHelper.clear_cache(category=prompt.category, prompt_id=prompt.id)
+        logger.info(f"✅ Updated prompt: {prompt.name} - cache cleared")
 
         return {
             "success": True,
@@ -351,10 +356,14 @@ async def delete_prompt(
             )
 
         prompt_name = prompt.name
+        prompt_category = prompt.category
+        prompt_id_to_clear = prompt.id
         db.delete(prompt)
         db.commit()
 
-        logger.info(f"🗑️ Deleted prompt: {prompt_name}")
+        # 🔴 پاک کردن کش پرامپت برای اعمال فوری تغییرات
+        PromptHelper.clear_cache(category=prompt_category, prompt_id=prompt_id_to_clear)
+        logger.info(f"🗑️ Deleted prompt: {prompt_name} - cache cleared")
 
         return {
             "success": True,
@@ -384,8 +393,11 @@ async def toggle_prompt(
         prompt.is_active = not prompt.is_active
         db.commit()
 
+        # 🔴 پاک کردن کش پرامپت برای اعمال فوری تغییرات
+        PromptHelper.clear_cache(category=prompt.category, prompt_id=prompt.id)
+
         status = "فعال" if prompt.is_active else "غیرفعال"
-        logger.info(f"🔄 Toggled prompt {prompt.name}: {status}")
+        logger.info(f"🔄 Toggled prompt {prompt.name}: {status} - cache cleared")
 
         return {
             "success": True,
@@ -447,7 +459,9 @@ async def duplicate_prompt(
         db.add(new_prompt)
         db.commit()
 
-        logger.info(f"📋 Duplicated prompt {original.name} -> {new_name}")
+        # 🔴 پاک کردن کش پرامپت برای اعمال فوری تغییرات
+        PromptHelper.clear_cache(category=new_prompt.category)
+        logger.info(f"📋 Duplicated prompt {original.name} -> {new_name} - cache cleared")
 
         return {
             "success": True,
@@ -997,7 +1011,9 @@ async def restore_default_prompts(
 
         if activated_count > 0:
             db.commit()
-            logger.info(f"✅ Activated {activated_count} inactive default prompts")
+            # 🔴 پاک کردن کش تمام پرامپت‌ها برای اعمال فوری تغییرات
+            PromptHelper.clear_cache()
+            logger.info(f"✅ Activated {activated_count} inactive default prompts - cache cleared")
 
         # گزارش وضعیت فعلی
         query = db.query(SystemPrompt).filter(SystemPrompt.is_default == True)

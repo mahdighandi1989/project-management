@@ -568,3 +568,65 @@ async def reset_ai_manager():
         providers=new_manager.get_available_providers()
     )
     return new_manager
+
+
+async def load_api_keys_and_reset():
+    """
+    🔴 تابع متمرکز برای بارگذاری API keys از دیتابیس و ریست کردن AI manager
+
+    این تابع باید در هر جایی که نیاز به بارگذاری کلیدها هست استفاده شود:
+    - startup سرور
+    - auto-setup پروژه
+    - تغییر تنظیمات
+
+    Returns:
+        tuple: (ai_manager, keys_loaded, available_providers)
+    """
+    import os
+
+    slog.start("Loading API keys from database")
+
+    keys_loaded = []
+
+    try:
+        from ..core.database import SessionLocal
+        from ..models.setting import Setting
+
+        db = SessionLocal()
+
+        # مپ کلیدها: (db_key, env_key)
+        key_mapping = [
+            ("api_key_openai", "OPENAI_API_KEY"),
+            ("api_key_claude", "CLAUDE_API_KEY"),
+            ("api_key_gemini", "GEMINI_API_KEY"),
+            ("api_key_deepseek", "DEEPSEEK_API_KEY"),
+            ("api_key_openrouter", "OPENROUTER_API_KEY"),
+            ("api_key_groq", "GROQ_API_KEY"),
+            ("api_key_perplexity", "PERPLEXITY_API_KEY"),
+        ]
+
+        for db_key, env_key in key_mapping:
+            try:
+                value = Setting.get_value(db, db_key)
+                if value:
+                    os.environ[env_key] = value
+                    keys_loaded.append(db_key)
+                    slog.info(f"Loaded {env_key}", source="database")
+            except Exception as e:
+                slog.warning(f"Could not load {db_key}", error=str(e)[:50])
+
+        db.close()
+
+    except Exception as e:
+        slog.error("Failed to load API keys from database", exception=e)
+
+    # ریست AI manager
+    ai_manager = await reset_ai_manager()
+    available_providers = ai_manager.get_available_providers()
+
+    slog.end("API keys loaded and AI manager reset",
+        keys_loaded=len(keys_loaded),
+        providers=available_providers
+    )
+
+    return ai_manager, keys_loaded, available_providers
