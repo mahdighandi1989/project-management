@@ -4036,7 +4036,7 @@ async def validate_all_files(
 
 @router.get("/{project_id}/security/scan")
 async def run_security_scan(
-    project_id: int,
+    project_id: str,
     db=Depends(get_db)
 ):
     """
@@ -4059,8 +4059,8 @@ async def run_security_scan(
     file_data = []
     for f in files:
         file_data.append({
-            "path": f.path,
-            "name": f.path.split("/")[-1] if "/" in f.path else f.path,
+            "path": f.file_path,
+            "name": f.file_path.split("/")[-1] if "/" in f.file_path else f.file_path,
             "content": f.content or ""
         })
 
@@ -4091,7 +4091,7 @@ async def run_security_scan(
 
 @router.get("/{project_id}/security/secrets")
 async def scan_secrets_only(
-    project_id: int,
+    project_id: str,
     db=Depends(get_db)
 ):
     """
@@ -4108,7 +4108,7 @@ async def scan_secrets_only(
 
     for f in files:
         if f.content:
-            secrets = scanner.scan_content_for_secrets(f.content, f.path)
+            secrets = scanner.scan_content_for_secrets(f.content, f.file_path)
             all_secrets.extend(secrets)
 
     return {
@@ -4121,7 +4121,7 @@ async def scan_secrets_only(
 
 @router.get("/{project_id}/security/license")
 async def detect_project_license(
-    project_id: int,
+    project_id: str,
     db=Depends(get_db)
 ):
     """
@@ -4136,8 +4136,8 @@ async def detect_project_license(
     file_data = []
     for f in files:
         file_data.append({
-            "path": f.path,
-            "name": f.path.split("/")[-1] if "/" in f.path else f.path,
+            "path": f.file_path,
+            "name": f.file_path.split("/")[-1] if "/" in f.file_path else f.file_path,
             "content": f.content or ""
         })
 
@@ -4153,7 +4153,7 @@ async def detect_project_license(
 
 @router.get("/{project_id}/security/dependencies")
 async def scan_dependencies(
-    project_id: int,
+    project_id: str,
     db=Depends(get_db)
 ):
     """
@@ -4168,8 +4168,8 @@ async def scan_dependencies(
     file_data = []
     for f in files:
         file_data.append({
-            "path": f.path,
-            "name": f.path.split("/")[-1] if "/" in f.path else f.path,
+            "path": f.file_path,
+            "name": f.file_path.split("/")[-1] if "/" in f.file_path else f.file_path,
             "content": f.content or ""
         })
 
@@ -4189,7 +4189,7 @@ async def scan_dependencies(
 
 @router.get("/{project_id}/test-coverage")
 async def analyze_test_coverage(
-    project_id: int,
+    project_id: str,
     db=Depends(get_db)
 ):
     """
@@ -4212,8 +4212,8 @@ async def analyze_test_coverage(
     file_data = []
     for f in files:
         file_data.append({
-            "path": f.path,
-            "name": f.path.split("/")[-1] if "/" in f.path else f.path,
+            "path": f.file_path,
+            "name": f.file_path.split("/")[-1] if "/" in f.file_path else f.file_path,
             "content": f.content or ""
         })
 
@@ -4245,7 +4245,7 @@ async def analyze_test_coverage(
 
 @router.get("/{project_id}/test-coverage/summary")
 async def get_test_coverage_summary(
-    project_id: int,
+    project_id: str,
     db=Depends(get_db)
 ):
     """
@@ -4272,7 +4272,7 @@ async def get_test_coverage_summary(
     files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
 
     analyzer = get_test_coverage_analyzer()
-    file_data = [{"path": f.path, "content": f.content or ""} for f in files]
+    file_data = [{"path": f.file_path, "content": f.content or ""} for f in files]
     coverage_result = analyzer.analyze_project(file_data)
 
     return {
@@ -4285,7 +4285,7 @@ async def get_test_coverage_summary(
 
 @router.get("/{project_id}/test-coverage/untested")
 async def get_untested_files(
-    project_id: int,
+    project_id: str,
     db=Depends(get_db)
 ):
     """
@@ -4298,7 +4298,7 @@ async def get_untested_files(
     files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
 
     analyzer = get_test_coverage_analyzer()
-    file_data = [{"path": f.path, "content": f.content or ""} for f in files]
+    file_data = [{"path": f.file_path, "content": f.content or ""} for f in files]
     coverage_result = analyzer.analyze_project(file_data)
 
     return {
