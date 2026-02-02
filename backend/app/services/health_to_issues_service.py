@@ -20,9 +20,11 @@ from sqlalchemy.orm import Session
 from ..core.database import SessionLocal
 from ..core.logging_utils import StructuredLogger
 from ..models.project import Project, ProjectIssue
+from .journal_service import get_journal_service
 
 slog = StructuredLogger(__name__, "HEALTH-TRANSFER")
 logger = logging.getLogger(__name__)
+journal = get_journal_service()
 
 
 class HealthToIssuesService:
@@ -378,6 +380,20 @@ class HealthToIssuesService:
             archived=archive_result.get("archived_count", 0)
         )
 
+        # ثبت در ژورنال
+        await journal.log_transfer(
+            project_id=project_id,
+            source="security_scan",
+            transferred=transferred,
+            merged=merged,
+            archived=archive_result.get("archived_count", 0),
+            details={
+                "total_findings": len(findings_to_process),
+                "errors_count": len(errors)
+            },
+            db=db
+        )
+
         return {
             "success": True,
             "transferred": transferred,
@@ -499,6 +515,20 @@ class HealthToIssuesService:
             transferred=transferred,
             merged=merged,
             archived=archive_result.get("archived_count", 0)
+        )
+
+        # ثبت در ژورنال
+        await journal.log_transfer(
+            project_id=project_id,
+            source="test_coverage",
+            transferred=transferred,
+            merged=merged,
+            archived=archive_result.get("archived_count", 0),
+            details={
+                "total_findings": len(findings_to_process),
+                "errors_count": len(errors)
+            },
+            db=db
         )
 
         return {

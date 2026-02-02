@@ -34,10 +34,13 @@ from ...services.analysis_progress_manager import (
 )
 from ...services.security_scanner import get_security_scanner
 from ...services.test_coverage_analyzer import get_test_coverage_analyzer
+from ...services.journal_service import get_journal_service
 
 logger = logging.getLogger(__name__)
 # لاگر ساختاریافته
 slog = StructuredLogger(__name__, "HEALTH")
+# سرویس ژورنال
+journal = get_journal_service()
 
 # ذخیره progress managers فعال برای کنترل pause/resume/stop
 _active_progress_managers: dict = {}
@@ -3005,6 +3008,15 @@ async def download_archive(
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     filename_base = f"archive_{project.name}_{timestamp}"
 
+    # ثبت در ژورنال
+    await journal.log_download(
+        project_id=project_id,
+        download_type="archive",
+        format=format,
+        items_count=len(archive),
+        db=db
+    )
+
     if format == "json":
         content = json.dumps({
             "project_id": project_id,
@@ -4208,6 +4220,19 @@ async def run_security_scan(
     project.metadata = json.dumps(existing_metadata, ensure_ascii=False)
     db.commit()
 
+    # ثبت در ژورنال
+    total_findings = scan_result.get("summary", {}).get("total_issues", 0)
+    await journal.log_scan(
+        project_id=project_id,
+        scan_type="security",
+        findings_count=total_findings,
+        details={
+            "security_score": scan_result.get("security_score", 0),
+            "files_scanned": len(file_data)
+        },
+        db=db
+    )
+
     return {
         "success": True,
         "project_id": project_id,
@@ -4361,6 +4386,21 @@ async def analyze_test_coverage(
     }
     project.metadata = json.dumps(existing_metadata, ensure_ascii=False)
     db.commit()
+
+    # ثبت در ژورنال
+    untested_count = len(coverage_result.get("untested_files", []))
+    await journal.log_scan(
+        project_id=project_id,
+        scan_type="coverage",
+        findings_count=untested_count,
+        details={
+            "coverage_percent": coverage_result["summary"]["coverage_percent"],
+            "total_tests": coverage_result["summary"]["total_tests"],
+            "health_score": coverage_result["health_score"],
+            "files_analyzed": len(file_data)
+        },
+        db=db
+    )
 
     return {
         "success": True,

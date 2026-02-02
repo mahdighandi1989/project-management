@@ -25,9 +25,11 @@ from ..models.project import Project
 from ..models.render_log import RenderLog, RenderService
 from .ai_manager import get_ai_manager
 from .ai_base import Message
+from .journal_service import get_journal_service
 
 logger = logging.getLogger(__name__)
 slog = StructuredLogger(__name__, "LOG2ISSUE")
+journal = get_journal_service()
 
 
 class LogToIssuesService:
@@ -147,6 +149,23 @@ class LogToIssuesService:
                 archived=result.get("archived", 0),
                 mode=mode
             )
+
+            # ثبت در ژورنال برای هر پروژه
+            for project_id in set(d.get("project_id") for d in result["details"] if d.get("project_id")):
+                project_transferred = sum(1 for d in result["details"] if d.get("project_id") == project_id and d.get("status") == "transferred")
+                project_merged = sum(1 for d in result["details"] if d.get("project_id") == project_id and d.get("status") == "merged")
+                await journal.log_transfer(
+                    project_id=project_id,
+                    source="render_logs",
+                    transferred=project_transferred,
+                    merged=project_merged,
+                    archived=result.get("archived", 0),
+                    details={
+                        "mode": mode,
+                        "service_count": len(service_ids) if service_ids else "all"
+                    },
+                    db=db
+                )
 
             return result
 
