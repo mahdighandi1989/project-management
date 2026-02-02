@@ -34,10 +34,13 @@ from ...services.analysis_progress_manager import (
 )
 from ...services.security_scanner import get_security_scanner
 from ...services.test_coverage_analyzer import get_test_coverage_analyzer
+from ...services.journal_service import get_journal_service
 
 logger = logging.getLogger(__name__)
 # لاگر ساختاریافته
 slog = StructuredLogger(__name__, "HEALTH")
+# سرویس ژورنال
+journal = get_journal_service()
 
 # ذخیره progress managers فعال برای کنترل pause/resume/stop
 _active_progress_managers: dict = {}
@@ -2962,6 +2965,141 @@ async def clear_general_archive(
     }
 
 
+@router.get("/{project_id}/health/general-archive/download")
+async def download_archive(
+    project_id: str,
+    format: str = "json",
+    type_filter: Optional[str] = None,
+    db=Depends(get_db)
+):
+    """
+    دانلود بایگانی گزارشات
+
+    فرمت‌های پشتیبانی:
+    - json: فرمت JSON
+    - csv: فرمت CSV
+    - txt: فرمت متنی
+    """
+    from fastapi.responses import Response
+    import csv
+    import io
+
+    logger.info(f"📦 [ARCHIVE] Downloading archive for project {project_id}, format={format}")
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت آرشیو
+    archive = []
+    if project.general_archive:
+        try:
+            archive = json.loads(project.general_archive) if isinstance(project.general_archive, str) else project.general_archive
+        except:
+            pass
+
+    # فیلتر بر اساس نوع
+    if type_filter:
+        archive = [item for item in archive if item.get("type") == type_filter]
+
+    # مرتب‌سازی بر اساس تاریخ
+    archive.sort(key=lambda x: x.get("archived_at", ""), reverse=True)
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    filename_base = f"archive_{project.name}_{timestamp}"
+
+    # ثبت در ژورنال
+    await journal.log_download(
+        project_id=project_id,
+        download_type="archive",
+        format=format,
+        items_count=len(archive),
+        db=db
+    )
+
+    if format == "json":
+        content = json.dumps({
+            "project_id": project_id,
+            "project_name": project.name,
+            "export_date": datetime.utcnow().isoformat(),
+            "total_items": len(archive),
+            "type_filter": type_filter,
+            "archive": archive
+        }, ensure_ascii=False, indent=2)
+        return Response(
+            content=content,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.json"'}
+        )
+
+    elif format == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            "شناسه",
+            "نوع",
+            "دسته‌بندی",
+            "عنوان",
+            "خلاصه",
+            "تاریخ بایگانی",
+            "دلیل بایگانی"
+        ])
+        for item in archive:
+            writer.writerow([
+                item.get("id", ""),
+                item.get("type", ""),
+                item.get("category", ""),
+                item.get("title", ""),
+                item.get("summary", ""),
+                item.get("archived_at", ""),
+                item.get("archived_reason", "")
+            ])
+        content = output.getvalue()
+        return Response(
+            content=content.encode("utf-8-sig"),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.csv"'}
+        )
+
+    elif format == "txt":
+        lines = [
+            f"📦 بایگانی گزارشات پروژه: {project.name}",
+            f"تاریخ خروجی: {datetime.utcnow().isoformat()}",
+            f"تعداد آیتم‌ها: {len(archive)}",
+            "=" * 60,
+            ""
+        ]
+        for i, item in enumerate(archive, 1):
+            lines.extend([
+                f"📌 آیتم {i}: {item.get('title', 'بدون عنوان')}",
+                f"   نوع: {item.get('type', '-')}",
+                f"   دسته: {item.get('category', '-')}",
+                f"   تاریخ بایگانی: {item.get('archived_at', '-')}",
+                f"   دلیل: {item.get('archived_reason', '-')}",
+                f"   خلاصه: {item.get('summary', '-')}",
+                ""
+            ])
+            # محتوای کامل
+            content_data = item.get("content", {})
+            if content_data:
+                lines.append("   📄 محتوا:")
+                content_str = json.dumps(content_data, ensure_ascii=False, indent=6)
+                for line in content_str.split("\n"):
+                    lines.append(f"      {line}")
+            lines.append("-" * 60)
+            lines.append("")
+
+        content = "\n".join(lines)
+        return Response(
+            content=content.encode("utf-8"),
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.txt"'}
+        )
+
+    else:
+        raise HTTPException(status_code=400, detail="فرمت نامعتبر. فرمت‌های مجاز: json, csv, txt")
+
+
 # =====================================
 # 🆕 API Endpoints برای زنجیره اعتبارسنجی
 # Validation Chain Endpoints
@@ -4082,6 +4220,19 @@ async def run_security_scan(
     project.metadata = json.dumps(existing_metadata, ensure_ascii=False)
     db.commit()
 
+    # ثبت در ژورنال
+    total_findings = scan_result.get("summary", {}).get("total_issues", 0)
+    await journal.log_scan(
+        project_id=project_id,
+        scan_type="security",
+        findings_count=total_findings,
+        details={
+            "security_score": scan_result.get("security_score", 0),
+            "files_scanned": len(file_data)
+        },
+        db=db
+    )
+
     return {
         "success": True,
         "project_id": project_id,
@@ -4236,6 +4387,21 @@ async def analyze_test_coverage(
     project.metadata = json.dumps(existing_metadata, ensure_ascii=False)
     db.commit()
 
+    # ثبت در ژورنال
+    untested_count = len(coverage_result.get("untested_files", []))
+    await journal.log_scan(
+        project_id=project_id,
+        scan_type="coverage",
+        findings_count=untested_count,
+        details={
+            "coverage_percent": coverage_result["summary"]["coverage_percent"],
+            "total_tests": coverage_result["summary"]["total_tests"],
+            "health_score": coverage_result["health_score"],
+            "files_analyzed": len(file_data)
+        },
+        db=db
+    )
+
     return {
         "success": True,
         "project_id": project_id,
@@ -4347,6 +4513,18 @@ async def download_security_report(
     scanner = get_security_scanner()
     scan_result = scanner.full_security_scan(file_data)
 
+    # استخراج داده‌ها با ساختار صحیح
+    secrets_data = scan_result.get("secrets", {})
+    secrets_list = secrets_data.get("findings", []) if isinstance(secrets_data, dict) else []
+
+    sensitive_data = scan_result.get("sensitive_files", {})
+    sensitive_list = sensitive_data.get("findings", []) if isinstance(sensitive_data, dict) else []
+
+    deps_data = scan_result.get("dependencies", {})
+    vulns_list = deps_data.get("vulnerabilities", []) if isinstance(deps_data, dict) else []
+
+    license_data = scan_result.get("license", {})
+
     # تولید گزارش بر اساس فرمت
     if format == "json":
         report = {
@@ -4357,12 +4535,15 @@ async def download_security_report(
             "summary": scan_result.get("summary", {}),
             "security_score": scan_result.get("security_score", 0),
             "findings": {
-                "secrets": scan_result.get("secrets", []),
-                "vulnerabilities": scan_result.get("vulnerabilities", []),
-                "sensitive_files": scan_result.get("sensitive_files", []),
-                "license_issues": scan_result.get("license_issues", [])
+                "secrets": secrets_list,
+                "secrets_count": len(secrets_list),
+                "vulnerabilities": vulns_list,
+                "vulnerabilities_count": len(vulns_list),
+                "sensitive_files": sensitive_list,
+                "sensitive_files_count": len(sensitive_list),
+                "license": license_data
             },
-            "recommendations": scan_result.get("recommendations", [])
+            "recommendations": [scan_result.get("summary", {}).get("recommendation", "")]
         }
         content = json.dumps(report, ensure_ascii=False, indent=2)
         media_type = "application/json"
@@ -4374,35 +4555,35 @@ async def download_security_report(
         writer.writerow(["نوع", "شدت", "فایل", "خط", "توضیحات", "راه‌حل"])
 
         # Secrets
-        for s in scan_result.get("secrets", []):
+        for s in secrets_list:
             writer.writerow([
                 "کلید محرمانه",
-                "بحرانی",
+                s.get("severity", "بحرانی"),
                 s.get("file", ""),
                 s.get("line", ""),
-                s.get("type", ""),
+                s.get("type", s.get("message", "")),
                 "حذف از کد و استفاده از متغیرهای محیطی"
             ])
 
-        # Vulnerabilities
-        for v in scan_result.get("vulnerabilities", []):
+        # Vulnerabilities - کلیدهای صحیح: package, cve, current_version, vulnerable_versions, message, recommendation
+        for v in vulns_list:
             writer.writerow([
                 "آسیب‌پذیری",
                 v.get("severity", "متوسط"),
-                v.get("file", ""),
-                v.get("line", ""),
-                v.get("description", ""),
-                v.get("fix", "")
+                v.get("package", "نامشخص"),  # پکیج به جای فایل
+                f"{v.get('current_version', '')} → {v.get('vulnerable_versions', '')}",  # نسخه‌ها
+                f"{v.get('message', '')} (CVE: {v.get('cve', 'N/A')})",  # توضیحات با CVE
+                v.get("recommendation", "به‌روزرسانی پکیج")
             ])
 
         # Sensitive files
-        for sf in scan_result.get("sensitive_files", []):
+        for sf in sensitive_list:
             writer.writerow([
                 "فایل حساس",
                 "بالا",
-                sf.get("file", ""),
+                sf.get("file", sf.get("path", "")),
                 "",
-                sf.get("reason", ""),
+                sf.get("reason", sf.get("type", "")),
                 "اضافه به .gitignore"
             ])
 
@@ -4419,19 +4600,20 @@ async def download_security_report(
             "=" * 60,
             "",
             "📊 خلاصه:",
-            f"  - کلیدهای محرمانه یافت شده: {len(scan_result.get('secrets', []))}",
-            f"  - آسیب‌پذیری‌ها: {len(scan_result.get('vulnerabilities', []))}",
-            f"  - فایل‌های حساس: {len(scan_result.get('sensitive_files', []))}",
+            f"  - کلیدهای محرمانه یافت شده: {len(secrets_list)}",
+            f"  - آسیب‌پذیری‌ها: {len(vulns_list)}",
+            f"  - فایل‌های حساس: {len(sensitive_list)}",
             "",
             "-" * 60,
             "🔐 کلیدهای محرمانه:",
             "-" * 60,
         ]
 
-        for s in scan_result.get("secrets", []):
+        for s in secrets_list:
             lines.append(f"  📍 فایل: {s.get('file', 'نامشخص')}")
-            lines.append(f"     نوع: {s.get('type', 'نامشخص')}")
+            lines.append(f"     نوع: {s.get('type', s.get('message', 'نامشخص'))}")
             lines.append(f"     خط: {s.get('line', 'نامشخص')}")
+            lines.append(f"     شدت: {s.get('severity', 'بحرانی')}")
             lines.append("")
 
         lines.extend([
@@ -4440,11 +4622,15 @@ async def download_security_report(
             "-" * 60,
         ])
 
-        for v in scan_result.get("vulnerabilities", []):
-            lines.append(f"  📍 فایل: {v.get('file', 'نامشخص')}")
-            lines.append(f"     شدت: {v.get('severity', 'متوسط')}")
-            lines.append(f"     توضیح: {v.get('description', '')}")
-            lines.append(f"     راه‌حل: {v.get('fix', '')}")
+        for v in vulns_list:
+            # کلیدهای صحیح: package, cve, current_version, vulnerable_versions, message, recommendation
+            lines.append(f"  📍 پکیج: {v.get('package', 'نامشخص')}")
+            lines.append(f"     نسخه فعلی: {v.get('current_version', 'نامشخص')}")
+            lines.append(f"     نسخه‌های آسیب‌پذیر: {v.get('vulnerable_versions', 'نامشخص')}")
+            lines.append(f"     CVE: {v.get('cve', 'نامشخص')}")
+            lines.append(f"     شدت: {v.get('severity', 'بالا')}")
+            lines.append(f"     توضیح: {v.get('message', '')}")
+            lines.append(f"     راه‌حل: {v.get('recommendation', '')}")
             lines.append("")
 
         lines.extend([
@@ -4453,19 +4639,31 @@ async def download_security_report(
             "-" * 60,
         ])
 
-        for sf in scan_result.get("sensitive_files", []):
-            lines.append(f"  📍 {sf.get('file', 'نامشخص')}")
-            lines.append(f"     دلیل: {sf.get('reason', '')}")
+        for sf in sensitive_list:
+            lines.append(f"  📍 {sf.get('file', sf.get('path', 'نامشخص'))}")
+            lines.append(f"     دلیل: {sf.get('reason', sf.get('type', ''))}")
             lines.append("")
 
         lines.extend([
             "-" * 60,
-            "💡 توصیه‌ها:",
+            "📄 وضعیت لایسنس:",
             "-" * 60,
         ])
+        if license_data.get("has_license"):
+            for lic in license_data.get("licenses", []):
+                lines.append(f"  ✅ {lic.get('license', 'نامشخص')} - {lic.get('file', '')}")
+        else:
+            lines.append("  ❌ پروژه فاقد لایسنس است")
 
-        for i, rec in enumerate(scan_result.get("recommendations", []), 1):
-            lines.append(f"  {i}. {rec}")
+        lines.extend([
+            "",
+            "-" * 60,
+            "💡 توصیه کلی:",
+            "-" * 60,
+        ])
+        recommendation = scan_result.get("summary", {}).get("recommendation", "")
+        if recommendation:
+            lines.append(f"  {recommendation}")
 
         content = "\n".join(lines)
         media_type = "text/plain; charset=utf-8"
@@ -4532,26 +4730,30 @@ async def download_test_coverage_report(
     elif format == "csv":
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["نوع", "فایل/تابع", "وضعیت", "اولویت", "توصیه"])
+        writer.writerow(["نوع", "مسیر فایل", "تعداد موجودیت", "نمونه توابع", "وضعیت"])
+
+        # فایل‌های تست
+        for tf in coverage_result.get("test_files", []):
+            tests = tf.get('tests', [])
+            test_names = ', '.join(t.get('name', '') for t in tests[:3])
+            writer.writerow([
+                "فایل تست",
+                tf.get("path", ""),
+                tf.get("test_count", 0),
+                test_names,
+                "موجود"
+            ])
 
         # فایل‌های بدون تست
         for uf in coverage_result.get("untested_files", []):
+            entities = uf.get("entities", [])
+            entity_names = ', '.join(entities[:3]) if entities else ""
             writer.writerow([
                 "فایل بدون تست",
-                uf.get("file", ""),
-                "نیاز به تست",
-                uf.get("priority", "متوسط"),
-                uf.get("recommendation", "")
-            ])
-
-        # توابع بدون تست
-        for func in coverage_result.get("untested_functions", []):
-            writer.writerow([
-                "تابع بدون تست",
-                f"{func.get('file', '')}:{func.get('name', '')}",
-                "نیاز به تست",
-                func.get("priority", "متوسط"),
-                ""
+                uf.get("path", ""),
+                uf.get("entity_count", 0),
+                entity_names,
+                "نیاز به تست"
             ])
 
         content = output.getvalue()
@@ -4569,9 +4771,9 @@ async def download_test_coverage_report(
             "",
             "📊 خلاصه:",
             f"  - درصد پوشش تست: {summary.get('coverage_percent', 0)}%",
-            f"  - تعداد فایل‌های تست: {summary.get('test_files_count', 0)}",
+            f"  - تعداد فایل‌های تست: {summary.get('total_test_files', 0)}",
             f"  - تعداد تست‌ها: {summary.get('total_tests', 0)}",
-            f"  - فایل‌های بدون تست: {len(coverage_result.get('untested_files', []))}",
+            f"  - فایل‌های بدون تست: {summary.get('untested_file_count', 0)}",
             "",
             "-" * 60,
             "🧪 فایل‌های تست موجود:",
@@ -4579,8 +4781,14 @@ async def download_test_coverage_report(
         ]
 
         for tf in coverage_result.get("test_files", []):
-            lines.append(f"  ✅ {tf.get('file', 'نامشخص')}")
+            # کلید path است نه file
+            lines.append(f"  ✅ {tf.get('path', 'نامشخص')}")
             lines.append(f"     تعداد تست: {tf.get('test_count', 0)}")
+            # نمایش نام تست‌ها
+            tests = tf.get('tests', [])
+            if tests:
+                for t in tests[:3]:  # فقط 3 تست اول
+                    lines.append(f"       - {t.get('name', '')}")
 
         lines.extend([
             "",
@@ -4590,11 +4798,14 @@ async def download_test_coverage_report(
         ])
 
         for uf in coverage_result.get("untested_files", []):
-            lines.append(f"  📍 {uf.get('file', 'نامشخص')}")
-            if uf.get("priority"):
-                lines.append(f"     اولویت: {uf.get('priority')}")
-            if uf.get("recommendation"):
-                lines.append(f"     توصیه: {uf.get('recommendation')}")
+            # کلید path است نه file
+            lines.append(f"  📍 {uf.get('path', 'نامشخص')}")
+            entity_count = uf.get("entity_count", 0)
+            if entity_count:
+                lines.append(f"     تعداد موجودیت: {entity_count}")
+            entities = uf.get("entities", [])
+            if entities:
+                lines.append(f"     نمونه توابع: {', '.join(entities[:3])}")
             lines.append("")
 
         lines.extend([
@@ -4615,9 +4826,10 @@ async def download_test_coverage_report(
 
         for i, rec in enumerate(coverage_result.get("recommendations", []), 1):
             if isinstance(rec, dict):
-                lines.append(f"  {i}. {rec.get('title', '')}")
-                if rec.get("description"):
-                    lines.append(f"     {rec.get('description')}")
+                # کلید message است نه title
+                lines.append(f"  {i}. {rec.get('message', rec.get('title', ''))}")
+                if rec.get("recommendation"):
+                    lines.append(f"     توصیه: {rec.get('recommendation')}")
             else:
                 lines.append(f"  {i}. {rec}")
 
@@ -4661,18 +4873,32 @@ async def transfer_security_to_issues(
 
     # دریافت فایل‌های پروژه
     files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+    slog.info(f"[DEBUG-TRANSFER] Found {len(files)} files for project {project_id}")
 
     file_data = []
+    files_with_content = 0
     for f in files:
+        has_content = bool(f.content and len(f.content) > 0)
+        if has_content:
+            files_with_content += 1
         file_data.append({
             "path": f.file_path,
             "name": f.file_path.split("/")[-1] if "/" in f.file_path else f.file_path,
             "content": f.content or ""
         })
 
+    slog.info(f"[DEBUG-TRANSFER] Files with content: {files_with_content}/{len(files)}")
+
     # اجرای اسکن امنیتی
     scanner = get_security_scanner()
     scan_result = scanner.full_security_scan(file_data)
+
+    # Debug scan result
+    slog.info(f"[DEBUG-TRANSFER] Scan result keys: {list(scan_result.keys()) if scan_result else 'None'}")
+    secrets_count = len(scan_result.get('secrets', {}).get('findings', [])) if isinstance(scan_result.get('secrets'), dict) else 0
+    vulns_count = len(scan_result.get('dependencies', {}).get('vulnerabilities', [])) if isinstance(scan_result.get('dependencies'), dict) else 0
+    sensitive_count = len(scan_result.get('sensitive_files', {}).get('findings', [])) if isinstance(scan_result.get('sensitive_files'), dict) else 0
+    slog.info(f"[DEBUG-TRANSFER] Scan findings: secrets={secrets_count}, vulns={vulns_count}, sensitive={sensitive_count}")
 
     # انتقال به ایرادات
     service = get_health_to_issues_service()
@@ -4705,18 +4931,32 @@ async def transfer_test_coverage_to_issues(
 
     # دریافت فایل‌های پروژه
     files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+    slog.info(f"[DEBUG-TRANSFER-COV] Found {len(files)} files for project {project_id}")
 
     file_data = []
+    files_with_content = 0
     for f in files:
+        has_content = bool(f.content and len(f.content) > 0)
+        if has_content:
+            files_with_content += 1
         file_data.append({
             "path": f.file_path,
             "name": f.file_path.split("/")[-1] if "/" in f.file_path else f.file_path,
             "content": f.content or ""
         })
 
+    slog.info(f"[DEBUG-TRANSFER-COV] Files with content: {files_with_content}/{len(files)}")
+
     # اجرای تحلیل پوشش تست
     analyzer = get_test_coverage_analyzer()
     coverage_result = analyzer.analyze_project(file_data)
+
+    # Debug coverage result
+    slog.info(f"[DEBUG-TRANSFER-COV] Coverage result keys: {list(coverage_result.keys()) if coverage_result else 'None'}")
+    untested_count = len(coverage_result.get('untested_files', []))
+    recommendations_count = len(coverage_result.get('recommendations', []))
+    coverage_percent = coverage_result.get('summary', {}).get('coverage_percent', 0)
+    slog.info(f"[DEBUG-TRANSFER-COV] Coverage findings: untested={untested_count}, recommendations={recommendations_count}, coverage%={coverage_percent}")
 
     # انتقال به ایرادات
     service = get_health_to_issues_service()

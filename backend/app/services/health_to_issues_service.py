@@ -20,9 +20,11 @@ from sqlalchemy.orm import Session
 from ..core.database import SessionLocal
 from ..core.logging_utils import StructuredLogger
 from ..models.project import Project, ProjectIssue
+from .journal_service import get_journal_service
 
 slog = StructuredLogger(__name__, "HEALTH-TRANSFER")
 logger = logging.getLogger(__name__)
+journal = get_journal_service()
 
 
 class HealthToIssuesService:
@@ -253,6 +255,12 @@ class HealthToIssuesService:
         """
         slog.info("Transferring security findings", project_id=project_id)
 
+        # Debug: نمایش ساختار scan_result
+        slog.info(f"[DEBUG] scan_result keys: {list(scan_result.keys()) if scan_result else 'None'}")
+        slog.info(f"[DEBUG] secrets: {scan_result.get('secrets', {})}")
+        slog.info(f"[DEBUG] sensitive_files: {scan_result.get('sensitive_files', {})}")
+        slog.info(f"[DEBUG] dependencies: {scan_result.get('dependencies', {})}")
+
         # دریافت پروژه
         project = db.query(Project).filter(Project.id == project_id).first()
         if not project:
@@ -265,40 +273,63 @@ class HealthToIssuesService:
         # پردازش یافته‌های مختلف
         findings_to_process = []
 
-        # Secrets
-        for secret in scan_result.get("secrets", []):
+        # Secrets - ساختار: secrets.findings[]
+        secrets_data = scan_result.get("secrets", {})
+        secrets_list = secrets_data.get("findings", []) if isinstance(secrets_data, dict) else secrets_data
+        slog.info(f"[DEBUG] secrets_list count: {len(secrets_list)}")
+        for secret in secrets_list:
             findings_to_process.append({
                 "type": "secret",
                 "title": f"کلید محرمانه در {secret.get('file', 'unknown')}",
                 "data": secret
             })
 
-        # Vulnerabilities
-        for vuln in scan_result.get("vulnerabilities", []):
+        # Vulnerabilities - ساختار: dependencies.vulnerabilities[]
+        deps_data = scan_result.get("dependencies", {})
+        vulns_list = deps_data.get("vulnerabilities", []) if isinstance(deps_data, dict) else []
+        slog.info(f"[DEBUG] vulns_list count: {len(vulns_list)}")
+        for vuln in vulns_list:
             findings_to_process.append({
                 "type": "vulnerability",
                 "title": f"آسیب‌پذیری: {vuln.get('type', 'unknown')}",
                 "data": vuln
             })
 
-        # Sensitive files
-        for sensitive in scan_result.get("sensitive_files", []):
+        # Sensitive files - ساختار: sensitive_files.findings[]
+        sensitive_data = scan_result.get("sensitive_files", {})
+        sensitive_list = sensitive_data.get("findings", []) if isinstance(sensitive_data, dict) else sensitive_data
+        slog.info(f"[DEBUG] sensitive_list count: {len(sensitive_list)}")
+        for sensitive in sensitive_list:
             findings_to_process.append({
                 "type": "sensitive_file",
                 "title": f"فایل حساس: {sensitive.get('file', 'unknown')}",
                 "data": sensitive
             })
 
-        # License issues
-        if scan_result.get("license_issues"):
+        # License issues - ساختار: license.has_license
+        license_data = scan_result.get("license", {})
+        if isinstance(license_data, dict) and not license_data.get("has_license", True):
             findings_to_process.append({
                 "type": "license",
-                "title": "مشکلات لایسنس",
-                "data": scan_result["license_issues"]
+                "title": "پروژه فاقد لایسنس است",
+                "data": license_data
             })
 
+        # Summary issues
+        summary = scan_result.get("summary", {})
+        if summary.get("total_issues", 0) > 0:
+            findings_to_process.append({
+                "type": "security_summary",
+                "title": f"خلاصه امنیتی: {summary.get('total_issues', 0)} مشکل",
+                "data": summary
+            })
+
+        slog.info(f"[DEBUG] Total findings_to_process: {len(findings_to_process)}")
+        slog.info(f"[DEBUG] findings_to_process types: {[f['type'] for f in findings_to_process]}")
+
         # پردازش هر یافته
-        for finding in findings_to_process:
+        for i, finding in enumerate(findings_to_process):
+            slog.info(f"[DEBUG] Processing finding {i+1}/{len(findings_to_process)}: {finding.get('type')}")
             try:
                 # بسط توسط AI
                 enhanced = await self._enhance_with_ai(
@@ -306,6 +337,7 @@ class HealthToIssuesService:
                     finding,
                     project.name
                 )
+                slog.info(f"[DEBUG] Enhanced result: title={enhanced.get('title', 'NO_TITLE')[:50]}")
 
                 # جستجوی ایراد مشابه
                 existing = self._find_similar_issue(
@@ -341,15 +373,39 @@ class HealthToIssuesService:
                     transferred += 1
 
             except Exception as e:
-                slog.error("Error processing security finding", exception=e)
+                slog.error(f"[DEBUG] Error processing security finding: {str(e)}", exception=e)
                 errors.append(str(e))
 
         db.commit()
 
+        # آرشیو کردن یافته‌ها و پاک کردن نتایج اصلی
+        archive_result = self._archive_and_clear(
+            db=db,
+            project=project,
+            findings=findings_to_process,
+            source_type="security_scan",
+            scan_result=scan_result
+        )
+
         slog.success("Security findings transferred",
             project_id=project_id,
             transferred=transferred,
-            merged=merged
+            merged=merged,
+            archived=archive_result.get("archived_count", 0)
+        )
+
+        # ثبت در ژورنال
+        await journal.log_transfer(
+            project_id=project_id,
+            source="security_scan",
+            transferred=transferred,
+            merged=merged,
+            archived=archive_result.get("archived_count", 0),
+            details={
+                "total_findings": len(findings_to_process),
+                "errors_count": len(errors)
+            },
+            db=db
         )
 
         return {
@@ -357,6 +413,7 @@ class HealthToIssuesService:
             "transferred": transferred,
             "merged": merged,
             "total_findings": len(findings_to_process),
+            "archived": archive_result.get("archived_count", 0),
             "errors": errors if errors else None
         }
 
@@ -371,6 +428,11 @@ class HealthToIssuesService:
         """
         slog.info("Transferring test coverage findings", project_id=project_id)
 
+        # Debug: نمایش ساختار coverage_result
+        slog.info(f"[DEBUG] coverage_result keys: {list(coverage_result.keys()) if coverage_result else 'None'}")
+        slog.info(f"[DEBUG] untested_files count: {len(coverage_result.get('untested_files', []))}")
+        slog.info(f"[DEBUG] recommendations count: {len(coverage_result.get('recommendations', []))}")
+
         # دریافت پروژه
         project = db.query(Project).filter(Project.id == project_id).first()
         if not project:
@@ -382,35 +444,21 @@ class HealthToIssuesService:
 
         findings_to_process = []
 
-        # فایل‌های بدون تست
+        # فایل‌های بدون تست - ساختار: untested_files[].path
         for untested in coverage_result.get("untested_files", []):
+            file_path = untested.get("path", untested.get("file", "unknown"))
             findings_to_process.append({
                 "type": "untested_file",
-                "title": f"فایل بدون تست: {untested.get('file', 'unknown')}",
+                "title": f"فایل بدون تست: {file_path}",
                 "data": untested
             })
 
-        # توابع بدون تست
-        for func in coverage_result.get("untested_functions", []):
-            findings_to_process.append({
-                "type": "untested_function",
-                "title": f"تابع بدون تست: {func.get('name', 'unknown')}",
-                "data": func
-            })
-
-        # کلاس‌های بدون تست
-        for cls in coverage_result.get("untested_classes", []):
-            findings_to_process.append({
-                "type": "untested_class",
-                "title": f"کلاس بدون تست: {cls.get('name', 'unknown')}",
-                "data": cls
-            })
-
-        # توصیه‌ها
+        # توصیه‌ها - ساختار: recommendations[].message
         for rec in coverage_result.get("recommendations", []):
+            msg = rec.get("message", rec.get("title", "توصیه تست"))
             findings_to_process.append({
                 "type": "test_recommendation",
-                "title": rec.get("title", "توصیه تست"),
+                "title": msg,
                 "data": rec
             })
 
@@ -423,8 +471,12 @@ class HealthToIssuesService:
                 "data": summary
             })
 
+        slog.info(f"[DEBUG] Total findings_to_process: {len(findings_to_process)}")
+        slog.info(f"[DEBUG] findings_to_process types: {[f['type'] for f in findings_to_process]}")
+
         # پردازش هر یافته
-        for finding in findings_to_process:
+        for i, finding in enumerate(findings_to_process):
+            slog.info(f"[DEBUG] Processing finding {i+1}/{len(findings_to_process)}: {finding.get('type')}")
             try:
                 # بسط توسط AI
                 enhanced = await self._enhance_with_ai(
@@ -432,6 +484,7 @@ class HealthToIssuesService:
                     finding,
                     project.name
                 )
+                slog.info(f"[DEBUG] Enhanced result: title={enhanced.get('title', 'NO_TITLE')[:50]}")
 
                 # جستجوی ایراد مشابه
                 existing = self._find_similar_issue(
@@ -467,15 +520,39 @@ class HealthToIssuesService:
                     transferred += 1
 
             except Exception as e:
-                slog.error("Error processing test coverage finding", exception=e)
+                slog.error(f"[DEBUG] Error processing test coverage finding: {str(e)}", exception=e)
                 errors.append(str(e))
 
         db.commit()
 
+        # آرشیو کردن یافته‌ها و پاک کردن نتایج اصلی
+        archive_result = self._archive_and_clear(
+            db=db,
+            project=project,
+            findings=findings_to_process,
+            source_type="test_coverage",
+            scan_result=coverage_result
+        )
+
         slog.success("Test coverage findings transferred",
             project_id=project_id,
             transferred=transferred,
-            merged=merged
+            merged=merged,
+            archived=archive_result.get("archived_count", 0)
+        )
+
+        # ثبت در ژورنال
+        await journal.log_transfer(
+            project_id=project_id,
+            source="test_coverage",
+            transferred=transferred,
+            merged=merged,
+            archived=archive_result.get("archived_count", 0),
+            details={
+                "total_findings": len(findings_to_process),
+                "errors_count": len(errors)
+            },
+            db=db
         )
 
         return {
@@ -483,8 +560,113 @@ class HealthToIssuesService:
             "transferred": transferred,
             "merged": merged,
             "total_findings": len(findings_to_process),
+            "archived": archive_result.get("archived_count", 0),
             "errors": errors if errors else None
         }
+
+    def _archive_and_clear(
+        self,
+        db: Session,
+        project: Project,
+        findings: List[Dict],
+        source_type: str,
+        scan_result: Dict
+    ) -> Dict:
+        """
+        آرشیو کردن یافته‌ها بعد از انتقال و پاک کردن نتایج اصلی
+
+        Args:
+            db: Session دیتابیس
+            project: پروژه
+            findings: لیست یافته‌ها
+            source_type: نوع منبع (security_scan, test_coverage)
+            scan_result: نتایج اسکن اصلی
+
+        Returns:
+            {"archived_count": int, "cleared": bool}
+        """
+        import uuid
+
+        try:
+            # دریافت آرشیو موجود
+            general_archive = []
+            if project.general_archive:
+                try:
+                    general_archive = json.loads(project.general_archive) if isinstance(project.general_archive, str) else project.general_archive
+                except:
+                    general_archive = []
+
+            archive_timestamp = datetime.utcnow().isoformat()
+            archived_count = 0
+
+            # آرشیو کردن هر یافته
+            for finding in findings:
+                archive_item = {
+                    "id": str(uuid.uuid4()),
+                    "type": source_type,
+                    "category": finding.get("type", "unknown"),
+                    "title": finding.get("title", "یافته"),
+                    "content": finding.get("data", {}),
+                    "summary": finding.get("title", ""),
+                    "archived_at": archive_timestamp,
+                    "archived_reason": "transferred_to_issues",
+                    "archived_by": "system",
+                    "metadata": {
+                        "original_created_at": archive_timestamp,
+                        "source": source_type,
+                        "transfer_status": "completed"
+                    }
+                }
+                general_archive.append(archive_item)
+                archived_count += 1
+
+            # آرشیو کردن نتیجه کلی اسکن
+            summary_archive = {
+                "id": str(uuid.uuid4()),
+                "type": f"{source_type}_full_report",
+                "category": "full_report",
+                "title": f"گزارش کامل {source_type}",
+                "content": scan_result,
+                "summary": f"گزارش کامل منتقل شده در {archive_timestamp}",
+                "archived_at": archive_timestamp,
+                "archived_reason": "transferred_to_issues",
+                "archived_by": "system",
+                "metadata": {
+                    "original_created_at": archive_timestamp,
+                    "source": source_type,
+                    "findings_count": len(findings)
+                }
+            }
+            general_archive.append(summary_archive)
+
+            # ذخیره آرشیو
+            project.general_archive = json.dumps(general_archive, ensure_ascii=False)
+
+            # پاک کردن نتایج اصلی برای جلوگیری از انتقال مجدد
+            if source_type == "security_scan":
+                project.security_scan_result = None
+            elif source_type == "test_coverage":
+                project.test_coverage_result = None
+
+            db.commit()
+
+            slog.info(f"Archived {archived_count} findings and cleared original results",
+                project_id=project.id,
+                source_type=source_type
+            )
+
+            return {
+                "archived_count": archived_count + 1,  # +1 برای گزارش کامل
+                "cleared": True
+            }
+
+        except Exception as e:
+            slog.error("Error archiving findings", exception=e)
+            return {
+                "archived_count": 0,
+                "cleared": False,
+                "error": str(e)
+            }
 
 
 # Singleton instance

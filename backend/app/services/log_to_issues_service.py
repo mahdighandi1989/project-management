@@ -25,9 +25,11 @@ from ..models.project import Project
 from ..models.render_log import RenderLog, RenderService
 from .ai_manager import get_ai_manager
 from .ai_base import Message
+from .journal_service import get_journal_service
 
 logger = logging.getLogger(__name__)
 slog = StructuredLogger(__name__, "LOG2ISSUE")
+journal = get_journal_service()
 
 
 class LogToIssuesService:
@@ -129,14 +131,41 @@ class LogToIssuesService:
             if mode == "since_deploy" and (result["transferred"] > 0 or result["merged"] > 0):
                 await self._update_last_transferred_deploy(db, error_logs)
 
+            # آرشیو کردن لاگ‌های منتقل شده
+            if result["transferred"] > 0 or result["merged"] > 0:
+                archive_result = await self._archive_transferred_logs(
+                    db=db,
+                    transferred_logs=error_logs,
+                    service_project_map=service_project_map
+                )
+                result["archived"] = archive_result.get("archived_count", 0)
+
             db.commit()
 
             slog.success("Transfer completed",
                 transferred=result["transferred"],
                 merged=result["merged"],
                 skipped=result["skipped"],
+                archived=result.get("archived", 0),
                 mode=mode
             )
+
+            # ثبت در ژورنال برای هر پروژه
+            for project_id in set(d.get("project_id") for d in result["details"] if d.get("project_id")):
+                project_transferred = sum(1 for d in result["details"] if d.get("project_id") == project_id and d.get("status") == "transferred")
+                project_merged = sum(1 for d in result["details"] if d.get("project_id") == project_id and d.get("status") == "merged")
+                await journal.log_transfer(
+                    project_id=project_id,
+                    source="render_logs",
+                    transferred=project_transferred,
+                    merged=project_merged,
+                    archived=result.get("archived", 0),
+                    details={
+                        "mode": mode,
+                        "service_count": len(service_ids) if service_ids else "all"
+                    },
+                    db=db
+                )
 
             return result
 
@@ -170,53 +199,87 @@ class LogToIssuesService:
         """
         error_logs = []
 
-        if mode == "since_deploy":
-            # حالت جدید: فیلتر بر اساس آخرین دیپلوی
-            services_query = db.query(RenderService)
-            if service_ids:
-                services_query = services_query.filter(RenderService.id.in_(service_ids))
+        try:
+            if mode == "since_deploy":
+                # حالت جدید: فیلتر بر اساس آخرین دیپلوی
+                try:
+                    services_query = db.query(RenderService)
+                    if service_ids:
+                        services_query = services_query.filter(RenderService.id.in_(service_ids))
+                    services = services_query.all()
+                except Exception as e:
+                    slog.warning("Error querying services, using fallback", exception=e)
+                    services = []
 
-            services = services_query.all()
+                for service in services:
+                    try:
+                        # برای هر سرویس، لاگ‌های خطایی که منتقل نشده را بگیر
+                        service_query = db.query(RenderLog).filter(
+                            RenderLog.service_id == service.id,
+                            RenderLog.level.in_(["error", "fatal", "critical"])
+                        )
 
-            for service in services:
-                # برای هر سرویس، لاگ‌های بعد از آخرین دیپلوی که منتقل نشده را بگیر
-                service_query = db.query(RenderLog).filter(
-                    RenderLog.service_id == service.id,
-                    RenderLog.level.in_(["error", "fatal", "critical"]),
-                    RenderLog.transferred_to_issues == False
+                        # فیلتر لاگ‌های منتقل نشده - با fallback
+                        try:
+                            service_query = service_query.filter(
+                                RenderLog.transferred_to_issues == False
+                            )
+                        except Exception:
+                            pass  # ستون وجود ندارد
+
+                        # اگر آخرین دیپلوی منتقل شده مشخص باشه
+                        last_transferred = getattr(service, 'last_transferred_deploy_id', None)
+                        if last_transferred:
+                            service_query = service_query.filter(
+                                RenderLog.deploy_id != last_transferred
+                            )
+
+                        logs = service_query.order_by(RenderLog.timestamp.desc()).limit(50).all()
+                        error_logs.extend(logs)
+                        slog.info(f"Found {len(logs)} error logs for service {service.name}")
+
+                    except Exception as e:
+                        slog.warning(f"Error querying logs for service {service.id}", exception=e)
+
+                # اگر هیچ لاگی پیدا نشد، fallback به حالت time_based
+                if not error_logs:
+                    slog.info("No logs found in since_deploy mode, falling back to time_based")
+                    mode = "time_based"
+
+            if mode == "time_based" or not error_logs:
+                # حالت قدیمی: فیلتر بر اساس زمان
+                cutoff = datetime.utcnow() - timedelta(hours=hours)
+
+                query = db.query(RenderLog).filter(
+                    RenderLog.timestamp >= cutoff,
+                    RenderLog.level.in_(["error", "fatal", "critical"])
                 )
 
-                # اگر آخرین دیپلوی منتقل شده مشخص باشه، فقط دیپلوی‌های جدیدتر
-                if service.last_transferred_deploy_id:
-                    # لاگ‌هایی که deploy_id متفاوت دارند یا بعد از آخرین انتقال هستند
-                    service_query = service_query.filter(
-                        RenderLog.deploy_id != service.last_transferred_deploy_id
-                    )
+                if service_ids:
+                    query = query.filter(RenderLog.service_id.in_(service_ids))
 
-                # اگر آخرین دیپلوی سرویس مشخص باشه، فقط لاگ‌های اون دیپلوی
-                if service.last_deploy_id:
-                    service_query = service_query.filter(
-                        RenderLog.deploy_id == service.last_deploy_id
-                    )
+                # فیلتر لاگ‌های منتقل نشده - با fallback
+                try:
+                    query = query.filter(RenderLog.transferred_to_issues == False)
+                except Exception:
+                    pass  # ستون وجود ندارد
 
-                logs = service_query.order_by(RenderLog.timestamp.desc()).limit(50).all()
-                error_logs.extend(logs)
+                error_logs = query.order_by(RenderLog.timestamp.desc()).limit(100).all()
 
-        else:
-            # حالت قدیمی: فیلتر بر اساس زمان
-            cutoff = datetime.utcnow() - timedelta(hours=hours)
+        except Exception as e:
+            slog.error("Error in _get_error_logs", exception=e)
+            # Fallback: گرفتن همه لاگ‌های خطا بدون فیلتر پیچیده
+            try:
+                cutoff = datetime.utcnow() - timedelta(hours=hours)
+                error_logs = db.query(RenderLog).filter(
+                    RenderLog.timestamp >= cutoff,
+                    RenderLog.level.in_(["error", "fatal", "critical"])
+                ).order_by(RenderLog.timestamp.desc()).limit(100).all()
+            except Exception as e2:
+                slog.error("Fallback also failed", exception=e2)
+                error_logs = []
 
-            query = db.query(RenderLog).filter(
-                RenderLog.timestamp >= cutoff,
-                RenderLog.level.in_(["error", "fatal", "critical"])
-            )
-
-            if service_ids:
-                query = query.filter(RenderLog.service_id.in_(service_ids))
-
-            query = query.filter(RenderLog.transferred_to_issues == False)
-            error_logs = query.order_by(RenderLog.timestamp.desc()).limit(100).all()
-
+        slog.info(f"Total error logs found: {len(error_logs)}")
         return error_logs
 
     async def _update_last_transferred_deploy(
@@ -572,6 +635,90 @@ class LogToIssuesService:
                 pass
 
         return {"error": "Could not parse JSON"}
+
+    async def _archive_transferred_logs(
+        self,
+        db: Session,
+        transferred_logs: List[RenderLog],
+        service_project_map: Dict
+    ) -> Dict:
+        """
+        آرشیو کردن لاگ‌های منتقل شده به general_archive پروژه
+
+        Args:
+            db: Session دیتابیس
+            transferred_logs: لاگ‌های منتقل شده
+            service_project_map: نگاشت سرویس به پروژه
+
+        Returns:
+            {"archived_count": int}
+        """
+        import uuid
+
+        archived_count = 0
+        archive_timestamp = datetime.utcnow().isoformat()
+
+        # گروه‌بندی لاگ‌ها بر اساس پروژه
+        project_logs: Dict[str, List] = {}
+        for log in transferred_logs:
+            if log.service_id in service_project_map:
+                project_id = service_project_map[log.service_id]["project_id"]
+                if project_id not in project_logs:
+                    project_logs[project_id] = []
+                project_logs[project_id].append(log)
+
+        # آرشیو کردن برای هر پروژه
+        for project_id, logs in project_logs.items():
+            try:
+                project = db.query(Project).filter(Project.id == project_id).first()
+                if not project:
+                    continue
+
+                # دریافت آرشیو موجود
+                general_archive = []
+                if project.general_archive:
+                    try:
+                        general_archive = json.loads(project.general_archive) if isinstance(project.general_archive, str) else project.general_archive
+                    except:
+                        general_archive = []
+
+                # آرشیو کردن هر لاگ
+                for log in logs:
+                    archive_item = {
+                        "id": str(uuid.uuid4()),
+                        "type": "render_logs",
+                        "category": log.level or "error",
+                        "title": f"خطای Render: {log.service_name or 'unknown'}",
+                        "content": {
+                            "log_id": log.id,
+                            "service_name": log.service_name,
+                            "service_id": log.service_id,
+                            "level": log.level,
+                            "message": log.message,
+                            "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+                            "deploy_id": log.deploy_id
+                        },
+                        "summary": log.message[:200] if log.message else "",
+                        "archived_at": archive_timestamp,
+                        "archived_reason": "transferred_to_issues",
+                        "archived_by": "system",
+                        "metadata": {
+                            "original_created_at": log.timestamp.isoformat() if log.timestamp else archive_timestamp,
+                            "source": "render_logs",
+                            "transfer_status": "completed"
+                        }
+                    }
+                    general_archive.append(archive_item)
+                    archived_count += 1
+
+                # ذخیره آرشیو
+                project.general_archive = json.dumps(general_archive, ensure_ascii=False)
+
+            except Exception as e:
+                slog.error(f"Error archiving logs for project {project_id}", exception=e)
+
+        slog.info(f"Archived {archived_count} logs to general archive")
+        return {"archived_count": archived_count}
 
 
 # =====================================================

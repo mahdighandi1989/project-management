@@ -1013,7 +1013,7 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
           { id: 'settings', label: 'تنظیمات', icon: '+' },
           { id: 'files', label: 'فایل‌ها', icon: '-' },
           { id: 'issues', label: `ایرادات (${issues.filter(i => !i.archived).length})`, icon: '!' },
-          { id: 'archive', label: `بایگانی (${issues.filter(i => i.archived).length})`, icon: '📦' },
+          { id: 'archive', label: `بایگانی (${issues.filter(i => i.archived).length + (generalArchive?.total || 0)})`, icon: '📦' },
           { id: 'validation', label: 'زنجیره اعتبارسنجی', icon: '✓' },
           { id: 'security', label: 'امنیت', icon: '🔒' },
           { id: 'coverage', label: 'پوشش تست', icon: '🧪' },
@@ -1598,6 +1598,11 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
               case 'file_health': return '📁';
               case 'validation': return '✓';
               case 'ideal_state': return '🎯';
+              case 'security_scan': return '🔒';
+              case 'security_scan_full_report': return '🛡️';
+              case 'test_coverage': return '🧪';
+              case 'test_coverage_full_report': return '📋';
+              case 'render_logs': return '📜';
               default: return '📦';
             }
           };
@@ -1610,6 +1615,11 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
               case 'file_health': return 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300';
               case 'validation': return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300';
               case 'ideal_state': return 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300';
+              case 'security_scan': return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300';
+              case 'security_scan_full_report': return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300';
+              case 'test_coverage': return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300';
+              case 'test_coverage_full_report': return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300';
+              case 'render_logs': return 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300';
               default: return 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300';
             }
           };
@@ -1619,13 +1629,41 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
               {/* هدر و دکمه‌ها */}
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <h3 className="font-bold text-lg">بایگانی عمومی</h3>
-                <button
-                  onClick={loadGeneralArchive}
-                  disabled={loadingGeneralArchive}
-                  className="px-3 py-1 bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300 disabled:opacity-50"
-                >
-                  {loadingGeneralArchive ? '...' : '🔄 بروزرسانی'}
-                </button>
+                <div className="flex items-center gap-2">
+                  {/* دکمه‌های دانلود */}
+                  {generalArchive && generalArchive.total > 0 && (
+                    <>
+                      <button
+                        onClick={() => window.open(`${API_BASE}/api/projects/${projectId}/health/general-archive/download?format=json`, '_blank')}
+                        className="px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600"
+                        title="دانلود JSON"
+                      >
+                        📥 JSON
+                      </button>
+                      <button
+                        onClick={() => window.open(`${API_BASE}/api/projects/${projectId}/health/general-archive/download?format=csv`, '_blank')}
+                        className="px-2 py-1 text-xs bg-green-500 text-white rounded hover:bg-green-600"
+                        title="دانلود CSV"
+                      >
+                        📊 CSV
+                      </button>
+                      <button
+                        onClick={() => window.open(`${API_BASE}/api/projects/${projectId}/health/general-archive/download?format=txt`, '_blank')}
+                        className="px-2 py-1 text-xs bg-purple-500 text-white rounded hover:bg-purple-600"
+                        title="دانلود TXT"
+                      >
+                        📄 TXT
+                      </button>
+                    </>
+                  )}
+                  <button
+                    onClick={loadGeneralArchive}
+                    disabled={loadingGeneralArchive}
+                    className="px-3 py-1 bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300 disabled:opacity-50"
+                  >
+                    {loadingGeneralArchive ? '...' : '🔄 بروزرسانی'}
+                  </button>
+                </div>
               </div>
 
               {/* آمار دسته‌بندی */}
@@ -1637,7 +1675,12 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                         type === 'issues' ? 'ایرادات' :
                         type === 'file_health' ? 'سلامت فایل' :
                         type === 'validation' ? 'اعتبارسنجی' :
-                        type === 'ideal_state' ? 'وضعیت ایده‌آل' : type}: {count}
+                        type === 'ideal_state' ? 'وضعیت ایده‌آل' :
+                        type === 'security_scan' ? 'اسکن امنیتی' :
+                        type === 'security_scan_full_report' ? 'گزارش امنیتی' :
+                        type === 'test_coverage' ? 'پوشش تست' :
+                        type === 'test_coverage_full_report' ? 'گزارش پوشش تست' :
+                        type === 'render_logs' ? 'لاگ Render' : type}: {count as number}
                     </span>
                   ))}
                 </div>
