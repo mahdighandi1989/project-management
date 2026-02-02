@@ -8,12 +8,14 @@
 - فیلتر و جستجو
 - تنظیمات polling
 - آرشیو و بازیابی
+- WebSocket برای streaming واقعی
 """
 
 import json
+import uuid
 from datetime import datetime, timedelta
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, and_
@@ -527,6 +529,18 @@ async def update_log_settings(
 
     db.commit()
 
+    # 🆕 به‌روزرسانی scheduler برای auto-transfer
+    try:
+        from ...services.background_scheduler import get_background_scheduler
+        scheduler = get_background_scheduler()
+        await scheduler.update_auto_transfer_settings(
+            enabled=request.auto_transfer_enabled,
+            interval_minutes=request.auto_transfer_interval_minutes,
+            hours_back=request.auto_transfer_hours_back
+        )
+    except Exception as e:
+        slog.warning("Failed to update scheduler", exception=e)
+
     slog.success("Log settings updated",
         polling_interval=request.polling_interval_seconds,
         retention_hours=request.retention_hours,
@@ -870,3 +884,192 @@ async def get_log_stats(
         "error_count": next((c for l, c in level_counts if l == "error"), 0),
         "warning_count": next((c for l, c in level_counts if l == "warn"), 0)
     }
+
+
+# =====================================
+# Scheduler Status Endpoints
+# =====================================
+
+@router.get("/scheduler/status")
+async def get_scheduler_status():
+    """وضعیت scheduler و job های فعال"""
+    try:
+        from ...services.background_scheduler import get_background_scheduler
+        scheduler = get_background_scheduler()
+        return {
+            "success": True,
+            **scheduler.get_jobs_info()
+        }
+    except Exception as e:
+        slog.error("Failed to get scheduler status", exception=e)
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@router.post("/scheduler/trigger-auto-transfer")
+async def trigger_auto_transfer_now():
+    """اجرای فوری auto-transfer"""
+    try:
+        from ...services.background_scheduler import get_background_scheduler
+        scheduler = get_background_scheduler()
+
+        # اجرای مستقیم به جای trigger job
+        result = await scheduler._run_auto_transfer()
+
+        return {
+            "success": True,
+            "message": "Auto-transfer executed",
+            "result": result
+        }
+    except Exception as e:
+        slog.error("Failed to trigger auto-transfer", exception=e)
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+# =====================================
+# WebSocket Endpoints
+# =====================================
+
+@router.websocket("/ws/stream")
+async def websocket_log_stream(websocket: WebSocket):
+    """
+    WebSocket endpoint برای streaming لاگ‌های زنده
+
+    Protocol:
+    1. Client متصل می‌شود
+    2. Client می‌تواند فیلترها را ارسال کند: {"type": "set_filters", "filters": {...}}
+    3. Server لاگ‌های جدید را broadcast می‌کند: {"type": "new_logs", "logs": [...]}
+    4. Client می‌تواند ping ارسال کند: {"type": "ping"}
+    5. Server پاسخ می‌دهد: {"type": "pong"}
+    """
+    from ...services.log_stream_service import get_log_stream_service
+
+    await websocket.accept()
+    client_id = str(uuid.uuid4())
+
+    slog.info("WebSocket client connected", client_id=client_id)
+
+    try:
+        # ثبت کلاینت
+        stream_service = get_log_stream_service()
+        await stream_service.register_client(client_id, websocket)
+
+        # ارسال پیام خوش‌آمدگویی
+        await websocket.send_json({
+            "type": "connected",
+            "client_id": client_id,
+            "message": "Connected to log stream"
+        })
+
+        # حلقه دریافت پیام
+        while True:
+            try:
+                data = await websocket.receive_json()
+                msg_type = data.get("type")
+
+                if msg_type == "set_filters":
+                    # به‌روزرسانی فیلترها
+                    filters = data.get("filters", {})
+                    await stream_service.update_client_filters(client_id, filters)
+                    await websocket.send_json({
+                        "type": "filters_updated",
+                        "filters": filters
+                    })
+
+                elif msg_type == "ping":
+                    await websocket.send_json({"type": "pong"})
+
+                elif msg_type == "start_polling":
+                    await stream_service.start_polling()
+                    await websocket.send_json({
+                        "type": "polling_started"
+                    })
+
+                elif msg_type == "stop_polling":
+                    await stream_service.stop_polling()
+                    await websocket.send_json({
+                        "type": "polling_stopped"
+                    })
+
+            except WebSocketDisconnect:
+                break
+            except Exception as e:
+                slog.warning("WebSocket message error", client_id=client_id, exception=e)
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        slog.error("WebSocket error", client_id=client_id, exception=e)
+    finally:
+        # حذف کلاینت
+        await stream_service.unregister_client(client_id)
+        slog.info("WebSocket client disconnected", client_id=client_id)
+
+
+@router.get("/stream/status")
+async def get_stream_status():
+    """وضعیت سرویس streaming"""
+    from ...services.log_stream_service import get_log_stream_service
+
+    service = get_log_stream_service()
+    return {
+        "success": True,
+        **service.get_status()
+    }
+
+
+@router.post("/stream/start")
+async def start_server_polling():
+    """شروع server-side polling"""
+    from ...services.log_stream_service import get_log_stream_service
+
+    service = get_log_stream_service()
+    await service.start_polling()
+
+    return {
+        "success": True,
+        "message": "Server-side polling started"
+    }
+
+
+@router.post("/stream/stop")
+async def stop_server_polling():
+    """توقف server-side polling"""
+    from ...services.log_stream_service import get_log_stream_service
+
+    service = get_log_stream_service()
+    await service.stop_polling()
+
+    return {
+        "success": True,
+        "message": "Server-side polling stopped"
+    }
+
+
+@router.get("/stream/latest")
+async def get_latest_logs_for_stream(
+    service_ids: Optional[List[str]] = Query(None),
+    levels: Optional[List[str]] = Query(None),
+    limit: int = 100,
+    since_id: Optional[str] = None
+):
+    """
+    دریافت آخرین لاگ‌ها (برای HTTP polling fallback)
+
+    این endpoint برای کلاینت‌هایی است که نمی‌توانند
+    از WebSocket استفاده کنند
+    """
+    from ...services.log_stream_service import get_log_stream_service
+
+    service = get_log_stream_service()
+    return await service.fetch_latest_logs(
+        service_ids=service_ids,
+        levels=levels,
+        limit=limit,
+        since_id=since_id
+    )
