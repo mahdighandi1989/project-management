@@ -115,12 +115,38 @@ async def get_services(
             "last_updated": services[0].updated_at.isoformat() if services and hasattr(services[0], 'updated_at') and services[0].updated_at else None
         }
     except Exception as e:
-        slog.error("Error fetching services from database", exception=e)
-        return {
-            "success": False,
-            "services": [],
-            "error": str(e)
-        }
+        slog.error("Error fetching services from database (ORM)", exception=e)
+        # Fallback: استفاده از raw SQL برای ستون‌های پایه
+        try:
+            from sqlalchemy import text
+            result = db.execute(text("SELECT id, name, type, region, status FROM render_services ORDER BY name"))
+            rows = result.fetchall()
+            return {
+                "success": True,
+                "services": [
+                    {
+                        "id": row[0],
+                        "name": row[1],
+                        "type": row[2],
+                        "region": row[3],
+                        "status": row[4],
+                        "auto_fetch_logs": True,
+                        "log_retention_hours": 48,
+                        "last_deploy_id": None,
+                        "last_transferred_deploy_id": None
+                    }
+                    for row in rows
+                ],
+                "source": "database_raw",
+                "last_updated": None
+            }
+        except Exception as e2:
+            slog.error("Error fetching services from database (raw SQL)", exception=e2)
+            return {
+                "success": False,
+                "services": [],
+                "error": str(e)
+            }
 
 
 @router.post("/services/refresh")
@@ -288,6 +314,7 @@ async def fetch_new_logs(
         errors = []
 
         # تعیین سرویس‌ها
+        services = []
         try:
             if service_id:
                 services = db.query(RenderService).filter(
@@ -299,8 +326,25 @@ async def fetch_new_logs(
                 # فیلتر در پایتون به جای SQL
                 services = [s for s in services if getattr(s, 'auto_fetch_logs', True)]
         except Exception as e:
-            slog.error("Error querying services", exception=e)
-            services = []
+            slog.error("Error querying services (ORM)", exception=e)
+            # Fallback: raw SQL
+            try:
+                from sqlalchemy import text
+                if service_id:
+                    result = db.execute(text("SELECT id, name FROM render_services WHERE id = :sid"), {"sid": service_id})
+                else:
+                    result = db.execute(text("SELECT id, name FROM render_services"))
+                rows = result.fetchall()
+                # ساخت شیء ساده به جای ORM model
+                class SimpleService:
+                    def __init__(self, id, name):
+                        self.id = id
+                        self.name = name
+                        self.auto_fetch_logs = True
+                services = [SimpleService(row[0], row[1]) for row in rows]
+            except Exception as e2:
+                slog.error("Error querying services (raw SQL)", exception=e2)
+                services = []
 
         if not services:
             # اگر سرویسی نبود، اول لیست رو بگیر
@@ -498,33 +542,55 @@ async def search_logs(
 @router.get("/settings")
 async def get_log_settings(db: Session = Depends(get_db)):
     """دریافت تنظیمات لاگ"""
-    settings = db.query(RenderLogSettings).first()
+    try:
+        settings = db.query(RenderLogSettings).first()
 
-    if not settings:
-        # ایجاد تنظیمات پیش‌فرض
-        settings = RenderLogSettings()
-        db.add(settings)
-        db.commit()
-        db.refresh(settings)
+        if not settings:
+            # ایجاد تنظیمات پیش‌فرض
+            settings = RenderLogSettings()
+            db.add(settings)
+            db.commit()
+            db.refresh(settings)
 
-    return {
-        "success": True,
-        "settings": {
-            "polling_interval_seconds": settings.polling_interval_seconds,
-            "polling_enabled": settings.polling_enabled,
-            "retention_hours": settings.retention_hours,
-            "archive_enabled": settings.archive_enabled,
-            "archive_retention_days": settings.archive_retention_days,
-            "default_log_levels": settings.default_log_levels,
-            "auto_scroll": settings.auto_scroll,
-            # تنظیمات انتقال خودکار
-            "auto_transfer_enabled": getattr(settings, 'auto_transfer_enabled', False),
-            "auto_transfer_interval_minutes": getattr(settings, 'auto_transfer_interval_minutes', 30),
-            "auto_transfer_hours_back": getattr(settings, 'auto_transfer_hours_back', 24),
-            "auto_transfer_mode": getattr(settings, 'auto_transfer_mode', 'since_deploy') or 'since_deploy',
-            "last_auto_transfer": settings.last_auto_transfer.isoformat() if getattr(settings, 'last_auto_transfer', None) else None
+        return {
+            "success": True,
+            "settings": {
+                "polling_interval_seconds": settings.polling_interval_seconds,
+                "polling_enabled": settings.polling_enabled,
+                "retention_hours": settings.retention_hours,
+                "archive_enabled": settings.archive_enabled,
+                "archive_retention_days": settings.archive_retention_days,
+                "default_log_levels": settings.default_log_levels,
+                "auto_scroll": settings.auto_scroll,
+                # تنظیمات انتقال خودکار
+                "auto_transfer_enabled": getattr(settings, 'auto_transfer_enabled', False),
+                "auto_transfer_interval_minutes": getattr(settings, 'auto_transfer_interval_minutes', 30),
+                "auto_transfer_hours_back": getattr(settings, 'auto_transfer_hours_back', 24),
+                "auto_transfer_mode": getattr(settings, 'auto_transfer_mode', 'since_deploy') or 'since_deploy',
+                "last_auto_transfer": settings.last_auto_transfer.isoformat() if getattr(settings, 'last_auto_transfer', None) else None
+            }
         }
-    }
+    except Exception as e:
+        slog.error("Error fetching settings (ORM)", exception=e)
+        # Fallback: مقادیر پیش‌فرض
+        return {
+            "success": True,
+            "settings": {
+                "polling_interval_seconds": 10,
+                "polling_enabled": True,
+                "retention_hours": 48,
+                "archive_enabled": True,
+                "archive_retention_days": 30,
+                "default_log_levels": "info,warn,error",
+                "auto_scroll": True,
+                "auto_transfer_enabled": False,
+                "auto_transfer_interval_minutes": 30,
+                "auto_transfer_hours_back": 24,
+                "auto_transfer_mode": "since_deploy",
+                "last_auto_transfer": None
+            },
+            "source": "defaults"
+        }
 
 
 @router.put("/settings")
