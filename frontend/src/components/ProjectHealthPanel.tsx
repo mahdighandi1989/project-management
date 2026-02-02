@@ -200,6 +200,33 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
     }
   }, [activeTab]);
 
+  // لود ایرادات پروژه وقتی تب issues باز شد
+  useEffect(() => {
+    if (activeTab === 'issues' && projectIssues.length === 0 && !loadingProjectIssues) {
+      loadProjectIssues();
+    }
+  }, [activeTab]);
+
+  // تابع بارگذاری ایرادات پروژه
+  const loadProjectIssues = async () => {
+    if (!projectId) return;
+    setLoadingProjectIssues(true);
+    try {
+      const [issuesRes, summaryRes] = await Promise.all([
+        fetch(`${API_BASE}/api/projects/${projectId}/issues`),
+        fetch(`${API_BASE}/api/projects/${projectId}/issues/summary`)
+      ]);
+      const issuesData = await issuesRes.json();
+      const summaryData = await summaryRes.json();
+      if (issuesData.success) setProjectIssues(issuesData.issues || []);
+      if (summaryData.success) setIssuesSummary(summaryData);
+    } catch (err) {
+      console.error('Error loading project issues:', err);
+    } finally {
+      setLoadingProjectIssues(false);
+    }
+  };
+
   const checkAnalysisStatus = async () => {
     if (!projectId) return;
     try {
@@ -1012,7 +1039,7 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
           { id: 'overview', label: 'نمای کلی', icon: '*' },
           { id: 'settings', label: 'تنظیمات', icon: '+' },
           { id: 'files', label: 'فایل‌ها', icon: '-' },
-          { id: 'issues', label: `ایرادات (${issues.filter(i => !i.archived).length})`, icon: '!' },
+          { id: 'issues', label: `ایرادات (${issues.filter(i => !i.archived).length + projectIssues.length})`, icon: '!' },
           { id: 'archive', label: `بایگانی (${issues.filter(i => i.archived).length + (generalArchive?.total || 0)})`, icon: '📦' },
           { id: 'validation', label: 'زنجیره اعتبارسنجی', icon: '✓' },
           { id: 'security', label: 'امنیت', icon: '🔒' },
@@ -2139,13 +2166,15 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                         });
                         const data = await res.json();
                         if (data.success) {
-                          alert(`✅ ${data.transferred} یافته جدید منتقل شد، ${data.merged} ایراد ادغام شد`);
+                          showSuccess(`✅ ${data.transferred} یافته جدید منتقل شد، ${data.merged} ایراد ادغام شد`);
+                          // بروزرسانی ایرادات پروژه
+                          await loadProjectIssues();
                         } else {
-                          alert('❌ خطا در انتقال: ' + (data.error || 'Unknown error'));
+                          showError('خطا در انتقال: ' + (data.error || 'Unknown error'));
                         }
                       } catch (err) {
                         console.error('Transfer error:', err);
-                        alert('❌ خطا در انتقال به ایرادات');
+                        showError('خطا در انتقال به ایرادات');
                       }
                       setTransferringSecurityIssues(false);
                     }}
@@ -2298,13 +2327,15 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                         });
                         const data = await res.json();
                         if (data.success) {
-                          alert(`✅ ${data.transferred} یافته جدید منتقل شد، ${data.merged} ایراد ادغام شد`);
+                          showSuccess(`✅ ${data.transferred} یافته جدید منتقل شد، ${data.merged} ایراد ادغام شد`);
+                          // بروزرسانی ایرادات پروژه
+                          await loadProjectIssues();
                         } else {
-                          alert('❌ خطا در انتقال: ' + (data.error || 'Unknown error'));
+                          showError('خطا در انتقال: ' + (data.error || 'Unknown error'));
                         }
                       } catch (err) {
                         console.error('Transfer error:', err);
-                        alert('❌ خطا در انتقال به ایرادات');
+                        showError('خطا در انتقال به ایرادات');
                       }
                       setTransferringCoverageIssues(false);
                     }}
@@ -2327,28 +2358,13 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
         {activeTab === 'issues' && (
           <div className="space-y-6">
             <div className="flex justify-between items-center">
-              <h3 className="text-lg font-bold">ایرادات پروژه</h3>
+              <h3 className="text-lg font-bold">ایرادات پروژه ({projectIssues.length})</h3>
               <button
-                onClick={async () => {
-                  setLoadingProjectIssues(true);
-                  try {
-                    const [issuesRes, summaryRes] = await Promise.all([
-                      fetch(`${API_BASE}/api/projects/${projectId}/issues`),
-                      fetch(`${API_BASE}/api/projects/${projectId}/issues/summary`)
-                    ]);
-                    const issuesData = await issuesRes.json();
-                    const summaryData = await summaryRes.json();
-                    if (issuesData.success) setProjectIssues(issuesData.issues);
-                    if (summaryData.success) setIssuesSummary(summaryData);
-                  } catch (err) {
-                    console.error('Error loading issues:', err);
-                  }
-                  setLoadingProjectIssues(false);
-                }}
+                onClick={loadProjectIssues}
                 disabled={loadingProjectIssues}
                 className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
               >
-                {loadingProjectIssues ? 'در حال بارگذاری...' : 'بروزرسانی'}
+                {loadingProjectIssues ? 'در حال بارگذاری...' : '🔄 بروزرسانی'}
               </button>
             </div>
 

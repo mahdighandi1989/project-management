@@ -133,6 +133,8 @@ export default function RenderLogsPanel() {
   const [transferring, setTransferring] = useState(false);
   const [transferProgress, setTransferProgress] = useState<TransferProgress | null>(null);
   const [forceTransfer, setForceTransfer] = useState(false);
+  const [transferAbortController, setTransferAbortController] = useState<AbortController | null>(null);
+  const [transferPaused, setTransferPaused] = useState(false);
 
   // Archive State
   const [archives, setArchives] = useState<LogArchive[]>([]);
@@ -521,6 +523,11 @@ export default function RenderLogsPanel() {
   const transferErrorsToIssues = async () => {
     setTransferring(true);
     setTransferProgress(null);
+    setTransferPaused(false);
+
+    // ایجاد AbortController برای امکان لغو
+    const abortController = new AbortController();
+    setTransferAbortController(abortController);
 
     try {
       const params = new URLSearchParams();
@@ -536,6 +543,7 @@ export default function RenderLogsPanel() {
       // استفاده از SSE برای نمایش پیشرفت لحظه‌ای
       const response = await fetch(`${API_BASE}/api/render/transfer-errors-stream?${params}`, {
         method: 'POST',
+        signal: abortController.signal,
       });
 
       if (!response.ok) {
@@ -558,6 +566,12 @@ export default function RenderLogsPanel() {
         const { done, value } = await reader.read();
         if (done) break;
 
+        // بررسی لغو
+        if (abortController.signal.aborted) {
+          reader.cancel();
+          break;
+        }
+
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n\n');
         buffer = lines.pop() || '';
@@ -571,7 +585,9 @@ export default function RenderLogsPanel() {
               if (data.type === 'complete') {
                 const msg = data.message || `✅ ${data.transferred} خطا منتقل شد، ${data.merged} ادغام شد`;
                 showSuccess(msg);
+                // بروزرسانی آمار بعد از اتمام
                 await loadTransferStatus();
+                await loadStats();
               } else if (data.type === 'error') {
                 showError(data.message || 'خطا در انتقال');
               }
@@ -581,13 +597,30 @@ export default function RenderLogsPanel() {
           }
         }
       }
-    } catch (e) {
-      console.error('Error transferring errors:', e);
-      showError('خطا در ارتباط با سرور');
+    } catch (e: any) {
+      if (e.name === 'AbortError') {
+        showSuccess('انتقال متوقف شد');
+        // هنوز آمار را بروزرسانی کن
+        await loadTransferStatus();
+        await loadStats();
+      } else {
+        console.error('Error transferring errors:', e);
+        showError('خطا در ارتباط با سرور');
+      }
     } finally {
       setTransferring(false);
-      // پاک کردن پیشرفت بعد از 3 ثانیه
-      setTimeout(() => setTransferProgress(null), 3000);
+      setTransferAbortController(null);
+      setTransferPaused(false);
+      // پاک کردن پیشرفت بعد از 5 ثانیه (بیشتر برای دیدن نتیجه)
+      setTimeout(() => setTransferProgress(null), 5000);
+    }
+  };
+
+  // توقف انتقال
+  const stopTransfer = () => {
+    if (transferAbortController) {
+      transferAbortController.abort();
+      setTransferAbortController(null);
     }
   };
 
@@ -891,18 +924,28 @@ export default function RenderLogsPanel() {
                   📥 دانلود
                 </button>
                 <div className="flex items-center gap-2">
-                  <button
-                    onClick={transferErrorsToIssues}
-                    disabled={transferring || (!transferStatus?.can_transfer && !forceTransfer)}
-                    className={`px-4 py-2 rounded ${
-                      (transferStatus?.can_transfer || forceTransfer)
-                        ? 'bg-red-500 text-white hover:bg-red-600'
-                        : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                    }`}
-                    title="انتقال خطاها به تب ایرادات پروژه‌ها"
-                  >
-                    {transferring ? '...' : `🚨 انتقال خطاها (${transferStatus?.pending_errors || 0})`}
-                  </button>
+                  {transferring ? (
+                    <button
+                      onClick={stopTransfer}
+                      className="px-4 py-2 rounded bg-orange-500 text-white hover:bg-orange-600"
+                      title="توقف انتقال"
+                    >
+                      ⏹️ توقف
+                    </button>
+                  ) : (
+                    <button
+                      onClick={transferErrorsToIssues}
+                      disabled={!transferStatus?.can_transfer && !forceTransfer}
+                      className={`px-4 py-2 rounded ${
+                        (transferStatus?.can_transfer || forceTransfer)
+                          ? 'bg-red-500 text-white hover:bg-red-600'
+                          : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                      }`}
+                      title="انتقال خطاها به تب ایرادات پروژه‌ها"
+                    >
+                      🚨 انتقال خطاها ({transferStatus?.pending_errors || 0})
+                    </button>
+                  )}
                   <label
                     className="flex items-center gap-1 text-xs text-gray-500 cursor-pointer"
                     title="انتقال مجدد لاگ‌هایی که قبلاً منتقل شده‌اند"
@@ -912,6 +955,7 @@ export default function RenderLogsPanel() {
                       checked={forceTransfer}
                       onChange={(e) => setForceTransfer(e.target.checked)}
                       className="w-3 h-3"
+                      disabled={transferring}
                     />
                     اجباری
                   </label>
