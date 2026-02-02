@@ -389,6 +389,38 @@ class HealthToIssuesService:
                 slog.error(f"[DEBUG] Error processing security finding: {str(e)}", exception=e)
                 errors.append(str(e))
 
+                # Fallback: اضافه کردن یافته بدون AI enhancement
+                try:
+                    fallback_title = finding.get("message", finding.get("type", "یافته امنیتی"))[:200]
+                    fallback_desc = json.dumps(finding, ensure_ascii=False, indent=2)
+
+                    existing = self._find_similar_issue(
+                        db, project_id, fallback_title, "security_scan"
+                    )
+
+                    if existing:
+                        existing.occurrences = (existing.occurrences or 0) + 1
+                        existing.updated_at = datetime.utcnow()
+                        merged += 1
+                    else:
+                        new_issue = ProjectIssue(
+                            project_id=project_id,
+                            title=fallback_title,
+                            description=fallback_desc,
+                            solution="نیاز به بررسی دستی",
+                            priority=self._priority_to_order(finding.get("severity", "medium")),
+                            status="open",
+                            source="security_scan",
+                            source_data=json.dumps(finding, ensure_ascii=False),
+                            occurrences=1,
+                            created_at=datetime.utcnow()
+                        )
+                        db.add(new_issue)
+                        transferred += 1
+                        slog.info(f"[DEBUG] Fallback: added finding without AI enhancement")
+                except Exception as e2:
+                    slog.error(f"[DEBUG] Fallback also failed: {str(e2)}")
+
         db.commit()
 
         # آرشیو کردن یافته‌ها و پاک کردن نتایج اصلی
@@ -535,6 +567,45 @@ class HealthToIssuesService:
             except Exception as e:
                 slog.error(f"[DEBUG] Error processing test coverage finding: {str(e)}", exception=e)
                 errors.append(str(e))
+
+                # Fallback: اضافه کردن یافته بدون AI enhancement
+                try:
+                    finding_type = finding.get("type", "untested_file")
+                    if finding_type == "untested_file":
+                        fallback_title = f"فایل بدون تست: {finding.get('file', 'نامشخص')}"
+                    elif finding_type == "test_recommendation":
+                        fallback_title = finding.get("recommendation", "پیشنهاد تست")[:200]
+                    else:
+                        fallback_title = f"یافته پوشش تست: {finding_type}"
+
+                    fallback_desc = json.dumps(finding, ensure_ascii=False, indent=2)
+
+                    existing = self._find_similar_issue(
+                        db, project_id, fallback_title, "test_coverage"
+                    )
+
+                    if existing:
+                        existing.occurrences = (existing.occurrences or 0) + 1
+                        existing.updated_at = datetime.utcnow()
+                        merged += 1
+                    else:
+                        new_issue = ProjectIssue(
+                            project_id=project_id,
+                            title=fallback_title,
+                            description=fallback_desc,
+                            solution="نیاز به نوشتن تست برای این فایل",
+                            priority=self._priority_to_order(finding.get("priority", "medium")),
+                            status="open",
+                            source="test_coverage",
+                            source_data=json.dumps(finding, ensure_ascii=False),
+                            occurrences=1,
+                            created_at=datetime.utcnow()
+                        )
+                        db.add(new_issue)
+                        transferred += 1
+                        slog.info(f"[DEBUG] Fallback: added test coverage finding without AI enhancement")
+                except Exception as e2:
+                    slog.error(f"[DEBUG] Fallback also failed: {str(e2)}")
 
         db.commit()
 
