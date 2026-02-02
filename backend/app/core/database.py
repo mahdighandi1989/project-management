@@ -293,6 +293,26 @@ def migrate_db():
                 cursor.execute("ALTER TABLE render_log_settings ADD COLUMN last_auto_transfer DATETIME")
                 logger.info("Added 'last_auto_transfer' column to render_log_settings table")
 
+            if "auto_transfer_mode" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN auto_transfer_mode VARCHAR(20) DEFAULT 'since_deploy'")
+                logger.info("Added 'auto_transfer_mode' column to render_log_settings table")
+
+        # Migration برای render_services - ستون‌های دیپلوی
+        if "render_services" in tables:
+            existing_cols = get_columns("render_services")
+
+            if "last_deploy_id" not in existing_cols:
+                cursor.execute("ALTER TABLE render_services ADD COLUMN last_deploy_id VARCHAR(50)")
+                logger.info("Added 'last_deploy_id' column to render_services table")
+
+            if "last_deploy_at" not in existing_cols:
+                cursor.execute("ALTER TABLE render_services ADD COLUMN last_deploy_at DATETIME")
+                logger.info("Added 'last_deploy_at' column to render_services table")
+
+            if "last_transferred_deploy_id" not in existing_cols:
+                cursor.execute("ALTER TABLE render_services ADD COLUMN last_transferred_deploy_id VARCHAR(50)")
+                logger.info("Added 'last_transferred_deploy_id' column to render_services table")
+
         conn.commit()
         logger.info("Database migration completed")
 
