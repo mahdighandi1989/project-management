@@ -34,8 +34,23 @@ interface LogSettings {
   auto_transfer_enabled: boolean;
   auto_transfer_interval_minutes: number;
   auto_transfer_hours_back: number;
-  auto_transfer_mode: 'since_deploy' | 'time_based';
+  auto_transfer_mode: 'since_deploy' | 'time_based' | 'realtime';
   last_auto_transfer?: string;
+}
+
+// Progress interface for SSE transfer
+interface TransferProgress {
+  type: 'start' | 'progress' | 'log_processed' | 'complete' | 'error';
+  total_logs?: number;
+  current?: number;
+  total?: number;
+  status?: string;
+  service?: string;
+  action?: string;
+  transferred?: number;
+  merged?: number;
+  skipped?: number;
+  message?: string;
 }
 
 interface LogStats {
@@ -104,6 +119,8 @@ export default function RenderLogsPanel() {
     can_transfer: boolean;
   } | null>(null);
   const [transferring, setTransferring] = useState(false);
+  const [transferProgress, setTransferProgress] = useState<TransferProgress | null>(null);
+  const [forceTransfer, setForceTransfer] = useState(false);
 
   // Archive State
   const [archives, setArchives] = useState<LogArchive[]>([]);
@@ -491,31 +508,74 @@ export default function RenderLogsPanel() {
 
   const transferErrorsToIssues = async () => {
     setTransferring(true);
+    setTransferProgress(null);
+
     try {
       const params = new URLSearchParams();
       selectedServices.forEach(sid => {
         params.append('service_ids', sid);
       });
       params.append('hours', '24');
+      params.append('mode', settings.auto_transfer_mode || 'since_deploy');
+      if (forceTransfer) {
+        params.append('force', 'true');
+      }
 
-      const res = await fetch(`${API_BASE}/api/render/transfer-errors?${params}`, {
+      // استفاده از SSE برای نمایش پیشرفت لحظه‌ای
+      const response = await fetch(`${API_BASE}/api/render/transfer-errors-stream?${params}`, {
         method: 'POST',
       });
 
-      if (res.ok) {
-        const data = await res.json();
-        const msg = `${data.transferred} خطا منتقل شد، ${data.merged} ادغام شد`;
-        showSuccess(msg);
-        await loadTransferStatus();
-      } else {
-        const err = await res.json();
+      if (!response.ok) {
+        const err = await response.json();
         showError(err.detail || 'خطا در انتقال');
+        return;
+      }
+
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+
+      if (!reader) {
+        showError('خطا در دریافت پاسخ');
+        return;
+      }
+
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data: TransferProgress = JSON.parse(line.slice(6));
+              setTransferProgress(data);
+
+              if (data.type === 'complete') {
+                const msg = data.message || `✅ ${data.transferred} خطا منتقل شد، ${data.merged} ادغام شد`;
+                showSuccess(msg);
+                await loadTransferStatus();
+              } else if (data.type === 'error') {
+                showError(data.message || 'خطا در انتقال');
+              }
+            } catch (e) {
+              console.error('Error parsing SSE data:', e);
+            }
+          }
+        }
       }
     } catch (e) {
       console.error('Error transferring errors:', e);
       showError('خطا در ارتباط با سرور');
     } finally {
       setTransferring(false);
+      // پاک کردن پیشرفت بعد از 3 ثانیه
+      setTimeout(() => setTransferProgress(null), 3000);
     }
   };
 
@@ -818,21 +878,74 @@ export default function RenderLogsPanel() {
                 >
                   📥 دانلود
                 </button>
-                <button
-                  onClick={transferErrorsToIssues}
-                  disabled={transferring || !transferStatus?.can_transfer}
-                  className={`px-4 py-2 rounded ${
-                    transferStatus?.can_transfer
-                      ? 'bg-red-500 text-white hover:bg-red-600'
-                      : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                  }`}
-                  title="انتقال خطاها به تب ایرادات پروژه‌ها"
-                >
-                  {transferring ? '...' : `🚨 انتقال خطاها (${transferStatus?.pending_errors || 0})`}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={transferErrorsToIssues}
+                    disabled={transferring || (!transferStatus?.can_transfer && !forceTransfer)}
+                    className={`px-4 py-2 rounded ${
+                      (transferStatus?.can_transfer || forceTransfer)
+                        ? 'bg-red-500 text-white hover:bg-red-600'
+                        : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                    }`}
+                    title="انتقال خطاها به تب ایرادات پروژه‌ها"
+                  >
+                    {transferring ? '...' : `🚨 انتقال خطاها (${transferStatus?.pending_errors || 0})`}
+                  </button>
+                  <label
+                    className="flex items-center gap-1 text-xs text-gray-500 cursor-pointer"
+                    title="انتقال مجدد لاگ‌هایی که قبلاً منتقل شده‌اند"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={forceTransfer}
+                      onChange={(e) => setForceTransfer(e.target.checked)}
+                      className="w-3 h-3"
+                    />
+                    اجباری
+                  </label>
+                </div>
               </div>
             </div>
           </div>
+
+          {/* نمایش پیشرفت انتقال */}
+          {transferProgress && (
+            <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-4">
+              <div className="flex items-center gap-3">
+                {transferProgress.type === 'complete' ? (
+                  <span className="text-2xl">✅</span>
+                ) : transferProgress.type === 'error' ? (
+                  <span className="text-2xl">❌</span>
+                ) : (
+                  <div className="animate-spin w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full" />
+                )}
+                <div className="flex-1">
+                  <div className="font-medium text-blue-800 dark:text-blue-200">
+                    {transferProgress.status || transferProgress.message || 'در حال پردازش...'}
+                  </div>
+                  {transferProgress.current !== undefined && transferProgress.total !== undefined && (
+                    <div className="mt-2">
+                      <div className="flex justify-between text-sm text-blue-600 dark:text-blue-300 mb-1">
+                        <span>{transferProgress.current} از {transferProgress.total}</span>
+                        <span>{Math.round((transferProgress.current / transferProgress.total) * 100)}%</span>
+                      </div>
+                      <div className="w-full bg-blue-200 dark:bg-blue-800 rounded-full h-2">
+                        <div
+                          className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                          style={{ width: `${(transferProgress.current / transferProgress.total) * 100}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {transferProgress.service && (
+                    <div className="text-sm text-blue-500 dark:text-blue-400 mt-1">
+                      سرویس: {transferProgress.service}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* وضعیت */}
           <div className="flex justify-between items-center text-sm text-gray-500">
@@ -1030,10 +1143,10 @@ export default function RenderLogsPanel() {
               {/* حالت انتقال */}
               <div>
                 <label className="block text-sm font-medium mb-2">حالت انتقال</label>
-                <div className="flex gap-3">
+                <div className="flex gap-2 flex-wrap">
                   <button
                     onClick={() => setSettings(s => ({ ...s, auto_transfer_mode: 'since_deploy' }))}
-                    className={`flex-1 px-4 py-2 rounded-lg text-sm transition ${
+                    className={`flex-1 min-w-[120px] px-3 py-2 rounded-lg text-sm transition ${
                       settings.auto_transfer_mode === 'since_deploy'
                         ? 'bg-red-500 text-white'
                         : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300'
@@ -1044,7 +1157,7 @@ export default function RenderLogsPanel() {
                   </button>
                   <button
                     onClick={() => setSettings(s => ({ ...s, auto_transfer_mode: 'time_based' }))}
-                    className={`flex-1 px-4 py-2 rounded-lg text-sm transition ${
+                    className={`flex-1 min-w-[120px] px-3 py-2 rounded-lg text-sm transition ${
                       settings.auto_transfer_mode === 'time_based'
                         ? 'bg-red-500 text-white'
                         : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300'
@@ -1053,36 +1166,52 @@ export default function RenderLogsPanel() {
                   >
                     ⏰ بازه زمانی
                   </button>
+                  <button
+                    onClick={() => setSettings(s => ({ ...s, auto_transfer_mode: 'realtime' }))}
+                    className={`flex-1 min-w-[120px] px-3 py-2 rounded-lg text-sm transition ${
+                      settings.auto_transfer_mode === 'realtime'
+                        ? 'bg-orange-500 text-white'
+                        : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300'
+                    }`}
+                    disabled={!settings.auto_transfer_enabled}
+                  >
+                    ⚡ لحظه‌ای
+                  </button>
                 </div>
                 <p className="text-xs text-gray-500 mt-1">
                   {settings.auto_transfer_mode === 'since_deploy'
                     ? '✨ خطاهای بعد از آخرین دیپلوی هر سرویس منتقل می‌شوند (پیشنهادی)'
+                    : settings.auto_transfer_mode === 'realtime'
+                    ? '⚡ هر خطا فوراً پس از دریافت منتقل می‌شود (بدون اینتروال)'
                     : 'خطاهای X ساعت گذشته منتقل می‌شوند'}
                 </p>
               </div>
 
-              <div>
-                <label className="block text-sm mb-2">
-                  فاصله بررسی: هر {settings.auto_transfer_interval_minutes} دقیقه
-                </label>
-                <input
-                  type="range"
-                  min="5"
-                  max="120"
-                  step="5"
-                  value={settings.auto_transfer_interval_minutes}
-                  onChange={(e) => setSettings(s => ({
-                    ...s,
-                    auto_transfer_interval_minutes: parseInt(e.target.value)
-                  }))}
-                  className="w-full"
-                  disabled={!settings.auto_transfer_enabled}
-                />
-                <div className="flex justify-between text-xs text-gray-500">
-                  <span>5 دقیقه</span>
-                  <span>2 ساعت</span>
+              {/* فقط در حالت‌های غیر realtime نمایش داده شود */}
+              {settings.auto_transfer_mode !== 'realtime' && (
+                <div>
+                  <label className="block text-sm mb-2">
+                    فاصله بررسی: هر {settings.auto_transfer_interval_minutes} دقیقه
+                  </label>
+                  <input
+                    type="range"
+                    min="5"
+                    max="120"
+                    step="5"
+                    value={settings.auto_transfer_interval_minutes}
+                    onChange={(e) => setSettings(s => ({
+                      ...s,
+                      auto_transfer_interval_minutes: parseInt(e.target.value)
+                    }))}
+                    className="w-full"
+                    disabled={!settings.auto_transfer_enabled}
+                  />
+                  <div className="flex justify-between text-xs text-gray-500">
+                    <span>5 دقیقه</span>
+                    <span>2 ساعت</span>
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* فقط در حالت time_based نمایش داده شود */}
               {settings.auto_transfer_mode === 'time_based' && (

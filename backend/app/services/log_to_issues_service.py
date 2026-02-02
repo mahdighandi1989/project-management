@@ -187,7 +187,8 @@ class LogToIssuesService:
         db: Session,
         service_ids: List[str],
         hours: int,
-        mode: str = "since_deploy"
+        mode: str = "since_deploy",
+        force: bool = False
     ) -> List[RenderLog]:
         """
         دریافت لاگ‌های خطا
@@ -196,8 +197,38 @@ class LogToIssuesService:
             mode:
                 - since_deploy: فقط خطاهای بعد از آخرین دیپلوی هر سرویس
                 - time_based: خطاهای X ساعت اخیر
+            force: اگر True باشد، لاگ‌های قبلاً منتقل شده هم برگردانده می‌شوند
         """
         error_logs = []
+
+        # DEBUG: ابتدا تعداد کل لاگ‌های خطا را بررسی کن (بدون فیلتر transferred)
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        try:
+            total_error_logs = db.query(RenderLog).filter(
+                RenderLog.timestamp >= cutoff,
+                RenderLog.level.in_(["error", "fatal", "critical"])
+            ).count()
+            slog.info(f"[DEBUG-TRANSFER] Total error logs in last {hours} hours: {total_error_logs}")
+
+            # بررسی تعداد لاگ‌های منتقل شده
+            try:
+                transferred_count = db.query(RenderLog).filter(
+                    RenderLog.timestamp >= cutoff,
+                    RenderLog.level.in_(["error", "fatal", "critical"]),
+                    RenderLog.transferred_to_issues == True
+                ).count()
+                slog.info(f"[DEBUG-TRANSFER] Already transferred: {transferred_count}")
+            except Exception as e:
+                slog.warning(f"[DEBUG-TRANSFER] Could not count transferred logs: {e}")
+                transferred_count = 0
+
+            # اگر force=True است، لاگ‌ها را ریست کن برای re-transfer
+            if force and transferred_count > 0:
+                slog.info(f"[DEBUG-TRANSFER] Force mode: resetting {transferred_count} transferred logs")
+
+        except Exception as e:
+            slog.warning(f"[DEBUG-TRANSFER] Could not get total count: {e}")
+            total_error_logs = 0
 
         try:
             if mode == "since_deploy":
@@ -207,6 +238,7 @@ class LogToIssuesService:
                     if service_ids:
                         services_query = services_query.filter(RenderService.id.in_(service_ids))
                     services = services_query.all()
+                    slog.info(f"[DEBUG-TRANSFER] Found {len(services)} services")
                 except Exception as e:
                     slog.warning("Error querying services, using fallback", exception=e)
                     services = []
@@ -219,31 +251,37 @@ class LogToIssuesService:
                             RenderLog.level.in_(["error", "fatal", "critical"])
                         )
 
-                        # فیلتر لاگ‌های منتقل نشده - با fallback
-                        try:
-                            service_query = service_query.filter(
-                                RenderLog.transferred_to_issues == False
-                            )
-                        except Exception:
-                            pass  # ستون وجود ندارد
+                        # DEBUG: تعداد خطاها قبل از فیلتر transferred
+                        service_error_count = service_query.count()
+                        slog.info(f"[DEBUG-TRANSFER] Service {service.name}: {service_error_count} error logs total")
+
+                        # فیلتر لاگ‌های منتقل نشده - مگر اینکه force=True باشد
+                        if not force:
+                            try:
+                                service_query = service_query.filter(
+                                    RenderLog.transferred_to_issues == False
+                                )
+                            except Exception:
+                                pass  # ستون وجود ندارد
 
                         # اگر آخرین دیپلوی منتقل شده مشخص باشه
                         last_transferred = getattr(service, 'last_transferred_deploy_id', None)
                         if last_transferred:
+                            slog.info(f"[DEBUG-TRANSFER] Service {service.name}: filtering out deploy_id={last_transferred}")
                             service_query = service_query.filter(
                                 RenderLog.deploy_id != last_transferred
                             )
 
                         logs = service_query.order_by(RenderLog.timestamp.desc()).limit(50).all()
                         error_logs.extend(logs)
-                        slog.info(f"Found {len(logs)} error logs for service {service.name}")
+                        slog.info(f"[DEBUG-TRANSFER] Service {service.name}: found {len(logs)} untransferred error logs")
 
                     except Exception as e:
                         slog.warning(f"Error querying logs for service {service.id}", exception=e)
 
                 # اگر هیچ لاگی پیدا نشد، fallback به حالت time_based
                 if not error_logs:
-                    slog.info("No logs found in since_deploy mode, falling back to time_based")
+                    slog.info("[DEBUG-TRANSFER] No logs found in since_deploy mode, falling back to time_based")
                     mode = "time_based"
 
             if mode == "time_based" or not error_logs:
@@ -258,13 +296,15 @@ class LogToIssuesService:
                 if service_ids:
                     query = query.filter(RenderLog.service_id.in_(service_ids))
 
-                # فیلتر لاگ‌های منتقل نشده - با fallback
-                try:
-                    query = query.filter(RenderLog.transferred_to_issues == False)
-                except Exception:
-                    pass  # ستون وجود ندارد
+                # فیلتر لاگ‌های منتقل نشده - مگر اینکه force=True باشد
+                if not force:
+                    try:
+                        query = query.filter(RenderLog.transferred_to_issues == False)
+                    except Exception:
+                        pass  # ستون وجود ندارد
 
                 error_logs = query.order_by(RenderLog.timestamp.desc()).limit(100).all()
+                slog.info(f"[DEBUG-TRANSFER] Time-based mode: found {len(error_logs)} error logs (force={force})")
 
         except Exception as e:
             slog.error("Error in _get_error_logs", exception=e)
@@ -275,11 +315,12 @@ class LogToIssuesService:
                     RenderLog.timestamp >= cutoff,
                     RenderLog.level.in_(["error", "fatal", "critical"])
                 ).order_by(RenderLog.timestamp.desc()).limit(100).all()
+                slog.info(f"[DEBUG-TRANSFER] Fallback: found {len(error_logs)} error logs")
             except Exception as e2:
                 slog.error("Fallback also failed", exception=e2)
                 error_logs = []
 
-        slog.info(f"Total error logs found: {len(error_logs)}")
+        slog.info(f"[DEBUG-TRANSFER] Total error logs returned: {len(error_logs)}")
         return error_logs
 
     async def _update_last_transferred_deploy(
