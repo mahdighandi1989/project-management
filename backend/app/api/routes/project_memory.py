@@ -1050,6 +1050,10 @@ class EnhancedProjectChatRequest(BaseModel):
     include_files: bool = True  # شامل محتوای فایل‌ها شود؟
     include_issues: bool = True  # شامل ایرادات شناسایی شده شود؟
     include_health: bool = True  # شامل وضعیت سلامت شود؟
+    include_logs: bool = True  # شامل لاگ‌های سرویس شود؟
+    log_hours: int = 24  # بازه زمانی لاگ‌ها (ساعت)
+    log_levels: List[str] = ["error", "warn"]  # سطوح لاگ
+    max_logs: int = 50  # حداکثر تعداد لاگ
     file_filter: Optional[List[str]] = None  # فیلتر فایل‌ها (فقط این فایل‌ها شامل شوند)
     max_file_content_length: int = 5000  # حداکثر طول محتوای هر فایل
     create_dynamic_fields: bool = False  # تبدیل پاسخ به فیلدهای پویا؟
@@ -1393,9 +1397,57 @@ async def enhanced_project_chat(
     except:
         pass
 
+    # 12. 🆕 اضافه کردن لاگ‌های سرویس Render
+    if request.include_logs:
+        try:
+            from datetime import timedelta
+            from ...models.render_log import RenderLog, RenderService
+
+            # پیدا کردن سرویس‌های مرتبط با پروژه
+            services = db.query(RenderService).all()
+            service_ids = []
+
+            # تلاش برای match کردن سرویس با پروژه
+            project_name_lower = project.name.lower() if project.name else ""
+            github_path = project.github_path.lower() if project.github_path else ""
+
+            for service in services:
+                service_name_lower = service.name.lower() if service.name else ""
+                if (project_name_lower and project_name_lower in service_name_lower) or \
+                   (service_name_lower and service_name_lower in project_name_lower) or \
+                   (github_path and service_name_lower in github_path):
+                    service_ids.append(service.id)
+
+            if service_ids:
+                # دریافت لاگ‌ها
+                cutoff = datetime.utcnow() - timedelta(hours=request.log_hours)
+                logs_query = db.query(RenderLog).filter(
+                    RenderLog.service_id.in_(service_ids),
+                    RenderLog.timestamp >= cutoff,
+                    RenderLog.level.in_(request.log_levels)
+                ).order_by(RenderLog.timestamp.desc()).limit(request.max_logs)
+
+                logs = logs_query.all()
+
+                if logs:
+                    context_parts.append(f"\n## لاگ‌های سرویس ({len(logs)} مورد از {request.log_hours} ساعت اخیر):")
+                    for log in logs:
+                        ts = log.timestamp.strftime("%Y-%m-%d %H:%M") if log.timestamp else "?"
+                        level = (log.level or "?").upper()
+                        service = log.service_name or log.service_id or "?"
+                        msg = (log.message or "")[:300]  # محدود کردن طول پیام
+                        context_parts.append(f"[{ts}] [{level}] [{service}] {msg}")
+
+                    # اضافه کردن آمار خطاها
+                    error_count = sum(1 for l in logs if l.level in ["error", "fatal", "critical"])
+                    warn_count = sum(1 for l in logs if l.level == "warn")
+                    context_parts.append(f"\n📊 آمار: {error_count} خطا، {warn_count} هشدار در {request.log_hours} ساعت اخیر")
+        except Exception as e:
+            context_parts.append(f"\n⚠️ خطا در دریافت لاگ‌ها: {str(e)}")
+
     full_context = "\n".join(context_parts)
 
-    # 12. ساخت system prompt
+    # 13. ساخت system prompt
     system_prompt = f"""تو یک دستیار هوشمند برای تحلیل و بررسی دقیق پروژه هستی.
 
 وظیفه تو:
@@ -1403,11 +1455,14 @@ async def enhanced_project_chat(
 2. یافتن مشکلات واقعی با ارجاع به فایل و خط کد مربوطه
 3. ارائه راه‌حل‌های مشخص و عملی
 4. پاسخ‌های قاطع (نه با شاید و احتمالا) بر اساس آنچه در کد می‌بینی
+5. تحلیل لاگ‌های سرویس و شناسایی الگوهای خطا
 
 هنگام پاسخ‌گویی:
 - اگر مشکلی وجود دارد، دقیقاً بگو کجا و چرا
 - اگر باید اقدامی انجام شود، مشخص کن: فایل، خط، و تغییر لازم
 - اولویت مشکلات را مشخص کن (بحرانی، بالا، متوسط، پایین)
+- در صورت وجود لاگ خطا، علت احتمالی و راه‌حل را ارائه بده
+- الگوهای تکراری در لاگ‌ها را شناسایی کن
 
 {full_context}"""
 
