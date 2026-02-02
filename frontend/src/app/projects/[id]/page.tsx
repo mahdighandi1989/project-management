@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import ProjectHealthPanel from '@/components/ProjectHealthPanel';
+import PromptManager from '@/components/PromptManager';
 import ReactFlow, {
   Node,
   Edge,
@@ -251,6 +252,10 @@ export default function ProjectDetailPage() {
   const [selectedEngineeringModels, setSelectedEngineeringModels] = useState<string[]>(['claude']);
   const [showEngineeringModelSelector, setShowEngineeringModelSelector] = useState(false);
   const [engineeringReportDepth, setEngineeringReportDepth] = useState<'quick' | 'standard' | 'deep'>('standard');
+
+  // 🆕 مدیریت پرامپت‌ها
+  const [showEngineeringPrompts, setShowEngineeringPrompts] = useState(false);
+  const [showAutoSetupPrompts, setShowAutoSetupPrompts] = useState(false);
 
   // Roadmap State (در تب ژورنال)
   const [roadmapContent, setRoadmapContent] = useState<string>('');
@@ -3043,23 +3048,33 @@ export default function ProjectDetailPage() {
                     </li>
                   </ul>
                 </div>
-                <button
-                  onClick={runAutoSetup}
-                  disabled={runningAutoSetup}
-                  className="px-6 py-3 bg-white text-purple-600 rounded-xl font-bold hover:bg-gray-100 disabled:opacity-50 shadow-lg transform hover:scale-105 transition-all flex items-center gap-2"
-                >
-                  {runningAutoSetup ? (
-                    <>
-                      <span className="animate-spin">⚙️</span>
-                      <span>در حال پردازش...</span>
-                    </>
-                  ) : (
-                    <>
-                      <span>✨</span>
-                      <span>راه‌اندازی خودکار</span>
-                    </>
-                  )}
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setShowAutoSetupPrompts(true)}
+                    className="px-4 py-3 bg-white/20 hover:bg-white/30 rounded-xl font-medium text-sm flex items-center gap-2 transition-all"
+                    title="مدیریت پرامپت‌ها"
+                  >
+                    <span>📝</span>
+                    <span>پرامپت‌ها</span>
+                  </button>
+                  <button
+                    onClick={runAutoSetup}
+                    disabled={runningAutoSetup}
+                    className="px-6 py-3 bg-white text-purple-600 rounded-xl font-bold hover:bg-gray-100 disabled:opacity-50 shadow-lg transform hover:scale-105 transition-all flex items-center gap-2"
+                  >
+                    {runningAutoSetup ? (
+                      <>
+                        <span className="animate-spin">⚙️</span>
+                        <span>در حال پردازش...</span>
+                      </>
+                    ) : (
+                      <>
+                        <span>✨</span>
+                        <span>راه‌اندازی خودکار</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
               {runningAutoSetup && (
                 <div className="mt-4 bg-white/10 rounded-lg p-3">
@@ -4461,21 +4476,60 @@ export default function ProjectDetailPage() {
                         </div>
 
                         {/* دکمه‌ها */}
-                        <div className="flex gap-3 justify-end">
+                        <div className="flex gap-3 justify-between">
                           <button
-                            onClick={() => setShowEngineeringModelSelector(false)}
-                            className="px-4 py-2 text-gray-600 hover:text-gray-800 dark:text-gray-400"
+                            onClick={() => {
+                              setShowEngineeringModelSelector(false);
+                              setShowEngineeringPrompts(true);
+                            }}
+                            className="px-4 py-2 text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/30 rounded-lg flex items-center gap-2"
                           >
-                            انصراف
+                            <span>📝</span>
+                            مدیریت پرامپت‌ها
                           </button>
+                          <div className="flex gap-3">
+                            <button
+                              onClick={() => setShowEngineeringModelSelector(false)}
+                              className="px-4 py-2 text-gray-600 hover:text-gray-800 dark:text-gray-400"
+                            >
+                              انصراف
+                            </button>
+                            <button
+                              onClick={() => executeEngineeringReport(7)}
+                              disabled={selectedEngineeringModels.length === 0}
+                              className="px-6 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                            >
+                              <span>🚀</span>
+                              شروع گزارش‌گیری
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 🆕 مدال پرامپت‌های گزارش مهندسی */}
+                  {showEngineeringPrompts && (
+                    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+                      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+                        <div className="sticky top-0 bg-white dark:bg-gray-800 p-4 border-b flex items-center justify-between">
+                          <h3 className="font-bold text-xl flex items-center gap-2">
+                            <span className="text-2xl">📝</span>
+                            پرامپت‌های گزارش مهندسی
+                          </h3>
                           <button
-                            onClick={() => executeEngineeringReport(7)}
-                            disabled={selectedEngineeringModels.length === 0}
-                            className="px-6 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                            onClick={() => setShowEngineeringPrompts(false)}
+                            className="text-gray-500 hover:text-gray-700 text-2xl"
                           >
-                            <span>🚀</span>
-                            شروع گزارش‌گیری
+                            ×
                           </button>
+                        </div>
+                        <div className="p-4">
+                          <PromptManager
+                            category="engineering_report"
+                            projectId={projectId}
+                            showExecutionStatus={true}
+                          />
                         </div>
                       </div>
                     </div>
@@ -5927,6 +5981,33 @@ export default function ProjectDetailPage() {
                   💡 این انتخاب ذخیره میشه و دیگه نیازی به انتخاب مجدد نیست.
                   برای تغییر، از تنظیمات Deploy استفاده کنید.
                 </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 🆕 مدال پرامپت‌های راه‌اندازی خودکار */}
+        {showAutoSetupPrompts && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+              <div className="sticky top-0 bg-white dark:bg-gray-800 p-4 border-b flex items-center justify-between">
+                <h3 className="font-bold text-xl flex items-center gap-2">
+                  <span className="text-2xl">📝</span>
+                  پرامپت‌های راه‌اندازی خودکار
+                </h3>
+                <button
+                  onClick={() => setShowAutoSetupPrompts(false)}
+                  className="text-gray-500 hover:text-gray-700 text-2xl"
+                >
+                  ×
+                </button>
+              </div>
+              <div className="p-4">
+                <PromptManager
+                  category="auto_setup"
+                  projectId={projectId}
+                  showExecutionStatus={true}
+                />
               </div>
             </div>
           </div>
