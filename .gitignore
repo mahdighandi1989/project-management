@@ -46,6 +46,7 @@ htmlcov/
 
 # Data directory (except backend/storage which we want to keep)
 /data/
+backend/data/
 
 # Uploads
 uploads/
