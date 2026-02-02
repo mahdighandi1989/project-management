@@ -337,7 +337,7 @@ def init_db():
     این تابع در startup اپلیکیشن فراخوانی می‌شود
     """
     # Import models تا register شوند
-    from ..models import project, debate, setting, ai_log, ai_profile
+    from ..models import project, debate, setting, ai_log, ai_profile, system_prompt
 
     # اول migration رو اجرا کن (برای جداول موجود)
     migrate_db()
@@ -345,6 +345,9 @@ def init_db():
     # ایجاد جداول جدید (اگر وجود نداشتند)
     Base.metadata.create_all(bind=engine)
     logger.info(f"Database initialized at {DATABASE_PATH}")
+
+    # 🆕 اضافه کردن پرامپت‌های پیش‌فرض سیستم
+    _seed_default_prompts()
 
 
 def get_db_info():
@@ -381,3 +384,594 @@ def get_db_info():
         "tables": tables,
         "record_counts": table_counts
     }
+
+
+def _seed_default_prompts():
+    """
+    اضافه کردن پرامپت‌های پیش‌فرض سیستم
+    این تابع فقط یکبار در اولین اجرا، پرامپت‌های پایه را اضافه می‌کند
+    """
+    import json
+    from ..models.system_prompt import SystemPrompt
+
+    db = SessionLocal()
+    try:
+        # چک کن آیا قبلاً پرامپت‌ها اضافه شده‌اند
+        existing_count = db.query(SystemPrompt).filter(SystemPrompt.is_default == True).count()
+        if existing_count > 0:
+            logger.info(f"📝 System prompts already seeded ({existing_count} default prompts)")
+            return
+
+        logger.info("🌱 Seeding default system prompts...")
+
+        # =====================================================
+        # 🩺 پرامپت‌های تحلیل سلامت (Health Analysis)
+        # =====================================================
+        health_prompts = [
+            {
+                "id": "health_micro_analysis",
+                "name": "تحلیل جزئی فایل (Micro Analysis)",
+                "description": "بررسی دقیق هر فایل به صورت جداگانه - کیفیت کد، امنیت، کارایی",
+                "category": "health_analysis",
+                "prompt_type": "instruction",
+                "execution_order": 1,
+                "is_required": True,
+                "content": """# تحلیل جزئی فایل (Micro Analysis)
+
+## فایل: {file_path}
+## نوع فایل: {file_type}
+
+## دستورات:
+{instruction}
+
+## محتوای فایل:
+```
+{content}
+```
+
+## وظیفه تو:
+1. **بررسی کامل کد**: هر خط را بررسی کن (نه خلاصه!)
+2. **شناسایی مشکلات**: باگ‌ها، آسیب‌پذیری‌ها، کد بد
+3. **بررسی کیفیت**: نام‌گذاری، ساختار، خوانایی
+4. **تطبیق با نقشه‌راه**: آیا این فایل با نقشه‌راه همخوانی دارد؟
+5. **نمره‌دهی دقیق**: برای هر فاکتور نمره 0-100 بده
+
+## فرمت خروجی (JSON):
+```json
+{
+    "scores": {
+        "code_quality": 0-100,
+        "documentation": 0-100,
+        "roadmap_compliance": 0-100,
+        "security": 0-100,
+        "efficiency": 0-100,
+        "standards_compliance": 0-100
+    },
+    "issues": [
+        {
+            "line": شماره خط,
+            "severity": "critical|high|medium|low",
+            "type": "bug|security|quality|performance",
+            "message": "توضیح مشکل",
+            "suggestion": "پیشنهاد رفع"
+        }
+    ],
+    "summary": "خلاصه یک خطی وضعیت فایل",
+    "strengths": ["نقاط قوت"],
+    "weaknesses": ["نقاط ضعف"]
+}
+```
+
+مهم: فقط JSON برگردان، بدون توضیح اضافی!""",
+                "variables": json.dumps({
+                    "file_path": "مسیر فایل",
+                    "file_type": "نوع فایل (python, javascript, etc.)",
+                    "instruction": "دستورات تحلیل",
+                    "content": "محتوای فایل"
+                }, ensure_ascii=False),
+                "metadata_json": json.dumps({
+                    "output_format": "json",
+                    "min_tokens": 500,
+                    "max_tokens": 4000,
+                    "tags": ["analysis", "file", "quality"]
+                }, ensure_ascii=False)
+            },
+            {
+                "id": "health_macro_analysis",
+                "name": "تحلیل کلی پروژه (Macro Analysis)",
+                "description": "بررسی همکاری و جایگاه فایل‌ها در کل پروژه",
+                "category": "health_analysis",
+                "prompt_type": "instruction",
+                "execution_order": 2,
+                "is_required": True,
+                "content": """# تحلیل کلی پروژه (Macro Analysis)
+
+## دستورات:
+{instruction}
+
+## نمای کلی پروژه:
+{project_overview}
+
+## نقشه‌راه پروژه:
+{roadmap_content}
+
+## README پروژه:
+{readme_content}
+
+## وظیفه تو:
+1. **همکاری فایل‌ها**: آیا فایل‌ها با هم به درستی کار می‌کنند؟
+2. **جایگاه فایل‌ها**: آیا هر فایل در جای درست قرار دارد؟
+3. **تطبیق با نقشه‌راه**: پروژه چقدر با نقشه‌راه مطابقت دارد؟
+4. **تطبیق با README**: آیا README دقیق است؟
+5. **نیازها و کمبودها**: چه چیزهایی کم است؟
+
+## فرمت خروجی (JSON):
+```json
+{
+    "cooperation_scores": {
+        "فایل1": {"score": 0-100, "issues": [], "cooperates_well_with": [], "conflicts_with": []}
+    },
+    "roadmap_compliance": {
+        "overall_score": 0-100,
+        "completed_items": [],
+        "missing_items": []
+    },
+    "project_needs": {
+        "missing_files": ["فایل‌هایی که باید ایجاد شوند"],
+        "files_to_remove": ["فایل‌های اضافی"]
+    },
+    "overall_health": 0-100,
+    "summary": "خلاصه وضعیت کلی"
+}
+```
+
+مهم: فقط JSON برگردان!""",
+                "variables": json.dumps({
+                    "instruction": "دستورات تحلیل",
+                    "project_overview": "نمای کلی پروژه",
+                    "roadmap_content": "محتوای نقشه‌راه",
+                    "readme_content": "محتوای README"
+                }, ensure_ascii=False),
+                "metadata_json": json.dumps({
+                    "output_format": "json",
+                    "min_tokens": 1000,
+                    "max_tokens": 6000,
+                    "tags": ["analysis", "project", "macro"]
+                }, ensure_ascii=False)
+            },
+            {
+                "id": "health_structural_analysis",
+                "name": "تحلیل ساختاری (Structural Analysis)",
+                "description": "بررسی سیم‌کشی، وابستگی‌ها و معماری پروژه",
+                "category": "health_analysis",
+                "prompt_type": "instruction",
+                "execution_order": 3,
+                "is_required": True,
+                "content": """# تحلیل ساختاری پروژه (Structural Analysis)
+
+## دستورات:
+{instruction}
+
+## لیست فایل‌ها:
+{file_list}
+
+## گراف وابستگی‌ها:
+{dependency_graph}
+
+## خلاصه تحلیل جزئی (Micro):
+{micro_summary}
+
+## خلاصه تحلیل کلی (Macro):
+{macro_summary}
+
+## وظیفه تو:
+1. **سیم‌کشی**: آیا import ها و وابستگی‌ها درست هستند؟
+2. **معماری**: آیا ساختار پروژه منطقی است؟
+3. **circular dependencies**: آیا وابستگی دایره‌ای وجود دارد؟
+4. **کمبودها**: چه فایل‌هایی باید ایجاد شوند؟
+5. **اضافات**: چه فایل‌هایی اضافی هستند؟
+6. **حالت ایده‌آل**: ساختار ایده‌آل چیست؟
+
+## فرمت خروجی (JSON):
+```json
+{
+    "architecture": {
+        "type": "monolith|microservice|modular|...",
+        "score": 0-100,
+        "issues": []
+    },
+    "circular_dependencies": [
+        {"files": ["فایل1", "فایل2"], "severity": "high|medium|low"}
+    ],
+    "missing_files": [
+        {"path": "مسیر پیشنهادی", "purpose": "هدف", "priority": "high|medium|low"}
+    ],
+    "ideal_structure": {
+        "description": "توضیح ساختار ایده‌آل",
+        "components": [],
+        "roadmap_to_ideal": []
+    },
+    "overall_score": 0-100,
+    "summary": "خلاصه وضعیت ساختار"
+}
+```
+
+مهم: فقط JSON برگردان!""",
+                "variables": json.dumps({
+                    "instruction": "دستورات تحلیل",
+                    "file_list": "لیست فایل‌ها",
+                    "dependency_graph": "گراف وابستگی‌ها",
+                    "micro_summary": "خلاصه تحلیل جزئی",
+                    "macro_summary": "خلاصه تحلیل کلی"
+                }, ensure_ascii=False),
+                "metadata_json": json.dumps({
+                    "output_format": "json",
+                    "min_tokens": 1000,
+                    "max_tokens": 6000,
+                    "tags": ["analysis", "structure", "architecture"]
+                }, ensure_ascii=False)
+            }
+        ]
+
+        # =====================================================
+        # 📊 پرامپت‌های گزارش مهندسی (Engineering Report)
+        # =====================================================
+        engineering_prompts = [
+            {
+                "id": "eng_system_prompt",
+                "name": "دستورات سیستمی گزارش مهندسی",
+                "description": "دستورات اصلی برای تولید گزارش مهندسی جامع",
+                "category": "engineering_report",
+                "prompt_type": "system",
+                "execution_order": 1,
+                "is_required": True,
+                "content": """تو یک مهندس ارشد نرم‌افزار هستی که باید یک گزارش مهندسی جامع و حرفه‌ای تولید کنی.
+
+🔴 وظایف اصلی:
+1. اعتبارسنجی health analysis - هر ایراد را بررسی و تایید/رد کن
+2. بررسی فیلدهای PENDING - تایید، رد یا ادغام کن
+3. بررسی نقشه راه - آیتم‌های انجام شده و نشده
+4. تولید فیلدهای عملیاتی برای مشکلات
+
+📝 ساختار خروجی JSON:
+- executive_summary: خلاصه مدیریتی
+- project_health: نمره و وضعیت سلامت
+- technical_analysis: نقاط قوت و ضعف
+- bugs_and_issues: باگ‌ها و مشکلات
+- security_review: بررسی امنیتی
+- recommendations: توصیه‌ها
+- field_management: مدیریت فیلدها
+- roadmap: نقشه راه فوری/کوتاه‌مدت/بلندمدت
+- health_analysis_validation: اعتبارسنجی ایرادات
+
+⚠️ نکات مهم:
+- فیلدهای display ایجاد نکن - فقط github_commit/github_multi_commit
+- target_path حتماً باید مسیر فایل هدف باشد
+- توضیحات باید کامل باشد تا AI بتواند کد تولید کند
+- priority از 1 (بالاترین) تا 10 (پایین‌ترین)""",
+                "variables": json.dumps({}, ensure_ascii=False),
+                "metadata_json": json.dumps({
+                    "output_format": "json",
+                    "min_tokens": 2000,
+                    "max_tokens": 8000,
+                    "tags": ["engineering", "report", "system"]
+                }, ensure_ascii=False)
+            },
+            {
+                "id": "eng_validation_prompt",
+                "name": "اعتبارسنجی ایرادات سلامت",
+                "description": "بررسی و تایید/رد ایرادات شناسایی شده در health analysis",
+                "category": "engineering_report",
+                "prompt_type": "instruction",
+                "execution_order": 2,
+                "is_required": True,
+                "content": """🔴 اعتبارسنجی health analysis (بسیار مهم):
+
+## ایرادات شناسایی شده:
+{health_issues}
+
+## کد مربوطه:
+{related_code}
+
+## وظیفه:
+- تمام ایرادات ارسال شده را یک به یک بررسی کن
+- با نگاه به کد واقعی، مشخص کن آیا هر ایراد معتبر است یا نه
+- ایرادات معتبر را در validated_issues با create_field=true قرار بده
+- ایرادات نامعتبر را در rejected_issues با دلیل دقیق رد شدن قرار بده
+- validation_score از 0-100: بالای 70 = معتبر، زیر 30 = رد شده
+
+## فرمت خروجی:
+```json
+{
+    "health_analysis_validation": {
+        "total_reviewed": 15,
+        "validated_issues": [
+            {
+                "original_issue": {"file": "path", "type": "security", "message": "..."},
+                "validation_score": 95,
+                "validation_note": "این ایراد تایید می‌شود چون...",
+                "priority": "high",
+                "create_field": true
+            }
+        ],
+        "rejected_issues": [
+            {
+                "original_issue": {"file": "path", "type": "unused", "message": "..."},
+                "rejection_reason": "دلیل رد شدن",
+                "validation_score": 20
+            }
+        ],
+        "validation_summary": "خلاصه اعتبارسنجی"
+    }
+}
+```""",
+                "variables": json.dumps({
+                    "health_issues": "لیست ایرادات از health analysis",
+                    "related_code": "کد مربوطه برای بررسی"
+                }, ensure_ascii=False),
+                "metadata_json": json.dumps({
+                    "output_format": "json",
+                    "tags": ["validation", "health", "issues"]
+                }, ensure_ascii=False)
+            },
+            {
+                "id": "eng_field_management",
+                "name": "مدیریت فیلدهای پویا",
+                "description": "بررسی و مدیریت فیلدهای PENDING - تایید، رد، ادغام",
+                "category": "engineering_report",
+                "prompt_type": "instruction",
+                "execution_order": 3,
+                "is_required": True,
+                "content": """🔴 مدیریت فیلدهای PENDING (بسیار مهم):
+
+## فیلدهای PENDING:
+{pending_fields}
+
+## فیلدهای موجود (تایید شده):
+{approved_fields}
+
+## فیلدهای بایگانی شده:
+{archived_fields}
+
+## وظیفه:
+1. هر فیلد pending را بررسی کن
+2. اگر لازم است: id را در fields_to_approve قرار بده
+3. اگر غیرضروری/تکراری: id را در fields_to_reject قرار بده
+4. اگر قابل ادغام با فیلد دیگر: در fields_to_merge قرار بده
+5. اگر نیاز به به‌روزرسانی: در fields_to_update قرار بده
+
+## فرمت خروجی:
+```json
+{
+    "field_management": {
+        "fields_to_archive": ["id_فیلدهایی که انجام شده"],
+        "fields_to_approve": ["id_فیلدهای pending که تایید می‌شوند"],
+        "fields_to_reject": ["id_فیلدهای pending که رد می‌شوند"],
+        "fields_to_merge": [
+            {"source_ids": ["id1", "id2"], "merged_name": "نام جدید", "merged_value": "دستور ادغام‌شده"}
+        ],
+        "fields_to_update": [
+            {"id": "id_فیلد", "new_value": "دستور جدید", "new_priority": 3}
+        ]
+    }
+}
+```""",
+                "variables": json.dumps({
+                    "pending_fields": "فیلدهای در انتظار تایید",
+                    "approved_fields": "فیلدهای تایید شده",
+                    "archived_fields": "فیلدهای بایگانی شده"
+                }, ensure_ascii=False),
+                "metadata_json": json.dumps({
+                    "output_format": "json",
+                    "tags": ["fields", "management", "approval"]
+                }, ensure_ascii=False)
+            }
+        ]
+
+        # =====================================================
+        # 🚀 پرامپت‌های راه‌اندازی خودکار (Auto Setup)
+        # =====================================================
+        auto_setup_prompts = [
+            {
+                "id": "auto_setup_main",
+                "name": "راه‌اندازی خودکار پروژه",
+                "description": "تحلیل پروژه و تولید فیلدهای پویا و دستورات AI",
+                "category": "auto_setup",
+                "prompt_type": "instruction",
+                "execution_order": 1,
+                "is_required": True,
+                "content": """تو یک معمار نرم‌افزار و DevOps متخصص هستی. این پروژه را تحلیل کن و دستورات دقیق و اختصاصی برای کار با AI تولید کن.
+
+## اطلاعات پروژه
+- **نام**: {project_name}
+- **توضیحات**: {project_description}
+- **زبان اصلی**: {language}
+- **فریم‌ورک‌ها**: {frameworks}
+- **معماری**: {architecture}
+
+## فایل‌های موجود در پروژه
+{file_list}
+
+## وظیفه تو
+بر اساس تحلیل دقیق این پروژه، یک JSON با این ساختار برگردان:
+
+```json
+{
+    "memory_instructions": "محتوای باکس حافظه (حداقل 1000 کاراکتر)",
+    "fields_to_archive": ["id_فیلد_1"],
+    "fields_to_merge": [
+        {"source_ids": ["id1", "id2"], "merged_name": "نام", "merged_value": "دستور"}
+    ],
+    "dynamic_fields": [
+        {
+            "name": "نام فیلد (فارسی)",
+            "value": "دستور دقیق برای AI",
+            "why": "چرا این فیلد مهمه",
+            "recommended_model": "claude|openai|deepseek",
+            "action_type": "display|github_commit|github_multi_commit",
+            "target_path": "مسیر فایل",
+            "archive_after_run": true/false,
+            "priority": 1-10,
+            "field_type": "permanent|temporary"
+        }
+    ],
+    "missing_files": [
+        {"path": "مسیر", "description": "توضیح", "priority": "high|medium|low"}
+    ],
+    "project_summary": "خلاصه 3-5 خطی",
+    "key_recommendations": ["توصیه 1", "توصیه 2"]
+}
+```
+
+## نکات مهم:
+- حداقل 2 و حداکثر 6 فیلد پویای جدید تعریف کن
+- فیلدهای تکراری ایجاد نکن
+- priority از 1 (بالاترین) تا 10 (پایین‌ترین)
+- field_type: permanent برای دائمی، temporary برای یکبار مصرف""",
+                "variables": json.dumps({
+                    "project_name": "نام پروژه",
+                    "project_description": "توضیحات پروژه",
+                    "language": "زبان برنامه‌نویسی",
+                    "frameworks": "فریم‌ورک‌ها",
+                    "architecture": "معماری",
+                    "file_list": "لیست فایل‌ها"
+                }, ensure_ascii=False),
+                "metadata_json": json.dumps({
+                    "output_format": "json",
+                    "min_tokens": 1500,
+                    "max_tokens": 6000,
+                    "tags": ["setup", "fields", "memory"]
+                }, ensure_ascii=False)
+            },
+            {
+                "id": "auto_setup_roadmap",
+                "name": "ایجاد/ارتقای نقشه‌راه",
+                "description": "مدیریت و به‌روزرسانی نقشه‌راه پروژه",
+                "category": "auto_setup",
+                "prompt_type": "instruction",
+                "execution_order": 2,
+                "is_required": False,
+                "content": """# مدیریت نقشه‌راه پروژه
+
+## پروژه: {project_name}
+
+## وضعیت فعلی:
+{current_state}
+
+## ایرادات شناسایی شده:
+{issues_found}
+
+## حالت ایده‌آل:
+{ideal_state}
+
+## نقشه‌راه موجود:
+{existing_roadmap}
+
+## وظیفه:
+{task_type}
+
+یک نقشه‌راه کامل و حرفه‌ای به زبان فارسی بنویس که شامل:
+1. اهداف کوتاه‌مدت و بلندمدت
+2. فازهای توسعه با جزئیات
+3. باگ‌ها و مشکلاتی که باید رفع شوند
+4. قابلیت‌های جدید پیشنهادی
+5. زمان‌بندی تقریبی
+
+فقط محتوای Markdown نقشه‌راه را برگردان.""",
+                "variables": json.dumps({
+                    "project_name": "نام پروژه",
+                    "current_state": "وضعیت فعلی",
+                    "issues_found": "ایرادات شناسایی شده",
+                    "ideal_state": "حالت ایده‌آل",
+                    "existing_roadmap": "نقشه‌راه موجود",
+                    "task_type": "ایجاد جدید یا ارتقا"
+                }, ensure_ascii=False),
+                "metadata_json": json.dumps({
+                    "output_format": "markdown",
+                    "tags": ["roadmap", "planning"]
+                }, ensure_ascii=False)
+            },
+            {
+                "id": "auto_setup_readme",
+                "name": "ایجاد/ارتقای README",
+                "description": "مدیریت و به‌روزرسانی فایل README پروژه",
+                "category": "auto_setup",
+                "prompt_type": "instruction",
+                "execution_order": 3,
+                "is_required": False,
+                "content": """# مدیریت README پروژه
+
+## پروژه: {project_name}
+## توضیحات: {project_description}
+
+## اطلاعات فنی:
+- زبان: {language}
+- فریم‌ورک‌ها: {frameworks}
+- معماری: {architecture}
+- وابستگی‌ها: {dependencies}
+
+## README موجود:
+{existing_readme}
+
+## نقشه‌راه:
+{roadmap_content}
+
+## وظیفه:
+{task_type}
+
+یک README کامل و حرفه‌ای به زبان فارسی بنویس که شامل:
+1. معرفی پروژه
+2. ویژگی‌ها و قابلیت‌ها
+3. نیازمندی‌ها و نحوه نصب
+4. نحوه استفاده
+5. ساختار پروژه
+6. مشارکت در توسعه
+
+فقط محتوای Markdown README را برگردان.""",
+                "variables": json.dumps({
+                    "project_name": "نام پروژه",
+                    "project_description": "توضیحات",
+                    "language": "زبان",
+                    "frameworks": "فریم‌ورک‌ها",
+                    "architecture": "معماری",
+                    "dependencies": "وابستگی‌ها",
+                    "existing_readme": "README موجود",
+                    "roadmap_content": "محتوای نقشه‌راه",
+                    "task_type": "ایجاد جدید یا ارتقا"
+                }, ensure_ascii=False),
+                "metadata_json": json.dumps({
+                    "output_format": "markdown",
+                    "tags": ["readme", "documentation"]
+                }, ensure_ascii=False)
+            }
+        ]
+
+        # ذخیره همه پرامپت‌ها
+        all_prompts = health_prompts + engineering_prompts + auto_setup_prompts
+
+        for prompt_data in all_prompts:
+            prompt = SystemPrompt(
+                id=prompt_data["id"],
+                name=prompt_data["name"],
+                description=prompt_data.get("description", ""),
+                category=prompt_data["category"],
+                prompt_type=prompt_data.get("prompt_type", "instruction"),
+                execution_order=prompt_data.get("execution_order", 1),
+                is_required=prompt_data.get("is_required", True),
+                content=prompt_data["content"],
+                variables=prompt_data.get("variables"),
+                metadata_json=prompt_data.get("metadata_json"),
+                is_active=True,
+                is_default=True,
+                is_locked=True  # پرامپت‌های پیش‌فرض قفل هستند (قابل حذف نیستند)
+            )
+            db.add(prompt)
+
+        db.commit()
+        logger.info(f"✅ Seeded {len(all_prompts)} default system prompts")
+
+    except Exception as e:
+        logger.error(f"❌ Error seeding default prompts: {e}")
+        db.rollback()
+    finally:
+        db.close()

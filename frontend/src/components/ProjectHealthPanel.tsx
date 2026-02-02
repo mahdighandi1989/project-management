@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import HealthDiagram from './HealthDiagram';
+import PromptManager from './PromptManager';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -64,7 +65,7 @@ interface Props {
 }
 
 export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'settings' | 'files' | 'issues' | 'archive' | 'validation' | 'security' | 'coverage'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'settings' | 'files' | 'issues' | 'archive' | 'validation' | 'security' | 'coverage' | 'prompts'>('overview');
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
 
@@ -1044,6 +1045,7 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
           { id: 'validation', label: 'زنجیره اعتبارسنجی', icon: '✓' },
           { id: 'security', label: 'امنیت', icon: '🔒' },
           { id: 'coverage', label: 'پوشش تست', icon: '🧪' },
+          { id: 'prompts', label: 'پرامپت‌ها', icon: '📝' },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -2485,6 +2487,24 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                 </div>
               ))}
             </div>
+          </div>
+        )}
+
+        {/* 🆕 تب پرامپت‌ها - مدیریت پرامپت‌های تحلیل سلامت */}
+        {activeTab === 'prompts' && (
+          <div className="space-y-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold">مدیریت پرامپت‌های تحلیل سلامت</h3>
+              <p className="text-sm text-gray-500">
+                پرامپت‌های زیر در تحلیل سلامت فایل‌ها و پروژه استفاده می‌شوند
+              </p>
+            </div>
+
+            <PromptManager
+              category="health_analysis"
+              projectId={projectId}
+              showExecutionStatus={true}
+            />
           </div>
         )}
       </div>
