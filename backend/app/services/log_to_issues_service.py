@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from ..core.database import SessionLocal
 from ..core.logging_utils import StructuredLogger
-from ..models.project import Project
+from ..models.project import Project, ProjectIssue
 from ..models.render_log import RenderLog, RenderService
 from .ai_manager import get_ai_manager
 from .ai_base import Message
@@ -502,41 +502,48 @@ class LogToIssuesService:
         # 2. تحلیل AI برای توضیح خطا
         ai_analysis = await self._analyze_error_with_ai(log, project)
 
-        # 3. دریافت ایرادات موجود
-        issues = []
-        try:
-            if project.issues_found:
-                issues = json.loads(project.issues_found)
-        except:
-            issues = []
-
-        # 4. جستجوی ایراد مشابه
-        similar_issue = self._find_similar_issue(
+        # 3. جستجوی ایراد مشابه در جدول ProjectIssue
+        existing_issue = self._find_similar_issue_in_db(
+            db,
+            project_id,
             log.message,
-            ai_analysis.get("error_type", ""),
-            issues
+            ai_analysis.get("error_type", "")
         )
 
-        if similar_issue is not None:
+        if existing_issue:
             # ادغام با ایراد موجود
-            merged_issue = self._merge_with_existing(
-                issues[similar_issue],
-                log,
-                ai_analysis
-            )
-            issues[similar_issue] = merged_issue
+            existing_issue.occurrences = (existing_issue.occurrences or 0) + 1
+            existing_issue.updated_at = datetime.utcnow()
+            # اضافه کردن اطلاعات جدید به description
+            existing_issue.description = ai_analysis.get("explanation", existing_issue.description)
             result["status"] = "merged"
-            result["issue_index"] = similar_issue
-
+            result["issue_index"] = existing_issue.id
         else:
-            # ایجاد ایراد جدید
-            new_issue = self._create_new_issue(log, ai_analysis, mapping)
-            issues.append(new_issue)
+            # ایجاد ایراد جدید در جدول ProjectIssue
+            priority_map = {"high": 2, "medium": 3, "low": 4, "critical": 1}
+            new_issue = ProjectIssue(
+                project_id=project_id,
+                title=ai_analysis.get("error_type", "خطای Render")[:200] or log.message[:200],
+                description=ai_analysis.get("explanation", log.message),
+                solution=ai_analysis.get("suggested_fix", "بررسی لاگ کامل"),
+                priority=priority_map.get(ai_analysis.get("priority", "medium"), 3),
+                status="open",
+                source="render_logs",
+                source_data=json.dumps({
+                    "log_id": log.id,
+                    "service_name": log.service_name,
+                    "service_id": log.service_id,
+                    "message": log.message,
+                    "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+                    "deploy_id": log.deploy_id,
+                    "ai_analysis": ai_analysis
+                }, ensure_ascii=False),
+                occurrences=1,
+                created_at=datetime.utcnow()
+            )
+            db.add(new_issue)
             result["status"] = "transferred"
-            result["issue_index"] = len(issues) - 1
-
-        # 5. ذخیره ایرادات
-        project.issues_found = json.dumps(issues, ensure_ascii=False)
+            result["issue_index"] = "new"
 
         # علامت‌گذاری لاگ به عنوان منتقل شده
         log.transferred_to_issues = True
@@ -623,6 +630,39 @@ class LogToIssuesService:
                 "search_keywords": []
             }
 
+    def _find_similar_issue_in_db(
+        self,
+        db: Session,
+        project_id: str,
+        error_message: str,
+        error_type: str
+    ) -> Optional[ProjectIssue]:
+        """
+        جستجوی ایراد مشابه در جدول ProjectIssue
+
+        Returns:
+            ProjectIssue موجود یا None
+        """
+        # جستجوی ایرادات render_logs برای این پروژه
+        existing_issues = db.query(ProjectIssue).filter(
+            ProjectIssue.project_id == project_id,
+            ProjectIssue.source == "render_logs",
+            ProjectIssue.status != "resolved"
+        ).all()
+
+        for issue in existing_issues:
+            # بررسی نوع خطا در عنوان
+            if error_type and error_type in (issue.title or ""):
+                return issue
+
+            # بررسی تشابه پیام
+            if self._messages_similar(error_message, issue.title or ""):
+                return issue
+            if self._messages_similar(error_message, issue.description or ""):
+                return issue
+
+        return None
+
     def _find_similar_issue(
         self,
         error_message: str,
@@ -630,7 +670,7 @@ class LogToIssuesService:
         existing_issues: List[Dict]
     ) -> Optional[int]:
         """
-        جستجوی ایراد مشابه
+        جستجوی ایراد مشابه (متد قدیمی - برای backward compatibility)
 
         Returns:
             index ایراد مشابه یا None
