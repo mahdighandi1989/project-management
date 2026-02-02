@@ -180,17 +180,19 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
 
   // شروع polling خودکار وقتی تحلیل در حال اجراست
   useEffect(() => {
+    let interval: NodeJS.Timeout | null = null;
+
     if (progressData?.status === 'running') {
-      if (!pollingInterval) {
-        const interval = setInterval(pollProgress, 2000); // هر 2 ثانیه
-        setPollingIntervalState(interval);
-      }
-    } else {
-      if (pollingInterval) {
-        clearInterval(pollingInterval);
-        setPollingIntervalState(null);
-      }
+      interval = setInterval(pollProgress, 2000); // هر 2 ثانیه
+      setPollingIntervalState(interval);
     }
+
+    // Cleanup: همیشه interval قبلی رو پاک کن
+    return () => {
+      if (interval) {
+        clearInterval(interval);
+      }
+    };
   }, [progressData?.status]);
 
   // لود بایگانی عمومی وقتی تب archive باز شد
@@ -198,14 +200,14 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
     if (activeTab === 'archive' && !generalArchive && !loadingGeneralArchive) {
       loadGeneralArchive();
     }
-  }, [activeTab]);
+  }, [activeTab, generalArchive, loadingGeneralArchive]);
 
   // لود ایرادات پروژه وقتی تب issues باز شد
   useEffect(() => {
     if (activeTab === 'issues' && projectIssues.length === 0 && !loadingProjectIssues) {
       loadProjectIssues();
     }
-  }, [activeTab]);
+  }, [activeTab, projectIssues.length, loadingProjectIssues]);
 
   // تابع بارگذاری ایرادات پروژه
   const loadProjectIssues = async () => {
@@ -2357,15 +2359,61 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
         {/* تب ایرادات پروژه (از گزارشات سلامت) */}
         {activeTab === 'issues' && (
           <div className="space-y-6">
-            <div className="flex justify-between items-center">
+            <div className="flex justify-between items-center flex-wrap gap-2">
               <h3 className="text-lg font-bold">ایرادات پروژه ({projectIssues.length})</h3>
-              <button
-                onClick={loadProjectIssues}
-                disabled={loadingProjectIssues}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-              >
-                {loadingProjectIssues ? 'در حال بارگذاری...' : '🔄 بروزرسانی'}
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={loadProjectIssues}
+                  disabled={loadingProjectIssues}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm"
+                >
+                  {loadingProjectIssues ? 'در حال بارگذاری...' : '🔄 بروزرسانی'}
+                </button>
+                {projectIssues.length > 0 && (
+                  <>
+                    <button
+                      onClick={async () => {
+                        if (!confirm('آیا از بایگانی همه ایرادات مطمئن هستید؟')) return;
+                        try {
+                          const res = await fetch(`${API_BASE}/api/projects/${projectId}/issues/archive-all`, { method: 'POST' });
+                          const data = await res.json();
+                          if (data.success) {
+                            showSuccess(`${data.archived_count} ایراد بایگانی شد`);
+                            loadProjectIssues();
+                          } else {
+                            showError(data.detail || 'خطا در بایگانی');
+                          }
+                        } catch (e) {
+                          showError('خطا در ارتباط');
+                        }
+                      }}
+                      className="px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 text-sm"
+                    >
+                      📦 بایگانی همه
+                    </button>
+                    <button
+                      onClick={async () => {
+                        if (!confirm('آیا از حذف همه ایرادات مطمئن هستید؟ این عمل غیرقابل بازگشت است!')) return;
+                        try {
+                          const res = await fetch(`${API_BASE}/api/projects/${projectId}/issues/delete-all`, { method: 'DELETE' });
+                          const data = await res.json();
+                          if (data.success) {
+                            showSuccess(`${data.deleted_count} ایراد حذف شد`);
+                            loadProjectIssues();
+                          } else {
+                            showError(data.detail || 'خطا در حذف');
+                          }
+                        } catch (e) {
+                          showError('خطا در ارتباط');
+                        }
+                      }}
+                      className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm"
+                    >
+                      🗑️ حذف همه
+                    </button>
+                  </>
+                )}
+              </div>
             </div>
 
             {/* خلاصه آمار */}

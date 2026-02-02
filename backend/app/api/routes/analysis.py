@@ -320,6 +320,201 @@ async def delete_analysis_report(report_id: str):
         db.close()
 
 
+@router.get("/reports/{report_id}/download")
+async def download_analysis_report(
+    report_id: str,
+    format: str = "json"  # json, csv, txt, md
+):
+    """
+    دانلود گزارش تحلیل در فرمت‌های مختلف
+
+    فرمت‌ها:
+    - json: فرمت کامل JSON
+    - csv: فرمت جدولی CSV
+    - txt: فرمت متنی ساده
+    - md: فرمت Markdown
+    """
+    from ...core.database import SessionLocal
+    from ...models.analysis_report import AnalysisReport
+    from datetime import datetime
+    import csv
+    import io
+
+    db = SessionLocal()
+    try:
+        report = db.query(AnalysisReport).filter(AnalysisReport.id == report_id).first()
+        if not report:
+            raise HTTPException(status_code=404, detail="گزارش یافت نشد")
+
+        # تبدیل به دیکشنری
+        report_data = {
+            "id": report.id,
+            "project_id": report.project_id,
+            "status": report.status,
+            "created_at": str(report.created_at) if report.created_at else None,
+            "completed_at": str(report.completed_at) if report.completed_at else None,
+            "overall_score": report.overall_score,
+            "overall_color": report.overall_color,
+            "code_quality_score": report.code_quality_score,
+            "documentation_score": report.documentation_score,
+            "security_score": report.security_score,
+            "structure_score": report.structure_score,
+            "roadmap_compliance_score": report.roadmap_compliance_score,
+            "file_analyses": report.file_analyses or [],
+            "issues_found": report.issues_found or [],
+            "recommendations": report.recommendations or [],
+            "models_used": report.models_used or [],
+            "model_validations": report.model_validations or {}
+        }
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        if format == "json":
+            content = json.dumps(report_data, ensure_ascii=False, indent=2, default=str)
+            media_type = "application/json"
+            filename = f"analysis_report_{timestamp}.json"
+
+        elif format == "csv":
+            output = io.StringIO()
+
+            # نمرات کلی
+            output.write("=== نمرات کلی ===\n")
+            writer = csv.writer(output)
+            writer.writerow(["معیار", "نمره", "رنگ"])
+            writer.writerow(["نمره کلی", report_data["overall_score"], report_data["overall_color"]])
+            writer.writerow(["کیفیت کد", report_data["code_quality_score"], ""])
+            writer.writerow(["مستندات", report_data["documentation_score"], ""])
+            writer.writerow(["امنیت", report_data["security_score"], ""])
+            writer.writerow(["ساختار", report_data["structure_score"], ""])
+            writer.writerow(["تطابق نقشه راه", report_data["roadmap_compliance_score"], ""])
+
+            # تحلیل فایل‌ها
+            output.write("\n=== تحلیل فایل‌ها ===\n")
+            writer.writerow(["فایل", "نمره", "مشکلات"])
+            for fa in report_data["file_analyses"]:
+                if isinstance(fa, dict):
+                    writer.writerow([
+                        fa.get("file_path", ""),
+                        fa.get("score", ""),
+                        len(fa.get("issues", []))
+                    ])
+
+            # مشکلات یافت‌شده
+            output.write("\n=== مشکلات یافت‌شده ===\n")
+            writer.writerow(["عنوان", "شدت", "فایل", "توضیحات"])
+            for issue in report_data["issues_found"]:
+                if isinstance(issue, dict):
+                    writer.writerow([
+                        issue.get("title", ""),
+                        issue.get("severity", ""),
+                        issue.get("file_path", ""),
+                        issue.get("description", "")[:100]
+                    ])
+
+            content = output.getvalue()
+            media_type = "text/csv; charset=utf-8"
+            filename = f"analysis_report_{timestamp}.csv"
+
+        elif format == "txt":
+            lines = []
+            lines.append("=" * 60)
+            lines.append("گزارش تحلیل پروژه")
+            lines.append("=" * 60)
+            lines.append(f"شناسه گزارش: {report_data['id']}")
+            lines.append(f"تاریخ ایجاد: {report_data['created_at']}")
+            lines.append(f"تاریخ تکمیل: {report_data['completed_at']}")
+            lines.append("")
+            lines.append("-" * 40)
+            lines.append("نمرات")
+            lines.append("-" * 40)
+            lines.append(f"نمره کلی: {report_data['overall_score']} ({report_data['overall_color']})")
+            lines.append(f"کیفیت کد: {report_data['code_quality_score']}")
+            lines.append(f"مستندات: {report_data['documentation_score']}")
+            lines.append(f"امنیت: {report_data['security_score']}")
+            lines.append(f"ساختار: {report_data['structure_score']}")
+            lines.append(f"تطابق نقشه راه: {report_data['roadmap_compliance_score']}")
+            lines.append("")
+            lines.append("-" * 40)
+            lines.append(f"مشکلات یافت‌شده ({len(report_data['issues_found'])} مورد)")
+            lines.append("-" * 40)
+            for i, issue in enumerate(report_data["issues_found"], 1):
+                if isinstance(issue, dict):
+                    lines.append(f"{i}. [{issue.get('severity', 'unknown')}] {issue.get('title', '')}")
+                    if issue.get('file_path'):
+                        lines.append(f"   فایل: {issue.get('file_path')}")
+                    if issue.get('description'):
+                        lines.append(f"   توضیحات: {issue.get('description')[:200]}")
+                    lines.append("")
+
+            lines.append("-" * 40)
+            lines.append(f"پیشنهادات ({len(report_data['recommendations'])} مورد)")
+            lines.append("-" * 40)
+            for i, rec in enumerate(report_data["recommendations"], 1):
+                if isinstance(rec, dict):
+                    lines.append(f"{i}. {rec.get('title', rec.get('recommendation', ''))}")
+                elif isinstance(rec, str):
+                    lines.append(f"{i}. {rec}")
+
+            content = "\n".join(lines)
+            media_type = "text/plain; charset=utf-8"
+            filename = f"analysis_report_{timestamp}.txt"
+
+        elif format == "md":
+            lines = []
+            lines.append("# گزارش تحلیل پروژه\n")
+            lines.append(f"**شناسه گزارش:** `{report_data['id']}`\n")
+            lines.append(f"**تاریخ ایجاد:** {report_data['created_at']}\n")
+            lines.append(f"**تاریخ تکمیل:** {report_data['completed_at']}\n")
+            lines.append("")
+            lines.append("## نمرات\n")
+            lines.append("| معیار | نمره |")
+            lines.append("|-------|------|")
+            lines.append(f"| نمره کلی | **{report_data['overall_score']}** ({report_data['overall_color']}) |")
+            lines.append(f"| کیفیت کد | {report_data['code_quality_score']} |")
+            lines.append(f"| مستندات | {report_data['documentation_score']} |")
+            lines.append(f"| امنیت | {report_data['security_score']} |")
+            lines.append(f"| ساختار | {report_data['structure_score']} |")
+            lines.append(f"| تطابق نقشه راه | {report_data['roadmap_compliance_score']} |")
+            lines.append("")
+            lines.append(f"## مشکلات یافت‌شده ({len(report_data['issues_found'])} مورد)\n")
+            for issue in report_data["issues_found"]:
+                if isinstance(issue, dict):
+                    severity = issue.get('severity', 'unknown')
+                    severity_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(severity, "⚪")
+                    lines.append(f"### {severity_emoji} {issue.get('title', '')}\n")
+                    if issue.get('file_path'):
+                        lines.append(f"**فایل:** `{issue.get('file_path')}`\n")
+                    if issue.get('description'):
+                        lines.append(f"{issue.get('description')}\n")
+                    if issue.get('solution'):
+                        lines.append(f"**راه‌حل:** {issue.get('solution')}\n")
+                    lines.append("")
+
+            lines.append(f"## پیشنهادات ({len(report_data['recommendations'])} مورد)\n")
+            for i, rec in enumerate(report_data["recommendations"], 1):
+                if isinstance(rec, dict):
+                    lines.append(f"{i}. {rec.get('title', rec.get('recommendation', ''))}")
+                elif isinstance(rec, str):
+                    lines.append(f"{i}. {rec}")
+
+            content = "\n".join(lines)
+            media_type = "text/markdown; charset=utf-8"
+            filename = f"analysis_report_{timestamp}.md"
+        else:
+            raise HTTPException(status_code=400, detail="فرمت نامعتبر. فرمت‌های مجاز: json, csv, txt, md")
+
+        return StreamingResponse(
+            iter([content.encode('utf-8')]),
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "Content-Type": f"{media_type}"
+            }
+        )
+    finally:
+        db.close()
+
+
 # =====================
 # AI Profile Endpoints
 # =====================

@@ -5169,3 +5169,94 @@ async def delete_issue(
         "success": True,
         "message": "ایراد حذف شد"
     }
+
+
+@router.post("/{project_id}/issues/archive-all")
+async def archive_all_issues(
+    project_id: str,
+    source: Optional[str] = None,  # فیلتر بر اساس منبع: render_logs, security_scan, test_coverage
+    db=Depends(get_db)
+):
+    """
+    بایگانی همه ایرادات یک پروژه
+
+    استفاده:
+    - بعد از تولید گزارش مهندسی
+    - پاکسازی ایرادات قدیمی
+    - آرشیو ایرادات یک منبع خاص
+    """
+    from datetime import datetime
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # فیلتر ایرادات
+    query = db.query(ProjectIssue).filter(
+        ProjectIssue.project_id == project_id,
+        ProjectIssue.status != "archived"
+    )
+
+    if source:
+        query = query.filter(ProjectIssue.source == source)
+
+    issues = query.all()
+
+    if not issues:
+        return {
+            "success": True,
+            "message": "ایرادی برای بایگانی وجود ندارد",
+            "archived_count": 0
+        }
+
+    # بایگانی همه ایرادات
+    archived_count = 0
+    for issue in issues:
+        issue.status = "archived"
+        issue.resolved_at = datetime.utcnow()
+        archived_count += 1
+
+    db.commit()
+
+    return {
+        "success": True,
+        "message": f"{archived_count} ایراد بایگانی شد",
+        "archived_count": archived_count
+    }
+
+
+@router.delete("/{project_id}/issues/delete-all")
+async def delete_all_issues(
+    project_id: str,
+    source: Optional[str] = None,  # فیلتر بر اساس منبع
+    only_archived: bool = False,  # فقط بایگانی‌شده‌ها
+    db=Depends(get_db)
+):
+    """
+    حذف همه ایرادات یک پروژه
+
+    استفاده:
+    - پاکسازی کامل ایرادات
+    - حذف ایرادات یک منبع خاص
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # فیلتر ایرادات
+    query = db.query(ProjectIssue).filter(ProjectIssue.project_id == project_id)
+
+    if source:
+        query = query.filter(ProjectIssue.source == source)
+
+    if only_archived:
+        query = query.filter(ProjectIssue.status == "archived")
+
+    deleted_count = query.delete()
+    db.commit()
+
+    return {
+        "success": True,
+        "message": f"{deleted_count} ایراد حذف شد",
+        "deleted_count": deleted_count
+    }
