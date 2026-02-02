@@ -171,6 +171,7 @@ class Project(Base):
 
     # روابط
     files = relationship("ProjectFile", back_populates="project", cascade="all, delete-orphan")
+    issues = relationship("ProjectIssue", back_populates="project", cascade="all, delete-orphan")
 
     def to_dict(self):
         """تبدیل به dictionary"""
@@ -363,4 +364,53 @@ class ProjectFile(Base):
             "github_url": self.github_url,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class ProjectIssue(Base):
+    """جدول ایرادات پروژه"""
+    __tablename__ = "project_issues"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # اطلاعات ایراد
+    title = Column(String(200), nullable=False)
+    description = Column(Text)
+    solution = Column(Text)  # راه‌حل پیشنهادی
+    priority = Column(Integer, default=3)  # 1=critical, 2=high, 3=medium, 4=low
+    status = Column(String(20), default="open")  # open, in_progress, resolved, ignored
+
+    # منبع ایراد
+    source = Column(String(50))  # security_scan, test_coverage, render_logs, manual
+    source_data = Column(Text)  # JSON داده‌های اصلی
+
+    # آمار
+    occurrences = Column(Integer, default=1)  # تعداد تکرار
+
+    # متادیتا
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    resolved_at = Column(DateTime)
+
+    # روابط
+    project = relationship("Project", back_populates="issues")
+
+    def to_dict(self):
+        """تبدیل به dictionary"""
+        priority_map = {1: "critical", 2: "high", 3: "medium", 4: "low"}
+        return {
+            "id": self.id,
+            "project_id": self.project_id,
+            "title": self.title,
+            "description": self.description,
+            "solution": self.solution,
+            "priority": priority_map.get(self.priority, "medium"),
+            "priority_order": self.priority,
+            "status": self.status,
+            "source": self.source,
+            "occurrences": self.occurrences,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "resolved_at": self.resolved_at.isoformat() if self.resolved_at else None,
         }

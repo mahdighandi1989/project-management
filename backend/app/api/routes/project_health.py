@@ -4307,3 +4307,579 @@ async def get_untested_files(
         "untested_files": coverage_result["untested_files"],
         "recommendations": coverage_result["recommendations"]
     }
+
+
+# =====================================
+# Download Endpoints (گزارشات قابل دانلود)
+# =====================================
+
+from fastapi.responses import Response
+import csv
+import io
+
+@router.get("/{project_id}/security/download")
+async def download_security_report(
+    project_id: str,
+    format: str = "json",
+    db=Depends(get_db)
+):
+    """
+    دانلود گزارش امنیتی پروژه
+
+    فرمت‌ها: json, csv, txt
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت فایل‌های پروژه
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+
+    file_data = []
+    for f in files:
+        file_data.append({
+            "path": f.file_path,
+            "name": f.file_path.split("/")[-1] if "/" in f.file_path else f.file_path,
+            "content": f.content or ""
+        })
+
+    # اجرای اسکن امنیتی
+    scanner = get_security_scanner()
+    scan_result = scanner.full_security_scan(file_data)
+
+    # تولید گزارش بر اساس فرمت
+    if format == "json":
+        report = {
+            "report_type": "security_scan",
+            "project_name": project.name,
+            "project_id": project_id,
+            "generated_at": datetime.utcnow().isoformat(),
+            "summary": scan_result.get("summary", {}),
+            "security_score": scan_result.get("security_score", 0),
+            "findings": {
+                "secrets": scan_result.get("secrets", []),
+                "vulnerabilities": scan_result.get("vulnerabilities", []),
+                "sensitive_files": scan_result.get("sensitive_files", []),
+                "license_issues": scan_result.get("license_issues", [])
+            },
+            "recommendations": scan_result.get("recommendations", [])
+        }
+        content = json.dumps(report, ensure_ascii=False, indent=2)
+        media_type = "application/json"
+        filename = f"security-report-{project.name}.json"
+
+    elif format == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["نوع", "شدت", "فایل", "خط", "توضیحات", "راه‌حل"])
+
+        # Secrets
+        for s in scan_result.get("secrets", []):
+            writer.writerow([
+                "کلید محرمانه",
+                "بحرانی",
+                s.get("file", ""),
+                s.get("line", ""),
+                s.get("type", ""),
+                "حذف از کد و استفاده از متغیرهای محیطی"
+            ])
+
+        # Vulnerabilities
+        for v in scan_result.get("vulnerabilities", []):
+            writer.writerow([
+                "آسیب‌پذیری",
+                v.get("severity", "متوسط"),
+                v.get("file", ""),
+                v.get("line", ""),
+                v.get("description", ""),
+                v.get("fix", "")
+            ])
+
+        # Sensitive files
+        for sf in scan_result.get("sensitive_files", []):
+            writer.writerow([
+                "فایل حساس",
+                "بالا",
+                sf.get("file", ""),
+                "",
+                sf.get("reason", ""),
+                "اضافه به .gitignore"
+            ])
+
+        content = output.getvalue()
+        media_type = "text/csv; charset=utf-8"
+        filename = f"security-report-{project.name}.csv"
+
+    else:  # txt
+        lines = [
+            "=" * 60,
+            f"گزارش امنیتی پروژه: {project.name}",
+            f"تاریخ: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"نمره امنیتی: {scan_result.get('security_score', 0)}/100",
+            "=" * 60,
+            "",
+            "📊 خلاصه:",
+            f"  - کلیدهای محرمانه یافت شده: {len(scan_result.get('secrets', []))}",
+            f"  - آسیب‌پذیری‌ها: {len(scan_result.get('vulnerabilities', []))}",
+            f"  - فایل‌های حساس: {len(scan_result.get('sensitive_files', []))}",
+            "",
+            "-" * 60,
+            "🔐 کلیدهای محرمانه:",
+            "-" * 60,
+        ]
+
+        for s in scan_result.get("secrets", []):
+            lines.append(f"  📍 فایل: {s.get('file', 'نامشخص')}")
+            lines.append(f"     نوع: {s.get('type', 'نامشخص')}")
+            lines.append(f"     خط: {s.get('line', 'نامشخص')}")
+            lines.append("")
+
+        lines.extend([
+            "-" * 60,
+            "⚠️ آسیب‌پذیری‌ها:",
+            "-" * 60,
+        ])
+
+        for v in scan_result.get("vulnerabilities", []):
+            lines.append(f"  📍 فایل: {v.get('file', 'نامشخص')}")
+            lines.append(f"     شدت: {v.get('severity', 'متوسط')}")
+            lines.append(f"     توضیح: {v.get('description', '')}")
+            lines.append(f"     راه‌حل: {v.get('fix', '')}")
+            lines.append("")
+
+        lines.extend([
+            "-" * 60,
+            "📁 فایل‌های حساس:",
+            "-" * 60,
+        ])
+
+        for sf in scan_result.get("sensitive_files", []):
+            lines.append(f"  📍 {sf.get('file', 'نامشخص')}")
+            lines.append(f"     دلیل: {sf.get('reason', '')}")
+            lines.append("")
+
+        lines.extend([
+            "-" * 60,
+            "💡 توصیه‌ها:",
+            "-" * 60,
+        ])
+
+        for i, rec in enumerate(scan_result.get("recommendations", []), 1):
+            lines.append(f"  {i}. {rec}")
+
+        content = "\n".join(lines)
+        media_type = "text/plain; charset=utf-8"
+        filename = f"security-report-{project.name}.txt"
+
+    return Response(
+        content=content.encode("utf-8"),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        }
+    )
+
+
+@router.get("/{project_id}/test-coverage/download")
+async def download_test_coverage_report(
+    project_id: str,
+    format: str = "json",
+    db=Depends(get_db)
+):
+    """
+    دانلود گزارش پوشش تست پروژه
+
+    فرمت‌ها: json, csv, txt
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت فایل‌های پروژه
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+
+    file_data = []
+    for f in files:
+        file_data.append({
+            "path": f.file_path,
+            "name": f.file_path.split("/")[-1] if "/" in f.file_path else f.file_path,
+            "content": f.content or ""
+        })
+
+    # اجرای تحلیل پوشش تست
+    analyzer = get_test_coverage_analyzer()
+    coverage_result = analyzer.analyze_project(file_data)
+
+    # تولید گزارش بر اساس فرمت
+    if format == "json":
+        report = {
+            "report_type": "test_coverage",
+            "project_name": project.name,
+            "project_id": project_id,
+            "generated_at": datetime.utcnow().isoformat(),
+            "summary": coverage_result.get("summary", {}),
+            "health_score": coverage_result.get("health_score", 0),
+            "coverage_percent": coverage_result.get("summary", {}).get("coverage_percent", 0),
+            "test_files": coverage_result.get("test_files", []),
+            "untested_files": coverage_result.get("untested_files", []),
+            "untested_functions": coverage_result.get("untested_functions", []),
+            "recommendations": coverage_result.get("recommendations", [])
+        }
+        content = json.dumps(report, ensure_ascii=False, indent=2)
+        media_type = "application/json"
+        filename = f"test-coverage-{project.name}.json"
+
+    elif format == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["نوع", "فایل/تابع", "وضعیت", "اولویت", "توصیه"])
+
+        # فایل‌های بدون تست
+        for uf in coverage_result.get("untested_files", []):
+            writer.writerow([
+                "فایل بدون تست",
+                uf.get("file", ""),
+                "نیاز به تست",
+                uf.get("priority", "متوسط"),
+                uf.get("recommendation", "")
+            ])
+
+        # توابع بدون تست
+        for func in coverage_result.get("untested_functions", []):
+            writer.writerow([
+                "تابع بدون تست",
+                f"{func.get('file', '')}:{func.get('name', '')}",
+                "نیاز به تست",
+                func.get("priority", "متوسط"),
+                ""
+            ])
+
+        content = output.getvalue()
+        media_type = "text/csv; charset=utf-8"
+        filename = f"test-coverage-{project.name}.csv"
+
+    else:  # txt
+        summary = coverage_result.get("summary", {})
+        lines = [
+            "=" * 60,
+            f"گزارش پوشش تست پروژه: {project.name}",
+            f"تاریخ: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"نمره سلامت: {coverage_result.get('health_score', 0)}/100",
+            "=" * 60,
+            "",
+            "📊 خلاصه:",
+            f"  - درصد پوشش تست: {summary.get('coverage_percent', 0)}%",
+            f"  - تعداد فایل‌های تست: {summary.get('test_files_count', 0)}",
+            f"  - تعداد تست‌ها: {summary.get('total_tests', 0)}",
+            f"  - فایل‌های بدون تست: {len(coverage_result.get('untested_files', []))}",
+            "",
+            "-" * 60,
+            "🧪 فایل‌های تست موجود:",
+            "-" * 60,
+        ]
+
+        for tf in coverage_result.get("test_files", []):
+            lines.append(f"  ✅ {tf.get('file', 'نامشخص')}")
+            lines.append(f"     تعداد تست: {tf.get('test_count', 0)}")
+
+        lines.extend([
+            "",
+            "-" * 60,
+            "❌ فایل‌های بدون تست:",
+            "-" * 60,
+        ])
+
+        for uf in coverage_result.get("untested_files", []):
+            lines.append(f"  📍 {uf.get('file', 'نامشخص')}")
+            if uf.get("priority"):
+                lines.append(f"     اولویت: {uf.get('priority')}")
+            if uf.get("recommendation"):
+                lines.append(f"     توصیه: {uf.get('recommendation')}")
+            lines.append("")
+
+        lines.extend([
+            "-" * 60,
+            "⚠️ توابع بدون تست:",
+            "-" * 60,
+        ])
+
+        for func in coverage_result.get("untested_functions", []):
+            lines.append(f"  📍 {func.get('file', '')}:{func.get('name', '')}")
+
+        lines.extend([
+            "",
+            "-" * 60,
+            "💡 توصیه‌ها:",
+            "-" * 60,
+        ])
+
+        for i, rec in enumerate(coverage_result.get("recommendations", []), 1):
+            if isinstance(rec, dict):
+                lines.append(f"  {i}. {rec.get('title', '')}")
+                if rec.get("description"):
+                    lines.append(f"     {rec.get('description')}")
+            else:
+                lines.append(f"  {i}. {rec}")
+
+        content = "\n".join(lines)
+        media_type = "text/plain; charset=utf-8"
+        filename = f"test-coverage-{project.name}.txt"
+
+    return Response(
+        content=content.encode("utf-8"),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        }
+    )
+
+
+# =====================================
+# Transfer to Issues Endpoints (انتقال به ایرادات)
+# =====================================
+
+from ...services.health_to_issues_service import get_health_to_issues_service
+from ...models.project import ProjectIssue
+
+@router.post("/{project_id}/security/transfer-to-issues")
+async def transfer_security_to_issues(
+    project_id: str,
+    db=Depends(get_db)
+):
+    """
+    انتقال یافته‌های امنیتی به تب ایرادات
+
+    - تحلیل و بسط توسط AI
+    - ادغام با ایرادات مشابه
+    - اولویت‌بندی خودکار
+    """
+    slog.api_request("POST", f"/projects/{project_id}/security/transfer-to-issues")
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت فایل‌های پروژه
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+
+    file_data = []
+    for f in files:
+        file_data.append({
+            "path": f.file_path,
+            "name": f.file_path.split("/")[-1] if "/" in f.file_path else f.file_path,
+            "content": f.content or ""
+        })
+
+    # اجرای اسکن امنیتی
+    scanner = get_security_scanner()
+    scan_result = scanner.full_security_scan(file_data)
+
+    # انتقال به ایرادات
+    service = get_health_to_issues_service()
+    result = await service.transfer_security_findings(
+        project_id=project_id,
+        scan_result=scan_result,
+        db=db
+    )
+
+    return result
+
+
+@router.post("/{project_id}/test-coverage/transfer-to-issues")
+async def transfer_test_coverage_to_issues(
+    project_id: str,
+    db=Depends(get_db)
+):
+    """
+    انتقال یافته‌های پوشش تست به تب ایرادات
+
+    - تحلیل و بسط توسط AI
+    - ادغام با ایرادات مشابه
+    - اولویت‌بندی خودکار
+    """
+    slog.api_request("POST", f"/projects/{project_id}/test-coverage/transfer-to-issues")
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت فایل‌های پروژه
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+
+    file_data = []
+    for f in files:
+        file_data.append({
+            "path": f.file_path,
+            "name": f.file_path.split("/")[-1] if "/" in f.file_path else f.file_path,
+            "content": f.content or ""
+        })
+
+    # اجرای تحلیل پوشش تست
+    analyzer = get_test_coverage_analyzer()
+    coverage_result = analyzer.analyze_project(file_data)
+
+    # انتقال به ایرادات
+    service = get_health_to_issues_service()
+    result = await service.transfer_test_coverage_findings(
+        project_id=project_id,
+        coverage_result=coverage_result,
+        db=db
+    )
+
+    return result
+
+
+# =====================================
+# Issues Management Endpoints (مدیریت ایرادات)
+# =====================================
+
+@router.get("/{project_id}/issues")
+async def get_project_issues(
+    project_id: str,
+    status: Optional[str] = None,
+    source: Optional[str] = None,
+    priority: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    db=Depends(get_db)
+):
+    """
+    دریافت لیست ایرادات پروژه
+
+    فیلترها:
+    - status: open, in_progress, resolved, ignored
+    - source: security_scan, test_coverage, render_logs, manual
+    - priority: critical, high, medium, low
+    """
+    query = db.query(ProjectIssue).filter(ProjectIssue.project_id == project_id)
+
+    if status:
+        query = query.filter(ProjectIssue.status == status)
+    if source:
+        query = query.filter(ProjectIssue.source == source)
+    if priority:
+        priority_map = {"critical": 1, "high": 2, "medium": 3, "low": 4}
+        if priority in priority_map:
+            query = query.filter(ProjectIssue.priority == priority_map[priority])
+
+    total = query.count()
+    issues = query.order_by(ProjectIssue.priority, ProjectIssue.created_at.desc())\
+        .offset(offset).limit(limit).all()
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "issues": [issue.to_dict() for issue in issues],
+        "total": total,
+        "has_more": offset + limit < total
+    }
+
+
+@router.get("/{project_id}/issues/summary")
+async def get_issues_summary(
+    project_id: str,
+    db=Depends(get_db)
+):
+    """
+    خلاصه ایرادات پروژه
+    """
+    from sqlalchemy import func
+
+    # شمارش بر اساس وضعیت
+    status_counts = db.query(
+        ProjectIssue.status,
+        func.count(ProjectIssue.id)
+    ).filter(
+        ProjectIssue.project_id == project_id
+    ).group_by(ProjectIssue.status).all()
+
+    # شمارش بر اساس منبع
+    source_counts = db.query(
+        ProjectIssue.source,
+        func.count(ProjectIssue.id)
+    ).filter(
+        ProjectIssue.project_id == project_id
+    ).group_by(ProjectIssue.source).all()
+
+    # شمارش بر اساس اولویت
+    priority_counts = db.query(
+        ProjectIssue.priority,
+        func.count(ProjectIssue.id)
+    ).filter(
+        ProjectIssue.project_id == project_id
+    ).group_by(ProjectIssue.priority).all()
+
+    priority_map = {1: "critical", 2: "high", 3: "medium", 4: "low"}
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "by_status": {status: count for status, count in status_counts},
+        "by_source": {source: count for source, count in source_counts},
+        "by_priority": {priority_map.get(p, "unknown"): count for p, count in priority_counts},
+        "total": sum(count for _, count in status_counts)
+    }
+
+
+@router.patch("/{project_id}/issues/{issue_id}")
+async def update_issue(
+    project_id: str,
+    issue_id: int,
+    status: Optional[str] = None,
+    priority: Optional[str] = None,
+    db=Depends(get_db)
+):
+    """
+    بروزرسانی وضعیت یا اولویت یک ایراد
+    """
+    issue = db.query(ProjectIssue).filter(
+        ProjectIssue.id == issue_id,
+        ProjectIssue.project_id == project_id
+    ).first()
+
+    if not issue:
+        raise HTTPException(status_code=404, detail="ایراد یافت نشد")
+
+    if status:
+        issue.status = status
+        if status == "resolved":
+            issue.resolved_at = datetime.utcnow()
+
+    if priority:
+        priority_map = {"critical": 1, "high": 2, "medium": 3, "low": 4}
+        if priority in priority_map:
+            issue.priority = priority_map[priority]
+
+    issue.updated_at = datetime.utcnow()
+    db.commit()
+
+    return {
+        "success": True,
+        "issue": issue.to_dict()
+    }
+
+
+@router.delete("/{project_id}/issues/{issue_id}")
+async def delete_issue(
+    project_id: str,
+    issue_id: int,
+    db=Depends(get_db)
+):
+    """
+    حذف یک ایراد
+    """
+    issue = db.query(ProjectIssue).filter(
+        ProjectIssue.id == issue_id,
+        ProjectIssue.project_id == project_id
+    ).first()
+
+    if not issue:
+        raise HTTPException(status_code=404, detail="ایراد یافت نشد")
+
+    db.delete(issue)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": "ایراد حذف شد"
+    }
