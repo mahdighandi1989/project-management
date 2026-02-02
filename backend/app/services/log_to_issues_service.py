@@ -586,9 +586,20 @@ class LogToIssuesService:
 }}"""
 
         try:
+            # اطمینان از مقداردهی ai_manager
+            if not self.ai_manager:
+                self.initialize()
+
+            if not self.ai_manager:
+                raise Exception("AI manager not available")
+
             # انتخاب مدل مناسب
             available = self.ai_manager.get_available_models(task_type="analysis")
-            model_id = available[0].id if available else "claude"
+            if available:
+                # AIModel is a Pydantic model, use attribute access
+                model_id = available[0].id if hasattr(available[0], 'id') else "claude"
+            else:
+                model_id = "claude"
 
             response = await self.ai_manager.generate(
                 model_id=model_id,

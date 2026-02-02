@@ -43,7 +43,17 @@ class HealthToIssuesService:
     async def _get_best_model(self) -> str:
         """انتخاب بهترین مدل AI موجود"""
         ai_manager = self._get_ai_manager()
-        available = ai_manager.get_available_models()
+        if not ai_manager:
+            return None
+
+        try:
+            available = ai_manager.get_available_models()
+        except Exception as e:
+            slog.warning(f"Could not get available models: {e}")
+            return None
+
+        if not available:
+            return None
 
         # اولویت مدل‌ها
         preferred_models = [
@@ -58,12 +68,15 @@ class HealthToIssuesService:
 
         for model in preferred_models:
             for avail in available:
-                if model in avail.get("id", ""):
-                    return avail["id"]
+                # AIModel is a Pydantic model, use attribute access not .get()
+                model_id = avail.id if hasattr(avail, 'id') else (avail.get("id", "") if isinstance(avail, dict) else "")
+                if model in model_id:
+                    return model_id
 
         # اگر هیچکدام نبود، اولین مدل موجود
         if available:
-            return available[0]["id"]
+            first = available[0]
+            return first.id if hasattr(first, 'id') else (first.get("id") if isinstance(first, dict) else None)
 
         return None
 
