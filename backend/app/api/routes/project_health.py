@@ -61,6 +61,9 @@ class AnalysisSettingsRequest(BaseModel):
     trigger_interval_type: str = "minutes"  # minutes, hours, daily, weekly
     auto_analyze_on_import: bool = True
     criteria_weights: Optional[dict] = None
+    # 🆕 تنظیمات محدودیت فایل
+    unlimited_files: bool = True  # اگر True باشد، همه فایل‌ها تحلیل می‌شوند
+    max_files_limit: int = 100    # فقط وقتی unlimited_files=False باشد
 
 
 class RunAnalysisRequest(BaseModel):
@@ -1500,7 +1503,7 @@ async def _run_analysis_task(
         try:
             # 🆕 استفاده از عمق تحلیل از request
             depth = getattr(request, 'depth', 'standard')
-            slog.info("Running full analysis", depth=depth)
+            slog.info("Running full analysis", depth=depth, unlimited_files=analysis_settings.get('unlimited_files', True))
 
             analysis_result = await deep_analyzer.run_full_analysis(
                 project_id=project_id,
@@ -1511,7 +1514,8 @@ async def _run_analysis_task(
                 instruction=instruction,
                 db_session=db,
                 progress_manager=progress_manager,
-                depth=depth  # 🆕 پاس دادن عمق
+                depth=depth,  # 🆕 پاس دادن عمق
+                analysis_settings=analysis_settings  # 🆕 پاس دادن تنظیمات محدودیت فایل
             )
             slog.success("Analysis completed",
                 status=analysis_result.get('status'),
