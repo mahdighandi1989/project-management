@@ -114,14 +114,26 @@ export default function PromptManager({
     try {
       setLoading(true);
       const categoryParam = category !== 'all' ? `?category=${category}` : '';
-      const res = await fetch(`${API_BASE}/api/prompts${categoryParam}`);
+      const url = `${API_BASE}/api/prompts${categoryParam}`;
+      console.log('🔍 Fetching prompts from:', url);
 
-      if (!res.ok) throw new Error('خطا در دریافت پرامپت‌ها');
+      const res = await fetch(url);
+      console.log('📡 Response status:', res.status);
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        console.error('❌ Error response:', errorText);
+        throw new Error('خطا در دریافت پرامپت‌ها');
+      }
 
       const data = await res.json();
+      console.log('📦 Response data:', JSON.stringify(data, null, 2));
+      console.log('📊 Prompts count:', data.prompts?.length || 0);
+
       setPrompts(data.prompts || []);
       setError(null);
     } catch (err: any) {
+      console.error('💥 Fetch error:', err);
       setError(err.message);
     } finally {
       setLoading(false);
@@ -278,9 +290,13 @@ export default function PromptManager({
     try {
       setLoading(true);
       const categoryParam = category !== 'all' ? `?category=${category}` : '';
-      const res = await fetch(`${API_BASE}/api/prompts/restore-defaults${categoryParam}`, {
+      const url = `${API_BASE}/api/prompts/restore-defaults${categoryParam}`;
+      console.log('🔄 Restoring defaults from:', url);
+
+      const res = await fetch(url, {
         method: 'POST'
       });
+      console.log('📡 Restore response status:', res.status);
 
       if (!res.ok) {
         const data = await res.json();
@@ -288,9 +304,15 @@ export default function PromptManager({
       }
 
       const data = await res.json();
+      console.log('📦 Restore response:', JSON.stringify(data, null, 2));
       alert(`✅ ${data.total_default_prompts || 0} پرامپت پیش‌فرض موجود است`);
-      fetchPrompts();
+
+      // Small delay before fetching
+      await new Promise(resolve => setTimeout(resolve, 500));
+      console.log('🔍 Now fetching prompts...');
+      await fetchPrompts();
     } catch (err: any) {
+      console.error('💥 Restore error:', err);
       alert('خطا: ' + err.message);
     } finally {
       setLoading(false);
