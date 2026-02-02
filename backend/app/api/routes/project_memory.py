@@ -1310,9 +1310,92 @@ async def enhanced_project_chat(
         except:
             pass
 
+    # 7. 🆕 اضافه کردن نتایج اسکن امنیتی
+    try:
+        if project.security_scan_result:
+            scan_data = json.loads(project.security_scan_result) if isinstance(project.security_scan_result, str) else project.security_scan_result
+            context_parts.append("\n## نتایج اسکن امنیتی:")
+            context_parts.append(f"- امتیاز امنیتی: {scan_data.get('security_score', 0)}/100")
+            summary = scan_data.get("summary", {})
+            if summary:
+                context_parts.append(f"- کل مشکلات: {summary.get('total_issues', 0)}")
+                context_parts.append(f"- بحرانی: {summary.get('critical', 0)}, بالا: {summary.get('high', 0)}, متوسط: {summary.get('medium', 0)}")
+            secrets = scan_data.get("secrets", {}).get("findings", [])
+            if secrets:
+                context_parts.append(f"- کلیدهای محرمانه: {len(secrets)} مورد یافت شد")
+            vulns = scan_data.get("dependencies", {}).get("vulnerabilities", [])
+            if vulns:
+                context_parts.append(f"- آسیب‌پذیری وابستگی‌ها: {len(vulns)} مورد")
+    except:
+        pass
+
+    # 8. 🆕 اضافه کردن نتایج پوشش تست
+    try:
+        if project.test_coverage_result:
+            coverage_data = json.loads(project.test_coverage_result) if isinstance(project.test_coverage_result, str) else project.test_coverage_result
+            context_parts.append("\n## نتایج پوشش تست:")
+            summary = coverage_data.get("summary", {})
+            context_parts.append(f"- درصد پوشش: {summary.get('coverage_percent', 0)}%")
+            context_parts.append(f"- تعداد تست‌ها: {summary.get('total_tests', 0)}")
+            context_parts.append(f"- امتیاز سلامت تست: {coverage_data.get('health_score', 0)}/100")
+            untested = coverage_data.get("untested_files", [])
+            if untested:
+                context_parts.append(f"- فایل‌های بدون تست: {len(untested)} فایل")
+                for uf in untested[:5]:
+                    context_parts.append(f"  - {uf.get('path', uf)}")
+            recs = coverage_data.get("recommendations", [])
+            if recs:
+                context_parts.append(f"- توصیه‌ها: {len(recs)} مورد")
+    except:
+        pass
+
+    # 9. 🆕 اضافه کردن ایرادات پروژه (از مدل ProjectIssue)
+    try:
+        from ...models.project import ProjectIssue
+        issues = db.query(ProjectIssue).filter(
+            ProjectIssue.project_id == project_id,
+            ProjectIssue.status.in_(["open", "in_progress"])
+        ).order_by(ProjectIssue.priority).limit(20).all()
+        if issues:
+            context_parts.append(f"\n## ایرادات ثبت شده ({len(issues)} مورد):")
+            for issue in issues:
+                priority_map = {1: "بحرانی", 2: "بالا", 3: "متوسط", 4: "پایین"}
+                priority_label = priority_map.get(issue.priority, "نامشخص")
+                context_parts.append(f"- [{priority_label}] {issue.title} (منبع: {issue.source})")
+                if issue.description:
+                    context_parts.append(f"  توضیح: {issue.description[:200]}")
+    except:
+        pass
+
+    # 10. 🆕 اضافه کردن خلاصه بایگانی
+    try:
+        if project.general_archive:
+            archive_data = json.loads(project.general_archive) if isinstance(project.general_archive, str) else project.general_archive
+            if archive_data:
+                context_parts.append(f"\n## خلاصه بایگانی ({len(archive_data)} مورد):")
+                by_type = {}
+                for item in archive_data:
+                    item_type = item.get("type", "other")
+                    by_type[item_type] = by_type.get(item_type, 0) + 1
+                for t, c in by_type.items():
+                    context_parts.append(f"- {t}: {c} مورد")
+    except:
+        pass
+
+    # 11. 🆕 اضافه کردن اطلاعات GitHub
+    try:
+        if project.extra_data:
+            extra = json.loads(project.extra_data) if isinstance(project.extra_data, str) else project.extra_data
+            if extra.get("source") == "github":
+                context_parts.append("\n## اطلاعات GitHub:")
+                context_parts.append(f"- مخزن: {extra.get('owner')}/{extra.get('repo')}")
+                context_parts.append(f"- شاخه: {extra.get('branch', 'main')}")
+    except:
+        pass
+
     full_context = "\n".join(context_parts)
 
-    # 7. ساخت system prompt
+    # 12. ساخت system prompt
     system_prompt = f"""تو یک دستیار هوشمند برای تحلیل و بررسی دقیق پروژه هستی.
 
 وظیفه تو:
@@ -4683,6 +4766,130 @@ async def gather_project_context(project_id: str, project, db: Session) -> Dict[
         except:
             pass
         context["github_info"] = github_info
+
+        # 9. 🆕 نتایج اسکن امنیتی
+        security_scan = {}
+        try:
+            if project.security_scan_result:
+                scan_data = json.loads(project.security_scan_result) if isinstance(project.security_scan_result, str) else project.security_scan_result
+                security_scan = {
+                    "last_scan": project.security_scan_at.isoformat() if project.security_scan_at else None,
+                    "security_score": scan_data.get("security_score", 0),
+                    "summary": scan_data.get("summary", {}),
+                    "secrets_count": len(scan_data.get("secrets", {}).get("findings", [])),
+                    "vulnerabilities_count": len(scan_data.get("dependencies", {}).get("vulnerabilities", [])),
+                    "sensitive_files_count": len(scan_data.get("sensitive_files", {}).get("findings", []))
+                }
+        except Exception as e:
+            logger.debug(f"Could not load security scan: {e}")
+        context["security_scan"] = security_scan
+
+        # 10. 🆕 نتایج پوشش تست
+        test_coverage = {}
+        try:
+            if project.test_coverage_result:
+                coverage_data = json.loads(project.test_coverage_result) if isinstance(project.test_coverage_result, str) else project.test_coverage_result
+                test_coverage = {
+                    "coverage_percent": coverage_data.get("summary", {}).get("coverage_percent", 0),
+                    "health_score": coverage_data.get("health_score", 0),
+                    "total_tests": coverage_data.get("summary", {}).get("total_tests", 0),
+                    "untested_files_count": len(coverage_data.get("untested_files", [])),
+                    "recommendations_count": len(coverage_data.get("recommendations", []))
+                }
+        except Exception as e:
+            logger.debug(f"Could not load test coverage: {e}")
+        context["test_coverage"] = test_coverage
+
+        # 11. 🆕 ایرادات پروژه (از مدل ProjectIssue)
+        project_issues = []
+        try:
+            from ...models.project import ProjectIssue
+            issues = db.query(ProjectIssue).filter(
+                ProjectIssue.project_id == project_id,
+                ProjectIssue.status.in_(["open", "in_progress"])
+            ).order_by(ProjectIssue.priority).limit(20).all()
+            for issue in issues:
+                project_issues.append({
+                    "id": issue.id,
+                    "title": issue.title,
+                    "priority": issue.priority,
+                    "status": issue.status,
+                    "source": issue.source,
+                    "occurrences": issue.occurrences
+                })
+        except Exception as e:
+            logger.debug(f"Could not load project issues: {e}")
+        context["project_issues"] = project_issues
+
+        # 12. 🆕 بایگانی عمومی (خلاصه)
+        archive_summary = {"total": 0, "by_type": {}}
+        try:
+            if project.general_archive:
+                archive_data = json.loads(project.general_archive) if isinstance(project.general_archive, str) else project.general_archive
+                archive_summary["total"] = len(archive_data)
+                for item in archive_data:
+                    item_type = item.get("type", "other")
+                    archive_summary["by_type"][item_type] = archive_summary["by_type"].get(item_type, 0) + 1
+        except Exception as e:
+            logger.debug(f"Could not load archive: {e}")
+        context["archive_summary"] = archive_summary
+
+        # 13. 🆕 خلاصه فایل‌های پروژه
+        files_summary = {"total": 0, "by_type": {}, "sample_paths": []}
+        try:
+            from ...models.project import ProjectFile
+            files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+            files_summary["total"] = len(files)
+            for f in files[:50]:  # فقط 50 فایل اول
+                ext = f.file_path.split(".")[-1] if "." in f.file_path else "no_ext"
+                files_summary["by_type"][ext] = files_summary["by_type"].get(ext, 0) + 1
+                if len(files_summary["sample_paths"]) < 20:
+                    files_summary["sample_paths"].append(f.file_path)
+        except Exception as e:
+            logger.debug(f"Could not load files summary: {e}")
+        context["files_summary"] = files_summary
+
+        # 14. 🆕 اطلاعات پایه پروژه
+        project_info = {
+            "id": project.id,
+            "name": project.name,
+            "description": project.description,
+            "project_type": project.project_type,
+            "status": project.status,
+            "technologies": [],
+            "features": [],
+            "deploy_url": project.deploy_url,
+            "github_path": project.github_path,
+            "file_count": project.file_count,
+            "total_size": project.total_size,
+            "created_at": project.created_at.isoformat() if project.created_at else None
+        }
+        try:
+            if project.technologies:
+                project_info["technologies"] = json.loads(project.technologies) if isinstance(project.technologies, str) else project.technologies
+            if project.features:
+                project_info["features"] = json.loads(project.features) if isinstance(project.features, str) else project.features
+        except:
+            pass
+        context["project_info"] = project_info
+
+        # 15. 🆕 نتایج آخرین اعتبارسنجی
+        validation_results = {}
+        try:
+            if project.last_validation_results:
+                validation_results = json.loads(project.last_validation_results) if isinstance(project.last_validation_results, str) else project.last_validation_results
+        except Exception as e:
+            logger.debug(f"Could not load validation results: {e}")
+        context["validation_results"] = validation_results
+
+        # 16. 🆕 امتیازات سلامت
+        health_scores = {}
+        try:
+            if project.health_scores:
+                health_scores = json.loads(project.health_scores) if isinstance(project.health_scores, str) else project.health_scores
+        except Exception as e:
+            logger.debug(f"Could not load health scores: {e}")
+        context["health_scores"] = health_scores
 
     except Exception as e:
         logger.error(f"Error gathering context: {e}")
