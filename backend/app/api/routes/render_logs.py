@@ -92,25 +92,35 @@ async def get_services(
         return result
 
     # دریافت از دیتابیس
-    services = db.query(RenderService).order_by(RenderService.name).all()
+    try:
+        services = db.query(RenderService).order_by(RenderService.name).all()
 
-    return {
-        "success": True,
-        "services": [
-            {
-                "id": s.id,
-                "name": s.name,
-                "type": s.type,
-                "region": s.region,
-                "status": s.status,
-                "auto_fetch_logs": s.auto_fetch_logs,
-                "log_retention_hours": s.log_retention_hours
-            }
-            for s in services
-        ],
-        "source": "database",
-        "last_updated": services[0].updated_at.isoformat() if services else None
-    }
+        return {
+            "success": True,
+            "services": [
+                {
+                    "id": s.id,
+                    "name": s.name,
+                    "type": s.type,
+                    "region": s.region,
+                    "status": s.status,
+                    "auto_fetch_logs": getattr(s, 'auto_fetch_logs', True),
+                    "log_retention_hours": getattr(s, 'log_retention_hours', 48),
+                    "last_deploy_id": getattr(s, 'last_deploy_id', None),
+                    "last_transferred_deploy_id": getattr(s, 'last_transferred_deploy_id', None)
+                }
+                for s in services
+            ],
+            "source": "database",
+            "last_updated": services[0].updated_at.isoformat() if services and hasattr(services[0], 'updated_at') and services[0].updated_at else None
+        }
+    except Exception as e:
+        slog.error("Error fetching services from database", exception=e)
+        return {
+            "success": False,
+            "services": [],
+            "error": str(e)
+        }
 
 
 @router.post("/services/refresh")
@@ -271,78 +281,91 @@ async def fetch_new_logs(
         limit=limit
     )
 
-    render = get_render_service()
-    total_fetched = 0
-    total_saved = 0
-    errors = []
+    try:
+        render = get_render_service()
+        total_fetched = 0
+        total_saved = 0
+        errors = []
 
-    # تعیین سرویس‌ها
-    if service_id:
-        services = db.query(RenderService).filter(
-            RenderService.id == service_id
-        ).all()
-    else:
-        services = db.query(RenderService).filter(
-            RenderService.auto_fetch_logs == True
-        ).all()
-
-    if not services:
-        # اگر سرویسی نبود، اول لیست رو بگیر
-        result = await render.get_services()
-        if result["success"]:
-            services = db.query(RenderService).all()
-        else:
-            return {
-                "success": False,
-                "error": "هیچ سرویسی یافت نشد. ابتدا لیست سرویس‌ها را بروزرسانی کنید."
-            }
-
-    # دریافت لاگ برای هر سرویس
-    for service in services:
+        # تعیین سرویس‌ها
         try:
-            result = await render.get_logs(
-                service_id=service.id,
-                limit=limit,
-                direction="backward"
-            )
-
-            if result["success"]:
-                total_fetched += len(result["logs"])
-
-                # ذخیره در دیتابیس
-                saved = await render.save_logs_to_db(
-                    result["logs"],
-                    service_name=service.name
-                )
-                total_saved += saved
-
+            if service_id:
+                services = db.query(RenderService).filter(
+                    RenderService.id == service_id
+                ).all()
             else:
+                # استفاده از filter ساده‌تر در صورت مشکل با auto_fetch_logs
+                services = db.query(RenderService).all()
+                # فیلتر در پایتون به جای SQL
+                services = [s for s in services if getattr(s, 'auto_fetch_logs', True)]
+        except Exception as e:
+            slog.error("Error querying services", exception=e)
+            services = []
+
+        if not services:
+            # اگر سرویسی نبود، اول لیست رو بگیر
+            result = await render.get_services()
+            if result["success"]:
+                services = db.query(RenderService).all()
+            else:
+                return {
+                    "success": False,
+                    "error": result.get("error", "هیچ سرویسی یافت نشد. ابتدا لیست سرویس‌ها را بروزرسانی کنید.")
+                }
+
+        # دریافت لاگ برای هر سرویس
+        for service in services:
+            try:
+                result = await render.get_logs(
+                    service_id=service.id,
+                    limit=limit,
+                    direction="backward"
+                )
+
+                if result["success"]:
+                    total_fetched += len(result["logs"])
+
+                    # ذخیره در دیتابیس
+                    saved = await render.save_logs_to_db(
+                        result["logs"],
+                        service_name=service.name
+                    )
+                    total_saved += saved
+
+                else:
+                    errors.append({
+                        "service_id": service.id,
+                        "service_name": service.name,
+                        "error": result.get("error")
+                    })
+
+            except Exception as e:
                 errors.append({
                     "service_id": service.id,
                     "service_name": service.name,
-                    "error": result.get("error")
+                    "error": str(e)
                 })
 
-        except Exception as e:
-            errors.append({
-                "service_id": service.id,
-                "service_name": service.name,
-                "error": str(e)
-            })
+        slog.success("Logs fetched",
+            total_fetched=total_fetched,
+            total_saved=total_saved,
+            errors_count=len(errors)
+        )
 
-    slog.success("Logs fetched",
-        total_fetched=total_fetched,
-        total_saved=total_saved,
-        errors_count=len(errors)
-    )
+        return {
+            "success": True,
+            "total_fetched": total_fetched,
+            "total_saved": total_saved,
+            "services_processed": len(services),
+            "errors": errors if errors else None
+        }
 
-    return {
-        "success": True,
-        "fetched": total_fetched,
-        "saved": total_saved,
-        "services_checked": len(services),
-        "errors": errors if errors else None
-    }
+    except Exception as e:
+        slog.error("Fetch logs failed", exception=e)
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 
 @router.get("/logs/live")
