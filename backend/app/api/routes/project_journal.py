@@ -18,6 +18,7 @@ import logging
 
 from ...core.database import get_db, Base, engine
 from ...models.project import Project
+from ...services.prompt_helper import PromptHelper
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1353,8 +1354,22 @@ async def generate_engineering_report(
 
     logger.info(f"📋 Journal entries with review findings: {len(journal_reviews)}")
 
-    # ساخت prompt برای AI
-    system_prompt = """تو یک مهندس ارشد نرم‌افزار هستی که باید یک گزارش مهندسی جامع و حرفه‌ای تولید کنی.
+    # 🔴 تلاش برای دریافت پرامپت از دیتابیس
+    db_system_prompt = PromptHelper.get_prompt(
+        db=db,
+        category="engineering_report",
+        prompt_id="eng_system_prompt",  # ID مطابق با seed data
+        variables={}
+    )
+
+    if db_system_prompt:
+        logger.info("📝 Using DB prompt for engineering report system prompt")
+        system_prompt = db_system_prompt
+    else:
+        logger.debug("📝 Using hardcoded engineering report system prompt")
+        # 🔄 Fallback به پرامپت hardcoded
+        # ساخت prompt برای AI
+        system_prompt = """تو یک مهندس ارشد نرم‌افزار هستی که باید یک گزارش مهندسی جامع و حرفه‌ای تولید کنی.
 
 🔴🔴🔴 بسیار مهم - اعتبارسنجی health analysis 🔴🔴🔴
 اگر در بخش ورودی "نتایج آخرین health analysis" وجود دارد، باید:

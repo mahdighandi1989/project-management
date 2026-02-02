@@ -20,6 +20,7 @@ import re
 import os
 
 from .ai_base import Message
+from .prompt_helper import PromptHelper
 
 logger = logging.getLogger(__name__)
 
@@ -227,17 +228,88 @@ class DeepAnalysisService:
     3. Structural Analysis: بررسی سیم‌کشی و ساختار
     """
 
-    def __init__(self, ai_manager=None, progress_callback: Optional[Callable[[Dict], None]] = None):
+    def __init__(self, ai_manager=None, progress_callback: Optional[Callable[[Dict], None]] = None, db_session=None):
         """
         مقداردهی اولیه
 
         Args:
             ai_manager: مدیر مدل‌های AI (برای فراخوانی مدل‌ها)
             progress_callback: callback برای گزارش پیشرفت (برای streaming)
+            db_session: session دیتابیس برای پرامپت‌ها
         """
         self.ai_manager = ai_manager
         self.analysis_factors = DEFAULT_ANALYSIS_FACTORS.copy()
         self.progress = AnalysisProgressTracker(progress_callback)
+        self._db_session = db_session
+        self._prompt_executions = {}  # ذخیره شناسه‌های اجرای پرامپت‌ها
+
+    def set_db_session(self, db_session):
+        """تنظیم session دیتابیس"""
+        self._db_session = db_session
+
+    def _get_prompt_from_db(self, prompt_id: str, variables: Dict[str, Any] = None) -> Optional[str]:
+        """
+        دریافت پرامپت از دیتابیس
+
+        Args:
+            prompt_id: شناسه پرامپت (health_micro_analysis, health_macro_analysis, health_structural_analysis)
+            variables: متغیرها برای جایگزینی
+
+        Returns:
+            محتوای پرامپت یا None اگر پیدا نشد
+        """
+        if not self._db_session:
+            return None
+
+        try:
+            prompt_content = PromptHelper.get_prompt(
+                db=self._db_session,
+                category="health_analysis",
+                prompt_id=prompt_id,
+                variables=variables
+            )
+            return prompt_content
+        except Exception as e:
+            logger.warning(f"Failed to get prompt {prompt_id} from DB: {e}")
+            return None
+
+    def _start_prompt_execution(self, prompt_id: str, project_id: str = None) -> Optional[str]:
+        """شروع ثبت اجرای پرامپت"""
+        if not self._db_session:
+            return None
+        try:
+            execution_id = PromptHelper.start_execution(
+                db=self._db_session,
+                prompt_id=prompt_id,
+                project_id=project_id
+            )
+            if execution_id:
+                self._prompt_executions[prompt_id] = execution_id
+            return execution_id
+        except Exception as e:
+            logger.warning(f"Failed to start execution for {prompt_id}: {e}")
+            return None
+
+    def _complete_prompt_execution(self, prompt_id: str, success: bool = True, result_summary: str = None,
+                                    error_message: str = None, model_used: str = None, tokens_used: int = None):
+        """تکمیل ثبت اجرای پرامپت"""
+        if not self._db_session:
+            return
+        execution_id = self._prompt_executions.get(prompt_id)
+        if not execution_id:
+            return
+        try:
+            PromptHelper.complete_execution(
+                db=self._db_session,
+                execution_id=execution_id,
+                success=success,
+                result_summary=result_summary,
+                error_message=error_message,
+                model_used=model_used,
+                tokens_used=tokens_used
+            )
+        except Exception as e:
+            logger.warning(f"Failed to complete execution for {prompt_id}: {e}")
 
     async def run_full_analysis(
         self,
@@ -272,6 +344,11 @@ class DeepAnalysisService:
         """
         self._progress_manager = progress_manager
         self._analysis_settings = analysis_settings or {}
+        self._project_id = project_id
+
+        # ذخیره db_session برای استفاده در پرامپت‌ها
+        if db_session:
+            self._db_session = db_session
 
         # 🆕 تنظیمات عمق تحلیل
         depth_config = {
@@ -715,6 +792,26 @@ class DeepAnalysisService:
         file_type = self._get_file_type(file_path)
         is_frontend = file_type in ["typescript-react", "javascript-react", "typescript", "javascript", "css"]
         is_backend = file_type in ["python", "golang", "java", "rust"]
+        content_limit = getattr(self, '_depth_config', {}).get('content_limit', 15000)
+
+        # 🔴 اول تلاش برای دریافت از دیتابیس
+        db_prompt = self._get_prompt_from_db(
+            "health_micro_analysis",
+            variables={
+                "file_path": file_path,
+                "file_type": f"{file_type} {'(فرانت‌اند)' if is_frontend else '(بک‌اند)' if is_backend else ''}",
+                "instruction": instruction if instruction else "تحلیل کامل و دقیق فایل را انجام بده.",
+                "content": content[:content_limit],
+                "roadmap_content": roadmap_content[:3000] if roadmap_content else ""
+            }
+        )
+
+        if db_prompt:
+            logger.info(f"📝 Using DB prompt for micro analysis: {file_path}")
+            return db_prompt
+
+        # 🔄 Fallback به پرامپت hardcoded
+        logger.debug(f"📝 Using hardcoded prompt for micro analysis: {file_path}")
 
         # 🆕 دستورات اضافی بر اساس نوع فایل
         type_specific_instructions = ""
@@ -742,8 +839,6 @@ class DeepAnalysisService:
 - **Logging**: آیا لاگ‌گذاری مناسب انجام شده؟
 - **Testing**: آیا کد قابل تست است؟
 """
-
-        content_limit = getattr(self, '_depth_config', {}).get('content_limit', 15000)
 
         prompt = f"""# تحلیل جزئی فایل (Micro Analysis)
 
@@ -865,6 +960,24 @@ class DeepAnalysisService:
         instruction: str
     ) -> str:
         """ساخت پرامپت تحلیل کلی"""
+
+        # 🔴 اول تلاش برای دریافت از دیتابیس
+        db_prompt = self._get_prompt_from_db(
+            "health_macro_analysis",
+            variables={
+                "instruction": instruction if instruction else "تحلیل کامل همکاری و جایگاه فایل‌ها را انجام بده.",
+                "project_overview": project_overview,
+                "roadmap_content": roadmap_content[:5000] if roadmap_content else "",
+                "readme_content": readme_content[:3000] if readme_content else ""
+            }
+        )
+
+        if db_prompt:
+            logger.info("📝 Using DB prompt for macro analysis")
+            return db_prompt
+
+        # 🔄 Fallback به پرامپت hardcoded
+        logger.debug("📝 Using hardcoded prompt for macro analysis")
 
         prompt = f"""# تحلیل کلی پروژه (Macro Analysis)
 
@@ -995,6 +1108,27 @@ class DeepAnalysisService:
         """ساخت پرامپت تحلیل ساختاری"""
 
         file_list = "\n".join([f"- {f.get('path', f.get('file_path', ''))}" for f in files])
+        dependency_graph_str = json.dumps(dependency_graph, ensure_ascii=False, indent=2)[:5000]
+
+        # 🔴 اول تلاش برای دریافت از دیتابیس
+        db_prompt = self._get_prompt_from_db(
+            "health_structural_analysis",
+            variables={
+                "instruction": instruction if instruction else "تحلیل کامل ساختار و سیم‌کشی پروژه را انجام بده.",
+                "file_list": file_list,
+                "dependency_graph": dependency_graph_str,
+                "micro_summary": micro_summary,
+                "macro_summary": macro_summary,
+                "roadmap_content": roadmap_content[:3000] if roadmap_content else ""
+            }
+        )
+
+        if db_prompt:
+            logger.info("📝 Using DB prompt for structural analysis")
+            return db_prompt
+
+        # 🔄 Fallback به پرامپت hardcoded
+        logger.debug("📝 Using hardcoded prompt for structural analysis")
 
         prompt = f"""# تحلیل ساختاری پروژه (Structural Analysis)
 
