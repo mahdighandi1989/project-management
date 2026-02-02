@@ -4873,18 +4873,32 @@ async def transfer_security_to_issues(
 
     # دریافت فایل‌های پروژه
     files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+    slog.info(f"[DEBUG-TRANSFER] Found {len(files)} files for project {project_id}")
 
     file_data = []
+    files_with_content = 0
     for f in files:
+        has_content = bool(f.content and len(f.content) > 0)
+        if has_content:
+            files_with_content += 1
         file_data.append({
             "path": f.file_path,
             "name": f.file_path.split("/")[-1] if "/" in f.file_path else f.file_path,
             "content": f.content or ""
         })
 
+    slog.info(f"[DEBUG-TRANSFER] Files with content: {files_with_content}/{len(files)}")
+
     # اجرای اسکن امنیتی
     scanner = get_security_scanner()
     scan_result = scanner.full_security_scan(file_data)
+
+    # Debug scan result
+    slog.info(f"[DEBUG-TRANSFER] Scan result keys: {list(scan_result.keys()) if scan_result else 'None'}")
+    secrets_count = len(scan_result.get('secrets', {}).get('findings', [])) if isinstance(scan_result.get('secrets'), dict) else 0
+    vulns_count = len(scan_result.get('dependencies', {}).get('vulnerabilities', [])) if isinstance(scan_result.get('dependencies'), dict) else 0
+    sensitive_count = len(scan_result.get('sensitive_files', {}).get('findings', [])) if isinstance(scan_result.get('sensitive_files'), dict) else 0
+    slog.info(f"[DEBUG-TRANSFER] Scan findings: secrets={secrets_count}, vulns={vulns_count}, sensitive={sensitive_count}")
 
     # انتقال به ایرادات
     service = get_health_to_issues_service()
@@ -4917,18 +4931,32 @@ async def transfer_test_coverage_to_issues(
 
     # دریافت فایل‌های پروژه
     files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+    slog.info(f"[DEBUG-TRANSFER-COV] Found {len(files)} files for project {project_id}")
 
     file_data = []
+    files_with_content = 0
     for f in files:
+        has_content = bool(f.content and len(f.content) > 0)
+        if has_content:
+            files_with_content += 1
         file_data.append({
             "path": f.file_path,
             "name": f.file_path.split("/")[-1] if "/" in f.file_path else f.file_path,
             "content": f.content or ""
         })
 
+    slog.info(f"[DEBUG-TRANSFER-COV] Files with content: {files_with_content}/{len(files)}")
+
     # اجرای تحلیل پوشش تست
     analyzer = get_test_coverage_analyzer()
     coverage_result = analyzer.analyze_project(file_data)
+
+    # Debug coverage result
+    slog.info(f"[DEBUG-TRANSFER-COV] Coverage result keys: {list(coverage_result.keys()) if coverage_result else 'None'}")
+    untested_count = len(coverage_result.get('untested_files', []))
+    recommendations_count = len(coverage_result.get('recommendations', []))
+    coverage_percent = coverage_result.get('summary', {}).get('coverage_percent', 0)
+    slog.info(f"[DEBUG-TRANSFER-COV] Coverage findings: untested={untested_count}, recommendations={recommendations_count}, coverage%={coverage_percent}")
 
     # انتقال به ایرادات
     service = get_health_to_issues_service()
