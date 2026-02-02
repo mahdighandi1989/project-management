@@ -4565,15 +4565,15 @@ async def download_security_report(
                 "حذف از کد و استفاده از متغیرهای محیطی"
             ])
 
-        # Vulnerabilities
+        # Vulnerabilities - کلیدهای صحیح: package, cve, current_version, vulnerable_versions, message, recommendation
         for v in vulns_list:
             writer.writerow([
                 "آسیب‌پذیری",
                 v.get("severity", "متوسط"),
-                v.get("file", ""),
-                v.get("line", ""),
-                v.get("description", v.get("message", "")),
-                v.get("fix", "")
+                v.get("package", "نامشخص"),  # پکیج به جای فایل
+                f"{v.get('current_version', '')} → {v.get('vulnerable_versions', '')}",  # نسخه‌ها
+                f"{v.get('message', '')} (CVE: {v.get('cve', 'N/A')})",  # توضیحات با CVE
+                v.get("recommendation", "به‌روزرسانی پکیج")
             ])
 
         # Sensitive files
@@ -4623,10 +4623,14 @@ async def download_security_report(
         ])
 
         for v in vulns_list:
-            lines.append(f"  📍 فایل: {v.get('file', 'نامشخص')}")
-            lines.append(f"     شدت: {v.get('severity', 'متوسط')}")
-            lines.append(f"     توضیح: {v.get('description', v.get('message', ''))}")
-            lines.append(f"     راه‌حل: {v.get('fix', '')}")
+            # کلیدهای صحیح: package, cve, current_version, vulnerable_versions, message, recommendation
+            lines.append(f"  📍 پکیج: {v.get('package', 'نامشخص')}")
+            lines.append(f"     نسخه فعلی: {v.get('current_version', 'نامشخص')}")
+            lines.append(f"     نسخه‌های آسیب‌پذیر: {v.get('vulnerable_versions', 'نامشخص')}")
+            lines.append(f"     CVE: {v.get('cve', 'نامشخص')}")
+            lines.append(f"     شدت: {v.get('severity', 'بالا')}")
+            lines.append(f"     توضیح: {v.get('message', '')}")
+            lines.append(f"     راه‌حل: {v.get('recommendation', '')}")
             lines.append("")
 
         lines.extend([
