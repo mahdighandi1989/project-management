@@ -257,6 +257,16 @@ export default function ProjectDetailPage() {
   const [showEngineeringPrompts, setShowEngineeringPrompts] = useState(false);
   const [showAutoSetupPrompts, setShowAutoSetupPrompts] = useState(false);
 
+  // 🔴 وضعیت اجرای پرامپت‌ها
+  const [activePromptExecutions, setActivePromptExecutions] = useState<{
+    id: string;
+    prompt_id: string;
+    prompt_name: string;
+    prompt_category: string;
+    status: string;
+    started_at: string;
+  }[]>([]);
+
   // Roadmap State (در تب ژورنال)
   const [roadmapContent, setRoadmapContent] = useState<string>('');
   const [roadmapItems, setRoadmapItems] = useState<Array<{
@@ -1353,6 +1363,18 @@ export default function ProjectDetailPage() {
                     message: data.message || '',
                     progress: data.progress
                   });
+                  // 🔴 دریافت پرامپت‌های در حال اجرا
+                  try {
+                    const execRes = await fetch(`${API_BASE}/api/prompts/executions/active?project_id=${projectId}`);
+                    if (execRes.ok) {
+                      const execData = await execRes.json();
+                      if (execData.success && execData.executions) {
+                        setActivePromptExecutions(execData.executions);
+                      }
+                    }
+                  } catch (e) {
+                    console.error('Error fetching prompt executions:', e);
+                  }
                 }
 
                 // نتیجه نهایی
@@ -1406,6 +1428,7 @@ export default function ProjectDetailPage() {
     } finally {
       setGeneratingReport(false);
       setReportProgress(null);
+      setActivePromptExecutions([]); // 🔴 پاک کردن پرامپت‌های در حال اجرا
     }
   };
 
@@ -4390,6 +4413,29 @@ export default function ProjectDetailPage() {
                           {reportProgress.progress}%
                         </span>
                       </div>
+
+                      {/* 🔴 نمایش پرامپت در حال اجرا */}
+                      {activePromptExecutions.length > 0 && (
+                        <div className="mt-3 pt-3 border-t border-purple-200 dark:border-purple-700">
+                          <div className="flex items-center gap-2 text-sm">
+                            <span className="animate-pulse text-yellow-500">●</span>
+                            <span className="text-purple-600 dark:text-purple-300">📝 پرامپت:</span>
+                            <span className="text-purple-800 dark:text-purple-200 font-medium">
+                              {activePromptExecutions[0].prompt_name}
+                            </span>
+                          </div>
+                          {activePromptExecutions.length > 1 && (
+                            <div className="mt-2 space-y-1">
+                              {activePromptExecutions.slice(1).map((exec) => (
+                                <div key={exec.id} className="flex items-center gap-2 text-xs text-purple-500">
+                                  <span>⏳</span>
+                                  <span>{exec.prompt_name}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
 

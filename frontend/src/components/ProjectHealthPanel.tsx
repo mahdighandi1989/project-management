@@ -157,6 +157,16 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
   const [showProgressDetails, setShowProgressDetails] = useState(false);
   const [pollingInterval, setPollingIntervalState] = useState<NodeJS.Timeout | null>(null);
 
+  // 🔴 وضعیت اجرای پرامپت‌ها
+  const [activePromptExecutions, setActivePromptExecutions] = useState<{
+    id: string;
+    prompt_id: string;
+    prompt_name: string;
+    prompt_category: string;
+    status: string;
+    started_at: string;
+  }[]>([]);
+
   // Messages
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -241,6 +251,21 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
     }
   };
 
+  // 🔴 دریافت پرامپت‌های در حال اجرا
+  const fetchActivePromptExecutions = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/prompts/executions/active?project_id=${projectId}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.executions) {
+          setActivePromptExecutions(data.executions);
+        }
+      }
+    } catch (e) {
+      console.error('Error fetching prompt executions:', e);
+    }
+  };
+
   // Polling برای وضعیت پیشرفت - این باعث میشه حتی با جابجایی صفحه تحلیل قطع نشه
   const pollProgress = async () => {
     if (!projectId) return;
@@ -268,14 +293,18 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
             can_resume: progress.can_resume || false,
             error: progress.error
           });
+          // 🔴 دریافت پرامپت‌های در حال اجرا
+          await fetchActivePromptExecutions();
         } else if (progress.status === 'completed') {
           setAnalyzing(false);
           setProgressData(null);
+          setActivePromptExecutions([]); // 🔴 پاک کردن پرامپت‌های در حال اجرا
           showSuccess('تحلیل کامل شد!');
           await loadAllData();
           await checkAnalysisStatus();
         } else if (progress.status === 'failed') {
           setAnalyzing(false);
+          setActivePromptExecutions([]); // 🔴 پاک کردن پرامپت‌های در حال اجرا
           setProgressData({
             ...progress,
             status: 'failed',
@@ -285,11 +314,13 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
         } else if (progress.status === 'stopped') {
           setAnalyzing(false);
           setProgressData(null);
+          setActivePromptExecutions([]); // 🔴 پاک کردن پرامپت‌های در حال اجرا
           showSuccess('تحلیل متوقف شد');
           await loadAllData();
         } else {
           // idle یا سایر
           setProgressData(null);
+          setActivePromptExecutions([]); // 🔴 پاک کردن پرامپت‌های در حال اجرا
         }
       }
     } catch (e) {
@@ -933,6 +964,20 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                   )}
                 </div>
 
+                {/* 🔴 نمایش پرامپت در حال اجرا - همیشه قابل مشاهده */}
+                {activePromptExecutions.length > 0 && (
+                  <div className="flex items-center gap-2 mt-1 text-xs">
+                    <span className="animate-pulse text-yellow-400">●</span>
+                    <span className="text-blue-300">
+                      📝 {activePromptExecutions[0].prompt_name}
+                    </span>
+                    <span className="text-gray-400 text-[10px]">
+                      ({activePromptExecutions[0].prompt_category === 'health_analysis' ? 'سلامت' :
+                        activePromptExecutions[0].prompt_category === 'engineering_report' ? 'مهندسی' : 'راه‌اندازی'})
+                    </span>
+                  </div>
+                )}
+
                 <div className="flex items-center justify-between mt-1 text-xs opacity-75">
                   <span>فایل: {progressData.analyzed_files}/{progressData.total_files}</span>
                   <span>مشکلات: {progressData.issues_found}</span>
@@ -1006,6 +1051,37 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                     </div>
                   ))}
                 </div>
+
+                {/* 🔴 نمایش پرامپت‌های در حال اجرا */}
+                {activePromptExecutions.length > 0 && (
+                  <div className="mt-3 pt-2 border-t border-gray-700">
+                    <div className="text-gray-400 mb-2 flex items-center gap-2">
+                      <span className="animate-pulse text-yellow-400">●</span>
+                      پرامپت در حال اجرا:
+                    </div>
+                    <div className="space-y-1">
+                      {activePromptExecutions.map((exec) => (
+                        <div
+                          key={exec.id}
+                          className="flex items-center gap-2 p-2 bg-blue-500/20 rounded-lg animate-pulse"
+                        >
+                          <span className="text-blue-400">📝</span>
+                          <div className="flex-1">
+                            <div className="text-blue-300 font-medium">{exec.prompt_name}</div>
+                            <div className="text-xs text-gray-400">
+                              {exec.prompt_category === 'health_analysis' && 'تحلیل سلامت'}
+                              {exec.prompt_category === 'engineering_report' && 'گزارش مهندسی'}
+                              {exec.prompt_category === 'auto_setup' && 'راه‌اندازی خودکار'}
+                            </div>
+                          </div>
+                          <span className="text-xs text-yellow-400">
+                            {exec.status === 'running' ? '⏳ در حال اجرا' : '⏸️ در انتظار'}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {progressData.current_file && (
                   <div className="mt-2 pt-2 border-t border-gray-700">
