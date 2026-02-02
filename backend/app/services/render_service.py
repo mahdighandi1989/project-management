@@ -416,16 +416,85 @@ class RenderAPIService:
                     saved_count += 1
 
             db.commit()
-            db.close()
 
             if saved_count > 0:
                 slog.info("Logs saved to database", new_count=saved_count, total=len(logs))
+
+                # بررسی حالت realtime برای انتقال فوری خطاها
+                await self._check_realtime_transfer(db, logs)
+
+            db.close()
 
             return saved_count
 
         except Exception as e:
             slog.error("Failed to save logs to database", exception=e)
             return 0
+
+    async def _check_realtime_transfer(self, db, logs: List[Dict]):
+        """
+        بررسی و انتقال فوری خطاها در حالت realtime
+
+        - اگر auto_transfer_mode = "realtime" باشد
+        - خطاها فوراً به تب ایرادات منتقل می‌شوند
+        """
+        try:
+            from ..models.render_log import RenderLogSettings, RenderLog
+            from .log_to_issues_service import get_log_to_issues_service
+
+            # بررسی تنظیمات
+            settings = db.query(RenderLogSettings).first()
+            if not settings:
+                return
+
+            is_realtime = (
+                getattr(settings, 'auto_transfer_enabled', False) and
+                getattr(settings, 'auto_transfer_mode', 'since_deploy') == 'realtime'
+            )
+
+            if not is_realtime:
+                return
+
+            # فیلتر لاگ‌های خطا
+            error_logs = [
+                log for log in logs
+                if log.get("level", "").lower() in ["error", "fatal", "critical"]
+            ]
+
+            if not error_logs:
+                return
+
+            slog.info(f"[REALTIME] Transferring {len(error_logs)} error logs immediately...")
+
+            # دریافت لاگ‌های ذخیره شده از دیتابیس
+            error_log_ids = [log["id"] for log in error_logs]
+            db_logs = db.query(RenderLog).filter(RenderLog.id.in_(error_log_ids)).all()
+
+            if not db_logs:
+                return
+
+            # انتقال فوری
+            service = get_log_to_issues_service()
+            service_project_map = await service._build_service_project_map(db)
+
+            transferred = 0
+            merged = 0
+
+            for log in db_logs:
+                try:
+                    result = await service._process_error_log(log, service_project_map, db)
+                    if result.get("status") == "transferred":
+                        transferred += 1
+                    elif result.get("status") == "merged":
+                        merged += 1
+                except Exception as e:
+                    slog.warning(f"[REALTIME] Failed to transfer log {log.id}", exception=e)
+
+            db.commit()
+            slog.info(f"[REALTIME] Transferred: {transferred}, Merged: {merged}")
+
+        except Exception as e:
+            slog.error("[REALTIME] Error in realtime transfer", exception=e)
 
     async def cleanup_old_logs(self, retention_hours: int = 48):
         """پاکسازی لاگ‌های قدیمی و آرشیو"""

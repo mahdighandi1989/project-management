@@ -626,7 +626,9 @@ class LogToIssuesService:
             "search_keywords": ai_analysis.get("search_keywords", []),
             "source": "render_logs",
             "source_service": mapping.get("service_name", log.service_name),
+            "source_service_id": log.service_id,  # برای بررسی دیپلوی جدید
             "source_log_id": log.id,
+            "source_deploy_id": log.deploy_id,  # دیپلوی زمان ایجاد ایراد
             "first_occurrence": log.timestamp.isoformat(),
             "last_occurrence": log.timestamp.isoformat(),
             "occurrence_count": 1,
@@ -741,6 +743,129 @@ class LogToIssuesService:
 
         slog.info(f"Archived {archived_count} logs to general archive")
         return {"archived_count": archived_count}
+
+    async def archive_stale_issues_after_deploy(
+        self,
+        service_id: str,
+        new_deploy_id: str,
+        db: Session
+    ) -> Dict:
+        """
+        بایگانی خودکار ایرادات قدیمی بعد از دیپلوی جدید
+
+        وقتی یک دیپلوی جدید صورت می‌گیرد:
+        1. ایرادات مربوط به دیپلوی‌های قبلی را پیدا کن
+        2. این ایرادات را به آرشیو منتقل کن
+        3. از لیست issues_found حذف کن
+
+        این کار به این دلیل انجام می‌شود که:
+        - خطاهای دیپلوی قبلی ممکن است در دیپلوی جدید رفع شده باشند
+        - نگه داشتن آن‌ها باعث شلوغی می‌شود
+        """
+        try:
+            from ..models.project import Project
+            import uuid
+
+            archived_count = 0
+            archive_timestamp = datetime.utcnow().isoformat()
+
+            # پیدا کردن پروژه‌های مرتبط با این سرویس
+            service_project_map = await self._build_service_project_map(db)
+
+            if service_id not in service_project_map:
+                slog.info(f"No project mapping for service {service_id}")
+                return {"archived_count": 0}
+
+            project_id = service_project_map[service_id]["project_id"]
+            project = db.query(Project).filter(Project.id == project_id).first()
+
+            if not project:
+                return {"archived_count": 0}
+
+            # دریافت ایرادات موجود
+            issues = []
+            try:
+                if project.issues_found:
+                    issues = json.loads(project.issues_found)
+            except:
+                issues = []
+
+            if not issues:
+                return {"archived_count": 0}
+
+            # دریافت آرشیو موجود
+            general_archive = []
+            if project.general_archive:
+                try:
+                    general_archive = json.loads(project.general_archive) if isinstance(project.general_archive, str) else project.general_archive
+                except:
+                    general_archive = []
+
+            # فیلتر ایرادات قدیمی مربوط به این سرویس
+            issues_to_keep = []
+            issues_to_archive = []
+
+            for issue in issues:
+                # بررسی اینکه آیا ایراد مربوط به این سرویس و دیپلوی قدیمی است
+                issue_service_id = issue.get("source_service_id")
+                issue_deploy_id = issue.get("source_deploy_id")
+
+                # اگر ایراد مربوط به این سرویس است و دیپلوی آن با دیپلوی جدید فرق دارد
+                if (issue_service_id == service_id and
+                    issue_deploy_id and
+                    issue_deploy_id != new_deploy_id):
+                    issues_to_archive.append(issue)
+                else:
+                    issues_to_keep.append(issue)
+
+            if not issues_to_archive:
+                slog.info(f"No stale issues to archive for service {service_id}")
+                return {"archived_count": 0}
+
+            # آرشیو کردن ایرادات قدیمی
+            for issue in issues_to_archive:
+                archive_item = {
+                    "id": str(uuid.uuid4()),
+                    "type": "stale_issue",
+                    "category": "auto_archived_after_deploy",
+                    "title": issue.get("message", "")[:100] if issue.get("message") else issue.get("error_type", "unknown"),
+                    "content": issue,
+                    "summary": f"ایراد بایگانی شده بعد از دیپلوی جدید {new_deploy_id}",
+                    "archived_at": archive_timestamp,
+                    "archived_reason": "new_deploy_superseded",
+                    "archived_by": "system",
+                    "metadata": {
+                        "original_deploy_id": issue.get("source_deploy_id"),
+                        "new_deploy_id": new_deploy_id,
+                        "service_id": service_id,
+                        "original_created_at": issue.get("first_occurrence", archive_timestamp)
+                    }
+                }
+                general_archive.append(archive_item)
+                archived_count += 1
+
+            # ذخیره تغییرات
+            project.issues_found = json.dumps(issues_to_keep, ensure_ascii=False)
+            project.general_archive = json.dumps(general_archive, ensure_ascii=False)
+            db.commit()
+
+            slog.success(f"Auto-archived {archived_count} stale issues after deploy",
+                service_id=service_id,
+                new_deploy_id=new_deploy_id,
+                project_id=project_id
+            )
+
+            return {
+                "archived_count": archived_count,
+                "remaining_issues": len(issues_to_keep)
+            }
+
+        except Exception as e:
+            slog.error("Error archiving stale issues", exception=e)
+            return {
+                "archived_count": 0,
+                "error": str(e)
+            }
 
 
 # =====================================================
