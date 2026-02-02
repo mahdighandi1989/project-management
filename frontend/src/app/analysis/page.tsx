@@ -468,14 +468,33 @@ export default function AnalysisPage() {
                           <div className={`w-20 h-20 rounded-xl flex items-center justify-center text-2xl font-bold text-white ${getScoreColor(selectedReport.overall_score)}`}>
                             {selectedReport.overall_score.toFixed(0)}
                           </div>
-                          <div>
+                          <div className="flex-1">
                             <h2 className="text-xl font-bold">{selectedReport.project_id}</h2>
                             <p className="text-gray-500">
                               {selectedReport.status === 'completed' ? 'تکمیل شده' : selectedReport.status}
                             </p>
                             <p className="text-sm text-gray-400">
-                              مدل‌ها: {selectedReport.models_used.join(', ')}
+                              مدل‌ها: {selectedReport.models_used?.join(', ') || 'نامشخص'}
                             </p>
+                          </div>
+                          {/* دکمه‌های دانلود */}
+                          <div className="flex flex-col gap-2">
+                            <select
+                              onChange={(e) => {
+                                if (e.target.value) {
+                                  window.open(`${API_BASE}/api/analysis/reports/${selectedReport.id}/download?format=${e.target.value}`, '_blank');
+                                  e.target.value = '';
+                                }
+                              }}
+                              className="px-3 py-2 bg-blue-500 text-white rounded-lg text-sm cursor-pointer hover:bg-blue-600"
+                              defaultValue=""
+                            >
+                              <option value="" disabled>دانلود گزارش</option>
+                              <option value="json">JSON</option>
+                              <option value="csv">CSV</option>
+                              <option value="txt">Text</option>
+                              <option value="md">Markdown</option>
+                            </select>
                           </div>
                         </div>
 
@@ -570,17 +589,51 @@ export default function AnalysisPage() {
                         {selectedReport.issues_found && selectedReport.issues_found.length > 0 && (
                           <div>
                             <h3 className="font-bold mb-3">مشکلات یافت‌شده ({selectedReport.issues_found.length})</h3>
-                            <div className="space-y-2 max-h-[200px] overflow-auto">
-                              {selectedReport.issues_found.slice(0, 20).map((issue, idx) => (
-                                <div key={idx} className={`p-2 rounded text-sm ${
-                                  issue.severity === 'critical' ? 'bg-red-100 dark:bg-red-900/30' :
-                                  issue.severity === 'high' ? 'bg-orange-100 dark:bg-orange-900/30' :
-                                  'bg-yellow-100 dark:bg-yellow-900/30'
+                            <div className="space-y-2 max-h-[300px] overflow-auto">
+                              {selectedReport.issues_found.slice(0, 30).map((issue, idx) => (
+                                <div key={idx} className={`p-3 rounded text-sm ${
+                                  issue.severity === 'critical' ? 'bg-red-100 dark:bg-red-900/30 border-r-4 border-red-500' :
+                                  issue.severity === 'high' ? 'bg-orange-100 dark:bg-orange-900/30 border-r-4 border-orange-500' :
+                                  issue.severity === 'medium' ? 'bg-yellow-100 dark:bg-yellow-900/30 border-r-4 border-yellow-500' :
+                                  'bg-gray-100 dark:bg-gray-700 border-r-4 border-gray-400'
                                 }`}>
-                                  <div className="font-medium">{issue.file || 'عمومی'}</div>
-                                  <div className="text-gray-600 dark:text-gray-400">{issue.message}</div>
+                                  <div className="flex items-start justify-between">
+                                    <div className="font-medium">
+                                      {issue.title || issue.file || issue.file_path || 'مشکل شناسایی شده'}
+                                    </div>
+                                    {issue.severity && (
+                                      <span className={`px-2 py-0.5 rounded text-xs ${
+                                        issue.severity === 'critical' ? 'bg-red-500 text-white' :
+                                        issue.severity === 'high' ? 'bg-orange-500 text-white' :
+                                        issue.severity === 'medium' ? 'bg-yellow-500 text-black' :
+                                        'bg-gray-500 text-white'
+                                      }`}>
+                                        {issue.severity === 'critical' ? 'بحرانی' :
+                                         issue.severity === 'high' ? 'بالا' :
+                                         issue.severity === 'medium' ? 'متوسط' : 'پایین'}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="text-gray-600 dark:text-gray-400 mt-1">
+                                    {issue.description || issue.message || ''}
+                                  </div>
+                                  {(issue.file_path || issue.file) && issue.title && (
+                                    <div className="text-xs text-gray-500 mt-1 font-mono">
+                                      📁 {issue.file_path || issue.file}
+                                    </div>
+                                  )}
+                                  {issue.solution && (
+                                    <div className="mt-2 text-xs text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-900/20 p-2 rounded">
+                                      💡 {issue.solution}
+                                    </div>
+                                  )}
                                 </div>
                               ))}
+                              {selectedReport.issues_found.length > 30 && (
+                                <div className="text-center text-gray-500 text-sm py-2">
+                                  و {selectedReport.issues_found.length - 30} مورد دیگر...
+                                </div>
+                              )}
                             </div>
                           </div>
                         )}

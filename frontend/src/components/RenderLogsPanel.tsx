@@ -760,7 +760,7 @@ export default function RenderLogsPanel() {
   };
 
   const filteredLogs = logs.filter(log => {
-    if (searchTerm && !log.message.toLowerCase().includes(searchTerm.toLowerCase())) {
+    if (searchTerm && !(log.message || '').toLowerCase().includes(searchTerm.toLowerCase())) {
       return false;
     }
     return true;
