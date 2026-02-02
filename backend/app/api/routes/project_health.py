@@ -4218,6 +4218,10 @@ async def run_security_scan(
         "summary": scan_result["summary"]
     }
     project.metadata = json.dumps(existing_metadata, ensure_ascii=False)
+
+    # ذخیره نتایج کامل برای استفاده در انتقال به ایرادات
+    project.security_scan_result = json.dumps(scan_result, ensure_ascii=False)
+
     db.commit()
 
     # ثبت در ژورنال
@@ -4385,6 +4389,10 @@ async def analyze_test_coverage(
         "total_tests": coverage_result["summary"]["total_tests"]
     }
     project.metadata = json.dumps(existing_metadata, ensure_ascii=False)
+
+    # ذخیره نتایج کامل برای استفاده در انتقال به ایرادات
+    project.test_coverage_result = json.dumps(coverage_result, ensure_ascii=False)
+
     db.commit()
 
     # ثبت در ژورنال

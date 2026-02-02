@@ -317,25 +317,43 @@ class LogToIssuesService:
 
         # دریافت همه سرویس‌ها
         services = db.query(RenderService).all()
+        slog.info(f"[DEBUG-LOG-TRANSFER] Found {len(services)} render services")
+
+        # دریافت همه پروژه‌ها برای debug
+        all_projects = db.query(Project).all()
+        slog.info(f"[DEBUG-LOG-TRANSFER] Found {len(all_projects)} projects")
+        for p in all_projects[:5]:  # نمایش 5 پروژه اول برای debug
+            slog.info(f"[DEBUG-LOG-TRANSFER] Project: name={p.name}, github_path={p.github_path}")
 
         for service in services:
+            slog.info(f"[DEBUG-LOG-TRANSFER] Processing service: {service.name} (id={service.id})")
+
             # جستجوی پروژه مرتبط
             # استراتژی ۱: نام سرویس در نام پروژه
+            search_term = service.name.split('-')[0]
+            slog.info(f"[DEBUG-LOG-TRANSFER] Strategy 1: searching for '{search_term}' in project names")
             project = db.query(Project).filter(
-                Project.name.ilike(f"%{service.name.split('-')[0]}%")
+                Project.name.ilike(f"%{search_term}%")
             ).first()
 
             if not project:
                 # استراتژی ۲: جستجو در GitHub path
+                slog.info(f"[DEBUG-LOG-TRANSFER] Strategy 2: searching for '{service.name}' in github_path")
                 project = db.query(Project).filter(
                     Project.github_path.ilike(f"%{service.name}%")
                 ).first()
 
             if not project:
                 # استراتژی ۳: جستجو در توضیحات
+                slog.info(f"[DEBUG-LOG-TRANSFER] Strategy 3: searching in description")
                 project = db.query(Project).filter(
                     Project.description.ilike(f"%{service.name}%")
                 ).first()
+
+            if not project:
+                # استراتژی ۴: اولین پروژه (Fallback برای تست)
+                slog.info(f"[DEBUG-LOG-TRANSFER] Strategy 4: fallback to first project")
+                project = db.query(Project).first()
 
             if project:
                 service_project_map[service.id] = {
@@ -343,7 +361,11 @@ class LogToIssuesService:
                     "project_name": project.name,
                     "service_name": service.name
                 }
+                slog.info(f"[DEBUG-LOG-TRANSFER] Mapped service '{service.name}' to project '{project.name}'")
+            else:
+                slog.warning(f"[DEBUG-LOG-TRANSFER] No project found for service '{service.name}'")
 
+        slog.info(f"[DEBUG-LOG-TRANSFER] Final service_project_map: {len(service_project_map)} mappings")
         return service_project_map
 
     async def _process_error_log(
