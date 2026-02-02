@@ -4726,26 +4726,30 @@ async def download_test_coverage_report(
     elif format == "csv":
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["نوع", "فایل/تابع", "وضعیت", "اولویت", "توصیه"])
+        writer.writerow(["نوع", "مسیر فایل", "تعداد موجودیت", "نمونه توابع", "وضعیت"])
+
+        # فایل‌های تست
+        for tf in coverage_result.get("test_files", []):
+            tests = tf.get('tests', [])
+            test_names = ', '.join(t.get('name', '') for t in tests[:3])
+            writer.writerow([
+                "فایل تست",
+                tf.get("path", ""),
+                tf.get("test_count", 0),
+                test_names,
+                "موجود"
+            ])
 
         # فایل‌های بدون تست
         for uf in coverage_result.get("untested_files", []):
+            entities = uf.get("entities", [])
+            entity_names = ', '.join(entities[:3]) if entities else ""
             writer.writerow([
                 "فایل بدون تست",
-                uf.get("file", ""),
-                "نیاز به تست",
-                uf.get("priority", "متوسط"),
-                uf.get("recommendation", "")
-            ])
-
-        # توابع بدون تست
-        for func in coverage_result.get("untested_functions", []):
-            writer.writerow([
-                "تابع بدون تست",
-                f"{func.get('file', '')}:{func.get('name', '')}",
-                "نیاز به تست",
-                func.get("priority", "متوسط"),
-                ""
+                uf.get("path", ""),
+                uf.get("entity_count", 0),
+                entity_names,
+                "نیاز به تست"
             ])
 
         content = output.getvalue()
@@ -4763,9 +4767,9 @@ async def download_test_coverage_report(
             "",
             "📊 خلاصه:",
             f"  - درصد پوشش تست: {summary.get('coverage_percent', 0)}%",
-            f"  - تعداد فایل‌های تست: {summary.get('test_files_count', 0)}",
+            f"  - تعداد فایل‌های تست: {summary.get('total_test_files', 0)}",
             f"  - تعداد تست‌ها: {summary.get('total_tests', 0)}",
-            f"  - فایل‌های بدون تست: {len(coverage_result.get('untested_files', []))}",
+            f"  - فایل‌های بدون تست: {summary.get('untested_file_count', 0)}",
             "",
             "-" * 60,
             "🧪 فایل‌های تست موجود:",
@@ -4773,8 +4777,14 @@ async def download_test_coverage_report(
         ]
 
         for tf in coverage_result.get("test_files", []):
-            lines.append(f"  ✅ {tf.get('file', 'نامشخص')}")
+            # کلید path است نه file
+            lines.append(f"  ✅ {tf.get('path', 'نامشخص')}")
             lines.append(f"     تعداد تست: {tf.get('test_count', 0)}")
+            # نمایش نام تست‌ها
+            tests = tf.get('tests', [])
+            if tests:
+                for t in tests[:3]:  # فقط 3 تست اول
+                    lines.append(f"       - {t.get('name', '')}")
 
         lines.extend([
             "",
@@ -4784,11 +4794,14 @@ async def download_test_coverage_report(
         ])
 
         for uf in coverage_result.get("untested_files", []):
-            lines.append(f"  📍 {uf.get('file', 'نامشخص')}")
-            if uf.get("priority"):
-                lines.append(f"     اولویت: {uf.get('priority')}")
-            if uf.get("recommendation"):
-                lines.append(f"     توصیه: {uf.get('recommendation')}")
+            # کلید path است نه file
+            lines.append(f"  📍 {uf.get('path', 'نامشخص')}")
+            entity_count = uf.get("entity_count", 0)
+            if entity_count:
+                lines.append(f"     تعداد موجودیت: {entity_count}")
+            entities = uf.get("entities", [])
+            if entities:
+                lines.append(f"     نمونه توابع: {', '.join(entities[:3])}")
             lines.append("")
 
         lines.extend([
@@ -4809,9 +4822,10 @@ async def download_test_coverage_report(
 
         for i, rec in enumerate(coverage_result.get("recommendations", []), 1):
             if isinstance(rec, dict):
-                lines.append(f"  {i}. {rec.get('title', '')}")
-                if rec.get("description"):
-                    lines.append(f"     {rec.get('description')}")
+                # کلید message است نه title
+                lines.append(f"  {i}. {rec.get('message', rec.get('title', ''))}")
+                if rec.get("recommendation"):
+                    lines.append(f"     توصیه: {rec.get('recommendation')}")
             else:
                 lines.append(f"  {i}. {rec}")
 
