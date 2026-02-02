@@ -162,6 +162,7 @@ export default function RenderLogsPanel() {
   const logsContainerRef = useRef<HTMLDivElement>(null);
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const lastTimestampRef = useRef<string | null>(null);
+  const isInitializedRef = useRef(false); // 🆕 برای جلوگیری از بارگذاری مجدد در اولین render
 
   // Load initial data
   useEffect(() => {
@@ -190,6 +191,16 @@ export default function RenderLogsPanel() {
     }
   }, [logs, settings.auto_scroll]);
 
+  // 🆕 بارگذاری مجدد لاگ‌ها وقتی فیلترها تغییر می‌کنند
+  useEffect(() => {
+    // در اولین render کاری نکن (loadInitialData خودش لاگ‌ها را بارگذاری می‌کند)
+    if (!isInitializedRef.current) {
+      return;
+    }
+    // وقتی فیلتر تغییر کرد، لاگ‌ها را مجدداً بارگذاری کن
+    loadLogs();
+  }, [selectedLevels, selectedServices, timeRange]);
+
   const showError = (msg: string) => {
     setError(msg);
     setTimeout(() => setError(''), 4000);
@@ -215,6 +226,7 @@ export default function RenderLogsPanel() {
       console.error('Error loading data:', e);
     } finally {
       setLoading(false);
+      isInitializedRef.current = true; // 🆕 علامت‌گذاری که بارگذاری اولیه انجام شد
     }
   };
 
