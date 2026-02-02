@@ -265,36 +265,52 @@ class HealthToIssuesService:
         # پردازش یافته‌های مختلف
         findings_to_process = []
 
-        # Secrets
-        for secret in scan_result.get("secrets", []):
+        # Secrets - ساختار: secrets.findings[]
+        secrets_data = scan_result.get("secrets", {})
+        secrets_list = secrets_data.get("findings", []) if isinstance(secrets_data, dict) else secrets_data
+        for secret in secrets_list:
             findings_to_process.append({
                 "type": "secret",
                 "title": f"کلید محرمانه در {secret.get('file', 'unknown')}",
                 "data": secret
             })
 
-        # Vulnerabilities
-        for vuln in scan_result.get("vulnerabilities", []):
+        # Vulnerabilities - ساختار: dependencies.vulnerabilities[]
+        deps_data = scan_result.get("dependencies", {})
+        vulns_list = deps_data.get("vulnerabilities", []) if isinstance(deps_data, dict) else []
+        for vuln in vulns_list:
             findings_to_process.append({
                 "type": "vulnerability",
                 "title": f"آسیب‌پذیری: {vuln.get('type', 'unknown')}",
                 "data": vuln
             })
 
-        # Sensitive files
-        for sensitive in scan_result.get("sensitive_files", []):
+        # Sensitive files - ساختار: sensitive_files.findings[]
+        sensitive_data = scan_result.get("sensitive_files", {})
+        sensitive_list = sensitive_data.get("findings", []) if isinstance(sensitive_data, dict) else sensitive_data
+        for sensitive in sensitive_list:
             findings_to_process.append({
                 "type": "sensitive_file",
                 "title": f"فایل حساس: {sensitive.get('file', 'unknown')}",
                 "data": sensitive
             })
 
-        # License issues
-        if scan_result.get("license_issues"):
+        # License issues - ساختار: license.has_license
+        license_data = scan_result.get("license", {})
+        if isinstance(license_data, dict) and not license_data.get("has_license", True):
             findings_to_process.append({
                 "type": "license",
-                "title": "مشکلات لایسنس",
-                "data": scan_result["license_issues"]
+                "title": "پروژه فاقد لایسنس است",
+                "data": license_data
+            })
+
+        # Summary issues
+        summary = scan_result.get("summary", {})
+        if summary.get("total_issues", 0) > 0:
+            findings_to_process.append({
+                "type": "security_summary",
+                "title": f"خلاصه امنیتی: {summary.get('total_issues', 0)} مشکل",
+                "data": summary
             })
 
         # پردازش هر یافته
@@ -382,35 +398,21 @@ class HealthToIssuesService:
 
         findings_to_process = []
 
-        # فایل‌های بدون تست
+        # فایل‌های بدون تست - ساختار: untested_files[].path
         for untested in coverage_result.get("untested_files", []):
+            file_path = untested.get("path", untested.get("file", "unknown"))
             findings_to_process.append({
                 "type": "untested_file",
-                "title": f"فایل بدون تست: {untested.get('file', 'unknown')}",
+                "title": f"فایل بدون تست: {file_path}",
                 "data": untested
             })
 
-        # توابع بدون تست
-        for func in coverage_result.get("untested_functions", []):
-            findings_to_process.append({
-                "type": "untested_function",
-                "title": f"تابع بدون تست: {func.get('name', 'unknown')}",
-                "data": func
-            })
-
-        # کلاس‌های بدون تست
-        for cls in coverage_result.get("untested_classes", []):
-            findings_to_process.append({
-                "type": "untested_class",
-                "title": f"کلاس بدون تست: {cls.get('name', 'unknown')}",
-                "data": cls
-            })
-
-        # توصیه‌ها
+        # توصیه‌ها - ساختار: recommendations[].message
         for rec in coverage_result.get("recommendations", []):
+            msg = rec.get("message", rec.get("title", "توصیه تست"))
             findings_to_process.append({
                 "type": "test_recommendation",
-                "title": rec.get("title", "توصیه تست"),
+                "title": msg,
                 "data": rec
             })
 

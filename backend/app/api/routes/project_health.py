@@ -4347,6 +4347,18 @@ async def download_security_report(
     scanner = get_security_scanner()
     scan_result = scanner.full_security_scan(file_data)
 
+    # استخراج داده‌ها با ساختار صحیح
+    secrets_data = scan_result.get("secrets", {})
+    secrets_list = secrets_data.get("findings", []) if isinstance(secrets_data, dict) else []
+
+    sensitive_data = scan_result.get("sensitive_files", {})
+    sensitive_list = sensitive_data.get("findings", []) if isinstance(sensitive_data, dict) else []
+
+    deps_data = scan_result.get("dependencies", {})
+    vulns_list = deps_data.get("vulnerabilities", []) if isinstance(deps_data, dict) else []
+
+    license_data = scan_result.get("license", {})
+
     # تولید گزارش بر اساس فرمت
     if format == "json":
         report = {
@@ -4357,12 +4369,15 @@ async def download_security_report(
             "summary": scan_result.get("summary", {}),
             "security_score": scan_result.get("security_score", 0),
             "findings": {
-                "secrets": scan_result.get("secrets", []),
-                "vulnerabilities": scan_result.get("vulnerabilities", []),
-                "sensitive_files": scan_result.get("sensitive_files", []),
-                "license_issues": scan_result.get("license_issues", [])
+                "secrets": secrets_list,
+                "secrets_count": len(secrets_list),
+                "vulnerabilities": vulns_list,
+                "vulnerabilities_count": len(vulns_list),
+                "sensitive_files": sensitive_list,
+                "sensitive_files_count": len(sensitive_list),
+                "license": license_data
             },
-            "recommendations": scan_result.get("recommendations", [])
+            "recommendations": [scan_result.get("summary", {}).get("recommendation", "")]
         }
         content = json.dumps(report, ensure_ascii=False, indent=2)
         media_type = "application/json"
@@ -4374,35 +4389,35 @@ async def download_security_report(
         writer.writerow(["نوع", "شدت", "فایل", "خط", "توضیحات", "راه‌حل"])
 
         # Secrets
-        for s in scan_result.get("secrets", []):
+        for s in secrets_list:
             writer.writerow([
                 "کلید محرمانه",
-                "بحرانی",
+                s.get("severity", "بحرانی"),
                 s.get("file", ""),
                 s.get("line", ""),
-                s.get("type", ""),
+                s.get("type", s.get("message", "")),
                 "حذف از کد و استفاده از متغیرهای محیطی"
             ])
 
         # Vulnerabilities
-        for v in scan_result.get("vulnerabilities", []):
+        for v in vulns_list:
             writer.writerow([
                 "آسیب‌پذیری",
                 v.get("severity", "متوسط"),
                 v.get("file", ""),
                 v.get("line", ""),
-                v.get("description", ""),
+                v.get("description", v.get("message", "")),
                 v.get("fix", "")
             ])
 
         # Sensitive files
-        for sf in scan_result.get("sensitive_files", []):
+        for sf in sensitive_list:
             writer.writerow([
                 "فایل حساس",
                 "بالا",
-                sf.get("file", ""),
+                sf.get("file", sf.get("path", "")),
                 "",
-                sf.get("reason", ""),
+                sf.get("reason", sf.get("type", "")),
                 "اضافه به .gitignore"
             ])
 
@@ -4419,19 +4434,20 @@ async def download_security_report(
             "=" * 60,
             "",
             "📊 خلاصه:",
-            f"  - کلیدهای محرمانه یافت شده: {len(scan_result.get('secrets', []))}",
-            f"  - آسیب‌پذیری‌ها: {len(scan_result.get('vulnerabilities', []))}",
-            f"  - فایل‌های حساس: {len(scan_result.get('sensitive_files', []))}",
+            f"  - کلیدهای محرمانه یافت شده: {len(secrets_list)}",
+            f"  - آسیب‌پذیری‌ها: {len(vulns_list)}",
+            f"  - فایل‌های حساس: {len(sensitive_list)}",
             "",
             "-" * 60,
             "🔐 کلیدهای محرمانه:",
             "-" * 60,
         ]
 
-        for s in scan_result.get("secrets", []):
+        for s in secrets_list:
             lines.append(f"  📍 فایل: {s.get('file', 'نامشخص')}")
-            lines.append(f"     نوع: {s.get('type', 'نامشخص')}")
+            lines.append(f"     نوع: {s.get('type', s.get('message', 'نامشخص'))}")
             lines.append(f"     خط: {s.get('line', 'نامشخص')}")
+            lines.append(f"     شدت: {s.get('severity', 'بحرانی')}")
             lines.append("")
 
         lines.extend([
@@ -4440,10 +4456,10 @@ async def download_security_report(
             "-" * 60,
         ])
 
-        for v in scan_result.get("vulnerabilities", []):
+        for v in vulns_list:
             lines.append(f"  📍 فایل: {v.get('file', 'نامشخص')}")
             lines.append(f"     شدت: {v.get('severity', 'متوسط')}")
-            lines.append(f"     توضیح: {v.get('description', '')}")
+            lines.append(f"     توضیح: {v.get('description', v.get('message', ''))}")
             lines.append(f"     راه‌حل: {v.get('fix', '')}")
             lines.append("")
 
@@ -4453,19 +4469,31 @@ async def download_security_report(
             "-" * 60,
         ])
 
-        for sf in scan_result.get("sensitive_files", []):
-            lines.append(f"  📍 {sf.get('file', 'نامشخص')}")
-            lines.append(f"     دلیل: {sf.get('reason', '')}")
+        for sf in sensitive_list:
+            lines.append(f"  📍 {sf.get('file', sf.get('path', 'نامشخص'))}")
+            lines.append(f"     دلیل: {sf.get('reason', sf.get('type', ''))}")
             lines.append("")
 
         lines.extend([
             "-" * 60,
-            "💡 توصیه‌ها:",
+            "📄 وضعیت لایسنس:",
             "-" * 60,
         ])
+        if license_data.get("has_license"):
+            for lic in license_data.get("licenses", []):
+                lines.append(f"  ✅ {lic.get('license', 'نامشخص')} - {lic.get('file', '')}")
+        else:
+            lines.append("  ❌ پروژه فاقد لایسنس است")
 
-        for i, rec in enumerate(scan_result.get("recommendations", []), 1):
-            lines.append(f"  {i}. {rec}")
+        lines.extend([
+            "",
+            "-" * 60,
+            "💡 توصیه کلی:",
+            "-" * 60,
+        ])
+        recommendation = scan_result.get("summary", {}).get("recommendation", "")
+        if recommendation:
+            lines.append(f"  {recommendation}")
 
         content = "\n".join(lines)
         media_type = "text/plain; charset=utf-8"
