@@ -923,7 +923,8 @@ async def auto_setup_project_memory(
                 sample_files=important_files,
                 existing_fields=existing_fields,  # ارسال فیلدهای موجود
                 model_id=best_model,
-                full_context=full_context  # 🔴 ارسال context کامل
+                full_context=full_context,  # 🔴 ارسال context کامل
+                db_session=db_session  # 🔴 ارسال db_session برای استفاده از پرامپت‌های دیتابیس
             )
 
         # 🔴 تابع تشخیص فیلدهای محافظت شده (ایجاد شده توسط گزارش مهندسی)
