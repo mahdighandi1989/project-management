@@ -170,53 +170,87 @@ class LogToIssuesService:
         """
         error_logs = []
 
-        if mode == "since_deploy":
-            # حالت جدید: فیلتر بر اساس آخرین دیپلوی
-            services_query = db.query(RenderService)
-            if service_ids:
-                services_query = services_query.filter(RenderService.id.in_(service_ids))
+        try:
+            if mode == "since_deploy":
+                # حالت جدید: فیلتر بر اساس آخرین دیپلوی
+                try:
+                    services_query = db.query(RenderService)
+                    if service_ids:
+                        services_query = services_query.filter(RenderService.id.in_(service_ids))
+                    services = services_query.all()
+                except Exception as e:
+                    slog.warning("Error querying services, using fallback", exception=e)
+                    services = []
 
-            services = services_query.all()
+                for service in services:
+                    try:
+                        # برای هر سرویس، لاگ‌های خطایی که منتقل نشده را بگیر
+                        service_query = db.query(RenderLog).filter(
+                            RenderLog.service_id == service.id,
+                            RenderLog.level.in_(["error", "fatal", "critical"])
+                        )
 
-            for service in services:
-                # برای هر سرویس، لاگ‌های بعد از آخرین دیپلوی که منتقل نشده را بگیر
-                service_query = db.query(RenderLog).filter(
-                    RenderLog.service_id == service.id,
-                    RenderLog.level.in_(["error", "fatal", "critical"]),
-                    RenderLog.transferred_to_issues == False
+                        # فیلتر لاگ‌های منتقل نشده - با fallback
+                        try:
+                            service_query = service_query.filter(
+                                RenderLog.transferred_to_issues == False
+                            )
+                        except Exception:
+                            pass  # ستون وجود ندارد
+
+                        # اگر آخرین دیپلوی منتقل شده مشخص باشه
+                        last_transferred = getattr(service, 'last_transferred_deploy_id', None)
+                        if last_transferred:
+                            service_query = service_query.filter(
+                                RenderLog.deploy_id != last_transferred
+                            )
+
+                        logs = service_query.order_by(RenderLog.timestamp.desc()).limit(50).all()
+                        error_logs.extend(logs)
+                        slog.info(f"Found {len(logs)} error logs for service {service.name}")
+
+                    except Exception as e:
+                        slog.warning(f"Error querying logs for service {service.id}", exception=e)
+
+                # اگر هیچ لاگی پیدا نشد، fallback به حالت time_based
+                if not error_logs:
+                    slog.info("No logs found in since_deploy mode, falling back to time_based")
+                    mode = "time_based"
+
+            if mode == "time_based" or not error_logs:
+                # حالت قدیمی: فیلتر بر اساس زمان
+                cutoff = datetime.utcnow() - timedelta(hours=hours)
+
+                query = db.query(RenderLog).filter(
+                    RenderLog.timestamp >= cutoff,
+                    RenderLog.level.in_(["error", "fatal", "critical"])
                 )
 
-                # اگر آخرین دیپلوی منتقل شده مشخص باشه، فقط دیپلوی‌های جدیدتر
-                if service.last_transferred_deploy_id:
-                    # لاگ‌هایی که deploy_id متفاوت دارند یا بعد از آخرین انتقال هستند
-                    service_query = service_query.filter(
-                        RenderLog.deploy_id != service.last_transferred_deploy_id
-                    )
+                if service_ids:
+                    query = query.filter(RenderLog.service_id.in_(service_ids))
 
-                # اگر آخرین دیپلوی سرویس مشخص باشه، فقط لاگ‌های اون دیپلوی
-                if service.last_deploy_id:
-                    service_query = service_query.filter(
-                        RenderLog.deploy_id == service.last_deploy_id
-                    )
+                # فیلتر لاگ‌های منتقل نشده - با fallback
+                try:
+                    query = query.filter(RenderLog.transferred_to_issues == False)
+                except Exception:
+                    pass  # ستون وجود ندارد
 
-                logs = service_query.order_by(RenderLog.timestamp.desc()).limit(50).all()
-                error_logs.extend(logs)
+                error_logs = query.order_by(RenderLog.timestamp.desc()).limit(100).all()
 
-        else:
-            # حالت قدیمی: فیلتر بر اساس زمان
-            cutoff = datetime.utcnow() - timedelta(hours=hours)
+        except Exception as e:
+            slog.error("Error in _get_error_logs", exception=e)
+            # Fallback: گرفتن همه لاگ‌های خطا بدون فیلتر پیچیده
+            try:
+                cutoff = datetime.utcnow() - timedelta(hours=hours)
+                error_logs = db.query(RenderLog).filter(
+                    RenderLog.timestamp >= cutoff,
+                    RenderLog.level.in_(["error", "fatal", "critical"])
+                ).order_by(RenderLog.timestamp.desc()).limit(100).all()
+            except Exception as e2:
+                slog.error("Fallback also failed", exception=e2)
+                error_logs = []
 
-            query = db.query(RenderLog).filter(
-                RenderLog.timestamp >= cutoff,
-                RenderLog.level.in_(["error", "fatal", "critical"])
-            )
-
-            if service_ids:
-                query = query.filter(RenderLog.service_id.in_(service_ids))
-
-            query = query.filter(RenderLog.transferred_to_issues == False)
-            error_logs = query.order_by(RenderLog.timestamp.desc()).limit(100).all()
-
+        slog.info(f"Total error logs found: {len(error_logs)}")
         return error_logs
 
     async def _update_last_transferred_deploy(
