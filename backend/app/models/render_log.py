@@ -85,7 +85,11 @@ class RenderLogSettings(Base):
     auto_transfer_enabled = Column(Boolean, default=False)  # آیا انتقال خودکار فعال باشه
     auto_transfer_interval_minutes = Column(Integer, default=30)  # هر چند دقیقه یکبار
     auto_transfer_hours_back = Column(Integer, default=24)  # چند ساعت به عقب برگرده (فقط در حالت time-based)
-    auto_transfer_mode = Column(String(20), default="since_deploy")  # since_deploy یا time_based
+    # حالت‌های انتقال:
+    # - since_deploy: خطاهای بعد از آخرین دیپلوی
+    # - time_based: خطاهای X ساعت اخیر
+    # - realtime: هر خطا فوراً منتقل شود
+    auto_transfer_mode = Column(String(20), default="since_deploy")
     last_auto_transfer = Column(DateTime)  # آخرین زمان انتقال خودکار
 
     # آخرین بروزرسانی

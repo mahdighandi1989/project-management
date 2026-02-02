@@ -58,7 +58,11 @@ class LogSettingsRequest(BaseModel):
     auto_transfer_enabled: bool = False
     auto_transfer_interval_minutes: int = 30
     auto_transfer_hours_back: int = 24  # فقط در حالت time_based استفاده می‌شود
-    auto_transfer_mode: str = "since_deploy"  # since_deploy یا time_based
+    # حالت‌های انتقال:
+    # - since_deploy: خطاهای بعد از آخرین دیپلوی (با اینتروال)
+    # - time_based: خطاهای X ساعت اخیر (با اینتروال)
+    # - realtime: هر خطا فوراً منتقل شود (بدون اینتروال)
+    auto_transfer_mode: str = "since_deploy"
 
 
 # =====================================
@@ -930,6 +934,131 @@ async def get_transfer_status(
         "pending_errors": pending_count,
         "transferred_errors": transferred_count,
         "can_transfer": pending_count > 0
+    }
+
+
+from fastapi.responses import StreamingResponse
+import asyncio
+
+@router.post("/transfer-errors-stream")
+async def transfer_errors_stream(
+    service_ids: Optional[List[str]] = Query(None),
+    hours: int = 24,
+    mode: str = "since_deploy",
+    db: Session = Depends(get_db)
+):
+    """
+    انتقال لاگ‌های خطا با گزارش پیشرفت لحظه‌ای (SSE)
+
+    Stream events:
+    - {"type": "start", "total_logs": N}
+    - {"type": "progress", "current": N, "total": N, "status": "..."}
+    - {"type": "log_processed", "log_id": X, "action": "transferred|merged|skipped"}
+    - {"type": "complete", "transferred": N, "merged": N, "skipped": N}
+    - {"type": "error", "message": "..."}
+    """
+
+    async def event_generator():
+        try:
+            service = get_log_to_issues_service()
+
+            # 1. شمارش لاگ‌ها
+            error_logs = await service._get_error_logs(db, service_ids, hours, mode)
+            total_logs = len(error_logs)
+
+            yield f"data: {json.dumps({'type': 'start', 'total_logs': total_logs, 'message': f'شروع پردازش {total_logs} لاگ خطا...'})}\n\n"
+
+            if total_logs == 0:
+                yield f"data: {json.dumps({'type': 'complete', 'transferred': 0, 'merged': 0, 'skipped': 0, 'message': 'لاگ خطایی یافت نشد'})}\n\n"
+                return
+
+            # 2. ساخت نگاشت سرویس-پروژه
+            yield f"data: {json.dumps({'type': 'progress', 'current': 0, 'total': total_logs, 'status': 'در حال نگاشت سرویس‌ها به پروژه‌ها...'})}\n\n"
+            service_project_map = await service._build_service_project_map(db)
+
+            transferred = 0
+            merged = 0
+            skipped = 0
+
+            # 3. پردازش هر لاگ با گزارش پیشرفت
+            for i, log in enumerate(error_logs):
+                try:
+                    yield f"data: {json.dumps({'type': 'progress', 'current': i + 1, 'total': total_logs, 'status': f'پردازش لاگ {i + 1} از {total_logs}...', 'service': log.service_name or 'unknown'})}\n\n"
+
+                    result = await service._process_error_log(log, service_project_map, db)
+
+                    action = result.get("status", "skipped")
+                    if action == "transferred":
+                        transferred += 1
+                    elif action == "merged":
+                        merged += 1
+                    else:
+                        skipped += 1
+
+                    yield f"data: {json.dumps({'type': 'log_processed', 'log_id': log.id, 'action': action, 'current': i + 1, 'total': total_logs})}\n\n"
+
+                    # کمی صبر برای جلوگیری از overload
+                    await asyncio.sleep(0.1)
+
+                except Exception as e:
+                    slog.error(f"Error processing log {log.id}", exception=e)
+                    skipped += 1
+                    yield f"data: {json.dumps({'type': 'log_error', 'log_id': log.id, 'error': str(e)})}\n\n"
+
+            # 4. آرشیو کردن
+            if transferred > 0 or merged > 0:
+                yield f"data: {json.dumps({'type': 'progress', 'current': total_logs, 'total': total_logs, 'status': 'در حال آرشیو کردن...'})}\n\n"
+                await service._archive_transferred_logs(db, error_logs, service_project_map)
+
+            db.commit()
+
+            yield f"data: {json.dumps({'type': 'complete', 'transferred': transferred, 'merged': merged, 'skipped': skipped, 'message': f'✅ {transferred} یافته جدید منتقل شد، {merged} ایراد ادغام شد'})}\n\n"
+
+        except Exception as e:
+            slog.error("Transfer stream error", exception=e)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+@router.post("/archive-stale-issues")
+async def archive_stale_issues_after_deploy(
+    service_id: str,
+    deploy_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    بایگانی خودکار ایرادات قدیمی بعد از دیپلوی جدید
+
+    وقتی یک دیپلوی جدید شناسایی می‌شود:
+    - ایرادات مربوط به دیپلوی‌های قبلی بایگانی می‌شوند
+    - فقط ایرادات دیپلوی جاری باقی می‌مانند
+
+    این endpoint را می‌توان بعد از هر دیپلوی جدید صدا زد
+    """
+    slog.api_request("POST", "/render/archive-stale-issues",
+        service_id=service_id,
+        deploy_id=deploy_id
+    )
+
+    service = get_log_to_issues_service()
+    result = await service.archive_stale_issues_after_deploy(
+        service_id=service_id,
+        new_deploy_id=deploy_id,
+        db=db
+    )
+
+    return {
+        "success": True,
+        **result
     }
 
 

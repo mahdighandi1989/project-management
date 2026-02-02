@@ -4879,39 +4879,46 @@ async def transfer_security_to_issues(
     if not project:
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
 
-    # ابتدا سعی می‌کنیم از نتایج ذخیره شده استفاده کنیم (همان چیزی که کاربر در UI می‌بیند)
-    scan_result = None
-    if project.security_scan_result:
+    # همیشه اسکن جدید اجرا می‌کنیم برای اطمینان از داشتن آخرین داده‌ها
+    slog.info(f"[DEBUG-TRANSFER] Running fresh security scan for project {project_id}")
+
+    # دریافت فایل‌های پروژه از دیتابیس
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+    slog.info(f"[DEBUG-TRANSFER] Found {len(files)} files in database")
+
+    file_data = []
+    files_with_content = 0
+
+    for f in files:
+        has_content = bool(f.content and len(f.content) > 0)
+        if has_content:
+            files_with_content += 1
+        file_data.append({
+            "path": f.file_path,
+            "name": f.file_path.split("/")[-1] if "/" in f.file_path else f.file_path,
+            "content": f.content or ""
+        })
+
+    slog.info(f"[DEBUG-TRANSFER] Files with content: {files_with_content}/{len(files)}")
+
+    # اگر فایل‌ها محتوا ندارند، سعی کن از github_files بگیر
+    if files_with_content == 0 and project.github_files:
         try:
-            scan_result = json.loads(project.security_scan_result) if isinstance(project.security_scan_result, str) else project.security_scan_result
-            slog.info(f"[DEBUG-TRANSFER] Using stored scan result from database")
-        except:
-            scan_result = None
+            github_files = json.loads(project.github_files) if isinstance(project.github_files, str) else project.github_files
+            if isinstance(github_files, list):
+                file_data = github_files
+                files_with_content = sum(1 for f in file_data if f.get("content"))
+                slog.info(f"[DEBUG-TRANSFER] Loaded {len(file_data)} files from github_files, {files_with_content} with content")
+        except Exception as e:
+            slog.warning(f"[DEBUG-TRANSFER] Could not load github_files: {e}")
 
-    # اگر نتیجه ذخیره شده نبود، اسکن جدید اجرا می‌کنیم
-    if not scan_result:
-        slog.info(f"[DEBUG-TRANSFER] No stored result, running fresh scan")
-        # دریافت فایل‌های پروژه
-        files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
-        slog.info(f"[DEBUG-TRANSFER] Found {len(files)} files for project {project_id}")
+    # اجرای اسکن امنیتی
+    scanner = get_security_scanner()
+    scan_result = scanner.full_security_scan(file_data)
 
-        file_data = []
-        files_with_content = 0
-        for f in files:
-            has_content = bool(f.content and len(f.content) > 0)
-            if has_content:
-                files_with_content += 1
-            file_data.append({
-                "path": f.file_path,
-                "name": f.file_path.split("/")[-1] if "/" in f.file_path else f.file_path,
-                "content": f.content or ""
-            })
-
-        slog.info(f"[DEBUG-TRANSFER] Files with content: {files_with_content}/{len(files)}")
-
-        # اجرای اسکن امنیتی
-        scanner = get_security_scanner()
-        scan_result = scanner.full_security_scan(file_data)
+    # ذخیره نتایج برای استفاده‌های بعدی
+    project.security_scan_result = json.dumps(scan_result, ensure_ascii=False)
+    db.commit()
 
     # Debug scan result
     slog.info(f"[DEBUG-TRANSFER] Scan result keys: {list(scan_result.keys()) if scan_result else 'None'}")
@@ -4949,39 +4956,46 @@ async def transfer_test_coverage_to_issues(
     if not project:
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
 
-    # ابتدا سعی می‌کنیم از نتایج ذخیره شده استفاده کنیم (همان چیزی که کاربر در UI می‌بیند)
-    coverage_result = None
-    if project.test_coverage_result:
+    # همیشه تحلیل جدید اجرا می‌کنیم برای اطمینان از داشتن آخرین داده‌ها
+    slog.info(f"[DEBUG-TRANSFER-COV] Running fresh coverage analysis for project {project_id}")
+
+    # دریافت فایل‌های پروژه از دیتابیس
+    files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
+    slog.info(f"[DEBUG-TRANSFER-COV] Found {len(files)} files in database")
+
+    file_data = []
+    files_with_content = 0
+
+    for f in files:
+        has_content = bool(f.content and len(f.content) > 0)
+        if has_content:
+            files_with_content += 1
+        file_data.append({
+            "path": f.file_path,
+            "name": f.file_path.split("/")[-1] if "/" in f.file_path else f.file_path,
+            "content": f.content or ""
+        })
+
+    slog.info(f"[DEBUG-TRANSFER-COV] Files with content: {files_with_content}/{len(files)}")
+
+    # اگر فایل‌ها محتوا ندارند، سعی کن از github_files بگیر
+    if files_with_content == 0 and project.github_files:
         try:
-            coverage_result = json.loads(project.test_coverage_result) if isinstance(project.test_coverage_result, str) else project.test_coverage_result
-            slog.info(f"[DEBUG-TRANSFER-COV] Using stored coverage result from database")
-        except:
-            coverage_result = None
+            github_files = json.loads(project.github_files) if isinstance(project.github_files, str) else project.github_files
+            if isinstance(github_files, list):
+                file_data = github_files
+                files_with_content = sum(1 for f in file_data if f.get("content"))
+                slog.info(f"[DEBUG-TRANSFER-COV] Loaded {len(file_data)} files from github_files, {files_with_content} with content")
+        except Exception as e:
+            slog.warning(f"[DEBUG-TRANSFER-COV] Could not load github_files: {e}")
 
-    # اگر نتیجه ذخیره شده نبود، تحلیل جدید اجرا می‌کنیم
-    if not coverage_result:
-        slog.info(f"[DEBUG-TRANSFER-COV] No stored result, running fresh analysis")
-        # دریافت فایل‌های پروژه
-        files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
-        slog.info(f"[DEBUG-TRANSFER-COV] Found {len(files)} files for project {project_id}")
+    # اجرای تحلیل پوشش تست
+    analyzer = get_test_coverage_analyzer()
+    coverage_result = analyzer.analyze_project(file_data)
 
-        file_data = []
-        files_with_content = 0
-        for f in files:
-            has_content = bool(f.content and len(f.content) > 0)
-            if has_content:
-                files_with_content += 1
-            file_data.append({
-                "path": f.file_path,
-                "name": f.file_path.split("/")[-1] if "/" in f.file_path else f.file_path,
-                "content": f.content or ""
-            })
-
-        slog.info(f"[DEBUG-TRANSFER-COV] Files with content: {files_with_content}/{len(files)}")
-
-        # اجرای تحلیل پوشش تست
-        analyzer = get_test_coverage_analyzer()
-        coverage_result = analyzer.analyze_project(file_data)
+    # ذخیره نتایج برای استفاده‌های بعدی
+    project.test_coverage_result = json.dumps(coverage_result, ensure_ascii=False)
+    db.commit()
 
     # Debug coverage result
     slog.info(f"[DEBUG-TRANSFER-COV] Coverage result keys: {list(coverage_result.keys()) if coverage_result else 'None'}")
