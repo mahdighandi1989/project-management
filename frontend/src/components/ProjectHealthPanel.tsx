@@ -122,6 +122,11 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
   } | null>(null);
   const [loadingSecurity, setLoadingSecurity] = useState(false);
   const [loadingCoverage, setLoadingCoverage] = useState(false);
+  const [transferringSecurityIssues, setTransferringSecurityIssues] = useState(false);
+  const [transferringCoverageIssues, setTransferringCoverageIssues] = useState(false);
+  const [projectIssues, setProjectIssues] = useState<any[]>([]);
+  const [issuesSummary, setIssuesSummary] = useState<any>(null);
+  const [loadingProjectIssues, setLoadingProjectIssues] = useState(false);
 
   // Edit states
   const [editingSettings, setEditingSettings] = useState(false);
@@ -2056,6 +2061,61 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                     </div>
                   </div>
                 )}
+
+                {/* دکمه‌های دانلود و انتقال */}
+                <div className="flex flex-wrap gap-3 pt-4 border-t border-gray-200 dark:border-gray-700">
+                  {/* دانلود گزارش */}
+                  <div className="flex gap-2">
+                    <a
+                      href={`${API_BASE}/api/projects/${projectId}/security/download?format=json`}
+                      className="px-3 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 text-sm flex items-center gap-1"
+                    >
+                      📄 JSON
+                    </a>
+                    <a
+                      href={`${API_BASE}/api/projects/${projectId}/security/download?format=csv`}
+                      className="px-3 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 text-sm flex items-center gap-1"
+                    >
+                      📊 CSV
+                    </a>
+                    <a
+                      href={`${API_BASE}/api/projects/${projectId}/security/download?format=txt`}
+                      className="px-3 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 text-sm flex items-center gap-1"
+                    >
+                      📝 TXT
+                    </a>
+                  </div>
+
+                  {/* انتقال به ایرادات */}
+                  <button
+                    onClick={async () => {
+                      setTransferringSecurityIssues(true);
+                      try {
+                        const res = await fetch(`${API_BASE}/api/projects/${projectId}/security/transfer-to-issues`, {
+                          method: 'POST'
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                          alert(`✅ ${data.transferred} یافته جدید منتقل شد، ${data.merged} ایراد ادغام شد`);
+                        } else {
+                          alert('❌ خطا در انتقال: ' + (data.error || 'Unknown error'));
+                        }
+                      } catch (err) {
+                        console.error('Transfer error:', err);
+                        alert('❌ خطا در انتقال به ایرادات');
+                      }
+                      setTransferringSecurityIssues(false);
+                    }}
+                    disabled={transferringSecurityIssues}
+                    className="px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:opacity-50 text-sm flex items-center gap-2"
+                  >
+                    {transferringSecurityIssues ? (
+                      <>⏳ در حال انتقال...</>
+                    ) : (
+                      <>🔄 انتقال به ایرادات</>
+                    )}
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -2160,8 +2220,212 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                     </div>
                   </div>
                 )}
+
+                {/* دکمه‌های دانلود و انتقال */}
+                <div className="flex flex-wrap gap-3 pt-4 border-t border-gray-200 dark:border-gray-700">
+                  {/* دانلود گزارش */}
+                  <div className="flex gap-2">
+                    <a
+                      href={`${API_BASE}/api/projects/${projectId}/test-coverage/download?format=json`}
+                      className="px-3 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 text-sm flex items-center gap-1"
+                    >
+                      📄 JSON
+                    </a>
+                    <a
+                      href={`${API_BASE}/api/projects/${projectId}/test-coverage/download?format=csv`}
+                      className="px-3 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 text-sm flex items-center gap-1"
+                    >
+                      📊 CSV
+                    </a>
+                    <a
+                      href={`${API_BASE}/api/projects/${projectId}/test-coverage/download?format=txt`}
+                      className="px-3 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 text-sm flex items-center gap-1"
+                    >
+                      📝 TXT
+                    </a>
+                  </div>
+
+                  {/* انتقال به ایرادات */}
+                  <button
+                    onClick={async () => {
+                      setTransferringCoverageIssues(true);
+                      try {
+                        const res = await fetch(`${API_BASE}/api/projects/${projectId}/test-coverage/transfer-to-issues`, {
+                          method: 'POST'
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                          alert(`✅ ${data.transferred} یافته جدید منتقل شد، ${data.merged} ایراد ادغام شد`);
+                        } else {
+                          alert('❌ خطا در انتقال: ' + (data.error || 'Unknown error'));
+                        }
+                      } catch (err) {
+                        console.error('Transfer error:', err);
+                        alert('❌ خطا در انتقال به ایرادات');
+                      }
+                      setTransferringCoverageIssues(false);
+                    }}
+                    disabled={transferringCoverageIssues}
+                    className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 text-sm flex items-center gap-2"
+                  >
+                    {transferringCoverageIssues ? (
+                      <>⏳ در حال انتقال...</>
+                    ) : (
+                      <>🔄 انتقال به ایرادات</>
+                    )}
+                  </button>
+                </div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* تب ایرادات پروژه (از گزارشات سلامت) */}
+        {activeTab === 'issues' && (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-bold">ایرادات پروژه</h3>
+              <button
+                onClick={async () => {
+                  setLoadingProjectIssues(true);
+                  try {
+                    const [issuesRes, summaryRes] = await Promise.all([
+                      fetch(`${API_BASE}/api/projects/${projectId}/issues`),
+                      fetch(`${API_BASE}/api/projects/${projectId}/issues/summary`)
+                    ]);
+                    const issuesData = await issuesRes.json();
+                    const summaryData = await summaryRes.json();
+                    if (issuesData.success) setProjectIssues(issuesData.issues);
+                    if (summaryData.success) setIssuesSummary(summaryData);
+                  } catch (err) {
+                    console.error('Error loading issues:', err);
+                  }
+                  setLoadingProjectIssues(false);
+                }}
+                disabled={loadingProjectIssues}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+              >
+                {loadingProjectIssues ? 'در حال بارگذاری...' : 'بروزرسانی'}
+              </button>
+            </div>
+
+            {/* خلاصه آمار */}
+            {issuesSummary && (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="p-4 bg-red-50 dark:bg-red-900/30 rounded-xl text-center">
+                  <div className="text-2xl font-bold text-red-600">{issuesSummary.by_priority?.critical || 0}</div>
+                  <div className="text-sm text-gray-600">بحرانی</div>
+                </div>
+                <div className="p-4 bg-orange-50 dark:bg-orange-900/30 rounded-xl text-center">
+                  <div className="text-2xl font-bold text-orange-600">{issuesSummary.by_priority?.high || 0}</div>
+                  <div className="text-sm text-gray-600">بالا</div>
+                </div>
+                <div className="p-4 bg-yellow-50 dark:bg-yellow-900/30 rounded-xl text-center">
+                  <div className="text-2xl font-bold text-yellow-600">{issuesSummary.by_priority?.medium || 0}</div>
+                  <div className="text-sm text-gray-600">متوسط</div>
+                </div>
+                <div className="p-4 bg-blue-50 dark:bg-blue-900/30 rounded-xl text-center">
+                  <div className="text-2xl font-bold text-blue-600">{issuesSummary.by_status?.open || 0}</div>
+                  <div className="text-sm text-gray-600">باز</div>
+                </div>
+              </div>
+            )}
+
+            {/* منبع ایرادات */}
+            {issuesSummary && (
+              <div className="flex gap-4 text-sm">
+                <span className="px-3 py-1 bg-blue-100 dark:bg-blue-900/30 rounded-full">
+                  🔐 امنیتی: {issuesSummary.by_source?.security_scan || 0}
+                </span>
+                <span className="px-3 py-1 bg-purple-100 dark:bg-purple-900/30 rounded-full">
+                  🧪 تست: {issuesSummary.by_source?.test_coverage || 0}
+                </span>
+                <span className="px-3 py-1 bg-green-100 dark:bg-green-900/30 rounded-full">
+                  📋 لاگ: {issuesSummary.by_source?.render_logs || 0}
+                </span>
+              </div>
+            )}
+
+            {/* لیست ایرادات */}
+            <div className="space-y-3">
+              {projectIssues.length === 0 && !loadingProjectIssues && (
+                <div className="text-center py-8 text-gray-500">
+                  هنوز ایرادی ثبت نشده است. از تب‌های امنیت یا پوشش تست، یافته‌ها را منتقل کنید.
+                </div>
+              )}
+
+              {projectIssues.map((issue: any) => (
+                <div
+                  key={issue.id}
+                  className={`p-4 rounded-xl border ${
+                    issue.priority === 'critical' ? 'border-red-300 bg-red-50 dark:bg-red-900/20' :
+                    issue.priority === 'high' ? 'border-orange-300 bg-orange-50 dark:bg-orange-900/20' :
+                    issue.priority === 'medium' ? 'border-yellow-300 bg-yellow-50 dark:bg-yellow-900/20' :
+                    'border-gray-300 bg-gray-50 dark:bg-gray-800'
+                  }`}
+                >
+                  <div className="flex justify-between items-start">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className={`px-2 py-0.5 rounded text-xs font-bold text-white ${
+                          issue.priority === 'critical' ? 'bg-red-600' :
+                          issue.priority === 'high' ? 'bg-orange-500' :
+                          issue.priority === 'medium' ? 'bg-yellow-500' :
+                          'bg-gray-500'
+                        }`}>
+                          {issue.priority}
+                        </span>
+                        <span className={`px-2 py-0.5 rounded text-xs ${
+                          issue.source === 'security_scan' ? 'bg-blue-200 text-blue-800' :
+                          issue.source === 'test_coverage' ? 'bg-purple-200 text-purple-800' :
+                          'bg-gray-200 text-gray-800'
+                        }`}>
+                          {issue.source === 'security_scan' ? '🔐 امنیتی' :
+                           issue.source === 'test_coverage' ? '🧪 تست' :
+                           issue.source === 'render_logs' ? '📋 لاگ' : issue.source}
+                        </span>
+                        {issue.occurrences > 1 && (
+                          <span className="px-2 py-0.5 bg-gray-200 dark:bg-gray-600 rounded text-xs">
+                            {issue.occurrences}x
+                          </span>
+                        )}
+                      </div>
+                      <h4 className="font-bold mb-1">{issue.title}</h4>
+                      <p className="text-sm text-gray-600 dark:text-gray-400 whitespace-pre-wrap">{issue.description}</p>
+                      {issue.solution && (
+                        <div className="mt-2 p-2 bg-green-50 dark:bg-green-900/20 rounded text-sm">
+                          <span className="font-bold text-green-700">💡 راه‌حل:</span>
+                          <p className="text-green-800 dark:text-green-300">{issue.solution}</p>
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex gap-2 mr-4">
+                      <select
+                        value={issue.status}
+                        onChange={async (e) => {
+                          try {
+                            await fetch(`${API_BASE}/api/projects/${projectId}/issues/${issue.id}?status=${e.target.value}`, {
+                              method: 'PATCH'
+                            });
+                            setProjectIssues(prev => prev.map(i =>
+                              i.id === issue.id ? { ...i, status: e.target.value } : i
+                            ));
+                          } catch (err) {
+                            console.error('Error updating issue:', err);
+                          }
+                        }}
+                        className="px-2 py-1 border rounded text-sm bg-white dark:bg-gray-700"
+                      >
+                        <option value="open">باز</option>
+                        <option value="in_progress">در حال بررسی</option>
+                        <option value="resolved">حل شده</option>
+                        <option value="ignored">نادیده</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>
