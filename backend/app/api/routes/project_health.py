@@ -4036,7 +4036,7 @@ async def validate_all_files(
 
 @router.get("/{project_id}/security/scan")
 async def run_security_scan(
-    project_id: int,
+    project_id: str,
     db=Depends(get_db)
 ):
     """
@@ -4091,7 +4091,7 @@ async def run_security_scan(
 
 @router.get("/{project_id}/security/secrets")
 async def scan_secrets_only(
-    project_id: int,
+    project_id: str,
     db=Depends(get_db)
 ):
     """
@@ -4121,7 +4121,7 @@ async def scan_secrets_only(
 
 @router.get("/{project_id}/security/license")
 async def detect_project_license(
-    project_id: int,
+    project_id: str,
     db=Depends(get_db)
 ):
     """
@@ -4153,7 +4153,7 @@ async def detect_project_license(
 
 @router.get("/{project_id}/security/dependencies")
 async def scan_dependencies(
-    project_id: int,
+    project_id: str,
     db=Depends(get_db)
 ):
     """
@@ -4189,7 +4189,7 @@ async def scan_dependencies(
 
 @router.get("/{project_id}/test-coverage")
 async def analyze_test_coverage(
-    project_id: int,
+    project_id: str,
     db=Depends(get_db)
 ):
     """
@@ -4245,7 +4245,7 @@ async def analyze_test_coverage(
 
 @router.get("/{project_id}/test-coverage/summary")
 async def get_test_coverage_summary(
-    project_id: int,
+    project_id: str,
     db=Depends(get_db)
 ):
     """
@@ -4285,7 +4285,7 @@ async def get_test_coverage_summary(
 
 @router.get("/{project_id}/test-coverage/untested")
 async def get_untested_files(
-    project_id: int,
+    project_id: str,
     db=Depends(get_db)
 ):
     """
