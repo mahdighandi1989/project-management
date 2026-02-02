@@ -313,6 +313,14 @@ def migrate_db():
                 cursor.execute("ALTER TABLE render_services ADD COLUMN last_transferred_deploy_id VARCHAR(50)")
                 logger.info("Added 'last_transferred_deploy_id' column to render_services table")
 
+            # 🆕 ستون اتصال دستی به پروژه
+            if "project_id" not in existing_cols:
+                cursor.execute("ALTER TABLE render_services ADD COLUMN project_id VARCHAR(36)")
+                logger.info("Added 'project_id' column to render_services table")
+                # ایجاد ایندکس برای جستجوی سریع
+                cursor.execute("CREATE INDEX IF NOT EXISTS ix_render_services_project_id ON render_services(project_id)")
+                logger.info("Created index on render_services.project_id")
+
         conn.commit()
         logger.info("Database migration completed")
 
