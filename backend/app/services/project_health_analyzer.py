@@ -44,6 +44,9 @@ DEFAULT_ANALYSIS_SETTINGS = {
     "trigger_interval_minutes": 30,
     "trigger_interval_type": "minutes",
     "auto_analyze_on_import": True,
+    # 🆕 تنظیمات محدودیت فایل - پیش‌فرض: نامحدود
+    "unlimited_files": True,  # اگر True باشد، محدودیت تعداد فایل اعمال نمی‌شود
+    "max_files_limit": 100,   # فقط وقتی unlimited_files=False باشد استفاده می‌شود
     "criteria_weights": {
         "code_quality": 0.25,
         "documentation": 0.15,
@@ -524,11 +527,13 @@ README باید شامل این بخش‌ها باشد:
         self,
         files: List[Dict],
         model_ids: List[str],
-        roadmap_content: str
+        roadmap_content: str,
+        analysis_settings: Dict[str, Any] = None  # 🆕 تنظیمات محدودیت فایل
     ) -> List[Dict]:
         """تحلیل موازی همه فایل‌ها"""
 
         file_analyses = []
+        analysis_settings = analysis_settings or {}
 
         # فیلتر فایل‌های قابل تحلیل
         analyzable_files = [
@@ -536,7 +541,20 @@ README باید شامل این بخش‌ها باشد:
             if self._is_analyzable_file(f.get("path", ""))
         ]
 
-        for file in analyzable_files[:50]:  # حداکثر 50 فایل
+        # 🆕 بررسی تنظیمات محدودیت فایل
+        unlimited_files = analysis_settings.get('unlimited_files', True)
+        max_files_limit = analysis_settings.get('max_files_limit', 100)
+
+        if unlimited_files:
+            # حالت نامحدود - همه فایل‌ها
+            files_to_process = analyzable_files
+            logger.info(f"[Health Analyzer] Unlimited mode: processing all {len(files_to_process)} files")
+        else:
+            # حالت محدود
+            files_to_process = analyzable_files[:max_files_limit]
+            logger.info(f"[Health Analyzer] Limited mode: processing {len(files_to_process)} of {len(analyzable_files)} files")
+
+        for file in files_to_process:
             file_path = file.get("path", file.get("file_path", ""))
             file_content = file.get("content", "")
 

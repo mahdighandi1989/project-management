@@ -2838,44 +2838,27 @@ async def generate_engineering_report_stream(
                     yield f"data: {msg4_err}\n\n"
                 await asyncio.sleep(delay_factor)
 
-                # 🔴🔴🔴 بایگانی قطعی همه ایرادات فعال در حالت deep
+                # 🟢 اصلاح شده: فقط ایرادات تبدیل‌شده به فیلد بایگانی شوند
+                # ایرادات با archived_reason="converted_to_field" قبلاً در generate_engineering_report بایگانی شده‌اند
+                # بقیه ایرادات باید فعال بمانند تا کاربر بتواند آنها را دستی بررسی کند
                 try:
                     project_fresh = db.query(Project).filter(Project.id == project_id).first()
                     if project_fresh and project_fresh.issues_found:
                         all_issues = json.loads(project_fresh.issues_found)
-                        archived_count = 0
-                        for issue in all_issues:
-                            if not issue.get("archived"):
-                                issue["archived"] = True
-                                issue["archived_at"] = datetime.utcnow().isoformat()
-                                issue["archived_reason"] = "engineering_report_4step_completed"
-                                archived_count += 1
+                        # فقط شمارش ایرادات تبدیل‌شده (که قبلاً بایگانی شده‌اند)
+                        converted_count = sum(1 for i in all_issues if i.get("archived_reason") == "converted_to_field")
+                        remaining_count = sum(1 for i in all_issues if not i.get("archived"))
 
-                                # 🆕 ثبت در ژورنال برای هر ایراد بایگانی شده
-                                log_detailed_operation(
-                                    db, project_id, None,
-                                    "issue_archived",
-                                    f"ایراد بایگانی شد (گزارش مهندسی عمیق): {issue.get('message', '')[:60]}",
-                                    details={
-                                        "issue_id": issue.get("id"),
-                                        "file": issue.get("file"),
-                                        "severity": issue.get("severity"),
-                                        "archive_reason": "engineering_report_4step_completed",
-                                    },
-                                    target_type="issue",
-                                    target_id=issue.get("id"),
-                                    target_name=issue.get("message", "")[:60],
-                                    status="completed"
-                                )
-
-                        if archived_count > 0:
-                            project_fresh.issues_found = json.dumps(all_issues, ensure_ascii=False)
-                            db.commit()
-                            archive_msg = json.dumps({'step': total_steps - 1, 'message': f'🗂️ {archived_count} ایراد بایگانی شد', 'progress': 98}, ensure_ascii=False)
-                            yield f"data: {archive_msg}\n\n"
+                        if converted_count > 0 or remaining_count > 0:
+                            status_msg = json.dumps({
+                                'step': total_steps - 1,
+                                'message': f'📋 {converted_count} ایراد به فیلد تبدیل شد، {remaining_count} ایراد فعال باقی‌ماند',
+                                'progress': 98
+                            }, ensure_ascii=False)
+                            yield f"data: {status_msg}\n\n"
                 except Exception as arch_err:
                     import logging
-                    logging.getLogger(__name__).error(f"Deep mode: Failed to archive issues: {arch_err}")
+                    logging.getLogger(__name__).error(f"Deep mode: Error checking issues: {arch_err}")
 
                 result = {
                     "success": True,
@@ -2906,48 +2889,30 @@ async def generate_engineering_report_stream(
                     result["models_used"] = selected_models
                     result["depth"] = depth
 
-            # 🔴🔴🔴 مرحله نهایی و قطعی: بایگانی همه ایرادات فعال
-            # این مرحله تضمین می‌کند که همه ایرادات بعد از گزارش مهندسی بایگانی شوند
+            # 🟢 اصلاح شده: فقط گزارش وضعیت ایرادات - بایگانی خودکار حذف شد
+            # ایرادات فقط در صورت تبدیل به فیلد بایگانی می‌شوند (در generate_engineering_report)
+            # بقیه ایرادات فعال می‌مانند تا کاربر بتواند آنها را دستی بررسی کند
             if result.get("success"):
                 try:
-                    # دریافت مجدد پروژه برای اطمینان از آخرین داده‌ها
                     project_fresh = db.query(Project).filter(Project.id == project_id).first()
                     if project_fresh and project_fresh.issues_found:
                         all_issues = json.loads(project_fresh.issues_found)
-                        archived_count = 0
-                        for issue in all_issues:
-                            if not issue.get("archived"):
-                                issue["archived"] = True
-                                issue["archived_at"] = datetime.utcnow().isoformat()
-                                issue["archived_reason"] = "engineering_report_completed"
-                                archived_count += 1
+                        converted_count = sum(1 for i in all_issues if i.get("archived_reason") == "converted_to_field")
+                        remaining_count = sum(1 for i in all_issues if not i.get("archived"))
 
-                                # 🆕 ثبت در ژورنال برای هر ایراد بایگانی شده
-                                log_detailed_operation(
-                                    db, project_id, None,
-                                    "issue_archived",
-                                    f"ایراد بایگانی شد (گزارش مهندسی): {issue.get('message', '')[:60]}",
-                                    details={
-                                        "issue_id": issue.get("id"),
-                                        "file": issue.get("file"),
-                                        "severity": issue.get("severity"),
-                                        "archive_reason": "engineering_report_completed",
-                                    },
-                                    target_type="issue",
-                                    target_id=issue.get("id"),
-                                    target_name=issue.get("message", "")[:60],
-                                    status="completed"
-                                )
+                        result["issues_converted"] = converted_count
+                        result["issues_remaining"] = remaining_count
 
-                        if archived_count > 0:
-                            project_fresh.issues_found = json.dumps(all_issues, ensure_ascii=False)
-                            db.commit()
-                            result["issues_archived"] = archived_count
-                            archive_msg = json.dumps({'step': total_steps, 'message': f'🗂️ {archived_count} ایراد بایگانی شد', 'progress': 99}, ensure_ascii=False)
-                            yield f"data: {archive_msg}\n\n"
-                except Exception as arch_err:
+                        if converted_count > 0 or remaining_count > 0:
+                            status_msg = json.dumps({
+                                'step': total_steps,
+                                'message': f'📋 {converted_count} ایراد به فیلد تبدیل شد، {remaining_count} ایراد برای بررسی دستی باقی‌ماند',
+                                'progress': 99
+                            }, ensure_ascii=False)
+                            yield f"data: {status_msg}\n\n"
+                except Exception as stat_err:
                     import logging
-                    logging.getLogger(__name__).error(f"Failed to archive issues: {arch_err}")
+                    logging.getLogger(__name__).error(f"Failed to get issues status: {stat_err}")
 
             # مرحله نهایی: اتمام
             if result.get("success"):
@@ -4655,3 +4620,267 @@ def check_cycle_prevention(
         return False
 
     return True
+
+
+# =====================================
+# 🆕 خروجی ژورنال - Export
+# =====================================
+
+@router.get("/{project_id}/journal/export")
+async def export_journal(
+    project_id: str,
+    format: str = Query("json", description="فرمت خروجی: json, csv, xlsx"),
+    days: int = Query(30, ge=1, le=365, description="تعداد روز"),
+    activity_type: str = Query(None, description="فیلتر نوع فعالیت"),
+    include_operations: bool = Query(False, description="شامل عملیات جزئی"),
+    db: Session = Depends(get_db)
+):
+    """
+    خروجی ژورنال فعالیت‌ها در فرمت‌های مختلف
+
+    فرمت‌های پشتیبانی شده:
+    - json: فایل JSON با تمام جزئیات
+    - csv: فایل CSV برای باز کردن در Excel
+    - xlsx: فایل Excel با فرمت‌بندی
+    """
+    from fastapi.responses import Response
+    import csv
+    import io
+
+    # بررسی وجود پروژه
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت فعالیت‌ها
+    since_date = datetime.utcnow() - timedelta(days=days)
+    query = db.query(ActivityLog).filter(
+        ActivityLog.project_id == project_id,
+        ActivityLog.created_at >= since_date
+    )
+
+    if activity_type:
+        query = query.filter(ActivityLog.activity_type == activity_type)
+
+    logs = query.order_by(desc(ActivityLog.created_at)).all()
+
+    # تبدیل به دیکشنری
+    journal_data = []
+    for log in logs:
+        log_dict = {
+            "id": log.id,
+            "activity_type": log.activity_type,
+            "model_id": log.model_id,
+            "model_provider": log.model_provider,
+            "prompt": log.prompt,
+            "response": log.response,
+            "tokens_used": log.tokens_used,
+            "latency_ms": log.latency_ms,
+            "success": log.success,
+            "error_message": log.error_message,
+            "field_id": log.field_id,
+            "field_name": log.field_name,
+            "created_at": log.created_at.isoformat() if log.created_at else None,
+        }
+
+        # اضافه کردن عملیات جزئی
+        if include_operations:
+            operations = db.query(DetailedOperation).filter(
+                DetailedOperation.parent_log_id == log.id
+            ).order_by(DetailedOperation.sequence_number).all()
+
+            log_dict["operations"] = [
+                {
+                    "id": op.id,
+                    "operation_type": op.operation_type,
+                    "summary": op.summary,
+                    "target_type": op.target_type,
+                    "target_name": op.target_name,
+                    "status": op.status,
+                    "created_at": op.created_at.isoformat() if op.created_at else None
+                }
+                for op in operations
+            ]
+
+        journal_data.append(log_dict)
+
+    # خروجی JSON
+    if format.lower() == "json":
+        export_data = {
+            "project_id": project_id,
+            "project_name": project.name,
+            "exported_at": datetime.utcnow().isoformat(),
+            "period_days": days,
+            "total_activities": len(journal_data),
+            "activities": journal_data
+        }
+        content = json.dumps(export_data, ensure_ascii=False, indent=2)
+        return Response(
+            content=content,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="journal_{project_id[:8]}_{datetime.now().strftime("%Y%m%d")}.json"'
+            }
+        )
+
+    # خروجی CSV
+    elif format.lower() == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        # هدر
+        headers = [
+            "شناسه", "نوع فعالیت", "مدل", "ارائه‌دهنده", "خلاصه",
+            "توکن", "تاخیر (ms)", "موفق", "خطا", "فیلد", "تاریخ"
+        ]
+        writer.writerow(headers)
+
+        # داده‌ها
+        for log in journal_data:
+            writer.writerow([
+                log["id"],
+                log["activity_type"],
+                log["model_id"],
+                log["model_provider"],
+                (log["prompt"] or "")[:100],
+                log["tokens_used"],
+                log["latency_ms"],
+                "بله" if log["success"] else "خیر",
+                log["error_message"] or "",
+                log["field_name"] or "",
+                log["created_at"]
+            ])
+
+        content = output.getvalue()
+        # Add BOM for Excel compatibility with UTF-8
+        content = '\ufeff' + content
+
+        return Response(
+            content=content.encode('utf-8'),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="journal_{project_id[:8]}_{datetime.now().strftime("%Y%m%d")}.csv"'
+            }
+        )
+
+    # خروجی XLSX
+    elif format.lower() == "xlsx":
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment
+        except ImportError:
+            raise HTTPException(
+                status_code=500,
+                detail="کتابخانه openpyxl نصب نیست. برای خروجی Excel از pip install openpyxl استفاده کنید."
+            )
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "ژورنال فعالیت‌ها"
+
+        # استایل هدر
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+
+        # هدرها
+        headers = [
+            "شناسه", "نوع فعالیت", "مدل", "ارائه‌دهنده", "خلاصه",
+            "توکن", "تاخیر (ms)", "موفق", "خطا", "فیلد", "تاریخ"
+        ]
+
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center")
+
+        # داده‌ها
+        for row, log in enumerate(journal_data, 2):
+            ws.cell(row=row, column=1, value=log["id"])
+            ws.cell(row=row, column=2, value=log["activity_type"])
+            ws.cell(row=row, column=3, value=log["model_id"])
+            ws.cell(row=row, column=4, value=log["model_provider"])
+            ws.cell(row=row, column=5, value=(log["prompt"] or "")[:100])
+            ws.cell(row=row, column=6, value=log["tokens_used"])
+            ws.cell(row=row, column=7, value=log["latency_ms"])
+            ws.cell(row=row, column=8, value="بله" if log["success"] else "خیر")
+            ws.cell(row=row, column=9, value=log["error_message"] or "")
+            ws.cell(row=row, column=10, value=log["field_name"] or "")
+            ws.cell(row=row, column=11, value=log["created_at"])
+
+        # تنظیم عرض ستون‌ها
+        column_widths = [15, 15, 12, 12, 40, 10, 12, 8, 30, 20, 22]
+        for i, width in enumerate(column_widths, 1):
+            ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = width
+
+        # ذخیره در حافظه
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        return Response(
+            content=output.read(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f'attachment; filename="journal_{project_id[:8]}_{datetime.now().strftime("%Y%m%d")}.xlsx"'
+            }
+        )
+
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"فرمت '{format}' پشتیبانی نمی‌شود. فرمت‌های مجاز: json, csv, xlsx"
+        )
+
+
+@router.get("/{project_id}/journal/export/stats")
+async def export_journal_stats(
+    project_id: str,
+    days: int = Query(30, ge=1, le=365),
+    db: Session = Depends(get_db)
+):
+    """
+    آمار ژورنال برای خروجی
+    """
+    # بررسی وجود پروژه
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    since_date = datetime.utcnow() - timedelta(days=days)
+
+    # شمارش کل
+    total_count = db.query(ActivityLog).filter(
+        ActivityLog.project_id == project_id,
+        ActivityLog.created_at >= since_date
+    ).count()
+
+    # شمارش بر اساس نوع
+    from sqlalchemy import func
+    type_counts = db.query(
+        ActivityLog.activity_type,
+        func.count(ActivityLog.id)
+    ).filter(
+        ActivityLog.project_id == project_id,
+        ActivityLog.created_at >= since_date
+    ).group_by(ActivityLog.activity_type).all()
+
+    # شمارش بر اساس مدل
+    model_counts = db.query(
+        ActivityLog.model_id,
+        func.count(ActivityLog.id)
+    ).filter(
+        ActivityLog.project_id == project_id,
+        ActivityLog.created_at >= since_date
+    ).group_by(ActivityLog.model_id).all()
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "project_name": project.name,
+        "period_days": days,
+        "total_activities": total_count,
+        "by_type": {t: c for t, c in type_counts},
+        "by_model": {m: c for m, c in model_counts},
+        "export_formats": ["json", "csv", "xlsx"]
+    }

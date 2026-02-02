@@ -249,7 +249,8 @@ class DeepAnalysisService:
         instruction: str = "",
         db_session=None,
         progress_manager=None,
-        depth: str = "standard"  # 🆕 quick, standard, deep, thorough
+        depth: str = "standard",  # 🆕 quick, standard, deep, thorough
+        analysis_settings: Dict[str, Any] = None  # 🆕 تنظیمات از پروژه
     ) -> Dict[str, Any]:
         """
         اجرای تحلیل کامل سه‌مرحله‌ای
@@ -264,11 +265,13 @@ class DeepAnalysisService:
             db_session: session دیتابیس
             progress_manager: مدیر پیشرفت برای ذخیره وضعیت و pause/resume/stop
             depth: عمق تحلیل (quick, standard, deep, thorough)
+            analysis_settings: تنظیمات تحلیل از پروژه (شامل unlimited_files و max_files_limit)
 
         Returns:
             نتایج کامل تحلیل
         """
         self._progress_manager = progress_manager
+        self._analysis_settings = analysis_settings or {}
 
         # 🆕 تنظیمات عمق تحلیل
         depth_config = {
@@ -534,12 +537,22 @@ class DeepAnalysisService:
         batch_delay = getattr(self, '_depth_config', {}).get('batch_delay', 0.5)
         max_files = getattr(self, '_depth_config', {}).get('max_files', 100)
 
-        # محدود کردن تعداد فایل‌ها بر اساس عمق
-        if len(files_to_analyze) > max_files:
-            logger.info(f"🔍 [MICRO ANALYSIS] Limiting files from {len(files_to_analyze)} to {max_files} based on depth settings")
-            files_to_analyze = files_to_analyze[:max_files]
+        # 🆕 بررسی تنظیمات محدودیت فایل از پروژه
+        unlimited_files = getattr(self, '_analysis_settings', {}).get('unlimited_files', True)
+        custom_max_files = getattr(self, '_analysis_settings', {}).get('max_files_limit', 100)
 
-        logger.info(f"🔍 [MICRO ANALYSIS] Batch size: {batch_size}, Delay: {batch_delay}s, Max files: {max_files}")
+        # محدود کردن تعداد فایل‌ها بر اساس تنظیمات
+        if unlimited_files:
+            # 🆕 حالت نامحدود - همه فایل‌ها تحلیل می‌شوند
+            logger.info(f"🔍 [MICRO ANALYSIS] Unlimited mode: analyzing all {len(files_to_analyze)} files")
+        else:
+            # حالت محدود - استفاده از تنظیمات کاربر یا depth
+            effective_max = custom_max_files if custom_max_files else max_files
+            if len(files_to_analyze) > effective_max:
+                logger.info(f"🔍 [MICRO ANALYSIS] Limiting files from {len(files_to_analyze)} to {effective_max} based on settings")
+                files_to_analyze = files_to_analyze[:effective_max]
+
+        logger.info(f"🔍 [MICRO ANALYSIS] Batch size: {batch_size}, Delay: {batch_delay}s, Files: {len(files_to_analyze)}, Unlimited: {unlimited_files}")
 
         for i in range(0, len(files_to_analyze), batch_size):
             # بررسی درخواست توقف
