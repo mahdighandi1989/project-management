@@ -255,6 +255,12 @@ class HealthToIssuesService:
         """
         slog.info("Transferring security findings", project_id=project_id)
 
+        # Debug: نمایش ساختار scan_result
+        slog.info(f"[DEBUG] scan_result keys: {list(scan_result.keys()) if scan_result else 'None'}")
+        slog.info(f"[DEBUG] secrets: {scan_result.get('secrets', {})}")
+        slog.info(f"[DEBUG] sensitive_files: {scan_result.get('sensitive_files', {})}")
+        slog.info(f"[DEBUG] dependencies: {scan_result.get('dependencies', {})}")
+
         # دریافت پروژه
         project = db.query(Project).filter(Project.id == project_id).first()
         if not project:
@@ -270,6 +276,7 @@ class HealthToIssuesService:
         # Secrets - ساختار: secrets.findings[]
         secrets_data = scan_result.get("secrets", {})
         secrets_list = secrets_data.get("findings", []) if isinstance(secrets_data, dict) else secrets_data
+        slog.info(f"[DEBUG] secrets_list count: {len(secrets_list)}")
         for secret in secrets_list:
             findings_to_process.append({
                 "type": "secret",
@@ -280,6 +287,7 @@ class HealthToIssuesService:
         # Vulnerabilities - ساختار: dependencies.vulnerabilities[]
         deps_data = scan_result.get("dependencies", {})
         vulns_list = deps_data.get("vulnerabilities", []) if isinstance(deps_data, dict) else []
+        slog.info(f"[DEBUG] vulns_list count: {len(vulns_list)}")
         for vuln in vulns_list:
             findings_to_process.append({
                 "type": "vulnerability",
@@ -290,6 +298,7 @@ class HealthToIssuesService:
         # Sensitive files - ساختار: sensitive_files.findings[]
         sensitive_data = scan_result.get("sensitive_files", {})
         sensitive_list = sensitive_data.get("findings", []) if isinstance(sensitive_data, dict) else sensitive_data
+        slog.info(f"[DEBUG] sensitive_list count: {len(sensitive_list)}")
         for sensitive in sensitive_list:
             findings_to_process.append({
                 "type": "sensitive_file",
@@ -315,8 +324,12 @@ class HealthToIssuesService:
                 "data": summary
             })
 
+        slog.info(f"[DEBUG] Total findings_to_process: {len(findings_to_process)}")
+        slog.info(f"[DEBUG] findings_to_process types: {[f['type'] for f in findings_to_process]}")
+
         # پردازش هر یافته
-        for finding in findings_to_process:
+        for i, finding in enumerate(findings_to_process):
+            slog.info(f"[DEBUG] Processing finding {i+1}/{len(findings_to_process)}: {finding.get('type')}")
             try:
                 # بسط توسط AI
                 enhanced = await self._enhance_with_ai(
@@ -324,6 +337,7 @@ class HealthToIssuesService:
                     finding,
                     project.name
                 )
+                slog.info(f"[DEBUG] Enhanced result: title={enhanced.get('title', 'NO_TITLE')[:50]}")
 
                 # جستجوی ایراد مشابه
                 existing = self._find_similar_issue(
@@ -359,7 +373,7 @@ class HealthToIssuesService:
                     transferred += 1
 
             except Exception as e:
-                slog.error("Error processing security finding", exception=e)
+                slog.error(f"[DEBUG] Error processing security finding: {str(e)}", exception=e)
                 errors.append(str(e))
 
         db.commit()
@@ -414,6 +428,11 @@ class HealthToIssuesService:
         """
         slog.info("Transferring test coverage findings", project_id=project_id)
 
+        # Debug: نمایش ساختار coverage_result
+        slog.info(f"[DEBUG] coverage_result keys: {list(coverage_result.keys()) if coverage_result else 'None'}")
+        slog.info(f"[DEBUG] untested_files count: {len(coverage_result.get('untested_files', []))}")
+        slog.info(f"[DEBUG] recommendations count: {len(coverage_result.get('recommendations', []))}")
+
         # دریافت پروژه
         project = db.query(Project).filter(Project.id == project_id).first()
         if not project:
@@ -452,8 +471,12 @@ class HealthToIssuesService:
                 "data": summary
             })
 
+        slog.info(f"[DEBUG] Total findings_to_process: {len(findings_to_process)}")
+        slog.info(f"[DEBUG] findings_to_process types: {[f['type'] for f in findings_to_process]}")
+
         # پردازش هر یافته
-        for finding in findings_to_process:
+        for i, finding in enumerate(findings_to_process):
+            slog.info(f"[DEBUG] Processing finding {i+1}/{len(findings_to_process)}: {finding.get('type')}")
             try:
                 # بسط توسط AI
                 enhanced = await self._enhance_with_ai(
@@ -461,6 +484,7 @@ class HealthToIssuesService:
                     finding,
                     project.name
                 )
+                slog.info(f"[DEBUG] Enhanced result: title={enhanced.get('title', 'NO_TITLE')[:50]}")
 
                 # جستجوی ایراد مشابه
                 existing = self._find_similar_issue(
@@ -496,7 +520,7 @@ class HealthToIssuesService:
                     transferred += 1
 
             except Exception as e:
-                slog.error("Error processing test coverage finding", exception=e)
+                slog.error(f"[DEBUG] Error processing test coverage finding: {str(e)}", exception=e)
                 errors.append(str(e))
 
         db.commit()
