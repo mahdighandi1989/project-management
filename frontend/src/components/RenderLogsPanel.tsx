@@ -182,12 +182,35 @@ export default function RenderLogsPanel() {
   const loadServices = async () => {
     try {
       const res = await fetch(`${API_BASE}/api/render/services`);
-      if (res.ok) {
-        const data = await res.json();
-        setServices(data.services || []);
+      const data = await res.json();
+
+      if (res.ok && data.services && data.services.length > 0) {
+        setServices(data.services);
+      } else {
+        // اگر سرویسی نبود، سعی کن از API بگیری
+        console.log('No services in cache, trying to refresh from API...');
+        await refreshServicesQuietly();
       }
     } catch (e) {
       console.error('Error loading services:', e);
+      // در صورت خطا هم سعی کن refresh کنی
+      await refreshServicesQuietly();
+    }
+  };
+
+  const refreshServicesQuietly = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/render/services/refresh`, {
+        method: 'POST',
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.services && data.services.length > 0) {
+          setServices(data.services);
+        }
+      }
+    } catch (e) {
+      console.error('Error refreshing services:', e);
     }
   };
 
@@ -665,22 +688,35 @@ export default function RenderLogsPanel() {
             <div className="flex flex-wrap items-start gap-3">
               <label className="text-sm font-medium pt-2">سرویس‌ها:</label>
               <div className="flex flex-wrap gap-2 flex-1">
-                {services.map(s => (
-                  <button
-                    key={s.id}
-                    onClick={() => {
-                      toggleService(s.id);
-                      setTimeout(loadLogs, 100);
-                    }}
-                    className={`px-3 py-1 rounded text-sm border transition ${
-                      selectedServices.includes(s.id)
-                        ? 'bg-blue-500 text-white border-blue-600'
-                        : 'bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 hover:bg-gray-100'
-                    }`}
-                  >
-                    {s.name}
-                  </button>
-                ))}
+                {services.length === 0 ? (
+                  <div className="flex items-center gap-2 text-gray-500 text-sm">
+                    <span>هیچ سرویسی یافت نشد.</span>
+                    <button
+                      onClick={refreshServices}
+                      disabled={fetching}
+                      className="text-blue-500 hover:underline"
+                    >
+                      {fetching ? 'در حال بارگذاری...' : 'بروزرسانی از Render'}
+                    </button>
+                  </div>
+                ) : (
+                  services.map(s => (
+                    <button
+                      key={s.id}
+                      onClick={() => {
+                        toggleService(s.id);
+                        setTimeout(loadLogs, 100);
+                      }}
+                      className={`px-3 py-1 rounded text-sm border transition ${
+                        selectedServices.includes(s.id)
+                          ? 'bg-blue-500 text-white border-blue-600'
+                          : 'bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 hover:bg-gray-100'
+                      }`}
+                    >
+                      {s.name}
+                    </button>
+                  ))
+                )}
               </div>
               <div className="flex gap-2">
                 <button
