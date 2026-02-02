@@ -642,11 +642,12 @@ class HealthToIssuesService:
             # ذخیره آرشیو
             project.general_archive = json.dumps(general_archive, ensure_ascii=False)
 
-            # پاک کردن نتایج اصلی برای جلوگیری از انتقال مجدد
-            if source_type == "security_scan":
-                project.security_scan_result = None
-            elif source_type == "test_coverage":
-                project.test_coverage_result = None
+            # نتایج را پاک نمی‌کنیم - فقط علامت‌گذاری می‌کنیم که انتقال شده
+            # این به کاربر اجازه می‌دهد بدون اسکن مجدد، دوباره انتقال کند
+            # if source_type == "security_scan":
+            #     project.security_scan_result = None
+            # elif source_type == "test_coverage":
+            #     project.test_coverage_result = None
 
             db.commit()
 
