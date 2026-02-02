@@ -136,6 +136,14 @@ export default function RenderLogsPanel() {
   const [transferAbortController, setTransferAbortController] = useState<AbortController | null>(null);
   const [transferPaused, setTransferPaused] = useState(false);
 
+  // Service-Project Mapping State
+  const [serviceMappings, setServiceMappings] = useState<{
+    mapped: any[];
+    unmapped: any[];
+    projects: { id: string; name: string }[];
+  } | null>(null);
+  const [loadingMappings, setLoadingMappings] = useState(false);
+
   // Archive State
   const [archives, setArchives] = useState<LogArchive[]>([]);
   const [selectedArchive, setSelectedArchive] = useState<number | null>(null);
@@ -517,6 +525,45 @@ export default function RenderLogsPanel() {
       }
     } catch (e) {
       console.error('Error loading transfer status:', e);
+    }
+  };
+
+  // بارگذاری نگاشت سرویس‌ها به پروژه‌ها
+  const loadServiceMappings = async () => {
+    setLoadingMappings(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/render/services/mappings`);
+      if (res.ok) {
+        const data = await res.json();
+        setServiceMappings({
+          mapped: data.mapped || [],
+          unmapped: data.unmapped || [],
+          projects: data.projects || []
+        });
+      }
+    } catch (e) {
+      console.error('Error loading service mappings:', e);
+    } finally {
+      setLoadingMappings(false);
+    }
+  };
+
+  // بروزرسانی نگاشت سرویس به پروژه
+  const updateServiceMapping = async (serviceId: string, projectId: string | null) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/render/services/${serviceId}?project_id=${projectId || ''}`, {
+        method: 'PATCH'
+      });
+      if (res.ok) {
+        showSuccess('نگاشت سرویس بروزرسانی شد');
+        loadServiceMappings(); // بارگذاری مجدد
+      } else {
+        const data = await res.json();
+        showError(data.detail || 'خطا در بروزرسانی نگاشت');
+      }
+    } catch (e) {
+      console.error('Error updating service mapping:', e);
+      showError('خطا در ارتباط با سرور');
     }
   };
 
@@ -1335,6 +1382,91 @@ export default function RenderLogsPanel() {
                 </ul>
               </div>
             </div>
+          </div>
+
+          {/* 🆕 نگاشت سرویس‌ها به پروژه‌ها */}
+          <div className="border-t pt-6 mt-6">
+            <div className="flex justify-between items-center mb-4">
+              <h4 className="font-bold text-lg flex items-center gap-2">
+                🔗 نگاشت سرویس‌ها به پروژه‌ها
+              </h4>
+              <button
+                onClick={loadServiceMappings}
+                disabled={loadingMappings}
+                className="px-3 py-1 bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300 dark:hover:bg-gray-600 text-sm"
+              >
+                {loadingMappings ? '...' : '🔄 بارگذاری'}
+              </button>
+            </div>
+
+            {serviceMappings ? (
+              <div className="space-y-4">
+                {/* سرویس‌های بدون نگاشت */}
+                {serviceMappings.unmapped.length > 0 && (
+                  <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4">
+                    <h5 className="font-medium text-yellow-800 dark:text-yellow-200 mb-3">
+                      ⚠️ سرویس‌های بدون نگاشت ({serviceMappings.unmapped.length})
+                    </h5>
+                    <div className="space-y-2">
+                      {serviceMappings.unmapped.map(service => (
+                        <div key={service.service_id} className="flex items-center gap-3 bg-white dark:bg-gray-800 p-2 rounded">
+                          <span className="font-mono text-sm flex-1">{service.service_name}</span>
+                          <select
+                            onChange={(e) => updateServiceMapping(service.service_id, e.target.value)}
+                            className="px-2 py-1 border rounded text-sm dark:bg-gray-700"
+                            defaultValue=""
+                          >
+                            <option value="">انتخاب پروژه...</option>
+                            {serviceMappings.projects.map(p => (
+                              <option key={p.id} value={p.id}>{p.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* سرویس‌های نگاشت شده */}
+                {serviceMappings.mapped.length > 0 && (
+                  <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-4">
+                    <h5 className="font-medium text-green-800 dark:text-green-200 mb-3">
+                      ✅ سرویس‌های نگاشت شده ({serviceMappings.mapped.length})
+                    </h5>
+                    <div className="space-y-2">
+                      {serviceMappings.mapped.map(service => (
+                        <div key={service.service_id} className="flex items-center gap-3 bg-white dark:bg-gray-800 p-2 rounded">
+                          <span className="font-mono text-sm flex-1">{service.service_name}</span>
+                          <span className="text-xs text-gray-500">
+                            {service.mapping_type === 'manual' ? '🔧 دستی' : '🤖 خودکار'}
+                          </span>
+                          <select
+                            value={service.project_id || ''}
+                            onChange={(e) => updateServiceMapping(service.service_id, e.target.value || null)}
+                            className="px-2 py-1 border rounded text-sm dark:bg-gray-700"
+                          >
+                            <option value="">بدون پروژه</option>
+                            {serviceMappings.projects.map(p => (
+                              <option key={p.id} value={p.id}>{p.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {serviceMappings.mapped.length === 0 && serviceMappings.unmapped.length === 0 && (
+                  <div className="text-center text-gray-500 py-4">
+                    هیچ سرویسی یافت نشد
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-center text-gray-500 py-4">
+                برای مشاهده نگاشت‌ها کلیک کنید «بارگذاری»
+              </div>
+            )}
           </div>
 
           <button

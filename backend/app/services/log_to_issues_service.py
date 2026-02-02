@@ -405,7 +405,11 @@ class LogToIssuesService:
         """
         ساخت نگاشت سرویس به پروژه
 
-        بررسی می‌کند که آیا سرویس متعلق به پروژه‌ای ایمپورت شده است
+        اولویت‌ها:
+        1. project_id دستی (اگر تنظیم شده باشد)
+        2. نام سرویس در نام پروژه
+        3. نام سرویس در GitHub path
+        4. نام سرویس در توضیحات
         """
         service_project_map = {}
 
@@ -415,49 +419,54 @@ class LogToIssuesService:
 
         # دریافت همه پروژه‌ها برای debug
         all_projects = db.query(Project).all()
+        projects_dict = {p.id: p for p in all_projects}
         slog.info(f"[DEBUG-LOG-TRANSFER] Found {len(all_projects)} projects")
-        for p in all_projects[:5]:  # نمایش 5 پروژه اول برای debug
-            slog.info(f"[DEBUG-LOG-TRANSFER] Project: name={p.name}, github_path={p.github_path}")
 
         for service in services:
             slog.info(f"[DEBUG-LOG-TRANSFER] Processing service: {service.name} (id={service.id})")
+            project = None
 
-            # جستجوی پروژه مرتبط
-            # استراتژی ۱: نام سرویس در نام پروژه
-            search_term = service.name.split('-')[0]
-            slog.info(f"[DEBUG-LOG-TRANSFER] Strategy 1: searching for '{search_term}' in project names")
-            project = db.query(Project).filter(
-                Project.name.ilike(f"%{search_term}%")
-            ).first()
+            # 🆕 استراتژی ۱: استفاده از project_id دستی (اولویت بالا)
+            if service.project_id:
+                project = projects_dict.get(service.project_id)
+                if project:
+                    slog.info(f"[DEBUG-LOG-TRANSFER] Using manual project_id mapping: {project.name}")
+                else:
+                    slog.warning(f"[DEBUG-LOG-TRANSFER] Manual project_id {service.project_id} not found!")
 
+            # استراتژی ۲: نام سرویس در نام پروژه
             if not project:
-                # استراتژی ۲: جستجو در GitHub path
-                slog.info(f"[DEBUG-LOG-TRANSFER] Strategy 2: searching for '{service.name}' in github_path")
+                search_term = service.name.split('-')[0]
+                slog.info(f"[DEBUG-LOG-TRANSFER] Strategy 2: searching for '{search_term}' in project names")
+                project = db.query(Project).filter(
+                    Project.name.ilike(f"%{search_term}%")
+                ).first()
+
+            # استراتژی ۳: جستجو در GitHub path
+            if not project:
+                slog.info(f"[DEBUG-LOG-TRANSFER] Strategy 3: searching for '{service.name}' in github_path")
                 project = db.query(Project).filter(
                     Project.github_path.ilike(f"%{service.name}%")
                 ).first()
 
+            # استراتژی ۴: جستجو در توضیحات
             if not project:
-                # استراتژی ۳: جستجو در توضیحات
-                slog.info(f"[DEBUG-LOG-TRANSFER] Strategy 3: searching in description")
+                slog.info(f"[DEBUG-LOG-TRANSFER] Strategy 4: searching in description")
                 project = db.query(Project).filter(
                     Project.description.ilike(f"%{service.name}%")
                 ).first()
 
-            if not project:
-                # استراتژی ۴: اولین پروژه (Fallback برای تست)
-                slog.info(f"[DEBUG-LOG-TRANSFER] Strategy 4: fallback to first project")
-                project = db.query(Project).first()
-
+            # ⚠️ حذف fallback به اولین پروژه - سرویس‌های بدون نگاشت skip می‌شوند
             if project:
                 service_project_map[service.id] = {
                     "project_id": project.id,
                     "project_name": project.name,
-                    "service_name": service.name
+                    "service_name": service.name,
+                    "mapping_type": "manual" if service.project_id else "auto"
                 }
                 slog.info(f"[DEBUG-LOG-TRANSFER] Mapped service '{service.name}' to project '{project.name}'")
             else:
-                slog.warning(f"[DEBUG-LOG-TRANSFER] No project found for service '{service.name}'")
+                slog.warning(f"[DEBUG-LOG-TRANSFER] ⚠️ No project found for service '{service.name}' - needs manual mapping")
 
         slog.info(f"[DEBUG-LOG-TRANSFER] Final service_project_map: {len(service_project_map)} mappings")
         return service_project_map
