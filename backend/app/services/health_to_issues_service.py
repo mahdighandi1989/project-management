@@ -362,10 +362,20 @@ class HealthToIssuesService:
 
         db.commit()
 
+        # آرشیو کردن یافته‌ها و پاک کردن نتایج اصلی
+        archive_result = self._archive_and_clear(
+            db=db,
+            project=project,
+            findings=findings_to_process,
+            source_type="security_scan",
+            scan_result=scan_result
+        )
+
         slog.success("Security findings transferred",
             project_id=project_id,
             transferred=transferred,
-            merged=merged
+            merged=merged,
+            archived=archive_result.get("archived_count", 0)
         )
 
         return {
@@ -373,6 +383,7 @@ class HealthToIssuesService:
             "transferred": transferred,
             "merged": merged,
             "total_findings": len(findings_to_process),
+            "archived": archive_result.get("archived_count", 0),
             "errors": errors if errors else None
         }
 
@@ -474,10 +485,20 @@ class HealthToIssuesService:
 
         db.commit()
 
+        # آرشیو کردن یافته‌ها و پاک کردن نتایج اصلی
+        archive_result = self._archive_and_clear(
+            db=db,
+            project=project,
+            findings=findings_to_process,
+            source_type="test_coverage",
+            scan_result=coverage_result
+        )
+
         slog.success("Test coverage findings transferred",
             project_id=project_id,
             transferred=transferred,
-            merged=merged
+            merged=merged,
+            archived=archive_result.get("archived_count", 0)
         )
 
         return {
@@ -485,8 +506,113 @@ class HealthToIssuesService:
             "transferred": transferred,
             "merged": merged,
             "total_findings": len(findings_to_process),
+            "archived": archive_result.get("archived_count", 0),
             "errors": errors if errors else None
         }
+
+    def _archive_and_clear(
+        self,
+        db: Session,
+        project: Project,
+        findings: List[Dict],
+        source_type: str,
+        scan_result: Dict
+    ) -> Dict:
+        """
+        آرشیو کردن یافته‌ها بعد از انتقال و پاک کردن نتایج اصلی
+
+        Args:
+            db: Session دیتابیس
+            project: پروژه
+            findings: لیست یافته‌ها
+            source_type: نوع منبع (security_scan, test_coverage)
+            scan_result: نتایج اسکن اصلی
+
+        Returns:
+            {"archived_count": int, "cleared": bool}
+        """
+        import uuid
+
+        try:
+            # دریافت آرشیو موجود
+            general_archive = []
+            if project.general_archive:
+                try:
+                    general_archive = json.loads(project.general_archive) if isinstance(project.general_archive, str) else project.general_archive
+                except:
+                    general_archive = []
+
+            archive_timestamp = datetime.utcnow().isoformat()
+            archived_count = 0
+
+            # آرشیو کردن هر یافته
+            for finding in findings:
+                archive_item = {
+                    "id": str(uuid.uuid4()),
+                    "type": source_type,
+                    "category": finding.get("type", "unknown"),
+                    "title": finding.get("title", "یافته"),
+                    "content": finding.get("data", {}),
+                    "summary": finding.get("title", ""),
+                    "archived_at": archive_timestamp,
+                    "archived_reason": "transferred_to_issues",
+                    "archived_by": "system",
+                    "metadata": {
+                        "original_created_at": archive_timestamp,
+                        "source": source_type,
+                        "transfer_status": "completed"
+                    }
+                }
+                general_archive.append(archive_item)
+                archived_count += 1
+
+            # آرشیو کردن نتیجه کلی اسکن
+            summary_archive = {
+                "id": str(uuid.uuid4()),
+                "type": f"{source_type}_full_report",
+                "category": "full_report",
+                "title": f"گزارش کامل {source_type}",
+                "content": scan_result,
+                "summary": f"گزارش کامل منتقل شده در {archive_timestamp}",
+                "archived_at": archive_timestamp,
+                "archived_reason": "transferred_to_issues",
+                "archived_by": "system",
+                "metadata": {
+                    "original_created_at": archive_timestamp,
+                    "source": source_type,
+                    "findings_count": len(findings)
+                }
+            }
+            general_archive.append(summary_archive)
+
+            # ذخیره آرشیو
+            project.general_archive = json.dumps(general_archive, ensure_ascii=False)
+
+            # پاک کردن نتایج اصلی برای جلوگیری از انتقال مجدد
+            if source_type == "security_scan":
+                project.security_scan_result = None
+            elif source_type == "test_coverage":
+                project.test_coverage_result = None
+
+            db.commit()
+
+            slog.info(f"Archived {archived_count} findings and cleared original results",
+                project_id=project.id,
+                source_type=source_type
+            )
+
+            return {
+                "archived_count": archived_count + 1,  # +1 برای گزارش کامل
+                "cleared": True
+            }
+
+        except Exception as e:
+            slog.error("Error archiving findings", exception=e)
+            return {
+                "archived_count": 0,
+                "cleared": False,
+                "error": str(e)
+            }
 
 
 # Singleton instance

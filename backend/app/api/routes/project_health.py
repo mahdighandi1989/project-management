@@ -2962,6 +2962,132 @@ async def clear_general_archive(
     }
 
 
+@router.get("/{project_id}/health/general-archive/download")
+async def download_archive(
+    project_id: str,
+    format: str = "json",
+    type_filter: Optional[str] = None,
+    db=Depends(get_db)
+):
+    """
+    دانلود بایگانی گزارشات
+
+    فرمت‌های پشتیبانی:
+    - json: فرمت JSON
+    - csv: فرمت CSV
+    - txt: فرمت متنی
+    """
+    from fastapi.responses import Response
+    import csv
+    import io
+
+    logger.info(f"📦 [ARCHIVE] Downloading archive for project {project_id}, format={format}")
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # دریافت آرشیو
+    archive = []
+    if project.general_archive:
+        try:
+            archive = json.loads(project.general_archive) if isinstance(project.general_archive, str) else project.general_archive
+        except:
+            pass
+
+    # فیلتر بر اساس نوع
+    if type_filter:
+        archive = [item for item in archive if item.get("type") == type_filter]
+
+    # مرتب‌سازی بر اساس تاریخ
+    archive.sort(key=lambda x: x.get("archived_at", ""), reverse=True)
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    filename_base = f"archive_{project.name}_{timestamp}"
+
+    if format == "json":
+        content = json.dumps({
+            "project_id": project_id,
+            "project_name": project.name,
+            "export_date": datetime.utcnow().isoformat(),
+            "total_items": len(archive),
+            "type_filter": type_filter,
+            "archive": archive
+        }, ensure_ascii=False, indent=2)
+        return Response(
+            content=content,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.json"'}
+        )
+
+    elif format == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            "شناسه",
+            "نوع",
+            "دسته‌بندی",
+            "عنوان",
+            "خلاصه",
+            "تاریخ بایگانی",
+            "دلیل بایگانی"
+        ])
+        for item in archive:
+            writer.writerow([
+                item.get("id", ""),
+                item.get("type", ""),
+                item.get("category", ""),
+                item.get("title", ""),
+                item.get("summary", ""),
+                item.get("archived_at", ""),
+                item.get("archived_reason", "")
+            ])
+        content = output.getvalue()
+        return Response(
+            content=content.encode("utf-8-sig"),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.csv"'}
+        )
+
+    elif format == "txt":
+        lines = [
+            f"📦 بایگانی گزارشات پروژه: {project.name}",
+            f"تاریخ خروجی: {datetime.utcnow().isoformat()}",
+            f"تعداد آیتم‌ها: {len(archive)}",
+            "=" * 60,
+            ""
+        ]
+        for i, item in enumerate(archive, 1):
+            lines.extend([
+                f"📌 آیتم {i}: {item.get('title', 'بدون عنوان')}",
+                f"   نوع: {item.get('type', '-')}",
+                f"   دسته: {item.get('category', '-')}",
+                f"   تاریخ بایگانی: {item.get('archived_at', '-')}",
+                f"   دلیل: {item.get('archived_reason', '-')}",
+                f"   خلاصه: {item.get('summary', '-')}",
+                ""
+            ])
+            # محتوای کامل
+            content_data = item.get("content", {})
+            if content_data:
+                lines.append("   📄 محتوا:")
+                content_str = json.dumps(content_data, ensure_ascii=False, indent=6)
+                for line in content_str.split("\n"):
+                    lines.append(f"      {line}")
+            lines.append("-" * 60)
+            lines.append("")
+
+        content = "\n".join(lines)
+        return Response(
+            content=content.encode("utf-8"),
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.txt"'}
+        )
+
+    else:
+        raise HTTPException(status_code=400, detail="فرمت نامعتبر. فرمت‌های مجاز: json, csv, txt")
+
+
 # =====================================
 # 🆕 API Endpoints برای زنجیره اعتبارسنجی
 # Validation Chain Endpoints

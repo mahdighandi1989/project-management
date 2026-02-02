@@ -129,12 +129,22 @@ class LogToIssuesService:
             if mode == "since_deploy" and (result["transferred"] > 0 or result["merged"] > 0):
                 await self._update_last_transferred_deploy(db, error_logs)
 
+            # آرشیو کردن لاگ‌های منتقل شده
+            if result["transferred"] > 0 or result["merged"] > 0:
+                archive_result = await self._archive_transferred_logs(
+                    db=db,
+                    transferred_logs=error_logs,
+                    service_project_map=service_project_map
+                )
+                result["archived"] = archive_result.get("archived_count", 0)
+
             db.commit()
 
             slog.success("Transfer completed",
                 transferred=result["transferred"],
                 merged=result["merged"],
                 skipped=result["skipped"],
+                archived=result.get("archived", 0),
                 mode=mode
             )
 
@@ -606,6 +616,90 @@ class LogToIssuesService:
                 pass
 
         return {"error": "Could not parse JSON"}
+
+    async def _archive_transferred_logs(
+        self,
+        db: Session,
+        transferred_logs: List[RenderLog],
+        service_project_map: Dict
+    ) -> Dict:
+        """
+        آرشیو کردن لاگ‌های منتقل شده به general_archive پروژه
+
+        Args:
+            db: Session دیتابیس
+            transferred_logs: لاگ‌های منتقل شده
+            service_project_map: نگاشت سرویس به پروژه
+
+        Returns:
+            {"archived_count": int}
+        """
+        import uuid
+
+        archived_count = 0
+        archive_timestamp = datetime.utcnow().isoformat()
+
+        # گروه‌بندی لاگ‌ها بر اساس پروژه
+        project_logs: Dict[str, List] = {}
+        for log in transferred_logs:
+            if log.service_id in service_project_map:
+                project_id = service_project_map[log.service_id]["project_id"]
+                if project_id not in project_logs:
+                    project_logs[project_id] = []
+                project_logs[project_id].append(log)
+
+        # آرشیو کردن برای هر پروژه
+        for project_id, logs in project_logs.items():
+            try:
+                project = db.query(Project).filter(Project.id == project_id).first()
+                if not project:
+                    continue
+
+                # دریافت آرشیو موجود
+                general_archive = []
+                if project.general_archive:
+                    try:
+                        general_archive = json.loads(project.general_archive) if isinstance(project.general_archive, str) else project.general_archive
+                    except:
+                        general_archive = []
+
+                # آرشیو کردن هر لاگ
+                for log in logs:
+                    archive_item = {
+                        "id": str(uuid.uuid4()),
+                        "type": "render_logs",
+                        "category": log.level or "error",
+                        "title": f"خطای Render: {log.service_name or 'unknown'}",
+                        "content": {
+                            "log_id": log.id,
+                            "service_name": log.service_name,
+                            "service_id": log.service_id,
+                            "level": log.level,
+                            "message": log.message,
+                            "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+                            "deploy_id": log.deploy_id
+                        },
+                        "summary": log.message[:200] if log.message else "",
+                        "archived_at": archive_timestamp,
+                        "archived_reason": "transferred_to_issues",
+                        "archived_by": "system",
+                        "metadata": {
+                            "original_created_at": log.timestamp.isoformat() if log.timestamp else archive_timestamp,
+                            "source": "render_logs",
+                            "transfer_status": "completed"
+                        }
+                    }
+                    general_archive.append(archive_item)
+                    archived_count += 1
+
+                # ذخیره آرشیو
+                project.general_archive = json.dumps(general_archive, ensure_ascii=False)
+
+            except Exception as e:
+                slog.error(f"Error archiving logs for project {project_id}", exception=e)
+
+        slog.info(f"Archived {archived_count} logs to general archive")
+        return {"archived_count": archived_count}
 
 
 # =====================================================
