@@ -177,10 +177,14 @@ async def update_service_settings(
     service_id: str,
     auto_fetch_logs: Optional[bool] = None,
     log_retention_hours: Optional[int] = None,
+    project_id: Optional[str] = None,  # 🆕 نگاشت به پروژه
     db: Session = Depends(get_db)
 ):
     """
     بروزرسانی تنظیمات یک سرویس
+
+    Args:
+        project_id: ID پروژه برای نگاشت (یا null برای حذف نگاشت)
     """
     slog.api_request("PATCH", f"/render/services/{service_id}")
 
@@ -193,12 +197,91 @@ async def update_service_settings(
     if log_retention_hours is not None:
         service.log_retention_hours = log_retention_hours
 
+    # 🆕 بروزرسانی نگاشت به پروژه
+    if project_id is not None:
+        if project_id == "" or project_id == "null":
+            service.project_id = None
+            slog.info(f"Removed project mapping for service {service_id}")
+        else:
+            # بررسی وجود پروژه
+            from ...models.project import Project
+            project = db.query(Project).filter(Project.id == project_id).first()
+            if project:
+                service.project_id = project_id
+                slog.info(f"Mapped service {service_id} to project {project.name}")
+            else:
+                raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
     db.commit()
 
     return {
         "success": True,
         "service_id": service_id,
+        "project_id": service.project_id,
         "message": "تنظیمات بروزرسانی شد"
+    }
+
+
+@router.get("/services/mappings")
+async def get_service_project_mappings(
+    db: Session = Depends(get_db)
+):
+    """
+    دریافت وضعیت نگاشت سرویس‌ها به پروژه‌ها
+
+    شامل:
+    - سرویس‌های نگاشت شده (دستی و خودکار)
+    - سرویس‌های بدون نگاشت
+    - لیست پروژه‌ها برای انتخاب
+    """
+    from ...models.project import Project
+
+    services = db.query(RenderService).all()
+    projects = db.query(Project).all()
+
+    mappings = []
+    unmapped = []
+
+    projects_dict = {p.id: p for p in projects}
+
+    for service in services:
+        service_info = {
+            "service_id": service.id,
+            "service_name": service.name,
+            "service_type": service.type,
+            "project_id": service.project_id,
+            "project_name": None,
+            "mapping_type": None
+        }
+
+        if service.project_id and service.project_id in projects_dict:
+            project = projects_dict[service.project_id]
+            service_info["project_name"] = project.name
+            service_info["mapping_type"] = "manual"
+            mappings.append(service_info)
+        else:
+            # تلاش برای یافتن خودکار
+            search_term = service.name.split('-')[0]
+            auto_project = db.query(Project).filter(
+                Project.name.ilike(f"%{search_term}%")
+            ).first()
+
+            if auto_project:
+                service_info["project_id"] = auto_project.id
+                service_info["project_name"] = auto_project.name
+                service_info["mapping_type"] = "auto"
+                mappings.append(service_info)
+            else:
+                unmapped.append(service_info)
+
+    return {
+        "success": True,
+        "mapped": mappings,
+        "unmapped": unmapped,
+        "total_services": len(services),
+        "total_mapped": len(mappings),
+        "total_unmapped": len(unmapped),
+        "projects": [{"id": p.id, "name": p.name} for p in projects]
     }
 
 

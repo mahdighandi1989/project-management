@@ -29,6 +29,9 @@ class RenderService(Base):
     last_deploy_at = Column(DateTime)  # زمان آخرین deploy
     last_transferred_deploy_id = Column(String(50))  # آخرین deploy که خطاهاش منتقل شده
 
+    # 🆕 اتصال به پروژه (دستی تنظیم می‌شود)
+    project_id = Column(String(36), nullable=True, index=True)  # ID پروژه مرتبط
+
 
 class RenderLog(Base):
     """لاگ‌های Render"""
