@@ -326,7 +326,8 @@ async def generate_intelligent_setup(
     model_id: str = "claude",
     full_review: bool = True,  # بررسی کامل و به‌روزرسانی فیلدهای موجود
     full_context: Dict[str, Any] = None,  # 🔴 context کامل شامل ایرادات، گزارشات، نقشه راه
-    db_session=None  # 🔴 session دیتابیس برای استفاده از پرامپت‌های دیتابیسی
+    db_session=None,  # 🔴 session دیتابیس برای استفاده از پرامپت‌های دیتابیسی
+    project_id: str = None  # 🔴 شناسه پروژه برای ثبت اجرای پرامپت
 ) -> Dict[str, Any]:
     """
     تولید دستورات و فیلدهای کاملاً اختصاصی با AI
@@ -602,9 +603,23 @@ async def generate_intelligent_setup(
             Message(role="user", content=prompt)
         ]
 
+        # 🔴 شروع ثبت اجرای پرامپت
+        execution_id = None
+        if db_session and project_id:
+            try:
+                execution_id = PromptHelper.start_execution(
+                    db=db_session,
+                    prompt_id="auto_setup_main",
+                    project_id=project_id
+                )
+                logger.info(f"📝 Started auto_setup prompt execution: {execution_id}")
+            except Exception as e:
+                logger.warning(f"Could not start prompt execution: {e}")
+
         # اول claude امتحان کن، بعد openai
         response = None
         last_error = None
+        used_model = None
         for try_model in [model_id, "claude", "openai", "deepseek"]:
             try:
                 slog.ai_call(try_model, "generating setup",
@@ -616,6 +631,7 @@ async def generate_intelligent_setup(
                     max_tokens=2000,
                     temperature=0.7
                 )
+                used_model = try_model
                 slog.success(f"AI model responded", model=try_model)
                 break
             except Exception as e:
@@ -624,9 +640,34 @@ async def generate_intelligent_setup(
                 continue
 
         if not response:
+            # 🔴 تکمیل اجرای پرامپت (ناموفق)
+            if execution_id and db_session:
+                try:
+                    PromptHelper.complete_execution(
+                        db=db_session,
+                        execution_id=execution_id,
+                        success=False,
+                        error_message=f"هیچ مدل AI در دسترس نیست. آخرین خطا: {last_error}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not complete prompt execution: {e}")
+
             error_msg = f"هیچ مدل AI در دسترس نیست. آخرین خطا: {last_error}"
             slog.error("No AI model available", last_error=str(last_error)[:100])
             return {"success": False, "error": error_msg}
+
+        # 🔴 تکمیل اجرای پرامپت (موفق)
+        if execution_id and db_session:
+            try:
+                PromptHelper.complete_execution(
+                    db=db_session,
+                    execution_id=execution_id,
+                    success=True,
+                    model_used=used_model,
+                    result_summary="راه‌اندازی خودکار تکمیل شد"
+                )
+            except Exception as e:
+                logger.warning(f"Could not complete prompt execution: {e}")
 
         # پارس JSON از پاسخ
         content = response.content
@@ -924,7 +965,8 @@ async def auto_setup_project_memory(
                 existing_fields=existing_fields,  # ارسال فیلدهای موجود
                 model_id=best_model,
                 full_context=full_context,  # 🔴 ارسال context کامل
-                db_session=db_session  # 🔴 ارسال db_session برای استفاده از پرامپت‌های دیتابیس
+                db_session=db_session,  # 🔴 ارسال db_session برای استفاده از پرامپت‌های دیتابیس
+                project_id=project_id  # 🔴 ارسال project_id برای ثبت اجرای پرامپت
             )
 
         # 🔴 تابع تشخیص فیلدهای محافظت شده (ایجاد شده توسط گزارش مهندسی)

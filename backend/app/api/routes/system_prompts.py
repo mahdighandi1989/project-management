@@ -144,10 +144,21 @@ async def list_prompts(
 ):
     """دریافت لیست پرامپت‌ها"""
     try:
+        # 🔴 Debug logging
+        from ...core.database import DATABASE_PATH
+        logger.info(f"📂 list_prompts called - category={category}, active_only={active_only}")
+        logger.info(f"📂 Using database: {DATABASE_PATH}")
+
+        # اول تعداد کل پرامپت‌ها را چک کن
+        total_all = db.query(SystemPrompt).count()
+        logger.info(f"📊 Total prompts in DB (no filter): {total_all}")
+
         query = db.query(SystemPrompt)
 
         if category:
             query = query.filter(SystemPrompt.category == category)
+            cat_count = db.query(SystemPrompt).filter(SystemPrompt.category == category).count()
+            logger.info(f"📊 Prompts with category={category}: {cat_count}")
 
         if active_only:
             query = query.filter(SystemPrompt.is_active == True)
@@ -159,6 +170,8 @@ async def list_prompts(
             SystemPrompt.category,
             SystemPrompt.execution_order
         ).all()
+
+        logger.info(f"✅ Returning {len(prompts)} prompts")
 
         # گروه‌بندی بر اساس دسته‌بندی
         grouped = {}

@@ -1718,6 +1718,18 @@ async def generate_engineering_report(
         logger.error(f"🔴🔴🔴 CRITICAL: No health issues to validate! Check extraction logic above.")
     logger.info(f"=" * 60)
 
+    # 🔴 شروع ثبت اجرای پرامپت
+    execution_id = None
+    try:
+        execution_id = PromptHelper.start_execution(
+            db=db,
+            prompt_id="eng_system_prompt",
+            project_id=project_id
+        )
+        logger.info(f"📝 Started prompt execution: {execution_id}")
+    except Exception as e:
+        logger.warning(f"Could not start prompt execution: {e}")
+
     try:
         response = await ai_manager.generate(
             model_id=model_id,
@@ -1727,6 +1739,19 @@ async def generate_engineering_report(
             task_type="engineering_report",
             allow_fallback=True,
         )
+
+        # 🔴 تکمیل اجرای پرامپت (موفق)
+        if execution_id:
+            try:
+                PromptHelper.complete_execution(
+                    db=db,
+                    execution_id=execution_id,
+                    success=True,
+                    model_used=model_id,
+                    result_summary="گزارش مهندسی تولید شد"
+                )
+            except Exception as e:
+                logger.warning(f"Could not complete prompt execution: {e}")
 
         # پارس JSON از پاسخ
         report_content = response.content
