@@ -55,6 +55,7 @@ class LogToIssuesService:
         service_ids: List[str] = None,
         hours: int = 24,
         auto_mode: bool = False,
+        mode: str = "since_deploy",  # since_deploy یا time_based
         db: Session = None
     ) -> Dict[str, Any]:
         """
@@ -62,8 +63,9 @@ class LogToIssuesService:
 
         Args:
             service_ids: لیست سرویس‌های مورد نظر (None = همه)
-            hours: بازه زمانی (ساعت)
+            hours: بازه زمانی (ساعت) - فقط در حالت time_based
             auto_mode: حالت خودکار (تریگر شده)
+            mode: حالت فیلتر - since_deploy (از آخرین دیپلوی) یا time_based (بازه زمانی)
             db: نشست دیتابیس
         """
         if not self.ai_manager:
@@ -85,8 +87,8 @@ class LogToIssuesService:
             }
 
             # 1. دریافت لاگ‌های خطا
-            error_logs = await self._get_error_logs(db, service_ids, hours)
-            slog.info("Found error logs", count=len(error_logs))
+            error_logs = await self._get_error_logs(db, service_ids, hours, mode)
+            slog.info("Found error logs", count=len(error_logs), mode=mode)
 
             if not error_logs:
                 result["message"] = "لاگ خطایی یافت نشد"
@@ -123,12 +125,17 @@ class LogToIssuesService:
                         "error": str(e)
                     })
 
+            # به‌روزرسانی last_transferred_deploy_id برای هر سرویس
+            if mode == "since_deploy" and (result["transferred"] > 0 or result["merged"] > 0):
+                await self._update_last_transferred_deploy(db, error_logs)
+
             db.commit()
 
             slog.success("Transfer completed",
                 transferred=result["transferred"],
                 merged=result["merged"],
-                skipped=result["skipped"]
+                skipped=result["skipped"],
+                mode=mode
             )
 
             return result
@@ -150,23 +157,92 @@ class LogToIssuesService:
         self,
         db: Session,
         service_ids: List[str],
-        hours: int
+        hours: int,
+        mode: str = "since_deploy"
     ) -> List[RenderLog]:
-        """دریافت لاگ‌های خطا"""
-        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        """
+        دریافت لاگ‌های خطا
 
-        query = db.query(RenderLog).filter(
-            RenderLog.timestamp >= cutoff,
-            RenderLog.level.in_(["error", "fatal", "critical"])
-        )
+        Args:
+            mode:
+                - since_deploy: فقط خطاهای بعد از آخرین دیپلوی هر سرویس
+                - time_based: خطاهای X ساعت اخیر
+        """
+        error_logs = []
 
-        if service_ids:
-            query = query.filter(RenderLog.service_id.in_(service_ids))
+        if mode == "since_deploy":
+            # حالت جدید: فیلتر بر اساس آخرین دیپلوی
+            services_query = db.query(RenderService)
+            if service_ids:
+                services_query = services_query.filter(RenderService.id.in_(service_ids))
 
-        # فیلتر لاگ‌هایی که قبلاً منتقل نشده‌اند
-        query = query.filter(RenderLog.transferred_to_issues == False)
+            services = services_query.all()
 
-        return query.order_by(RenderLog.timestamp.desc()).limit(100).all()
+            for service in services:
+                # برای هر سرویس، لاگ‌های بعد از آخرین دیپلوی که منتقل نشده را بگیر
+                service_query = db.query(RenderLog).filter(
+                    RenderLog.service_id == service.id,
+                    RenderLog.level.in_(["error", "fatal", "critical"]),
+                    RenderLog.transferred_to_issues == False
+                )
+
+                # اگر آخرین دیپلوی منتقل شده مشخص باشه، فقط دیپلوی‌های جدیدتر
+                if service.last_transferred_deploy_id:
+                    # لاگ‌هایی که deploy_id متفاوت دارند یا بعد از آخرین انتقال هستند
+                    service_query = service_query.filter(
+                        RenderLog.deploy_id != service.last_transferred_deploy_id
+                    )
+
+                # اگر آخرین دیپلوی سرویس مشخص باشه، فقط لاگ‌های اون دیپلوی
+                if service.last_deploy_id:
+                    service_query = service_query.filter(
+                        RenderLog.deploy_id == service.last_deploy_id
+                    )
+
+                logs = service_query.order_by(RenderLog.timestamp.desc()).limit(50).all()
+                error_logs.extend(logs)
+
+        else:
+            # حالت قدیمی: فیلتر بر اساس زمان
+            cutoff = datetime.utcnow() - timedelta(hours=hours)
+
+            query = db.query(RenderLog).filter(
+                RenderLog.timestamp >= cutoff,
+                RenderLog.level.in_(["error", "fatal", "critical"])
+            )
+
+            if service_ids:
+                query = query.filter(RenderLog.service_id.in_(service_ids))
+
+            query = query.filter(RenderLog.transferred_to_issues == False)
+            error_logs = query.order_by(RenderLog.timestamp.desc()).limit(100).all()
+
+        return error_logs
+
+    async def _update_last_transferred_deploy(
+        self,
+        db: Session,
+        transferred_logs: List[RenderLog]
+    ):
+        """به‌روزرسانی آخرین دیپلوی منتقل شده برای هر سرویس"""
+        # گروه‌بندی بر اساس سرویس
+        service_deploys = {}
+        for log in transferred_logs:
+            if log.deploy_id and log.service_id:
+                if log.service_id not in service_deploys:
+                    service_deploys[log.service_id] = log.deploy_id
+                # نگه داشتن جدیدترین deploy_id
+                # (چون لاگ‌ها به ترتیب timestamp desc هستند، اولی جدیدترین است)
+
+        # به‌روزرسانی سرویس‌ها
+        for service_id, deploy_id in service_deploys.items():
+            service = db.query(RenderService).filter(
+                RenderService.id == service_id
+            ).first()
+            if service:
+                service.last_transferred_deploy_id = deploy_id
+                slog.info("Updated last_transferred_deploy",
+                    service_id=service_id, deploy_id=deploy_id)
 
     async def _build_service_project_map(self, db: Session) -> Dict[str, Dict]:
         """

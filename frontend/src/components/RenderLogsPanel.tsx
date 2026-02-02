@@ -34,6 +34,7 @@ interface LogSettings {
   auto_transfer_enabled: boolean;
   auto_transfer_interval_minutes: number;
   auto_transfer_hours_back: number;
+  auto_transfer_mode: 'since_deploy' | 'time_based';
   last_auto_transfer?: string;
 }
 
@@ -77,6 +78,7 @@ export default function RenderLogsPanel() {
     auto_transfer_enabled: false,
     auto_transfer_interval_minutes: 30,
     auto_transfer_hours_back: 24,
+    auto_transfer_mode: 'since_deploy',
   });
 
   // Filters
@@ -989,6 +991,40 @@ export default function RenderLogsPanel() {
                 </button>
               </div>
 
+              {/* حالت انتقال */}
+              <div>
+                <label className="block text-sm font-medium mb-2">حالت انتقال</label>
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setSettings(s => ({ ...s, auto_transfer_mode: 'since_deploy' }))}
+                    className={`flex-1 px-4 py-2 rounded-lg text-sm transition ${
+                      settings.auto_transfer_mode === 'since_deploy'
+                        ? 'bg-red-500 text-white'
+                        : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300'
+                    }`}
+                    disabled={!settings.auto_transfer_enabled}
+                  >
+                    🚀 از آخرین دیپلوی
+                  </button>
+                  <button
+                    onClick={() => setSettings(s => ({ ...s, auto_transfer_mode: 'time_based' }))}
+                    className={`flex-1 px-4 py-2 rounded-lg text-sm transition ${
+                      settings.auto_transfer_mode === 'time_based'
+                        ? 'bg-red-500 text-white'
+                        : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300'
+                    }`}
+                    disabled={!settings.auto_transfer_enabled}
+                  >
+                    ⏰ بازه زمانی
+                  </button>
+                </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  {settings.auto_transfer_mode === 'since_deploy'
+                    ? '✨ خطاهای بعد از آخرین دیپلوی هر سرویس منتقل می‌شوند (پیشنهادی)'
+                    : 'خطاهای X ساعت گذشته منتقل می‌شوند'}
+                </p>
+              </div>
+
               <div>
                 <label className="block text-sm mb-2">
                   فاصله بررسی: هر {settings.auto_transfer_interval_minutes} دقیقه
@@ -1012,28 +1048,31 @@ export default function RenderLogsPanel() {
                 </div>
               </div>
 
-              <div>
-                <label className="block text-sm mb-2">
-                  بازه زمانی بررسی: {settings.auto_transfer_hours_back} ساعت گذشته
-                </label>
-                <input
-                  type="range"
-                  min="1"
-                  max="72"
-                  step="1"
-                  value={settings.auto_transfer_hours_back}
-                  onChange={(e) => setSettings(s => ({
-                    ...s,
-                    auto_transfer_hours_back: parseInt(e.target.value)
-                  }))}
-                  className="w-full"
-                  disabled={!settings.auto_transfer_enabled}
-                />
-                <div className="flex justify-between text-xs text-gray-500">
-                  <span>1 ساعت</span>
-                  <span>3 روز</span>
+              {/* فقط در حالت time_based نمایش داده شود */}
+              {settings.auto_transfer_mode === 'time_based' && (
+                <div>
+                  <label className="block text-sm mb-2">
+                    بازه زمانی بررسی: {settings.auto_transfer_hours_back} ساعت گذشته
+                  </label>
+                  <input
+                    type="range"
+                    min="1"
+                    max="72"
+                    step="1"
+                    value={settings.auto_transfer_hours_back}
+                    onChange={(e) => setSettings(s => ({
+                      ...s,
+                      auto_transfer_hours_back: parseInt(e.target.value)
+                    }))}
+                    className="w-full"
+                    disabled={!settings.auto_transfer_enabled}
+                  />
+                  <div className="flex justify-between text-xs text-gray-500">
+                    <span>1 ساعت</span>
+                    <span>3 روز</span>
+                  </div>
                 </div>
-              </div>
+              )}
 
               {settings.last_auto_transfer && (
                 <div className="text-sm text-gray-500 bg-gray-100 dark:bg-gray-700 p-3 rounded">

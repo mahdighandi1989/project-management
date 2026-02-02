@@ -24,6 +24,11 @@ class RenderService(Base):
     auto_fetch_logs = Column(Boolean, default=True)  # آیا لاگ‌ها خودکار گرفته بشن
     log_retention_hours = Column(Integer, default=48)  # چند ساعت لاگ نگه داری بشه
 
+    # آخرین دیپلوی و انتقال
+    last_deploy_id = Column(String(50))  # آخرین deploy ID که fetch شده
+    last_deploy_at = Column(DateTime)  # زمان آخرین deploy
+    last_transferred_deploy_id = Column(String(50))  # آخرین deploy که خطاهاش منتقل شده
+
 
 class RenderLog(Base):
     """لاگ‌های Render"""
@@ -79,7 +84,8 @@ class RenderLogSettings(Base):
     # تنظیمات انتقال خودکار خطاها به ایرادات
     auto_transfer_enabled = Column(Boolean, default=False)  # آیا انتقال خودکار فعال باشه
     auto_transfer_interval_minutes = Column(Integer, default=30)  # هر چند دقیقه یکبار
-    auto_transfer_hours_back = Column(Integer, default=24)  # چند ساعت به عقب برگرده
+    auto_transfer_hours_back = Column(Integer, default=24)  # چند ساعت به عقب برگرده (فقط در حالت time-based)
+    auto_transfer_mode = Column(String(20), default="since_deploy")  # since_deploy یا time_based
     last_auto_transfer = Column(DateTime)  # آخرین زمان انتقال خودکار
 
     # آخرین بروزرسانی

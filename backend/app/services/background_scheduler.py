@@ -87,7 +87,8 @@ class BackgroundScheduler:
             if settings.auto_transfer_enabled:
                 await self._enable_auto_transfer(
                     interval_minutes=settings.auto_transfer_interval_minutes or 30,
-                    hours_back=settings.auto_transfer_hours_back or 24
+                    hours_back=settings.auto_transfer_hours_back or 24,
+                    mode=getattr(settings, 'auto_transfer_mode', 'since_deploy') or 'since_deploy'
                 )
             else:
                 await self._disable_auto_transfer()
@@ -97,7 +98,12 @@ class BackgroundScheduler:
         finally:
             db.close()
 
-    async def _enable_auto_transfer(self, interval_minutes: int, hours_back: int):
+    async def _enable_auto_transfer(
+        self,
+        interval_minutes: int,
+        hours_back: int,
+        mode: str = "since_deploy"
+    ):
         """فعال‌سازی job انتقال خودکار"""
         if not self.scheduler:
             slog.error("Scheduler not started")
@@ -115,14 +121,15 @@ class BackgroundScheduler:
             trigger=IntervalTrigger(minutes=interval_minutes),
             id=self._auto_transfer_job_id,
             name="Auto Transfer Errors to Issues",
-            kwargs={"hours_back": hours_back},
+            kwargs={"hours_back": hours_back, "mode": mode},
             replace_existing=True,
             max_instances=1  # فقط یک instance همزمان
         )
 
         slog.success("Auto-transfer job enabled",
             interval_minutes=interval_minutes,
-            hours_back=hours_back
+            hours_back=hours_back,
+            mode=mode
         )
 
     async def _disable_auto_transfer(self):
@@ -135,12 +142,12 @@ class BackgroundScheduler:
             self.scheduler.remove_job(self._auto_transfer_job_id)
             slog.info("Auto-transfer job disabled")
 
-    async def _run_auto_transfer(self, hours_back: int = 24):
+    async def _run_auto_transfer(self, hours_back: int = 24, mode: str = "since_deploy"):
         """
         اجرای انتقال خودکار
         این متد توسط scheduler فراخوانی می‌شود
         """
-        slog.info("Running auto-transfer job", hours_back=hours_back)
+        slog.info("Running auto-transfer job", hours_back=hours_back, mode=mode)
 
         db = SessionLocal()
         try:
@@ -152,6 +159,7 @@ class BackgroundScheduler:
                 service_ids=None,  # همه سرویس‌ها
                 hours=hours_back,
                 auto_mode=True,
+                mode=mode,  # since_deploy یا time_based
                 db=db
             )
 
@@ -181,14 +189,15 @@ class BackgroundScheduler:
         self,
         enabled: bool,
         interval_minutes: int = 30,
-        hours_back: int = 24
+        hours_back: int = 24,
+        mode: str = "since_deploy"
     ):
         """
         به‌روزرسانی تنظیمات auto-transfer
         این متد از API فراخوانی می‌شود
         """
         if enabled:
-            await self._enable_auto_transfer(interval_minutes, hours_back)
+            await self._enable_auto_transfer(interval_minutes, hours_back, mode)
         else:
             await self._disable_auto_transfer()
 

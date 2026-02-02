@@ -57,7 +57,8 @@ class LogSettingsRequest(BaseModel):
     # تنظیمات انتقال خودکار
     auto_transfer_enabled: bool = False
     auto_transfer_interval_minutes: int = 30
-    auto_transfer_hours_back: int = 24
+    auto_transfer_hours_back: int = 24  # فقط در حالت time_based استفاده می‌شود
+    auto_transfer_mode: str = "since_deploy"  # since_deploy یا time_based
 
 
 # =====================================
@@ -497,6 +498,7 @@ async def get_log_settings(db: Session = Depends(get_db)):
             "auto_transfer_enabled": getattr(settings, 'auto_transfer_enabled', False),
             "auto_transfer_interval_minutes": getattr(settings, 'auto_transfer_interval_minutes', 30),
             "auto_transfer_hours_back": getattr(settings, 'auto_transfer_hours_back', 24),
+            "auto_transfer_mode": getattr(settings, 'auto_transfer_mode', 'since_deploy') or 'since_deploy',
             "last_auto_transfer": settings.last_auto_transfer.isoformat() if getattr(settings, 'last_auto_transfer', None) else None
         }
     }
@@ -526,6 +528,7 @@ async def update_log_settings(
     settings.auto_transfer_enabled = request.auto_transfer_enabled
     settings.auto_transfer_interval_minutes = request.auto_transfer_interval_minutes
     settings.auto_transfer_hours_back = request.auto_transfer_hours_back
+    settings.auto_transfer_mode = request.auto_transfer_mode
 
     db.commit()
 
@@ -536,7 +539,8 @@ async def update_log_settings(
         await scheduler.update_auto_transfer_settings(
             enabled=request.auto_transfer_enabled,
             interval_minutes=request.auto_transfer_interval_minutes,
-            hours_back=request.auto_transfer_hours_back
+            hours_back=request.auto_transfer_hours_back,
+            mode=request.auto_transfer_mode
         )
     except Exception as e:
         slog.warning("Failed to update scheduler", exception=e)
@@ -544,7 +548,8 @@ async def update_log_settings(
     slog.success("Log settings updated",
         polling_interval=request.polling_interval_seconds,
         retention_hours=request.retention_hours,
-        auto_transfer_enabled=request.auto_transfer_enabled
+        auto_transfer_enabled=request.auto_transfer_enabled,
+        auto_transfer_mode=request.auto_transfer_mode
     )
 
     return {
