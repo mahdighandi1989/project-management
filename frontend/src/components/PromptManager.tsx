@@ -271,6 +271,32 @@ export default function PromptManager({
     }
   };
 
+  // 🔴 بازیابی پرامپت‌های پیش‌فرض
+  const handleRestoreDefaults = async () => {
+    if (!confirm('آیا می‌خواهید پرامپت‌های پیش‌فرض را بازیابی کنید؟')) return;
+
+    try {
+      setLoading(true);
+      const categoryParam = category !== 'all' ? `?category=${category}` : '';
+      const res = await fetch(`${API_BASE}/api/prompts/restore-defaults${categoryParam}`, {
+        method: 'POST'
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.detail || 'خطا در بازیابی');
+      }
+
+      const data = await res.json();
+      alert(`✅ ${data.total_default_prompts || 0} پرامپت پیش‌فرض موجود است`);
+      fetchPrompts();
+    } catch (err: any) {
+      alert('خطا: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // =====================================================
   // Render Helpers
   // =====================================================
@@ -343,13 +369,23 @@ export default function PromptManager({
         <h3 className="text-lg font-bold text-gray-800">
           مدیریت پرامپت‌ها
         </h3>
-        <button
-          onClick={() => setShowAddNew(true)}
-          className="flex items-center gap-1 px-3 py-1.5 bg-blue-500 text-white rounded-lg hover:bg-blue-600 text-sm"
-        >
-          <span>+</span>
-          <span>پرامپت جدید</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleRestoreDefaults}
+            className="flex items-center gap-1 px-3 py-1.5 bg-green-500 text-white rounded-lg hover:bg-green-600 text-sm"
+            title="بازیابی پرامپت‌های پیش‌فرض"
+          >
+            <span>🔄</span>
+            <span>بازیابی</span>
+          </button>
+          <button
+            onClick={() => setShowAddNew(true)}
+            className="flex items-center gap-1 px-3 py-1.5 bg-blue-500 text-white rounded-lg hover:bg-blue-600 text-sm"
+          >
+            <span>+</span>
+            <span>پرامپت جدید</span>
+          </button>
+        </div>
       </div>
 
       {/* Active Executions */}
@@ -802,15 +838,26 @@ export default function PromptManager({
       )}
 
       {/* Empty State */}
-      {prompts.length === 0 && (
+      {prompts.length === 0 && !loading && (
         <div className="text-center py-8 text-gray-500">
-          <p>هیچ پرامپتی یافت نشد</p>
-          <button
-            onClick={() => setShowAddNew(true)}
-            className="mt-2 text-blue-500 hover:underline"
-          >
-            اولین پرامپت را ایجاد کنید
-          </button>
+          <p className="text-lg mb-4">هیچ پرامپتی یافت نشد</p>
+          <div className="flex flex-col gap-3 items-center">
+            {/* 🔴 دکمه بازیابی پیش‌فرض‌ها */}
+            <button
+              onClick={handleRestoreDefaults}
+              className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors flex items-center gap-2"
+            >
+              <span>🔄</span>
+              بازیابی پرامپت‌های پیش‌فرض
+            </button>
+            <span className="text-sm text-gray-400">یا</span>
+            <button
+              onClick={() => setShowAddNew(true)}
+              className="text-blue-500 hover:underline"
+            >
+              ایجاد پرامپت جدید
+            </button>
+          </div>
         </div>
       )}
     </div>
