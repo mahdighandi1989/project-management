@@ -14,6 +14,7 @@ import re
 
 # استفاده از لاگر ساختاریافته
 from ..core.logging_utils import StructuredLogger
+from .prompt_helper import PromptHelper
 
 # لاگر قدیمی برای سازگاری
 logger = logging.getLogger(__name__)
@@ -324,7 +325,8 @@ async def generate_intelligent_setup(
     existing_fields: List[Dict] = None,
     model_id: str = "claude",
     full_review: bool = True,  # بررسی کامل و به‌روزرسانی فیلدهای موجود
-    full_context: Dict[str, Any] = None  # 🔴 context کامل شامل ایرادات، گزارشات، نقشه راه
+    full_context: Dict[str, Any] = None,  # 🔴 context کامل شامل ایرادات، گزارشات، نقشه راه
+    db_session=None  # 🔴 session دیتابیس برای استفاده از پرامپت‌های دیتابیسی
 ) -> Dict[str, Any]:
     """
     تولید دستورات و فیلدهای کاملاً اختصاصی با AI
@@ -478,7 +480,40 @@ async def generate_intelligent_setup(
 5. **از نقشه راه پیروی کن** - فیلدها باید در راستای اهداف نقشه راه باشند
 """.format(run_count=run_count)
 
-        prompt = f"""تو یک معمار نرم‌افزار و DevOps متخصص هستی. این پروژه را تحلیل کن و دستورات دقیق و اختصاصی برای کار با AI تولید کن.
+        # 🔴 تلاش برای دریافت پرامپت از دیتابیس
+        db_prompt = None
+        if db_session:
+            try:
+                db_prompt = PromptHelper.get_prompt(
+                    db=db_session,
+                    category="auto_setup",
+                    prompt_id="auto_setup_main",
+                    variables={
+                        "project_name": project_name,
+                        "project_description": project_description or 'ندارد',
+                        "language": insights.get('language', 'نامشخص'),
+                        "frameworks": ', '.join(insights.get('frameworks', [])) or 'نامشخص',
+                        "architecture": insights.get('architecture', 'نامشخص'),
+                        "domain": insights.get('domain', 'نامشخص'),
+                        "patterns": ', '.join(insights.get('patterns', [])) or 'نامشخص',
+                        "file_list": file_list,
+                        "files_text": files_text,
+                        "review_section": review_section,
+                        "context_section": context_section,
+                        "existing_fields_text": existing_fields_text
+                    }
+                )
+                if db_prompt:
+                    logger.info("📝 Using DB prompt for auto-setup")
+            except Exception as e:
+                logger.warning(f"Failed to get auto-setup prompt from DB: {e}")
+
+        if db_prompt:
+            prompt = db_prompt
+        else:
+            # 🔄 Fallback به پرامپت hardcoded
+            logger.debug("📝 Using hardcoded prompt for auto-setup")
+            prompt = f"""تو یک معمار نرم‌افزار و DevOps متخصص هستی. این پروژه را تحلیل کن و دستورات دقیق و اختصاصی برای کار با AI تولید کن.
 
 ## اطلاعات پروژه
 - **نام**: {project_name}
@@ -888,7 +923,8 @@ async def auto_setup_project_memory(
                 sample_files=important_files,
                 existing_fields=existing_fields,  # ارسال فیلدهای موجود
                 model_id=best_model,
-                full_context=full_context  # 🔴 ارسال context کامل
+                full_context=full_context,  # 🔴 ارسال context کامل
+                db_session=db_session  # 🔴 ارسال db_session برای استفاده از پرامپت‌های دیتابیس
             )
 
         # 🔴 تابع تشخیص فیلدهای محافظت شده (ایجاد شده توسط گزارش مهندسی)

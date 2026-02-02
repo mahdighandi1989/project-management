@@ -396,13 +396,28 @@ def _seed_default_prompts():
 
     db = SessionLocal()
     try:
-        # چک کن آیا قبلاً پرامپت‌ها اضافه شده‌اند
-        existing_count = db.query(SystemPrompt).filter(SystemPrompt.is_default == True).count()
-        if existing_count > 0:
-            logger.info(f"📝 System prompts already seeded ({existing_count} default prompts)")
+        # 🔴 بررسی و بازیابی پرامپت‌های گمشده (نه فقط اولین بار)
+        logger.info("🔍 Checking for missing system prompts...")
+
+        # لیست همه پرامپت‌های پیش‌فرض که باید وجود داشته باشند
+        required_prompt_ids = [
+            "health_micro_analysis", "health_macro_analysis", "health_structural_analysis",
+            "eng_system_prompt", "eng_validation_prompt", "eng_field_management",
+            "auto_setup_main", "auto_setup_roadmap", "auto_setup_readme"
+        ]
+
+        # چک کن کدام پرامپت‌ها وجود ندارند
+        existing_ids = [p.id for p in db.query(SystemPrompt.id).filter(
+            SystemPrompt.id.in_(required_prompt_ids)
+        ).all()]
+
+        missing_ids = [pid for pid in required_prompt_ids if pid not in existing_ids]
+
+        if not missing_ids:
+            logger.info(f"✅ All {len(required_prompt_ids)} default prompts exist")
             return
 
-        logger.info("🌱 Seeding default system prompts...")
+        logger.info(f"🌱 Restoring {len(missing_ids)} missing prompts: {missing_ids}")
 
         # =====================================================
         # 🩺 پرامپت‌های تحلیل سلامت (Health Analysis)
@@ -949,7 +964,12 @@ def _seed_default_prompts():
         # ذخیره همه پرامپت‌ها
         all_prompts = health_prompts + engineering_prompts + auto_setup_prompts
 
+        # 🔴 فقط پرامپت‌های گمشده را اضافه کن
+        added_count = 0
         for prompt_data in all_prompts:
+            if prompt_data["id"] not in missing_ids:
+                continue  # این پرامپت قبلاً وجود دارد
+
             prompt = SystemPrompt(
                 id=prompt_data["id"],
                 name=prompt_data["name"],
@@ -966,9 +986,11 @@ def _seed_default_prompts():
                 is_locked=True  # پرامپت‌های پیش‌فرض قفل هستند (قابل حذف نیستند)
             )
             db.add(prompt)
+            added_count += 1
+            logger.info(f"  + Restored prompt: {prompt_data['id']}")
 
         db.commit()
-        logger.info(f"✅ Seeded {len(all_prompts)} default system prompts")
+        logger.info(f"✅ Restored {added_count} missing system prompts")
 
     except Exception as e:
         logger.error(f"❌ Error seeding default prompts: {e}")

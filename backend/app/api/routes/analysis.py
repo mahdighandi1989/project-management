@@ -112,10 +112,15 @@ async def run_analysis_stream(request: AnalysisRequest):
                 # دریافت AI Manager
                 ai_manager = get_ai_manager()
 
-                # ساخت DeepAnalysisService با progress callback
+                # 🔴 ایجاد db session برای استفاده از پرامپت‌های دیتابیس
+                from ...core.database import SessionLocal
+                analysis_db = SessionLocal()
+
+                # ساخت DeepAnalysisService با progress callback و db_session
                 deep_analyzer = DeepAnalysisService(
                     ai_manager=ai_manager,
-                    progress_callback=progress_callback
+                    progress_callback=progress_callback,
+                    db_session=analysis_db  # 🔴 برای استفاده از پرامپت‌های دیتابیس
                 )
 
                 # جمع‌آوری فایل‌های پروژه

@@ -944,3 +944,51 @@ async def validate_category_prompts(
     except Exception as e:
         logger.error(f"Error validating category prompts: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# =====================================================
+# 🔴 بازیابی پرامپت‌های پیش‌فرض
+# =====================================================
+
+@router.post("/restore-defaults")
+async def restore_default_prompts(
+    category: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    بازیابی پرامپت‌های پیش‌فرض حذف شده
+
+    Args:
+        category: دسته‌بندی خاص (اختیاری) - اگر خالی باشد همه دسته‌ها بررسی می‌شوند
+    """
+    try:
+        from ...core.database import _seed_default_prompts
+
+        # اجرای seed برای بازیابی پرامپت‌های گمشده
+        _seed_default_prompts()
+
+        # گزارش وضعیت فعلی
+        query = db.query(SystemPrompt).filter(SystemPrompt.is_default == True)
+        if category:
+            query = query.filter(SystemPrompt.category == category)
+
+        prompts = query.all()
+
+        return {
+            "success": True,
+            "message": "پرامپت‌های پیش‌فرض بازیابی شدند",
+            "total_default_prompts": len(prompts),
+            "prompts": [
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "category": p.category,
+                    "is_active": p.is_active
+                }
+                for p in prompts
+            ]
+        }
+
+    except Exception as e:
+        logger.error(f"Error restoring default prompts: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

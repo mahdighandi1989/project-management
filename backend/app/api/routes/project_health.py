@@ -980,10 +980,13 @@ async def run_streaming_analysis(
         async def run_analysis_task():
             nonlocal final_result
             try:
-                # ساخت DeepAnalysisService با progress callback
+                # ساخت DeepAnalysisService با progress callback و db_session
+                from ...core.database import SessionLocal
+                analysis_db = SessionLocal()
                 deep_analyzer = DeepAnalysisService(
                     ai_manager=ai_manager,
-                    progress_callback=progress_callback
+                    progress_callback=progress_callback,
+                    db_session=analysis_db  # 🔴 ارسال db_session برای استفاده از پرامپت‌های دیتابیس
                 )
 
                 # اجرای تحلیل
@@ -993,7 +996,8 @@ async def run_streaming_analysis(
                     roadmap_content=project.roadmap_content or "",
                     readme_content=project.readme_content or "",
                     model_ids=model_ids,
-                    instruction="تحلیل کامل پروژه"
+                    instruction="تحلیل کامل پروژه",
+                    db_session=analysis_db  # 🔴 db_session برای tracking
                 )
 
                 # ذخیره نتایج
@@ -2712,7 +2716,8 @@ async def _run_resumed_analysis_task(
         from ...services.deep_analysis_service import DeepAnalysisService
         deep_analyzer = DeepAnalysisService(
             ai_manager=ai_manager,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            db_session=db  # 🔴 ارسال db_session برای استفاده از پرامپت‌های دیتابیس
         )
 
         # اجرای تحلیل
