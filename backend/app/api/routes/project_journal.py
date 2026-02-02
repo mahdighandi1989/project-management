@@ -2860,12 +2860,77 @@ async def generate_engineering_report_stream(
                     import logging
                     logging.getLogger(__name__).error(f"Deep mode: Error checking issues: {arch_err}")
 
+                # 🆕 ذخیره گزارش مهندسی 4 مرحله‌ای در دیتابیس
+                report_id = f"eng_4step_{uuid.uuid4().hex[:12]}"
+                try:
+                    # جمع‌آوری نتایج مراحل (با استفاده از locals برای دسترسی امن)
+                    local_vars = locals()
+                    report_content = {
+                        "depth": depth,
+                        "models_used": selected_models,
+                        "steps": {
+                            "step1_validate_fields": local_vars.get('step1_result', {}),
+                            "step2_health_to_fields": local_vars.get('step2_result', {}),
+                            "step3_evaluate_models": local_vars.get('step3_result', {}),
+                            "step4_update_roadmap": local_vars.get('step4_result', {}),
+                        },
+                        "completed_at": datetime.utcnow().isoformat(),
+                    }
+
+                    # ایجاد گزارش
+                    report = Report(
+                        id=report_id,
+                        project_id=project_id,
+                        report_type="engineering_4step",
+                        title=f"گزارش مهندسی ۴ مرحله‌ای - {project.name if project else 'پروژه'}",
+                        content=json.dumps(report_content, ensure_ascii=False, indent=2),
+                        summary=f"گزارش مهندسی عمیق با {len(selected_models)} مدل",
+                        total_activities=4,
+                        total_tokens=0,  # در 4 مرحله‌ای توکن جداگانه حساب نشده
+                        models_used=json.dumps(selected_models),
+                        period_start=datetime.utcnow() - timedelta(days=days),
+                        period_end=datetime.utcnow(),
+                        created_at=datetime.utcnow(),
+                        generated_by=",".join(selected_models),
+                    )
+                    db.add(report)
+
+                    # ثبت در ژورنال
+                    activity_log = ActivityLog(
+                        id=f"log_{uuid.uuid4().hex[:12]}",
+                        project_id=project_id,
+                        model_id=selected_models[0] if selected_models else "unknown",
+                        model_provider="multi_model",
+                        activity_type="engineering_report_4step",
+                        prompt=f"تولید گزارش مهندسی 4 مرحله‌ای برای {days} روز اخیر",
+                        response=f"مراحل تکمیل شد: اعتبارسنجی فیلدها، تبدیل ایرادات، ارزیابی مدل‌ها، به‌روزرسانی نقشه راه",
+                        tokens_used=0,
+                        latency_ms=0,
+                        success=True,
+                        field_id=None,
+                        field_name=f"گزارش مهندسی ۴ مرحله‌ای - {report_id}",
+                        extra_data=json.dumps({
+                            "report_id": report_id,
+                            "depth": depth,
+                            "models_used": selected_models,
+                            "steps_completed": 4,
+                        }, ensure_ascii=False),
+                        created_at=datetime.utcnow()
+                    )
+                    db.add(activity_log)
+                    db.commit()
+
+                    logger.info(f"✅ 4-step engineering report saved: {report_id}")
+                except Exception as save_err:
+                    logger.error(f"Error saving 4-step report: {save_err}")
+
                 result = {
                     "success": True,
                     "depth": depth,
                     "models_used": selected_models,
                     "steps_completed": 4,
-                    "message": "گزارش مهندسی 4 مرحله‌ای تکمیل شد"
+                    "message": "گزارش مهندسی 4 مرحله‌ای تکمیل شد",
+                    "report_id": report_id  # 🆕 شناسه گزارش
                 }
             else:
                 # حالت quick/standard: یک فراخوانی
