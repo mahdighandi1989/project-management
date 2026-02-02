@@ -323,6 +323,59 @@ class LogToIssuesService:
         slog.info(f"[DEBUG-TRANSFER] Total error logs returned: {len(error_logs)}")
         return error_logs
 
+    async def _get_debug_info(
+        self,
+        db: Session,
+        service_ids: List[str],
+        hours: int
+    ) -> Dict:
+        """
+        اطلاعات دیباگ برای نمایش در صورت نبود لاگ
+        """
+        from datetime import datetime, timedelta
+
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+
+        try:
+            # تعداد کل لاگ‌ها
+            total_logs = db.query(RenderLog).filter(
+                RenderLog.timestamp >= cutoff
+            ).count()
+
+            # تعداد لاگ‌های خطا
+            error_logs = db.query(RenderLog).filter(
+                RenderLog.timestamp >= cutoff,
+                RenderLog.level.in_(["error", "fatal", "critical"])
+            ).count()
+
+            # تعداد لاگ‌های منتقل شده
+            try:
+                transferred_logs = db.query(RenderLog).filter(
+                    RenderLog.timestamp >= cutoff,
+                    RenderLog.level.in_(["error", "fatal", "critical"]),
+                    RenderLog.transferred_to_issues == True
+                ).count()
+            except:
+                transferred_logs = "unknown"
+
+            # تعداد سرویس‌ها
+            services_count = db.query(RenderService).count()
+
+            # تعداد پروژه‌ها
+            projects_count = db.query(Project).count()
+
+            return {
+                "total_logs_in_period": total_logs,
+                "error_logs_in_period": error_logs,
+                "already_transferred": transferred_logs,
+                "services_count": services_count,
+                "projects_count": projects_count,
+                "period_hours": hours,
+                "hint": "اگر error_logs > 0 و already_transferred برابر است، همه لاگ‌ها قبلاً منتقل شده‌اند. گزینه 'اجباری' را بزنید."
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
     async def _update_last_transferred_deploy(
         self,
         db: Session,

@@ -40,7 +40,7 @@ interface LogSettings {
 
 // Progress interface for SSE transfer
 interface TransferProgress {
-  type: 'start' | 'progress' | 'log_processed' | 'complete' | 'error';
+  type: 'start' | 'progress' | 'log_processed' | 'complete' | 'error' | 'debug';
   total_logs?: number;
   current?: number;
   total?: number;
@@ -51,6 +51,18 @@ interface TransferProgress {
   merged?: number;
   skipped?: number;
   message?: string;
+  force?: boolean;
+  debug?: {
+    total_logs_in_period?: number;
+    error_logs_in_period?: number;
+    already_transferred?: number | string;
+    services_count?: number;
+    projects_count?: number;
+    period_hours?: number;
+    hint?: string;
+    error?: string;
+  };
+  mappings?: string[];
 }
 
 interface LogStats {
@@ -940,6 +952,30 @@ export default function RenderLogsPanel() {
                   {transferProgress.service && (
                     <div className="text-sm text-blue-500 dark:text-blue-400 mt-1">
                       سرویس: {transferProgress.service}
+                    </div>
+                  )}
+                  {/* نمایش اطلاعات دیباگ */}
+                  {transferProgress.debug && (
+                    <div className="mt-3 p-3 bg-yellow-50 dark:bg-yellow-900/20 rounded text-sm">
+                      <div className="font-medium text-yellow-800 dark:text-yellow-200 mb-2">🔍 اطلاعات دیباگ:</div>
+                      <div className="grid grid-cols-2 gap-2 text-yellow-700 dark:text-yellow-300">
+                        <div>کل لاگ‌ها ({transferProgress.debug.period_hours}h): {transferProgress.debug.total_logs_in_period}</div>
+                        <div>لاگ‌های خطا: {transferProgress.debug.error_logs_in_period}</div>
+                        <div>منتقل شده قبلی: {transferProgress.debug.already_transferred}</div>
+                        <div>تعداد سرویس‌ها: {transferProgress.debug.services_count}</div>
+                        <div>تعداد پروژه‌ها: {transferProgress.debug.projects_count}</div>
+                      </div>
+                      {transferProgress.debug.hint && (
+                        <div className="mt-2 text-yellow-600 dark:text-yellow-400 text-xs">
+                          💡 {transferProgress.debug.hint}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {/* نمایش mappings */}
+                  {transferProgress.mappings && transferProgress.mappings.length > 0 && (
+                    <div className="mt-2 text-xs text-gray-500">
+                      نگاشت: {transferProgress.mappings.join(', ')}
                     </div>
                   )}
                 </div>
