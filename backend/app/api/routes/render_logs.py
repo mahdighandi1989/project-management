@@ -945,6 +945,7 @@ async def transfer_errors_stream(
     service_ids: Optional[List[str]] = Query(None),
     hours: int = 24,
     mode: str = "since_deploy",
+    force: bool = False,
     db: Session = Depends(get_db)
 ):
     """
@@ -956,6 +957,9 @@ async def transfer_errors_stream(
     - {"type": "log_processed", "log_id": X, "action": "transferred|merged|skipped"}
     - {"type": "complete", "transferred": N, "merged": N, "skipped": N}
     - {"type": "error", "message": "..."}
+
+    Args:
+        force: اگر True باشد، لاگ‌هایی که قبلاً منتقل شده‌اند هم مجدداً پردازش می‌شوند
     """
 
     async def event_generator():
@@ -963,18 +967,23 @@ async def transfer_errors_stream(
             service = get_log_to_issues_service()
 
             # 1. شمارش لاگ‌ها
-            error_logs = await service._get_error_logs(db, service_ids, hours, mode)
+            error_logs = await service._get_error_logs(db, service_ids, hours, mode, force=force)
             total_logs = len(error_logs)
 
-            yield f"data: {json.dumps({'type': 'start', 'total_logs': total_logs, 'message': f'شروع پردازش {total_logs} لاگ خطا...'})}\n\n"
+            yield f"data: {json.dumps({'type': 'start', 'total_logs': total_logs, 'message': f'شروع پردازش {total_logs} لاگ خطا...', 'force': force})}\n\n"
 
             if total_logs == 0:
-                yield f"data: {json.dumps({'type': 'complete', 'transferred': 0, 'merged': 0, 'skipped': 0, 'message': 'لاگ خطایی یافت نشد'})}\n\n"
+                # DEBUG: نمایش اطلاعات بیشتر در صورت نبود لاگ
+                debug_info = await service._get_debug_info(db, service_ids, hours)
+                yield f"data: {json.dumps({'type': 'complete', 'transferred': 0, 'merged': 0, 'skipped': 0, 'message': 'لاگ خطایی یافت نشد', 'debug': debug_info})}\n\n"
                 return
 
             # 2. ساخت نگاشت سرویس-پروژه
             yield f"data: {json.dumps({'type': 'progress', 'current': 0, 'total': total_logs, 'status': 'در حال نگاشت سرویس‌ها به پروژه‌ها...'})}\n\n"
             service_project_map = await service._build_service_project_map(db)
+
+            # DEBUG: نمایش تعداد نگاشت‌ها
+            yield f"data: {json.dumps({'type': 'debug', 'message': f'نگاشت سرویس-پروژه: {len(service_project_map)} مورد', 'mappings': list(service_project_map.keys())})}\n\n"
 
             transferred = 0
             merged = 0

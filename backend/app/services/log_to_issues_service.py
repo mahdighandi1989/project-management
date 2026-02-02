@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from ..core.database import SessionLocal
 from ..core.logging_utils import StructuredLogger
-from ..models.project import Project
+from ..models.project import Project, ProjectIssue
 from ..models.render_log import RenderLog, RenderService
 from .ai_manager import get_ai_manager
 from .ai_base import Message
@@ -187,7 +187,8 @@ class LogToIssuesService:
         db: Session,
         service_ids: List[str],
         hours: int,
-        mode: str = "since_deploy"
+        mode: str = "since_deploy",
+        force: bool = False
     ) -> List[RenderLog]:
         """
         دریافت لاگ‌های خطا
@@ -196,8 +197,38 @@ class LogToIssuesService:
             mode:
                 - since_deploy: فقط خطاهای بعد از آخرین دیپلوی هر سرویس
                 - time_based: خطاهای X ساعت اخیر
+            force: اگر True باشد، لاگ‌های قبلاً منتقل شده هم برگردانده می‌شوند
         """
         error_logs = []
+
+        # DEBUG: ابتدا تعداد کل لاگ‌های خطا را بررسی کن (بدون فیلتر transferred)
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        try:
+            total_error_logs = db.query(RenderLog).filter(
+                RenderLog.timestamp >= cutoff,
+                RenderLog.level.in_(["error", "fatal", "critical"])
+            ).count()
+            slog.info(f"[DEBUG-TRANSFER] Total error logs in last {hours} hours: {total_error_logs}")
+
+            # بررسی تعداد لاگ‌های منتقل شده
+            try:
+                transferred_count = db.query(RenderLog).filter(
+                    RenderLog.timestamp >= cutoff,
+                    RenderLog.level.in_(["error", "fatal", "critical"]),
+                    RenderLog.transferred_to_issues == True
+                ).count()
+                slog.info(f"[DEBUG-TRANSFER] Already transferred: {transferred_count}")
+            except Exception as e:
+                slog.warning(f"[DEBUG-TRANSFER] Could not count transferred logs: {e}")
+                transferred_count = 0
+
+            # اگر force=True است، لاگ‌ها را ریست کن برای re-transfer
+            if force and transferred_count > 0:
+                slog.info(f"[DEBUG-TRANSFER] Force mode: resetting {transferred_count} transferred logs")
+
+        except Exception as e:
+            slog.warning(f"[DEBUG-TRANSFER] Could not get total count: {e}")
+            total_error_logs = 0
 
         try:
             if mode == "since_deploy":
@@ -207,6 +238,7 @@ class LogToIssuesService:
                     if service_ids:
                         services_query = services_query.filter(RenderService.id.in_(service_ids))
                     services = services_query.all()
+                    slog.info(f"[DEBUG-TRANSFER] Found {len(services)} services")
                 except Exception as e:
                     slog.warning("Error querying services, using fallback", exception=e)
                     services = []
@@ -219,31 +251,37 @@ class LogToIssuesService:
                             RenderLog.level.in_(["error", "fatal", "critical"])
                         )
 
-                        # فیلتر لاگ‌های منتقل نشده - با fallback
-                        try:
-                            service_query = service_query.filter(
-                                RenderLog.transferred_to_issues == False
-                            )
-                        except Exception:
-                            pass  # ستون وجود ندارد
+                        # DEBUG: تعداد خطاها قبل از فیلتر transferred
+                        service_error_count = service_query.count()
+                        slog.info(f"[DEBUG-TRANSFER] Service {service.name}: {service_error_count} error logs total")
+
+                        # فیلتر لاگ‌های منتقل نشده - مگر اینکه force=True باشد
+                        if not force:
+                            try:
+                                service_query = service_query.filter(
+                                    RenderLog.transferred_to_issues == False
+                                )
+                            except Exception:
+                                pass  # ستون وجود ندارد
 
                         # اگر آخرین دیپلوی منتقل شده مشخص باشه
                         last_transferred = getattr(service, 'last_transferred_deploy_id', None)
                         if last_transferred:
+                            slog.info(f"[DEBUG-TRANSFER] Service {service.name}: filtering out deploy_id={last_transferred}")
                             service_query = service_query.filter(
                                 RenderLog.deploy_id != last_transferred
                             )
 
                         logs = service_query.order_by(RenderLog.timestamp.desc()).limit(50).all()
                         error_logs.extend(logs)
-                        slog.info(f"Found {len(logs)} error logs for service {service.name}")
+                        slog.info(f"[DEBUG-TRANSFER] Service {service.name}: found {len(logs)} untransferred error logs")
 
                     except Exception as e:
                         slog.warning(f"Error querying logs for service {service.id}", exception=e)
 
                 # اگر هیچ لاگی پیدا نشد، fallback به حالت time_based
                 if not error_logs:
-                    slog.info("No logs found in since_deploy mode, falling back to time_based")
+                    slog.info("[DEBUG-TRANSFER] No logs found in since_deploy mode, falling back to time_based")
                     mode = "time_based"
 
             if mode == "time_based" or not error_logs:
@@ -258,13 +296,15 @@ class LogToIssuesService:
                 if service_ids:
                     query = query.filter(RenderLog.service_id.in_(service_ids))
 
-                # فیلتر لاگ‌های منتقل نشده - با fallback
-                try:
-                    query = query.filter(RenderLog.transferred_to_issues == False)
-                except Exception:
-                    pass  # ستون وجود ندارد
+                # فیلتر لاگ‌های منتقل نشده - مگر اینکه force=True باشد
+                if not force:
+                    try:
+                        query = query.filter(RenderLog.transferred_to_issues == False)
+                    except Exception:
+                        pass  # ستون وجود ندارد
 
                 error_logs = query.order_by(RenderLog.timestamp.desc()).limit(100).all()
+                slog.info(f"[DEBUG-TRANSFER] Time-based mode: found {len(error_logs)} error logs (force={force})")
 
         except Exception as e:
             slog.error("Error in _get_error_logs", exception=e)
@@ -275,12 +315,66 @@ class LogToIssuesService:
                     RenderLog.timestamp >= cutoff,
                     RenderLog.level.in_(["error", "fatal", "critical"])
                 ).order_by(RenderLog.timestamp.desc()).limit(100).all()
+                slog.info(f"[DEBUG-TRANSFER] Fallback: found {len(error_logs)} error logs")
             except Exception as e2:
                 slog.error("Fallback also failed", exception=e2)
                 error_logs = []
 
-        slog.info(f"Total error logs found: {len(error_logs)}")
+        slog.info(f"[DEBUG-TRANSFER] Total error logs returned: {len(error_logs)}")
         return error_logs
+
+    async def _get_debug_info(
+        self,
+        db: Session,
+        service_ids: List[str],
+        hours: int
+    ) -> Dict:
+        """
+        اطلاعات دیباگ برای نمایش در صورت نبود لاگ
+        """
+        from datetime import datetime, timedelta
+
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+
+        try:
+            # تعداد کل لاگ‌ها
+            total_logs = db.query(RenderLog).filter(
+                RenderLog.timestamp >= cutoff
+            ).count()
+
+            # تعداد لاگ‌های خطا
+            error_logs = db.query(RenderLog).filter(
+                RenderLog.timestamp >= cutoff,
+                RenderLog.level.in_(["error", "fatal", "critical"])
+            ).count()
+
+            # تعداد لاگ‌های منتقل شده
+            try:
+                transferred_logs = db.query(RenderLog).filter(
+                    RenderLog.timestamp >= cutoff,
+                    RenderLog.level.in_(["error", "fatal", "critical"]),
+                    RenderLog.transferred_to_issues == True
+                ).count()
+            except:
+                transferred_logs = "unknown"
+
+            # تعداد سرویس‌ها
+            services_count = db.query(RenderService).count()
+
+            # تعداد پروژه‌ها
+            projects_count = db.query(Project).count()
+
+            return {
+                "total_logs_in_period": total_logs,
+                "error_logs_in_period": error_logs,
+                "already_transferred": transferred_logs,
+                "services_count": services_count,
+                "projects_count": projects_count,
+                "period_hours": hours,
+                "hint": "اگر error_logs > 0 و already_transferred برابر است، همه لاگ‌ها قبلاً منتقل شده‌اند. گزینه 'اجباری' را بزنید."
+            }
+        except Exception as e:
+            return {"error": str(e)}
 
     async def _update_last_transferred_deploy(
         self,
@@ -408,41 +502,48 @@ class LogToIssuesService:
         # 2. تحلیل AI برای توضیح خطا
         ai_analysis = await self._analyze_error_with_ai(log, project)
 
-        # 3. دریافت ایرادات موجود
-        issues = []
-        try:
-            if project.issues_found:
-                issues = json.loads(project.issues_found)
-        except:
-            issues = []
-
-        # 4. جستجوی ایراد مشابه
-        similar_issue = self._find_similar_issue(
+        # 3. جستجوی ایراد مشابه در جدول ProjectIssue
+        existing_issue = self._find_similar_issue_in_db(
+            db,
+            project_id,
             log.message,
-            ai_analysis.get("error_type", ""),
-            issues
+            ai_analysis.get("error_type", "")
         )
 
-        if similar_issue is not None:
+        if existing_issue:
             # ادغام با ایراد موجود
-            merged_issue = self._merge_with_existing(
-                issues[similar_issue],
-                log,
-                ai_analysis
-            )
-            issues[similar_issue] = merged_issue
+            existing_issue.occurrences = (existing_issue.occurrences or 0) + 1
+            existing_issue.updated_at = datetime.utcnow()
+            # اضافه کردن اطلاعات جدید به description
+            existing_issue.description = ai_analysis.get("explanation", existing_issue.description)
             result["status"] = "merged"
-            result["issue_index"] = similar_issue
-
+            result["issue_index"] = existing_issue.id
         else:
-            # ایجاد ایراد جدید
-            new_issue = self._create_new_issue(log, ai_analysis, mapping)
-            issues.append(new_issue)
+            # ایجاد ایراد جدید در جدول ProjectIssue
+            priority_map = {"high": 2, "medium": 3, "low": 4, "critical": 1}
+            new_issue = ProjectIssue(
+                project_id=project_id,
+                title=ai_analysis.get("error_type", "خطای Render")[:200] or log.message[:200],
+                description=ai_analysis.get("explanation", log.message),
+                solution=ai_analysis.get("suggested_fix", "بررسی لاگ کامل"),
+                priority=priority_map.get(ai_analysis.get("priority", "medium"), 3),
+                status="open",
+                source="render_logs",
+                source_data=json.dumps({
+                    "log_id": log.id,
+                    "service_name": log.service_name,
+                    "service_id": log.service_id,
+                    "message": log.message,
+                    "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+                    "deploy_id": log.deploy_id,
+                    "ai_analysis": ai_analysis
+                }, ensure_ascii=False),
+                occurrences=1,
+                created_at=datetime.utcnow()
+            )
+            db.add(new_issue)
             result["status"] = "transferred"
-            result["issue_index"] = len(issues) - 1
-
-        # 5. ذخیره ایرادات
-        project.issues_found = json.dumps(issues, ensure_ascii=False)
+            result["issue_index"] = "new"
 
         # علامت‌گذاری لاگ به عنوان منتقل شده
         log.transferred_to_issues = True
@@ -492,9 +593,20 @@ class LogToIssuesService:
 }}"""
 
         try:
+            # اطمینان از مقداردهی ai_manager
+            if not self.ai_manager:
+                self.initialize()
+
+            if not self.ai_manager:
+                raise Exception("AI manager not available")
+
             # انتخاب مدل مناسب
             available = self.ai_manager.get_available_models(task_type="analysis")
-            model_id = available[0].id if available else "claude"
+            if available:
+                # AIModel is a Pydantic model, use attribute access
+                model_id = available[0].id if hasattr(available[0], 'id') else "claude"
+            else:
+                model_id = "claude"
 
             response = await self.ai_manager.generate(
                 model_id=model_id,
@@ -518,6 +630,39 @@ class LogToIssuesService:
                 "search_keywords": []
             }
 
+    def _find_similar_issue_in_db(
+        self,
+        db: Session,
+        project_id: str,
+        error_message: str,
+        error_type: str
+    ) -> Optional[ProjectIssue]:
+        """
+        جستجوی ایراد مشابه در جدول ProjectIssue
+
+        Returns:
+            ProjectIssue موجود یا None
+        """
+        # جستجوی ایرادات render_logs برای این پروژه
+        existing_issues = db.query(ProjectIssue).filter(
+            ProjectIssue.project_id == project_id,
+            ProjectIssue.source == "render_logs",
+            ProjectIssue.status != "resolved"
+        ).all()
+
+        for issue in existing_issues:
+            # بررسی نوع خطا در عنوان
+            if error_type and error_type in (issue.title or ""):
+                return issue
+
+            # بررسی تشابه پیام
+            if self._messages_similar(error_message, issue.title or ""):
+                return issue
+            if self._messages_similar(error_message, issue.description or ""):
+                return issue
+
+        return None
+
     def _find_similar_issue(
         self,
         error_message: str,
@@ -525,7 +670,7 @@ class LogToIssuesService:
         existing_issues: List[Dict]
     ) -> Optional[int]:
         """
-        جستجوی ایراد مشابه
+        جستجوی ایراد مشابه (متد قدیمی - برای backward compatibility)
 
         Returns:
             index ایراد مشابه یا None
