@@ -298,7 +298,7 @@ def migrate_db():
                 logger.info("Added 'auto_transfer_mode' column to render_log_settings table")
 
         # Migration برای render_services - ستون‌های دیپلوی
-        if "render_services" in tables:
+        if "render_services" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
             existing_cols = get_columns("render_services")
 
             if "last_deploy_id" not in existing_cols:
