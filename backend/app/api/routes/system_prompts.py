@@ -980,6 +980,25 @@ async def restore_default_prompts(
         # اجرای seed برای بازیابی پرامپت‌های گمشده
         _seed_default_prompts()
 
+        # 🔴 فعال کردن پرامپت‌های پیش‌فرض غیرفعال
+        query = db.query(SystemPrompt).filter(
+            SystemPrompt.is_default == True,
+            SystemPrompt.is_active == False
+        )
+        if category:
+            query = query.filter(SystemPrompt.category == category)
+
+        inactive_prompts = query.all()
+        activated_count = 0
+        for prompt in inactive_prompts:
+            prompt.is_active = True
+            activated_count += 1
+            logger.info(f"🔄 Activated prompt: {prompt.id}")
+
+        if activated_count > 0:
+            db.commit()
+            logger.info(f"✅ Activated {activated_count} inactive default prompts")
+
         # گزارش وضعیت فعلی
         query = db.query(SystemPrompt).filter(SystemPrompt.is_default == True)
         if category:
@@ -989,8 +1008,9 @@ async def restore_default_prompts(
 
         return {
             "success": True,
-            "message": "پرامپت‌های پیش‌فرض بازیابی شدند",
+            "message": f"پرامپت‌های پیش‌فرض بازیابی شدند ({activated_count} فعال شد)",
             "total_default_prompts": len(prompts),
+            "activated_count": activated_count,
             "prompts": [
                 {
                     "id": p.id,
@@ -1004,4 +1024,5 @@ async def restore_default_prompts(
 
     except Exception as e:
         logger.error(f"Error restoring default prompts: {e}")
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
