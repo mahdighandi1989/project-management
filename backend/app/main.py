@@ -388,14 +388,29 @@ app.add_middleware(
 async def log_requests(request: Request, call_next):
     start_time = time.time()
 
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        # خطا رخ داده - برگرداندن پاسخ با header های CORS
+        logger.error(f"Middleware error: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal server error", "error": str(e)},
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "*",
+                "Access-Control-Allow-Headers": "*",
+            }
+        )
 
     process_time = time.time() - start_time
     logger.info(
         f"{request.method} {request.url.path} - {response.status_code} - {process_time:.3f}s"
     )
 
+    # اضافه کردن header های CORS به همه پاسخ‌ها (اطمینان از وجود)
     response.headers["X-Process-Time"] = str(process_time)
+    response.headers["Access-Control-Allow-Origin"] = "*"
     return response
 
 
