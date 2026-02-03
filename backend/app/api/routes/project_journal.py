@@ -2782,25 +2782,24 @@ async def generate_engineering_report_stream(
     async def progress_generator():
         """Generator برای ارسال پیشرفت"""
         # 🔴🔴🔴 FIX: ایجاد PromptExecution برای نمایش در پنل انیمیشن
-        from ..services.prompt_helper import PromptHelper
         from ..models.system_prompt import PromptExecution
 
         execution_id = f"eng_exec_{uuid.uuid4().hex[:12]}"
 
         try:
             # ایجاد رکورد PromptExecution برای ردیابی در پنل
+            # 🔴 فقط از فیلدهای موجود در مدل استفاده می‌کنیم
             execution = PromptExecution(
                 id=execution_id,
                 prompt_id="engineering_report",  # شناسه مجازی
-                prompt_name=f"گزارش مهندسی ({depth})",
-                prompt_category="engineering_report",
                 project_id=project_id,
                 status="running",
                 model_used=selected_models[0] if selected_models else "claude",
-                current_step="🔍 شروع بررسی...",
+                current_step=f"🔍 شروع گزارش مهندسی ({depth})...",
                 current_progress=0,
                 total_steps=config["total_steps"],
                 current_step_index=0,
+                result_summary=f"گزارش مهندسی ({depth})",  # برای نمایش نام در پنل
                 started_at=datetime.utcnow(),
                 created_at=datetime.utcnow()
             )
