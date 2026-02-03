@@ -14,6 +14,8 @@ from enum import Enum
 import logging
 
 from .ai_base import Message  # اضافه شد
+from ..core.database import SessionLocal
+from ..models.ai_profile import AIProfile
 
 logger = logging.getLogger(__name__)
 
@@ -149,13 +151,51 @@ class SmartModelSelector:
         self._load_performance_history()
 
     def _load_performance_history(self):
-        """بارگذاری تاریخچه عملکرد"""
-        # در آینده از دیتابیس خوانده می‌شود
-        pass
+        """بارگذاری تاریخچه عملکرد از دیتابیس"""
+        try:
+            db = SessionLocal()
+            profiles = db.query(AIProfile).all()
+
+            for profile in profiles:
+                # تبدیل پروفایل دیتابیس به ModelPerformance
+                self.performance_history[profile.model_id] = ModelPerformance(
+                    model_id=profile.model_id,
+                    total_tasks=profile.total_tasks or 0,
+                    successful_tasks=profile.total_correct_findings or 0,
+                    average_score=profile.overall_score or 0.0,
+                    scores_by_category=profile.last_scores_by_task or {},
+                    average_response_time=profile.speed_score or 0.0,
+                    last_used=profile.last_used.isoformat() if profile.last_used else None,
+                    feedback_history=[]
+                )
+
+            logger.info(f"Loaded performance history for {len(profiles)} models")
+            db.close()
+        except Exception as e:
+            logger.warning(f"Could not load performance history: {e}")
 
     def _save_performance_history(self):
-        """ذخیره تاریخچه عملکرد"""
-        pass
+        """ذخیره تاریخچه عملکرد در دیتابیس"""
+        try:
+            db = SessionLocal()
+
+            for model_id, perf in self.performance_history.items():
+                profile = db.query(AIProfile).filter(
+                    AIProfile.model_id == model_id
+                ).first()
+
+                if profile:
+                    # به‌روزرسانی پروفایل موجود
+                    profile.total_tasks = perf.total_tasks
+                    profile.last_scores_by_task = perf.scores_by_category
+                    if perf.last_used:
+                        profile.last_used = datetime.fromisoformat(perf.last_used)
+
+            db.commit()
+            logger.info(f"Saved performance history for {len(self.performance_history)} models")
+            db.close()
+        except Exception as e:
+            logger.warning(f"Could not save performance history: {e}")
 
     def select_best_model(
         self,

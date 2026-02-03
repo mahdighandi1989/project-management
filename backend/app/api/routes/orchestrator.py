@@ -19,6 +19,115 @@ router = APIRouter(prefix="/orchestrator", tags=["Smart Orchestrator"])
 # Auto-Detection Helper Functions
 # =====================================
 
+def extract_technologies_from_project(project: Dict, estimated_files: List[str]) -> List[str]:
+    """
+    استخراج تکنولوژی‌ها از اطلاعات پروژه
+    """
+    technologies = set()
+
+    # نگاشت نوع پروژه به تکنولوژی‌ها
+    project_type_tech = {
+        "web_app": ["HTML", "CSS", "JavaScript"],
+        "api_service": ["REST API", "JSON"],
+        "mobile_app": ["Mobile"],
+        "desktop_app": ["Desktop"],
+        "data_science": ["Python", "Data Analysis"],
+        "machine_learning": ["Python", "ML/AI"],
+        "devops": ["Docker", "CI/CD"],
+        "fullstack": ["Frontend", "Backend", "Database"],
+    }
+
+    project_type = project.get("project_type", "custom")
+    if project_type in project_type_tech:
+        technologies.update(project_type_tech[project_type])
+
+    # استخراج از فایل‌ها
+    extension_tech = {
+        ".py": "Python",
+        ".js": "JavaScript",
+        ".ts": "TypeScript",
+        ".tsx": "React",
+        ".jsx": "React",
+        ".vue": "Vue.js",
+        ".go": "Go",
+        ".rs": "Rust",
+        ".java": "Java",
+        ".kt": "Kotlin",
+        ".swift": "Swift",
+        ".rb": "Ruby",
+        ".php": "PHP",
+        ".cs": "C#",
+        ".cpp": "C++",
+        ".c": "C",
+        ".sql": "SQL",
+        ".html": "HTML",
+        ".css": "CSS",
+        ".scss": "SASS",
+        ".md": "Markdown",
+        ".yaml": "YAML",
+        ".yml": "YAML",
+        ".json": "JSON",
+        ".xml": "XML",
+        ".dockerfile": "Docker",
+        ".sh": "Shell",
+    }
+
+    for file in estimated_files:
+        file_lower = file.lower()
+        for ext, tech in extension_tech.items():
+            if file_lower.endswith(ext):
+                technologies.add(tech)
+
+        # فایل‌های خاص
+        if "dockerfile" in file_lower:
+            technologies.add("Docker")
+        if "requirements.txt" in file_lower or "setup.py" in file_lower:
+            technologies.add("Python")
+        if "package.json" in file_lower:
+            technologies.add("Node.js")
+        if "composer.json" in file_lower:
+            technologies.add("PHP")
+        if "gemfile" in file_lower:
+            technologies.add("Ruby")
+        if "cargo.toml" in file_lower:
+            technologies.add("Rust")
+        if "go.mod" in file_lower:
+            technologies.add("Go")
+
+    # استخراج از توضیحات
+    description = (project.get("description", "") + " " + project.get("goal", "")).lower()
+    keywords_tech = {
+        "react": "React",
+        "vue": "Vue.js",
+        "angular": "Angular",
+        "django": "Django",
+        "flask": "Flask",
+        "fastapi": "FastAPI",
+        "express": "Express.js",
+        "nest": "NestJS",
+        "spring": "Spring",
+        "laravel": "Laravel",
+        "rails": "Ruby on Rails",
+        "docker": "Docker",
+        "kubernetes": "Kubernetes",
+        "postgresql": "PostgreSQL",
+        "mysql": "MySQL",
+        "mongodb": "MongoDB",
+        "redis": "Redis",
+        "graphql": "GraphQL",
+        "rest api": "REST API",
+        "machine learning": "ML/AI",
+        "هوش مصنوعی": "ML/AI",
+        "یادگیری ماشین": "ML/AI",
+    }
+
+    for keyword, tech in keywords_tech.items():
+        if keyword in description:
+            technologies.add(tech)
+
+    return list(technologies)
+
+
 def get_optimal_settings_for_file(filename: str, file_size: int) -> Dict[str, Any]:
     """
     تشخیص خودکار تنظیمات بهینه بر اساس نوع فایل و اندازه
@@ -475,7 +584,7 @@ async def start_project_workflow(request: StartWorkflowRequest):
                     "project_type": project.get("project_type", "custom"),
                     "goal": project.get("goal", ""),
                     "phases": phases,
-                    "technologies": [],  # TODO: extract from project
+                    "technologies": extract_technologies_from_project(project, estimated_files),
                     "features": [],
                     "estimated_files": estimated_files
                 },
