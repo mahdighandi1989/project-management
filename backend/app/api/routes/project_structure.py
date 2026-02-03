@@ -507,8 +507,24 @@ async def get_live_status(project_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
 
     cached = get_cached_structure(project)
-    if not cached:
-        return {"success": True, "active_nodes": [], "animated_edges": []}
+
+    # 🔴 FIX: اگر کش نداریم، دیاگرام جدید بساز
+    if not cached or not cached.nodes:
+        files = []
+        try:
+            if project.structure:
+                structure_data = json.loads(project.structure) if isinstance(project.structure, str) else project.structure
+                files = structure_data.get('files', [])
+                if not files:
+                    files = structure_data.get('file_tree', [])
+        except Exception:
+            pass
+
+        if files:
+            cached = build_project_diagram(project, files)
+            save_cached_structure(db, project, cached)
+        else:
+            return {"success": True, "active_nodes": [], "animated_edges": [], "message": "فایلی برای نمایش وجود ندارد"}
 
     active_nodes = [n.id for n in cached.nodes if n.is_active]
     animated_edges = [e.id for e in cached.edges if e.animated]
@@ -517,4 +533,6 @@ async def get_live_status(project_id: str, db: Session = Depends(get_db)):
         "success": True,
         "active_nodes": active_nodes,
         "animated_edges": animated_edges,
+        "total_nodes": len(cached.nodes),
+        "total_edges": len(cached.edges),
     }
