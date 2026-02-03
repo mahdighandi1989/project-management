@@ -103,7 +103,7 @@ def _get_issue_key(issue: dict) -> str:
     return f"{file_path}:{line}:{issue_type}:{msg}"
 
 
-def _merge_with_existing_issues(project, new_issues: list, source: str = "analysis") -> list:
+def _merge_with_existing_issues(project, new_issues: list, source: str = "analysis", db=None) -> list:
     """
     🔴 ادغام ایرادات جدید با ایرادات موجود در دیتابیس
 
@@ -113,12 +113,20 @@ def _merge_with_existing_issues(project, new_issues: list, source: str = "analys
         project: شیء پروژه
         new_issues: لیست ایرادات جدید
         source: منبع ایرادات (analysis, roadmap, etc.)
+        db: Database session برای refresh (اختیاری)
 
     Returns:
         لیست ایرادات ادغام شده
     """
     import logging
     logger = logging.getLogger(__name__)
+
+    # 🔴 بازخوانی داده‌ها از دیتابیس برای جلوگیری از stale data
+    if db:
+        try:
+            db.refresh(project)
+        except Exception as e:
+            logger.warning(f"[Merge Issues] Could not refresh project: {e}")
 
     # خواندن ایرادات موجود
     existing_issues = []
@@ -991,11 +999,12 @@ async def run_direct_analysis(project_id: str, db=Depends(get_db)):
                 analysis_result.get("file_health_map", {}),
                 ensure_ascii=False
             )
-            # 🔴 اصلاح شده: MERGE بجای OVERWRITE
+            # 🔴 اصلاح شده: MERGE بجای OVERWRITE + db.refresh
             merged_issues = _merge_with_existing_issues(
                 project,
                 analysis_result.get("issues", []),
-                source="direct_analysis"
+                source="direct_analysis",
+                db=db
             )
             project.issues_found = json.dumps(merged_issues, ensure_ascii=False)
             project.last_analysis_at = datetime.utcnow()
@@ -1529,7 +1538,7 @@ async def _run_analysis_task(
                     "type": "config",
                     "source": "streaming_analysis"
                 }
-                merged_issues = _merge_with_existing_issues(project, [error_issue], "streaming_error")
+                merged_issues = _merge_with_existing_issues(project, [error_issue], "streaming_error", db=db)
                 project.issues_found = json.dumps(merged_issues, ensure_ascii=False)
                 db.commit()
             return
@@ -1646,7 +1655,7 @@ async def _run_analysis_task(
                 "type": "error",
                 "source": "streaming_analysis"
             }
-            merged_issues = _merge_with_existing_issues(project, [error_issue], "analysis_error")
+            merged_issues = _merge_with_existing_issues(project, [error_issue], "analysis_error", db=db)
             project.issues_found = json.dumps(merged_issues, ensure_ascii=False)
             db.commit()
             return
@@ -1670,12 +1679,13 @@ async def _run_analysis_task(
             # 🆕 همیشه ادغام ایرادات قبل از ذخیره (رفع مشکل ۳ و ۴)
             raw_issues = analysis_result.get("issues", [])
 
-            # 🔴 اصلاح شده: ابتدا MERGE با ایرادات موجود
+            # 🔴 اصلاح شده: ابتدا MERGE با ایرادات موجود + db.refresh
             # سپس ادغام ایرادات مشابه در همین تحلیل
             merged_with_existing = _merge_with_existing_issues(
                 project,
                 raw_issues,
-                source="streaming_analysis"
+                source="streaming_analysis",
+                db=db
             )
 
             # ادغام ایرادات مشابه (برای کاهش تکرار)
@@ -1773,7 +1783,7 @@ async def _run_analysis_task(
                     "type": "system_error",
                     "source": "streaming_analysis"
                 }
-                merged_issues = _merge_with_existing_issues(project, [error_issue], "system_error")
+                merged_issues = _merge_with_existing_issues(project, [error_issue], "system_error", db=db)
                 project.issues_found = json.dumps(merged_issues, ensure_ascii=False)
                 db.commit()
         except:
@@ -1888,12 +1898,13 @@ async def update_project_roadmap(
         project.roadmap_content = result.get("roadmap_content", "")
         project.ideal_state = result.get("ideal_state", "")
 
-        # 🔴 اصلاح شده: MERGE بجای OVERWRITE
+        # 🔴 اصلاح شده: MERGE بجای OVERWRITE + db.refresh
         if result.get("issues_found"):
             merged_issues = _merge_with_existing_issues(
                 project,
                 result["issues_found"],
-                source="roadmap_analysis"
+                source="roadmap_analysis",
+                db=db
             )
             project.issues_found = json.dumps(merged_issues, ensure_ascii=False)
 
@@ -2867,11 +2878,12 @@ async def _run_resumed_analysis_task(
                 analysis_result.get("file_health_map", {}),
                 ensure_ascii=False
             )
-            # 🔴 اصلاح شده: MERGE بجای OVERWRITE
+            # 🔴 اصلاح شده: MERGE بجای OVERWRITE + db.refresh
             merged_issues = _merge_with_existing_issues(
                 project,
                 analysis_result.get("issues", []),
-                source="resume_analysis"
+                source="resume_analysis",
+                db=db
             )
             project.issues_found = json.dumps(merged_issues, ensure_ascii=False)
             project.last_analysis_at = datetime.utcnow()

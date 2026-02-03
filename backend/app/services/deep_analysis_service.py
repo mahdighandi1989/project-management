@@ -2188,6 +2188,11 @@ class DeepAnalysisService:
                 logger.info(f"نتایج تحلیل برای پروژه {project_id} ذخیره شد")
         except Exception as e:
             logger.error(f"خطا در ذخیره نتایج: {e}")
+            # 🔴 Rollback در صورت خطا
+            try:
+                db_session.rollback()
+            except:
+                pass
 
     async def _update_model_profiles(
         self,
