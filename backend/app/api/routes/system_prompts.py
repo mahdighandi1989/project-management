@@ -572,6 +572,46 @@ async def get_active_executions(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.delete("/executions/clear-stuck")
+async def clear_stuck_executions(
+    db: Session = Depends(get_db)
+):
+    """
+    پاک کردن اجراهای گیر کرده (running بیش از ۱ ساعت)
+    """
+    try:
+        from datetime import timedelta
+
+        # پیدا کردن اجراهای گیر کرده (running بیش از ۱ ساعت)
+        one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+
+        stuck_executions = db.query(PromptExecution).filter(
+            PromptExecution.status.in_(["pending", "running"]),
+            PromptExecution.created_at < one_hour_ago
+        ).all()
+
+        cleared_count = 0
+        for exec in stuck_executions:
+            exec.status = "failed"
+            exec.completed_at = datetime.utcnow()
+            exec.error_message = "خودکار بسته شد - گیر کرده بود"
+            cleared_count += 1
+
+        db.commit()
+
+        logger.info(f"Cleared {cleared_count} stuck executions")
+
+        return {
+            "success": True,
+            "cleared": cleared_count,
+            "message": f"{cleared_count} اجرای گیر کرده بسته شد"
+        }
+
+    except Exception as e:
+        logger.error(f"Error clearing stuck executions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/executions/history")
 async def get_execution_history(
     project_id: Optional[str] = None,
