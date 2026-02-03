@@ -747,6 +747,14 @@ class QuickApprovalService:
 
                 marker = f.get("validation_marker", "")
                 needs_approval = f.get("needs_approval", False)
+                action_type = f.get("action_type", "")
+
+                # بررسی آیا قبلاً تایید شده
+                is_approved = marker in ["quick_approved", "engineering_approved"] or \
+                              f.get("engineering_approval", {}).get("approved", False)
+
+                if is_approved:
+                    continue  # فیلدهای تایید شده نیاز به تایید ندارند
 
                 if marker == "auto_pending":
                     auto_pending.append({
@@ -766,6 +774,19 @@ class QuickApprovalService:
                         "priority": f.get("priority", 5),
                         "created_at": f.get("created_at"),
                         "source": f.get("source"),
+                        "can_quick_approve": False,
+                        "needs_engineering_report": True
+                    })
+                # 🆕 فیلدهای اقدام‌محور بدون تاییدیه
+                elif action_type and action_type != "display":
+                    pending.append({
+                        "id": f.get("id"),
+                        "name": f.get("name"),
+                        "value": f.get("value", "")[:200],
+                        "priority": f.get("priority", 5),
+                        "created_at": f.get("created_at"),
+                        "source": f.get("source"),
+                        "action_type": action_type,
                         "can_quick_approve": False,
                         "needs_engineering_report": True
                     })
