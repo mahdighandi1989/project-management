@@ -342,6 +342,15 @@ def migrate_db():
                 cursor.execute("ALTER TABLE prompt_executions ADD COLUMN current_step_index INTEGER DEFAULT 0")
                 logger.info("Added 'current_step_index' column to prompt_executions table")
 
+        # 🆕 Migration برای جدول project_issues - ستون Quick Approval
+        if "project_issues" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
+            existing_cols = get_columns("project_issues")
+
+            # ستون ارتباط با فیلد تبدیل شده
+            if "converted_field_id" not in existing_cols:
+                cursor.execute("ALTER TABLE project_issues ADD COLUMN converted_field_id VARCHAR(50)")
+                logger.info("Added 'converted_field_id' column to project_issues table")
+
         conn.commit()
         logger.info("Database migration completed")
 
