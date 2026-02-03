@@ -1394,21 +1394,24 @@ async def debug_auto_transfer(db: Session = Depends(get_db)):
 @router.post("/auto-transfer/force-transfer")
 async def force_transfer_all_errors(
     hours_back: int = Query(24, ge=1, le=168),
+    limit: int = Query(10, ge=1, le=100),  # 🆕 محدود کردن تعداد برای تست
     db: Session = Depends(get_db)
 ):
     """
-    🔴 انتقال اجباری همه خطاها (حتی قبلاً منتقل شده)
+    🔴 انتقال اجباری خطاها با logging کامل
 
-    این endpoint برای debug استفاده می‌شود و:
-    - همه لاگ‌های خطا را بدون توجه به transferred_to_issues انتقال می‌دهد
-    - نتیجه جزئی را برمی‌گرداند
+    - limit: حداکثر تعداد لاگ برای پردازش (برای تست)
     """
     from ...services.log_to_issues_service import get_log_to_issues_service
+    from ...models.project import Project, ProjectIssue
+
+    debug_log = []
 
     try:
         service = get_log_to_issues_service()
+        service.initialize()
 
-        # ریست کردن فلگ transferred برای تست مجدد
+        # ریست کردن فلگ transferred برای تست
         cutoff = datetime.utcnow() - timedelta(hours=hours_back)
         reset_count = db.query(RenderLog).filter(
             RenderLog.timestamp >= cutoff,
@@ -1416,33 +1419,136 @@ async def force_transfer_all_errors(
             RenderLog.transferred_to_issues == True
         ).update({RenderLog.transferred_to_issues: False})
         db.commit()
+        debug_log.append(f"✅ Reset {reset_count} transferred flags")
 
-        slog.info(f"Reset {reset_count} transferred flags for force transfer")
+        # شمارش ایرادات قبل
+        issues_before = db.query(ProjectIssue).count()
+        debug_log.append(f"📊 Issues before: {issues_before}")
 
-        # اجرای انتقال
-        result = await service.transfer_error_logs(
-            service_ids=None,
-            hours=hours_back,
-            auto_mode=False,
-            mode="time_based",
-            db=db
-        )
+        # دریافت لاگ‌های خطا (محدود)
+        error_logs = db.query(RenderLog).filter(
+            RenderLog.timestamp >= cutoff,
+            RenderLog.level.in_(["error", "fatal", "critical"]),
+            RenderLog.transferred_to_issues == False
+        ).order_by(RenderLog.timestamp.desc()).limit(limit).all()
 
-        # اضافه کردن اطلاعات debug
-        debug_info = await service._get_debug_info(db, None, hours_back)
+        debug_log.append(f"📋 Found {len(error_logs)} error logs to process")
+
+        # ساخت service-project map
+        service_project_map = await service._build_service_project_map(db)
+        debug_log.append(f"🗺️ Service mapping: {len(service_project_map)} services mapped")
+
+        # پردازش دستی هر لاگ با logging کامل
+        transferred = 0
+        merged = 0
+        skipped = 0
+        errors_list = []
+
+        for i, log in enumerate(error_logs):
+            try:
+                debug_log.append(f"\n--- Log {i+1}/{len(error_logs)} ---")
+                debug_log.append(f"   Service: {log.service_name} ({log.service_id})")
+                debug_log.append(f"   Message: {(log.message or '')[:100]}...")
+
+                # بررسی mapping
+                if log.service_id not in service_project_map:
+                    debug_log.append(f"   ❌ SKIPPED: service not mapped")
+                    skipped += 1
+                    continue
+
+                mapping = service_project_map[log.service_id]
+                project_id = mapping["project_id"]
+                debug_log.append(f"   ✅ Mapped to project: {mapping['project_name']}")
+
+                # دریافت پروژه
+                project = db.query(Project).filter(Project.id == project_id).first()
+                if not project:
+                    debug_log.append(f"   ❌ SKIPPED: project not found")
+                    skipped += 1
+                    continue
+
+                # تحلیل AI
+                debug_log.append(f"   🧠 Running AI analysis...")
+                ai_analysis = await service._analyze_error_with_ai(log, project)
+                debug_log.append(f"   📝 AI result: {ai_analysis.get('error_type', 'unknown')}")
+
+                # جستجوی ایراد مشابه
+                existing = service._find_similar_issue_in_db(
+                    db, project_id, log.message, ai_analysis.get("error_type", "")
+                )
+
+                if existing:
+                    existing.occurrences = (existing.occurrences or 0) + 1
+                    existing.updated_at = datetime.utcnow()
+                    merged += 1
+                    debug_log.append(f"   🔄 MERGED with existing issue {existing.id}")
+                else:
+                    # ایجاد ایراد جدید
+                    priority_map = {"high": 2, "medium": 3, "low": 4, "critical": 1}
+                    new_issue = ProjectIssue(
+                        project_id=project_id,
+                        title=ai_analysis.get("error_type", "خطای Render")[:200] or (log.message or "")[:200],
+                        description=ai_analysis.get("explanation", log.message),
+                        solution=ai_analysis.get("suggested_fix", "بررسی لاگ کامل"),
+                        priority=priority_map.get(ai_analysis.get("priority", "medium"), 3),
+                        status="open",
+                        source="render_logs",
+                        source_data=json.dumps({
+                            "log_id": log.id,
+                            "service_name": log.service_name,
+                            "ai_analysis": ai_analysis
+                        }, ensure_ascii=False),
+                        occurrences=1,
+                        created_at=datetime.utcnow()
+                    )
+                    db.add(new_issue)
+                    transferred += 1
+                    debug_log.append(f"   ✅ CREATED new issue")
+
+                # علامت‌گذاری لاگ
+                log.transferred_to_issues = True
+                log.transferred_at = datetime.utcnow()
+
+            except Exception as e:
+                debug_log.append(f"   ❌ ERROR: {str(e)}")
+                errors_list.append({"log_id": log.id, "error": str(e)})
+
+        # Commit
+        try:
+            db.commit()
+            debug_log.append(f"\n✅ Committed successfully")
+        except Exception as ce:
+            debug_log.append(f"\n❌ Commit failed: {str(ce)}")
+            db.rollback()
+
+        # شمارش بعد
+        issues_after = db.query(ProjectIssue).count()
+        debug_log.append(f"📊 Issues after: {issues_after}")
+        debug_log.append(f"📊 New issues: {issues_after - issues_before}")
 
         return {
             "success": True,
-            "reset_count": reset_count,
-            "transfer_result": result,
-            "debug_info": debug_info
+            "summary": {
+                "reset_count": reset_count,
+                "logs_processed": len(error_logs),
+                "transferred": transferred,
+                "merged": merged,
+                "skipped": skipped,
+                "issues_before": issues_before,
+                "issues_after": issues_after,
+                "new_issues": issues_after - issues_before
+            },
+            "errors": errors_list,
+            "debug_log": debug_log
         }
 
     except Exception as e:
-        slog.error("Force transfer failed", exception=e)
+        import traceback
         return {
             "success": False,
-            "error": str(e)
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+            "debug_log": debug_log
         }
 
 
