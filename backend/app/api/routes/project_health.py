@@ -5255,69 +5255,8 @@ async def get_issues_summary(
     }
 
 
-@router.patch("/{project_id}/issues/{issue_id}")
-async def update_issue(
-    project_id: str,
-    issue_id: int,
-    status: Optional[str] = None,
-    priority: Optional[str] = None,
-    db=Depends(get_db)
-):
-    """
-    بروزرسانی وضعیت یا اولویت یک ایراد
-    """
-    issue = db.query(ProjectIssue).filter(
-        ProjectIssue.id == issue_id,
-        ProjectIssue.project_id == project_id
-    ).first()
-
-    if not issue:
-        raise HTTPException(status_code=404, detail="ایراد یافت نشد")
-
-    if status:
-        issue.status = status
-        if status == "resolved":
-            issue.resolved_at = datetime.utcnow()
-
-    if priority:
-        priority_map = {"critical": 1, "high": 2, "medium": 3, "low": 4}
-        if priority in priority_map:
-            issue.priority = priority_map[priority]
-
-    issue.updated_at = datetime.utcnow()
-    db.commit()
-
-    return {
-        "success": True,
-        "issue": issue.to_dict()
-    }
-
-
-@router.delete("/{project_id}/issues/{issue_id}")
-async def delete_issue(
-    project_id: str,
-    issue_id: int,
-    db=Depends(get_db)
-):
-    """
-    حذف یک ایراد
-    """
-    issue = db.query(ProjectIssue).filter(
-        ProjectIssue.id == issue_id,
-        ProjectIssue.project_id == project_id
-    ).first()
-
-    if not issue:
-        raise HTTPException(status_code=404, detail="ایراد یافت نشد")
-
-    db.delete(issue)
-    db.commit()
-
-    return {
-        "success": True,
-        "message": "ایراد حذف شد"
-    }
-
+# ⚠️ IMPORTANT: Bulk operations must be defined BEFORE {issue_id} routes
+# to prevent FastAPI from matching "delete-all" or "archive-all" as issue_id
 
 @router.post("/{project_id}/issues/archive-all")
 async def archive_all_issues(
@@ -5408,3 +5347,70 @@ async def delete_all_issues(
         "message": f"{deleted_count} ایراد حذف شد",
         "deleted_count": deleted_count
     }
+
+
+# Individual issue operations (must be AFTER bulk operations)
+@router.patch("/{project_id}/issues/{issue_id}")
+async def update_issue(
+    project_id: str,
+    issue_id: int,
+    status: Optional[str] = None,
+    priority: Optional[str] = None,
+    db=Depends(get_db)
+):
+    """
+    بروزرسانی وضعیت یا اولویت یک ایراد
+    """
+    issue = db.query(ProjectIssue).filter(
+        ProjectIssue.id == issue_id,
+        ProjectIssue.project_id == project_id
+    ).first()
+
+    if not issue:
+        raise HTTPException(status_code=404, detail="ایراد یافت نشد")
+
+    if status:
+        issue.status = status
+        if status == "resolved":
+            issue.resolved_at = datetime.utcnow()
+
+    if priority:
+        priority_map = {"critical": 1, "high": 2, "medium": 3, "low": 4}
+        if priority in priority_map:
+            issue.priority = priority_map[priority]
+
+    issue.updated_at = datetime.utcnow()
+    db.commit()
+
+    return {
+        "success": True,
+        "issue": issue.to_dict()
+    }
+
+
+@router.delete("/{project_id}/issues/{issue_id}")
+async def delete_issue(
+    project_id: str,
+    issue_id: int,
+    db=Depends(get_db)
+):
+    """
+    حذف یک ایراد
+    """
+    issue = db.query(ProjectIssue).filter(
+        ProjectIssue.id == issue_id,
+        ProjectIssue.project_id == project_id
+    ).first()
+
+    if not issue:
+        raise HTTPException(status_code=404, detail="ایراد یافت نشد")
+
+    db.delete(issue)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": "ایراد حذف شد"
+    }
+
+
