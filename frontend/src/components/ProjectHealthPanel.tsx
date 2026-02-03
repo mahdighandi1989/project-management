@@ -452,8 +452,14 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
     }
   };
 
-  const showError = (msg: string) => {
-    setError(msg);
+  const showError = (msg: string | object | unknown) => {
+    // Ensure we always pass a string to setError to prevent React Error #31
+    const errorMessage = typeof msg === 'string'
+      ? msg
+      : typeof msg === 'object' && msg !== null
+        ? (msg as any).message || (msg as any).detail || JSON.stringify(msg)
+        : String(msg);
+    setError(errorMessage);
     setTimeout(() => setError(''), 4000);
   };
 
@@ -962,7 +968,9 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                     <span className="truncate">{progressData.message}</span>
                   )}
                   {progressData.error && (
-                    <span className="text-red-300 truncate">{progressData.error}</span>
+                    <span className="text-red-300 truncate">
+                      {typeof progressData.error === 'string' ? progressData.error : JSON.stringify(progressData.error)}
+                    </span>
                   )}
                 </div>
 
@@ -2451,9 +2459,19 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                   <>
                     <button
                       onClick={async () => {
+                        if (!projectId) {
+                          showError('شناسه پروژه نامعتبر است');
+                          return;
+                        }
                         if (!confirm('آیا از بایگانی همه ایرادات مطمئن هستید؟')) return;
                         try {
                           const res = await fetch(`${API_BASE}/api/projects/${projectId}/issues/archive-all`, { method: 'POST' });
+                          if (!res.ok) {
+                            const errorText = await res.text();
+                            console.error('Archive all issues error:', res.status, errorText);
+                            showError(`خطا: ${res.status} - ${res.statusText}`);
+                            return;
+                          }
                           const data = await res.json();
                           if (data.success) {
                             showSuccess(`${data.archived_count} ایراد بایگانی شد`);
@@ -2462,7 +2480,8 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                             showError(data.detail || 'خطا در بایگانی');
                           }
                         } catch (e) {
-                          showError('خطا در ارتباط');
+                          console.error('Archive all issues network error:', e);
+                          showError('خطا در ارتباط با سرور. لطفاً دوباره تلاش کنید.');
                         }
                       }}
                       className="px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 text-sm"
@@ -2471,9 +2490,19 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                     </button>
                     <button
                       onClick={async () => {
+                        if (!projectId) {
+                          showError('شناسه پروژه نامعتبر است');
+                          return;
+                        }
                         if (!confirm('آیا از حذف همه ایرادات مطمئن هستید؟ این عمل غیرقابل بازگشت است!')) return;
                         try {
                           const res = await fetch(`${API_BASE}/api/projects/${projectId}/issues/delete-all`, { method: 'DELETE' });
+                          if (!res.ok) {
+                            const errorText = await res.text();
+                            console.error('Delete all issues error:', res.status, errorText);
+                            showError(`خطا: ${res.status} - ${res.statusText}`);
+                            return;
+                          }
                           const data = await res.json();
                           if (data.success) {
                             showSuccess(`${data.deleted_count} ایراد حذف شد`);
@@ -2482,7 +2511,8 @@ export default function ProjectHealthPanel({ projectId, onHealthUpdate }: Props)
                             showError(data.detail || 'خطا در حذف');
                           }
                         } catch (e) {
-                          showError('خطا در ارتباط');
+                          console.error('Delete all issues network error:', e);
+                          showError('خطا در ارتباط با سرور. لطفاً دوباره تلاش کنید.');
                         }
                       }}
                       className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm"

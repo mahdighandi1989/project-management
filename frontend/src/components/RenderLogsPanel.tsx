@@ -209,8 +209,14 @@ export default function RenderLogsPanel() {
     loadLogs();
   }, [selectedLevels, selectedServices, timeRange]);
 
-  const showError = (msg: string) => {
-    setError(msg);
+  const showError = (msg: string | object | unknown) => {
+    // Ensure we always pass a string to setError to prevent React Error #31
+    const errorMessage = typeof msg === 'string'
+      ? msg
+      : typeof msg === 'object' && msg !== null
+        ? (msg as any).message || (msg as any).detail || JSON.stringify(msg)
+        : String(msg);
+    setError(errorMessage);
     setTimeout(() => setError(''), 4000);
   };
 
