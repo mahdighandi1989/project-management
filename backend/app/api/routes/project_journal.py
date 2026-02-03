@@ -2782,38 +2782,48 @@ async def generate_engineering_report_stream(
     async def progress_generator():
         """Generator برای ارسال پیشرفت"""
         # 🔴🔴🔴 FIX: ایجاد session جدید داخل generator
-        # چون session از Depends(get_db) ممکنه قبل از اتمام streaming بسته بشه
         from ..core.database import SessionLocal
-        from ..models.system_prompt import PromptExecution
 
         # ایجاد session جدید برای generator
         gen_db = SessionLocal()
-        execution_id = f"eng_exec_{uuid.uuid4().hex[:12]}"
+        execution_id = None
+        PromptExecution = None
 
         try:
-            # ایجاد رکورد PromptExecution برای ردیابی در پنل
-            # 🔴 فقط از فیلدهای موجود در مدل استفاده می‌کنیم
-            execution = PromptExecution(
-                id=execution_id,
-                prompt_id="engineering_report",  # شناسه مجازی
-                project_id=project_id,
-                status="running",
-                model_used=selected_models[0] if selected_models else "claude",
-                current_step=f"🔍 شروع گزارش مهندسی ({depth})...",
-                current_progress=0,
-                total_steps=config["total_steps"],
-                current_step_index=0,
-                result_summary=f"گزارش مهندسی ({depth})",  # برای نمایش نام در پنل
-                started_at=datetime.utcnow(),
-                created_at=datetime.utcnow()
-            )
-            gen_db.add(execution)
-            gen_db.commit()
+            # 🔴 سعی کن PromptExecution رو import و استفاده کنی
+            # اگه خطا داد (جدول/ستون نیست)، بدون انیمیشن ادامه بده
+            try:
+                from ..models.system_prompt import PromptExecution as PE
+                PromptExecution = PE
+                execution_id = f"eng_exec_{uuid.uuid4().hex[:12]}"
+                execution = PromptExecution(
+                    id=execution_id,
+                    prompt_id="engineering_report",
+                    project_id=project_id,
+                    status="running",
+                    model_used=selected_models[0] if selected_models else "claude",
+                    current_step=f"🔍 شروع گزارش مهندسی ({depth})...",
+                    current_progress=0,
+                    total_steps=config["total_steps"],
+                    current_step_index=0,
+                    result_summary=f"گزارش مهندسی ({depth})",
+                    started_at=datetime.utcnow(),
+                    created_at=datetime.utcnow()
+                )
+                gen_db.add(execution)
+                gen_db.commit()
+                logger.info(f"Created PromptExecution: {execution_id}")
+            except Exception as exec_err:
+                logger.warning(f"Could not create PromptExecution (continuing without animation): {exec_err}")
+                execution_id = None
+                gen_db.rollback()
 
             total_steps = config["total_steps"]
 
             # تابع کمکی برای به‌روزرسانی پیشرفت
             def update_progress(step_msg: str, progress: int, step_idx: int = 0):
+                if not execution_id or not PromptExecution:
+                    return
                 try:
                     exec_obj = gen_db.query(PromptExecution).filter(PromptExecution.id == execution_id).first()
                     if exec_obj:
@@ -2821,13 +2831,13 @@ async def generate_engineering_report_stream(
                         exec_obj.current_progress = progress
                         exec_obj.current_step_index = step_idx
                         gen_db.commit()
-                except Exception as e:
-                    logger.warning(f"Could not update execution progress: {e}")
+                except Exception:
+                    pass
 
             # مرحله 1: بررسی پروژه
             update_progress("🔍 بررسی پروژه...", 5, 1)
             yield f"data: {json.dumps({'step': 1, 'total': total_steps, 'message': '🔍 بررسی پروژه...', 'progress': 5}, ensure_ascii=False)}\n\n"
-            await asyncio.sleep(delay_factor)  # 🔴 استفاده از delay_factor
+            await asyncio.sleep(delay_factor)
 
             project = gen_db.query(Project).filter(Project.id == project_id).first()
             if not project:
@@ -3239,30 +3249,32 @@ async def generate_engineering_report_stream(
                 yield f"data: {error_msg}\n\n"
 
             # 🔴 علامت‌گذاری اجرا به عنوان تکمیل‌شده
-            try:
-                exec_obj = gen_db.query(PromptExecution).filter(PromptExecution.id == execution_id).first()
-                if exec_obj:
-                    exec_obj.status = "completed" if result.get("success") else "failed"
-                    exec_obj.completed_at = datetime.utcnow()
-                    exec_obj.current_progress = 100
-                    gen_db.commit()
-            except Exception as e:
-                logger.warning(f"Could not mark execution as completed: {e}")
+            if execution_id and PromptExecution:
+                try:
+                    exec_obj = gen_db.query(PromptExecution).filter(PromptExecution.id == execution_id).first()
+                    if exec_obj:
+                        exec_obj.status = "completed" if result.get("success") else "failed"
+                        exec_obj.completed_at = datetime.utcnow()
+                        exec_obj.current_progress = 100
+                        gen_db.commit()
+                except Exception:
+                    pass
 
         except Exception as e:
             exc_msg = json.dumps({'error': str(e), 'progress': 100}, ensure_ascii=False)
             yield f"data: {exc_msg}\n\n"
 
             # 🔴 علامت‌گذاری اجرا به عنوان شکست‌خورده
-            try:
-                exec_obj = gen_db.query(PromptExecution).filter(PromptExecution.id == execution_id).first()
-                if exec_obj:
-                    exec_obj.status = "failed"
-                    exec_obj.completed_at = datetime.utcnow()
-                    exec_obj.current_step = f"❌ خطا: {str(e)[:100]}"
-                    gen_db.commit()
-            except Exception as cleanup_err:
-                logger.error(f"Could not cleanup execution: {cleanup_err}")
+            if execution_id and PromptExecution:
+                try:
+                    exec_obj = gen_db.query(PromptExecution).filter(PromptExecution.id == execution_id).first()
+                    if exec_obj:
+                        exec_obj.status = "failed"
+                        exec_obj.completed_at = datetime.utcnow()
+                        exec_obj.current_step = f"❌ خطا: {str(e)[:100]}"
+                        gen_db.commit()
+                except Exception:
+                    pass
 
         finally:
             # 🔴 بستن session
