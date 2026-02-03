@@ -133,6 +133,10 @@ export default function RenderLogsPanel() {
     pending_errors: number;
     transferred_errors: number;
     can_transfer: boolean;
+    // 🆕 اطلاعات پس از دیپلوی
+    since_deploy?: boolean;
+    historical_pending?: number;
+    total_pending?: number;
   } | null>(null);
   const [transferring, setTransferring] = useState(false);
   const [transferProgress, setTransferProgress] = useState<TransferProgress | null>(null);
@@ -1004,9 +1008,12 @@ export default function RenderLogsPanel() {
                           ? 'bg-red-500 text-white hover:bg-red-600'
                           : 'bg-gray-300 text-gray-500 cursor-not-allowed'
                       }`}
-                      title="انتقال خطاها به تب ایرادات پروژه‌ها"
+                      title={`انتقال خطاها به تب ایرادات پروژه‌ها${transferStatus?.historical_pending ? ` (${transferStatus.historical_pending} خطای تاریخی)` : ''}`}
                     >
                       🚨 انتقال خطاها ({transferStatus?.pending_errors || 0})
+                      {transferStatus?.since_deploy && (
+                        <span className="text-xs opacity-75 mr-1">(جدید)</span>
+                      )}
                     </button>
                   )}
                   <label
