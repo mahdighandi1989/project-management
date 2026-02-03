@@ -81,12 +81,20 @@ class StructuredLogger:
         """هشدار"""
         self._log(logging.WARNING, "WARNING", f"⚠️ {message}", **extras)
 
-    def error(self, message: str, exception: Exception = None, **extras):
-        """خطا"""
+    def error(self, message: str, exception: Exception = None, include_traceback: bool = True, **extras):
+        """خطا با traceback کامل"""
         if exception:
             extras["error_type"] = type(exception).__name__
-            extras["error_msg"] = str(exception)[:200]
+            extras["error_msg"] = str(exception)[:500]
+            if include_traceback:
+                # Traceback کامل برای دیباگ
+                tb = traceback.format_exception(type(exception), exception, exception.__traceback__)
+                extras["traceback"] = "".join(tb)[-2000:]  # آخرین 2000 کاراکتر
         self._log(logging.ERROR, "ERROR", f"❌ {message}", **extras)
+
+        # همچنین traceback کامل را جداگانه لاگ کن برای خوانایی بهتر
+        if exception and include_traceback:
+            self.logger.error(f"[{self.section}] [TRACEBACK] Full exception:\n{''.join(traceback.format_exception(type(exception), exception, exception.__traceback__))}")
 
     def debug(self, message: str, **extras):
         """دیباگ"""
@@ -201,3 +209,94 @@ settings_logger = StructuredLogger("app.api.routes.settings", "SETTINGS")
 
 # لاگر برای Deploy
 deploy_logger = StructuredLogger("app.services.deploy_service", "DEPLOY")
+
+# لاگر برای Engineering Report
+engineering_logger = StructuredLogger("app.api.routes.project_journal", "ENGINEERING")
+
+
+# =====================
+# توابع کمکی برای لاگ کردن خطاهای بحرانی
+# =====================
+
+def log_critical_error(
+    context: str,
+    exception: Exception,
+    extra_data: Dict[str, Any] = None,
+    logger_name: str = "CRITICAL"
+):
+    """
+    لاگ کردن خطاهای بحرانی با تمام جزئیات
+
+    Args:
+        context: توضیح اینکه در چه عملیاتی خطا رخ داد
+        exception: خطای رخ داده
+        extra_data: اطلاعات اضافی برای دیباگ
+        logger_name: نام لاگر
+    """
+    logger = logging.getLogger(logger_name)
+
+    # اطلاعات خطا
+    error_info = {
+        "context": context,
+        "error_type": type(exception).__name__,
+        "error_message": str(exception),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+    # اطلاعات اضافی
+    if extra_data:
+        error_info["extra_data"] = extra_data
+
+    # Traceback کامل
+    tb_lines = traceback.format_exception(type(exception), exception, exception.__traceback__)
+    full_traceback = "".join(tb_lines)
+
+    # لاگ ساختار یافته
+    logger.error(f"""
+╔══════════════════════════════════════════════════════════════════╗
+║                    🔴 CRITICAL ERROR 🔴                          ║
+╠══════════════════════════════════════════════════════════════════╣
+║ Context: {context[:60]}
+║ Error Type: {type(exception).__name__}
+║ Error Message: {str(exception)[:100]}
+║ Timestamp: {datetime.utcnow().isoformat()}
+╠══════════════════════════════════════════════════════════════════╣
+║ Extra Data:
+{json.dumps(extra_data or {}, ensure_ascii=False, indent=2)[:500]}
+╠══════════════════════════════════════════════════════════════════╣
+║ Full Traceback:
+{full_traceback}
+╚══════════════════════════════════════════════════════════════════╝
+""")
+
+    return error_info
+
+
+def create_error_response(
+    context: str,
+    exception: Exception,
+    extra_data: Dict[str, Any] = None,
+    include_traceback: bool = False
+) -> Dict[str, Any]:
+    """
+    ساخت response استاندارد برای خطاها
+
+    این تابع هم لاگ می‌کند و هم یک response مناسب برمی‌گرداند
+    """
+    # اول لاگ کن
+    error_info = log_critical_error(context, exception, extra_data)
+
+    # response بساز
+    response = {
+        "success": False,
+        "error": str(exception)[:200],
+        "error_type": type(exception).__name__,
+        "context": context,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+    if include_traceback:
+        tb_lines = traceback.format_exception(type(exception), exception, exception.__traceback__)
+        response["traceback"] = "".join(tb_lines)[-1000:]
+
+    return response
