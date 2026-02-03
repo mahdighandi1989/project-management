@@ -3,6 +3,7 @@ Database Configuration - اتصال به SQLite
 """
 
 import os
+import asyncio
 from sqlalchemy import create_engine, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -1068,3 +1069,114 @@ memory_instructions باید شامل موارد زیر باشد (حداقل 100
         db.rollback()
     finally:
         db.close()
+
+
+# =====================================
+# 🔴 Project Lock Manager - جلوگیری از Race Condition
+# =====================================
+
+class ProjectLockManager:
+    """
+    مدیریت قفل برای عملیات همزمان روی پروژه‌ها
+
+    هر پروژه یک قفل مجزا دارد تا عملیات روی پروژه‌های مختلف
+    بدون تداخل انجام شود، اما عملیات روی یک پروژه serialize شود.
+
+    Usage:
+        async with project_lock_manager.acquire_lock(project_id, "issues_found"):
+            # عملیات روی issues_found
+            db.refresh(project)
+            # ... modifications ...
+            db.commit()
+    """
+
+    def __init__(self):
+        self._locks: dict = {}  # project_id:field -> asyncio.Lock
+        self._master_lock = asyncio.Lock()  # برای ایجاد قفل‌های جدید
+
+    async def acquire_lock(self, project_id: str, field: str = "default"):
+        """
+        دریافت قفل برای یک فیلد خاص از پروژه
+
+        Args:
+            project_id: شناسه پروژه
+            field: نام فیلد (issues_found, dynamic_fields, memory_instructions, ...)
+        """
+        lock_key = f"{project_id}:{field}"
+
+        async with self._master_lock:
+            if lock_key not in self._locks:
+                self._locks[lock_key] = asyncio.Lock()
+
+        return self._locks[lock_key]
+
+    async def get_lock(self, project_id: str, field: str = "default"):
+        """Alias برای acquire_lock - برای سازگاری"""
+        return await self.acquire_lock(project_id, field)
+
+    def cleanup_old_locks(self, max_locks: int = 1000):
+        """پاکسازی قفل‌های قدیمی برای جلوگیری از memory leak"""
+        if len(self._locks) > max_locks:
+            # حذف نیمی از قفل‌هایی که در حال استفاده نیستند
+            to_remove = []
+            for key, lock in self._locks.items():
+                if not lock.locked():
+                    to_remove.append(key)
+                if len(to_remove) >= max_locks // 2:
+                    break
+            for key in to_remove:
+                del self._locks[key]
+            logger.info(f"🔒 Cleaned up {len(to_remove)} unused locks")
+
+
+# Singleton instance
+project_lock_manager = ProjectLockManager()
+
+
+def get_project_lock_manager() -> ProjectLockManager:
+    """دریافت instance از مدیر قفل"""
+    return project_lock_manager
+
+
+# =====================================
+# 🔴 Helper functions برای db operations
+# =====================================
+
+def safe_refresh(db, obj, logger_name: str = "DB"):
+    """
+    بازخوانی امن یک object از دیتابیس
+
+    Args:
+        db: Database session
+        obj: SQLAlchemy object
+        logger_name: نام لاگر برای پیام‌ها
+    """
+    try:
+        db.refresh(obj)
+        return True
+    except Exception as e:
+        logger.warning(f"[{logger_name}] Could not refresh object: {e}")
+        return False
+
+
+def safe_commit(db, logger_name: str = "DB") -> bool:
+    """
+    کامیت امن با rollback در صورت خطا
+
+    Args:
+        db: Database session
+        logger_name: نام لاگر
+
+    Returns:
+        True اگر موفق، False اگر خطا
+    """
+    try:
+        db.commit()
+        return True
+    except Exception as e:
+        logger.error(f"[{logger_name}] Commit failed, rolling back: {e}")
+        try:
+            db.rollback()
+        except:
+            pass
+        return False
