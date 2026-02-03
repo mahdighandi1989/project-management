@@ -6103,3 +6103,188 @@ async def export_single_issue_to_markdown(
             "Content-Disposition": f"attachment; filename*=UTF-8''{filename}"
         }
     )
+
+
+# =====================================
+# ⚡ Quick Approval - تایید سریع فیلدها
+# =====================================
+
+class QuickApproveRequest(BaseModel):
+    """درخواست تایید سریع یک فیلد"""
+    approver_note: Optional[str] = None
+
+
+class RejectFieldRequest(BaseModel):
+    """درخواست رد کردن یک فیلد"""
+    rejection_reason: str
+
+
+@router.get("/{project_id}/quick-approval/pending")
+async def get_pending_approvals(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    ⚡ دریافت لیست فیلدهای در انتظار تایید
+
+    Returns:
+        - auto_pending: فیلدهایی که از تبدیل خودکار ایرادات ایجاد شده‌اند (قابل تایید سریع)
+        - pending: فیلدهایی که نیاز به Engineering Report دارند
+        - total: تعداد کل
+    """
+    from ...services.quick_approval_service import get_quick_approval_service
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    service = get_quick_approval_service()
+    result = await service.get_pending_approvals(project_id, db)
+
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    return result
+
+
+@router.post("/{project_id}/quick-approval/auto-convert")
+async def auto_convert_critical_issues(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    🔄 تبدیل خودکار ایرادات بحرانی به فیلد
+
+    ایرادات با اولویت critical یا high را به فیلد تبدیل می‌کند.
+    این فیلدها با validation_marker="auto_pending" ایجاد می‌شوند
+    و نیاز به تایید سریع یا Engineering Report دارند.
+
+    Returns:
+        - converted: تعداد تبدیل شده
+        - skipped_duplicate: تعداد رد شده به دلیل تکراری بودن
+        - fields_created: لیست فیلدهای ایجاد شده
+    """
+    from ...services.quick_approval_service import get_quick_approval_service
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    service = get_quick_approval_service()
+    result = await service.auto_convert_critical_issues(project_id, db)
+
+    return result
+
+
+@router.post("/{project_id}/quick-approval/approve/{field_id}")
+async def quick_approve_field(
+    project_id: str,
+    field_id: str,
+    request: Optional[QuickApproveRequest] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    ✅ تایید سریع یک فیلد
+
+    این روش برای موارد واضح است که نیازی به Engineering Report کامل ندارند.
+    فقط فیلدهای با validation_marker="auto_pending" قابل تایید سریع هستند.
+
+    Args:
+        field_id: شناسه فیلد
+        approver_note: یادداشت تایید کننده (اختیاری)
+
+    Returns:
+        - success: bool
+        - field: فیلد تایید شده
+        - message: پیام
+    """
+    from ...services.quick_approval_service import get_quick_approval_service
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    service = get_quick_approval_service()
+    result = await service.quick_approve_field(
+        project_id,
+        field_id,
+        approver_note=request.approver_note if request else None,
+        db=db
+    )
+
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "خطا در تایید"))
+
+    return result
+
+
+@router.post("/{project_id}/quick-approval/reject/{field_id}")
+async def reject_field(
+    project_id: str,
+    field_id: str,
+    request: RejectFieldRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    ❌ رد کردن یک فیلد auto_pending
+
+    فیلد آرشیو شده و دلیل رد ثبت می‌شود.
+
+    Args:
+        field_id: شناسه فیلد
+        rejection_reason: دلیل رد (اجباری)
+
+    Returns:
+        - success: bool
+        - message: پیام
+    """
+    from ...services.quick_approval_service import get_quick_approval_service
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    service = get_quick_approval_service()
+    result = await service.reject_field(
+        project_id,
+        field_id,
+        rejection_reason=request.rejection_reason,
+        db=db
+    )
+
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "خطا در رد کردن"))
+
+    return result
+
+
+@router.get("/{project_id}/quick-approval/pre-validate/{field_id}")
+async def pre_execution_validation(
+    project_id: str,
+    field_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    🔍 اعتبارسنجی قبل از اجرای فیلد
+
+    بررسی می‌کند:
+    1. آیا ایراد اصلی هنوز وجود دارد؟
+    2. آیا به صورت دستی یا روش دیگری حل شده؟
+    3. آیا فیلد مشابهی اخیراً اجرا شده؟
+
+    Returns:
+        - can_execute: آیا می‌توان اجرا کرد
+        - reason: دلیل (اگر نمی‌توان)
+        - checks: نتایج بررسی‌ها
+        - recommendation: توصیه
+    """
+    from ...services.quick_approval_service import get_quick_approval_service
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    service = get_quick_approval_service()
+    result = await service.pre_execution_validation(project_id, field_id, db)
+
+    return result
