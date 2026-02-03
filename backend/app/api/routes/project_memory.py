@@ -1046,6 +1046,10 @@ async def request_new_feature(
             created_field["requested_by"] = "user"
             created_field["requested_at"] = datetime.utcnow().isoformat()
             created_field["target_files"] = request.target_files
+            # 🆕 اطلاعات مبدأ فیلد برای شفافیت
+            created_field["source"] = "feature_request"
+            created_field["source_prompt"] = f"{request.title}: {request.description[:200]}"
+            created_field["created_via"] = "دکمه قابلیت جدید"
 
             # ذخیره فیلد در پروژه
             dynamic_fields = []
@@ -1869,6 +1873,10 @@ async def enhanced_project_chat(
                             result["field"]["source_model"] = resp["model_id"]
                             result["field"]["validation_marker"] = "pending"
                             result["field"]["needs_approval"] = True
+                            # 🆕 اطلاعات مبدأ فیلد برای شفافیت
+                            result["field"]["source"] = "ai_chat"
+                            result["field"]["source_prompt"] = request.prompt[:300]
+                            result["field"]["created_via"] = "پرسش از AI"
                             created_fields.append(result["field"])
 
                             if result.get("roadmap_item_added"):
