@@ -216,6 +216,12 @@ class PromptExecution(Base):
     model_used = Column(String(50))  # مدل AI استفاده شده
     tokens_used = Column(Integer)
 
+    # 🔴 اطلاعات پیشرفت real-time
+    current_step = Column(String(200))  # مرحله فعلی (مثلاً "تحلیل فایل auth.py")
+    current_progress = Column(Integer, default=0)  # درصد پیشرفت 0-100
+    total_steps = Column(Integer, default=0)  # تعداد کل مراحل
+    current_step_index = Column(Integer, default=0)  # شماره مرحله فعلی
+
     # زمان‌ها
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -233,4 +239,9 @@ class PromptExecution(Base):
             "model_used": self.model_used,
             "tokens_used": self.tokens_used,
             "created_at": self.created_at.isoformat() if self.created_at else None,
+            # 🔴 اطلاعات پیشرفت
+            "current_step": self.current_step,
+            "current_progress": self.current_progress,
+            "total_steps": self.total_steps,
+            "current_step_index": self.current_step_index,
         }

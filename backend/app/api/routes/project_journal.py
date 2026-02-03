@@ -2769,13 +2769,14 @@ async def generate_engineering_report_stream(
 
     # تعداد مراحل بر اساس عمق - 🔴 بدون محدودیت فایل (تنظیمات جداگانه)
     depth_config = {
-        "quick": {"total_steps": 4, "ai_calls": 1, "delay_factor": 0.2, "file_delay": 0.02, "use_4step": False},
-        "standard": {"total_steps": 8, "ai_calls": 2, "delay_factor": 1.0, "file_delay": 0.1, "use_4step": False},
-        "deep": {"total_steps": 20, "ai_calls": 8, "delay_factor": 5.0, "file_delay": 0.5, "use_4step": True}  # 🔴 فرآیند 4 مرحله‌ای واقعی
+        "quick": {"total_steps": 4, "ai_calls": 1, "delay_factor": 0.5, "file_delay": 0.05, "use_4step": False, "step_delay": 1.0},
+        "standard": {"total_steps": 8, "ai_calls": 2, "delay_factor": 2.0, "file_delay": 0.2, "use_4step": False, "step_delay": 3.0},
+        "deep": {"total_steps": 20, "ai_calls": 8, "delay_factor": 8.0, "file_delay": 1.0, "use_4step": True, "step_delay": 10.0}  # 🔴 فرآیند 4 مرحله‌ای واقعی با تاخیر بیشتر
     }
     config = depth_config.get(depth, depth_config["standard"])
     delay_factor = config.get("delay_factor", 0.5)
     file_delay = config.get("file_delay", 0.05)
+    step_delay = config.get("step_delay", 2.0)  # 🔴 تاخیر بین مراحل اصلی
     use_4step = config.get("use_4step", False)  # 🆕 در deep از فرآیند 4 مرحله‌ای استفاده شود
 
     async def progress_generator():
@@ -2888,68 +2889,103 @@ async def generate_engineering_report_stream(
 
             # 🔴 در حالت deep از فرآیند 4 مرحله‌ای استفاده شود
             if use_4step:
-                # مرحله 1: اعتبارسنجی فیلدها
+                # 🔴 مرحله 1: اعتبارسنجی فیلدها (60-72%)
                 step = total_steps - 5
-                msg1_start = json.dumps({'step': step, 'total': total_steps, 'message': '🔬 مرحله ۱: اعتبارسنجی فیلدهای موجود...', 'progress': 60}, ensure_ascii=False)
+                msg1_start = json.dumps({'step': step, 'total': total_steps, 'message': '🔬 مرحله ۱: شروع اعتبارسنجی فیلدهای موجود...', 'progress': 60}, ensure_ascii=False)
                 yield f"data: {msg1_start}\n\n"
-                await asyncio.sleep(delay_factor)
+
+                # پیشرفت تدریجی مرحله 1
+                for p in range(61, 68, 2):
+                    await asyncio.sleep(step_delay / 4)
+                    msg_p = json.dumps({'step': step, 'message': f'🔬 مرحله ۱: در حال تحلیل فیلدها... ({p}%)', 'progress': p}, ensure_ascii=False)
+                    yield f"data: {msg_p}\n\n"
+
                 try:
                     step1_result = await engineering_step1_validate_fields(project_id, selected_models[0], depth, db)
                     validated_count = step1_result.get('validated_count', 0)
-                    msg1_done = json.dumps({'step': step, 'message': f'✅ مرحله ۱ تکمیل: {validated_count} فیلد بررسی شد', 'progress': 65}, ensure_ascii=False)
+                    rejected_count = step1_result.get('rejected_count', 0)
+                    msg1_done = json.dumps({'step': step, 'message': f'✅ مرحله ۱ تکمیل: {validated_count} تایید، {rejected_count} رد شد', 'progress': 72}, ensure_ascii=False)
                     yield f"data: {msg1_done}\n\n"
                 except Exception as e:
-                    err_msg = str(e)[:50]
-                    msg1_err = json.dumps({'step': step, 'message': f'⚠️ مرحله ۱: {err_msg}', 'progress': 65}, ensure_ascii=False)
+                    err_msg = str(e)[:100]
+                    step1_result = {'validated_count': 0, 'rejected_count': 0, 'error': err_msg}
+                    msg1_err = json.dumps({'step': step, 'message': f'⚠️ مرحله ۱: {err_msg}', 'progress': 72}, ensure_ascii=False)
                     yield f"data: {msg1_err}\n\n"
-                await asyncio.sleep(delay_factor)
+                await asyncio.sleep(step_delay / 2)
 
-                # مرحله 2: تبدیل ایرادات سلامت به فیلد
+                # 🔴 مرحله 2: تبدیل ایرادات سلامت به فیلد (72-82%)
                 step = total_steps - 4
-                msg2_start = json.dumps({'step': step, 'total': total_steps, 'message': '🔄 مرحله ۲: تبدیل ایرادات سلامت به فیلد...', 'progress': 70}, ensure_ascii=False)
+                msg2_start = json.dumps({'step': step, 'total': total_steps, 'message': '🔄 مرحله ۲: شروع تبدیل ایرادات سلامت به فیلد...', 'progress': 72}, ensure_ascii=False)
                 yield f"data: {msg2_start}\n\n"
-                await asyncio.sleep(delay_factor)
+
+                # پیشرفت تدریجی مرحله 2
+                for p in range(73, 79, 2):
+                    await asyncio.sleep(step_delay / 4)
+                    msg_p = json.dumps({'step': step, 'message': f'🔄 مرحله ۲: در حال پردازش ایرادات... ({p}%)', 'progress': p}, ensure_ascii=False)
+                    yield f"data: {msg_p}\n\n"
+
                 try:
                     step2_result = await engineering_step2_health_to_fields(project_id, selected_models[0], depth, db)
                     created = step2_result.get('created_count', 0)
                     archived = step2_result.get('archived_count', 0)
-                    msg2_done = json.dumps({'step': step, 'message': f'✅ مرحله ۲: {created} فیلد ایجاد، {archived} ایراد بایگانی', 'progress': 75}, ensure_ascii=False)
+                    msg2_done = json.dumps({'step': step, 'message': f'✅ مرحله ۲: {created} فیلد ایجاد، {archived} ایراد بایگانی شد', 'progress': 82}, ensure_ascii=False)
                     yield f"data: {msg2_done}\n\n"
                 except Exception as e:
-                    err_msg = str(e)[:50]
-                    msg2_err = json.dumps({'step': step, 'message': f'⚠️ مرحله ۲: {err_msg}', 'progress': 75}, ensure_ascii=False)
+                    err_msg = str(e)[:100]
+                    step2_result = {'created_count': 0, 'archived_count': 0, 'error': err_msg}
+                    msg2_err = json.dumps({'step': step, 'message': f'⚠️ مرحله ۲: {err_msg}', 'progress': 82}, ensure_ascii=False)
                     yield f"data: {msg2_err}\n\n"
-                await asyncio.sleep(delay_factor)
+                await asyncio.sleep(step_delay / 2)
 
-                # مرحله 3: ارزیابی مدل‌ها
+                # 🔴 مرحله 3: ارزیابی مدل‌ها (82-90%)
                 step = total_steps - 3
-                msg3_start = json.dumps({'step': step, 'total': total_steps, 'message': '📊 مرحله ۳: ارزیابی عملکرد مدل‌ها...', 'progress': 80}, ensure_ascii=False)
+                msg3_start = json.dumps({'step': step, 'total': total_steps, 'message': '📊 مرحله ۳: شروع ارزیابی عملکرد مدل‌ها...', 'progress': 82}, ensure_ascii=False)
                 yield f"data: {msg3_start}\n\n"
-                await asyncio.sleep(delay_factor)
+
+                # پیشرفت تدریجی مرحله 3
+                for p in range(83, 88, 2):
+                    await asyncio.sleep(step_delay / 4)
+                    msg_p = json.dumps({'step': step, 'message': f'📊 مرحله ۳: در حال ارزیابی مدل‌ها... ({p}%)', 'progress': p}, ensure_ascii=False)
+                    yield f"data: {msg_p}\n\n"
+
                 try:
                     step3_result = await engineering_step3_evaluate_models(project_id, selected_models[0], depth, db)
-                    msg3_done = json.dumps({'step': step, 'message': '✅ مرحله ۳: ارزیابی مدل‌ها تکمیل شد', 'progress': 85}, ensure_ascii=False)
+                    models_evaluated = step3_result.get('models_evaluated', [])
+                    msg3_done = json.dumps({'step': step, 'message': f'✅ مرحله ۳: {len(models_evaluated)} مدل ارزیابی شد', 'progress': 90}, ensure_ascii=False)
                     yield f"data: {msg3_done}\n\n"
                 except Exception as e:
-                    err_msg = str(e)[:50]
-                    msg3_err = json.dumps({'step': step, 'message': f'⚠️ مرحله ۳: {err_msg}', 'progress': 85}, ensure_ascii=False)
+                    err_msg = str(e)[:100]
+                    step3_result = {'models_evaluated': [], 'error': err_msg}
+                    msg3_err = json.dumps({'step': step, 'message': f'⚠️ مرحله ۳: {err_msg}', 'progress': 90}, ensure_ascii=False)
                     yield f"data: {msg3_err}\n\n"
-                await asyncio.sleep(delay_factor)
+                await asyncio.sleep(step_delay / 2)
 
-                # مرحله 4: به‌روزرسانی نقشه راه
+                # 🔴 مرحله 4: به‌روزرسانی نقشه راه (90-96%)
                 step = total_steps - 2
-                msg4_start = json.dumps({'step': step, 'total': total_steps, 'message': '🗺️ مرحله ۴: به‌روزرسانی نقشه راه...', 'progress': 90}, ensure_ascii=False)
+                msg4_start = json.dumps({'step': step, 'total': total_steps, 'message': '🗺️ مرحله ۴: شروع به‌روزرسانی نقشه راه...', 'progress': 90}, ensure_ascii=False)
                 yield f"data: {msg4_start}\n\n"
-                await asyncio.sleep(delay_factor)
+
+                # پیشرفت تدریجی مرحله 4
+                for p in range(91, 95, 2):
+                    await asyncio.sleep(step_delay / 4)
+                    msg_p = json.dumps({'step': step, 'message': f'🗺️ مرحله ۴: در حال به‌روزرسانی نقشه راه... ({p}%)', 'progress': p}, ensure_ascii=False)
+                    yield f"data: {msg_p}\n\n"
+
                 try:
                     step4_result = await engineering_step4_update_roadmap(project_id, selected_models[0], db)
-                    msg4_done = json.dumps({'step': step, 'message': '✅ مرحله ۴: نقشه راه به‌روزرسانی شد', 'progress': 95}, ensure_ascii=False)
+                    roadmap_updated = step4_result.get('roadmap_updated', False)
+                    ideal_updated = step4_result.get('ideal_state_updated', False)
+                    status_text = "نقشه راه" if roadmap_updated else ""
+                    if ideal_updated:
+                        status_text += " و حالت ایده‌آل" if status_text else "حالت ایده‌آل"
+                    msg4_done = json.dumps({'step': step, 'message': f'✅ مرحله ۴: {status_text or "بررسی"} به‌روزرسانی شد', 'progress': 96}, ensure_ascii=False)
                     yield f"data: {msg4_done}\n\n"
                 except Exception as e:
-                    err_msg = str(e)[:50]
-                    msg4_err = json.dumps({'step': step, 'message': f'⚠️ مرحله ۴: {err_msg}', 'progress': 95}, ensure_ascii=False)
+                    err_msg = str(e)[:100]
+                    step4_result = {'roadmap_updated': False, 'ideal_state_updated': False, 'error': err_msg}
+                    msg4_err = json.dumps({'step': step, 'message': f'⚠️ مرحله ۴: {err_msg}', 'progress': 96}, ensure_ascii=False)
                     yield f"data: {msg4_err}\n\n"
-                await asyncio.sleep(delay_factor)
+                await asyncio.sleep(step_delay / 2)
 
                 # 🟢 اصلاح شده: فقط ایرادات تبدیل‌شده به فیلد بایگانی شوند
                 # ایرادات با archived_reason="converted_to_field" قبلاً در generate_engineering_report بایگانی شده‌اند
@@ -2978,14 +3014,58 @@ async def generate_engineering_report_stream(
                 try:
                     # جمع‌آوری نتایج مراحل (با استفاده از locals برای دسترسی امن)
                     local_vars = locals()
+
+                    # 🔴 استخراج آمار از نتایج مراحل
+                    step1_data = local_vars.get('step1_result', {})
+                    step2_data = local_vars.get('step2_result', {})
+                    step3_data = local_vars.get('step3_result', {})
+                    step4_data = local_vars.get('step4_result', {})
+
+                    # 🔴 ساخت خلاصه جامع برای نمایش بهتر
+                    summary_parts = []
+
+                    # مرحله 1: اعتبارسنجی فیلدها
+                    validated = step1_data.get('validated_count', 0)
+                    rejected = step1_data.get('rejected_count', 0)
+                    if validated > 0 or rejected > 0:
+                        summary_parts.append(f"✅ فیلدها: {validated} تایید، {rejected} رد")
+
+                    # مرحله 2: تبدیل ایرادات
+                    created = step2_data.get('created_count', 0)
+                    archived = step2_data.get('archived_count', 0)
+                    if created > 0 or archived > 0:
+                        summary_parts.append(f"🔄 ایرادات: {created} فیلد ایجاد، {archived} بایگانی")
+
+                    # مرحله 3: ارزیابی مدل‌ها
+                    models_evaluated = step3_data.get('models_evaluated', [])
+                    if models_evaluated:
+                        summary_parts.append(f"📊 مدل‌ها: {len(models_evaluated)} ارزیابی شد")
+
+                    # مرحله 4: نقشه راه
+                    roadmap_updated = step4_data.get('roadmap_updated', False)
+                    ideal_updated = step4_data.get('ideal_state_updated', False)
+                    if roadmap_updated or ideal_updated:
+                        summary_parts.append(f"🗺️ نقشه راه به‌روز شد")
+
+                    executive_summary = " | ".join(summary_parts) if summary_parts else f"گزارش مهندسی عمیق با {len(selected_models)} مدل تکمیل شد"
+
                     report_content = {
                         "depth": depth,
                         "models_used": selected_models,
+                        "executive_summary": executive_summary,
                         "steps": {
-                            "step1_validate_fields": local_vars.get('step1_result', {}),
-                            "step2_health_to_fields": local_vars.get('step2_result', {}),
-                            "step3_evaluate_models": local_vars.get('step3_result', {}),
-                            "step4_update_roadmap": local_vars.get('step4_result', {}),
+                            "step1_validate_fields": step1_data,
+                            "step2_health_to_fields": step2_data,
+                            "step3_evaluate_models": step3_data,
+                            "step4_update_roadmap": step4_data,
+                        },
+                        "statistics": {
+                            "fields_validated": validated,
+                            "fields_rejected": rejected,
+                            "issues_converted": created,
+                            "issues_archived": archived,
+                            "models_count": len(selected_models),
+                            "roadmap_updated": roadmap_updated,
                         },
                         "completed_at": datetime.utcnow().isoformat(),
                     }
@@ -2997,7 +3077,7 @@ async def generate_engineering_report_stream(
                         report_type="engineering_4step",
                         title=f"گزارش مهندسی ۴ مرحله‌ای - {project.name if project else 'پروژه'}",
                         content=json.dumps(report_content, ensure_ascii=False, indent=2),
-                        summary=f"گزارش مهندسی عمیق با {len(selected_models)} مدل",
+                        summary=executive_summary,
                         total_activities=4,
                         total_tokens=0,  # در 4 مرحله‌ای توکن جداگانه حساب نشده
                         models_used=json.dumps(selected_models),
@@ -3007,6 +3087,10 @@ async def generate_engineering_report_stream(
                         generated_by=",".join(selected_models),
                     )
                     db.add(report)
+
+                    # 🔴 یک yield قبل از commit برای اطلاع‌رسانی
+                    save_msg = json.dumps({'step': total_steps - 1, 'message': f'💾 ذخیره گزارش: {report_id}', 'progress': 97}, ensure_ascii=False)
+                    yield f"data: {save_msg}\n\n"
 
                     # ثبت در ژورنال
                     activity_log = ActivityLog(

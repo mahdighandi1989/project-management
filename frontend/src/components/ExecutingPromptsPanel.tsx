@@ -13,6 +13,11 @@ interface PromptExecution {
   status: string;
   started_at?: string;
   model_used?: string;
+  // 🔴 اطلاعات پیشرفت real-time
+  current_step?: string;
+  current_progress?: number;
+  total_steps?: number;
+  current_step_index?: number;
 }
 
 interface ExecutingPromptsPanelProps {
@@ -170,6 +175,13 @@ export default function ExecutingPromptsPanel({
                     </span>
                   </div>
 
+                  {/* 🔴 نمایش مرحله فعلی */}
+                  {exec.current_step && (
+                    <div className="mt-1 text-xs text-gray-600 dark:text-gray-300 truncate font-mono">
+                      {exec.current_step}
+                    </div>
+                  )}
+
                   <div className="flex items-center gap-2 mt-1">
                     <span className="text-xs px-2 py-0.5 bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300 rounded">
                       {categoryLabels[exec.prompt_category] || exec.prompt_category}
@@ -179,12 +191,31 @@ export default function ExecutingPromptsPanel({
                         {exec.model_used}
                       </span>
                     )}
+                    {/* 🔴 نمایش شماره مرحله */}
+                    {exec.total_steps && exec.total_steps > 0 && (
+                      <span className="text-xs px-2 py-0.5 bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300 rounded">
+                        {exec.current_step_index || 0}/{exec.total_steps}
+                      </span>
+                    )}
                   </div>
 
-                  {/* Progress bar animation */}
+                  {/* 🔴 Progress bar با درصد واقعی */}
                   {index === 0 && (
-                    <div className="mt-2 h-1 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                      <div className="h-full bg-gradient-to-r from-purple-500 to-blue-500 animate-progress" />
+                    <div className="mt-2">
+                      <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400 mb-1">
+                        <span>پیشرفت</span>
+                        <span>{exec.current_progress || 0}%</span>
+                      </div>
+                      <div className="h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                        {exec.current_progress ? (
+                          <div
+                            className="h-full bg-gradient-to-r from-purple-500 to-blue-500 transition-all duration-500"
+                            style={{ width: `${exec.current_progress}%` }}
+                          />
+                        ) : (
+                          <div className="h-full bg-gradient-to-r from-purple-500 to-blue-500 animate-progress" />
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>

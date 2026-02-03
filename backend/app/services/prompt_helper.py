@@ -297,6 +297,56 @@ class PromptHelper:
             db.rollback()
 
     @classmethod
+    def update_execution_progress(
+        cls,
+        db: Session,
+        execution_id: str,
+        current_step: str = None,
+        current_progress: int = None,
+        total_steps: int = None,
+        current_step_index: int = None,
+        model_used: str = None
+    ):
+        """
+        🔴 به‌روزرسانی پیشرفت اجرای پرامپت (برای نمایش real-time)
+
+        Args:
+            db: Session دیتابیس
+            execution_id: شناسه اجرا
+            current_step: توضیح مرحله فعلی
+            current_progress: درصد پیشرفت 0-100
+            total_steps: تعداد کل مراحل
+            current_step_index: شماره مرحله فعلی
+            model_used: مدل در حال استفاده
+        """
+        from ..models.system_prompt import PromptExecution
+
+        try:
+            execution = db.query(PromptExecution).filter(
+                PromptExecution.id == execution_id
+            ).first()
+
+            if not execution:
+                return
+
+            if current_step is not None:
+                execution.current_step = current_step
+            if current_progress is not None:
+                execution.current_progress = min(100, max(0, current_progress))
+            if total_steps is not None:
+                execution.total_steps = total_steps
+            if current_step_index is not None:
+                execution.current_step_index = current_step_index
+            if model_used is not None:
+                execution.model_used = model_used
+
+            db.commit()
+
+        except Exception as e:
+            logger.error(f"Error updating execution progress {execution_id}: {e}")
+            db.rollback()
+
+    @classmethod
     def get_active_executions(cls, db: Session, project_id: str = None) -> List[Dict]:
         """
         دریافت اجراهای فعال
