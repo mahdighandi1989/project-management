@@ -3197,15 +3197,23 @@ async def generate_engineering_report_stream(
                 msg_final = json.dumps({'step': step, 'total': total_steps, 'message': f'🧠 تولید گزارش نهایی با {models_text}...', 'progress': 80}, ensure_ascii=False)
                 yield f"data: {msg_final}\n\n"
 
+                # 🔴 DEBUG: قبل از فراخوانی
+                logger.info(f"🔴 DEBUG - Calling generate_engineering_report: project_id={project_id}, model={selected_models[0]}, depth={depth}")
+
                 # فراخوانی گزارش اصلی (با مدل اول)
-                result = await generate_engineering_report(
-                    project_id=project_id,
-                    days=days,
-                    model_id=selected_models[0],
-                    auto_create_fields=auto_create_fields,
-                    validate_health_issues=validate_health_issues,
-                    db=gen_db
-                )
+                try:
+                    result = await generate_engineering_report(
+                        project_id=project_id,
+                        days=days,
+                        model_id=selected_models[0],
+                        auto_create_fields=auto_create_fields,
+                        validate_health_issues=validate_health_issues,
+                        db=gen_db
+                    )
+                    logger.info(f"🔴 DEBUG - generate_engineering_report returned: {type(result)}")
+                except Exception as gen_err:
+                    logger.error(f"🔴 DEBUG - generate_engineering_report EXCEPTION: {gen_err}")
+                    result = {"success": False, "error": str(gen_err)}
 
                 # 🆕 ثبت مدل‌های استفاده شده در نتیجه
                 if result.get("success"):
@@ -3238,12 +3246,19 @@ async def generate_engineering_report_stream(
                     logging.getLogger(__name__).error(f"Failed to get issues status: {stat_err}")
 
             # مرحله نهایی: اتمام
+            # 🔴 DEBUG: لاگ کامل نتیجه
+            logger.info(f"🔴 DEBUG - generate_engineering_report result: success={result.get('success')}, error={result.get('error')}, report_id={result.get('report_id')}")
+
             if result.get("success"):
                 update_progress("✅ گزارش با موفقیت تولید شد", 100, total_steps)
-                success_msg = json.dumps({'step': total_steps, 'total': total_steps, 'message': '✅ گزارش با موفقیت تولید شد', 'progress': 100, 'result': result}, ensure_ascii=False)
+                # 🔴 DEBUG: نمایش report_id
+                report_id = result.get('report_id', 'N/A')
+                logger.info(f"✅ Report generated successfully: {report_id}")
+                success_msg = json.dumps({'step': total_steps, 'total': total_steps, 'message': f'✅ گزارش با موفقیت تولید شد (ID: {report_id})', 'progress': 100, 'result': result}, ensure_ascii=False)
                 yield f"data: {success_msg}\n\n"
             else:
                 error_text = result.get('error', 'خطای نامشخص')
+                logger.error(f"❌ Report generation failed: {error_text}")
                 update_progress(f"❌ خطا: {error_text}", 100, total_steps)
                 error_msg = json.dumps({'step': total_steps, 'message': f'❌ خطا: {error_text}', 'progress': 100, 'error': error_text}, ensure_ascii=False)
                 yield f"data: {error_msg}\n\n"

@@ -533,14 +533,32 @@ async def get_active_executions(
 
         results = []
         for exec in executions:
-            prompt = db.query(SystemPrompt).filter(
-                SystemPrompt.id == exec.prompt_id
-            ).first()
+            # 🔴 FIX: برای اجراهای خاص (مثل engineering_report) از result_summary استفاده کن
+            prompt_name = None
+            prompt_category = None
+
+            if exec.prompt_id == "engineering_report":
+                # گزارش مهندسی - از result_summary استفاده کن
+                prompt_name = exec.result_summary or "گزارش مهندسی"
+                prompt_category = "engineering_report"
+            elif exec.prompt_id == "health_analysis":
+                prompt_name = exec.result_summary or "تحلیل سلامت"
+                prompt_category = "health_analysis"
+            elif exec.prompt_id == "auto_setup":
+                prompt_name = exec.result_summary or "راه‌اندازی خودکار"
+                prompt_category = "auto_setup"
+            else:
+                # پرامپت معمولی - از جدول SystemPrompt بخون
+                prompt = db.query(SystemPrompt).filter(
+                    SystemPrompt.id == exec.prompt_id
+                ).first()
+                prompt_name = prompt.name if prompt else (exec.result_summary or "پرامپت")
+                prompt_category = prompt.category if prompt else "custom"
 
             results.append({
                 **exec.to_dict(),
-                "prompt_name": prompt.name if prompt else "نامشخص",
-                "prompt_category": prompt.category if prompt else "نامشخص"
+                "prompt_name": prompt_name,
+                "prompt_category": prompt_category
             })
 
         return {
