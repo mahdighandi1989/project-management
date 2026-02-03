@@ -1812,10 +1812,83 @@ async def generate_engineering_report(
                 if report_data:
                     logger.info(f"Successfully parsed JSON directly ({len(json_str)} chars)")
 
-        # 3. اگر هنوز پارس نشده، محتوای خام را ذخیره کن
+        # 🆕 3. تلاش برای استخراج JSON با balanced braces
+        if not report_data:
+            logger.warning("Attempting balanced brace extraction...")
+            try:
+                # پیدا کردن balanced JSON object
+                brace_count = 0
+                start_idx = -1
+                end_idx = -1
+                for i, char in enumerate(report_content):
+                    if char == '{':
+                        if start_idx == -1:
+                            start_idx = i
+                        brace_count += 1
+                    elif char == '}':
+                        brace_count -= 1
+                        if brace_count == 0 and start_idx != -1:
+                            end_idx = i + 1
+                            break
+
+                if start_idx != -1 and end_idx != -1:
+                    json_str = report_content[start_idx:end_idx]
+                    report_data, error = attempt_json_parse(json_str, "balanced extraction")
+                    if report_data:
+                        logger.info(f"Successfully parsed JSON with balanced extraction ({len(json_str)} chars)")
+            except Exception as be:
+                logger.warning(f"Balanced extraction failed: {be}")
+
+        # 🆕 4. اگر هنوز پارس نشده، تلاش برای ساخت ساختار از محتوای خام
+        if not report_data:
+            logger.warning("Attempting to construct structured report from raw content...")
+            try:
+                # تلاش برای استخراج بخش‌های کلیدی از متن
+                constructed_report = {
+                    "executive_summary": "",
+                    "project_health": {"score": 0, "status": "نامشخص"},
+                    "technical_analysis": {"strengths": [], "weaknesses": []},
+                    "bugs_and_issues": [],
+                    "recommendations": [],
+                    "parse_recovered": True
+                }
+
+                # جستجوی الگوهای خلاصه
+                summary_patterns = [
+                    r'خلاصه[:\s]*(.{100,500})',
+                    r'summary[:\s]*(.{100,500})',
+                    r'executive[:\s]*(.{100,500})',
+                ]
+                for pattern in summary_patterns:
+                    match = re.search(pattern, report_content, re.IGNORECASE | re.DOTALL)
+                    if match:
+                        constructed_report["executive_summary"] = match.group(1).strip()[:500]
+                        break
+
+                # جستجوی امتیاز سلامت
+                score_match = re.search(r'(?:score|امتیاز|health)[:\s]*(\d{1,3})', report_content, re.IGNORECASE)
+                if score_match:
+                    constructed_report["project_health"]["score"] = min(int(score_match.group(1)), 100)
+
+                # اگر حداقل خلاصه یا امتیاز پیدا شد، از ساختار بازسازی شده استفاده کن
+                if constructed_report["executive_summary"] or constructed_report["project_health"]["score"] > 0:
+                    constructed_report["raw_content_backup"] = report_content[:5000]  # نگه داشتن backup
+                    report_data = constructed_report
+                    logger.info("Successfully constructed partial report from raw content")
+
+            except Exception as ce:
+                logger.warning(f"Construction from raw failed: {ce}")
+
+        # 5. اگر هنوز پارس نشده، محتوای خام را ذخیره کن با ساختار بهتر
         if not report_data:
             logger.error(f"Could not parse JSON from AI response after all attempts. Content preview: {report_content[:500]}")
-            report_data = {"raw_content": report_content, "parse_error": True}
+            # 🆕 ذخیره با ساختار حداقلی برای نمایش بهتر
+            report_data = {
+                "raw_content": report_content,
+                "parse_error": True,
+                "executive_summary": f"⚠️ گزارش نیاز به بازبینی دستی دارد\n\n{report_content[:1000]}...",
+                "project_health": {"score": 0, "status": "خطا در پردازش"}
+            }
         else:
             logger.info(f"Report data parsed successfully. Keys: {list(report_data.keys())}")
 
