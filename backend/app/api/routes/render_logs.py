@@ -1006,7 +1006,8 @@ async def get_transfer_status(
 
     # 🆕 دریافت زمان آخرین دیپلوی هر سرویس
     services = db.query(RenderService).all()
-    service_deploy_times = {s.service_id: s.last_deploy_at for s in services if s.last_deploy_at}
+    # 🔴 FIX: استفاده از s.id به جای s.service_id
+    service_deploy_times = {s.id: s.last_deploy_at for s in services if s.last_deploy_at}
 
     # Base filter for error logs
     error_filter = RenderLog.level.in_(["error", "fatal", "critical"])
@@ -1022,9 +1023,9 @@ async def get_transfer_status(
                 )
             )
         # سرویس‌های بدون deploy_at - fallback به 24 ساعت
-        services_without_deploy = [s.service_id for s in services if not s.last_deploy_at]
+        # 🔴 FIX: استفاده از s.id به جای s.service_id
+        services_without_deploy = [s.id for s in services if not s.last_deploy_at]
         if services_without_deploy:
-            from datetime import timedelta
             fallback_cutoff = datetime.utcnow() - timedelta(hours=24)
             conditions.append(
                 and_(
@@ -1036,16 +1037,16 @@ async def get_transfer_status(
         if conditions:
             time_filter = or_(*conditions)
         else:
-            time_filter = True  # no filter if no conditions
+            time_filter = None
     else:
-        time_filter = True  # no time filter
+        time_filter = None
 
     # لاگ‌های خطای منتقل نشده (پس از دیپلوی)
     pending_query = db.query(RenderLog).filter(
         error_filter,
         RenderLog.transferred_to_issues == False
     )
-    if since_deploy and service_deploy_times:
+    if time_filter is not None:
         pending_query = pending_query.filter(time_filter)
     pending_count = pending_query.count()
 
@@ -1239,7 +1240,8 @@ async def get_log_stats(
 
     # 🆕 دریافت آخرین deploy_at هر سرویس
     services = db.query(RenderService).all()
-    service_deploy_times = {s.service_id: s.last_deploy_at for s in services if s.last_deploy_at}
+    # 🔴 FIX: استفاده از s.id به جای s.service_id
+    service_deploy_times = {s.id: s.last_deploy_at for s in services if s.last_deploy_at}
 
     # Base query
     if since_deploy and service_deploy_times:
@@ -1254,7 +1256,8 @@ async def get_log_stats(
                 )
             )
         # اگر سرویسی last_deploy_at نداشته باشد، لاگ‌های 24 ساعت اخیر آن را بگیر
-        services_without_deploy = [s.service_id for s in services if not s.last_deploy_at]
+        # 🔴 FIX: استفاده از s.id به جای s.service_id
+        services_without_deploy = [s.id for s in services if not s.last_deploy_at]
         if services_without_deploy:
             fallback_cutoff = datetime.utcnow() - timedelta(hours=24)
             conditions.append(
