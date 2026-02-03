@@ -2781,10 +2781,48 @@ async def generate_engineering_report_stream(
 
     async def progress_generator():
         """Generator برای ارسال پیشرفت"""
+        # 🔴🔴🔴 FIX: ایجاد PromptExecution برای نمایش در پنل انیمیشن
+        from ..services.prompt_helper import PromptHelper
+        from ..models.system_prompt import PromptExecution
+
+        execution_id = f"eng_exec_{uuid.uuid4().hex[:12]}"
+
         try:
+            # ایجاد رکورد PromptExecution برای ردیابی در پنل
+            execution = PromptExecution(
+                id=execution_id,
+                prompt_id="engineering_report",  # شناسه مجازی
+                prompt_name=f"گزارش مهندسی ({depth})",
+                prompt_category="engineering_report",
+                project_id=project_id,
+                status="running",
+                model_used=selected_models[0] if selected_models else "claude",
+                current_step="🔍 شروع بررسی...",
+                current_progress=0,
+                total_steps=config["total_steps"],
+                current_step_index=0,
+                started_at=datetime.utcnow(),
+                created_at=datetime.utcnow()
+            )
+            db.add(execution)
+            db.commit()
+
             total_steps = config["total_steps"]
 
+            # تابع کمکی برای به‌روزرسانی پیشرفت
+            def update_progress(step_msg: str, progress: int, step_idx: int = 0):
+                try:
+                    exec_obj = db.query(PromptExecution).filter(PromptExecution.id == execution_id).first()
+                    if exec_obj:
+                        exec_obj.current_step = step_msg
+                        exec_obj.current_progress = progress
+                        exec_obj.current_step_index = step_idx
+                        db.commit()
+                except Exception as e:
+                    logger.warning(f"Could not update execution progress: {e}")
+
             # مرحله 1: بررسی پروژه
+            update_progress("🔍 بررسی پروژه...", 5, 1)
             yield f"data: {json.dumps({'step': 1, 'total': total_steps, 'message': '🔍 بررسی پروژه...', 'progress': 5}, ensure_ascii=False)}\n\n"
             await asyncio.sleep(delay_factor)  # 🔴 استفاده از delay_factor
 
@@ -2891,12 +2929,14 @@ async def generate_engineering_report_stream(
             if use_4step:
                 # 🔴 مرحله 1: اعتبارسنجی فیلدها (60-72%)
                 step = total_steps - 5
+                update_progress("🔬 مرحله ۱: اعتبارسنجی فیلدها...", 60, step)
                 msg1_start = json.dumps({'step': step, 'total': total_steps, 'message': '🔬 مرحله ۱: شروع اعتبارسنجی فیلدهای موجود...', 'progress': 60}, ensure_ascii=False)
                 yield f"data: {msg1_start}\n\n"
 
                 # پیشرفت تدریجی مرحله 1
                 for p in range(61, 68, 2):
                     await asyncio.sleep(step_delay / 4)
+                    update_progress(f"🔬 مرحله ۱: تحلیل فیلدها... ({p}%)", p, step)
                     msg_p = json.dumps({'step': step, 'message': f'🔬 مرحله ۱: در حال تحلیل فیلدها... ({p}%)', 'progress': p}, ensure_ascii=False)
                     yield f"data: {msg_p}\n\n"
 
@@ -2904,23 +2944,27 @@ async def generate_engineering_report_stream(
                     step1_result = await engineering_step1_validate_fields(project_id, selected_models[0], depth, db)
                     validated_count = step1_result.get('validated_count', 0)
                     rejected_count = step1_result.get('rejected_count', 0)
+                    update_progress(f"✅ مرحله ۱: {validated_count} تایید، {rejected_count} رد", 72, step)
                     msg1_done = json.dumps({'step': step, 'message': f'✅ مرحله ۱ تکمیل: {validated_count} تایید، {rejected_count} رد شد', 'progress': 72}, ensure_ascii=False)
                     yield f"data: {msg1_done}\n\n"
                 except Exception as e:
                     err_msg = str(e)[:100]
                     step1_result = {'validated_count': 0, 'rejected_count': 0, 'error': err_msg}
+                    update_progress(f"⚠️ مرحله ۱: {err_msg}", 72, step)
                     msg1_err = json.dumps({'step': step, 'message': f'⚠️ مرحله ۱: {err_msg}', 'progress': 72}, ensure_ascii=False)
                     yield f"data: {msg1_err}\n\n"
                 await asyncio.sleep(step_delay / 2)
 
                 # 🔴 مرحله 2: تبدیل ایرادات سلامت به فیلد (72-82%)
                 step = total_steps - 4
+                update_progress("🔄 مرحله ۲: تبدیل ایرادات به فیلد...", 72, step)
                 msg2_start = json.dumps({'step': step, 'total': total_steps, 'message': '🔄 مرحله ۲: شروع تبدیل ایرادات سلامت به فیلد...', 'progress': 72}, ensure_ascii=False)
                 yield f"data: {msg2_start}\n\n"
 
                 # پیشرفت تدریجی مرحله 2
                 for p in range(73, 79, 2):
                     await asyncio.sleep(step_delay / 4)
+                    update_progress(f"🔄 مرحله ۲: پردازش ایرادات... ({p}%)", p, step)
                     msg_p = json.dumps({'step': step, 'message': f'🔄 مرحله ۲: در حال پردازش ایرادات... ({p}%)', 'progress': p}, ensure_ascii=False)
                     yield f"data: {msg_p}\n\n"
 
@@ -2928,46 +2972,54 @@ async def generate_engineering_report_stream(
                     step2_result = await engineering_step2_health_to_fields(project_id, selected_models[0], depth, db)
                     created = step2_result.get('created_count', 0)
                     archived = step2_result.get('archived_count', 0)
+                    update_progress(f"✅ مرحله ۲: {created} فیلد، {archived} بایگانی", 82, step)
                     msg2_done = json.dumps({'step': step, 'message': f'✅ مرحله ۲: {created} فیلد ایجاد، {archived} ایراد بایگانی شد', 'progress': 82}, ensure_ascii=False)
                     yield f"data: {msg2_done}\n\n"
                 except Exception as e:
                     err_msg = str(e)[:100]
                     step2_result = {'created_count': 0, 'archived_count': 0, 'error': err_msg}
+                    update_progress(f"⚠️ مرحله ۲: {err_msg}", 82, step)
                     msg2_err = json.dumps({'step': step, 'message': f'⚠️ مرحله ۲: {err_msg}', 'progress': 82}, ensure_ascii=False)
                     yield f"data: {msg2_err}\n\n"
                 await asyncio.sleep(step_delay / 2)
 
                 # 🔴 مرحله 3: ارزیابی مدل‌ها (82-90%)
                 step = total_steps - 3
+                update_progress("📊 مرحله ۳: ارزیابی مدل‌ها...", 82, step)
                 msg3_start = json.dumps({'step': step, 'total': total_steps, 'message': '📊 مرحله ۳: شروع ارزیابی عملکرد مدل‌ها...', 'progress': 82}, ensure_ascii=False)
                 yield f"data: {msg3_start}\n\n"
 
                 # پیشرفت تدریجی مرحله 3
                 for p in range(83, 88, 2):
                     await asyncio.sleep(step_delay / 4)
+                    update_progress(f"📊 مرحله ۳: ارزیابی... ({p}%)", p, step)
                     msg_p = json.dumps({'step': step, 'message': f'📊 مرحله ۳: در حال ارزیابی مدل‌ها... ({p}%)', 'progress': p}, ensure_ascii=False)
                     yield f"data: {msg_p}\n\n"
 
                 try:
                     step3_result = await engineering_step3_evaluate_models(project_id, selected_models[0], depth, db)
                     models_evaluated = step3_result.get('models_evaluated', [])
+                    update_progress(f"✅ مرحله ۳: {len(models_evaluated)} مدل ارزیابی شد", 90, step)
                     msg3_done = json.dumps({'step': step, 'message': f'✅ مرحله ۳: {len(models_evaluated)} مدل ارزیابی شد', 'progress': 90}, ensure_ascii=False)
                     yield f"data: {msg3_done}\n\n"
                 except Exception as e:
                     err_msg = str(e)[:100]
                     step3_result = {'models_evaluated': [], 'error': err_msg}
+                    update_progress(f"⚠️ مرحله ۳: {err_msg}", 90, step)
                     msg3_err = json.dumps({'step': step, 'message': f'⚠️ مرحله ۳: {err_msg}', 'progress': 90}, ensure_ascii=False)
                     yield f"data: {msg3_err}\n\n"
                 await asyncio.sleep(step_delay / 2)
 
                 # 🔴 مرحله 4: به‌روزرسانی نقشه راه (90-96%)
                 step = total_steps - 2
+                update_progress("🗺️ مرحله ۴: به‌روزرسانی نقشه راه...", 90, step)
                 msg4_start = json.dumps({'step': step, 'total': total_steps, 'message': '🗺️ مرحله ۴: شروع به‌روزرسانی نقشه راه...', 'progress': 90}, ensure_ascii=False)
                 yield f"data: {msg4_start}\n\n"
 
                 # پیشرفت تدریجی مرحله 4
                 for p in range(91, 95, 2):
                     await asyncio.sleep(step_delay / 4)
+                    update_progress(f"🗺️ مرحله ۴: نقشه راه... ({p}%)", p, step)
                     msg_p = json.dumps({'step': step, 'message': f'🗺️ مرحله ۴: در حال به‌روزرسانی نقشه راه... ({p}%)', 'progress': p}, ensure_ascii=False)
                     yield f"data: {msg_p}\n\n"
 
@@ -2978,11 +3030,13 @@ async def generate_engineering_report_stream(
                     status_text = "نقشه راه" if roadmap_updated else ""
                     if ideal_updated:
                         status_text += " و حالت ایده‌آل" if status_text else "حالت ایده‌آل"
+                    update_progress(f"✅ مرحله ۴: {status_text or 'بررسی'} به‌روز شد", 96, step)
                     msg4_done = json.dumps({'step': step, 'message': f'✅ مرحله ۴: {status_text or "بررسی"} به‌روزرسانی شد', 'progress': 96}, ensure_ascii=False)
                     yield f"data: {msg4_done}\n\n"
                 except Exception as e:
                     err_msg = str(e)[:100]
                     step4_result = {'roadmap_updated': False, 'ideal_state_updated': False, 'error': err_msg}
+                    update_progress(f"⚠️ مرحله ۴: {err_msg}", 96, step)
                     msg4_err = json.dumps({'step': step, 'message': f'⚠️ مرحله ۴: {err_msg}', 'progress': 96}, ensure_ascii=False)
                     yield f"data: {msg4_err}\n\n"
                 await asyncio.sleep(step_delay / 2)
@@ -3009,126 +3063,120 @@ async def generate_engineering_report_stream(
                     import logging
                     logging.getLogger(__name__).error(f"Deep mode: Error checking issues: {arch_err}")
 
-                # 🆕 ذخیره گزارش مهندسی 4 مرحله‌ای در دیتابیس
-                report_id = f"eng_4step_{uuid.uuid4().hex[:12]}"
+                # 🔴🔴🔴 FIX: در حالت deep هم باید گزارش کامل AI تولید شود
+                # قبلاً فقط نتایج 4 مرحله ذخیره می‌شد ولی گزارش کامل AI تولید نمی‌شد
+
+                # جمع‌آوری نتایج مراحل برای ترکیب با گزارش اصلی
+                local_vars = locals()
+                step1_data = local_vars.get('step1_result', {})
+                step2_data = local_vars.get('step2_result', {})
+                step3_data = local_vars.get('step3_result', {})
+                step4_data = local_vars.get('step4_result', {})
+
+                # آمار 4 مرحله
+                validated = step1_data.get('validated_count', 0)
+                rejected = step1_data.get('rejected_count', 0)
+                created = step2_data.get('created_count', 0)
+                archived = step2_data.get('archived_count', 0)
+                models_evaluated = step3_data.get('models_evaluated', [])
+                roadmap_updated = step4_data.get('roadmap_updated', False)
+                ideal_updated = step4_data.get('ideal_state_updated', False)
+
+                # 🔴 حالا گزارش کامل AI را هم تولید کن (مثل حالت quick/standard)
+                step = total_steps - 1
+                models_text = ", ".join(selected_models)
+                msg_ai = json.dumps({'step': step, 'total': total_steps, 'message': f'🧠 تولید گزارش جامع AI با {models_text}...', 'progress': 85}, ensure_ascii=False)
+                yield f"data: {msg_ai}\n\n"
+
+                # فراخوانی گزارش اصلی AI (این همان تابعی است که گزارش کامل با health_score و roadmap می‌سازد)
                 try:
-                    # جمع‌آوری نتایج مراحل (با استفاده از locals برای دسترسی امن)
-                    local_vars = locals()
+                    ai_result = await generate_engineering_report(
+                        project_id=project_id,
+                        days=days,
+                        model_id=selected_models[0],
+                        auto_create_fields=auto_create_fields,
+                        validate_health_issues=validate_health_issues,
+                        db=db
+                    )
 
-                    # 🔴 استخراج آمار از نتایج مراحل
-                    step1_data = local_vars.get('step1_result', {})
-                    step2_data = local_vars.get('step2_result', {})
-                    step3_data = local_vars.get('step3_result', {})
-                    step4_data = local_vars.get('step4_result', {})
-
-                    # 🔴 ساخت خلاصه جامع برای نمایش بهتر
-                    summary_parts = []
-
-                    # مرحله 1: اعتبارسنجی فیلدها
-                    validated = step1_data.get('validated_count', 0)
-                    rejected = step1_data.get('rejected_count', 0)
-                    if validated > 0 or rejected > 0:
-                        summary_parts.append(f"✅ فیلدها: {validated} تایید، {rejected} رد")
-
-                    # مرحله 2: تبدیل ایرادات
-                    created = step2_data.get('created_count', 0)
-                    archived = step2_data.get('archived_count', 0)
-                    if created > 0 or archived > 0:
-                        summary_parts.append(f"🔄 ایرادات: {created} فیلد ایجاد، {archived} بایگانی")
-
-                    # مرحله 3: ارزیابی مدل‌ها
-                    models_evaluated = step3_data.get('models_evaluated', [])
-                    if models_evaluated:
-                        summary_parts.append(f"📊 مدل‌ها: {len(models_evaluated)} ارزیابی شد")
-
-                    # مرحله 4: نقشه راه
-                    roadmap_updated = step4_data.get('roadmap_updated', False)
-                    ideal_updated = step4_data.get('ideal_state_updated', False)
-                    if roadmap_updated or ideal_updated:
-                        summary_parts.append(f"🗺️ نقشه راه به‌روز شد")
-
-                    executive_summary = " | ".join(summary_parts) if summary_parts else f"گزارش مهندسی عمیق با {len(selected_models)} مدل تکمیل شد"
-
-                    report_content = {
-                        "depth": depth,
-                        "models_used": selected_models,
-                        "executive_summary": executive_summary,
-                        "steps": {
+                    if ai_result.get("success"):
+                        # ترکیب نتایج 4 مرحله با گزارش AI
+                        ai_result["depth"] = depth
+                        ai_result["models_used"] = selected_models
+                        ai_result["four_step_results"] = {
                             "step1_validate_fields": step1_data,
                             "step2_health_to_fields": step2_data,
                             "step3_evaluate_models": step3_data,
                             "step4_update_roadmap": step4_data,
-                        },
-                        "statistics": {
+                        }
+                        ai_result["four_step_statistics"] = {
                             "fields_validated": validated,
                             "fields_rejected": rejected,
                             "issues_converted": created,
                             "issues_archived": archived,
                             "models_count": len(selected_models),
                             "roadmap_updated": roadmap_updated,
-                        },
-                        "completed_at": datetime.utcnow().isoformat(),
-                    }
+                            "ideal_state_updated": ideal_updated,
+                        }
 
-                    # ایجاد گزارش
-                    report = Report(
-                        id=report_id,
-                        project_id=project_id,
-                        report_type="engineering_4step",
-                        title=f"گزارش مهندسی ۴ مرحله‌ای - {project.name if project else 'پروژه'}",
-                        content=json.dumps(report_content, ensure_ascii=False, indent=2),
-                        summary=executive_summary,
-                        total_activities=4,
-                        total_tokens=0,  # در 4 مرحله‌ای توکن جداگانه حساب نشده
-                        models_used=json.dumps(selected_models),
-                        period_start=datetime.utcnow() - timedelta(days=days),
-                        period_end=datetime.utcnow(),
-                        created_at=datetime.utcnow(),
-                        generated_by=",".join(selected_models),
-                    )
-                    db.add(report)
+                        msg_done = json.dumps({'step': step, 'message': '✅ گزارش جامع AI تولید شد', 'progress': 95}, ensure_ascii=False)
+                        yield f"data: {msg_done}\n\n"
 
-                    # 🔴 یک yield قبل از commit برای اطلاع‌رسانی
-                    save_msg = json.dumps({'step': total_steps - 1, 'message': f'💾 ذخیره گزارش: {report_id}', 'progress': 97}, ensure_ascii=False)
-                    yield f"data: {save_msg}\n\n"
+                        result = ai_result
+                        logger.info(f"✅ Deep mode: Full AI report generated successfully")
+                    else:
+                        # اگر گزارش AI خطا داد، از نتایج 4 مرحله استفاده کن
+                        logger.warning(f"Deep mode: AI report failed, using 4-step results only")
+                        summary_parts = []
+                        if validated > 0 or rejected > 0:
+                            summary_parts.append(f"✅ فیلدها: {validated} تایید، {rejected} رد")
+                        if created > 0 or archived > 0:
+                            summary_parts.append(f"🔄 ایرادات: {created} فیلد ایجاد، {archived} بایگانی")
+                        if models_evaluated:
+                            summary_parts.append(f"📊 مدل‌ها: {len(models_evaluated)} ارزیابی شد")
+                        if roadmap_updated or ideal_updated:
+                            summary_parts.append(f"🗺️ نقشه راه به‌روز شد")
 
-                    # ثبت در ژورنال
-                    activity_log = ActivityLog(
-                        id=f"log_{uuid.uuid4().hex[:12]}",
-                        project_id=project_id,
-                        model_id=selected_models[0] if selected_models else "unknown",
-                        model_provider="multi_model",
-                        activity_type="engineering_report_4step",
-                        prompt=f"تولید گزارش مهندسی 4 مرحله‌ای برای {days} روز اخیر",
-                        response=f"مراحل تکمیل شد: اعتبارسنجی فیلدها، تبدیل ایرادات، ارزیابی مدل‌ها، به‌روزرسانی نقشه راه",
-                        tokens_used=0,
-                        latency_ms=0,
-                        success=True,
-                        field_id=None,
-                        field_name=f"گزارش مهندسی ۴ مرحله‌ای - {report_id}",
-                        extra_data=json.dumps({
-                            "report_id": report_id,
+                        result = {
+                            "success": True,
                             "depth": depth,
                             "models_used": selected_models,
-                            "steps_completed": 4,
-                        }, ensure_ascii=False),
-                        created_at=datetime.utcnow()
-                    )
-                    db.add(activity_log)
-                    db.commit()
+                            "executive_summary": " | ".join(summary_parts) if summary_parts else f"گزارش مهندسی عمیق با {len(selected_models)} مدل تکمیل شد",
+                            "four_step_results": {
+                                "step1_validate_fields": step1_data,
+                                "step2_health_to_fields": step2_data,
+                                "step3_evaluate_models": step3_data,
+                                "step4_update_roadmap": step4_data,
+                            },
+                            "message": "گزارش مهندسی 4 مرحله‌ای تکمیل شد (بدون گزارش AI)",
+                        }
 
-                    logger.info(f"✅ 4-step engineering report saved: {report_id}")
-                except Exception as save_err:
-                    logger.error(f"Error saving 4-step report: {save_err}")
+                except Exception as ai_err:
+                    logger.error(f"Deep mode: Error generating AI report: {ai_err}")
+                    # Fallback به نتایج 4 مرحله
+                    summary_parts = []
+                    if validated > 0 or rejected > 0:
+                        summary_parts.append(f"✅ فیلدها: {validated} تایید، {rejected} رد")
+                    if created > 0 or archived > 0:
+                        summary_parts.append(f"🔄 ایرادات: {created} فیلد ایجاد، {archived} بایگانی")
+                    if models_evaluated:
+                        summary_parts.append(f"📊 مدل‌ها: {len(models_evaluated)} ارزیابی شد")
+                    if roadmap_updated or ideal_updated:
+                        summary_parts.append(f"🗺️ نقشه راه به‌روز شد")
 
-                result = {
-                    "success": True,
-                    "depth": depth,
-                    "models_used": selected_models,
-                    "steps_completed": 4,
-                    "message": "گزارش مهندسی 4 مرحله‌ای تکمیل شد",
-                    "report_id": report_id  # 🆕 شناسه گزارش
-                }
+                    result = {
+                        "success": True,
+                        "depth": depth,
+                        "models_used": selected_models,
+                        "executive_summary": " | ".join(summary_parts) if summary_parts else f"گزارش مهندسی عمیق با {len(selected_models)} مدل تکمیل شد",
+                        "four_step_results": {
+                            "step1_validate_fields": step1_data,
+                            "step2_health_to_fields": step2_data,
+                            "step3_evaluate_models": step3_data,
+                            "step4_update_roadmap": step4_data,
+                        },
+                        "message": f"گزارش مهندسی 4 مرحله‌ای تکمیل شد (خطا در AI: {str(ai_err)[:100]})",
+                    }
             else:
                 # حالت quick/standard: یک فراخوانی
                 step = total_steps - 1
@@ -3178,16 +3226,40 @@ async def generate_engineering_report_stream(
 
             # مرحله نهایی: اتمام
             if result.get("success"):
+                update_progress("✅ گزارش با موفقیت تولید شد", 100, total_steps)
                 success_msg = json.dumps({'step': total_steps, 'total': total_steps, 'message': '✅ گزارش با موفقیت تولید شد', 'progress': 100, 'result': result}, ensure_ascii=False)
                 yield f"data: {success_msg}\n\n"
             else:
                 error_text = result.get('error', 'خطای نامشخص')
+                update_progress(f"❌ خطا: {error_text}", 100, total_steps)
                 error_msg = json.dumps({'step': total_steps, 'message': f'❌ خطا: {error_text}', 'progress': 100, 'error': error_text}, ensure_ascii=False)
                 yield f"data: {error_msg}\n\n"
+
+            # 🔴 علامت‌گذاری اجرا به عنوان تکمیل‌شده
+            try:
+                exec_obj = db.query(PromptExecution).filter(PromptExecution.id == execution_id).first()
+                if exec_obj:
+                    exec_obj.status = "completed" if result.get("success") else "failed"
+                    exec_obj.completed_at = datetime.utcnow()
+                    exec_obj.current_progress = 100
+                    db.commit()
+            except Exception as e:
+                logger.warning(f"Could not mark execution as completed: {e}")
 
         except Exception as e:
             exc_msg = json.dumps({'error': str(e), 'progress': 100}, ensure_ascii=False)
             yield f"data: {exc_msg}\n\n"
+
+            # 🔴 علامت‌گذاری اجرا به عنوان شکست‌خورده
+            try:
+                exec_obj = db.query(PromptExecution).filter(PromptExecution.id == execution_id).first()
+                if exec_obj:
+                    exec_obj.status = "failed"
+                    exec_obj.completed_at = datetime.utcnow()
+                    exec_obj.current_step = f"❌ خطا: {str(e)[:100]}"
+                    db.commit()
+            except Exception as cleanup_err:
+                logger.error(f"Could not cleanup execution: {cleanup_err}")
 
     return StreamingResponse(
         progress_generator(),
@@ -4162,14 +4234,34 @@ async def engineering_step4_update_roadmap(
         logger.error(f"Step4 JSON parse error: {e}")
         result_data = {"error": str(e)}
 
-    # به‌روزرسانی نقشه راه
+    # 🔴🔴🔴 FIX: به‌روزرسانی نقشه راه با حفظ محتوای موجود
+    # قبلاً نقشه راه موجود حذف و با نقشه راه جدید جایگزین می‌شد
+    # حالا فقط آیتم‌های جدید اضافه می‌شوند و آیتم‌های تکمیل‌شده علامت می‌خورند
+
+    existing_roadmap = project.roadmap_content or ""
     new_roadmap = result_data.get("new_roadmap_content")
-    if new_roadmap:
+    roadmap_updates = result_data.get("roadmap_updates", [])
+
+    # فقط اگر AI یک نقشه راه کامل و معتبر برگرداند، جایگزین کن
+    # نقشه راه معتبر باید حداقل 100 کاراکتر داشته باشد و شامل آیتم‌های واقعی باشد
+    if new_roadmap and len(new_roadmap) > 100 and ("[x]" in new_roadmap or "[ ]" in new_roadmap):
+        # نقشه راه جدید معتبر است
         project.roadmap_content = new_roadmap
-    else:
-        # 🆕 اگر AI محتوای نقشه راه را برنگرداند، خودمان از updates بسازیم
-        roadmap_updates = result_data.get("roadmap_updates", [])
-        if roadmap_updates:
+        logger.info(f"Replaced roadmap with AI response: {len(new_roadmap)} chars")
+    elif roadmap_updates and len(roadmap_updates) > 0:
+        # اگر updates داریم، آنها را به نقشه راه موجود اضافه کن
+        if existing_roadmap and len(existing_roadmap) > 50:
+            # نقشه راه موجود را حفظ کن و فقط به‌روزرسانی‌ها را اضافه کن
+            update_lines = [f"\n\n## به‌روزرسانی {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}\n"]
+            for update in roadmap_updates:
+                status = "[x] ✅" if update.get("completed") else "[ ]"
+                update_lines.append(f"{status} {update.get('item', 'آیتم')}")
+                if update.get("reason"):
+                    update_lines.append(f"   - {update.get('reason')}")
+            project.roadmap_content = existing_roadmap + "\n".join(update_lines)
+            logger.info(f"Appended {len(roadmap_updates)} updates to existing roadmap")
+        else:
+            # نقشه راه موجود خالی است، یک نقشه راه جدید بساز
             roadmap_lines = [f"# نقشه راه پروژه {project.name}\n"]
             roadmap_lines.append(f"*به‌روزرسانی: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}*\n")
             for update in roadmap_updates:
@@ -4180,43 +4272,49 @@ async def engineering_step4_update_roadmap(
             project.roadmap_content = "\n".join(roadmap_lines)
             new_roadmap = project.roadmap_content
             logger.info(f"Generated roadmap from updates: {len(roadmap_updates)} items")
-        else:
-            # 🆕 Fallback نهایی: ساخت نقشه راه از وضعیت فعلی پروژه
-            roadmap_lines = [f"# نقشه راه پروژه {project.name}\n"]
-            roadmap_lines.append(f"*تولید خودکار: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}*\n")
-            roadmap_lines.append("\n## وضعیت فعلی\n")
+    elif existing_roadmap and len(existing_roadmap) > 50:
+        # 🔴 FIX: اگر نقشه راه موجود داریم و AI چیز معتبری برنگرداند، نقشه راه موجود را حفظ کن
+        logger.info(f"Preserving existing roadmap ({len(existing_roadmap)} chars) - AI response was insufficient")
+        new_roadmap = existing_roadmap
+        # فقط یک یادداشت اضافه کن
+        project.roadmap_content = existing_roadmap + f"\n\n*آخرین بررسی: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}*"
+    else:
+        # 🆕 Fallback نهایی: ساخت نقشه راه از وضعیت فعلی پروژه
+        roadmap_lines = [f"# نقشه راه پروژه {project.name}\n"]
+        roadmap_lines.append(f"*تولید خودکار: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}*\n")
+        roadmap_lines.append("\n## وضعیت فعلی\n")
 
-            # فیلدهای تایید شده
-            approved_count = len([f for f in existing_fields if f.get("engineering_approval", {}).get("approved")])
-            executed_count = len(executed_fields)
-            pending_count = len([f for f in existing_fields if not f.get("archived") and not f.get("engineering_approval")])
+        # فیلدهای تایید شده
+        approved_count = len([f for f in existing_fields if f.get("engineering_approval", {}).get("approved")])
+        executed_count = len(executed_fields)
+        pending_count = len([f for f in existing_fields if not f.get("archived") and not f.get("engineering_approval")])
 
-            if approved_count > 0:
-                roadmap_lines.append(f"[x] ✅ {approved_count} فیلد تایید شده توسط گزارش مهندسی")
-            if executed_count > 0:
-                roadmap_lines.append(f"[x] ✅ {executed_count} فیلد اجرا شده")
-            if pending_count > 0:
-                roadmap_lines.append(f"[ ] {pending_count} فیلد در انتظار بررسی")
+        if approved_count > 0:
+            roadmap_lines.append(f"[x] ✅ {approved_count} فیلد تایید شده توسط گزارش مهندسی")
+        if executed_count > 0:
+            roadmap_lines.append(f"[x] ✅ {executed_count} فیلد اجرا شده")
+        if pending_count > 0:
+            roadmap_lines.append(f"[ ] {pending_count} فیلد در انتظار بررسی")
 
-            # ایرادات
-            health_issues = []
-            try:
-                if project.issues_found:
-                    health_issues = json.loads(project.issues_found)
-            except:
-                pass
-            active_issues = [i for i in health_issues if not i.get("archived")]
-            if active_issues:
-                roadmap_lines.append(f"[ ] {len(active_issues)} ایراد سلامت نیاز به رسیدگی")
+        # ایرادات
+        health_issues = []
+        try:
+            if project.issues_found:
+                health_issues = json.loads(project.issues_found)
+        except:
+            pass
+        active_issues = [i for i in health_issues if not i.get("archived")]
+        if active_issues:
+            roadmap_lines.append(f"[ ] {len(active_issues)} ایراد سلامت نیاز به رسیدگی")
 
-            roadmap_lines.append("\n## مراحل بعدی\n")
-            roadmap_lines.append("[ ] اجرای فیلدهای تایید شده")
-            roadmap_lines.append("[ ] رفع ایرادات سلامت شناسایی شده")
-            roadmap_lines.append("[ ] اجرای مجدد گزارش مهندسی پس از تغییرات")
+        roadmap_lines.append("\n## مراحل بعدی\n")
+        roadmap_lines.append("[ ] اجرای فیلدهای تایید شده")
+        roadmap_lines.append("[ ] رفع ایرادات سلامت شناسایی شده")
+        roadmap_lines.append("[ ] اجرای مجدد گزارش مهندسی پس از تغییرات")
 
-            project.roadmap_content = "\n".join(roadmap_lines)
-            new_roadmap = project.roadmap_content
-            logger.info(f"Generated fallback roadmap from project state")
+        project.roadmap_content = "\n".join(roadmap_lines)
+        new_roadmap = project.roadmap_content
+        logger.info(f"Generated fallback roadmap from project state")
 
     # به‌روزرسانی حالت ایده‌آل
     ideal_state = result_data.get("ideal_state", {})
