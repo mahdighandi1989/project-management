@@ -1246,6 +1246,206 @@ async def trigger_auto_transfer_now():
         }
 
 
+@router.get("/auto-transfer/debug")
+async def debug_auto_transfer(db: Session = Depends(get_db)):
+    """
+    🔍 تشخیص مشکلات انتقال خودکار
+
+    بررسی می‌کند:
+    1. تنظیمات auto-transfer فعال است؟
+    2. scheduler اجرا می‌شود؟
+    3. سرویس‌ها به پروژه نگاشت شده‌اند؟
+    4. لاگ خطایی برای انتقال وجود دارد؟
+    """
+    from ...services.log_to_issues_service import get_log_to_issues_service
+    from ...services.background_scheduler import get_background_scheduler
+    from datetime import datetime, timedelta
+
+    diagnosis = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "settings": {},
+        "scheduler": {},
+        "service_mapping": {},
+        "error_logs": {},
+        "issues": [],
+        "recommendations": []
+    }
+
+    try:
+        # 1. بررسی تنظیمات
+        settings = db.query(RenderLogSettings).first()
+        if settings:
+            diagnosis["settings"] = {
+                "auto_transfer_enabled": settings.auto_transfer_enabled,
+                "auto_transfer_mode": getattr(settings, 'auto_transfer_mode', 'since_deploy') or 'since_deploy',
+                "auto_transfer_interval_minutes": settings.auto_transfer_interval_minutes,
+                "auto_transfer_hours_back": settings.auto_transfer_hours_back,
+                "last_auto_transfer": settings.last_auto_transfer.isoformat() if settings.last_auto_transfer else None
+            }
+            if not settings.auto_transfer_enabled:
+                diagnosis["issues"].append("❌ انتقال خودکار غیرفعال است!")
+                diagnosis["recommendations"].append("✅ از تب تنظیمات Render Logs، گزینه 'انتقال خودکار خطاها' را فعال کنید")
+        else:
+            diagnosis["settings"] = {"error": "تنظیمات یافت نشد"}
+            diagnosis["issues"].append("❌ تنظیمات Render Logs ایجاد نشده")
+
+        # 2. بررسی scheduler
+        try:
+            scheduler = get_background_scheduler()
+            jobs_info = scheduler.get_jobs_info()
+            diagnosis["scheduler"] = jobs_info
+
+            if not jobs_info.get("running"):
+                diagnosis["issues"].append("❌ Scheduler اجرا نمی‌شود!")
+                diagnosis["recommendations"].append("✅ سرور را ری‌استارت کنید")
+            elif not any(j["id"] == "auto_transfer_errors" for j in jobs_info.get("jobs", [])):
+                diagnosis["issues"].append("⚠️ Job انتقال خودکار ثبت نشده (احتمالاً چون auto_transfer_enabled=False)")
+                diagnosis["recommendations"].append("✅ انتقال خودکار را فعال کرده و ذخیره کنید")
+        except Exception as se:
+            diagnosis["scheduler"] = {"error": str(se)}
+
+        # 3. بررسی نگاشت سرویس-پروژه
+        try:
+            service = get_log_to_issues_service()
+            service_map = await service._build_service_project_map(db)
+
+            # دریافت همه سرویس‌ها
+            services = db.query(RenderService).all()
+
+            mapped_count = 0
+            unmapped_services = []
+
+            for s in services:
+                if s.id in service_map:
+                    mapped_count += 1
+                else:
+                    unmapped_services.append({
+                        "id": s.id,
+                        "name": s.name,
+                        "manual_project_id": s.project_id
+                    })
+
+            diagnosis["service_mapping"] = {
+                "total_services": len(services),
+                "mapped_services": mapped_count,
+                "unmapped_services": unmapped_services,
+                "mapping_details": {k: v["project_name"] for k, v in service_map.items()}
+            }
+
+            if unmapped_services:
+                diagnosis["issues"].append(f"⚠️ {len(unmapped_services)} سرویس بدون نگاشت به پروژه")
+                diagnosis["recommendations"].append("✅ برای هر سرویس، project_id را در تنظیمات سرویس تعیین کنید")
+
+        except Exception as me:
+            diagnosis["service_mapping"] = {"error": str(me)}
+
+        # 4. بررسی لاگ‌های خطا
+        try:
+            cutoff = datetime.utcnow() - timedelta(hours=24)
+
+            total_errors = db.query(RenderLog).filter(
+                RenderLog.timestamp >= cutoff,
+                RenderLog.level.in_(["error", "fatal", "critical"])
+            ).count()
+
+            transferred_errors = db.query(RenderLog).filter(
+                RenderLog.timestamp >= cutoff,
+                RenderLog.level.in_(["error", "fatal", "critical"]),
+                RenderLog.transferred_to_issues == True
+            ).count()
+
+            not_transferred = total_errors - transferred_errors
+
+            diagnosis["error_logs"] = {
+                "period": "24 hours",
+                "total_error_logs": total_errors,
+                "already_transferred": transferred_errors,
+                "not_transferred": not_transferred
+            }
+
+            if total_errors == 0:
+                diagnosis["issues"].append("ℹ️ هیچ لاگ خطایی در ۲۴ ساعت گذشته وجود ندارد")
+            elif not_transferred > 0 and settings and settings.auto_transfer_enabled:
+                diagnosis["issues"].append(f"⚠️ {not_transferred} خطا منتظر انتقال هستند")
+                diagnosis["recommendations"].append("✅ روی 'اجرای فوری انتقال' کلیک کنید یا منتظر اجرای خودکار بمانید")
+
+        except Exception as le:
+            diagnosis["error_logs"] = {"error": str(le)}
+
+        # نتیجه‌گیری
+        if not diagnosis["issues"]:
+            diagnosis["status"] = "✅ همه چیز سالم به نظر می‌رسد"
+        else:
+            diagnosis["status"] = f"⚠️ {len(diagnosis['issues'])} مشکل شناسایی شد"
+
+        return {
+            "success": True,
+            "diagnosis": diagnosis
+        }
+
+    except Exception as e:
+        slog.error("Auto-transfer debug failed", exception=e)
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@router.post("/auto-transfer/force-transfer")
+async def force_transfer_all_errors(
+    hours_back: int = Query(24, ge=1, le=168),
+    db: Session = Depends(get_db)
+):
+    """
+    🔴 انتقال اجباری همه خطاها (حتی قبلاً منتقل شده)
+
+    این endpoint برای debug استفاده می‌شود و:
+    - همه لاگ‌های خطا را بدون توجه به transferred_to_issues انتقال می‌دهد
+    - نتیجه جزئی را برمی‌گرداند
+    """
+    from ...services.log_to_issues_service import get_log_to_issues_service
+
+    try:
+        service = get_log_to_issues_service()
+
+        # ریست کردن فلگ transferred برای تست مجدد
+        cutoff = datetime.utcnow() - timedelta(hours=hours_back)
+        reset_count = db.query(RenderLog).filter(
+            RenderLog.timestamp >= cutoff,
+            RenderLog.level.in_(["error", "fatal", "critical"]),
+            RenderLog.transferred_to_issues == True
+        ).update({RenderLog.transferred_to_issues: False})
+        db.commit()
+
+        slog.info(f"Reset {reset_count} transferred flags for force transfer")
+
+        # اجرای انتقال
+        result = await service.transfer_error_logs(
+            service_ids=None,
+            hours=hours_back,
+            auto_mode=False,
+            mode="time_based",
+            db=db
+        )
+
+        # اضافه کردن اطلاعات debug
+        debug_info = await service._get_debug_info(db, None, hours_back)
+
+        return {
+            "success": True,
+            "reset_count": reset_count,
+            "transfer_result": result,
+            "debug_info": debug_info
+        }
+
+    except Exception as e:
+        slog.error("Force transfer failed", exception=e)
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
 # =====================================
 # WebSocket Endpoints
 # =====================================

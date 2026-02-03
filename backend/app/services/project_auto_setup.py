@@ -513,7 +513,7 @@ async def generate_intelligent_setup(
             prompt = db_prompt
         else:
             # 🔄 Fallback به پرامپت hardcoded
-            logger.debug("📝 Using hardcoded prompt for auto-setup")
+            logger.warning("⚠️ Database prompt 'auto_setup_main' not found! Using hardcoded fallback. Check /api/prompts/restore-defaults")
             prompt = f"""تو یک معمار نرم‌افزار و DevOps متخصص هستی. این پروژه را تحلیل کن و دستورات دقیق و اختصاصی برای کار با AI تولید کن.
 
 ## اطلاعات پروژه

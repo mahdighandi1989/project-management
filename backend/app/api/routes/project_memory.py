@@ -4153,12 +4153,10 @@ async def auto_setup_project(
     """
     from ...services.project_auto_setup import auto_setup_project_memory
     from ...models.project import ProjectFile
-    from ...models.setting import Setting
-    from ...services.ai_manager import get_ai_manager, reset_ai_manager
+    from ...services.ai_manager import load_api_keys_and_reset
     from datetime import datetime
     import logging
     import httpx
-    import os
 
     logger = logging.getLogger(__name__)
 
@@ -4167,41 +4165,11 @@ async def auto_setup_project(
     available_providers = []
 
     # ========================================
-    # 🔴 مرحله 0: بارگذاری API keys از دیتابیس و ریست AI manager
+    # 🔴 مرحله 0: بارگذاری API keys و ریست AI manager (تابع متمرکز)
     # ========================================
     if use_ai:
-        logger.info("🔑 Loading API keys from database for auto-setup...")
-
-        # بارگذاری کلیدها از دیتابیس
-        key_mapping = [
-            ("api_key_openai", "OPENAI_API_KEY"),
-            ("api_key_claude", "CLAUDE_API_KEY"),
-            ("api_key_gemini", "GEMINI_API_KEY"),
-            ("api_key_deepseek", "DEEPSEEK_API_KEY"),
-            ("api_key_perplexity", "PERPLEXITY_API_KEY"),
-        ]
-
-        keys_loaded = []
-        for db_key, env_key in key_mapping:
-            try:
-                value = Setting.get_value(db, db_key)
-                if value and value.strip():
-                    os.environ[env_key] = value
-                    keys_loaded.append(env_key.replace("_API_KEY", "").lower())
-                    logger.info(f"  ✅ {env_key} loaded from database")
-            except Exception as e:
-                logger.warning(f"  ⚠️ Could not load {db_key}: {e}")
-
-        # 🔴 اگه هیچ کلیدی از دیتابیس لود نشد
-        if not keys_loaded:
-            logger.warning("⚠️ No API keys found in database!")
-            logger.warning("   💡 Please add API keys in Settings page first")
-
-        # 🔴 همیشه AI manager رو ریست کن تا کلیدهای جدید لود بشن
-        logger.info(f"🔄 Resetting AI manager... (keys_loaded: {keys_loaded})")
-        ai_manager = await reset_ai_manager()
-        available_providers = ai_manager.get_available_providers()
-        logger.info(f"📊 AI providers after reset: {available_providers}")
+        logger.info("🔑 Loading API keys using centralized function...")
+        ai_manager, keys_loaded, available_providers = await load_api_keys_and_reset()
 
         if not available_providers:
             logger.warning("⚠️ No AI providers available! Auto-setup will use fallback mode.")

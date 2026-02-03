@@ -346,6 +346,152 @@ class PromptHelper:
             cls._cache.clear()
             cls._cache_time.clear()
 
+    @classmethod
+    def get_ordered_prompts_for_execution(
+        cls,
+        db: Session,
+        category: str,
+        only_required: bool = False
+    ) -> List[Dict]:
+        """
+        🔴 دریافت پرامپت‌های یک دسته به ترتیب execution_order برای اجرای متوالی
+
+        Args:
+            db: Session دیتابیس
+            category: دسته پرامپت
+            only_required: فقط پرامپت‌های اجباری
+
+        Returns:
+            لیست پرامپت‌ها مرتب شده بر اساس execution_order
+        """
+        from ..models.system_prompt import SystemPrompt
+
+        try:
+            query = db.query(SystemPrompt).filter(
+                SystemPrompt.category == category,
+                SystemPrompt.is_active == True
+            )
+
+            if only_required:
+                query = query.filter(SystemPrompt.is_required == True)
+
+            # مرتب‌سازی بر اساس execution_order
+            prompts = query.order_by(SystemPrompt.execution_order.asc()).all()
+
+            return [p.to_dict() for p in prompts]
+
+        except Exception as e:
+            logger.error(f"Error fetching ordered prompts for {category}: {e}")
+            return []
+
+    @classmethod
+    def execute_prompts_in_order(
+        cls,
+        db: Session,
+        category: str,
+        project_id: str,
+        executor_func,
+        variables: Dict[str, Any] = None,
+        only_required: bool = False
+    ) -> List[Dict]:
+        """
+        🔴 اجرای پرامپت‌ها به ترتیب execution_order
+
+        Args:
+            db: Session دیتابیس
+            category: دسته پرامپت
+            project_id: شناسه پروژه
+            executor_func: تابع اجرا کننده (async یا sync)
+            variables: متغیرها برای جایگزینی
+            only_required: فقط اجباری‌ها
+
+        Returns:
+            لیست نتایج اجرا
+        """
+        import json
+
+        prompts = cls.get_ordered_prompts_for_execution(db, category, only_required)
+        results = []
+
+        for prompt in prompts:
+            prompt_id = prompt.get("id")
+
+            # بررسی وابستگی‌ها
+            depends_on = prompt.get("depends_on", [])
+            if isinstance(depends_on, str):
+                try:
+                    depends_on = json.loads(depends_on)
+                except:
+                    depends_on = []
+
+            # چک کن آیا وابستگی‌ها موفق بودند
+            if depends_on:
+                dependencies_met = True
+                for dep_id in depends_on:
+                    dep_result = next(
+                        (r for r in results if r.get("prompt_id") == dep_id),
+                        None
+                    )
+                    if not dep_result or not dep_result.get("success"):
+                        dependencies_met = False
+                        logger.warning(f"Dependency {dep_id} not met for prompt {prompt_id}")
+                        break
+
+                if not dependencies_met:
+                    results.append({
+                        "prompt_id": prompt_id,
+                        "prompt_name": prompt.get("name"),
+                        "success": False,
+                        "skipped": True,
+                        "reason": "وابستگی‌ها برآورده نشدند"
+                    })
+                    continue
+
+            # شروع اجرا
+            execution_id = cls.start_execution(db, prompt_id, project_id)
+
+            try:
+                # جایگزینی متغیرها در محتوا
+                content = prompt.get("content", "")
+                if variables:
+                    content = cls._apply_variables(content, variables)
+
+                # فراخوانی تابع اجرا
+                result = executor_func(prompt_id, content, prompt)
+
+                # تکمیل اجرا
+                cls.complete_execution(
+                    db=db,
+                    execution_id=execution_id,
+                    success=True,
+                    result_summary=f"اجرا شد: {prompt.get('name')}"
+                )
+
+                results.append({
+                    "prompt_id": prompt_id,
+                    "prompt_name": prompt.get("name"),
+                    "execution_order": prompt.get("execution_order"),
+                    "success": True,
+                    "result": result
+                })
+
+            except Exception as e:
+                cls.complete_execution(
+                    db=db,
+                    execution_id=execution_id,
+                    success=False,
+                    error_message=str(e)
+                )
+
+                results.append({
+                    "prompt_id": prompt_id,
+                    "prompt_name": prompt.get("name"),
+                    "success": False,
+                    "error": str(e)
+                })
+
+        return results
+
 
 # Singleton instance
 _prompt_helper = None

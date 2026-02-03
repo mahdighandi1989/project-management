@@ -457,6 +457,9 @@ class DeepAnalysisService:
             logger.info(f"[{analysis_id}] مرحله 1: شروع Micro Analysis")
             await self.progress.start_phase("micro", "بررسی جزئی فایل‌ها (Micro Analysis)")
 
+            # 🔴 ثبت اجرای پرامپت برای نمایش در ExecutingPromptsPanel
+            self._start_prompt_execution("health_micro_analysis", project_id)
+
             micro_results = await self._run_micro_analysis(
                 files=files,
                 roadmap_content=roadmap_content,
@@ -466,11 +469,17 @@ class DeepAnalysisService:
             results["micro_analysis"] = micro_results
             results["analyzed_files"] = len(micro_results.get("files", {}))
 
+            # 🔴 تکمیل اجرای پرامپت Micro
+            self._complete_prompt_execution("health_micro_analysis", success=True, result_summary="Micro Analysis تکمیل شد")
+
             # =====================================
             # مرحله 2: Macro Analysis (بررسی کلی)
             # =====================================
             logger.info(f"[{analysis_id}] مرحله 2: شروع Macro Analysis")
             await self.progress.start_phase("macro", "بررسی همکاری و جایگاه (Macro Analysis)")
+
+            # 🔴 ثبت اجرای پرامپت برای نمایش در ExecutingPromptsPanel
+            self._start_prompt_execution("health_macro_analysis", project_id)
 
             macro_results = await self._run_macro_analysis(
                 files=files,
@@ -482,11 +491,17 @@ class DeepAnalysisService:
             )
             results["macro_analysis"] = macro_results
 
+            # 🔴 تکمیل اجرای پرامپت Macro
+            self._complete_prompt_execution("health_macro_analysis", success=True, result_summary="Macro Analysis تکمیل شد")
+
             # =====================================
             # مرحله 3: Structural Analysis (بررسی ساختاری)
             # =====================================
             logger.info(f"[{analysis_id}] مرحله 3: شروع Structural Analysis")
             await self.progress.start_phase("structural", "بررسی ساختار و وابستگی‌ها (Structural Analysis)")
+
+            # 🔴 ثبت اجرای پرامپت برای نمایش در ExecutingPromptsPanel
+            self._start_prompt_execution("health_structural_analysis", project_id)
 
             structural_results = await self._run_structural_analysis(
                 files=files,
@@ -497,6 +512,9 @@ class DeepAnalysisService:
                 instruction=instruction
             )
             results["structural_analysis"] = structural_results
+
+            # 🔴 تکمیل اجرای پرامپت Structural
+            self._complete_prompt_execution("health_structural_analysis", success=True, result_summary="Structural Analysis تکمیل شد")
 
             # =====================================
             # محاسبه نتایج نهایی

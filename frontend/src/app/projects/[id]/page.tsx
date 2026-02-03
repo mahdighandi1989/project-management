@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import ProjectHealthPanel from '@/components/ProjectHealthPanel';
 import PromptManager from '@/components/PromptManager';
+import ExecutingPromptsPanel from '@/components/ExecutingPromptsPanel';
 import ReactFlow, {
   Node,
   Edge,
@@ -2505,6 +2506,9 @@ export default function ProjectDetailPage() {
           {success}
         </div>
       )}
+
+      {/* 🔴 نمایش پرامپت‌های در حال اجرا */}
+      <ExecutingPromptsPanel projectId={projectId} refreshInterval={2000} />
 
       <div className="max-w-7xl mx-auto p-6">
         {/* هدر */}
