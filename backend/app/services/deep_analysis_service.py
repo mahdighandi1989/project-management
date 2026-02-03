@@ -2112,6 +2112,58 @@ class DeepAnalysisService:
 
         return result
 
+    def _get_issue_key(self, issue: dict) -> str:
+        """🔴 ایجاد کلید یکتا برای یک ایراد"""
+        file_path = issue.get("file", issue.get("path", ""))
+        line = str(issue.get("line", issue.get("line_number", "")))
+        msg = issue.get("message", issue.get("description", ""))[:100]
+        issue_type = issue.get("type", "general")
+        return f"{file_path}:{line}:{issue_type}:{msg}"
+
+    def _merge_with_existing_issues(self, project, new_issues: list, source: str = "deep_analysis") -> list:
+        """🔴 ادغام ایرادات جدید با ایرادات موجود در دیتابیس"""
+        existing_issues = []
+        try:
+            if project.issues_found:
+                existing_issues = json.loads(project.issues_found)
+                if not isinstance(existing_issues, list):
+                    existing_issues = []
+        except:
+            existing_issues = []
+
+        # ایجاد دیکشنری برای جلوگیری از تکرار
+        issues_dict = {}
+
+        # ابتدا ایرادات موجود را اضافه کن
+        for issue in existing_issues:
+            key = self._get_issue_key(issue)
+            issues_dict[key] = issue
+
+        # سپس ایرادات جدید را اضافه یا بروزرسانی کن
+        for issue in new_issues:
+            key = self._get_issue_key(issue)
+            issue["source"] = source
+            issue["updated_at"] = datetime.now().isoformat()
+
+            if key in issues_dict:
+                # بروزرسانی ایراد موجود
+                existing = issues_dict[key]
+                existing["occurrence_count"] = existing.get("occurrence_count", 1) + 1
+                existing["last_seen"] = datetime.now().isoformat()
+                # اگر severity جدید بدتر است، بروزرسانی کن
+                severity_order = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+                if severity_order.get(issue.get("severity", "low"), 1) > severity_order.get(existing.get("severity", "low"), 1):
+                    existing["severity"] = issue.get("severity")
+            else:
+                # ایراد جدید
+                issue["occurrence_count"] = 1
+                issue["first_seen"] = datetime.now().isoformat()
+                issues_dict[key] = issue
+
+        merged = list(issues_dict.values())
+        logger.info(f"🔀 [MERGE] ادغام {len(new_issues)} ایراد جدید با {len(existing_issues)} موجود → {len(merged)} نهایی")
+        return merged
+
     async def _save_analysis_results(self, project_id: str, results: Dict, db_session) -> None:
         """ذخیره نتایج در دیتابیس"""
         try:
@@ -2121,7 +2173,12 @@ class DeepAnalysisService:
             if project:
                 project.health_scores = json.dumps(results.get("overall_scores", {}))
                 project.file_health_map = json.dumps(results.get("file_health_map", {}))
-                project.issues_found = json.dumps(results.get("issues", []))
+
+                # 🔴 MERGE: ادغام ایرادات جدید با موجود به جای OVERWRITE
+                new_issues = results.get("issues", [])
+                merged_issues = self._merge_with_existing_issues(project, new_issues, "deep_analysis")
+                project.issues_found = json.dumps(merged_issues, ensure_ascii=False)
+
                 project.ideal_state = results.get("ideal_state", "")
                 project.last_analysis_id = results.get("analysis_id")
                 project.last_analysis_at = datetime.now()
