@@ -2,7 +2,7 @@
 
 **تاریخ:** 2026-02-03
 **شاخه:** `claude/update-system-report-izMLQ`
-**وضعیت:** به‌روز شده با انطباق گزارش قدیمی و ادغام تغییرات جدید
+**وضعیت:** به‌روز شده - نسخه 2.1 (اصلاحات کامل + زمان‌بندی پس‌زمینه)
 
 ---
 
@@ -35,10 +35,10 @@
 
 | وضعیت | تعداد | توضیح |
 |-------|-------|--------|
-| ✅ رفع شده | 12 | مشکلات اصلی |
-| ⚠️ نیاز به بهبود | 8 | موارد ناقص |
-| 🔴 باقیمانده | 5 | مشکلات |
-| 🆕 قابلیت جدید | 6 | پیاده‌سازی شده |
+| ✅ رفع شده | 18 | مشکلات اصلی + موارد ناقص |
+| ⚠️ نیاز به بهبود | 5 | موارد UI و Frontend |
+| 🔴 باقیمانده | 2 | مشکلات جزئی |
+| 🆕 قابلیت جدید | 10 | پیاده‌سازی شده |
 
 ---
 
@@ -396,6 +396,71 @@ class ProjectLockManager:
 | Quick Approval | quick_approval_service.py | 827 |
 | Pre-Execution Validation | quick_approval_service.py | داخل سرویس |
 | UI تایید سریع | projects/[id]/page.tsx | +513 |
+| **🆕 Source Tracking** | project_memory.py | ردیابی منبع فیلدها |
+| **🆕 Error Logging** | logging_utils.py | لاگ‌های کامل با traceback |
+| **🆕 Background Scheduler** | background_scheduler.py | 6 نوع تریگر |
+| **🆕 Technology Extraction** | orchestrator.py | استخراج تکنولوژی‌ها |
+| **🆕 Performance History** | smart_orchestrator.py | ذخیره تاریخچه عملکرد |
+
+### 🆕 سیستم زمان‌بندی پس‌زمینه (Background Scheduler)
+
+**فایل:** `backend/app/services/background_scheduler.py`
+
+#### ۶ نوع تریگر پیاده‌سازی شده
+
+| # | نوع تریگر | توضیح | بازه پیش‌فرض |
+|---|-----------|--------|--------------|
+| ۱ | Auto Security Transfer | انتقال خودکار یافته‌های امنیتی به ایرادات | هر 60 دقیقه |
+| ۲ | Auto Test Coverage Transfer | انتقال مشکلات پوشش تست | هر 60 دقیقه |
+| ۳ | Auto Health Analysis | اجرای خودکار تحلیل سلامت | هر 120 دقیقه |
+| ۴ | Auto Engineering Report | اجرای خودکار گزارش مهندسی | هر 240 دقیقه |
+| ۵ | Auto Archive Old Issues | بایگانی خودکار ایرادات قدیمی | هر 1440 دقیقه (روزانه) |
+| ۶ | Auto Render Log Sync | همگام‌سازی لاگ‌های Render | هر 30 دقیقه |
+
+#### تنظیمات جدید دیتابیس (RenderLogSettings)
+
+```python
+# ستون‌های جدید برای هر تریگر
+auto_security_transfer_enabled: Boolean
+auto_security_transfer_interval_minutes: Integer
+auto_security_transfer_last_run: DateTime
+
+auto_test_coverage_transfer_enabled: Boolean
+auto_test_coverage_transfer_interval_minutes: Integer
+auto_test_coverage_transfer_last_run: DateTime
+
+# و مشابه برای سایر تریگرها...
+```
+
+### 🆕 ردیابی منبع فیلدها (Source Tracking)
+
+فیلدهای جدید برای هر فیلد پویا:
+
+| فیلد | توضیح |
+|------|--------|
+| `source` | منبع ایجاد: `ai_chat` یا `feature_request` |
+| `source_prompt` | متن درخواست کاربر (300 کاراکتر اول) |
+| `created_via` | روش ایجاد: "پرسش از AI" یا "دکمه قابلیت جدید" |
+
+### 🆕 سیستم لاگ‌گیری پیشرفته
+
+**فایل:** `backend/app/core/logging_utils.py`
+
+```python
+def log_critical_error(context: str, exception: Exception, extra_data: Dict = None):
+    """لاگ خطای بحرانی با traceback کامل"""
+    full_traceback = traceback.format_exc()
+    logger.error(f"""
+    ╔══════════════════════════════════════════════════════════════════╗
+    ║            🔴 CRITICAL ERROR: {context}                          ║
+    ╠══════════════════════════════════════════════════════════════════╣
+    ║ Exception: {type(exception).__name__}
+    ║ Message: {str(exception)}
+    ║ Full Traceback:
+    {full_traceback}
+    ╚══════════════════════════════════════════════════════════════════╝
+    """)
+```
 
 ### جریان داده جدید
 
@@ -656,21 +721,27 @@ class ProjectLockManager:
 
 | وضعیت | تعداد | درصد |
 |-------|-------|------|
-| ✅ رفع شده | 12 | 48% |
-| ⚠️ نیاز به بهبود | 8 | 32% |
-| 🔴 باقیمانده | 5 | 20% |
+| ✅ رفع شده | 18 | 72% |
+| ⚠️ نیاز به بهبود | 5 | 20% |
+| 🔴 باقیمانده | 2 | 8% |
 | **کل** | **25** | **100%** |
 
 ### فایل‌های کلیدی تغییر یافته
 
-| فایل | نوع تغییر | خطوط |
+| فایل | نوع تغییر | توضیح |
 |------|----------|------|
 | backend/app/api/routes/project_health.py | ویرایش | MERGE logic |
-| backend/app/api/routes/project_memory.py | ویرایش | +370 |
+| backend/app/api/routes/project_memory.py | ویرایش | +370 + source tracking |
+| backend/app/api/routes/project_structure.py | ویرایش | رفع باگ دیاگرام خالی |
+| backend/app/api/routes/orchestrator.py | ویرایش | استخراج تکنولوژی |
 | backend/app/services/deep_analysis_service.py | ویرایش | MERGE + rollback |
 | backend/app/services/project_auto_setup.py | ویرایش | MERGE helpers |
-| backend/app/services/quick_approval_service.py | **جدید** | 827 |
-| backend/app/core/database.py | ویرایش | ProjectLockManager |
+| backend/app/services/quick_approval_service.py | **جدید** | 827 خط |
+| backend/app/services/background_scheduler.py | ویرایش | 6 نوع تریگر |
+| backend/app/services/smart_orchestrator.py | ویرایش | ذخیره تاریخچه عملکرد |
+| backend/app/core/database.py | ویرایش | ProjectLockManager + migrations |
+| backend/app/core/logging_utils.py | ویرایش | لاگ‌گیری پیشرفته |
+| backend/app/models/render_log.py | ویرایش | ستون‌های تریگر |
 | backend/app/models/project.py | ویرایش | +converted_field_id |
 | frontend/src/app/projects/[id]/page.tsx | ویرایش | +513 |
 
@@ -678,11 +749,16 @@ class ProjectLockManager:
 
 | Commit | توضیح |
 |--------|--------|
-| 3f4c906 | Fix data race conditions: Replace OVERWRITE with MERGE |
-| c65f3d5 | Add database safety: Lock manager, db.refresh(), db.rollback() |
-| a3abaa3 | Add POST /request-feature endpoint |
-| 2b5a960 | Add Quick Approval system + Pre-execution validation |
+| **13cc9a6** | **Fix: Complete implementation of incomplete/stub features** |
+| **fa61fb6** | **Feat: Add source tracking to fields created from AI Chat and Feature Request** |
+| **a2d90ed** | **Fix: Add comprehensive error logging for Engineering Report debugging** |
+| **e02e6e3** | **Feat: Implement complete background scheduler with all 6 trigger types** |
+| **dea2061** | **Fix: Ensure CORS headers are always present even on errors** |
+| **6f9a1e7** | **Fix: Add missing database migration and improve Quick Approval detection** |
+| 5fc9f0a | Add comprehensive system report with merged old/new analysis |
 | 8f99770 | Add frontend UI for Quick Approval and Feature Request |
+| 2b5a960 | Add Quick Approval system + Pre-execution validation |
+| a3abaa3 | Add POST /request-feature endpoint |
 
 ---
 
@@ -698,20 +774,31 @@ class ProjectLockManager:
 6. **ژورنال جامع:** ثبت تمام عملیات با 15+ نوع فعالیت
 7. **بایگانی عمومی:** حفظ تمام داده‌های حذف شده
 8. **لاگ Render:** سیستم کامل با انتقال خودکار خطاها
+9. **🆕 زمان‌بندی پس‌زمینه:** 6 نوع تریگر خودکار برای همه عملیات
+10. **🆕 ردیابی منبع فیلدها:** دانستن اینکه هر فیلد از کجا آمده
+11. **🆕 لاگ‌گیری پیشرفته:** خطاها با traceback کامل ثبت می‌شوند
+12. **🆕 استخراج تکنولوژی:** شناسایی خودکار تکنولوژی‌های پروژه
+13. **🆕 ذخیره تاریخچه عملکرد:** مدل‌ها بر اساس عملکرد واقعی انتخاب می‌شوند
 
-### ⚠️ موارد نیازمند توجه
+### ⚠️ موارد نیازمند توجه (کاهش یافته)
 
 1. بهبود UI برای محدودیت فایل‌ها
-2. بهبود کیفیت و سرعت گزارش مهندسی
-3. اضافه کردن تحلیل فرانت‌اند در تحلیل سلامت
-4. پیاده‌سازی Dry Run (پیش‌نمایش تغییرات)
-5. نمایش زنده پیشرفت پرامپت‌ها
-6. بهبود شرح و بسط ایرادات منتقل شده
-7. اصلاح رنگ فونت در نمایش فایل‌ها
-8. قابلیت باز کردن فایل‌ها در همه حالت‌های نمایش
+2. اضافه کردن تحلیل فرانت‌اند در تحلیل سلامت
+3. پیاده‌سازی Dry Run (پیش‌نمایش تغییرات)
+4. نمایش زنده پیشرفت پرامپت‌ها
+5. اصلاح رنگ فونت در نمایش فایل‌ها
+
+### 📊 خلاصه پیشرفت
+
+| معیار | قبل | بعد |
+|-------|-----|-----|
+| موارد رفع شده | 12 | 18 |
+| موارد نیازمند بهبود | 8 | 5 |
+| قابلیت‌های جدید | 6 | 10 |
+| تریگرهای زمان‌بندی فعال | 1 | 6 |
 
 ---
 
 **تاریخ به‌روزرسانی:** 2026-02-03
-**نسخه گزارش:** 2.0 (ادغام شده)
+**نسخه گزارش:** 2.1 (اصلاحات کامل + زمان‌بندی پس‌زمینه)
 **شاخه:** `claude/update-system-report-izMLQ`
