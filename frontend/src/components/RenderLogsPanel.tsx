@@ -71,6 +71,10 @@ interface LogStats {
   by_service: { service_id: string; service_name: string; count: number }[];
   error_count: number;
   warning_count: number;
+  // 🆕 آمار پس از دیپلوی
+  since_deploy?: boolean;
+  historical_error_count?: number;
+  deploy_info?: Record<string, string | null>;
 }
 
 interface LogArchive {
@@ -1139,32 +1143,57 @@ export default function RenderLogsPanel() {
       )}
 
       {activeTab === 'stats' && stats && (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           {/* کل لاگ‌ها */}
           <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow">
             <div className="text-3xl font-bold text-blue-500">{stats.total_logs}</div>
-            <div className="text-gray-500">کل لاگ‌ها (24 ساعت)</div>
+            <div className="text-gray-500 text-sm">
+              {stats.since_deploy ? 'کل لاگ‌ها (از آخرین دیپلوی)' : 'کل لاگ‌ها (24 ساعت)'}
+            </div>
           </div>
 
-          {/* خطاها */}
+          {/* خطاهای جدید (پس از دیپلوی) */}
           <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow">
             <div className="text-3xl font-bold text-red-500">{stats.error_count}</div>
-            <div className="text-gray-500">خطاها</div>
+            <div className="text-gray-500 text-sm">
+              {stats.since_deploy ? '🔴 خطاهای جدید' : 'خطاها'}
+            </div>
+            {stats.since_deploy && (
+              <div className="text-xs text-green-600 mt-1">پس از آخرین دیپلوی</div>
+            )}
           </div>
+
+          {/* خطاهای تاریخی (قبل از دیپلوی) */}
+          {stats.since_deploy && stats.historical_error_count !== undefined && (
+            <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow border border-gray-200 dark:border-gray-700">
+              <div className="text-3xl font-bold text-gray-400">{stats.historical_error_count}</div>
+              <div className="text-gray-500 text-sm">📦 خطاهای تاریخی</div>
+              <div className="text-xs text-gray-400 mt-1">قبل از آخرین دیپلوی</div>
+            </div>
+          )}
 
           {/* هشدارها */}
           <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow">
             <div className="text-3xl font-bold text-yellow-500">{stats.warning_count}</div>
-            <div className="text-gray-500">هشدارها</div>
+            <div className="text-gray-500 text-sm">
+              {stats.since_deploy ? 'هشدارهای جدید' : 'هشدارها'}
+            </div>
           </div>
 
           {/* بر اساس سرویس */}
           <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow col-span-full">
-            <h3 className="font-bold mb-4">لاگ‌ها بر اساس سرویس</h3>
+            <h3 className="font-bold mb-4">لاگ‌ها بر اساس سرویس {stats.since_deploy && <span className="text-sm font-normal text-gray-500">(از آخرین دیپلوی)</span>}</h3>
             <div className="space-y-2">
               {stats.by_service.map(s => (
                 <div key={s.service_id} className="flex justify-between items-center">
-                  <span>{s.service_name || s.service_id}</span>
+                  <div>
+                    <span>{s.service_name || s.service_id}</span>
+                    {stats.deploy_info?.[s.service_id] && (
+                      <span className="text-xs text-gray-400 mr-2">
+                        (دیپلوی: {new Date(stats.deploy_info[s.service_id]!).toLocaleString('fa-IR')})
+                      </span>
+                    )}
+                  </div>
                   <span className="bg-blue-100 dark:bg-blue-900 px-3 py-1 rounded">
                     {s.count}
                   </span>

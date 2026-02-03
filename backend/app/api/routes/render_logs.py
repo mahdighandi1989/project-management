@@ -1161,35 +1161,91 @@ async def archive_stale_issues_after_deploy(
 @router.get("/stats")
 async def get_log_stats(
     hours: int = 24,
+    since_deploy: bool = True,  # 🆕 پیش‌فرض: فقط لاگ‌های بعد از آخرین دیپلوی
     db: Session = Depends(get_db)
 ):
-    """آمار لاگ‌ها"""
-    cutoff = datetime.utcnow() - timedelta(hours=hours)
+    """
+    آمار لاگ‌ها
+
+    Args:
+        hours: بازه زمانی (ساعت) - فقط در حالت since_deploy=False استفاده می‌شود
+        since_deploy: اگر True باشد، فقط لاگ‌های بعد از آخرین دیپلوی هر سرویس شمرده می‌شوند
+    """
+    from sqlalchemy import func, or_, and_
+
+    # 🆕 دریافت آخرین deploy_at هر سرویس
+    services = db.query(RenderService).all()
+    service_deploy_times = {s.service_id: s.last_deploy_at for s in services if s.last_deploy_at}
+
+    # Base query
+    if since_deploy and service_deploy_times:
+        # 🆕 فیلتر بر اساس آخرین دیپلوی هر سرویس
+        # لاگ‌هایی که timestamp آنها بعد از last_deploy_at سرویس مربوطه است
+        conditions = []
+        for service_id, deploy_time in service_deploy_times.items():
+            conditions.append(
+                and_(
+                    RenderLog.service_id == service_id,
+                    RenderLog.timestamp >= deploy_time
+                )
+            )
+        # اگر سرویسی last_deploy_at نداشته باشد، لاگ‌های 24 ساعت اخیر آن را بگیر
+        services_without_deploy = [s.service_id for s in services if not s.last_deploy_at]
+        if services_without_deploy:
+            fallback_cutoff = datetime.utcnow() - timedelta(hours=24)
+            conditions.append(
+                and_(
+                    RenderLog.service_id.in_(services_without_deploy),
+                    RenderLog.timestamp >= fallback_cutoff
+                )
+            )
+
+        if conditions:
+            base_filter = or_(*conditions)
+        else:
+            base_filter = RenderLog.timestamp >= (datetime.utcnow() - timedelta(hours=24))
+    else:
+        # حالت قدیمی: بر اساس hours
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        base_filter = RenderLog.timestamp >= cutoff
 
     # تعداد کل
-    total = db.query(RenderLog).filter(RenderLog.timestamp >= cutoff).count()
+    total = db.query(RenderLog).filter(base_filter).count()
 
     # تعداد بر اساس سطح
-    from sqlalchemy import func
     level_counts = db.query(
         RenderLog.level,
         func.count(RenderLog.id)
-    ).filter(
-        RenderLog.timestamp >= cutoff
-    ).group_by(RenderLog.level).all()
+    ).filter(base_filter).group_by(RenderLog.level).all()
 
     # تعداد بر اساس سرویس
     service_counts = db.query(
         RenderLog.service_id,
         RenderLog.service_name,
         func.count(RenderLog.id)
-    ).filter(
-        RenderLog.timestamp >= cutoff
-    ).group_by(RenderLog.service_id, RenderLog.service_name).all()
+    ).filter(base_filter).group_by(RenderLog.service_id, RenderLog.service_name).all()
+
+    # 🆕 آمار تاریخی (قبل از دیپلوی) - فقط برای نمایش
+    historical_error_count = 0
+    if since_deploy and service_deploy_times:
+        historical_conditions = []
+        for service_id, deploy_time in service_deploy_times.items():
+            historical_conditions.append(
+                and_(
+                    RenderLog.service_id == service_id,
+                    RenderLog.timestamp < deploy_time,
+                    RenderLog.level == "error"
+                )
+            )
+        if historical_conditions:
+            historical_error_count = db.query(RenderLog).filter(
+                or_(*historical_conditions)
+            ).count()
 
     return {
         "success": True,
-        "period_hours": hours,
+        "period_hours": hours if not since_deploy else None,
+        "since_deploy": since_deploy,
         "total_logs": total,
         "by_level": {level: count for level, count in level_counts},
         "by_service": [
@@ -1197,7 +1253,13 @@ async def get_log_stats(
             for sid, sname, count in service_counts
         ],
         "error_count": next((c for l, c in level_counts if l == "error"), 0),
-        "warning_count": next((c for l, c in level_counts if l == "warn"), 0)
+        "warning_count": next((c for l, c in level_counts if l == "warn"), 0),
+        # 🆕 آمار تاریخی
+        "historical_error_count": historical_error_count if since_deploy else None,
+        "deploy_info": {
+            sid: dt.isoformat() if dt else None
+            for sid, dt in service_deploy_times.items()
+        } if since_deploy else None
     }
 
 

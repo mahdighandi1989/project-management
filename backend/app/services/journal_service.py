@@ -477,6 +477,246 @@ class JournalService:
             db=db
         )
 
+    # =====================================================
+    # 🆕 متدهای جدید برای لاگ کردن فعالیت‌های جزئی
+    # =====================================================
+
+    async def log_field_change(
+        self,
+        project_id: str,
+        field_name: str,
+        action: str,
+        old_value: Optional[Any] = None,
+        new_value: Optional[Any] = None,
+        details: Optional[Dict] = None,
+        db: Session = None
+    ) -> str:
+        """
+        ثبت تغییر فیلد پویا
+
+        Args:
+            project_id: شناسه پروژه
+            field_name: نام فیلد
+            action: عملیات (create, update, execute, archive, restore)
+            old_value: مقدار قبلی
+            new_value: مقدار جدید
+            details: جزئیات اضافی
+            db: Session
+        """
+        action_labels = {
+            "create": "ایجاد",
+            "update": "به‌روزرسانی",
+            "execute": "اجرا",
+            "archive": "بایگانی",
+            "restore": "بازیابی",
+            "delete": "حذف"
+        }
+        action_label = action_labels.get(action, action)
+
+        summary = f"{action_label} فیلد: {field_name}"
+
+        return await self.log_activity(
+            project_id=project_id,
+            activity_type="field_change",
+            summary=summary,
+            field_name=field_name,
+            details={
+                "action": action,
+                "field_name": field_name,
+                "old_value": str(old_value)[:200] if old_value else None,
+                "new_value": str(new_value)[:200] if new_value else None,
+                **(details or {})
+            },
+            db=db
+        )
+
+    async def log_settings_change(
+        self,
+        project_id: str,
+        settings_type: str,
+        changes: Dict[str, Any],
+        db: Session = None
+    ) -> str:
+        """
+        ثبت تغییر تنظیمات
+
+        Args:
+            project_id: شناسه پروژه (یا 'global')
+            settings_type: نوع تنظیمات (render_logs, ai_limits, sync, etc.)
+            changes: تغییرات انجام شده
+            db: Session
+        """
+        settings_labels = {
+            "render_logs": "لاگ Render",
+            "ai_limits": "محدودیت‌های AI",
+            "sync": "همگام‌سازی",
+            "auto_transfer": "انتقال خودکار",
+            "trigger": "تریگر گزارش"
+        }
+        settings_label = settings_labels.get(settings_type, settings_type)
+
+        # خلاصه تغییرات
+        change_summary = ", ".join([f"{k}: {v}" for k, v in list(changes.items())[:3]])
+        if len(changes) > 3:
+            change_summary += f" و {len(changes) - 3} مورد دیگر"
+
+        summary = f"تغییر تنظیمات {settings_label}: {change_summary}"
+
+        return await self.log_activity(
+            project_id=project_id,
+            activity_type="settings_change",
+            summary=summary,
+            details={
+                "settings_type": settings_type,
+                "changes": changes
+            },
+            db=db
+        )
+
+    async def log_user_action(
+        self,
+        project_id: str,
+        action: str,
+        target: str,
+        details: Optional[Dict] = None,
+        db: Session = None
+    ) -> str:
+        """
+        ثبت اقدام کاربر
+
+        Args:
+            project_id: شناسه پروژه
+            action: نوع اقدام (view, click, navigate, search, filter)
+            target: هدف اقدام (page, component, item)
+            details: جزئیات اضافی
+            db: Session
+        """
+        action_labels = {
+            "view": "مشاهده",
+            "click": "کلیک",
+            "navigate": "پیمایش",
+            "search": "جستجو",
+            "filter": "فیلتر"
+        }
+        action_label = action_labels.get(action, action)
+
+        summary = f"{action_label}: {target}"
+
+        return await self.log_activity(
+            project_id=project_id,
+            activity_type="user_action",
+            summary=summary,
+            details={
+                "action": action,
+                "target": target,
+                **(details or {})
+            },
+            db=db
+        )
+
+    async def log_file_operation(
+        self,
+        project_id: str,
+        operation: str,
+        file_path: str,
+        details: Optional[Dict] = None,
+        db: Session = None
+    ) -> str:
+        """
+        ثبت عملیات فایل
+
+        Args:
+            project_id: شناسه پروژه
+            operation: نوع عملیات (add, update, delete, analyze)
+            file_path: مسیر فایل
+            details: جزئیات اضافی
+            db: Session
+        """
+        operation_labels = {
+            "add": "افزودن",
+            "update": "به‌روزرسانی",
+            "delete": "حذف",
+            "analyze": "تحلیل"
+        }
+        operation_label = operation_labels.get(operation, operation)
+
+        summary = f"{operation_label} فایل: {file_path}"
+
+        return await self.log_activity(
+            project_id=project_id,
+            activity_type="file_operation",
+            summary=summary,
+            details={
+                "operation": operation,
+                "file_path": file_path,
+                **(details or {})
+            },
+            db=db
+        )
+
+    async def log_api_call(
+        self,
+        project_id: str,
+        endpoint: str,
+        method: str,
+        status: str,
+        latency_ms: int = 0,
+        details: Optional[Dict] = None,
+        db: Session = None
+    ) -> str:
+        """
+        ثبت فراخوانی API
+
+        Args:
+            project_id: شناسه پروژه
+            endpoint: آدرس endpoint
+            method: متد HTTP (GET, POST, PUT, DELETE)
+            status: وضعیت (success, error)
+            latency_ms: زمان پاسخگویی
+            details: جزئیات اضافی
+            db: Session
+        """
+        status_icon = "✅" if status == "success" else "❌"
+        summary = f"{status_icon} {method} {endpoint} ({latency_ms}ms)"
+
+        return await self.log_activity(
+            project_id=project_id,
+            activity_type="api_call",
+            summary=summary,
+            latency_ms=latency_ms,
+            success=status == "success",
+            details={
+                "endpoint": endpoint,
+                "method": method,
+                "status": status,
+                **(details or {})
+            },
+            db=db
+        )
+
+    async def log_quick(
+        self,
+        project_id: str,
+        activity_type: str,
+        message: str,
+        db: Session = None
+    ) -> str:
+        """
+        لاگ سریع برای فعالیت‌های کوچک
+
+        Args:
+            project_id: شناسه پروژه
+            activity_type: نوع فعالیت
+            message: پیام کوتاه
+            db: Session
+        """
+        return await self.log_activity(
+            project_id=project_id,
+            activity_type=activity_type,
+            summary=message,
+            db=db
+        )
+
 
 # =====================================================
 # Singleton Instance
