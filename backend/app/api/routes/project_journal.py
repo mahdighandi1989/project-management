@@ -3047,10 +3047,23 @@ async def generate_engineering_report_stream(
                     msg4_done = json.dumps({'step': step, 'message': f'✅ مرحله ۴: {status_text or "بررسی"} به‌روزرسانی شد', 'progress': 96}, ensure_ascii=False)
                     yield f"data: {msg4_done}\n\n"
                 except Exception as e:
-                    err_msg = str(e)[:100]
-                    step4_result = {'roadmap_updated': False, 'ideal_state_updated': False, 'error': err_msg}
-                    update_progress(f"⚠️ مرحله ۴: {err_msg}", 96, step)
-                    msg4_err = json.dumps({'step': step, 'message': f'⚠️ مرحله ۴: {err_msg}', 'progress': 96}, ensure_ascii=False)
+                    import traceback
+                    err_traceback = traceback.format_exc()
+                    err_msg = str(e)[:200]
+
+                    # 🔴 لاگ کامل خطای مرحله 4
+                    logger.error(f"""
+🔴 STEP 4 ERROR - Engineering Report
+Project: {project_id}
+Model: {selected_models[0] if selected_models else 'unknown'}
+Error: {err_msg}
+Full Traceback:
+{err_traceback}
+""")
+
+                    step4_result = {'roadmap_updated': False, 'ideal_state_updated': False, 'error': err_msg, 'traceback': err_traceback[-500:]}
+                    update_progress(f"⚠️ مرحله ۴: {type(e).__name__}: {err_msg[:80]}", 96, step)
+                    msg4_err = json.dumps({'step': step, 'message': f'⚠️ مرحله ۴: {type(e).__name__}: {err_msg[:80]}', 'progress': 96, 'error_type': type(e).__name__}, ensure_ascii=False)
                     yield f"data: {msg4_err}\n\n"
                 await asyncio.sleep(step_delay / 2)
 
@@ -3299,7 +3312,34 @@ async def generate_engineering_report_stream(
                     pass
 
         except Exception as e:
-            exc_msg = json.dumps({'error': str(e), 'progress': 100}, ensure_ascii=False)
+            # 🔴🔴🔴 لاگینگ کامل خطا با traceback
+            import traceback
+            full_traceback = traceback.format_exc()
+
+            # لاگ کامل برای دیباگ
+            logger.error(f"""
+╔══════════════════════════════════════════════════════════════════╗
+║            🔴 ENGINEERING REPORT STREAM ERROR 🔴                 ║
+╠══════════════════════════════════════════════════════════════════╣
+║ Project ID: {project_id}
+║ Depth: {depth}
+║ Models: {selected_models}
+║ Error Type: {type(e).__name__}
+║ Error Message: {str(e)}
+╠══════════════════════════════════════════════════════════════════╣
+║ Full Traceback:
+{full_traceback}
+╚══════════════════════════════════════════════════════════════════╝
+""")
+
+            # ارسال خطا با جزئیات بیشتر به کلاینت
+            error_detail = {
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'progress': 100,
+                'traceback_preview': full_traceback[-500:] if len(full_traceback) > 500 else full_traceback
+            }
+            exc_msg = json.dumps(error_detail, ensure_ascii=False)
             yield f"data: {exc_msg}\n\n"
 
             # 🔴 علامت‌گذاری اجرا به عنوان شکست‌خورده
@@ -3309,10 +3349,10 @@ async def generate_engineering_report_stream(
                     if exec_obj:
                         exec_obj.status = "failed"
                         exec_obj.completed_at = datetime.utcnow()
-                        exec_obj.current_step = f"❌ خطا: {str(e)[:100]}"
+                        exec_obj.current_step = f"❌ {type(e).__name__}: {str(e)[:150]}"
                         gen_db.commit()
-                except Exception:
-                    pass
+                except Exception as inner_e:
+                    logger.error(f"Failed to update execution status: {inner_e}")
 
         finally:
             # 🔴 بستن session
@@ -4265,20 +4305,44 @@ async def engineering_step4_update_roadmap(
         Message(role="user", content=user_prompt),
     ]
 
-    response = await ai_manager.generate(
-        model_id=model_id,
-        messages=messages,
-        max_tokens=8192,
-        temperature=0.3,
-        task_type="engineering_step4",
-        allow_fallback=True,
-    )
+    # 🔴 فراخوانی AI با error handling بهبود یافته
+    try:
+        logger.info(f"[STEP4] Calling AI model: {model_id} for project: {project_id}")
+        response = await ai_manager.generate(
+            model_id=model_id,
+            messages=messages,
+            max_tokens=8192,
+            temperature=0.3,
+            task_type="engineering_step4",
+            allow_fallback=True,
+        )
+        logger.info(f"[STEP4] AI response received, tokens: {response.tokens_used if hasattr(response, 'tokens_used') else 'N/A'}")
+    except Exception as ai_err:
+        import traceback
+        ai_traceback = traceback.format_exc()
+        logger.error(f"""
+🔴 STEP4 AI CALL FAILED
+Project: {project_id}
+Model: {model_id}
+Error: {ai_err}
+Traceback:
+{ai_traceback}
+""")
+        # برگرداندن نتیجه خطا بدون exception
+        return {
+            "roadmap_updated": False,
+            "ideal_state_updated": False,
+            "error": f"AI call failed: {str(ai_err)[:200]}",
+            "error_type": type(ai_err).__name__,
+        }
 
     # پردازش نتایج
     result_data = {}
     try:
         import re
-        content = response.content
+        content = response.content if hasattr(response, 'content') else str(response)
+        logger.info(f"[STEP4] Parsing AI response, length: {len(content) if content else 0}")
+
         match = re.search(r'```(?:json)?\s*([\s\S]*?)```', content)
         if match:
             result_data = json.loads(match.group(1).strip())
@@ -4287,9 +4351,19 @@ async def engineering_step4_update_roadmap(
             last = content.rfind('}')
             if first != -1 and last != -1:
                 result_data = json.loads(content[first:last+1])
+        logger.info(f"[STEP4] JSON parsed successfully, keys: {list(result_data.keys())[:5]}")
     except Exception as e:
-        logger.error(f"Step4 JSON parse error: {e}")
-        result_data = {"error": str(e)}
+        import traceback
+        parse_traceback = traceback.format_exc()
+        logger.error(f"""
+🔴 STEP4 JSON PARSE ERROR
+Project: {project_id}
+Error: {e}
+Content preview: {content[:500] if content else 'None'}
+Traceback:
+{parse_traceback}
+""")
+        result_data = {"error": str(e), "parse_error": True}
 
     # 🔴🔴🔴 FIX: به‌روزرسانی نقشه راه با حفظ محتوای موجود
     # قبلاً نقشه راه موجود حذف و با نقشه راه جدید جایگزین می‌شد
