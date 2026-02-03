@@ -2782,7 +2782,7 @@ async def generate_engineering_report_stream(
     async def progress_generator():
         """Generator برای ارسال پیشرفت"""
         # 🔴🔴🔴 FIX: ایجاد session جدید داخل generator
-        from ..core.database import SessionLocal
+        from ...core.database import SessionLocal  # 🔴 سه نقطه!
 
         # ایجاد session جدید برای generator
         gen_db = SessionLocal()
@@ -2793,7 +2793,7 @@ async def generate_engineering_report_stream(
             # 🔴 سعی کن PromptExecution رو import و استفاده کنی
             # اگه خطا داد (جدول/ستون نیست)، بدون انیمیشن ادامه بده
             try:
-                from ..models.system_prompt import PromptExecution as PE
+                from ...models.system_prompt import PromptExecution as PE  # 🔴 سه نقطه!
                 PromptExecution = PE
                 execution_id = f"eng_exec_{uuid.uuid4().hex[:12]}"
                 execution = PromptExecution(
