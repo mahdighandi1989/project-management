@@ -298,6 +298,75 @@ def migrate_db():
                 cursor.execute("ALTER TABLE render_log_settings ADD COLUMN auto_transfer_mode VARCHAR(20) DEFAULT 'since_deploy'")
                 logger.info("Added 'auto_transfer_mode' column to render_log_settings table")
 
+            # =====================================================
+            # 🆕 ستون‌های تریگرهای خودکار اضافی
+            # =====================================================
+
+            # تریگر تحلیل سلامت خودکار
+            if "auto_health_analysis_enabled" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN auto_health_analysis_enabled BOOLEAN DEFAULT 0")
+                logger.info("Added 'auto_health_analysis_enabled' column to render_log_settings table")
+
+            if "auto_health_analysis_interval_minutes" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN auto_health_analysis_interval_minutes INTEGER DEFAULT 60")
+                logger.info("Added 'auto_health_analysis_interval_minutes' column to render_log_settings table")
+
+            if "last_auto_health_analysis" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN last_auto_health_analysis DATETIME")
+                logger.info("Added 'last_auto_health_analysis' column to render_log_settings table")
+
+            # تریگر فیلدهای پویا
+            if "auto_dynamic_fields_trigger_enabled" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN auto_dynamic_fields_trigger_enabled BOOLEAN DEFAULT 0")
+                logger.info("Added 'auto_dynamic_fields_trigger_enabled' column to render_log_settings table")
+
+            if "auto_dynamic_fields_trigger_interval_minutes" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN auto_dynamic_fields_trigger_interval_minutes INTEGER DEFAULT 120")
+                logger.info("Added 'auto_dynamic_fields_trigger_interval_minutes' column to render_log_settings table")
+
+            if "last_auto_dynamic_fields_trigger" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN last_auto_dynamic_fields_trigger DATETIME")
+                logger.info("Added 'last_auto_dynamic_fields_trigger' column to render_log_settings table")
+
+            # تریگر انتقال یافته‌های امنیتی
+            if "auto_security_transfer_enabled" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN auto_security_transfer_enabled BOOLEAN DEFAULT 0")
+                logger.info("Added 'auto_security_transfer_enabled' column to render_log_settings table")
+
+            if "auto_security_transfer_interval_minutes" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN auto_security_transfer_interval_minutes INTEGER DEFAULT 60")
+                logger.info("Added 'auto_security_transfer_interval_minutes' column to render_log_settings table")
+
+            if "last_auto_security_transfer" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN last_auto_security_transfer DATETIME")
+                logger.info("Added 'last_auto_security_transfer' column to render_log_settings table")
+
+            # تریگر انتقال پوشش تست
+            if "auto_test_coverage_transfer_enabled" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN auto_test_coverage_transfer_enabled BOOLEAN DEFAULT 0")
+                logger.info("Added 'auto_test_coverage_transfer_enabled' column to render_log_settings table")
+
+            if "auto_test_coverage_transfer_interval_minutes" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN auto_test_coverage_transfer_interval_minutes INTEGER DEFAULT 60")
+                logger.info("Added 'auto_test_coverage_transfer_interval_minutes' column to render_log_settings table")
+
+            if "last_auto_test_coverage_transfer" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN last_auto_test_coverage_transfer DATETIME")
+                logger.info("Added 'last_auto_test_coverage_transfer' column to render_log_settings table")
+
+            # تریگر گزارش مهندسی خودکار
+            if "auto_engineering_report_enabled" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN auto_engineering_report_enabled BOOLEAN DEFAULT 0")
+                logger.info("Added 'auto_engineering_report_enabled' column to render_log_settings table")
+
+            if "auto_engineering_report_interval_minutes" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN auto_engineering_report_interval_minutes INTEGER DEFAULT 180")
+                logger.info("Added 'auto_engineering_report_interval_minutes' column to render_log_settings table")
+
+            if "last_auto_engineering_report" not in existing_cols:
+                cursor.execute("ALTER TABLE render_log_settings ADD COLUMN last_auto_engineering_report DATETIME")
+                logger.info("Added 'last_auto_engineering_report' column to render_log_settings table")
+
         # Migration برای render_services - ستون‌های دیپلوی
         if "render_services" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
             existing_cols = get_columns("render_services")

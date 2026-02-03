@@ -95,6 +95,35 @@ class RenderLogSettings(Base):
     auto_transfer_mode = Column(String(20), default="since_deploy")
     last_auto_transfer = Column(DateTime)  # آخرین زمان انتقال خودکار
 
+    # =====================================================
+    # 🆕 تنظیمات تریگرهای خودکار اضافی
+    # =====================================================
+
+    # تریگر تحلیل سلامت خودکار
+    auto_health_analysis_enabled = Column(Boolean, default=False)
+    auto_health_analysis_interval_minutes = Column(Integer, default=60)  # هر چند دقیقه
+    last_auto_health_analysis = Column(DateTime)  # آخرین اجرا
+
+    # تریگر فیلدهای پویا (sync شدن از طریق AI)
+    auto_dynamic_fields_trigger_enabled = Column(Boolean, default=False)
+    auto_dynamic_fields_trigger_interval_minutes = Column(Integer, default=120)  # هر 2 ساعت
+    last_auto_dynamic_fields_trigger = Column(DateTime)
+
+    # تریگر انتقال یافته‌های امنیتی به ایرادات
+    auto_security_transfer_enabled = Column(Boolean, default=False)
+    auto_security_transfer_interval_minutes = Column(Integer, default=60)
+    last_auto_security_transfer = Column(DateTime)
+
+    # تریگر انتقال پوشش تست به ایرادات
+    auto_test_coverage_transfer_enabled = Column(Boolean, default=False)
+    auto_test_coverage_transfer_interval_minutes = Column(Integer, default=60)
+    last_auto_test_coverage_transfer = Column(DateTime)
+
+    # تریگر گزارش مهندسی خودکار
+    auto_engineering_report_enabled = Column(Boolean, default=False)
+    auto_engineering_report_interval_minutes = Column(Integer, default=180)  # هر 3 ساعت
+    last_auto_engineering_report = Column(DateTime)
+
     # آخرین بروزرسانی
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
