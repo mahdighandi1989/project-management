@@ -5813,6 +5813,44 @@ export default function ProjectDetailPage() {
                             </div>
                           )}
 
+                          {/* 🆕 Fallback: اگر هیچ بخش ساختاریافته‌ای نبود، محتوا را به شکل خوانا نمایش بده */}
+                          {!parsed.executive_summary && !parsed.project_health && !parsed.bugs_and_issues?.length && !parsed.recommendations?.length && !parsed.technical_analysis && !parsed.health_analysis_validation && (
+                            <div className="p-4 bg-gray-50 dark:bg-gray-800 rounded-lg border dark:border-gray-700">
+                              <h4 className="font-bold text-gray-700 dark:text-gray-300 mb-3 flex items-center gap-2">
+                                <span>📋</span> محتوای گزارش
+                              </h4>
+                              <div className="space-y-2">
+                                {Object.entries(parsed).filter(([key, value]) =>
+                                  value && typeof value !== 'function' && key !== 'raw_content_backup' && key !== 'parse_recovered'
+                                ).map(([key, value]) => (
+                                  <div key={key} className="border-b border-gray-200 dark:border-gray-600 pb-2 last:border-0">
+                                    <div className="text-xs font-medium text-gray-500 mb-1">{key.replace(/_/g, ' ')}:</div>
+                                    <div className="text-sm text-gray-700 dark:text-gray-300">
+                                      {typeof value === 'string' ? (
+                                        <p className="whitespace-pre-wrap">{value}</p>
+                                      ) : typeof value === 'number' ? (
+                                        <span className="font-bold">{value}</span>
+                                      ) : Array.isArray(value) ? (
+                                        <ul className="list-disc list-inside">
+                                          {value.slice(0, 10).map((item, idx) => (
+                                            <li key={idx}>{typeof item === 'string' ? item : JSON.stringify(item)}</li>
+                                          ))}
+                                          {value.length > 10 && <li className="text-gray-400">... و {value.length - 10} مورد دیگر</li>}
+                                        </ul>
+                                      ) : typeof value === 'object' ? (
+                                        <pre className="text-xs bg-gray-100 dark:bg-gray-700 p-2 rounded overflow-auto max-h-24">
+                                          {JSON.stringify(value, null, 2)}
+                                        </pre>
+                                      ) : (
+                                        String(value)
+                                      )}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
                           {/* نمایش محتوای خام در صورت نیاز */}
                           <details className="text-xs">
                             <summary className="cursor-pointer text-gray-500 hover:text-gray-700">📄 نمایش JSON خام</summary>

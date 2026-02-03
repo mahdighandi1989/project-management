@@ -80,6 +80,128 @@ class HealthToIssuesService:
 
         return None
 
+    def _create_readable_fallback(self, issue_type: str, raw_content: Dict) -> Dict[str, str]:
+        """
+        ایجاد توضیحات خوانا برای زمانی که AI در دسترس نیست
+        به جای JSON خام، متن قابل فهم برای کاربر تولید می‌کند
+        """
+        title = raw_content.get("title", "")
+        finding_type = raw_content.get("type", "")
+        data = raw_content.get("data", {})
+
+        # تعیین عنوان بر اساس نوع
+        if not title:
+            if finding_type == "security_summary":
+                title = "خلاصه وضعیت امنیتی پروژه"
+            elif finding_type == "secret_exposure":
+                title = "احتمال افشای اطلاعات محرمانه"
+            elif finding_type == "vulnerability":
+                title = "آسیب‌پذیری امنیتی شناسایی شده"
+            elif finding_type == "dependency":
+                title = "مشکل در وابستگی‌ها"
+            elif finding_type == "license":
+                title = "مشکل لایسنس پروژه"
+            elif finding_type == "test_gap":
+                title = "نقص در پوشش تست"
+            elif finding_type == "missing_test":
+                title = "فایل بدون تست"
+            else:
+                title = f"یافته {issue_type}"
+
+        # ساخت توضیحات خوانا
+        description_parts = []
+
+        if issue_type == "security":
+            if finding_type == "security_summary":
+                total = data.get("total_issues", 0)
+                high = data.get("high_severity", 0)
+                medium = data.get("medium_severity", 0)
+                low = data.get("low_severity", 0)
+                description_parts.append(f"تعداد کل مشکلات امنیتی: {total}")
+                if high:
+                    description_parts.append(f"🔴 بحرانی: {high}")
+                if medium:
+                    description_parts.append(f"🟡 متوسط: {medium}")
+                if low:
+                    description_parts.append(f"🟢 کم‌اهمیت: {low}")
+            elif finding_type == "secret_exposure":
+                file_path = data.get("file", data.get("file_path", "نامشخص"))
+                secret_type = data.get("secret_type", "نامشخص")
+                description_parts.append(f"فایل: {file_path}")
+                description_parts.append(f"نوع: {secret_type}")
+                description_parts.append("⚠️ اطلاعات محرمانه ممکن است در کد منبع افشا شده باشد")
+            elif finding_type == "vulnerability":
+                vuln_type = data.get("vulnerability_type", data.get("type", "نامشخص"))
+                file_path = data.get("file", data.get("file_path", "نامشخص"))
+                description_parts.append(f"نوع آسیب‌پذیری: {vuln_type}")
+                description_parts.append(f"فایل: {file_path}")
+            elif finding_type == "dependency":
+                name = data.get("name", data.get("package", "نامشخص"))
+                version = data.get("version", "نامشخص")
+                issue = data.get("issue", data.get("problem", "مشکل نامشخص"))
+                description_parts.append(f"پکیج: {name}")
+                description_parts.append(f"نسخه: {version}")
+                description_parts.append(f"مشکل: {issue}")
+            elif finding_type == "license":
+                description_parts.append("پروژه فاقد فایل لایسنس است")
+                description_parts.append("توصیه: یک فایل LICENSE به پروژه اضافه کنید")
+            else:
+                # برای سایر انواع امنیتی
+                for key, value in data.items():
+                    if value and not key.startswith("_"):
+                        description_parts.append(f"{key}: {value}")
+
+        elif issue_type == "test_coverage":
+            if finding_type == "test_gap" or finding_type == "missing_test":
+                file_path = data.get("file", data.get("file_path", "نامشخص"))
+                reason = data.get("reason", data.get("message", ""))
+                description_parts.append(f"فایل: {file_path}")
+                if reason:
+                    description_parts.append(f"دلیل: {reason}")
+                description_parts.append("این فایل نیاز به تست دارد")
+            else:
+                coverage = data.get("coverage", data.get("percentage", "نامشخص"))
+                description_parts.append(f"پوشش تست: {coverage}%")
+                uncovered = data.get("uncovered_files", [])
+                if uncovered:
+                    description_parts.append(f"فایل‌های بدون تست: {len(uncovered)} فایل")
+        else:
+            # حالت عمومی
+            message = raw_content.get("message", "")
+            if message:
+                description_parts.append(message)
+            else:
+                for key, value in data.items():
+                    if value and not key.startswith("_"):
+                        if isinstance(value, (list, dict)):
+                            value = str(value)[:100]
+                        description_parts.append(f"{key}: {value}")
+
+        description = "\n".join(description_parts) if description_parts else "نیاز به بررسی دستی"
+
+        # تعیین راه‌حل پیش‌فرض
+        if issue_type == "security":
+            solution = "بررسی کد منبع و رفع مشکلات امنیتی شناسایی شده"
+        elif issue_type == "test_coverage":
+            solution = "نوشتن تست‌های مناسب برای پوشش کد"
+        else:
+            solution = "نیاز به بررسی دستی"
+
+        # تعیین اولویت
+        priority = "medium"
+        if finding_type in ["secret_exposure", "vulnerability"]:
+            priority = "high"
+        elif finding_type == "security_summary":
+            high_sev = data.get("high_severity", 0)
+            priority = "high" if high_sev > 0 else "medium"
+
+        return {
+            "title": title[:200],
+            "description": description,
+            "solution": solution,
+            "priority": priority
+        }
+
     async def _enhance_with_ai(
         self,
         issue_type: str,
@@ -99,13 +221,8 @@ class HealthToIssuesService:
         """
         model_id = await self._get_best_model()
         if not model_id:
-            # اگر مدلی نبود، خروجی ساده
-            return {
-                "title": raw_content.get("title", "یافته جدید"),
-                "description": json.dumps(raw_content, ensure_ascii=False, indent=2),
-                "solution": "نیاز به بررسی دستی",
-                "priority": "medium"
-            }
+            # اگر مدلی نبود، خروجی خوانا بساز
+            return self._create_readable_fallback(issue_type, raw_content)
 
         ai_manager = self._get_ai_manager()
 
@@ -389,10 +506,11 @@ class HealthToIssuesService:
                 slog.error(f"[DEBUG] Error processing security finding: {str(e)}", exception=e)
                 errors.append(str(e))
 
-                # Fallback: اضافه کردن یافته بدون AI enhancement
+                # Fallback: اضافه کردن یافته بدون AI enhancement - با فرمت خوانا
                 try:
-                    fallback_title = finding.get("message", finding.get("type", "یافته امنیتی"))[:200]
-                    fallback_desc = json.dumps(finding, ensure_ascii=False, indent=2)
+                    fallback = self._create_readable_fallback("security", finding)
+                    fallback_title = fallback["title"]
+                    fallback_desc = fallback["description"]
 
                     existing = self._find_similar_issue(
                         db, project_id, fallback_title, "security_scan"
@@ -407,8 +525,8 @@ class HealthToIssuesService:
                             project_id=project_id,
                             title=fallback_title,
                             description=fallback_desc,
-                            solution="نیاز به بررسی دستی",
-                            priority=self._priority_to_order(finding.get("severity", "medium")),
+                            solution=fallback.get("solution", "نیاز به بررسی دستی"),
+                            priority=self._priority_to_order(fallback.get("priority", "medium")),
                             status="open",
                             source="security_scan",
                             source_data=json.dumps(finding, ensure_ascii=False),
@@ -417,7 +535,7 @@ class HealthToIssuesService:
                         )
                         db.add(new_issue)
                         transferred += 1
-                        slog.info(f"[DEBUG] Fallback: added finding without AI enhancement")
+                        slog.info(f"[DEBUG] Fallback: added finding with readable format")
                 except Exception as e2:
                     slog.error(f"[DEBUG] Fallback also failed: {str(e2)}")
 
@@ -568,17 +686,11 @@ class HealthToIssuesService:
                 slog.error(f"[DEBUG] Error processing test coverage finding: {str(e)}", exception=e)
                 errors.append(str(e))
 
-                # Fallback: اضافه کردن یافته بدون AI enhancement
+                # Fallback: اضافه کردن یافته بدون AI enhancement - با فرمت خوانا
                 try:
-                    finding_type = finding.get("type", "untested_file")
-                    if finding_type == "untested_file":
-                        fallback_title = f"فایل بدون تست: {finding.get('file', 'نامشخص')}"
-                    elif finding_type == "test_recommendation":
-                        fallback_title = finding.get("recommendation", "پیشنهاد تست")[:200]
-                    else:
-                        fallback_title = f"یافته پوشش تست: {finding_type}"
-
-                    fallback_desc = json.dumps(finding, ensure_ascii=False, indent=2)
+                    fallback = self._create_readable_fallback("test_coverage", finding)
+                    fallback_title = fallback["title"]
+                    fallback_desc = fallback["description"]
 
                     existing = self._find_similar_issue(
                         db, project_id, fallback_title, "test_coverage"
@@ -593,8 +705,8 @@ class HealthToIssuesService:
                             project_id=project_id,
                             title=fallback_title,
                             description=fallback_desc,
-                            solution="نیاز به نوشتن تست برای این فایل",
-                            priority=self._priority_to_order(finding.get("priority", "medium")),
+                            solution=fallback.get("solution", "نیاز به نوشتن تست برای این فایل"),
+                            priority=self._priority_to_order(fallback.get("priority", "medium")),
                             status="open",
                             source="test_coverage",
                             source_data=json.dumps(finding, ensure_ascii=False),
@@ -603,7 +715,7 @@ class HealthToIssuesService:
                         )
                         db.add(new_issue)
                         transferred += 1
-                        slog.info(f"[DEBUG] Fallback: added test coverage finding without AI enhancement")
+                        slog.info(f"[DEBUG] Fallback: added test coverage finding with readable format")
                 except Exception as e2:
                     slog.error(f"[DEBUG] Fallback also failed: {str(e2)}")
 
