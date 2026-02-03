@@ -90,6 +90,39 @@ interface DynamicField {
     approved_by?: string;
     approval_type?: string;
   };
+  // 🆕 Quick Approval fields
+  needs_approval?: boolean;
+  validation_marker?: string;  // "pending" | "auto_pending" | "quick_approved" | "engineering_approved"
+  source?: string;
+  source_issue_id?: number;
+  quick_approved_at?: string;
+  approver_note?: string;
+  rejection_reason?: string;
+  rejected_at?: string;
+}
+
+// 🆕 Feature Request interface
+interface FeatureRequest {
+  title: string;
+  description: string;
+  priority: string;
+  category: string;
+  target_files?: string[];
+  ai_analyze: boolean;
+  auto_add_roadmap: boolean;
+  model_id: string;
+}
+
+// 🆕 Pending Approval interface
+interface PendingApproval {
+  id: string;
+  name: string;
+  value: string;
+  priority: number;
+  created_at: string;
+  source: string;
+  can_quick_approve: boolean;
+  needs_engineering_report?: boolean;
 }
 
 interface AIModel {
@@ -372,6 +405,34 @@ export default function ProjectDetailPage() {
   // Edit Field
   const [editingField, setEditingField] = useState<string | null>(null);
 
+  // 🆕 Quick Approval State
+  const [showQuickApprovalPanel, setShowQuickApprovalPanel] = useState(false);
+  const [pendingApprovals, setPendingApprovals] = useState<{
+    auto_pending: PendingApproval[];
+    pending: PendingApproval[];
+    total: number;
+  }>({ auto_pending: [], pending: [], total: 0 });
+  const [loadingApprovals, setLoadingApprovals] = useState(false);
+  const [approvingField, setApprovingField] = useState<string | null>(null);
+  const [rejectingField, setRejectingField] = useState<string | null>(null);
+  const [rejectionReason, setRejectionReason] = useState('');
+  const [autoConvertingIssues, setAutoConvertingIssues] = useState(false);
+
+  // 🆕 Feature Request State
+  const [showFeatureRequestForm, setShowFeatureRequestForm] = useState(false);
+  const [featureRequest, setFeatureRequest] = useState<FeatureRequest>({
+    title: '',
+    description: '',
+    priority: 'medium',
+    category: 'feature',
+    target_files: [],
+    ai_analyze: true,
+    auto_add_roadmap: true,
+    model_id: 'claude'
+  });
+  const [submittingFeatureRequest, setSubmittingFeatureRequest] = useState(false);
+  const [featureRequestResult, setFeatureRequestResult] = useState<any>(null);
+
   // AI Chat State
   const [chatPrompt, setChatPrompt] = useState('');
   const [chatResponse, setChatResponse] = useState('');
@@ -429,6 +490,7 @@ export default function ProjectDetailPage() {
       loadProject();
       loadMemory();
       loadSyncSettings();
+      loadPendingApprovals(); // 🆕 بارگذاری فیلدهای در انتظار تایید
       // 🔴 چک کردن وضعیت اجرای گروهی هنگام لود صفحه
       checkBatchStatusOnLoad();
     }
@@ -642,6 +704,153 @@ export default function ProjectDetailPage() {
       }
     } catch (e) {
       console.error('Error loading memory:', e);
+    }
+  };
+
+  // 🆕 بارگذاری فیلدهای در انتظار تایید
+  const loadPendingApprovals = async () => {
+    setLoadingApprovals(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/quick-approval/pending`);
+      if (res.ok) {
+        const data = await res.json();
+        setPendingApprovals(data);
+      }
+    } catch (e) {
+      console.error('Error loading pending approvals:', e);
+    } finally {
+      setLoadingApprovals(false);
+    }
+  };
+
+  // 🆕 تایید سریع فیلد
+  const quickApproveField = async (fieldId: string, note?: string) => {
+    setApprovingField(fieldId);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/quick-approval/approve/${fieldId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approver_note: note }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess(data.message || 'فیلد با موفقیت تایید شد');
+        loadMemory();
+        loadPendingApprovals();
+      } else {
+        showError(data.error || 'خطا در تایید فیلد');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط با سرور');
+    } finally {
+      setApprovingField(null);
+    }
+  };
+
+  // 🆕 رد کردن فیلد
+  const rejectField = async (fieldId: string, reason: string) => {
+    if (!reason.trim()) {
+      showError('لطفاً دلیل رد را وارد کنید');
+      return;
+    }
+    setRejectingField(fieldId);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/quick-approval/reject/${fieldId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rejection_reason: reason }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess(data.message || 'فیلد رد و آرشیو شد');
+        loadMemory();
+        loadPendingApprovals();
+        setRejectionReason('');
+      } else {
+        showError(data.error || 'خطا در رد فیلد');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط با سرور');
+    } finally {
+      setRejectingField(null);
+    }
+  };
+
+  // 🆕 تبدیل خودکار ایرادات بحرانی به فیلد
+  const autoConvertCriticalIssues = async () => {
+    setAutoConvertingIssues(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/quick-approval/auto-convert`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (data.success) {
+        const msg = `${data.converted} ایراد به فیلد تبدیل شد` +
+          (data.skipped_duplicate > 0 ? ` (${data.skipped_duplicate} تکراری رد شد)` : '');
+        showSuccess(msg);
+        loadMemory();
+        loadPendingApprovals();
+      } else {
+        showError(data.errors?.join(', ') || 'خطا در تبدیل');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط با سرور');
+    } finally {
+      setAutoConvertingIssues(false);
+    }
+  };
+
+  // 🆕 اعتبارسنجی قبل از اجرا
+  const preValidateField = async (fieldId: string): Promise<{can_execute: boolean; reason?: string; recommendation?: string}> => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/quick-approval/pre-validate/${fieldId}`);
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch (e) {
+      console.error('Pre-validation error:', e);
+    }
+    return { can_execute: true }; // در صورت خطا، اجازه اجرا بده
+  };
+
+  // 🆕 ارسال درخواست قابلیت جدید
+  const submitFeatureRequest = async () => {
+    if (!featureRequest.title.trim() || !featureRequest.description.trim()) {
+      showError('عنوان و توضیحات الزامی است');
+      return;
+    }
+    setSubmittingFeatureRequest(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/request-feature`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(featureRequest),
+      });
+      const data = await res.json();
+      setFeatureRequestResult(data);
+      if (data.success) {
+        showSuccess(data.message || 'درخواست قابلیت ثبت شد');
+        loadMemory();
+        // ریست فرم
+        setFeatureRequest({
+          title: '',
+          description: '',
+          priority: 'medium',
+          category: 'feature',
+          target_files: [],
+          ai_analyze: true,
+          auto_add_roadmap: true,
+          model_id: 'claude'
+        });
+      } else if (data.duplicate_warning) {
+        showError(data.duplicate_warning.message || 'قابلیت مشابه وجود دارد');
+      } else {
+        showError(data.message || 'خطا در ثبت درخواست');
+      }
+    } catch (e) {
+      showError('خطا در ارتباط با سرور');
+    } finally {
+      setSubmittingFeatureRequest(false);
     }
   };
 
@@ -1829,6 +2038,19 @@ export default function ProjectDetailPage() {
   // اجرای دستی تریگر
   const executeFieldTrigger = async (fieldId: string) => {
     setExecutingTrigger(fieldId);
+
+    // 🆕 اعتبارسنجی قبل از اجرا
+    const field = dynamicFields.find(f => f.id === fieldId);
+    if (field && (field.validation_marker === 'auto_pending' || field.source_issue_id)) {
+      const validation = await preValidateField(fieldId);
+      if (!validation.can_execute) {
+        setExecutingTrigger(null);
+        const proceed = confirm(`⚠️ هشدار اعتبارسنجی\n\n${validation.reason}\n\n📋 توصیه: ${validation.recommendation}\n\nآیا باز هم می‌خواهید اجرا کنید؟`);
+        if (!proceed) {
+          return;
+        }
+      }
+    }
 
     // فعال کردن ویژوالیزیشن workflow - نشان دادن که trigger در حال اجراست
     const triggerNodeId = `trigger_${fieldId}`;
@@ -3160,17 +3382,283 @@ export default function ProjectDetailPage() {
                 <div className="flex items-center gap-2">
                   <span className="text-2xl">📝</span>
                   <h2 className="font-bold text-lg">فیلدهای پویا</h2>
+                  {/* 🆕 نشانگر تعداد در انتظار تایید */}
+                  {pendingApprovals.total > 0 && (
+                    <span className="px-2 py-0.5 bg-amber-100 dark:bg-amber-900 text-amber-700 dark:text-amber-300 text-xs rounded-full">
+                      {pendingApprovals.total} در انتظار
+                    </span>
+                  )}
                 </div>
-                <button
-                  onClick={() => setShowNewFieldForm(true)}
-                  className="px-3 py-1 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600"
-                >
-                  + افزودن فیلد
-                </button>
+                <div className="flex gap-2">
+                  {/* 🆕 دکمه درخواست قابلیت */}
+                  <button
+                    onClick={() => setShowFeatureRequestForm(true)}
+                    className="px-3 py-1 bg-purple-500 text-white rounded-lg text-sm hover:bg-purple-600 flex items-center gap-1"
+                    title="درخواست قابلیت جدید"
+                  >
+                    ✨ قابلیت جدید
+                  </button>
+                  {/* 🆕 دکمه تایید سریع */}
+                  <button
+                    onClick={() => {
+                      loadPendingApprovals();
+                      setShowQuickApprovalPanel(!showQuickApprovalPanel);
+                    }}
+                    className={`px-3 py-1 rounded-lg text-sm flex items-center gap-1 ${
+                      showQuickApprovalPanel
+                        ? 'bg-amber-600 text-white'
+                        : 'bg-amber-100 dark:bg-amber-900 text-amber-700 dark:text-amber-300 hover:bg-amber-200'
+                    }`}
+                    title="تایید سریع فیلدها"
+                  >
+                    ⚡ تایید سریع
+                  </button>
+                  <button
+                    onClick={() => setShowNewFieldForm(true)}
+                    className="px-3 py-1 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600"
+                  >
+                    + افزودن فیلد
+                  </button>
+                </div>
               </div>
               <p className="text-sm text-gray-500 mb-4">
                 دستورات متغیر که ممکن است زود به زود تغییر کنند
               </p>
+
+              {/* 🆕 فرم درخواست قابلیت جدید */}
+              {showFeatureRequestForm && (
+                <div className="mb-4 p-4 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-800">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="font-medium flex items-center gap-2">
+                      <span>✨</span> درخواست قابلیت جدید
+                    </h3>
+                    <button
+                      onClick={() => setShowFeatureRequestForm(false)}
+                      className="text-gray-400 hover:text-gray-600"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  <input
+                    type="text"
+                    placeholder="عنوان قابلیت (مثلاً: سیستم نوتیفیکیشن)"
+                    value={featureRequest.title}
+                    onChange={(e) => setFeatureRequest({ ...featureRequest, title: e.target.value })}
+                    className="w-full p-2 border rounded mb-2 dark:bg-gray-700 dark:border-gray-600 text-sm"
+                  />
+
+                  <textarea
+                    placeholder="توضیحات کامل قابلیت..."
+                    value={featureRequest.description}
+                    onChange={(e) => setFeatureRequest({ ...featureRequest, description: e.target.value })}
+                    className="w-full p-2 border rounded mb-2 dark:bg-gray-700 dark:border-gray-600 text-sm h-24 resize-none"
+                  />
+
+                  <div className="grid grid-cols-2 gap-2 mb-3">
+                    <div>
+                      <label className="text-xs text-gray-500">اولویت:</label>
+                      <select
+                        value={featureRequest.priority}
+                        onChange={(e) => setFeatureRequest({ ...featureRequest, priority: e.target.value })}
+                        className="w-full p-2 border rounded text-sm dark:bg-gray-700 dark:border-gray-600"
+                      >
+                        <option value="critical">🔴 بحرانی</option>
+                        <option value="high">🟠 بالا</option>
+                        <option value="medium">🟡 متوسط</option>
+                        <option value="low">🟢 پایین</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500">دسته‌بندی:</label>
+                      <select
+                        value={featureRequest.category}
+                        onChange={(e) => setFeatureRequest({ ...featureRequest, category: e.target.value })}
+                        className="w-full p-2 border rounded text-sm dark:bg-gray-700 dark:border-gray-600"
+                      >
+                        <option value="feature">✨ قابلیت جدید</option>
+                        <option value="bugfix">🐛 رفع باگ</option>
+                        <option value="improvement">⚡ بهبود</option>
+                        <option value="refactor">🔧 بازنویسی</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-3 mb-3 text-sm">
+                    <label className="flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        checked={featureRequest.ai_analyze}
+                        onChange={(e) => setFeatureRequest({ ...featureRequest, ai_analyze: e.target.checked })}
+                      />
+                      🤖 تحلیل AI
+                    </label>
+                    <label className="flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        checked={featureRequest.auto_add_roadmap}
+                        onChange={(e) => setFeatureRequest({ ...featureRequest, auto_add_roadmap: e.target.checked })}
+                      />
+                      📋 اضافه به Roadmap
+                    </label>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <button
+                      onClick={submitFeatureRequest}
+                      disabled={submittingFeatureRequest}
+                      className="flex-1 px-4 py-2 bg-purple-500 text-white rounded hover:bg-purple-600 disabled:opacity-50 flex items-center justify-center gap-2"
+                    >
+                      {submittingFeatureRequest ? (
+                        <><span className="animate-spin">⏳</span> در حال ثبت...</>
+                      ) : (
+                        <><span>✨</span> ثبت درخواست</>
+                      )}
+                    </button>
+                    <button
+                      onClick={() => setShowFeatureRequestForm(false)}
+                      className="px-4 py-2 bg-gray-200 dark:bg-gray-600 rounded hover:bg-gray-300"
+                    >
+                      انصراف
+                    </button>
+                  </div>
+
+                  {featureRequestResult && (
+                    <div className={`mt-3 p-2 rounded text-sm ${
+                      featureRequestResult.success
+                        ? 'bg-green-100 dark:bg-green-900/30 text-green-700'
+                        : 'bg-red-100 dark:bg-red-900/30 text-red-700'
+                    }`}>
+                      {featureRequestResult.message}
+                      {featureRequestResult.duplicate_warning && (
+                        <div className="mt-1 text-amber-600">
+                          ⚠️ {featureRequestResult.duplicate_warning.message}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 🆕 پنل تایید سریع */}
+              {showQuickApprovalPanel && (
+                <div className="mb-4 p-4 bg-amber-50 dark:bg-amber-900/20 rounded-lg border border-amber-200 dark:border-amber-800">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="font-medium flex items-center gap-2">
+                      <span>⚡</span> تایید سریع فیلدها
+                      <button
+                        onClick={autoConvertCriticalIssues}
+                        disabled={autoConvertingIssues}
+                        className="px-2 py-1 bg-orange-500 text-white rounded text-xs hover:bg-orange-600 disabled:opacity-50"
+                        title="تبدیل خودکار ایرادات بحرانی به فیلد"
+                      >
+                        {autoConvertingIssues ? '⏳' : '🔄'} تبدیل ایرادات
+                      </button>
+                    </h3>
+                    <button
+                      onClick={() => setShowQuickApprovalPanel(false)}
+                      className="text-gray-400 hover:text-gray-600"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  {loadingApprovals ? (
+                    <div className="text-center py-4 text-gray-500">
+                      <span className="animate-spin inline-block">⏳</span> در حال بارگذاری...
+                    </div>
+                  ) : pendingApprovals.total === 0 ? (
+                    <div className="text-center py-4 text-gray-500">
+                      ✅ هیچ فیلدی در انتظار تایید نیست
+                    </div>
+                  ) : (
+                    <div className="space-y-2 max-h-64 overflow-y-auto">
+                      {/* فیلدهای auto_pending - قابل تایید سریع */}
+                      {pendingApprovals.auto_pending.map((field) => (
+                        <div
+                          key={field.id}
+                          className="p-3 bg-white dark:bg-gray-700 rounded border border-amber-200 dark:border-amber-700"
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex-1">
+                              <div className="flex items-center gap-2">
+                                <span className="text-amber-500">⚡</span>
+                                <span className="font-medium text-sm">{field.name}</span>
+                                <span className="px-1.5 py-0.5 bg-amber-100 dark:bg-amber-800 text-amber-700 dark:text-amber-300 text-xs rounded">
+                                  قابل تایید سریع
+                                </span>
+                              </div>
+                              <p className="text-xs text-gray-500 mt-1 line-clamp-2">{field.value}</p>
+                            </div>
+                            <div className="flex gap-1 mr-2">
+                              <button
+                                onClick={() => quickApproveField(field.id)}
+                                disabled={approvingField === field.id}
+                                className="px-2 py-1 bg-green-500 text-white rounded text-xs hover:bg-green-600 disabled:opacity-50"
+                                title="تایید"
+                              >
+                                {approvingField === field.id ? '⏳' : '✅'}
+                              </button>
+                              <button
+                                onClick={() => setRejectingField(field.id)}
+                                className="px-2 py-1 bg-red-500 text-white rounded text-xs hover:bg-red-600"
+                                title="رد"
+                              >
+                                ❌
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* فرم رد */}
+                          {rejectingField === field.id && (
+                            <div className="mt-2 flex gap-2">
+                              <input
+                                type="text"
+                                placeholder="دلیل رد..."
+                                value={rejectionReason}
+                                onChange={(e) => setRejectionReason(e.target.value)}
+                                className="flex-1 p-1 border rounded text-xs dark:bg-gray-600 dark:border-gray-500"
+                              />
+                              <button
+                                onClick={() => rejectField(field.id, rejectionReason)}
+                                className="px-2 py-1 bg-red-500 text-white rounded text-xs"
+                              >
+                                تایید رد
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setRejectingField(null);
+                                  setRejectionReason('');
+                                }}
+                                className="px-2 py-1 bg-gray-300 rounded text-xs"
+                              >
+                                انصراف
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+
+                      {/* فیلدهای pending - نیاز به Engineering Report */}
+                      {pendingApprovals.pending.map((field) => (
+                        <div
+                          key={field.id}
+                          className="p-3 bg-white dark:bg-gray-700 rounded border border-gray-200 dark:border-gray-600 opacity-75"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="text-gray-400">⏳</span>
+                            <span className="font-medium text-sm">{field.name}</span>
+                            <span className="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-600 text-gray-600 dark:text-gray-300 text-xs rounded">
+                              نیاز به گزارش مهندسی
+                            </span>
+                          </div>
+                          <p className="text-xs text-gray-500 mt-1 line-clamp-2">{field.value}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* فرم افزودن فیلد جدید */}
               {showNewFieldForm && (
@@ -3736,12 +4224,27 @@ export default function ProjectDetailPage() {
                                   📦 بایگانی
                                 </span>
                               )}
-                              {/* نشانگر تاییدیه گزارش مهندسی */}
-                              {field.engineering_approval?.approved ? (
-                                <span className="px-2 py-0.5 bg-emerald-100 dark:bg-emerald-900 text-emerald-700 dark:text-emerald-300 text-xs rounded" title={`تایید شده توسط ${field.engineering_approval.approved_by || 'AI'} در ${field.engineering_approval.approved_at || ''}`}>
+                              {/* نشانگر تاییدیه - با پشتیبانی از Quick Approval */}
+                              {field.validation_marker === 'engineering_approved' || field.engineering_approval?.approved ? (
+                                <span className="px-2 py-0.5 bg-emerald-100 dark:bg-emerald-900 text-emerald-700 dark:text-emerald-300 text-xs rounded" title={`تایید شده توسط ${field.engineering_approval?.approved_by || 'AI'} در ${field.engineering_approval?.approved_at || ''}`}>
                                   ✅ تایید مهندسی
                                 </span>
-                              ) : field.action_type && field.action_type !== 'display' && !field.archived ? (
+                              ) : field.validation_marker === 'quick_approved' ? (
+                                <span className="px-2 py-0.5 bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 text-xs rounded" title={`تایید سریع در ${field.quick_approved_at || ''}`}>
+                                  ⚡ تایید سریع
+                                </span>
+                              ) : field.validation_marker === 'auto_pending' ? (
+                                <span
+                                  className="px-2 py-0.5 bg-amber-100 dark:bg-amber-900 text-amber-700 dark:text-amber-300 text-xs rounded cursor-pointer hover:bg-amber-200"
+                                  title="قابل تایید سریع - کلیک کنید"
+                                  onClick={() => {
+                                    loadPendingApprovals();
+                                    setShowQuickApprovalPanel(true);
+                                  }}
+                                >
+                                  🔄 در انتظار تایید
+                                </span>
+                              ) : field.needs_approval || (field.action_type && field.action_type !== 'display' && !field.archived) ? (
                                 <span className="px-2 py-0.5 bg-amber-100 dark:bg-amber-900 text-amber-700 dark:text-amber-300 text-xs rounded" title="برای اجرا نیاز به تایید گزارش مهندسی دارد">
                                   ⚠️ نیاز به تایید
                                 </span>
