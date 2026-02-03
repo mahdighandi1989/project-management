@@ -110,6 +110,28 @@ class FieldAttachmentRequest(BaseModel):
     file_type: str  # نوع فایل (image, document, code)
 
 
+class FeatureRequest(BaseModel):
+    """
+    🆕 درخواست افزودن قابلیت جدید به پروژه
+
+    این endpoint به کاربر اجازه می‌دهد مستقیماً درخواست افزودن قابلیت بدهد
+    و سیستم خودکار:
+    - چک تکراری انجام می‌دهد
+    - فیلد پویا می‌سازد
+    - به Roadmap اضافه می‌کند
+    - AI تحلیل می‌کند چه کارهایی لازم است
+    """
+    title: str  # عنوان قابلیت (مثل: "سیستم نوتیفیکیشن")
+    description: str  # توضیحات کامل (مثل: "کاربر بتواند ایمیل و SMS دریافت کند")
+    priority: str = "medium"  # critical, high, medium, low
+    category: str = "feature"  # feature, bugfix, improvement, refactor
+    # 🆕 تنظیمات اختیاری
+    target_files: Optional[List[str]] = None  # فایل‌هایی که باید تغییر کنند
+    ai_analyze: bool = True  # آیا AI تحلیل کند چه کارهایی لازم است؟
+    auto_add_roadmap: bool = True  # آیا خودکار به Roadmap اضافه شود؟
+    model_id: str = "claude"  # مدل AI برای تحلیل
+
+
 # ثابت‌های نوع اکشن
 ACTION_TYPES = [
     {"id": "display", "name": "فقط نمایش", "icon": "👁️", "description": "نتیجه فقط در ژورنال نمایش داده می‌شود"},
@@ -909,6 +931,248 @@ async def delete_dynamic_field(
         "message": "فیلد حذف شد",
         "remaining_fields": len(dynamic_fields)
     }
+
+
+# =====================================
+# 🆕 درخواست افزودن قابلیت جدید
+# =====================================
+
+@router.post("/{project_id}/request-feature")
+async def request_new_feature(
+    project_id: str,
+    request: FeatureRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    🆕 درخواست افزودن قابلیت جدید به پروژه
+
+    این endpoint:
+    1. چک تکراری انجام می‌دهد (با IntelligentFieldCreator)
+    2. فیلد پویا می‌سازد
+    3. به Roadmap اضافه می‌کند (اگر auto_add_roadmap=True)
+    4. AI تحلیل می‌کند چه کارهایی لازم است (اگر ai_analyze=True)
+
+    Returns:
+        - success: bool
+        - field_created: فیلد ایجاد شده
+        - roadmap_updated: آیا Roadmap بروز شد
+        - ai_analysis: تحلیل AI (اگر درخواست شده)
+        - duplicate_warning: هشدار تکراری (اگر قابلیت مشابه وجود داشت)
+    """
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+    from ...services.intelligent_field_creator import get_intelligent_field_creator
+    from ...core.database import project_lock_manager
+    import logging
+    logger = logging.getLogger(__name__)
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    result = {
+        "success": False,
+        "field_created": None,
+        "roadmap_updated": False,
+        "ai_analysis": None,
+        "duplicate_warning": None,
+        "existing_capability": None
+    }
+
+    # 🔴 استفاده از قفل برای جلوگیری از race condition
+    lock = await project_lock_manager.acquire_lock(project_id, "dynamic_fields")
+    async with lock:
+        # بازخوانی پروژه
+        db.refresh(project)
+
+        # 1. چک تکراری با IntelligentFieldCreator
+        field_creator = get_intelligent_field_creator(project_id, db)
+
+        capability_check = field_creator.check_existing_capability(
+            f"{request.title}: {request.description}"
+        )
+
+        if capability_check["exists"] and capability_check["similarity"] > 0.7:
+            # قابلیت مشابه وجود دارد
+            result["duplicate_warning"] = {
+                "message": f"قابلیت مشابه وجود دارد (شباهت: {capability_check['similarity']:.0%})",
+                "existing_type": capability_check["type"],
+                "existing_match": capability_check["match"],
+                "suggestion": capability_check["suggestion"]
+            }
+            result["existing_capability"] = capability_check["match"]
+
+            # اگر شباهت خیلی زیاد است، فیلد جدید نساز
+            if capability_check["similarity"] > 0.85:
+                result["success"] = False
+                result["message"] = "قابلیت درخواستی قبلاً وجود دارد. لطفاً قابلیت موجود را بروزرسانی کنید."
+                return result
+
+        # 2. تعیین اولویت عددی
+        priority_map = {"critical": 1, "high": 2, "medium": 5, "low": 7}
+        priority = priority_map.get(request.priority, 5)
+
+        # 3. ایجاد فیلد پویا
+        field_result = await field_creator.create_intelligent_field(
+            name=request.title,
+            value=f"""## {request.title}
+
+**دسته‌بندی:** {request.category}
+**اولویت:** {request.priority}
+
+### توضیحات:
+{request.description}
+
+### فایل‌های هدف:
+{chr(10).join(['- ' + f for f in (request.target_files or ['تعیین نشده'])]) }
+
+---
+*این قابلیت توسط کاربر درخواست شده و نیاز به تأیید گزارش مهندسی دارد.*
+""",
+            source_prompt=f"درخواست قابلیت: {request.title}",
+            ai_response_context=request.description,
+            force_create=capability_check["similarity"] <= 0.7  # اگر تکراری نیست، اجباری بساز
+        )
+
+        if field_result["success"]:
+            # تنظیمات اضافی فیلد
+            created_field = field_result.get("field", {})
+            created_field["category"] = request.category
+            created_field["priority"] = priority
+            created_field["action_type"] = "display"
+            created_field["field_type"] = "temporary"
+            created_field["needs_approval"] = True
+            created_field["validation_marker"] = "pending"
+            created_field["requested_by"] = "user"
+            created_field["requested_at"] = datetime.utcnow().isoformat()
+            created_field["target_files"] = request.target_files
+
+            # ذخیره فیلد در پروژه
+            dynamic_fields = []
+            try:
+                if project.dynamic_fields:
+                    dynamic_fields = json.loads(project.dynamic_fields)
+            except:
+                dynamic_fields = []
+
+            # اضافه کردن یا بروزرسانی فیلد
+            field_exists = False
+            for i, f in enumerate(dynamic_fields):
+                if f.get("id") == created_field.get("id"):
+                    dynamic_fields[i] = created_field
+                    field_exists = True
+                    break
+
+            if not field_exists:
+                dynamic_fields.append(created_field)
+
+            project.dynamic_fields = json.dumps(dynamic_fields, ensure_ascii=False)
+
+            result["field_created"] = created_field
+            result["success"] = True
+
+        # 4. اضافه کردن به Roadmap
+        if request.auto_add_roadmap and result["success"]:
+            roadmap_content = project.roadmap_content or ""
+
+            # ایجاد آیتم Roadmap
+            priority_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(request.priority, "🟡")
+            category_emoji = {"feature": "✨", "bugfix": "🐛", "improvement": "⚡", "refactor": "🔧"}.get(request.category, "📝")
+
+            roadmap_item = f"\n- [ ] {category_emoji} {priority_emoji} **{request.title}** - {request.description[:100]}{'...' if len(request.description) > 100 else ''}"
+
+            # پیدا کردن بخش مناسب در Roadmap
+            if "## در انتظار" in roadmap_content or "## Pending" in roadmap_content:
+                # اضافه به بخش در انتظار
+                roadmap_content = roadmap_content.replace(
+                    "## در انتظار",
+                    f"## در انتظار{roadmap_item}"
+                ).replace(
+                    "## Pending",
+                    f"## Pending{roadmap_item}"
+                )
+            elif "## TODO" in roadmap_content:
+                roadmap_content = roadmap_content.replace(
+                    "## TODO",
+                    f"## TODO{roadmap_item}"
+                )
+            else:
+                # اضافه به انتهای فایل
+                roadmap_content += f"\n\n## قابلیت‌های درخواستی{roadmap_item}"
+
+            project.roadmap_content = roadmap_content
+            result["roadmap_updated"] = True
+
+        # 5. تحلیل AI (اختیاری)
+        if request.ai_analyze and result["success"]:
+            try:
+                ai_manager = get_ai_manager()
+
+                analysis_prompt = f"""لطفاً این درخواست قابلیت را تحلیل کن و بگو:
+1. چه فایل‌هایی باید تغییر کنند؟
+2. چه مراحلی برای پیاده‌سازی لازم است؟
+3. تخمین پیچیدگی (ساده/متوسط/پیچیده)
+4. پیش‌نیازها و وابستگی‌ها
+
+**عنوان:** {request.title}
+**دسته‌بندی:** {request.category}
+**توضیحات:** {request.description}
+
+**ساختار پروژه:**
+{project.name} - {project.project_type}
+"""
+
+                messages = [Message(role="user", content=analysis_prompt)]
+
+                response = await ai_manager.generate(
+                    messages=messages,
+                    model_id=request.model_id,
+                    max_tokens=1500,
+                    temperature=0.3
+                )
+
+                if response and response.content:
+                    result["ai_analysis"] = {
+                        "model_used": request.model_id,
+                        "analysis": response.content,
+                        "analyzed_at": datetime.utcnow().isoformat()
+                    }
+
+            except Exception as ai_error:
+                logger.warning(f"AI analysis failed: {ai_error}")
+                result["ai_analysis"] = {
+                    "error": str(ai_error),
+                    "message": "تحلیل AI ناموفق بود اما فیلد ایجاد شد"
+                }
+
+        # 6. ثبت در ژورنال
+        try:
+            from .project_journal import ActivityLog
+            log_entry = ActivityLog(
+                id=f"log_{uuid.uuid4().hex[:12]}",
+                project_id=project_id,
+                activity_type="feature_request",
+                prompt=f"درخواست قابلیت: {request.title}",
+                response=json.dumps({
+                    "title": request.title,
+                    "description": request.description,
+                    "category": request.category,
+                    "priority": request.priority,
+                    "field_id": result.get("field_created", {}).get("id"),
+                    "duplicate_warning": result.get("duplicate_warning")
+                }, ensure_ascii=False),
+                success=result["success"],
+                created_at=datetime.utcnow()
+            )
+            db.add(log_entry)
+        except Exception as log_error:
+            logger.warning(f"Failed to log feature request: {log_error}")
+
+        db.commit()
+
+    result["message"] = "درخواست قابلیت ثبت شد و در انتظار تأیید گزارش مهندسی است" if result["success"] else "خطا در ثبت درخواست"
+
+    return result
 
 
 @router.post("/{project_id}/memory/fields/upgrade-action-types")
