@@ -393,6 +393,9 @@ class ProjectIssue(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     resolved_at = Column(DateTime)
 
+    # 🆕 ارتباط با Quick Approval
+    converted_field_id = Column(String(50), nullable=True)  # اگر به فیلد تبدیل شده باشد
+
     # روابط
     project = relationship("Project", back_populates="issues")
 
