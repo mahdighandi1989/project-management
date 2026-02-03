@@ -321,6 +321,26 @@ def migrate_db():
                 cursor.execute("CREATE INDEX IF NOT EXISTS ix_render_services_project_id ON render_services(project_id)")
                 logger.info("Created index on render_services.project_id")
 
+        # 🔴 Migration برای prompt_executions - ستون‌های پیشرفت real-time
+        if "prompt_executions" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
+            existing_cols = get_columns("prompt_executions")
+
+            if "current_step" not in existing_cols:
+                cursor.execute("ALTER TABLE prompt_executions ADD COLUMN current_step VARCHAR(200)")
+                logger.info("Added 'current_step' column to prompt_executions table")
+
+            if "current_progress" not in existing_cols:
+                cursor.execute("ALTER TABLE prompt_executions ADD COLUMN current_progress INTEGER DEFAULT 0")
+                logger.info("Added 'current_progress' column to prompt_executions table")
+
+            if "total_steps" not in existing_cols:
+                cursor.execute("ALTER TABLE prompt_executions ADD COLUMN total_steps INTEGER DEFAULT 0")
+                logger.info("Added 'total_steps' column to prompt_executions table")
+
+            if "current_step_index" not in existing_cols:
+                cursor.execute("ALTER TABLE prompt_executions ADD COLUMN current_step_index INTEGER DEFAULT 0")
+                logger.info("Added 'current_step_index' column to prompt_executions table")
+
         conn.commit()
         logger.info("Database migration completed")
 
