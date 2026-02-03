@@ -3095,34 +3095,43 @@ async def generate_engineering_report_stream(
                 roadmap_updated = step4_data.get('roadmap_updated', False)
                 ideal_updated = step4_data.get('ideal_state_updated', False)
 
-                # 🔴 حالا گزارش کامل AI را هم تولید کن (مثل حالت quick/standard)
+                # 🔴🔴🔴 FIX: در deep mode دیگه generate_engineering_report فراخوانی نشه
+                # چون ۴ مرحله کار رو انجام دادن و فراخوانی دوباره ساعت‌ها طول می‌کشه
+                # به جاش مستقیم گزارش و ژورنال ذخیره کن
+
                 step = total_steps - 1
-                models_text = ", ".join(selected_models)
-                msg_ai = json.dumps({'step': step, 'total': total_steps, 'message': f'🧠 تولید گزارش جامع AI با {models_text}...', 'progress': 85}, ensure_ascii=False)
-                yield f"data: {msg_ai}\n\n"
+                msg_save = json.dumps({'step': step, 'total': total_steps, 'message': '💾 ذخیره گزارش ۴ مرحله‌ای...', 'progress': 97}, ensure_ascii=False)
+                yield f"data: {msg_save}\n\n"
 
-                # فراخوانی گزارش اصلی AI (این همان تابعی است که گزارش کامل با health_score و roadmap می‌سازد)
+                # ساخت خلاصه اجرایی
+                summary_parts = []
+                if validated > 0 or rejected > 0:
+                    summary_parts.append(f"✅ فیلدها: {validated} تایید، {rejected} رد")
+                if created > 0 or archived > 0:
+                    summary_parts.append(f"🔄 ایرادات: {created} فیلد ایجاد، {archived} بایگانی")
+                if models_evaluated:
+                    summary_parts.append(f"📊 مدل‌ها: {len(models_evaluated)} ارزیابی شد")
+                if roadmap_updated or ideal_updated:
+                    summary_parts.append(f"🗺️ نقشه راه به‌روز شد")
+
+                executive_summary = " | ".join(summary_parts) if summary_parts else f"گزارش مهندسی عمیق با {len(selected_models)} مدل تکمیل شد"
+
+                # ذخیره گزارش در دیتابیس
                 try:
-                    ai_result = await generate_engineering_report(
-                        project_id=project_id,
-                        days=days,
-                        model_id=selected_models[0],
-                        auto_create_fields=auto_create_fields,
-                        validate_health_issues=validate_health_issues,
-                        db=gen_db
-                    )
+                    from ...models.project import Report
 
-                    if ai_result.get("success"):
-                        # ترکیب نتایج 4 مرحله با گزارش AI
-                        ai_result["depth"] = depth
-                        ai_result["models_used"] = selected_models
-                        ai_result["four_step_results"] = {
+                    report_id = f"eng_4step_{uuid.uuid4().hex[:12]}"
+                    report_content = {
+                        "depth": depth,
+                        "models_used": selected_models,
+                        "executive_summary": executive_summary,
+                        "four_step_results": {
                             "step1_validate_fields": step1_data,
                             "step2_health_to_fields": step2_data,
                             "step3_evaluate_models": step3_data,
                             "step4_update_roadmap": step4_data,
-                        }
-                        ai_result["four_step_statistics"] = {
+                        },
+                        "statistics": {
                             "fields_validated": validated,
                             "fields_rejected": rejected,
                             "issues_converted": created,
@@ -3130,65 +3139,79 @@ async def generate_engineering_report_stream(
                             "models_count": len(selected_models),
                             "roadmap_updated": roadmap_updated,
                             "ideal_state_updated": ideal_updated,
-                        }
+                        },
+                        "completed_at": datetime.utcnow().isoformat(),
+                    }
 
-                        msg_done = json.dumps({'step': step, 'message': '✅ گزارش جامع AI تولید شد', 'progress': 95}, ensure_ascii=False)
-                        yield f"data: {msg_done}\n\n"
+                    # پروژه رو بخون برای اسمش
+                    project_obj = gen_db.query(Project).filter(Project.id == project_id).first()
+                    project_name = project_obj.name if project_obj else "پروژه"
 
-                        result = ai_result
-                        logger.info(f"✅ Deep mode: Full AI report generated successfully")
-                    else:
-                        # اگر گزارش AI خطا داد، از نتایج 4 مرحله استفاده کن
-                        logger.warning(f"Deep mode: AI report failed, using 4-step results only")
-                        summary_parts = []
-                        if validated > 0 or rejected > 0:
-                            summary_parts.append(f"✅ فیلدها: {validated} تایید، {rejected} رد")
-                        if created > 0 or archived > 0:
-                            summary_parts.append(f"🔄 ایرادات: {created} فیلد ایجاد، {archived} بایگانی")
-                        if models_evaluated:
-                            summary_parts.append(f"📊 مدل‌ها: {len(models_evaluated)} ارزیابی شد")
-                        if roadmap_updated or ideal_updated:
-                            summary_parts.append(f"🗺️ نقشه راه به‌روز شد")
+                    report = Report(
+                        id=report_id,
+                        project_id=project_id,
+                        report_type="engineering_4step",
+                        title=f"گزارش مهندسی ۴ مرحله‌ای - {project_name}",
+                        content=json.dumps(report_content, ensure_ascii=False, indent=2),
+                        summary=executive_summary,
+                        total_activities=4,
+                        total_tokens=0,
+                        models_used=json.dumps(selected_models),
+                        period_start=datetime.utcnow() - timedelta(days=days),
+                        period_end=datetime.utcnow(),
+                        created_at=datetime.utcnow(),
+                        generated_by=",".join(selected_models),
+                    )
+                    gen_db.add(report)
 
-                        result = {
-                            "success": True,
+                    # ثبت در ژورنال
+                    activity_log = ActivityLog(
+                        id=f"log_{uuid.uuid4().hex[:12]}",
+                        project_id=project_id,
+                        model_id=selected_models[0] if selected_models else "unknown",
+                        model_provider="multi_model",
+                        activity_type="engineering_report_4step",
+                        prompt=f"تولید گزارش مهندسی 4 مرحله‌ای برای {days} روز اخیر",
+                        response=executive_summary[:500],
+                        tokens_used=0,
+                        latency_ms=0,
+                        success=True,
+                        field_id=None,
+                        field_name=f"گزارش مهندسی ۴ مرحله‌ای - {report_id}",
+                        extra_data=json.dumps({
+                            "report_id": report_id,
                             "depth": depth,
                             "models_used": selected_models,
-                            "executive_summary": " | ".join(summary_parts) if summary_parts else f"گزارش مهندسی عمیق با {len(selected_models)} مدل تکمیل شد",
-                            "four_step_results": {
-                                "step1_validate_fields": step1_data,
-                                "step2_health_to_fields": step2_data,
-                                "step3_evaluate_models": step3_data,
-                                "step4_update_roadmap": step4_data,
-                            },
-                            "message": "گزارش مهندسی 4 مرحله‌ای تکمیل شد (بدون گزارش AI)",
-                        }
+                            "steps_completed": 4,
+                            "statistics": report_content["statistics"],
+                        }, ensure_ascii=False),
+                        created_at=datetime.utcnow()
+                    )
+                    gen_db.add(activity_log)
+                    gen_db.commit()
 
-                except Exception as ai_err:
-                    logger.error(f"Deep mode: Error generating AI report: {ai_err}")
-                    # Fallback به نتایج 4 مرحله
-                    summary_parts = []
-                    if validated > 0 or rejected > 0:
-                        summary_parts.append(f"✅ فیلدها: {validated} تایید، {rejected} رد")
-                    if created > 0 or archived > 0:
-                        summary_parts.append(f"🔄 ایرادات: {created} فیلد ایجاد، {archived} بایگانی")
-                    if models_evaluated:
-                        summary_parts.append(f"📊 مدل‌ها: {len(models_evaluated)} ارزیابی شد")
-                    if roadmap_updated or ideal_updated:
-                        summary_parts.append(f"🗺️ نقشه راه به‌روز شد")
+                    logger.info(f"✅ Deep mode: 4-step report saved: {report_id}")
+
+                    msg_done = json.dumps({'step': step, 'message': f'✅ گزارش ذخیره شد: {report_id}', 'progress': 99}, ensure_ascii=False)
+                    yield f"data: {msg_done}\n\n"
 
                     result = {
                         "success": True,
+                        "report_id": report_id,
                         "depth": depth,
                         "models_used": selected_models,
-                        "executive_summary": " | ".join(summary_parts) if summary_parts else f"گزارش مهندسی عمیق با {len(selected_models)} مدل تکمیل شد",
-                        "four_step_results": {
-                            "step1_validate_fields": step1_data,
-                            "step2_health_to_fields": step2_data,
-                            "step3_evaluate_models": step3_data,
-                            "step4_update_roadmap": step4_data,
-                        },
-                        "message": f"گزارش مهندسی 4 مرحله‌ای تکمیل شد (خطا در AI: {str(ai_err)[:100]})",
+                        "executive_summary": executive_summary,
+                        "four_step_results": report_content["four_step_results"],
+                        "statistics": report_content["statistics"],
+                        "message": "گزارش مهندسی 4 مرحله‌ای با موفقیت ذخیره شد",
+                    }
+
+                except Exception as save_err:
+                    logger.error(f"Deep mode: Error saving report: {save_err}")
+                    result = {
+                        "success": False,
+                        "error": f"خطا در ذخیره گزارش: {str(save_err)[:100]}",
+                        "depth": depth,
                     }
             else:
                 # حالت quick/standard: یک فراخوانی
