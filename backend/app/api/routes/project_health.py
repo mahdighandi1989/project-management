@@ -91,6 +91,105 @@ def _get_score_color(score: float) -> str:
         return "red"
 
 
+def _get_issue_key(issue: dict) -> str:
+    """
+    ایجاد کلید یکتا برای یک ایراد
+    برای تشخیص ایرادات تکراری استفاده می‌شود
+    """
+    file_path = issue.get("file", issue.get("path", ""))
+    line = str(issue.get("line", issue.get("line_number", "")))
+    msg = issue.get("message", issue.get("description", ""))[:100]
+    issue_type = issue.get("type", "general")
+    return f"{file_path}:{line}:{issue_type}:{msg}"
+
+
+def _merge_with_existing_issues(project, new_issues: list, source: str = "analysis") -> list:
+    """
+    🔴 ادغام ایرادات جدید با ایرادات موجود در دیتابیس
+
+    این تابع از OVERWRITE جلوگیری می‌کند و ایرادات جدید را با موجود ترکیب می‌کند.
+
+    Args:
+        project: شیء پروژه
+        new_issues: لیست ایرادات جدید
+        source: منبع ایرادات (analysis, roadmap, etc.)
+
+    Returns:
+        لیست ایرادات ادغام شده
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # خواندن ایرادات موجود
+    existing_issues = []
+    if project.issues_found:
+        try:
+            existing_issues = json.loads(project.issues_found)
+            if not isinstance(existing_issues, list):
+                existing_issues = []
+        except (json.JSONDecodeError, TypeError):
+            existing_issues = []
+
+    if not new_issues:
+        return existing_issues
+
+    if not existing_issues:
+        # اگر ایراد قبلی نداریم، فقط جدیدها رو برگردون
+        for issue in new_issues:
+            issue["_source"] = source
+            issue["_added_at"] = datetime.utcnow().isoformat()
+        return new_issues
+
+    # ساخت دیکشنری از ایرادات موجود برای جستجوی سریع
+    existing_keys = {}
+    for issue in existing_issues:
+        key = _get_issue_key(issue)
+        existing_keys[key] = issue
+
+    # ادغام ایرادات جدید
+    merged_count = 0
+    added_count = 0
+
+    for new_issue in new_issues:
+        key = _get_issue_key(new_issue)
+
+        if key in existing_keys:
+            # ایراد تکراری - به‌روزرسانی occurrence count
+            existing = existing_keys[key]
+            existing["occurrences"] = existing.get("occurrences", 1) + 1
+            existing["last_seen"] = datetime.utcnow().isoformat()
+            # حفظ severity بالاتر
+            if _severity_to_num(new_issue.get("severity")) > _severity_to_num(existing.get("severity")):
+                existing["severity"] = new_issue.get("severity")
+            merged_count += 1
+        else:
+            # ایراد جدید
+            new_issue["_source"] = source
+            new_issue["_added_at"] = datetime.utcnow().isoformat()
+            new_issue["occurrences"] = 1
+            existing_issues.append(new_issue)
+            existing_keys[key] = new_issue
+            added_count += 1
+
+    logger.info(f"[Merge Issues] source={source}, existing={len(existing_issues)-added_count}, "
+                f"new={len(new_issues)}, merged={merged_count}, added={added_count}, "
+                f"total={len(existing_issues)}")
+
+    return existing_issues
+
+
+def _severity_to_num(severity: str) -> int:
+    """تبدیل severity به عدد برای مقایسه"""
+    severity_map = {
+        "critical": 4,
+        "high": 3,
+        "medium": 2,
+        "low": 1,
+        "info": 0
+    }
+    return severity_map.get(str(severity).lower(), 1)
+
+
 class RoadmapUpdateRequest(BaseModel):
     """به‌روزرسانی Roadmap"""
     content: Optional[str] = None  # محتوای جدید (اختیاری)
@@ -892,11 +991,13 @@ async def run_direct_analysis(project_id: str, db=Depends(get_db)):
                 analysis_result.get("file_health_map", {}),
                 ensure_ascii=False
             )
-            # 🔴 رفع محدودیت - تمام ایرادات ذخیره می‌شوند
-            project.issues_found = json.dumps(
+            # 🔴 اصلاح شده: MERGE بجای OVERWRITE
+            merged_issues = _merge_with_existing_issues(
+                project,
                 analysis_result.get("issues", []),
-                ensure_ascii=False
+                source="direct_analysis"
             )
+            project.issues_found = json.dumps(merged_issues, ensure_ascii=False)
             project.last_analysis_at = datetime.utcnow()
             project.last_analysis_models = json.dumps(model_ids, ensure_ascii=False)
             db.commit()
@@ -1421,11 +1522,15 @@ async def _run_analysis_task(
                     "overall": 0,
                     "overall_color": "red"
                 })
-                project.issues_found = json.dumps([{
+                # 🔴 MERGE: ادغام با ایرادات موجود
+                error_issue = {
                     "severity": "critical",
                     "message": "هیچ مدل AI در دسترس نیست. کلیدهای API در فایل .env را بررسی کنید.",
-                    "type": "config"
-                }])
+                    "type": "config",
+                    "source": "streaming_analysis"
+                }
+                merged_issues = _merge_with_existing_issues(project, [error_issue], "streaming_error")
+                project.issues_found = json.dumps(merged_issues, ensure_ascii=False)
                 db.commit()
             return
 
@@ -1534,11 +1639,15 @@ async def _run_analysis_task(
                 "overall": 0,
                 "overall_color": "red"
             })
-            project.issues_found = json.dumps([{
+            # 🔴 MERGE: ادغام خطا با ایرادات موجود
+            error_issue = {
                 "severity": "critical",
                 "message": f"خطا در تحلیل: {str(analysis_error)}",
-                "type": "error"
-            }])
+                "type": "error",
+                "source": "streaming_analysis"
+            }
+            merged_issues = _merge_with_existing_issues(project, [error_issue], "analysis_error")
+            project.issues_found = json.dumps(merged_issues, ensure_ascii=False)
             db.commit()
             return
 
@@ -1561,20 +1670,26 @@ async def _run_analysis_task(
             # 🆕 همیشه ادغام ایرادات قبل از ذخیره (رفع مشکل ۳ و ۴)
             raw_issues = analysis_result.get("issues", [])
 
-            # همیشه ادغام انجام بشه (نه فقط وقتی > 100)
-            if len(raw_issues) > 1:
-                # تنظیم سطح ادغام بر اساس تعداد
-                aggressive = len(raw_issues) > 200
-                merged_issues = _merge_similar_issues(raw_issues, aggressive=aggressive)
+            # 🔴 اصلاح شده: ابتدا MERGE با ایرادات موجود
+            # سپس ادغام ایرادات مشابه در همین تحلیل
+            merged_with_existing = _merge_with_existing_issues(
+                project,
+                raw_issues,
+                source="streaming_analysis"
+            )
 
-                # علامت‌گذاری که ایرادات ادغام شده‌اند
-                for issue in merged_issues:
-                    issue["_merged_at_save"] = True  # جلوگیری از ادغام مجدد در زمان خواندن
+            # ادغام ایرادات مشابه (برای کاهش تکرار)
+            if len(merged_with_existing) > 1:
+                aggressive = len(merged_with_existing) > 200
+                final_issues = _merge_similar_issues(merged_with_existing, aggressive=aggressive)
 
-                logger.info(f"[Health Analysis] Merged {len(raw_issues)} issues to {len(merged_issues)} before storing")
-                project.issues_found = json.dumps(merged_issues, ensure_ascii=False)
+                for issue in final_issues:
+                    issue["_merged_at_save"] = True
+
+                logger.info(f"[Health Analysis] Merged {len(merged_with_existing)} issues to {len(final_issues)} before storing")
+                project.issues_found = json.dumps(final_issues, ensure_ascii=False)
             else:
-                project.issues_found = json.dumps(raw_issues, ensure_ascii=False)
+                project.issues_found = json.dumps(merged_with_existing, ensure_ascii=False)
 
             # ذخیره حالت ایده‌آل
             if analysis_result.get("ideal_state"):
@@ -1651,11 +1766,15 @@ async def _run_analysis_task(
                     "overall": 0,
                     "overall_color": "red"
                 })
-                project.issues_found = json.dumps([{
+                # 🔴 MERGE: ادغام خطا با ایرادات موجود
+                error_issue = {
                     "severity": "critical",
                     "message": f"خطای سیستمی در تحلیل: {str(e)}",
-                    "type": "system_error"
-                }])
+                    "type": "system_error",
+                    "source": "streaming_analysis"
+                }
+                merged_issues = _merge_with_existing_issues(project, [error_issue], "system_error")
+                project.issues_found = json.dumps(merged_issues, ensure_ascii=False)
                 db.commit()
         except:
             pass
@@ -1769,8 +1888,14 @@ async def update_project_roadmap(
         project.roadmap_content = result.get("roadmap_content", "")
         project.ideal_state = result.get("ideal_state", "")
 
+        # 🔴 اصلاح شده: MERGE بجای OVERWRITE
         if result.get("issues_found"):
-            project.issues_found = json.dumps(result["issues_found"], ensure_ascii=False)
+            merged_issues = _merge_with_existing_issues(
+                project,
+                result["issues_found"],
+                source="roadmap_analysis"
+            )
+            project.issues_found = json.dumps(merged_issues, ensure_ascii=False)
 
         db.commit()
 
@@ -2742,11 +2867,13 @@ async def _run_resumed_analysis_task(
                 analysis_result.get("file_health_map", {}),
                 ensure_ascii=False
             )
-            # 🔴 رفع محدودیت - تمام ایرادات ذخیره می‌شوند
-            project.issues_found = json.dumps(
+            # 🔴 اصلاح شده: MERGE بجای OVERWRITE
+            merged_issues = _merge_with_existing_issues(
+                project,
                 analysis_result.get("issues", []),
-                ensure_ascii=False
+                source="resume_analysis"
             )
+            project.issues_found = json.dumps(merged_issues, ensure_ascii=False)
             project.last_analysis_at = datetime.utcnow()
             project.last_analysis_models = json.dumps(model_ids, ensure_ascii=False)
             db.commit()

@@ -70,6 +70,92 @@ def log_auto_setup_operation(
 
 
 # =====================================
+# 🔴 توابع کمکی برای MERGE به جای OVERWRITE
+# =====================================
+
+def _get_issue_key(issue: dict) -> str:
+    """🔴 ایجاد کلید یکتا برای یک ایراد"""
+    file_path = issue.get("file", issue.get("path", ""))
+    line = str(issue.get("line", issue.get("line_number", "")))
+    msg = issue.get("message", issue.get("description", ""))[:100]
+    issue_type = issue.get("type", "general")
+    return f"{file_path}:{line}:{issue_type}:{msg}"
+
+
+def _merge_with_existing_issues(project, new_issues: list, source: str = "auto_setup") -> list:
+    """🔴 ادغام ایرادات جدید با ایرادات موجود در دیتابیس"""
+    existing_issues = []
+    try:
+        if project.issues_found:
+            existing_issues = json.loads(project.issues_found)
+            if not isinstance(existing_issues, list):
+                existing_issues = []
+    except:
+        existing_issues = []
+
+    # ایجاد دیکشنری برای جلوگیری از تکرار
+    issues_dict = {}
+
+    # ابتدا ایرادات موجود را اضافه کن
+    for issue in existing_issues:
+        key = _get_issue_key(issue)
+        issues_dict[key] = issue
+
+    # سپس ایرادات جدید را اضافه یا بروزرسانی کن
+    for issue in new_issues:
+        key = _get_issue_key(issue)
+        issue["source"] = source
+        issue["updated_at"] = datetime.utcnow().isoformat()
+
+        if key in issues_dict:
+            # بروزرسانی ایراد موجود
+            existing = issues_dict[key]
+            existing["occurrence_count"] = existing.get("occurrence_count", 1) + 1
+            existing["last_seen"] = datetime.utcnow().isoformat()
+            # اگر severity جدید بدتر است، بروزرسانی کن
+            severity_order = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+            if severity_order.get(issue.get("severity", "low"), 1) > severity_order.get(existing.get("severity", "low"), 1):
+                existing["severity"] = issue.get("severity")
+        else:
+            # ایراد جدید
+            issue["occurrence_count"] = 1
+            issue["first_seen"] = datetime.utcnow().isoformat()
+            issues_dict[key] = issue
+
+    merged = list(issues_dict.values())
+    logger.info(f"🔀 [MERGE] ادغام {len(new_issues)} ایراد جدید با {len(existing_issues)} موجود → {len(merged)} نهایی")
+    return merged
+
+
+def _merge_memory_instructions(project, new_instructions: dict) -> dict:
+    """🔴 ادغام دستورالعمل‌های حافظه جدید با موجود - حفظ محتوای کاربر"""
+    existing = {}
+    try:
+        if project.memory_instructions:
+            existing = json.loads(project.memory_instructions)
+            if not isinstance(existing, dict):
+                existing = {}
+    except:
+        existing = {}
+
+    # اگر محتوای موجود توسط کاربر ویرایش شده، آن را حفظ کن
+    if existing.get("user_edited") and existing.get("content"):
+        # محتوای کاربر را حفظ کن، فقط متادیتا را بروزرسانی کن
+        merged = existing.copy()
+        merged["last_auto_update"] = datetime.utcnow().isoformat()
+        merged["ai_suggested_content"] = new_instructions.get("content", "")
+        merged["auto_setup_run_count"] = new_instructions.get("auto_setup_run_count", 1)
+        logger.info("🔀 [MERGE] حفظ محتوای کاربر، ذخیره پیشنهاد AI جداگانه")
+    else:
+        # محتوای جدید AI را استفاده کن
+        merged = new_instructions.copy()
+        merged["previous_content"] = existing.get("content", "") if existing else ""
+        logger.info("🔀 [MERGE] استفاده از محتوای جدید AI")
+
+    return merged
+
+
+# =====================================
 # تحلیل عمیق فایل‌های پروژه
 # =====================================
 
@@ -1343,7 +1429,9 @@ async def auto_setup_project_memory(
 
                 project = db_session.query(Project).filter(Project.id == project_id).first()
                 if project:
-                    project.memory_instructions = json.dumps(result["memory_instructions"], ensure_ascii=False)
+                    # 🔴 MERGE: ادغام با محتوای موجود به جای OVERWRITE
+                    merged_memory = _merge_memory_instructions(project, result["memory_instructions"])
+                    project.memory_instructions = json.dumps(merged_memory, ensure_ascii=False)
                     project.dynamic_fields = json.dumps(result["dynamic_fields"], ensure_ascii=False)
                     db_session.commit()
                     slog.db_operation("save", "projects",
@@ -1634,10 +1722,10 @@ async def advanced_auto_setup(
 
                 # ذخیره در پروژه
                 project.ideal_state = analysis_data.get("ideal_state", "")
-                project.issues_found = json.dumps(
-                    analysis_data.get("issues_found", []),
-                    ensure_ascii=False
-                )
+                # 🔴 MERGE: ادغام ایرادات جدید با موجود به جای OVERWRITE
+                new_issues = analysis_data.get("issues_found", [])
+                merged_issues = _merge_with_existing_issues(project, new_issues, "auto_setup_analysis")
+                project.issues_found = json.dumps(merged_issues, ensure_ascii=False)
 
         except Exception as e:
             logger.error(f"Error in analysis phase: {e}")
