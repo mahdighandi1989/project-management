@@ -572,12 +572,13 @@ async def get_active_executions(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/executions/clear-stuck")
+@router.api_route("/executions/clear-stuck", methods=["GET", "DELETE"])
 async def clear_stuck_executions(
     db: Session = Depends(get_db)
 ):
     """
     پاک کردن اجراهای گیر کرده (running بیش از ۱ ساعت)
+    هم با GET و هم با DELETE قابل دسترسی است
     """
     try:
         from datetime import timedelta
