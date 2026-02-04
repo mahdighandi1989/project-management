@@ -2271,42 +2271,70 @@ async def inspector_chat_multi(
 
 
 @router.get("/inspector/models")
-async def get_available_models_for_inspector():
+async def get_available_models_for_inspector(db: Session = Depends(get_db)):
     """
     دریافت لیست مدل‌های موجود برای استفاده در بازرس
 
-    فقط مدل‌های فعال برگردانده می‌شوند
+    همه مدل‌ها (فعال و غیرفعال) برگردانده می‌شوند
     """
     try:
-        from ...core.models_registry import get_all_models
+        from ...core.models_registry import MODEL_REGISTRY
+        from ...services.ai_manager import get_ai_manager
+        from ...models.ai_profile import ModelSettings
 
-        all_models = get_all_models()
+        # دریافت provider های فعال
+        available_providers = []
+        try:
+            ai_manager = get_ai_manager()
+            available_providers = ai_manager.get_available_providers()
+        except Exception as e:
+            slog.warning("Could not get AI manager", error=str(e))
+
+        # دریافت تنظیمات از دیتابیس
+        db_settings = db.query(ModelSettings).all() if db else []
+        settings_map = {s.model_id: s for s in db_settings}
 
         # گروه‌بندی بر اساس provider
         models_by_provider = {}
-        for model in all_models:
+        models_list = []
+
+        for model_id, model in MODEL_REGISTRY.items():
             provider = str(model.provider.value) if hasattr(model.provider, 'value') else str(model.provider)
-            if provider not in models_by_provider:
-                models_by_provider[provider] = []
-            models_by_provider[provider].append({
-                "id": model.id,
+
+            # بررسی فعال بودن
+            setting = settings_map.get(model_id)
+            is_enabled = setting.enabled if setting else True
+            provider_available = provider in [str(p.value) if hasattr(p, 'value') else str(p) for p in available_providers]
+
+            model_info = {
+                "id": model_id,
                 "name": model.name,
                 "provider": provider,
                 "context_window": getattr(model, 'context_window', 4096),
-                "enabled": getattr(model, 'enabled', True)
-            })
+                "enabled": is_enabled and provider_available,
+                "provider_available": provider_available
+            }
+
+            models_list.append(model_info)
+
+            if provider not in models_by_provider:
+                models_by_provider[provider] = []
+            models_by_provider[provider].append(model_info)
 
         return {
             "success": True,
-            "models": all_models,
+            "models": models_list,
             "models_by_provider": models_by_provider,
-            "total": len(all_models)
+            "total": len(models_list),
+            "available_providers": [str(p.value) if hasattr(p, 'value') else str(p) for p in available_providers]
         }
 
     except Exception as e:
         slog.error("Failed to get models for inspector", exception=e)
         return {
             "success": False,
+            "models": [],
+            "models_by_provider": {},
             "error": str(e)
         }
 
