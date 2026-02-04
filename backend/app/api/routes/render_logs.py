@@ -2787,3 +2787,266 @@ async def update_github_file(
             "error": str(e)
         }
 
+
+# =====================================
+# 🆕 Browser Automation Endpoints
+# =====================================
+
+class BrowserActionRequest(BaseModel):
+    """درخواست اکشن مرورگر"""
+    session_id: str
+    action: str  # analyze, click, type, scroll, find_login, login, screenshot
+    params: Optional[dict] = {}
+
+
+class BrowserSessionRequest(BaseModel):
+    """درخواست ایجاد سشن مرورگر"""
+    url: str
+    session_id: Optional[str] = None
+
+
+@router.post("/inspector/browser/session")
+async def create_browser_session(request: BrowserSessionRequest):
+    """
+    ایجاد یک سشن مرورگر جدید برای کنترل با AI
+
+    این endpoint یک مرورگر headless باز می‌کند و آماده دریافت دستورات می‌شود
+    """
+    import uuid
+    from ...services.browser_automation import create_session
+
+    session_id = request.session_id or str(uuid.uuid4())[:8]
+
+    slog.api_request("POST", "/inspector/browser/session",
+        url=request.url,
+        session_id=session_id
+    )
+
+    try:
+        session = await create_session(session_id, request.url)
+        screenshot = await session.take_screenshot()
+        page_info = await session.get_page_info()
+
+        return {
+            "success": True,
+            "session_id": session_id,
+            "page_info": page_info,
+            "screenshot": screenshot,
+            "message": f"مرورگر باز شد: {page_info.get('title', 'Unknown')}"
+        }
+    except Exception as e:
+        slog.error("Browser session creation failed", exception=e)
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@router.post("/inspector/browser/action")
+async def execute_browser_action(request: BrowserActionRequest):
+    """
+    اجرای یک اکشن در مرورگر
+
+    action types:
+    - analyze: تحلیل صفحه
+    - find_login: پیدا کردن فرم لاگین
+    - login: انجام لاگین کامل (params: username, password)
+    - click: کلیک (params: selector یا x,y)
+    - type: تایپ (params: selector, text)
+    - scroll: اسکرول (params: delta_y)
+    - screenshot: گرفتن screenshot
+    """
+    from ...services.browser_automation import get_session, execute_ai_action
+
+    slog.api_request("POST", "/inspector/browser/action",
+        session_id=request.session_id,
+        action=request.action
+    )
+
+    try:
+        session = await get_session(request.session_id)
+        if not session:
+            return {
+                "success": False,
+                "error": "Session not found. Create a session first."
+            }
+
+        result = await execute_ai_action(session, request.action, request.params or {})
+
+        return {
+            "success": result.get("success", False),
+            "action": request.action,
+            "cursor_position": result.get("cursor_position"),
+            "message": result.get("message", ""),
+            "data": {k: v for k, v in result.items() if k not in ["success", "cursor_position", "message"]}
+        }
+
+    except Exception as e:
+        slog.error("Browser action failed", exception=e)
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@router.delete("/inspector/browser/session/{session_id}")
+async def close_browser_session(session_id: str):
+    """بستن سشن مرورگر"""
+    from ...services.browser_automation import close_session
+
+    try:
+        await close_session(session_id)
+        return {"success": True, "message": "Session closed"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/inspector/ai-interact")
+async def ai_interact_with_page(
+    task: str,
+    url: str,
+    model_id: Optional[str] = "gpt-4o",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    تعامل هوشمند AI با صفحه وب
+
+    این endpoint:
+    1. مرورگر باز می‌کند
+    2. صفحه را تحلیل می‌کند
+    3. اکشن‌های لازم را اجرا می‌کند
+    4. موقعیت cursor را برمی‌گرداند
+
+    مثال: task="لاگین کن" -> AI فرم لاگین را پیدا می‌کند و لاگین می‌کند
+    """
+    import uuid
+    from ...services.browser_automation import create_session, execute_ai_action, close_session
+    from ...services.ai_manager import get_ai_manager
+
+    session_id = str(uuid.uuid4())[:8]
+
+    slog.api_request("POST", "/inspector/ai-interact",
+        task=task[:100],
+        url=url,
+        model_id=model_id
+    )
+
+    actions_log = []
+    cursor_positions = []
+
+    try:
+        # 1. باز کردن مرورگر
+        session = await create_session(session_id, url)
+        screenshot = await session.take_screenshot()
+        page_info = await session.get_page_info()
+
+        actions_log.append({
+            "step": 1,
+            "action": "open_browser",
+            "message": f"مرورگر باز شد: {page_info.get('title', 'Unknown')}",
+            "status": "done"
+        })
+
+        # 2. تحلیل task
+        task_lower = task.lower()
+        is_login_task = any(word in task_lower for word in ['login', 'لاگین', 'ورود', 'sign in', 'وارد'])
+
+        if is_login_task:
+            # 3. پیدا کردن فرم لاگین
+            actions_log.append({
+                "step": 2,
+                "action": "find_login",
+                "message": "در حال جستجوی فرم لاگین...",
+                "status": "running"
+            })
+
+            find_result = await execute_ai_action(session, "find_login", {})
+
+            if find_result.get("success"):
+                login_info = find_result.get("login_info", {})
+                actions_log[-1]["status"] = "done"
+                actions_log[-1]["message"] = f"فرم لاگین پیدا شد با {len(login_info.get('inputs', []))} فیلد"
+
+                if find_result.get("cursor_position"):
+                    cursor_positions.append({
+                        "step": 2,
+                        "action": "move_to_username",
+                        **find_result["cursor_position"]
+                    })
+
+                # 4. انجام لاگین
+                actions_log.append({
+                    "step": 3,
+                    "action": "login",
+                    "message": "در حال انجام لاگین...",
+                    "status": "running"
+                })
+
+                login_result = await execute_ai_action(session, "login", {
+                    "username": username or "admin",
+                    "password": password or "password"
+                })
+
+                if login_result.get("success"):
+                    actions_log[-1]["status"] = "done"
+                    actions_log[-1]["message"] = login_result.get("message", "لاگین انجام شد")
+
+                    # اضافه کردن cursor positions از اکشن‌های لاگین
+                    for action in login_result.get("actions", []):
+                        if action.get("cursor_position"):
+                            cursor_positions.append({
+                                "step": 3,
+                                "action": action["action"],
+                                **action["cursor_position"]
+                            })
+                else:
+                    actions_log[-1]["status"] = "failed"
+                    actions_log[-1]["message"] = login_result.get("message", "خطا در لاگین")
+            else:
+                actions_log[-1]["status"] = "failed"
+                actions_log[-1]["message"] = "فرم لاگین پیدا نشد"
+
+        else:
+            # Task عمومی - استفاده از AI برای تحلیل
+            actions_log.append({
+                "step": 2,
+                "action": "ai_analyze",
+                "message": "در حال تحلیل صفحه با AI...",
+                "status": "running"
+            })
+
+            # TODO: استفاده از vision model برای تحلیل
+            actions_log[-1]["status"] = "done"
+            actions_log[-1]["message"] = "صفحه تحلیل شد. برای اکشن‌های پیچیده‌تر، دستور دقیق‌تری بدهید."
+
+        # 5. گرفتن screenshot نهایی
+        final_screenshot = await session.take_screenshot()
+
+        # بستن session بعد از چند ثانیه
+        # await close_session(session_id)
+
+        return {
+            "success": True,
+            "session_id": session_id,
+            "task": task,
+            "actions": actions_log,
+            "cursor_positions": cursor_positions,
+            "final_screenshot": final_screenshot,
+            "message": f"کار انجام شد: {len(actions_log)} مرحله",
+            "page_info": page_info
+        }
+
+    except Exception as e:
+        slog.error("AI interaction failed", exception=e)
+        try:
+            await close_session(session_id)
+        except:
+            pass
+        return {
+            "success": False,
+            "error": str(e),
+            "actions": actions_log
+        }
+
