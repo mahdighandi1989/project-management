@@ -664,9 +664,9 @@ export default function ProjectDetailPage() {
 
   const loadInspectorLogs = async () => {
     try {
-      // دریافت لاگ‌های بک‌اند
+      // دریافت لاگ‌های بک‌اند (شامل سرویس‌های یکپارچه)
       const backendServiceIds = inspectorServices
-        .filter(s => s.role === 'backend' || !s.role)
+        .filter(s => s.role === 'backend' || s.role === 'unified' || !s.role)
         .map(s => s.id);
 
       if (backendServiceIds.length === 0) return;
@@ -6662,30 +6662,20 @@ export default function ProjectDetailPage() {
             </div>
 
             {/* محتوای اصلی - اسکرین و چت */}
-            <div className="flex flex-row-reverse gap-4" style={{ minHeight: '380px' }}>
+            <div className="flex flex-row-reverse gap-4" style={{ minHeight: '420px' }}>
               {/* اسکرین سمت چپ (در RTL) - ابعاد 5.1" x 2.8" (نسبت 1.82:1 - افقی/landscape) */}
-              <div className="flex-shrink-0 flex flex-col items-center" style={{ width: '460px' }}>
+              <div className="flex-shrink-0 flex flex-col items-center" style={{ width: '560px' }}>
                 <div className="bg-black rounded-2xl p-2 shadow-2xl w-full">
                   {/* فریم دستگاه - افقی */}
                   <div
                     className="bg-gray-900 rounded-xl overflow-hidden relative"
                     style={{ aspectRatio: '1.82/1' }}
                   >
-                    {/* نوار بالای دستگاه */}
-                    <div className="absolute top-0 left-0 right-0 h-5 bg-black/60 flex items-center justify-between px-3 z-10">
-                      <span className="text-[10px] text-gray-400">9:41</span>
-                      <div className="flex gap-1 items-center text-[10px] text-gray-400">
-                        {inspectorPowerOn && <span className="text-green-400">●</span>}
-                        <span>📶</span>
-                        <span>🔋</span>
-                      </div>
-                    </div>
-
                     {/* صفحه نمایش */}
-                    <div className="h-full w-full bg-gradient-to-br from-gray-800 to-gray-900 pt-5 pb-2 px-1 flex flex-col relative">
+                    <div className="h-full w-full bg-gradient-to-br from-gray-800 to-gray-900 p-1 flex flex-col relative">
                       {/* لایه لاگ‌های پس‌زمینه */}
                       {inspectorPowerOn && inspectorBackendLogs.length > 0 && (
-                        <div className="absolute inset-0 pt-5 pb-2 px-1 overflow-hidden opacity-30 pointer-events-none z-0">
+                        <div className="absolute inset-0 p-1 overflow-hidden opacity-30 pointer-events-none z-0">
                           <div className="h-full bg-black/50 rounded-lg p-2 font-mono text-[8px] text-green-400 overflow-hidden">
                             {inspectorBackendLogs.slice(0, 15).map((log, i) => (
                               <div key={log.id} className={`truncate ${log.level === 'error' ? 'text-red-400' : log.level === 'warn' ? 'text-yellow-400' : ''}`}>
@@ -6759,8 +6749,8 @@ export default function ProjectDetailPage() {
                 </span>
               </div>
 
-              {/* چت باکس سمت راست (در RTL) */}
-              <div className="flex-1 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 flex flex-col overflow-hidden">
+              {/* چت باکس سمت راست (در RTL) - کوچک‌تر شده */}
+              <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 flex flex-col overflow-hidden" style={{ width: '320px', flexShrink: 0 }}>
                 {/* هدر چت */}
                 <div className="bg-gradient-to-r from-red-500 to-orange-500 text-white px-4 py-3 flex items-center gap-2">
                   <span className="text-xl">🤖</span>
