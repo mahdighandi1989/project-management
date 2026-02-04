@@ -6070,6 +6070,147 @@ export default function ProjectDetailPage() {
                             </div>
                           )}
 
+                          {/* 🆕 گزارش ۴ مرحله‌ای */}
+                          {parsed.four_step_results && (
+                            <div className="space-y-4">
+                              {/* آمار کلی */}
+                              {parsed.statistics && (
+                                <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                                  <div className="text-center p-3 bg-purple-50 dark:bg-purple-900/30 rounded-lg">
+                                    <div className="text-2xl font-bold text-purple-600">{parsed.statistics.fields_validated || 0}</div>
+                                    <div className="text-xs text-gray-500">فیلد تایید شده</div>
+                                  </div>
+                                  <div className="text-center p-3 bg-red-50 dark:bg-red-900/30 rounded-lg">
+                                    <div className="text-2xl font-bold text-red-600">{parsed.statistics.fields_rejected || 0}</div>
+                                    <div className="text-xs text-gray-500">فیلد رد شده</div>
+                                  </div>
+                                  <div className="text-center p-3 bg-green-50 dark:bg-green-900/30 rounded-lg">
+                                    <div className="text-2xl font-bold text-green-600">{parsed.statistics.issues_converted || 0}</div>
+                                    <div className="text-xs text-gray-500">ایراد به فیلد</div>
+                                  </div>
+                                  <div className="text-center p-3 bg-yellow-50 dark:bg-yellow-900/30 rounded-lg">
+                                    <div className="text-2xl font-bold text-yellow-600">{parsed.statistics.issues_archived || 0}</div>
+                                    <div className="text-xs text-gray-500">بایگانی شده</div>
+                                  </div>
+                                  <div className="text-center p-3 bg-blue-50 dark:bg-blue-900/30 rounded-lg">
+                                    <div className="text-2xl font-bold text-blue-600">{parsed.statistics.models_count || 0}</div>
+                                    <div className="text-xs text-gray-500">مدل استفاده شده</div>
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* مرحله ۱: اعتبارسنجی فیلدها */}
+                              {parsed.four_step_results.step1_validate_fields && (
+                                <div className="p-4 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-700">
+                                  <h4 className="font-bold text-purple-700 dark:text-purple-400 mb-3 flex items-center gap-2">
+                                    <span>1️⃣</span> اعتبارسنجی فیلدهای پویا
+                                  </h4>
+                                  <div className="grid grid-cols-2 gap-3 text-sm">
+                                    <div className="p-2 bg-green-100 dark:bg-green-800/30 rounded text-center">
+                                      <div className="text-xl font-bold text-green-600">{parsed.four_step_results.step1_validate_fields.validated_count || 0}</div>
+                                      <div className="text-xs">✅ تایید شده</div>
+                                    </div>
+                                    <div className="p-2 bg-red-100 dark:bg-red-800/30 rounded text-center">
+                                      <div className="text-xl font-bold text-red-600">{parsed.four_step_results.step1_validate_fields.rejected_count || 0}</div>
+                                      <div className="text-xs">❌ رد شده</div>
+                                    </div>
+                                  </div>
+                                  {parsed.four_step_results.step1_validate_fields.error && (
+                                    <div className="mt-2 p-2 bg-red-100 dark:bg-red-900/30 rounded text-sm text-red-600">
+                                      ⚠️ خطا: {parsed.four_step_results.step1_validate_fields.error}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+
+                              {/* مرحله ۲: تبدیل ایرادات به فیلد */}
+                              {parsed.four_step_results.step2_health_to_fields && (
+                                <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-700">
+                                  <h4 className="font-bold text-green-700 dark:text-green-400 mb-3 flex items-center gap-2">
+                                    <span>2️⃣</span> تبدیل ایرادات سلامت به فیلد
+                                  </h4>
+                                  <div className="grid grid-cols-2 gap-3 text-sm">
+                                    <div className="p-2 bg-blue-100 dark:bg-blue-800/30 rounded text-center">
+                                      <div className="text-xl font-bold text-blue-600">{parsed.four_step_results.step2_health_to_fields.created_count || 0}</div>
+                                      <div className="text-xs">🆕 فیلد ایجاد شده</div>
+                                    </div>
+                                    <div className="p-2 bg-yellow-100 dark:bg-yellow-800/30 rounded text-center">
+                                      <div className="text-xl font-bold text-yellow-600">{parsed.four_step_results.step2_health_to_fields.archived_count || 0}</div>
+                                      <div className="text-xs">📦 بایگانی شده</div>
+                                    </div>
+                                  </div>
+                                  {parsed.four_step_results.step2_health_to_fields.error && (
+                                    <div className="mt-2 p-2 bg-red-100 dark:bg-red-900/30 rounded text-sm text-red-600">
+                                      ⚠️ خطا: {parsed.four_step_results.step2_health_to_fields.error}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+
+                              {/* مرحله ۳: ارزیابی مدل‌ها */}
+                              {parsed.four_step_results.step3_evaluate_models && (
+                                <div className="p-4 bg-orange-50 dark:bg-orange-900/20 rounded-lg border border-orange-200 dark:border-orange-700">
+                                  <h4 className="font-bold text-orange-700 dark:text-orange-400 mb-3 flex items-center gap-2">
+                                    <span>3️⃣</span> ارزیابی مدل‌ها
+                                  </h4>
+                                  {parsed.four_step_results.step3_evaluate_models.models_evaluated?.length > 0 ? (
+                                    <div className="space-y-2">
+                                      {parsed.four_step_results.step3_evaluate_models.models_evaluated.map((model: any, idx: number) => (
+                                        <div key={idx} className="p-2 bg-white dark:bg-gray-800 rounded flex justify-between items-center">
+                                          <span className="font-medium">{model.model_id || model}</span>
+                                          {model.score && <span className="text-orange-600 font-bold">{model.score}%</span>}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <p className="text-sm text-gray-500">مدلی ارزیابی نشد</p>
+                                  )}
+                                  {parsed.four_step_results.step3_evaluate_models.error && (
+                                    <div className="mt-2 p-2 bg-red-100 dark:bg-red-900/30 rounded text-sm text-red-600">
+                                      ⚠️ خطا: {parsed.four_step_results.step3_evaluate_models.error}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+
+                              {/* مرحله ۴: به‌روزرسانی نقشه راه */}
+                              {parsed.four_step_results.step4_update_roadmap && (
+                                <div className="p-4 bg-indigo-50 dark:bg-indigo-900/20 rounded-lg border border-indigo-200 dark:border-indigo-700">
+                                  <h4 className="font-bold text-indigo-700 dark:text-indigo-400 mb-3 flex items-center gap-2">
+                                    <span>4️⃣</span> به‌روزرسانی نقشه راه
+                                  </h4>
+                                  <div className="grid grid-cols-2 gap-3 text-sm">
+                                    <div className={`p-2 rounded text-center ${parsed.four_step_results.step4_update_roadmap.roadmap_updated ? 'bg-green-100 dark:bg-green-800/30' : 'bg-gray-100 dark:bg-gray-700'}`}>
+                                      <div className="text-xl">{parsed.four_step_results.step4_update_roadmap.roadmap_updated ? '✅' : '➖'}</div>
+                                      <div className="text-xs">نقشه راه</div>
+                                    </div>
+                                    <div className={`p-2 rounded text-center ${parsed.four_step_results.step4_update_roadmap.ideal_state_updated ? 'bg-green-100 dark:bg-green-800/30' : 'bg-gray-100 dark:bg-gray-700'}`}>
+                                      <div className="text-xl">{parsed.four_step_results.step4_update_roadmap.ideal_state_updated ? '✅' : '➖'}</div>
+                                      <div className="text-xs">وضعیت ایده‌آل</div>
+                                    </div>
+                                  </div>
+                                  {parsed.four_step_results.step4_update_roadmap.error && (
+                                    <div className="mt-2 p-2 bg-red-100 dark:bg-red-900/30 rounded text-sm text-red-600">
+                                      ⚠️ خطا: {parsed.four_step_results.step4_update_roadmap.error}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+
+                              {/* مدل‌های استفاده شده */}
+                              {parsed.models_used?.length > 0 && (
+                                <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                                  <span className="text-xs text-gray-500">مدل‌های استفاده شده: </span>
+                                  {parsed.models_used.map((model: string, idx: number) => (
+                                    <span key={idx} className="inline-block px-2 py-0.5 bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 text-xs rounded mr-1">
+                                      {model}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
                           {/* امتیاز سلامت */}
                           {parsed.project_health && (
                             <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-700">
