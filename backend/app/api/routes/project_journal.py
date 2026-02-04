@@ -3551,6 +3551,40 @@ async def engineering_step1_validate_fields(
         if fallback:
             model_id = fallback
 
+    # 🔴 FIX: کوتاه‌سازی prompt اگر از حد مجاز مدل بیشتر باشد
+    from ...core.models_registry import get_model
+    model_info = get_model(model_id)
+    max_context = model_info.context_window if model_info else 131072  # پیش‌فرض DeepSeek
+
+    # تخمین توکن (تقریباً هر 3 کاراکتر = 1 توکن)
+    estimated_tokens = (len(system_prompt) + len(user_prompt)) // 3
+    max_prompt_tokens = int(max_context * 0.75)  # 75% برای prompt
+
+    if estimated_tokens > max_prompt_tokens:
+        logger.warning(f"Step1 prompt too long ({estimated_tokens} tokens), max: {max_prompt_tokens}. Truncating...")
+
+        # کوتاه کردن لیست فیلدها
+        excess_ratio = max_prompt_tokens / estimated_tokens
+        max_fields = int(len(pending_fields) * excess_ratio * 0.8)  # کاهش 20% اضافی برای اطمینان
+
+        if max_fields < len(pending_fields):
+            pending_fields = pending_fields[:max_fields]
+            # بازسازی user_prompt با فیلدهای کمتر
+            user_prompt = f"""پروژه: {project.name}
+سطح بررسی: {depth.upper()}
+⚠️ توجه: به دلیل محدودیت توکن، فقط {max_fields} فیلد از {len(existing_fields)} بررسی می‌شوند.
+
+=== فیلدهای PENDING (نیاز به تایید) ===
+{json.dumps([{"id": f.get("id"), "name": f.get("name"), "value": f.get("value", "")[:value_limit], "action_type": f.get("action_type"), "target_path": f.get("target_path"), "priority": f.get("priority", 5)} for f in pending_fields], ensure_ascii=False, indent=2)}
+
+=== فیلدهای تایید شده (برای مقایسه) ===
+{json.dumps([{"id": f.get("id"), "name": f.get("name"), "action_type": f.get("action_type")} for f in approved_fields[:10]], ensure_ascii=False, indent=2)}
+
+{"🔴 حالت DEEP: لطفاً هر فیلد را به صورت جداگانه و با جزئیات کامل تحلیل کن و دلیل تصمیمت را بنویس." if depth == "deep" else "لطفاً هر فیلد pending را بررسی و تصمیم بگیر."}"""
+
+        estimated_tokens = (len(system_prompt) + len(user_prompt)) // 3
+        logger.info(f"After truncation: {estimated_tokens} tokens, {len(pending_fields)} fields")
+
     messages = [
         Message(role="system", content=system_prompt),
         Message(role="user", content=user_prompt),
@@ -4210,15 +4244,14 @@ async def engineering_step3_evaluate_models(
     )
     db.commit()
 
+    # 🔴 FIX: Return flat structure for consistency with other steps
     return {
         "success": True,
         "step": 3,
         "step_name": "evaluate_models",
-        "results": {
-            "models_evaluated": updated_profiles,
-            "files_color_updated": len(file_health_map),
-            "file_health_sample": dict(list(file_health_map.items())[:10])
-        }
+        "models_evaluated": updated_profiles,
+        "files_color_updated": len(file_health_map),
+        "file_health_sample": dict(list(file_health_map.items())[:10])
     }
 
 
