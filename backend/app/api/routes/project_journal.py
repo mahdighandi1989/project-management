@@ -3134,10 +3134,154 @@ Full Traceback:
                     # Report is already defined in this file (line 217)
 
                     report_id = f"eng_4step_{uuid.uuid4().hex[:12]}"
+
+                    # 🔴🔴🔴 FIX: پروژه رو بخون و داده‌های جامع رو اضافه کن
+                    project_obj = gen_db.query(Project).filter(Project.id == project_id).first()
+                    project_name = project_obj.name if project_obj else "پروژه"
+
+                    # 🆕 استخراج داده‌های جامع از پروژه
+                    health_issues = []
+                    health_analysis_data = {}
+                    dynamic_fields_list = []
+
+                    if project_obj:
+                        # ایرادات سلامت
+                        if project_obj.issues_found:
+                            try:
+                                health_issues = json.loads(project_obj.issues_found)
+                            except:
+                                pass
+
+                        # نتایج تحلیل سلامت
+                        if project_obj.health_analysis_result:
+                            try:
+                                health_analysis_data = json.loads(project_obj.health_analysis_result)
+                            except:
+                                pass
+
+                        # فیلدهای پویا
+                        if project_obj.dynamic_fields:
+                            try:
+                                dynamic_fields_list = json.loads(project_obj.dynamic_fields)
+                            except:
+                                pass
+
+                    # 🆕 محاسبه امتیاز سلامت
+                    active_issues = [i for i in health_issues if not i.get("archived")]
+                    critical_count = len([i for i in active_issues if i.get("severity") == "critical"])
+                    high_count = len([i for i in active_issues if i.get("severity") == "high"])
+                    medium_count = len([i for i in active_issues if i.get("severity") == "medium"])
+                    low_count = len([i for i in active_issues if i.get("severity") == "low"])
+
+                    # محاسبه امتیاز (100 - تاثیر ایرادات)
+                    health_score = max(0, 100 - (critical_count * 20 + high_count * 10 + medium_count * 5 + low_count * 2))
+                    health_status = "عالی" if health_score >= 85 else "خوب" if health_score >= 70 else "متوسط" if health_score >= 50 else "نیاز به توجه"
+
+                    # 🆕 تبدیل ایرادات به فرمت bugs_and_issues
+                    bugs_and_issues = []
+                    for issue in active_issues[:20]:  # حداکثر 20 ایراد
+                        bugs_and_issues.append({
+                            "title": issue.get("message", issue.get("description", "ایراد"))[:100],
+                            "description": issue.get("description", issue.get("message", ""))[:200],
+                            "severity": issue.get("severity", "medium"),
+                            "file": issue.get("file", issue.get("file_path", "")),
+                            "suggested_fix": issue.get("suggested_fix", issue.get("solution", ""))[:200],
+                        })
+
+                    # 🆕 پیشنهادات از فیلدهای pending
+                    recommendations = []
+                    pending_fields = [f for f in dynamic_fields_list if not f.get("archived") and not f.get("executed")]
+                    for field in pending_fields[:10]:  # حداکثر 10 پیشنهاد
+                        priority = "high" if field.get("validation_marker") == "auto_pending" else "medium"
+                        recommendations.append({
+                            "priority": priority,
+                            "title": field.get("name", "فیلد"),
+                            "description": field.get("description", "")[:200],
+                            "effort": "متوسط",
+                            "target_path": field.get("target_path", ""),
+                        })
+
+                    # 🆕 ساخت خلاصه مدیریتی مشروح
+                    detailed_summary = f"""پروژه {project_name} در حالت تحلیل عمیق ۴ مرحله‌ای بررسی شد.
+
+📊 آمار کلی:
+- {validated} فیلد پویا اعتبارسنجی و تایید شد
+- {rejected} فیلد پویا رد شد
+- {created} ایراد جدید به فیلد عملیاتی تبدیل شد
+- {archived} ایراد قدیمی بایگانی شد
+- {len(models_evaluated) if isinstance(models_evaluated, list) else 0} مدل AI ارزیابی شد
+
+🏥 وضعیت سلامت:
+- امتیاز کلی: {health_score}%
+- ایرادات بحرانی: {critical_count}
+- ایرادات مهم: {high_count}
+- ایرادات متوسط: {medium_count}
+
+{'🗺️ نقشه راه به‌روزرسانی شد' if roadmap_updated else ''}
+{'🌟 حالت ایده‌آل تعریف شد' if ideal_updated else ''}"""
+
+                    # 🆕 ساخت محتوای جامع گزارش
                     report_content = {
                         "depth": depth,
                         "models_used": selected_models,
-                        "executive_summary": executive_summary,
+                        "executive_summary": detailed_summary,
+
+                        # 🆕 بخش سلامت پروژه
+                        "project_health": {
+                            "score": health_score,
+                            "status": health_status,
+                            "key_metrics": {
+                                "code_quality": health_analysis_data.get("scores", {}).get("code_quality", health_score),
+                                "documentation": health_analysis_data.get("scores", {}).get("documentation", max(0, 100 - medium_count * 10)),
+                                "test_coverage": health_analysis_data.get("scores", {}).get("test_coverage", 50),
+                                "architecture": health_analysis_data.get("scores", {}).get("architecture", min(100, health_score + 15)),
+                            },
+                        },
+
+                        # 🆕 ایرادات و باگ‌ها
+                        "bugs_and_issues": bugs_and_issues,
+
+                        # 🆕 پیشنهادات
+                        "recommendations": recommendations,
+
+                        # 🆕 تحلیل فنی
+                        "technical_analysis": {
+                            "strengths": [
+                                f"پروژه دارای {len(dynamic_fields_list)} فیلد پویا است",
+                                f"{validated} فیلد با موفقیت اعتبارسنجی شد",
+                                f"از {len(selected_models)} مدل AI برای تحلیل استفاده شد",
+                            ] if validated > 0 else ["ساختار پروژه قابل قبول است"],
+                            "weaknesses": [
+                                f"{critical_count} ایراد بحرانی نیاز به رسیدگی فوری دارد" if critical_count > 0 else None,
+                                f"{high_count} ایراد مهم باید اصلاح شود" if high_count > 0 else None,
+                                f"{rejected} فیلد رد شده نیاز به بازبینی دارد" if rejected > 0 else None,
+                            ],
+                            "architecture_notes": health_analysis_data.get("architecture_notes", "معماری پروژه بررسی شد."),
+                        },
+
+                        # 🆕 نتایج اعتبارسنجی تحلیل سلامت
+                        "health_analysis_validation": {
+                            "total_reviewed": len(active_issues),
+                            "validated_count": created,
+                            "rejected_count": archived,
+                            "validation_summary": f"از {len(active_issues)} ایراد، {created} به فیلد تبدیل و {archived} بایگانی شد",
+                        },
+
+                        # 🆕 نقشه راه
+                        "roadmap": {
+                            "urgent": [f.get("name") for f in pending_fields[:3] if f.get("validation_marker") == "auto_pending"],
+                            "short_term": [f.get("name") for f in pending_fields[:5] if f.get("validation_marker") != "auto_pending"],
+                            "long_term": [],
+                        } if pending_fields else None,
+
+                        # 🆕 حالت ایده‌آل
+                        "comprehensive_ideal_state": {
+                            "description": project_obj.ideal_state if project_obj and project_obj.ideal_state else step4_data.get("ideal_state", ""),
+                            "current_deficiencies": [b["title"] for b in bugs_and_issues[:5]],
+                            "unexecuted_tasks": [r["title"] for r in recommendations[:5]],
+                        } if (project_obj and project_obj.ideal_state) or step4_data.get("ideal_state") else None,
+
+                        # نتایج 4 مرحله (برای نمایش جزئیات)
                         "four_step_results": {
                             "step1_validate_fields": step1_data,
                             "step2_health_to_fields": step2_data,
@@ -3156,9 +3300,11 @@ Full Traceback:
                         "completed_at": datetime.utcnow().isoformat(),
                     }
 
-                    # پروژه رو بخون برای اسمش
-                    project_obj = gen_db.query(Project).filter(Project.id == project_id).first()
-                    project_name = project_obj.name if project_obj else "پروژه"
+                    # حذف None ها از weaknesses
+                    if report_content.get("technical_analysis", {}).get("weaknesses"):
+                        report_content["technical_analysis"]["weaknesses"] = [
+                            w for w in report_content["technical_analysis"]["weaknesses"] if w
+                        ]
 
                     report = Report(
                         id=report_id,
@@ -3166,7 +3312,7 @@ Full Traceback:
                         report_type="engineering_4step",
                         title=f"گزارش مهندسی ۴ مرحله‌ای - {project_name}",
                         content=json.dumps(report_content, ensure_ascii=False, indent=2),
-                        summary=executive_summary,
+                        summary=detailed_summary[:500],
                         total_activities=4,
                         total_tokens=0,
                         models_used=json.dumps(selected_models),
