@@ -6547,8 +6547,8 @@ export default function ProjectDetailPage() {
             </div>
 
             {/* محتوای اصلی - اسکرین و چت */}
-            <div className="flex gap-4" style={{ minHeight: '320px' }}>
-              {/* اسکرین سمت چپ - ابعاد 5.1" x 2.8" (نسبت 1.82:1 - افقی/landscape) */}
+            <div className="flex flex-row-reverse gap-4" style={{ minHeight: '320px' }}>
+              {/* اسکرین سمت چپ (در RTL) - ابعاد 5.1" x 2.8" (نسبت 1.82:1 - افقی/landscape) */}
               <div className="flex-shrink-0" style={{ width: '460px' }}>
                 <div className="bg-black rounded-2xl p-2 shadow-2xl">
                   {/* فریم دستگاه - افقی */}
@@ -6580,7 +6580,7 @@ export default function ProjectDetailPage() {
                 </div>
               </div>
 
-              {/* چت باکس سمت راست */}
+              {/* چت باکس سمت راست (در RTL) */}
               <div className="flex-1 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 flex flex-col overflow-hidden">
                 {/* هدر چت */}
                 <div className="bg-gradient-to-r from-red-500 to-orange-500 text-white px-4 py-3 flex items-center gap-2">
