@@ -769,6 +769,11 @@ export default function ProjectDetailPage() {
         });
         setInspectorModels(allModels);
 
+        // 🆕 بررسی وضعیت GitHub
+        if (data.github_connected !== undefined) {
+          setInspectorGithubConnected(data.github_connected);
+        }
+
         // انتخاب اولین مدل فعال به صورت پیش‌فرض
         const firstEnabled = allModels.find(m => m.enabled);
         if (firstEnabled && inspectorSelectedModels.length === 0) {
