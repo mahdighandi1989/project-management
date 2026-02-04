@@ -1,8 +1,8 @@
 # گزارش جامع سیستم مدیریت پروژه هوشمند
 
 **تاریخ:** 2026-02-04
-**شاخه:** `claude/update-system-report-izMLQ`
-**وضعیت:** به‌روز شده - نسخه 2.3 (اصلاحات کامل گزارش مهندسی + رفع باگ‌های Type Safety)
+**شاخه:** `claude/review-project-structure-mmAqK`
+**وضعیت:** به‌روز شده - نسخه 2.4 (اضافه شدن سیستم راهنمای جامع + Tooltips + دیاگرام ساختاری)
 
 ---
 
@@ -38,7 +38,7 @@
 | ✅ رفع شده | 28 | مشکلات اصلی + باگ‌های Type Safety + مشکلات ActivityLog |
 | ⚠️ نیاز به بهبود | 4 | موارد UI و Frontend |
 | 🔴 باقیمانده | 2 | مشکلات جزئی |
-| 🆕 قابلیت جدید | 11 | پیاده‌سازی شده |
+| 🆕 قابلیت جدید | 12 | پیاده‌سازی شده (شامل سیستم راهنمای جامع) |
 
 ---
 
@@ -446,6 +446,71 @@ target_models = resolved_models
 
 ---
 
+### بخش ۸: سیستم راهنمای جامع (🆕 جدید)
+
+**موقعیت:** در تمام صفحات فرانت‌اند
+**فایل‌ها:**
+- `frontend/src/components/help/HelpSystem.tsx` - کامپوننت اصلی
+- `frontend/src/components/help/HelpTooltip.tsx` - کامپوننت Tooltip
+- `frontend/src/components/help/HelpProvider.tsx` - Context و Provider
+- `frontend/src/components/help/helpData.ts` - داده‌های راهنما
+
+#### ✅ قابلیت‌های پیاده‌سازی شده
+
+| قابلیت | توضیح |
+|--------|--------|
+| دکمه شناور راهنما | دکمه ❓ در گوشه پایین چپ هر صفحه |
+| پنل راهنما | پنل کشویی با توضیحات کامل صفحه |
+| دیاگرام ساختاری | نمودار Mermaid برای نمایش ساختار هر صفحه |
+| قابلیت دانلود | دانلود راهنما به فرمت Markdown |
+| حالت راهنما (Ctrl+H) | فعال‌سازی Tooltipها روی همه المان‌ها |
+| جستجو در المان‌ها | جستجو در توضیحات و عناوین |
+| گروه‌بندی المان‌ها | دسته‌بندی بر اساس نوع (دکمه، ورودی، تب، ...) |
+
+#### صفحات پوشش داده شده
+
+| صفحه | مسیر | تعداد المان |
+|------|------|-------------|
+| داشبورد اصلی | `/` | 10 |
+| پروژه‌ها | `/projects` | 18 |
+| جزئیات پروژه | `/projects/[id]` | 12 |
+| مناظره AI | `/debate` | 9 |
+| مدل‌های AI | `/models` | 17 |
+| تنظیمات | `/settings` | 12 |
+| موتور خالق | `/creator` | 7 |
+
+#### ساختار داده‌های راهنما
+
+```typescript
+interface ElementHelp {
+  id: string;           // شناسه یکتا
+  title: string;        // عنوان فارسی
+  description: string;  // توضیحات کامل
+  type: 'button' | 'input' | 'section' | 'tab' | 'panel' | 'checkbox' | 'select' | 'area';
+  tips?: string[];      // نکات و راهنمایی‌ها
+}
+
+interface PageHelp {
+  id: string;           // شناسه صفحه
+  title: string;        // عنوان صفحه
+  description: string;  // توضیح کوتاه
+  path: string;         // مسیر URL
+  overview: string;     // توضیح کامل
+  features: string[];   // قابلیت‌های صفحه
+  elements: ElementHelp[]; // المان‌های صفحه
+  diagram: string;      // دیاگرام Mermaid
+}
+```
+
+#### نحوه استفاده
+
+1. **دکمه راهنما:** کلیک روی ❓ در گوشه پایین چپ
+2. **پنل راهنما:** سه تب: نمای کلی، المان‌ها، دیاگرام
+3. **دانلود:** کلیک روی 📥 برای دانلود Markdown
+4. **حالت Tooltip:** فشردن Ctrl+H برای فعال‌سازی
+
+---
+
 ## 3. تغییرات اخیر انجام شده
 
 ### ✅ رفع تناقضات سیستمی
@@ -809,6 +874,7 @@ class ProjectLockManager:
 10. **🆕 ردیابی منبع فیلدها:** دانستن اینکه هر فیلد از کجا آمده
 11. **🆕 لاگ‌گیری پیشرفته:** خطاها با traceback کامل ثبت می‌شوند
 12. **🆕 Type Safety:** بررسی کامل انواع داده قبل از استفاده
+13. **🆕 سیستم راهنمای جامع:** راهنمای تعاملی در هر صفحه با دیاگرام و Tooltip
 
 ### ⚠️ موارد نیازمند توجه (کاهش یافته)
 
@@ -836,8 +902,18 @@ class ProjectLockManager:
 | فیلدها اجرا نمی‌شدند | Model alias به جای model ID واقعی | اضافه کردن MODEL_ALIASES |
 | NameError در چت و batch execute | ActivityLog import نشده بود | Import داخل تابع |
 
+### 🆕 فایل‌های جدید اضافه شده (جلسه فعلی)
+
+| فایل | توضیح |
+|------|------|
+| frontend/src/components/help/HelpSystem.tsx | کامپوننت اصلی سیستم راهنما با پنل کشویی |
+| frontend/src/components/help/HelpTooltip.tsx | کامپوننت Tooltip برای نمایش راهنما |
+| frontend/src/components/help/HelpProvider.tsx | Context و Provider برای مدیریت حالت راهنما |
+| frontend/src/components/help/helpData.ts | داده‌های راهنما برای 7 صفحه با 85+ المان |
+| frontend/src/components/help/index.ts | فایل export برای ماژول |
+
 ---
 
 **تاریخ به‌روزرسانی:** 2026-02-04
-**نسخه گزارش:** 2.3 (اصلاحات Type Safety + رفع باگ‌های ActivityLog و Model Alias)
-**شاخه:** `claude/update-system-report-izMLQ`
+**نسخه گزارش:** 2.4 (اضافه شدن سیستم راهنمای جامع + Tooltips + دیاگرام ساختاری)
+**شاخه:** `claude/review-project-structure-mmAqK`
