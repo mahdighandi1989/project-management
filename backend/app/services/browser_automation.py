@@ -497,41 +497,71 @@ async def analyze_with_vision_ai(
     ai_manager,
     model_id: str,
     screenshot_base64: str,
-    task: str
+    task: str,
+    previous_actions: List[Dict] = None
 ) -> Dict:
     """
-    تحلیل screenshot با AI Vision
+    تحلیل screenshot با AI Vision و تصمیم‌گیری برای اقدام بعدی
 
     این تابع از مدل‌های vision مثل GPT-4V استفاده می‌کند
     """
     from ..services.ai_base import Message
 
+    previous_context = ""
+    if previous_actions:
+        previous_context = "\n\n## اقدامات قبلی:\n" + "\n".join([
+            f"- {a.get('action')}: {a.get('description', '')}" for a in previous_actions
+        ])
+
     # ساخت پیام با تصویر
-    messages = [
-        Message(
-            role="system",
-            content="""شما یک اتومیشن هوشمند هستید که باید صفحات وب را تحلیل کنید.
+    system_prompt = """شما یک AI Agent هستید که می‌توانید صفحات وب را کنترل کنید.
 
-وظایف شما:
-1. تحلیل تصویر صفحه
-2. پیدا کردن المان‌های مورد نیاز (فرم‌ها، دکمه‌ها، فیلدها)
-3. پیشنهاد اقدامات لازم
+## قابلیت‌های شما:
+1. **click**: کلیک روی المان - نیاز به مختصات x,y (درصد از عرض و ارتفاع صفحه، 0-100)
+2. **type**: تایپ متن در فیلد فعلی
+3. **scroll**: اسکرول صفحه (up/down)
+4. **wait**: صبر کردن
+5. **done**: کار تمام شد
 
-پاسخ را به صورت JSON برگردانید:
+## قوانین مهم:
+- تصویر صفحه را دقیق ببینید
+- مختصات را به صورت درصد بدهید (مثلا x:50, y:30 یعنی وسط افقی، 30% از بالا)
+- هر بار فقط یک اقدام پیشنهاد دهید
+- اگر کار تمام شد، action را "done" قرار دهید
+
+## فرمت پاسخ (JSON):
+```json
 {
-    "analysis": "توضیح کوتاه از صفحه",
-    "elements_found": ["لیست المان‌های پیدا شده"],
-    "suggested_actions": [
-        {"action": "type", "selector": "...", "text": "..."},
-        {"action": "click", "selector": "..."}
-    ],
-    "next_step": "قدم بعدی چیست"
-}"""
-        ),
+    "thinking": "توضیح کوتاه از آنچه می‌بینم و تصمیمم",
+    "action": "click|type|scroll|wait|done",
+    "params": {
+        "x": 50,           // برای click - درصد افقی
+        "y": 30,           // برای click - درصد عمودی
+        "text": "...",     // برای type
+        "direction": "down", // برای scroll
+        "seconds": 1       // برای wait
+    },
+    "element_description": "توضیح المانی که روی آن کلیک می‌کنم",
+    "is_complete": false,
+    "next_expectation": "انتظار دارم بعد از این اقدام چه اتفاقی بیفتد"
+}
+```"""
+
+    user_prompt = f"""## وظیفه کاربر:
+{task}
+{previous_context}
+
+## تصویر فعلی صفحه:
+(تصویر پیوست شده)
+
+لطفا تصویر را تحلیل کنید و اقدام بعدی را مشخص کنید."""
+
+    messages = [
+        Message(role="system", content=system_prompt),
         Message(
             role="user",
             content=[
-                {"type": "text", "text": f"وظیفه: {task}\n\nتصویر صفحه:"},
+                {"type": "text", "text": user_prompt},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_base64}"}}
             ]
         )
@@ -541,29 +571,196 @@ async def analyze_with_vision_ai(
         response = await ai_manager.generate(
             model_id=model_id,
             messages=messages,
-            max_tokens=2048,
-            temperature=0.3
+            max_tokens=1024,
+            temperature=0.2
         )
 
         # تلاش برای parse JSON
         try:
             # پیدا کردن JSON در پاسخ
-            json_match = re.search(r'\{[\s\S]*\}', response.content)
+            json_match = re.search(r'\{[\s\S]*?\}', response.content)
             if json_match:
-                return json.loads(json_match.group())
-        except:
-            pass
+                result = json.loads(json_match.group())
+                slog.info(f"AI Vision decision", action=result.get("action"), thinking=result.get("thinking", "")[:100])
+                return result
+        except Exception as parse_error:
+            slog.warning(f"JSON parse failed", error=str(parse_error), content=response.content[:200])
 
         return {
-            "analysis": response.content,
-            "elements_found": [],
-            "suggested_actions": [],
-            "next_step": "تحلیل دستی نیاز است"
+            "thinking": response.content,
+            "action": "done",
+            "params": {},
+            "is_complete": True,
+            "error": "Could not parse AI response"
         }
 
     except Exception as e:
         slog.error("Vision analysis failed", exception=e)
         return {
             "error": str(e),
-            "analysis": "خطا در تحلیل"
+            "action": "done",
+            "is_complete": True
         }
+
+
+async def execute_ai_agent_task(
+    session: BrowserSession,
+    task: str,
+    ai_manager,
+    model_id: str = "gpt-4o",
+    max_steps: int = 10,
+    on_action_callback = None
+) -> Dict:
+    """
+    اجرای یک task توسط AI Agent با حلقه تکرار
+
+    این تابع:
+    1. Screenshot می‌گیرد
+    2. به AI Vision می‌فرستد
+    3. اقدام پیشنهادی را اجرا می‌کند
+    4. تکرار تا تکمیل task یا رسیدن به حداکثر steps
+
+    Args:
+        session: Browser session
+        task: دستور کاربر
+        ai_manager: AI manager instance
+        model_id: مدل vision (مثل gpt-4o)
+        max_steps: حداکثر تعداد اقدامات
+        on_action_callback: تابع callback برای گزارش هر اقدام
+
+    Returns:
+        نتیجه شامل تمام اقدامات و وضعیت نهایی
+    """
+    actions_log = []
+    cursor_positions = []
+    step = 0
+
+    slog.info(f"Starting AI agent task", task=task[:100], model=model_id, max_steps=max_steps)
+
+    while step < max_steps:
+        step += 1
+
+        # 1. گرفتن screenshot
+        try:
+            screenshot = await session.take_screenshot()
+        except Exception as e:
+            slog.error(f"Screenshot failed at step {step}", exception=e)
+            break
+
+        # 2. ارسال به AI Vision
+        try:
+            ai_decision = await analyze_with_vision_ai(
+                ai_manager=ai_manager,
+                model_id=model_id,
+                screenshot_base64=screenshot,
+                task=task,
+                previous_actions=actions_log
+            )
+        except Exception as e:
+            slog.error(f"AI analysis failed at step {step}", exception=e)
+            actions_log.append({
+                "step": step,
+                "action": "error",
+                "description": f"AI analysis failed: {str(e)}",
+                "status": "failed"
+            })
+            break
+
+        action = ai_decision.get("action", "done")
+        params = ai_decision.get("params", {})
+        thinking = ai_decision.get("thinking", "")
+        element_desc = ai_decision.get("element_description", "")
+        is_complete = ai_decision.get("is_complete", False)
+
+        # 3. لاگ کردن و callback
+        action_entry = {
+            "step": step,
+            "action": action,
+            "thinking": thinking,
+            "element": element_desc,
+            "params": params,
+            "status": "running"
+        }
+
+        if on_action_callback:
+            await on_action_callback(action_entry)
+
+        # 4. بررسی تکمیل
+        if action == "done" or is_complete:
+            action_entry["status"] = "done"
+            action_entry["description"] = "کار تکمیل شد"
+            actions_log.append(action_entry)
+            slog.info(f"Task completed at step {step}")
+            break
+
+        # 5. اجرای اقدام
+        try:
+            if action == "click":
+                x_percent = params.get("x", 50)
+                y_percent = params.get("y", 50)
+
+                # تبدیل درصد به پیکسل
+                x_pixel = (x_percent / 100) * session.viewport["width"]
+                y_pixel = (y_percent / 100) * session.viewport["height"]
+
+                await session.click(x_pixel, y_pixel)
+
+                action_entry["description"] = f"کلیک روی {element_desc} (x:{x_percent}%, y:{y_percent}%)"
+                action_entry["status"] = "done"
+
+                cursor_positions.append({
+                    "step": step,
+                    "action": f"click: {element_desc}",
+                    "x": x_percent,
+                    "y": y_percent
+                })
+
+            elif action == "type":
+                text = params.get("text", "")
+                # تایپ در فیلد فعلی (فرض: فیلد قبلا فوکوس شده)
+                if session.page:
+                    await session.page.keyboard.type(text, delay=50)
+                action_entry["description"] = f"تایپ: {text[:30]}..."
+                action_entry["status"] = "done"
+
+            elif action == "scroll":
+                direction = params.get("direction", "down")
+                delta = 300 if direction == "down" else -300
+                await session.scroll(delta)
+                action_entry["description"] = f"اسکرول {direction}"
+                action_entry["status"] = "done"
+
+            elif action == "wait":
+                seconds = params.get("seconds", 1)
+                await session.wait(seconds * 1000)
+                action_entry["description"] = f"صبر {seconds} ثانیه"
+                action_entry["status"] = "done"
+
+            else:
+                action_entry["description"] = f"اقدام ناشناخته: {action}"
+                action_entry["status"] = "skipped"
+
+        except Exception as e:
+            slog.error(f"Action execution failed", action=action, exception=e)
+            action_entry["status"] = "failed"
+            action_entry["error"] = str(e)
+
+        actions_log.append(action_entry)
+
+        # 6. صبر کوتاه بین اقدامات
+        await session.wait(500)
+
+    # گرفتن screenshot نهایی
+    try:
+        final_screenshot = await session.take_screenshot()
+    except:
+        final_screenshot = None
+
+    return {
+        "success": step < max_steps or any(a.get("action") == "done" for a in actions_log),
+        "total_steps": step,
+        "actions": actions_log,
+        "cursor_positions": cursor_positions,
+        "final_screenshot": final_screenshot,
+        "task": task
+    }
