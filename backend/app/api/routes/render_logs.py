@@ -2321,12 +2321,18 @@ async def get_available_models_for_inspector(db: Session = Depends(get_db)):
                 models_by_provider[provider] = []
             models_by_provider[provider].append(model_info)
 
+        # بررسی اتصال GitHub
+        from ...models.setting import Setting
+        github_token = db.query(Setting).filter(Setting.key == "github_token").first()
+        github_connected = github_token and github_token.value and len(github_token.value) > 10
+
         return {
             "success": True,
             "models": models_list,
             "models_by_provider": models_by_provider,
             "total": len(models_list),
-            "available_providers": [str(p.value) if hasattr(p, 'value') else str(p) for p in available_providers]
+            "available_providers": [str(p.value) if hasattr(p, 'value') else str(p) for p in available_providers],
+            "github_connected": github_connected
         }
 
     except Exception as e:
@@ -2335,7 +2341,8 @@ async def get_available_models_for_inspector(db: Session = Depends(get_db)):
             "success": False,
             "models": [],
             "models_by_provider": {},
-            "error": str(e)
+            "error": str(e),
+            "github_connected": False
         }
 
 
@@ -2588,6 +2595,21 @@ async def execute_smart_task(
         task_info["status"] = "completed"
         task_info["results"] = results
 
+        # 7. بررسی اتصال GitHub
+        from ...models.setting import Setting
+        github_token = db.query(Setting).filter(Setting.key == "github_token").first()
+        github_connected = github_token and github_token.value and len(github_token.value) > 10
+
+        # 8. ساخت پاسخ یکپارچه
+        combined_content = ""
+        total_tokens = 0
+        for r in results:
+            if r.get("success"):
+                combined_content += f"\n\n**{r['model_id']}:**\n{r['content']}"
+                total_tokens += r.get("tokens_used", 0)
+            else:
+                combined_content += f"\n\n**{r['model_id']}:** ❌ خطا: {r['content']}"
+
         return {
             "success": True,
             "task_id": task_id,
@@ -2595,7 +2617,11 @@ async def execute_smart_task(
             "analysis": analysis,
             "selected_models": selected_models,
             "temporarily_enabled": temporarily_enabled,
-            "results": results
+            "results": results,
+            "content": combined_content.strip() or "کار انجام شد.",
+            "tokens_used": total_tokens,
+            "github_connected": github_connected,
+            "actions": task_info["actions"]
         }
 
     except Exception as e:
