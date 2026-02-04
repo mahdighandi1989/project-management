@@ -1306,14 +1306,14 @@ async def get_memory_for_model(
 class ProjectChatRequest(BaseModel):
     """درخواست چت در context پروژه"""
     prompt: str
-    model_id: str = "openai"  # مدل پیش‌فرض
+    model_id: str = "gpt-4o-mini"  # 🔴 FIX: Use actual model ID
     include_memory: bool = True  # شامل دستورات حافظه شود؟
 
 
 class EnhancedProjectChatRequest(BaseModel):
     """درخواست چت پیشرفته با context کامل پروژه"""
     prompt: str
-    model_ids: List[str] = ["openai"]  # امکان انتخاب چند مدل همزمان
+    model_ids: List[str] = ["gpt-4o-mini"]  # 🔴 FIX: Use actual model ID
     include_memory: bool = True  # شامل دستورات حافظه شود؟
     include_files: bool = True  # شامل محتوای فایل‌ها شود؟
     include_issues: bool = True  # شامل ایرادات شناسایی شده شود؟
@@ -1527,7 +1527,7 @@ async def test_enhanced_chat(
 
         response = await asyncio.wait_for(
             ai_manager.generate(
-                model_id="openai",
+                model_id="gpt-4o-mini",  # 🔴 FIX: Use actual model ID
                 messages=messages,
                 max_tokens=50,
                 temperature=0.5,
