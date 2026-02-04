@@ -1457,6 +1457,69 @@ async def project_chat(
 
 
 # =====================================
+# 🔧 TEST endpoint for debugging enhanced-chat
+# =====================================
+
+@router.get("/{project_id}/enhanced-chat-test")
+async def test_enhanced_chat(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    تست ساده برای بررسی اجزای enhanced-chat
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    results = {
+        "project_id": project_id,
+        "checks": {}
+    }
+
+    # 1. Test project query
+    try:
+        project = db.query(Project).filter(Project.id == project_id).first()
+        results["checks"]["project"] = {"ok": bool(project), "name": project.name if project else None}
+    except Exception as e:
+        results["checks"]["project"] = {"ok": False, "error": str(e)}
+
+    # 2. Test AI manager import
+    try:
+        from ...services.ai_manager import get_ai_manager
+        ai_manager = get_ai_manager()
+        results["checks"]["ai_manager"] = {"ok": True}
+    except Exception as e:
+        results["checks"]["ai_manager"] = {"ok": False, "error": str(e)}
+
+    # 3. Test ProjectFile query
+    try:
+        from ...models.project import ProjectFile
+        files_count = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).count()
+        results["checks"]["files"] = {"ok": True, "count": files_count}
+    except Exception as e:
+        results["checks"]["files"] = {"ok": False, "error": str(e)}
+
+    # 4. Test RenderLog import
+    try:
+        from ...models.render_log import RenderLog, RenderService
+        results["checks"]["render_models"] = {"ok": True}
+    except Exception as e:
+        results["checks"]["render_models"] = {"ok": False, "error": str(e)}
+
+    # 5. Test ActivityLog
+    try:
+        from ..routes.project_journal import ActivityLog
+        results["checks"]["activity_log"] = {"ok": True}
+    except Exception as e:
+        results["checks"]["activity_log"] = {"ok": False, "error": str(e)}
+
+    all_ok = all(c.get("ok", False) for c in results["checks"].values())
+    results["all_ok"] = all_ok
+
+    return results
+
+
+# =====================================
 # چت پیشرفته با AI - با context کامل پروژه
 # =====================================
 
