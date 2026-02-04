@@ -853,10 +853,16 @@ export default function ProjectDetailPage() {
           timestamp: new Date()
         }]);
 
-        // استفاده از API تعامل هوشمند با مرورگر
-        const res = await fetch(`${API_BASE}/api/render/inspector/ai-interact?task=${encodeURIComponent(userMessage)}&url=${encodeURIComponent(inspectorFrontendUrl)}&model_id=gpt-4o`, {
+        // استفاده از API تعامل هوشمند با مرورگر (AI Agent)
+        const res = await fetch(`${API_BASE}/api/render/inspector/ai-interact`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' }
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            task: userMessage,
+            url: inspectorFrontendUrl,
+            model_id: 'gpt-4o',
+            max_steps: 10  // حداکثر 10 اقدام
+          })
         });
 
         const data = await res.json();

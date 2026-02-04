@@ -2901,140 +2901,85 @@ async def close_browser_session(session_id: str):
         return {"success": False, "error": str(e)}
 
 
+class AIInteractRequest(BaseModel):
+    """درخواست تعامل AI با صفحه"""
+    task: str
+    url: str
+    model_id: Optional[str] = "gpt-4o"
+    max_steps: Optional[int] = 10
+
+
 @router.post("/inspector/ai-interact")
 async def ai_interact_with_page(
-    task: str,
-    url: str,
-    model_id: Optional[str] = "gpt-4o",
-    username: Optional[str] = None,
-    password: Optional[str] = None,
+    request: AIInteractRequest,
     db: Session = Depends(get_db)
 ):
     """
-    تعامل هوشمند AI با صفحه وب
+    🤖 تعامل هوشمند AI با صفحه وب
 
-    این endpoint:
-    1. مرورگر باز می‌کند
-    2. صفحه را تحلیل می‌کند
-    3. اکشن‌های لازم را اجرا می‌کند
-    4. موقعیت cursor را برمی‌گرداند
+    این endpoint یک AI Agent کامل است که می‌تواند هر دستوری را اجرا کند:
+    - صفحه را می‌بیند (screenshot)
+    - تصمیم می‌گیرد چه کاری انجام دهد
+    - اقدام می‌کند (کلیک، تایپ، اسکرول)
+    - نتیجه را می‌بیند و تکرار می‌کند تا task کامل شود
 
-    مثال: task="لاگین کن" -> AI فرم لاگین را پیدا می‌کند و لاگین می‌کند
+    مثال‌ها:
+    - "لاگین کن" → فرم لاگین را پیدا می‌کند و لاگین می‌کند
+    - "برو به منوی Settings" → منو را پیدا می‌کند و کلیک می‌کند
+    - "اسکرول کن تا قسمت Contact" → اسکرول می‌کند تا آن قسمت را پیدا کند
+    - "دکمه Submit را بزن" → دکمه را پیدا می‌کند و کلیک می‌کند
     """
     import uuid
-    from ...services.browser_automation import create_session, execute_ai_action, close_session
+    from ...services.browser_automation import create_session, execute_ai_agent_task, close_session
     from ...services.ai_manager import get_ai_manager
 
     session_id = str(uuid.uuid4())[:8]
 
     slog.api_request("POST", "/inspector/ai-interact",
-        task=task[:100],
-        url=url,
-        model_id=model_id
+        task=request.task[:100],
+        url=request.url,
+        model_id=request.model_id
     )
-
-    actions_log = []
-    cursor_positions = []
 
     try:
         # 1. باز کردن مرورگر
-        session = await create_session(session_id, url)
-        screenshot = await session.take_screenshot()
+        session = await create_session(session_id, request.url)
         page_info = await session.get_page_info()
 
-        actions_log.append({
-            "step": 1,
-            "action": "open_browser",
-            "message": f"مرورگر باز شد: {page_info.get('title', 'Unknown')}",
-            "status": "done"
-        })
+        slog.info(f"Browser opened", session_id=session_id, title=page_info.get('title'))
 
-        # 2. تحلیل task
-        task_lower = task.lower()
-        is_login_task = any(word in task_lower for word in ['login', 'لاگین', 'ورود', 'sign in', 'وارد'])
+        # 2. دریافت AI manager
+        ai_manager = get_ai_manager()
 
-        if is_login_task:
-            # 3. پیدا کردن فرم لاگین
-            actions_log.append({
-                "step": 2,
-                "action": "find_login",
-                "message": "در حال جستجوی فرم لاگین...",
-                "status": "running"
+        # 3. اجرای task با AI Agent
+        result = await execute_ai_agent_task(
+            session=session,
+            task=request.task,
+            ai_manager=ai_manager,
+            model_id=request.model_id,
+            max_steps=request.max_steps
+        )
+
+        # 4. فرمت کردن اکشن‌ها برای نمایش
+        formatted_actions = []
+        for action in result.get("actions", []):
+            formatted_actions.append({
+                "step": action.get("step"),
+                "action": action.get("action"),
+                "message": action.get("description") or action.get("thinking", "")[:100],
+                "element": action.get("element", ""),
+                "status": action.get("status", "done")
             })
-
-            find_result = await execute_ai_action(session, "find_login", {})
-
-            if find_result.get("success"):
-                login_info = find_result.get("login_info", {})
-                actions_log[-1]["status"] = "done"
-                actions_log[-1]["message"] = f"فرم لاگین پیدا شد با {len(login_info.get('inputs', []))} فیلد"
-
-                if find_result.get("cursor_position"):
-                    cursor_positions.append({
-                        "step": 2,
-                        "action": "move_to_username",
-                        **find_result["cursor_position"]
-                    })
-
-                # 4. انجام لاگین
-                actions_log.append({
-                    "step": 3,
-                    "action": "login",
-                    "message": "در حال انجام لاگین...",
-                    "status": "running"
-                })
-
-                login_result = await execute_ai_action(session, "login", {
-                    "username": username or "admin",
-                    "password": password or "password"
-                })
-
-                if login_result.get("success"):
-                    actions_log[-1]["status"] = "done"
-                    actions_log[-1]["message"] = login_result.get("message", "لاگین انجام شد")
-
-                    # اضافه کردن cursor positions از اکشن‌های لاگین
-                    for action in login_result.get("actions", []):
-                        if action.get("cursor_position"):
-                            cursor_positions.append({
-                                "step": 3,
-                                "action": action["action"],
-                                **action["cursor_position"]
-                            })
-                else:
-                    actions_log[-1]["status"] = "failed"
-                    actions_log[-1]["message"] = login_result.get("message", "خطا در لاگین")
-            else:
-                actions_log[-1]["status"] = "failed"
-                actions_log[-1]["message"] = "فرم لاگین پیدا نشد"
-
-        else:
-            # Task عمومی - استفاده از AI برای تحلیل
-            actions_log.append({
-                "step": 2,
-                "action": "ai_analyze",
-                "message": "در حال تحلیل صفحه با AI...",
-                "status": "running"
-            })
-
-            # TODO: استفاده از vision model برای تحلیل
-            actions_log[-1]["status"] = "done"
-            actions_log[-1]["message"] = "صفحه تحلیل شد. برای اکشن‌های پیچیده‌تر، دستور دقیق‌تری بدهید."
-
-        # 5. گرفتن screenshot نهایی
-        final_screenshot = await session.take_screenshot()
-
-        # بستن session بعد از چند ثانیه
-        # await close_session(session_id)
 
         return {
-            "success": True,
+            "success": result.get("success", False),
             "session_id": session_id,
-            "task": task,
-            "actions": actions_log,
-            "cursor_positions": cursor_positions,
-            "final_screenshot": final_screenshot,
-            "message": f"کار انجام شد: {len(actions_log)} مرحله",
+            "task": request.task,
+            "actions": formatted_actions,
+            "cursor_positions": result.get("cursor_positions", []),
+            "final_screenshot": result.get("final_screenshot"),
+            "total_steps": result.get("total_steps", 0),
+            "message": f"کار انجام شد: {result.get('total_steps', 0)} مرحله",
             "page_info": page_info
         }
 
@@ -3047,6 +2992,6 @@ async def ai_interact_with_page(
         return {
             "success": False,
             "error": str(e),
-            "actions": actions_log
+            "actions": []
         }
 
