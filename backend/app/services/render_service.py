@@ -118,6 +118,20 @@ class RenderAPIService:
                             self._owner_id = owner_id
                             slog.info("Owner ID extracted", owner_id=owner_id)
 
+                        # 🆕 استخراج URL واقعی سرویس
+                        service_url = None
+                        service_details = service.get("serviceDetails", {})
+                        if service_details:
+                            # web services have url in serviceDetails
+                            service_url = service_details.get("url")
+
+                        # Fallback: ساخت URL از slug یا name
+                        if not service_url:
+                            slug = service.get("slug") or service.get("name", "").lower().replace(" ", "-").replace("_", "-")
+                            service_type = service.get("type", "")
+                            if service_type in ["web_service", "static_site"]:
+                                service_url = f"https://{slug}.onrender.com"
+
                         services.append({
                             "id": service.get("id"),
                             "name": service.get("name"),
@@ -127,6 +141,7 @@ class RenderAPIService:
                             "created_at": service.get("createdAt"),
                             "updated_at": service.get("updatedAt"),
                             "owner_id": owner_id,
+                            "service_url": service_url,  # 🆕 URL واقعی
                             "dashboard_url": f"https://dashboard.render.com/{service.get('type', 'web')}/{service.get('id')}"
                         })
 
@@ -361,13 +376,17 @@ class RenderAPIService:
                     existing.type = service["type"]
                     existing.region = service["region"]
                     existing.status = service["status"]
+                    # 🆕 آپدیت URL سرویس
+                    if service.get("service_url"):
+                        existing.service_url = service["service_url"]
                 else:
                     new_service = RenderService(
                         id=service["id"],
                         name=service["name"],
                         type=service["type"],
                         region=service["region"],
-                        status=service["status"]
+                        status=service["status"],
+                        service_url=service.get("service_url")  # 🆕 URL سرویس
                     )
                     db.add(new_service)
 

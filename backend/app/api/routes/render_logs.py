@@ -335,8 +335,19 @@ async def get_services_by_project(
     backend_services = []
     all_web_services = []  # همه سرویس‌های وب برای fallback
 
+    def get_service_url(s):
+        """استخراج URL سرویس - اول از دیتابیس، بعد fallback به ساخت از نام"""
+        # 🆕 اول از URL ذخیره شده استفاده کن
+        if hasattr(s, 'service_url') and s.service_url:
+            return s.service_url
+        # Fallback: ساخت از نام (برای رکوردهای قدیمی)
+        if s.type in ["web_service", "static_site"]:
+            slug = s.name.lower().replace(" ", "-").replace("_", "-")
+            return f"https://{slug}.onrender.com"
+        return None
+
     for s in services:
-        service_url = f"https://{s.name}.onrender.com" if s.type in ["web_service", "static_site"] else None
+        service_url = get_service_url(s)
         service_info = {
             "id": s.id,
             "name": s.name,
@@ -389,7 +400,8 @@ async def get_services_by_project(
                 "name": s.name,
                 "type": s.type,
                 "status": s.status,
-                "url": f"https://{s.name}.onrender.com" if s.type in ["web_service", "static_site"] else None
+                "url": get_service_url(s),
+                "role": next((bs["role"] for bs in backend_services if bs["id"] == s.id), "frontend")
             }
             for s in services
         ],

@@ -20,6 +20,9 @@ class RenderService(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
+    # 🆕 URL واقعی سرویس (از Render API)
+    service_url = Column(String(500), nullable=True)  # https://xxx.onrender.com
+
     # تنظیمات
     auto_fetch_logs = Column(Boolean, default=True)  # آیا لاگ‌ها خودکار گرفته بشن
     log_retention_hours = Column(Integer, default=48)  # چند ساعت لاگ نگه داری بشه

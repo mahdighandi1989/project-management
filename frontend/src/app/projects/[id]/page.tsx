@@ -6662,9 +6662,9 @@ export default function ProjectDetailPage() {
             </div>
 
             {/* محتوای اصلی - اسکرین و چت */}
-            <div className="flex flex-row-reverse gap-4" style={{ minHeight: '420px' }}>
-              {/* اسکرین سمت چپ (در RTL) - ابعاد 5.1" x 2.8" (نسبت 1.82:1 - افقی/landscape) */}
-              <div className="flex-shrink-0 flex flex-col items-center" style={{ width: '560px' }}>
+            <div className="flex flex-row-reverse gap-4" style={{ minHeight: '520px' }}>
+              {/* اسکرین سمت چپ (در RTL) - ابعاد 5.1" x 2.8" (نسبت 1.82:1 - افقی/landscape) - 1.5x بزرگتر */}
+              <div className="flex-shrink-0 flex flex-col items-center" style={{ width: '840px' }}>
                 <div className="bg-black rounded-2xl p-2 shadow-2xl w-full">
                   {/* فریم دستگاه - افقی */}
                   <div
