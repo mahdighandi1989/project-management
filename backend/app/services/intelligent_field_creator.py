@@ -519,7 +519,7 @@ class IntelligentFieldCreator:
 
         slog.end("Intelligent field creation",
             success=result["success"],
-            action=result["action"],
+            field_action=result["action"],
             priority=field.get("priority"),
             dependencies=len(dependencies) if dependencies else 0
         )
