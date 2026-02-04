@@ -1340,6 +1340,7 @@ async def project_chat(
     """
     from ...services.ai_manager import get_ai_manager
     from ...services.ai_base import Message
+    from .project_journal import ActivityLog  # 🔴 FIX: Import ActivityLog
 
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
