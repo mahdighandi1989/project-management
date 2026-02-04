@@ -574,38 +574,46 @@ async def get_active_executions(
 
 @router.api_route("/executions/clear-stuck", methods=["GET", "DELETE"])
 async def clear_stuck_executions(
+    force: bool = False,  # 🆕 اگر True باشد همه را متوقف می‌کند، نه فقط قدیمی‌ها
     db: Session = Depends(get_db)
 ):
     """
-    پاک کردن اجراهای گیر کرده (running بیش از ۱ ساعت)
-    هم با GET و هم با DELETE قابل دسترسی است
+    پاک کردن اجراهای گیر کرده
+    - force=false: فقط اجراهای بیش از ۱ ساعت
+    - force=true: همه اجراهای در حال انجام (برای توقف اضطراری)
     """
     try:
         from datetime import timedelta
 
-        # پیدا کردن اجراهای گیر کرده (running بیش از ۱ ساعت)
-        one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+        if force:
+            # 🆕 توقف همه اجراهای در حال انجام
+            stuck_executions = db.query(PromptExecution).filter(
+                PromptExecution.status.in_(["pending", "running"])
+            ).all()
+        else:
+            # پیدا کردن اجراهای گیر کرده (running بیش از ۱ ساعت)
+            one_hour_ago = datetime.utcnow() - timedelta(hours=1)
 
-        stuck_executions = db.query(PromptExecution).filter(
-            PromptExecution.status.in_(["pending", "running"]),
-            PromptExecution.created_at < one_hour_ago
-        ).all()
+            stuck_executions = db.query(PromptExecution).filter(
+                PromptExecution.status.in_(["pending", "running"]),
+                PromptExecution.created_at < one_hour_ago
+            ).all()
 
         cleared_count = 0
         for exec in stuck_executions:
             exec.status = "failed"
             exec.completed_at = datetime.utcnow()
-            exec.error_message = "خودکار بسته شد - گیر کرده بود"
+            exec.error_message = "توسط کاربر متوقف شد" if force else "خودکار بسته شد - گیر کرده بود"
             cleared_count += 1
 
         db.commit()
 
-        logger.info(f"Cleared {cleared_count} stuck executions")
+        logger.info(f"Cleared {cleared_count} {'all' if force else 'stuck'} executions")
 
         return {
             "success": True,
             "cleared": cleared_count,
-            "message": f"{cleared_count} اجرای گیر کرده بسته شد"
+            "message": f"{cleared_count} اجرا متوقف شد"
         }
 
     except Exception as e:
