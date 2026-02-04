@@ -3375,6 +3375,29 @@ async def batch_execute_fields(
             pass
 
         try:
+            # 🔴 لاگ کامل برای دیباگ GitHub commit
+            logger.info(f"[Batch Execute] === Field Debug Start ===")
+            logger.info(f"[Batch Execute] Field name: {field.get('name')}")
+            logger.info(f"[Batch Execute] Field action_type: {field.get('action_type', 'display')} (needs 'github_commit' or 'github_multi_commit' for GitHub)")
+            logger.info(f"[Batch Execute] Field target_path: {field.get('target_path')}")
+
+            # 🔴 چک کردن github_info
+            github_info = {}
+            try:
+                if project.extra_data:
+                    github_info = json.loads(project.extra_data)
+            except:
+                pass
+            logger.info(f"[Batch Execute] Project source: {github_info.get('source')} (needs 'github')")
+            logger.info(f"[Batch Execute] GitHub owner: {github_info.get('owner')}")
+            logger.info(f"[Batch Execute] GitHub repo: {github_info.get('repo')}")
+            logger.info(f"[Batch Execute] === Field Debug End ===")
+
+            # 🔴 خودکار ارتقای action_type اگر شرایط لازم برقرار باشه
+            if field.get("action_type", "display") == "display" and field.get("target_path") and github_info.get("source") == "github":
+                logger.info(f"[Batch Execute] 🔄 Auto-upgrading field action_type from 'display' to 'github_commit'")
+                field["action_type"] = "github_commit"
+
             logger.info(f"[Batch Execute] Calling execute_field_internal for field: {field.get('name')}")
             # اجرای فیلد با قابلیت کامل (commit + deploy + archive)
             result = await execute_field_internal(
@@ -5479,6 +5502,236 @@ async def get_sync_intervals():
     return {
         "success": True,
         "intervals": SYNC_INTERVALS
+    }
+
+
+# =====================================
+# 🆕 دیاگنوستیک GitHub Commit
+# =====================================
+
+@router.get("/{project_id}/github-commit-diagnostic")
+async def github_commit_diagnostic(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    🔧 بررسی تمام پیش‌نیازهای commit به GitHub
+    این endpoint نشان می‌دهد چرا commit ممکن است کار نکند
+    """
+    from ...models.setting import Setting
+    import os
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # استخراج github_info از extra_data
+    github_info = {}
+    try:
+        if project.extra_data:
+            github_info = json.loads(project.extra_data)
+    except:
+        pass
+
+    # بررسی توکن
+    github_token = os.getenv("GITHUB_TOKEN", "")
+    if not github_token:
+        try:
+            github_token = Setting.get_value(db, "api_key_github") or ""
+        except:
+            pass
+
+    # بررسی فیلدها
+    dynamic_fields = []
+    try:
+        if project.dynamic_fields:
+            dynamic_fields = json.loads(project.dynamic_fields)
+    except:
+        pass
+
+    active_fields = [f for f in dynamic_fields if not f.get("archived")]
+
+    # تحلیل فیلدها
+    fields_analysis = []
+    for field in active_fields[:10]:  # فقط ۱۰ تای اول
+        analysis = {
+            "name": field.get("name", "بدون نام"),
+            "id": field.get("id"),
+            "action_type": field.get("action_type", "display"),
+            "target_path": field.get("target_path"),
+            "can_commit": False,
+            "issues": []
+        }
+
+        # بررسی مشکلات
+        if field.get("action_type", "display") == "display":
+            analysis["issues"].append("⚠️ action_type='display' - باید 'github_commit' باشد")
+        if not field.get("target_path"):
+            analysis["issues"].append("⚠️ target_path ندارد - مسیر فایل هدف مشخص نیست")
+        if github_info.get("source") != "github":
+            analysis["issues"].append("⚠️ پروژه از GitHub ایمپورت نشده (source != 'github')")
+
+        if not analysis["issues"]:
+            analysis["can_commit"] = True
+            analysis["issues"].append("✅ آماده commit")
+
+        fields_analysis.append(analysis)
+
+    # نتیجه نهایی
+    checks = {
+        "github_source": {
+            "status": github_info.get("source") == "github",
+            "value": github_info.get("source"),
+            "expected": "github",
+            "message": "پروژه باید از GitHub ایمپورت شده باشد"
+        },
+        "github_owner": {
+            "status": bool(github_info.get("owner")),
+            "value": github_info.get("owner"),
+            "message": "نام صاحب ریپو (owner) باید مشخص باشد"
+        },
+        "github_repo": {
+            "status": bool(github_info.get("repo")),
+            "value": github_info.get("repo"),
+            "message": "نام ریپو (repo) باید مشخص باشد"
+        },
+        "github_token": {
+            "status": bool(github_token),
+            "value": "***" if github_token else None,
+            "message": "توکن GitHub باید در تنظیمات یا environment باشد"
+        },
+        "active_fields": {
+            "status": len(active_fields) > 0,
+            "value": len(active_fields),
+            "message": "فیلدهای فعال برای اجرا وجود داشته باشد"
+        }
+    }
+
+    all_ok = all(c["status"] for c in checks.values())
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "project_name": project.name,
+        "all_checks_passed": all_ok,
+        "overall_status": "✅ آماده برای commit به GitHub" if all_ok else "❌ مشکلاتی وجود دارد",
+        "checks": checks,
+        "fields_analysis": fields_analysis,
+        "github_info": {
+            "source": github_info.get("source"),
+            "owner": github_info.get("owner"),
+            "repo": github_info.get("repo"),
+            "branch": github_info.get("branch", "main")
+        },
+        "recommendations": [
+            "اگر source خالی است: پروژه را از GitHub ایمپورت کنید یا source را به 'github' تغییر دهید",
+            "اگر توکن ندارید: در تنظیمات سیستم، GitHub Token را وارد کنید",
+            "اگر action_type فیلدها 'display' است: یا target_path اضافه کنید یا action_type را تغییر دهید"
+        ] if not all_ok else []
+    }
+
+
+@router.post("/{project_id}/fix-github-settings")
+async def fix_github_settings(
+    project_id: str,
+    owner: str = None,
+    repo: str = None,
+    db: Session = Depends(get_db)
+):
+    """
+    🔧 تعمیر تنظیمات GitHub پروژه
+    اگر پروژه source='github' ندارد یا owner/repo مشخص نیست، می‌توانید با این endpoint تنظیم کنید
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # استخراج extra_data موجود
+    extra_data = {}
+    try:
+        if project.extra_data:
+            extra_data = json.loads(project.extra_data)
+    except:
+        pass
+
+    # بروزرسانی تنظیمات
+    updated_fields = []
+
+    if extra_data.get("source") != "github":
+        extra_data["source"] = "github"
+        updated_fields.append("source")
+
+    if owner:
+        extra_data["owner"] = owner
+        updated_fields.append("owner")
+
+    if repo:
+        extra_data["repo"] = repo
+        updated_fields.append("repo")
+
+    if not extra_data.get("branch"):
+        extra_data["branch"] = "main"
+        updated_fields.append("branch")
+
+    project.extra_data = json.dumps(extra_data, ensure_ascii=False)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": f"تنظیمات GitHub بروزرسانی شد: {', '.join(updated_fields)}",
+        "github_info": {
+            "source": extra_data.get("source"),
+            "owner": extra_data.get("owner"),
+            "repo": extra_data.get("repo"),
+            "branch": extra_data.get("branch")
+        }
+    }
+
+
+@router.post("/{project_id}/upgrade-fields-action-type")
+async def upgrade_fields_action_type(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    🔧 ارتقای action_type فیلدهایی که target_path دارند به github_commit
+    این کار باعث می‌شود فیلدها بتوانند به GitHub کامیت شوند
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    dynamic_fields = []
+    try:
+        if project.dynamic_fields:
+            dynamic_fields = json.loads(project.dynamic_fields)
+    except:
+        pass
+
+    upgraded_count = 0
+    upgraded_fields = []
+
+    for field in dynamic_fields:
+        # فقط فیلدهای display که target_path دارند
+        if field.get("action_type", "display") == "display" and field.get("target_path"):
+            field["action_type"] = "github_commit"
+            field["deploy_after_commit"] = True
+            upgraded_count += 1
+            upgraded_fields.append({
+                "id": field.get("id"),
+                "name": field.get("name"),
+                "target_path": field.get("target_path")
+            })
+
+    if upgraded_count > 0:
+        project.dynamic_fields = json.dumps(dynamic_fields, ensure_ascii=False)
+        db.commit()
+
+    return {
+        "success": True,
+        "upgraded_count": upgraded_count,
+        "upgraded_fields": upgraded_fields,
+        "message": f"{upgraded_count} فیلد به github_commit ارتقا یافت" if upgraded_count > 0 else "فیلدی برای ارتقا یافت نشد"
     }
 
 
