@@ -2623,13 +2623,22 @@ async def generate_engineering_report(
         models_used = list(set(log.model_id for log in logs))
         models_used.append(model_id)
 
+        # 🔴 FIX: Ensure executive_summary is always a string (not dict)
+        exec_summary = report_data.get("executive_summary", f"گزارش مهندسی با تحلیل {len(files)} فایل")
+        if isinstance(exec_summary, dict):
+            # اگر dict بود، به JSON تبدیل کن یا از description استفاده کن
+            exec_summary = exec_summary.get("description", exec_summary.get("summary", json.dumps(exec_summary, ensure_ascii=False)))
+        if not isinstance(exec_summary, str):
+            exec_summary = str(exec_summary)
+        exec_summary = exec_summary[:500]  # حداکثر 500 کاراکتر
+
         report = Report(
             id=f"eng_report_{uuid.uuid4().hex[:12]}",
             project_id=project_id,
             report_type="engineering",
             title=f"گزارش مهندسی - {project.name}",
             content=json.dumps(report_data, ensure_ascii=False, indent=2),
-            summary=report_data.get("executive_summary", f"گزارش مهندسی با تحلیل {len(files)} فایل"),
+            summary=exec_summary,
             total_activities=len(logs),
             total_tokens=total_tokens,
             models_used=json.dumps(list(set(models_used))),
@@ -2650,7 +2659,7 @@ async def generate_engineering_report(
             model_provider="anthropic" if "claude" in model_id.lower() else "openai",
             activity_type="engineering_report",
             prompt=f"تولید گزارش مهندسی برای {days} روز اخیر",
-            response=report_data.get("executive_summary", "")[:500] if isinstance(report_data, dict) else None,
+            response=exec_summary,  # 🔴 FIX: استفاده از exec_summary که قطعاً string است
             tokens_used=response.tokens_used or 0,
             latency_ms=int((datetime.utcnow() - since).total_seconds() * 1000) if since else 0,
             success=True,
@@ -3152,10 +3161,10 @@ Full Traceback:
                             except:
                                 pass
 
-                        # نتایج تحلیل سلامت
-                        if project_obj.health_analysis_result:
+                        # نتایج تحلیل سلامت (از health_scores)
+                        if project_obj.health_scores:
                             try:
-                                health_analysis_data = json.loads(project_obj.health_analysis_result)
+                                health_analysis_data = json.loads(project_obj.health_scores)
                             except:
                                 pass
 
