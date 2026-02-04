@@ -2649,6 +2649,10 @@ async def generate_engineering_report(
             exec_summary = str(exec_summary)
         exec_summary = exec_summary[:500]  # حداکثر 500 کاراکتر
 
+        # 🔴🔴 FIX: Also update report_data to ensure executive_summary is a string in content
+        # This prevents React error #31 when frontend parses the JSON content
+        report_data["executive_summary"] = exec_summary
+
         report = Report(
             id=f"eng_report_{uuid.uuid4().hex[:12]}",
             project_id=project_id,
