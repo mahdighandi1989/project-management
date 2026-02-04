@@ -1484,6 +1484,9 @@ async def enhanced_project_chat(
     if not project:
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
 
+    # 🔴 FIX: Initialize files to prevent NameError
+    files = []
+
     # 1. ساخت context کامل پروژه
     context_parts = [
         f"# پروژه: {project.name}",
