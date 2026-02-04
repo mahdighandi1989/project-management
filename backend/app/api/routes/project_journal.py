@@ -3820,6 +3820,37 @@ async def engineering_step2_health_to_fields(
         if fallback:
             model_id = fallback
 
+    # 🔴 FIX: کوتاه‌سازی prompt اگر از حد مجاز مدل بیشتر باشد
+    from ...core.models_registry import get_model
+    model_info = get_model(model_id)
+    max_context = model_info.context_window if model_info else 131072
+
+    estimated_tokens = (len(system_prompt) + len(user_prompt)) // 3
+    max_prompt_tokens = int(max_context * 0.75)
+
+    if estimated_tokens > max_prompt_tokens:
+        logger.warning(f"Step2 prompt too long ({estimated_tokens} tokens), max: {max_prompt_tokens}. Truncating...")
+
+        # کوتاه کردن ایرادات
+        excess_ratio = max_prompt_tokens / estimated_tokens
+        max_issues = max(5, int(len(active_issues) * excess_ratio * 0.7))
+
+        if max_issues < len(active_issues):
+            active_issues_truncated = active_issues[:max_issues]
+            user_prompt = f"""پروژه: {project.name}
+⚠️ توجه: به دلیل محدودیت توکن، فقط {max_issues} ایراد از {len(active_issues)} بررسی می‌شوند.
+
+=== ایرادات سلامت ({len(active_issues_truncated)} از {len(active_issues)}) ===
+{json.dumps(active_issues_truncated, ensure_ascii=False, indent=2)}
+
+=== فیلدهای موجود (برای جلوگیری از تکرار) ===
+{json.dumps([{"name": f.get("name"), "target_path": f.get("target_path")} for f in existing_fields if not f.get("archived")][:20], ensure_ascii=False, indent=2)}
+
+ایرادات را بررسی و به فیلدهای عملیاتی تبدیل کن."""
+
+            estimated_tokens = (len(system_prompt) + len(user_prompt)) // 3
+            logger.info(f"After truncation: {estimated_tokens} tokens, {len(active_issues_truncated)} issues")
+
     messages = [
         Message(role="system", content=system_prompt),
         Message(role="user", content=user_prompt),
