@@ -185,14 +185,20 @@ class ModelProfiler:
             }
 
             # اضافه کردن به تاریخچه (حداکثر 1000 ورودی)
-            history = profile.score_history or []
+            # 🔴 FIX: Ensure score_history is always a list
+            history = profile.score_history
+            if not isinstance(history, list):
+                history = []
             history.append(history_entry)
             if len(history) > 1000:
                 history = history[-1000:]
             profile.score_history = history
 
             # به‌روزرسانی آخرین نمرات هر نوع کار
-            last_scores = profile.last_scores_by_task or {}
+            # 🔴 FIX: Ensure last_scores_by_task is always a dict
+            last_scores = profile.last_scores_by_task
+            if not isinstance(last_scores, dict):
+                last_scores = {}
             last_scores[task_type] = history_entry['scores']
             profile.last_scores_by_task = last_scores
 
