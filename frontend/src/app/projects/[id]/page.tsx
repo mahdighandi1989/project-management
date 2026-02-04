@@ -6547,49 +6547,33 @@ export default function ProjectDetailPage() {
             </div>
 
             {/* محتوای اصلی - اسکرین و چت */}
-            <div className="flex gap-4 h-[450px]">
-              {/* اسکرین سمت چپ - ابعاد 5.1" x 2.8" با نسبت 1.82:1 */}
-              <div className="flex-shrink-0" style={{ width: '340px' }}>
-                <div
-                  className="bg-black rounded-3xl p-2 shadow-2xl h-full"
-                  style={{
-                    aspectRatio: '9/16',
-                    maxHeight: '100%',
-                    width: '100%'
-                  }}
-                >
-                  {/* فریم گوشی */}
-                  <div className="bg-gray-900 rounded-2xl h-full w-full overflow-hidden relative">
-                    {/* نوار بالای گوشی */}
-                    <div className="absolute top-0 left-0 right-0 h-6 bg-black flex items-center justify-center z-10">
-                      <div className="w-20 h-4 bg-black rounded-full flex items-center justify-center">
-                        <div className="w-2 h-2 bg-gray-700 rounded-full"></div>
+            <div className="flex gap-4" style={{ minHeight: '320px' }}>
+              {/* اسکرین سمت چپ - ابعاد 5.1" x 2.8" (نسبت 1.82:1 - افقی/landscape) */}
+              <div className="flex-shrink-0" style={{ width: '460px' }}>
+                <div className="bg-black rounded-2xl p-2 shadow-2xl">
+                  {/* فریم دستگاه - افقی */}
+                  <div
+                    className="bg-gray-900 rounded-xl overflow-hidden relative"
+                    style={{ aspectRatio: '1.82/1' }}
+                  >
+                    {/* نوار بالای دستگاه */}
+                    <div className="absolute top-0 left-0 right-0 h-5 bg-black/60 flex items-center justify-between px-3 z-10">
+                      <span className="text-[10px] text-gray-400">9:41</span>
+                      <div className="flex gap-1 items-center text-[10px] text-gray-400">
+                        <span>📶</span>
+                        <span>🔋</span>
                       </div>
                     </div>
 
                     {/* صفحه نمایش */}
-                    <div className="h-full w-full bg-gradient-to-b from-gray-800 to-gray-900 pt-6 pb-4 px-2 flex flex-col">
-                      {/* استاتوس بار */}
-                      <div className="flex justify-between items-center px-2 py-1 text-xs text-gray-400">
-                        <span>9:41</span>
-                        <div className="flex gap-1 items-center">
-                          <span>📶</span>
-                          <span>🔋</span>
-                        </div>
-                      </div>
-
+                    <div className="h-full w-full bg-gradient-to-br from-gray-800 to-gray-900 pt-5 pb-2 px-2 flex flex-col">
                       {/* محتوای اسکرین */}
-                      <div className="flex-1 bg-gray-800 rounded-lg mt-2 p-3 overflow-auto">
-                        <div className="text-center text-gray-500 text-sm">
-                          <div className="text-4xl mb-2">📱</div>
-                          <p>پیش‌نمایش پروژه</p>
-                          <p className="text-xs mt-1 text-gray-600">نمایش زنده تغییرات</p>
+                      <div className="flex-1 bg-gray-800/50 rounded-lg p-4 overflow-auto flex items-center justify-center">
+                        <div className="text-center text-gray-500">
+                          <div className="text-5xl mb-3">📱</div>
+                          <p className="text-sm font-medium">پیش‌نمایش پروژه</p>
+                          <p className="text-xs mt-1 text-gray-600">ابعاد: 5.1" × 2.8" | قطر: 5.8"</p>
                         </div>
-                      </div>
-
-                      {/* نوار پایین */}
-                      <div className="flex justify-center mt-2">
-                        <div className="w-24 h-1 bg-gray-600 rounded-full"></div>
                       </div>
                     </div>
                   </div>
