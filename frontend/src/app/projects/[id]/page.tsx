@@ -299,15 +299,39 @@ export default function ProjectDetailPage() {
   const [inspectorSelectedModels, setInspectorSelectedModels] = useState<string[]>([]);
   const [inspectorChatMessages, setInspectorChatMessages] = useState<Array<{
     id: string;
-    role: 'user' | 'assistant';
+    role: 'user' | 'assistant' | 'system' | 'action';
     content: string;
     model_id?: string;
     timestamp: Date;
     tokens_used?: number;
+    action_type?: 'click' | 'type' | 'navigate' | 'edit' | 'read' | 'log';
   }>>([]);
   const [inspectorChatInput, setInspectorChatInput] = useState('');
   const [inspectorChatLoading, setInspectorChatLoading] = useState(false);
   const [inspectorShowModelSelector, setInspectorShowModelSelector] = useState(false);
+
+  // 🆕 انتخاب خودکار مدل و همکاری
+  const [inspectorAutoSelect, setInspectorAutoSelect] = useState(true); // پیش‌فرض فعال
+  const [inspectorCollaborativeMode, setInspectorCollaborativeMode] = useState(true);
+  const [inspectorActiveTask, setInspectorActiveTask] = useState<{
+    id: string;
+    description: string;
+    models: string[];
+    status: 'running' | 'completed' | 'failed';
+    actions: Array<{
+      model_id: string;
+      action: string;
+      timestamp: Date;
+      status: 'pending' | 'running' | 'done';
+    }>;
+  } | null>(null);
+  const [inspectorVirtualCursor, setInspectorVirtualCursor] = useState<{
+    x: number;
+    y: number;
+    visible: boolean;
+    model_id?: string;
+  }>({ x: 0, y: 0, visible: false });
+  const [inspectorGithubConnected, setInspectorGithubConnected] = useState(false);
 
   const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
   const [selectedLog, setSelectedLog] = useState<ActivityLog | null>(null);
@@ -758,7 +782,9 @@ export default function ProjectDetailPage() {
 
   // 🆕 ارسال پیام به AI
   const sendInspectorChat = async () => {
-    if (!inspectorChatInput.trim() || inspectorSelectedModels.length === 0) return;
+    // در حالت انتخاب خودکار، نیازی به انتخاب دستی مدل نیست
+    if (!inspectorChatInput.trim()) return;
+    if (!inspectorAutoSelect && inspectorSelectedModels.length === 0) return;
 
     const userMessage = inspectorChatInput.trim();
     setInspectorChatInput('');
@@ -774,99 +800,200 @@ export default function ProjectDetailPage() {
     }]);
 
     try {
-      // آماده‌سازی context
-      const chatHistory = inspectorChatMessages.map(m => ({
-        role: m.role,
-        content: m.content
-      }));
-
       // آماده‌سازی فایل‌ها (اگر موجود باشد)
       const projectFiles = files.slice(0, 5).map(f => ({
         path: f.path,
         content: '' // محتوا بعداً می‌تواند از فایل‌های باز شده خوانده شود
       }));
 
-      if (inspectorSelectedModels.length === 1) {
-        // چت با یک مدل
-        const res = await fetch(`${API_BASE}/api/render/inspector/chat`, {
+      // 🆕 اگر انتخاب خودکار فعال باشد، از smart-task استفاده کن
+      if (inspectorAutoSelect) {
+        // اضافه کردن پیام سیستم که نشان می‌دهد در حال تحلیل است
+        setInspectorChatMessages(prev => [...prev, {
+          id: `system_${Date.now()}`,
+          role: 'assistant',
+          content: '🔍 در حال تحلیل درخواست و انتخاب مدل‌های مناسب...',
+          timestamp: new Date()
+        }]);
+
+        const res = await fetch(`${API_BASE}/api/render/inspector/smart-task`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            model_id: inspectorSelectedModels[0],
-            message: userMessage,
+            task: userMessage,
             project_id: projectId,
+            auto_select: true,
+            collaborative: inspectorCollaborativeMode,
+            visual_mode: true, // برای نشانگر مجازی
             backend_logs: inspectorBackendLogs,
             frontend_url: inspectorFrontendUrl,
             project_files: projectFiles,
-            chat_history: chatHistory
+            github_repo: project?.metadata?.repo ? `${project.metadata.owner}/${project.metadata.repo}` : null
           })
         });
 
         const data = await res.json();
 
         if (data.success) {
-          setInspectorChatMessages(prev => [...prev, {
-            id: `assistant_${Date.now()}`,
-            role: 'assistant',
-            content: data.content,
-            model_id: data.model_id,
-            timestamp: new Date(),
-            tokens_used: data.tokens_used
-          }]);
+          // ذخیره task برای نمایش پیشرفت
+          if (data.task_id) {
+            setInspectorActiveTask({
+              id: data.task_id,
+              description: userMessage,
+              models: data.selected_models || [],
+              status: 'running',
+              actions: data.actions || []
+            });
+          }
+
+          // حذف پیام "در حال تحلیل" و اضافه کردن نتیجه
+          setInspectorChatMessages(prev => {
+            const filtered = prev.filter(m => !m.id.startsWith('system_'));
+            return [...filtered, {
+              id: `assistant_${Date.now()}`,
+              role: 'assistant',
+              content: data.content || `✅ کار با موفقیت اجرا شد\n\n📊 مدل‌های انتخاب شده: ${(data.selected_models || []).join(', ')}\n\n${data.analysis || ''}`,
+              model_id: data.selected_models?.join(', '),
+              timestamp: new Date(),
+              tokens_used: data.tokens_used
+            }];
+          });
+
+          // نمایش اکشن‌های انجام شده
+          if (data.actions && data.actions.length > 0) {
+            const actionsText = data.actions.map((a: any) =>
+              `${a.status === 'done' ? '✅' : a.status === 'running' ? '⏳' : '⏸️'} [${a.model_id}] ${a.action}`
+            ).join('\n');
+
+            setInspectorChatMessages(prev => [...prev, {
+              id: `actions_${Date.now()}`,
+              role: 'assistant',
+              content: `📋 اقدامات انجام شده:\n${actionsText}`,
+              timestamp: new Date()
+            }]);
+          }
+
+          // اگر cursor position داریم، نشانگر مجازی را حرکت بده
+          if (data.cursor_position) {
+            setInspectorVirtualCursor({
+              x: data.cursor_position.x,
+              y: data.cursor_position.y,
+              visible: true,
+              model_id: data.selected_models?.[0]
+            });
+            // بعد از 3 ثانیه نشانگر را پنهان کن
+            setTimeout(() => {
+              setInspectorVirtualCursor(prev => ({ ...prev, visible: false }));
+            }, 3000);
+          }
+
+          // بررسی اتصال GitHub
+          if (data.github_connected) {
+            setInspectorGithubConnected(true);
+          }
         } else {
-          setInspectorChatMessages(prev => [...prev, {
-            id: `error_${Date.now()}`,
-            role: 'assistant',
-            content: `❌ خطا: ${data.error || 'خطای ناشناخته'}`,
-            timestamp: new Date()
-          }]);
+          setInspectorChatMessages(prev => {
+            const filtered = prev.filter(m => !m.id.startsWith('system_'));
+            return [...filtered, {
+              id: `error_${Date.now()}`,
+              role: 'assistant',
+              content: `❌ خطا: ${data.error || 'خطای ناشناخته'}`,
+              timestamp: new Date()
+            }];
+          });
         }
       } else {
-        // چت با چند مدل
-        const res = await fetch(`${API_BASE}/api/render/inspector/chat/multi`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model_ids: inspectorSelectedModels,
-            message: userMessage,
-            project_id: projectId,
-            backend_logs: inspectorBackendLogs,
-            frontend_url: inspectorFrontendUrl,
-            project_files: projectFiles,
-            chat_history: chatHistory
-          })
-        });
+        // حالت انتخاب دستی - کد قبلی
+        const chatHistory = inspectorChatMessages.map(m => ({
+          role: m.role,
+          content: m.content
+        }));
 
-        const data = await res.json();
-
-        if (data.success && data.responses) {
-          data.responses.forEach((r: any) => {
-            setInspectorChatMessages(prev => [...prev, {
-              id: `assistant_${Date.now()}_${r.model_id}`,
-              role: 'assistant',
-              content: r.error ? `❌ ${r.model_id}: ${r.error}` : r.content,
-              model_id: r.model_id,
-              timestamp: new Date(),
-              tokens_used: r.tokens_used
-            }]);
+        if (inspectorSelectedModels.length === 1) {
+          // چت با یک مدل
+          const res = await fetch(`${API_BASE}/api/render/inspector/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model_id: inspectorSelectedModels[0],
+              message: userMessage,
+              project_id: projectId,
+              backend_logs: inspectorBackendLogs,
+              frontend_url: inspectorFrontendUrl,
+              project_files: projectFiles,
+              chat_history: chatHistory
+            })
           });
+
+          const data = await res.json();
+
+          if (data.success) {
+            setInspectorChatMessages(prev => [...prev, {
+              id: `assistant_${Date.now()}`,
+              role: 'assistant',
+              content: data.content,
+              model_id: data.model_id,
+              timestamp: new Date(),
+              tokens_used: data.tokens_used
+            }]);
+          } else {
+            setInspectorChatMessages(prev => [...prev, {
+              id: `error_${Date.now()}`,
+              role: 'assistant',
+              content: `❌ خطا: ${data.error || 'خطای ناشناخته'}`,
+              timestamp: new Date()
+            }]);
+          }
         } else {
-          setInspectorChatMessages(prev => [...prev, {
-            id: `error_${Date.now()}`,
-            role: 'assistant',
-            content: `❌ خطا: ${data.error || 'خطای ناشناخته'}`,
-            timestamp: new Date()
-          }]);
+          // چت با چند مدل
+          const res = await fetch(`${API_BASE}/api/render/inspector/chat/multi`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model_ids: inspectorSelectedModels,
+              message: userMessage,
+              project_id: projectId,
+              backend_logs: inspectorBackendLogs,
+              frontend_url: inspectorFrontendUrl,
+              project_files: projectFiles,
+              chat_history: chatHistory
+            })
+          });
+
+          const data = await res.json();
+
+          if (data.success && data.responses) {
+            data.responses.forEach((r: any) => {
+              setInspectorChatMessages(prev => [...prev, {
+                id: `assistant_${Date.now()}_${r.model_id}`,
+                role: 'assistant',
+                content: r.error ? `❌ ${r.model_id}: ${r.error}` : r.content,
+                model_id: r.model_id,
+                timestamp: new Date(),
+                tokens_used: r.tokens_used
+              }]);
+            });
+          } else {
+            setInspectorChatMessages(prev => [...prev, {
+              id: `error_${Date.now()}`,
+              role: 'assistant',
+              content: `❌ خطا: ${data.error || 'خطای ناشناخته'}`,
+              timestamp: new Date()
+            }]);
+          }
         }
       }
     } catch (err) {
       console.error('Error sending inspector chat:', err);
-      setInspectorChatMessages(prev => [...prev, {
-        id: `error_${Date.now()}`,
-        role: 'assistant',
-        content: '❌ خطا در اتصال به سرور',
-        timestamp: new Date()
-      }]);
+      setInspectorChatMessages(prev => {
+        const filtered = prev.filter(m => !m.id.startsWith('system_'));
+        return [...filtered, {
+          id: `error_${Date.now()}`,
+          role: 'assistant',
+          content: '❌ خطا در اتصال به سرور',
+          timestamp: new Date()
+        }];
+      });
     } finally {
       setInspectorChatLoading(false);
     }
@@ -6878,12 +7005,48 @@ export default function ProjectDetailPage() {
                             </div>
                           </div>
                         ) : inspectorPowerOn && inspectorFrontendUrl ? (
-                          <iframe
-                            src={inspectorFrontendUrl}
-                            className="w-full h-full border-0 bg-white"
-                            title="پیش‌نمایش فرانت‌اند"
-                            sandbox="allow-scripts allow-same-origin allow-forms"
-                          />
+                          <div className="relative w-full h-full">
+                            <iframe
+                              src={inspectorFrontendUrl}
+                              className="w-full h-full border-0 bg-white"
+                              title="پیش‌نمایش فرانت‌اند"
+                              sandbox="allow-scripts allow-same-origin allow-forms"
+                            />
+                            {/* 🆕 نشانگر موس مجازی */}
+                            {inspectorVirtualCursor.visible && (
+                              <div
+                                className="absolute pointer-events-none z-50 transition-all duration-300 ease-out"
+                                style={{
+                                  left: `${inspectorVirtualCursor.x}%`,
+                                  top: `${inspectorVirtualCursor.y}%`,
+                                  transform: 'translate(-50%, -50%)'
+                                }}
+                              >
+                                {/* نشانگر موس */}
+                                <svg
+                                  width="24"
+                                  height="24"
+                                  viewBox="0 0 24 24"
+                                  className="drop-shadow-lg animate-pulse"
+                                >
+                                  <path
+                                    d="M3 3l9 18 3-9 9-3z"
+                                    fill="#ef4444"
+                                    stroke="#fff"
+                                    strokeWidth="2"
+                                  />
+                                </svg>
+                                {/* نشانگر مدل */}
+                                {inspectorVirtualCursor.model_id && (
+                                  <div className="absolute -top-6 -right-2 bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full whitespace-nowrap shadow-lg">
+                                    {inspectorVirtualCursor.model_id}
+                                  </div>
+                                )}
+                                {/* افکت کلیک */}
+                                <div className="absolute inset-0 w-6 h-6 bg-red-500/30 rounded-full animate-ping" />
+                              </div>
+                            )}
+                          </div>
                         ) : inspectorPowerOn && inspectorError ? (
                           <div className="h-full flex items-center justify-center p-3">
                             <div className="text-center text-yellow-500">
@@ -6958,26 +7121,75 @@ export default function ProjectDetailPage() {
 
                   {/* انتخابگر مدل */}
                   {inspectorShowModelSelector && (
-                    <div className="mt-3 bg-white/10 rounded-lg p-2 max-h-40 overflow-auto">
-                      <p className="text-xs mb-2 opacity-80">مدل‌های موجود (کلیک برای انتخاب):</p>
-                      <div className="flex flex-wrap gap-1">
-                        {inspectorModels.map(model => (
-                          <button
-                            key={model.id}
-                            onClick={() => toggleInspectorModel(model.id)}
-                            className={`text-xs px-2 py-1 rounded-full transition ${
-                              inspectorSelectedModels.includes(model.id)
-                                ? 'bg-white text-red-500 font-bold'
-                                : model.enabled
-                                  ? 'bg-white/20 hover:bg-white/30'
-                                  : 'bg-white/10 opacity-50'
-                            }`}
-                            disabled={!model.enabled}
-                          >
-                            {model.name}
-                          </button>
-                        ))}
+                    <div className="mt-3 bg-white/10 rounded-lg p-2 max-h-60 overflow-auto">
+                      {/* 🆕 چک‌باکس انتخاب خودکار */}
+                      <div className="mb-3 pb-2 border-b border-white/20">
+                        <label className="flex items-center gap-2 cursor-pointer hover:bg-white/10 p-1 rounded">
+                          <input
+                            type="checkbox"
+                            checked={inspectorAutoSelect}
+                            onChange={(e) => setInspectorAutoSelect(e.target.checked)}
+                            className="w-4 h-4 rounded accent-white"
+                          />
+                          <div>
+                            <span className="text-xs font-medium">🎯 انتخاب خودکار مدل</span>
+                            <p className="text-[10px] opacity-70">مدل‌ها بر اساس نوع درخواست انتخاب می‌شوند</p>
+                          </div>
+                        </label>
+
+                        <label className="flex items-center gap-2 cursor-pointer hover:bg-white/10 p-1 rounded mt-1">
+                          <input
+                            type="checkbox"
+                            checked={inspectorCollaborativeMode}
+                            onChange={(e) => setInspectorCollaborativeMode(e.target.checked)}
+                            className="w-4 h-4 rounded accent-white"
+                          />
+                          <div>
+                            <span className="text-xs font-medium">🤝 همکاری چند مدل</span>
+                            <p className="text-[10px] opacity-70">مدل‌ها از کار همدیگر آگاه هستند</p>
+                          </div>
+                        </label>
+
+                        {/* نشانگر GitHub */}
+                        <div className="flex items-center gap-2 mt-2 p-1">
+                          <span className={`w-2 h-2 rounded-full ${inspectorGithubConnected ? 'bg-green-400' : 'bg-gray-400'}`}></span>
+                          <span className="text-[10px] opacity-70">
+                            {inspectorGithubConnected ? '✓ متصل به GitHub' : 'GitHub غیرمتصل'}
+                          </span>
+                        </div>
                       </div>
+
+                      {/* انتخاب دستی مدل‌ها */}
+                      {!inspectorAutoSelect && (
+                        <>
+                          <p className="text-xs mb-2 opacity-80">مدل‌های موجود (کلیک برای انتخاب):</p>
+                          <div className="flex flex-wrap gap-1">
+                            {inspectorModels.map(model => (
+                              <button
+                                key={model.id}
+                                onClick={() => toggleInspectorModel(model.id)}
+                                className={`text-xs px-2 py-1 rounded-full transition ${
+                                  inspectorSelectedModels.includes(model.id)
+                                    ? 'bg-white text-red-500 font-bold'
+                                    : model.enabled
+                                      ? 'bg-white/20 hover:bg-white/30'
+                                      : 'bg-white/10 opacity-50'
+                                }`}
+                                disabled={!model.enabled}
+                              >
+                                {model.name}
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      )}
+
+                      {inspectorAutoSelect && (
+                        <p className="text-xs opacity-60 text-center py-2">
+                          ✨ مدل‌ها خودکار انتخاب می‌شوند
+                        </p>
+                      )}
+
                       {inspectorModels.length === 0 && (
                         <p className="text-xs opacity-60">دکمه پاور را بزنید تا مدل‌ها لود شوند</p>
                       )}
@@ -7101,19 +7313,38 @@ export default function ProjectDetailPage() {
 
                 {/* ورودی پیام */}
                 <div className="p-3 border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
+                  {/* 🆕 نمایش تسک فعال */}
+                  {inspectorActiveTask && inspectorActiveTask.status === 'running' && (
+                    <div className="mb-2 p-2 bg-blue-50 dark:bg-blue-900/20 rounded-lg text-xs">
+                      <div className="flex items-center gap-2 text-blue-600 dark:text-blue-400">
+                        <span className="animate-spin">⚙️</span>
+                        <span>در حال اجرا: {inspectorActiveTask.description.slice(0, 40)}...</span>
+                      </div>
+                      <div className="mt-1 text-blue-500/80 text-[10px]">
+                        مدل‌ها: {inspectorActiveTask.models.join(', ')}
+                      </div>
+                    </div>
+                  )}
+
                   <div className="flex gap-2">
                     <input
                       type="text"
                       value={inspectorChatInput}
                       onChange={(e) => setInspectorChatInput(e.target.value)}
                       onKeyPress={(e) => e.key === 'Enter' && !inspectorChatLoading && sendInspectorChat()}
-                      placeholder={inspectorSelectedModels.length > 0 ? "پیام خود را بنویسید..." : "ابتدا مدلی انتخاب کنید..."}
-                      disabled={inspectorSelectedModels.length === 0 || inspectorChatLoading}
+                      placeholder={
+                        inspectorAutoSelect
+                          ? "درخواست خود را بنویسید... (مدل‌ها خودکار انتخاب می‌شوند)"
+                          : inspectorSelectedModels.length > 0
+                            ? "پیام خود را بنویسید..."
+                            : "ابتدا مدلی انتخاب کنید..."
+                      }
+                      disabled={(!inspectorAutoSelect && inspectorSelectedModels.length === 0) || inspectorChatLoading}
                       className="flex-1 bg-gray-100 dark:bg-gray-700 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50"
                     />
                     <button
                       onClick={sendInspectorChat}
-                      disabled={!inspectorChatInput.trim() || inspectorSelectedModels.length === 0 || inspectorChatLoading}
+                      disabled={!inspectorChatInput.trim() || (!inspectorAutoSelect && inspectorSelectedModels.length === 0) || inspectorChatLoading}
                       className="bg-gradient-to-r from-red-500 to-orange-500 text-white rounded-full w-10 h-10 flex items-center justify-center hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {inspectorChatLoading ? (
@@ -7123,8 +7354,8 @@ export default function ProjectDetailPage() {
                       )}
                     </button>
                   </div>
-                  {inspectorSelectedModels.length === 0 && inspectorPowerOn && (
-                    <p className="text-xs text-red-500 mt-1 text-center">از بالا مدلی انتخاب کنید</p>
+                  {!inspectorAutoSelect && inspectorSelectedModels.length === 0 && inspectorPowerOn && (
+                    <p className="text-xs text-red-500 mt-1 text-center">از بالا مدلی انتخاب کنید یا انتخاب خودکار را فعال کنید</p>
                   )}
                 </div>
               </div>
