@@ -1513,6 +1513,55 @@ async def test_enhanced_chat(
     except Exception as e:
         results["checks"]["activity_log"] = {"ok": False, "error": str(e)}
 
+    # 6. 🔴 Test actual AI call with simple prompt
+    try:
+        from ...services.ai_manager import get_ai_manager
+        from ...services.ai_base import Message
+        import asyncio
+
+        ai_manager = get_ai_manager()
+        messages = [
+            Message(role="system", content="You are a helpful assistant."),
+            Message(role="user", content="Say hello in one word."),
+        ]
+
+        response = await asyncio.wait_for(
+            ai_manager.generate(
+                model_id="openai",
+                messages=messages,
+                max_tokens=50,
+                temperature=0.5,
+            ),
+            timeout=30
+        )
+
+        results["checks"]["ai_call"] = {
+            "ok": True,
+            "response_preview": response.content[:100] if response.content else None,
+            "model_used": response.model_id
+        }
+    except Exception as e:
+        import traceback
+        results["checks"]["ai_call"] = {
+            "ok": False,
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "traceback": traceback.format_exc()[:500]
+        }
+
+    # 7. 🔴 Test IntelligentFieldCreator
+    try:
+        from ...services.intelligent_field_creator import get_intelligent_field_creator
+        field_creator = get_intelligent_field_creator(project_id, db)
+        results["checks"]["field_creator"] = {"ok": True}
+    except Exception as e:
+        import traceback
+        results["checks"]["field_creator"] = {
+            "ok": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
     all_ok = all(c.get("ok", False) for c in results["checks"].values())
     results["all_ok"] = all_ok
 
