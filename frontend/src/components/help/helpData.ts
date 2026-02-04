@@ -368,9 +368,30 @@ export const projectDetailHelp: PageHelp = {
     {
       id: 'tab-inspector',
       title: 'تب بازرس ویژه',
-      description: 'ابزار پیشرفته برای بازرسی و تحلیل عمیق پروژه. شامل بررسی‌های تخصصی و گزارش‌های دقیق.',
+      description: 'ابزار پیشرفته برای بازرسی و تحلیل عمیق پروژه. شامل اسکرین پیش‌نمایش و چت با دستیار هوشمند.',
       type: 'tab',
-      tips: ['تحلیل عمیق ساختار پروژه', 'شناسایی مشکلات پنهان', 'پیشنهادات بهینه‌سازی'],
+      tips: ['اسکرین سمت چپ برای پیش‌نمایش پروژه', 'چت با دستیار بازرس برای تحلیل', 'دکمه‌های سریع: تحلیل کد، بررسی امنیت، یافتن باگ'],
+    },
+    {
+      id: 'inspector-screen',
+      title: 'اسکرین پیش‌نمایش',
+      description: 'نمایشگر موبایل با ابعاد 5.8 اینچ (5.1" x 2.8") برای پیش‌نمایش زنده پروژه و تغییرات.',
+      type: 'panel',
+      tips: ['نمایش زنده تغییرات', 'شبیه‌سازی محیط موبایل', 'قابلیت تعامل با پیش‌نمایش'],
+    },
+    {
+      id: 'inspector-chat',
+      title: 'چت دستیار بازرس',
+      description: 'پنل گفتگو با دستیار هوشمند بازرس برای تحلیل پروژه، یافتن باگ و بررسی امنیت.',
+      type: 'panel',
+      tips: ['سوالات خود را درباره پروژه بپرسید', 'از دکمه‌های سریع استفاده کنید', 'نتایج تحلیل در چت نمایش داده می‌شود'],
+    },
+    {
+      id: 'inspector-quick-actions',
+      title: 'دکمه‌های سریع',
+      description: 'دکمه‌های میانبر برای تحلیل کد، بررسی امنیت و یافتن باگ.',
+      type: 'button',
+      tips: ['تحلیل کد: بررسی کیفیت و ساختار کد', 'بررسی امنیت: شناسایی آسیب‌پذیری‌ها', 'یافتن باگ: کشف خطاهای احتمالی'],
     },
     {
       id: 'btn-upload',
@@ -443,9 +464,15 @@ export const projectDetailHelp: PageHelp = {
     end
 
     subgraph InspectorTab["🔍 بازرس ویژه"]
-        DeepAnalysis["تحلیل عمیق"]
-        Reports["گزارش‌های تخصصی"]
-        Issues["مشکلات پنهان"]
+        Screen["📱 اسکرین پیش‌نمایش<br/>5.8 اینچ"]
+        Chat["💬 چت دستیار"]
+        QuickBtns["⚡ دکمه‌های سریع"]
+    end
+
+    subgraph ChatFeatures["💬 امکانات چت"]
+        CodeAnalysis["تحلیل کد"]
+        SecurityCheck["بررسی امنیت"]
+        BugFinder["یافتن باگ"]
     end
 
     Tabs --> Files
@@ -463,9 +490,12 @@ export const projectDetailHelp: PageHelp = {
     Health --> Diagram
     Health --> Suggestions
 
-    Inspector --> DeepAnalysis
-    Inspector --> Reports
-    Inspector --> Issues`,
+    Inspector --> Screen
+    Inspector --> Chat
+    Chat --> QuickBtns
+    QuickBtns --> CodeAnalysis
+    QuickBtns --> SecurityCheck
+    QuickBtns --> BugFinder`,
 };
 
 

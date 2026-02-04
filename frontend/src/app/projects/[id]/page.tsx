@@ -6536,19 +6536,129 @@ export default function ProjectDetailPage() {
 
         {/* محتوای تب بازرس ویژه */}
         {activeTab === 'inspector' && (
-          <div className="space-y-6">
-            <div className="bg-gradient-to-r from-red-50 to-orange-50 dark:from-red-900/20 dark:to-orange-900/20 rounded-xl p-6 border border-red-200 dark:border-red-800">
-              <div className="flex items-center gap-3 mb-4">
-                <span className="text-4xl">🔍</span>
-                <div>
-                  <h2 className="text-xl font-bold text-red-800 dark:text-red-200">بازرس ویژه</h2>
-                  <p className="text-red-600 dark:text-red-400 text-sm">ابزار پیشرفته برای بازرسی و تحلیل عمیق پروژه</p>
+          <div className="space-y-4">
+            {/* هدر */}
+            <div className="flex items-center gap-3 mb-2">
+              <span className="text-3xl">🔍</span>
+              <div>
+                <h2 className="text-xl font-bold text-red-800 dark:text-red-200">بازرس ویژه</h2>
+                <p className="text-red-600 dark:text-red-400 text-sm">ابزار پیشرفته برای بازرسی و تحلیل عمیق پروژه</p>
+              </div>
+            </div>
+
+            {/* محتوای اصلی - اسکرین و چت */}
+            <div className="flex gap-4 h-[450px]">
+              {/* اسکرین سمت چپ - ابعاد 5.1" x 2.8" با نسبت 1.82:1 */}
+              <div className="flex-shrink-0" style={{ width: '340px' }}>
+                <div
+                  className="bg-black rounded-3xl p-2 shadow-2xl h-full"
+                  style={{
+                    aspectRatio: '9/16',
+                    maxHeight: '100%',
+                    width: '100%'
+                  }}
+                >
+                  {/* فریم گوشی */}
+                  <div className="bg-gray-900 rounded-2xl h-full w-full overflow-hidden relative">
+                    {/* نوار بالای گوشی */}
+                    <div className="absolute top-0 left-0 right-0 h-6 bg-black flex items-center justify-center z-10">
+                      <div className="w-20 h-4 bg-black rounded-full flex items-center justify-center">
+                        <div className="w-2 h-2 bg-gray-700 rounded-full"></div>
+                      </div>
+                    </div>
+
+                    {/* صفحه نمایش */}
+                    <div className="h-full w-full bg-gradient-to-b from-gray-800 to-gray-900 pt-6 pb-4 px-2 flex flex-col">
+                      {/* استاتوس بار */}
+                      <div className="flex justify-between items-center px-2 py-1 text-xs text-gray-400">
+                        <span>9:41</span>
+                        <div className="flex gap-1 items-center">
+                          <span>📶</span>
+                          <span>🔋</span>
+                        </div>
+                      </div>
+
+                      {/* محتوای اسکرین */}
+                      <div className="flex-1 bg-gray-800 rounded-lg mt-2 p-3 overflow-auto">
+                        <div className="text-center text-gray-500 text-sm">
+                          <div className="text-4xl mb-2">📱</div>
+                          <p>پیش‌نمایش پروژه</p>
+                          <p className="text-xs mt-1 text-gray-600">نمایش زنده تغییرات</p>
+                        </div>
+                      </div>
+
+                      {/* نوار پایین */}
+                      <div className="flex justify-center mt-2">
+                        <div className="w-24 h-1 bg-gray-600 rounded-full"></div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
-              <div className="bg-white dark:bg-gray-800 rounded-lg p-4 mt-4">
-                <p className="text-gray-600 dark:text-gray-400 text-center">
-                  🚧 این بخش در حال توسعه است...
-                </p>
+
+              {/* چت باکس سمت راست */}
+              <div className="flex-1 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 flex flex-col overflow-hidden">
+                {/* هدر چت */}
+                <div className="bg-gradient-to-r from-red-500 to-orange-500 text-white px-4 py-3 flex items-center gap-2">
+                  <span className="text-xl">🤖</span>
+                  <div>
+                    <h3 className="font-bold text-sm">دستیار بازرس</h3>
+                    <p className="text-xs opacity-80">آنلاین و آماده کمک</p>
+                  </div>
+                </div>
+
+                {/* محتوای چت */}
+                <div className="flex-1 p-4 overflow-auto bg-gray-50 dark:bg-gray-900 space-y-3">
+                  {/* پیام سیستم */}
+                  <div className="flex gap-2">
+                    <div className="w-8 h-8 rounded-full bg-red-500 flex items-center justify-center text-white text-sm flex-shrink-0">
+                      🔍
+                    </div>
+                    <div className="bg-white dark:bg-gray-800 rounded-lg rounded-tl-none p-3 shadow-sm max-w-[80%]">
+                      <p className="text-sm text-gray-700 dark:text-gray-300">
+                        سلام! من بازرس ویژه هستم. می‌تونم پروژه رو تحلیل کنم و مشکلات رو پیدا کنم.
+                      </p>
+                      <span className="text-xs text-gray-400 mt-1 block">الان</span>
+                    </div>
+                  </div>
+
+                  {/* پیام راهنما */}
+                  <div className="flex gap-2">
+                    <div className="w-8 h-8 rounded-full bg-red-500 flex items-center justify-center text-white text-sm flex-shrink-0">
+                      🔍
+                    </div>
+                    <div className="bg-white dark:bg-gray-800 rounded-lg rounded-tl-none p-3 shadow-sm max-w-[80%]">
+                      <p className="text-sm text-gray-700 dark:text-gray-300">
+                        چه کاری می‌تونم برات انجام بدم؟
+                      </p>
+                      <div className="flex flex-wrap gap-1 mt-2">
+                        <button className="text-xs bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 px-2 py-1 rounded-full hover:bg-red-200 dark:hover:bg-red-900/50 transition">
+                          تحلیل کد
+                        </button>
+                        <button className="text-xs bg-orange-100 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400 px-2 py-1 rounded-full hover:bg-orange-200 dark:hover:bg-orange-900/50 transition">
+                          بررسی امنیت
+                        </button>
+                        <button className="text-xs bg-yellow-100 dark:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400 px-2 py-1 rounded-full hover:bg-yellow-200 dark:hover:bg-yellow-900/50 transition">
+                          یافتن باگ
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* ورودی پیام */}
+                <div className="p-3 border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      placeholder="پیام خود را بنویسید..."
+                      className="flex-1 bg-gray-100 dark:bg-gray-700 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500"
+                    />
+                    <button className="bg-gradient-to-r from-red-500 to-orange-500 text-white rounded-full w-10 h-10 flex items-center justify-center hover:opacity-90 transition">
+                      <span>➤</span>
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
