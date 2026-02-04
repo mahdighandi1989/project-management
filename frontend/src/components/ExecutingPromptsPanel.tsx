@@ -56,16 +56,17 @@ export default function ExecutingPromptsPanel({
   const [minimized, setMinimized] = useState(false);  // 🆕 برای minimize کردن
   const [stopping, setStopping] = useState(false);  // 🆕 برای نمایش loading هنگام توقف
 
-  // 🆕 توقف همه پرامپت‌های گیر کرده
+  // 🆕 توقف همه پرامپت‌ها (force=true برای توقف همه، نه فقط قدیمی‌ها)
   const stopAllExecutions = async () => {
     setStopping(true);
     try {
-      const res = await fetch(`${API_BASE}/api/prompts/executions/clear-stuck`, {
+      const res = await fetch(`${API_BASE}/api/prompts/executions/clear-stuck?force=true`, {
         method: 'DELETE'
       });
       if (res.ok) {
         setExecutions([]);
         setVisible(false);
+        setMinimized(false);
       }
     } catch (e) {
       console.error('Error stopping executions:', e);
