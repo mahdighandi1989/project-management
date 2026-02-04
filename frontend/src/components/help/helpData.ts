@@ -394,6 +394,19 @@ export const projectDetailHelp: PageHelp = {
       tips: ['تحلیل کد: بررسی کیفیت و ساختار کد', 'بررسی امنیت: شناسایی آسیب‌پذیری‌ها', 'یافتن باگ: کشف خطاهای احتمالی'],
     },
     {
+      id: 'inspector-power-button',
+      title: 'دکمه پاور',
+      description: 'دکمه روشن/خاموش برای لود کردن سرویس‌های Render پروژه. با کلیک روی این دکمه، سرویس‌های فرانت‌اند و بک‌اند پروژه از Render لود می‌شوند.',
+      type: 'button',
+      tips: [
+        'سبز = روشن، خاکستری = خاموش',
+        'فرانت‌اند در اسکرین نمایش داده می‌شود',
+        'لاگ‌های بک‌اند در پس‌زمینه اسکرین نمایش داده می‌شوند',
+        'خطاها در چت دستیار نمایش داده می‌شوند',
+        'برای اتصال، سرویس‌ها باید به پروژه نگاشت شده باشند'
+      ],
+    },
+    {
       id: 'btn-upload',
       title: 'آپلود فایل',
       description: 'آپلود فایل جدید به پروژه. انواع فایل‌های متنی پشتیبانی می‌شود.',
@@ -465,14 +478,21 @@ export const projectDetailHelp: PageHelp = {
 
     subgraph InspectorTab["🔍 بازرس ویژه"]
         Screen["📱 اسکرین پیش‌نمایش<br/>5.8 اینچ"]
+        PowerBtn["🔘 دکمه پاور"]
         Chat["💬 چت دستیار"]
         QuickBtns["⚡ دکمه‌های سریع"]
+    end
+
+    subgraph ScreenContent["📺 محتوای اسکرین"]
+        Frontend["🌐 فرانت‌اند (iframe)"]
+        BackendLogs["📋 لاگ‌های بک‌اند"]
     end
 
     subgraph ChatFeatures["💬 امکانات چت"]
         CodeAnalysis["تحلیل کد"]
         SecurityCheck["بررسی امنیت"]
         BugFinder["یافتن باگ"]
+        ErrorAlerts["⚠️ هشدار خطاها"]
     end
 
     Tabs --> Files
@@ -491,8 +511,13 @@ export const projectDetailHelp: PageHelp = {
     Health --> Suggestions
 
     Inspector --> Screen
+    Inspector --> PowerBtn
     Inspector --> Chat
+    PowerBtn --> ScreenContent
+    Screen --> Frontend
+    Screen --> BackendLogs
     Chat --> QuickBtns
+    Chat --> ErrorAlerts
     QuickBtns --> CodeAnalysis
     QuickBtns --> SecurityCheck
     QuickBtns --> BugFinder`,

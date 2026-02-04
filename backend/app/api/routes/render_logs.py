@@ -285,6 +285,100 @@ async def get_service_project_mappings(
     }
 
 
+@router.get("/services/by-project/{project_id}")
+async def get_services_by_project(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    دریافت سرویس‌های مرتبط با یک پروژه خاص
+
+    این endpoint برای تب بازرس ویژه استفاده می‌شود تا سرویس‌های
+    یک پروژه را برای نمایش لاگ‌ها و پیش‌نمایش لود کند.
+
+    Returns:
+        - services: لیست سرویس‌ها با URL و نوع
+        - frontend_url: URL فرانت‌اند برای نمایش در iframe
+        - backend_services: لیست سرویس‌های بک‌اند برای نمایش لاگ
+    """
+    slog.api_request("GET", f"/render/services/by-project/{project_id}")
+
+    # 1. سرویس‌های نگاشت شده به این پروژه
+    services = db.query(RenderService).filter(
+        RenderService.project_id == project_id
+    ).all()
+
+    # 2. اگر نگاشت دستی نداشت، جستجوی خودکار
+    if not services:
+        from ...models.project import Project
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if project:
+            # جستجو بر اساس نام پروژه
+            search_term = project.name.lower().replace(" ", "-").replace("_", "-")
+            all_services = db.query(RenderService).all()
+            services = [
+                s for s in all_services
+                if search_term in s.name.lower() or s.name.lower() in search_term
+            ]
+
+    if not services:
+        return {
+            "success": True,
+            "services": [],
+            "frontend_url": None,
+            "backend_services": [],
+            "message": "هیچ سرویسی برای این پروژه یافت نشد. از صفحه تنظیمات Render Logs سرویس‌ها را به این پروژه نگاشت کنید."
+        }
+
+    # 3. دسته‌بندی سرویس‌ها
+    frontend_url = None
+    backend_services = []
+
+    for s in services:
+        service_info = {
+            "id": s.id,
+            "name": s.name,
+            "type": s.type,
+            "status": s.status,
+            "url": f"https://{s.name}.onrender.com" if s.type in ["web_service", "static_site"] else None,
+            "dashboard_url": f"https://dashboard.render.com/web/{s.id}"
+        }
+
+        # تشخیص فرانت‌اند vs بک‌اند
+        name_lower = s.name.lower()
+        if any(x in name_lower for x in ["frontend", "front", "client", "web", "ui", "static"]):
+            if not frontend_url and s.type in ["web_service", "static_site"]:
+                frontend_url = service_info["url"]
+            service_info["role"] = "frontend"
+        else:
+            service_info["role"] = "backend"
+            backend_services.append(service_info)
+
+    # اگر فرانت‌اند پیدا نشد، اولین web_service را انتخاب کن
+    if not frontend_url:
+        for s in services:
+            if s.type in ["web_service", "static_site"]:
+                frontend_url = f"https://{s.name}.onrender.com"
+                break
+
+    return {
+        "success": True,
+        "services": [
+            {
+                "id": s.id,
+                "name": s.name,
+                "type": s.type,
+                "status": s.status,
+                "url": f"https://{s.name}.onrender.com" if s.type in ["web_service", "static_site"] else None
+            }
+            for s in services
+        ],
+        "frontend_url": frontend_url,
+        "backend_services": backend_services,
+        "total": len(services)
+    }
+
+
 # =====================================
 # Logs Endpoints
 # =====================================

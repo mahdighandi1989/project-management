@@ -267,6 +267,27 @@ export default function ProjectDetailPage() {
   }>>([]);
   const [loadingOperations, setLoadingOperations] = useState(false);
   const [journalTotal, setJournalTotal] = useState(0);
+
+  // 🔍 Inspector State - بازرس ویژه
+  const [inspectorPowerOn, setInspectorPowerOn] = useState(false);
+  const [inspectorLoading, setInspectorLoading] = useState(false);
+  const [inspectorFrontendUrl, setInspectorFrontendUrl] = useState<string | null>(null);
+  const [inspectorBackendLogs, setInspectorBackendLogs] = useState<Array<{
+    id: string;
+    timestamp: string;
+    level: string;
+    message: string;
+    service_name: string;
+  }>>([]);
+  const [inspectorServices, setInspectorServices] = useState<Array<{
+    id: string;
+    name: string;
+    type: string;
+    status: string;
+    url: string | null;
+    role?: string;
+  }>>([]);
+  const [inspectorError, setInspectorError] = useState<string | null>(null);
   const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
   const [selectedLog, setSelectedLog] = useState<ActivityLog | null>(null);
   const [reports, setReports] = useState<ProjectReport[]>([]);
@@ -615,6 +636,80 @@ export default function ProjectDetailPage() {
     setSuccess(msg);
     setTimeout(() => setSuccess(''), 5000);
   };
+
+  // 🔍 Inspector Functions - بازرس ویژه
+  const loadInspectorServices = async () => {
+    setInspectorLoading(true);
+    setInspectorError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/render/services/by-project/${projectId}`);
+      const data = await res.json();
+
+      if (data.success) {
+        setInspectorServices(data.services || []);
+        setInspectorFrontendUrl(data.frontend_url);
+
+        if (data.services?.length === 0) {
+          setInspectorError(data.message || 'هیچ سرویسی یافت نشد');
+        }
+      } else {
+        setInspectorError(data.error || 'خطا در دریافت سرویس‌ها');
+      }
+    } catch (err) {
+      setInspectorError('خطا در اتصال به سرور');
+    } finally {
+      setInspectorLoading(false);
+    }
+  };
+
+  const loadInspectorLogs = async () => {
+    try {
+      // دریافت لاگ‌های بک‌اند
+      const backendServiceIds = inspectorServices
+        .filter(s => s.role === 'backend' || !s.role)
+        .map(s => s.id);
+
+      if (backendServiceIds.length === 0) return;
+
+      const params = new URLSearchParams();
+      backendServiceIds.forEach(id => params.append('service_ids', id));
+      params.append('minutes', '30');
+      params.append('limit', '50');
+
+      const res = await fetch(`${API_BASE}/api/render/logs?${params}`);
+      const data = await res.json();
+
+      if (data.success && data.logs) {
+        setInspectorBackendLogs(data.logs);
+      }
+    } catch (err) {
+      console.error('Error loading inspector logs:', err);
+    }
+  };
+
+  const toggleInspectorPower = async () => {
+    if (inspectorPowerOn) {
+      // خاموش کردن
+      setInspectorPowerOn(false);
+      setInspectorFrontendUrl(null);
+      setInspectorBackendLogs([]);
+      setInspectorServices([]);
+    } else {
+      // روشن کردن
+      setInspectorPowerOn(true);
+      await loadInspectorServices();
+    }
+  };
+
+  // بارگذاری لاگ‌ها وقتی سرویس‌ها لود شدن
+  useEffect(() => {
+    if (inspectorPowerOn && inspectorServices.length > 0) {
+      loadInspectorLogs();
+      // به‌روزرسانی هر 10 ثانیه
+      const interval = setInterval(loadInspectorLogs, 10000);
+      return () => clearInterval(interval);
+    }
+  }, [inspectorPowerOn, inspectorServices]);
 
   const loadProject = async () => {
     setLoading(true);
@@ -6538,19 +6633,39 @@ export default function ProjectDetailPage() {
         {activeTab === 'inspector' && (
           <div className="space-y-4">
             {/* هدر */}
-            <div className="flex items-center gap-3 mb-2">
-              <span className="text-3xl">🔍</span>
-              <div>
-                <h2 className="text-xl font-bold text-red-800 dark:text-red-200">بازرس ویژه</h2>
-                <p className="text-red-600 dark:text-red-400 text-sm">ابزار پیشرفته برای بازرسی و تحلیل عمیق پروژه</p>
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-3">
+                <span className="text-3xl">🔍</span>
+                <div>
+                  <h2 className="text-xl font-bold text-red-800 dark:text-red-200">بازرس ویژه</h2>
+                  <p className="text-red-600 dark:text-red-400 text-sm">ابزار پیشرفته برای بازرسی و تحلیل عمیق پروژه</p>
+                </div>
               </div>
+              {/* نمایش سرویس‌های متصل */}
+              {inspectorPowerOn && inspectorServices.length > 0 && (
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-gray-500">سرویس‌ها:</span>
+                  {inspectorServices.map(s => (
+                    <span
+                      key={s.id}
+                      className={`px-2 py-1 rounded-full ${
+                        s.status === 'deployed'
+                          ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                          : 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+                      }`}
+                    >
+                      {s.name}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* محتوای اصلی - اسکرین و چت */}
-            <div className="flex flex-row-reverse gap-4" style={{ minHeight: '320px' }}>
+            <div className="flex flex-row-reverse gap-4" style={{ minHeight: '380px' }}>
               {/* اسکرین سمت چپ (در RTL) - ابعاد 5.1" x 2.8" (نسبت 1.82:1 - افقی/landscape) */}
-              <div className="flex-shrink-0" style={{ width: '460px' }}>
-                <div className="bg-black rounded-2xl p-2 shadow-2xl">
+              <div className="flex-shrink-0 flex flex-col items-center" style={{ width: '460px' }}>
+                <div className="bg-black rounded-2xl p-2 shadow-2xl w-full">
                   {/* فریم دستگاه - افقی */}
                   <div
                     className="bg-gray-900 rounded-xl overflow-hidden relative"
@@ -6560,24 +6675,88 @@ export default function ProjectDetailPage() {
                     <div className="absolute top-0 left-0 right-0 h-5 bg-black/60 flex items-center justify-between px-3 z-10">
                       <span className="text-[10px] text-gray-400">9:41</span>
                       <div className="flex gap-1 items-center text-[10px] text-gray-400">
+                        {inspectorPowerOn && <span className="text-green-400">●</span>}
                         <span>📶</span>
                         <span>🔋</span>
                       </div>
                     </div>
 
                     {/* صفحه نمایش */}
-                    <div className="h-full w-full bg-gradient-to-br from-gray-800 to-gray-900 pt-5 pb-2 px-2 flex flex-col">
-                      {/* محتوای اسکرین */}
-                      <div className="flex-1 bg-gray-800/50 rounded-lg p-4 overflow-auto flex items-center justify-center">
-                        <div className="text-center text-gray-500">
-                          <div className="text-5xl mb-3">📱</div>
-                          <p className="text-sm font-medium">پیش‌نمایش پروژه</p>
-                          <p className="text-xs mt-1 text-gray-600">ابعاد: 5.1" × 2.8" | قطر: 5.8"</p>
+                    <div className="h-full w-full bg-gradient-to-br from-gray-800 to-gray-900 pt-5 pb-2 px-1 flex flex-col relative">
+                      {/* لایه لاگ‌های پس‌زمینه */}
+                      {inspectorPowerOn && inspectorBackendLogs.length > 0 && (
+                        <div className="absolute inset-0 pt-5 pb-2 px-1 overflow-hidden opacity-30 pointer-events-none z-0">
+                          <div className="h-full bg-black/50 rounded-lg p-2 font-mono text-[8px] text-green-400 overflow-hidden">
+                            {inspectorBackendLogs.slice(0, 15).map((log, i) => (
+                              <div key={log.id} className={`truncate ${log.level === 'error' ? 'text-red-400' : log.level === 'warn' ? 'text-yellow-400' : ''}`}>
+                                [{new Date(log.timestamp).toLocaleTimeString('fa-IR')}] {log.message?.slice(0, 60)}
+                              </div>
+                            ))}
+                          </div>
                         </div>
+                      )}
+
+                      {/* محتوای اسکرین */}
+                      <div className="flex-1 bg-gray-800/50 rounded-lg overflow-hidden relative z-10">
+                        {inspectorLoading ? (
+                          <div className="h-full flex items-center justify-center">
+                            <div className="text-center text-gray-400">
+                              <div className="animate-spin text-3xl mb-2">⚡</div>
+                              <p className="text-xs">در حال بارگذاری...</p>
+                            </div>
+                          </div>
+                        ) : inspectorPowerOn && inspectorFrontendUrl ? (
+                          <iframe
+                            src={inspectorFrontendUrl}
+                            className="w-full h-full border-0 bg-white"
+                            title="پیش‌نمایش فرانت‌اند"
+                            sandbox="allow-scripts allow-same-origin allow-forms"
+                          />
+                        ) : inspectorPowerOn && inspectorError ? (
+                          <div className="h-full flex items-center justify-center p-3">
+                            <div className="text-center text-yellow-500">
+                              <div className="text-3xl mb-2">⚠️</div>
+                              <p className="text-xs">{inspectorError}</p>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="h-full flex items-center justify-center p-4">
+                            <div className="text-center text-gray-500">
+                              <div className="text-4xl mb-2">📱</div>
+                              <p className="text-sm font-medium">پیش‌نمایش پروژه</p>
+                              <p className="text-xs mt-1 text-gray-600">دکمه پاور را بزنید</p>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
                 </div>
+
+                {/* دکمه پاور زیر اسکرین */}
+                <button
+                  onClick={toggleInspectorPower}
+                  disabled={inspectorLoading}
+                  className={`mt-4 w-14 h-14 rounded-full shadow-lg flex items-center justify-center transition-all duration-300 ${
+                    inspectorPowerOn
+                      ? 'bg-gradient-to-br from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 shadow-green-500/30'
+                      : 'bg-gradient-to-br from-gray-600 to-gray-700 hover:from-gray-500 hover:to-gray-600 shadow-gray-500/20'
+                  } ${inspectorLoading ? 'opacity-50 cursor-wait' : ''}`}
+                  title={inspectorPowerOn ? 'خاموش کردن' : 'روشن کردن'}
+                >
+                  <svg
+                    className={`w-7 h-7 ${inspectorPowerOn ? 'text-white' : 'text-gray-300'}`}
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v9m0 0a7 7 0 100 14 7 7 0 000-14z" />
+                  </svg>
+                </button>
+                <span className={`text-xs mt-1 ${inspectorPowerOn ? 'text-green-600' : 'text-gray-500'}`}>
+                  {inspectorLoading ? 'در حال اتصال...' : inspectorPowerOn ? 'روشن' : 'خاموش'}
+                </span>
               </div>
 
               {/* چت باکس سمت راست (در RTL) */}
@@ -6600,11 +6779,30 @@ export default function ProjectDetailPage() {
                     </div>
                     <div className="bg-white dark:bg-gray-800 rounded-lg rounded-tl-none p-3 shadow-sm max-w-[80%]">
                       <p className="text-sm text-gray-700 dark:text-gray-300">
-                        سلام! من بازرس ویژه هستم. می‌تونم پروژه رو تحلیل کنم و مشکلات رو پیدا کنم.
+                        سلام! من بازرس ویژه هستم. دکمه پاور را بزنید تا سرویس‌های پروژه را لود کنم.
                       </p>
                       <span className="text-xs text-gray-400 mt-1 block">الان</span>
                     </div>
                   </div>
+
+                  {/* نمایش لاگ‌های خطا در چت */}
+                  {inspectorPowerOn && inspectorBackendLogs.filter(l => l.level === 'error').length > 0 && (
+                    <div className="flex gap-2">
+                      <div className="w-8 h-8 rounded-full bg-red-600 flex items-center justify-center text-white text-sm flex-shrink-0">
+                        ⚠️
+                      </div>
+                      <div className="bg-red-50 dark:bg-red-900/30 rounded-lg rounded-tl-none p-3 shadow-sm max-w-[80%] border border-red-200 dark:border-red-800">
+                        <p className="text-sm text-red-700 dark:text-red-300 font-medium mb-1">
+                          {inspectorBackendLogs.filter(l => l.level === 'error').length} خطا شناسایی شد!
+                        </p>
+                        <div className="text-xs text-red-600 dark:text-red-400 space-y-1 max-h-24 overflow-auto">
+                          {inspectorBackendLogs.filter(l => l.level === 'error').slice(0, 3).map(log => (
+                            <div key={log.id} className="truncate">• {log.message?.slice(0, 80)}</div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {/* پیام راهنما */}
                   <div className="flex gap-2">
