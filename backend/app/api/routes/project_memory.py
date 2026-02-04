@@ -1772,11 +1772,15 @@ async def enhanced_project_chat(
             responses.append(model_response)
 
             # 🔴 ثبت کامل جزئیات در ژورنال (بهبود یافته)
+            # 🔴 FIX: Ensure model_id is always a string
+            actual_model_id = str(response.model_id) if response.model_id else model_id
+            model_provider_str = str(model_id).split("-")[0] if "-" in str(model_id) else str(model_id)
+
             log_entry = ActivityLog(
                 id=f"log_{uuid.uuid4().hex[:12]}",
                 project_id=project_id,
-                model_id=response.model_id,
-                model_provider=model_id.split("-")[0] if "-" in model_id else model_id,
+                model_id=actual_model_id,
+                model_provider=model_provider_str,
                 activity_type="enhanced_chat",
                 prompt=request.prompt[:2000],
                 response=response.content[:5000] if response.content else None,
@@ -1811,30 +1815,41 @@ async def enhanced_project_chat(
             responses.append(model_response)
 
             # 🔴 ثبت کامل جزئیات خطا در ژورنال (بهبود یافته)
+            # 🔴 FIX: Ensure model_id is always a string
+            model_id_str = str(model_id) if model_id else "unknown"
+
             log_entry = ActivityLog(
                 id=f"log_{uuid.uuid4().hex[:12]}",
                 project_id=project_id,
-                model_id=model_id,
+                model_id=model_id_str,
                 activity_type="enhanced_chat",
-                prompt=request.prompt[:2000],
+                prompt=request.prompt[:2000] if request.prompt else "",
                 tokens_used=0,
                 latency_ms=latency_ms,
                 success=False,
                 error_message=str(e)[:500],
-                field_name=f"AI Query Error: {request.prompt[:40]}...",  # 🔴 نام قابل شناسایی
+                field_name=f"AI Query Error: {request.prompt[:40] if request.prompt else 'unknown'}...",
                 extra_data=json.dumps({
-                    "full_prompt": request.prompt,
-                    "model_requested": model_id,
+                    "full_prompt": request.prompt if request.prompt else "",
+                    "model_requested": model_id_str,
                     "error_details": str(e),
-                    "create_dynamic_fields": request.create_dynamic_fields,
-                    "files_included_count": len(files) if request.include_files else 0,
-                    "clickable": True,  # 🔴 قابل کلیک در UI
+                    "create_dynamic_fields": bool(request.create_dynamic_fields),
+                    "files_included_count": len(files) if files else 0,
+                    "clickable": True,
                 }, ensure_ascii=False),
                 created_at=datetime.utcnow(),
             )
             db.add(log_entry)
 
-    db.commit()
+    # 🔴 FIX: Better error handling for db.commit
+    try:
+        db.commit()
+    except Exception as db_error:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"[Enhanced Chat] Database commit error: {type(db_error).__name__}: {str(db_error)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"خطای دیتابیس: {str(db_error)[:200]}")
 
     # 9. تبدیل به فیلدهای پویا با سرویس هوشمند
     # 🆕 استفاده از IntelligentFieldCreator برای:
