@@ -53,6 +53,31 @@ export default function ExecutingPromptsPanel({
   const [previousExecutions, setPreviousExecutions] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [visible, setVisible] = useState(false);
+  const [minimized, setMinimized] = useState(false);  // 🆕 برای minimize کردن
+  const [stopping, setStopping] = useState(false);  // 🆕 برای نمایش loading هنگام توقف
+
+  // 🆕 توقف همه پرامپت‌های گیر کرده
+  const stopAllExecutions = async () => {
+    setStopping(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/prompts/executions/clear-stuck`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        setExecutions([]);
+        setVisible(false);
+      }
+    } catch (e) {
+      console.error('Error stopping executions:', e);
+    } finally {
+      setStopping(false);
+    }
+  };
+
+  // 🆕 مخفی کردن موقت پنل
+  const hidePanel = () => {
+    setMinimized(true);
+  };
 
   const fetchExecutions = useCallback(async () => {
     try {
@@ -74,6 +99,11 @@ export default function ExecutingPromptsPanel({
 
         setExecutions(newExecutions);
         setPreviousExecutions(newExecutions.map((e: PromptExecution) => e.id));
+
+        // اگر minimize شده و اجراها تموم شد، دوباره نشون بده
+        if (newExecutions.length === 0) {
+          setMinimized(false);
+        }
         setVisible(newExecutions.length > 0);
       }
     } catch (e) {
@@ -109,6 +139,21 @@ export default function ExecutingPromptsPanel({
     return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
   };
 
+  // 🆕 حالت minimized - فقط یک دکمه کوچک
+  if (minimized && executions.length > 0) {
+    return (
+      <div className="fixed bottom-4 right-4 z-50">
+        <button
+          onClick={() => setMinimized(false)}
+          className="bg-gradient-to-r from-purple-600 to-blue-500 text-white px-4 py-2 rounded-full shadow-lg flex items-center gap-2 hover:shadow-xl transition-all"
+        >
+          <div className="w-2 h-2 bg-white rounded-full animate-ping" />
+          <span>{executions.length} پرامپت در حال اجرا</span>
+        </button>
+      </div>
+    );
+  }
+
   if (compact) {
     return (
       <div className="fixed bottom-4 left-4 z-50 animate-pulse">
@@ -137,9 +182,38 @@ export default function ExecutingPromptsPanel({
               <div className="w-3 h-3 bg-white rounded-full animate-pulse" />
               <span className="font-bold">پرامپت در حال اجرا</span>
             </div>
-            <span className="text-xs bg-white/20 px-2 py-0.5 rounded-full">
-              {executions.length} فعال
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-xs bg-white/20 px-2 py-0.5 rounded-full">
+                {executions.length} فعال
+              </span>
+              {/* 🆕 دکمه minimize */}
+              <button
+                onClick={hidePanel}
+                className="text-white/80 hover:text-white hover:bg-white/20 rounded p-1 transition-colors"
+                title="کوچک کردن"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+              {/* 🆕 دکمه بستن/توقف */}
+              <button
+                onClick={stopAllExecutions}
+                disabled={stopping}
+                className="text-white/80 hover:text-white hover:bg-red-500/50 rounded p-1 transition-colors"
+                title="توقف همه و بستن"
+              >
+                {stopping ? (
+                  <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" fill="none" strokeDasharray="60" strokeDashoffset="20" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                )}
+              </button>
+            </div>
           </div>
         </div>
 
@@ -225,8 +299,16 @@ export default function ExecutingPromptsPanel({
         </div>
 
         {/* Footer */}
-        <div className="px-4 py-2 bg-gray-50 dark:bg-gray-900 text-xs text-gray-500 dark:text-gray-400 text-center">
-          پرامپت‌ها به ترتیب اجرا می‌شوند
+        <div className="px-4 py-2 bg-gray-50 dark:bg-gray-900 text-xs text-gray-500 dark:text-gray-400 flex items-center justify-between">
+          <span>پرامپت‌ها به ترتیب اجرا می‌شوند</span>
+          {/* 🆕 دکمه توقف همه */}
+          <button
+            onClick={stopAllExecutions}
+            disabled={stopping}
+            className="text-red-500 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/30 px-2 py-1 rounded text-xs font-medium transition-colors"
+          >
+            {stopping ? '⏳ در حال توقف...' : '⏹️ توقف همه'}
+          </button>
         </div>
       </div>
 
