@@ -1155,6 +1155,8 @@ async def request_new_feature(
             log_entry = ActivityLog(
                 id=f"log_{uuid.uuid4().hex[:12]}",
                 project_id=project_id,
+                model_id="user_request",  # 🔴 FIX: مقدار پیش‌فرض برای درخواست‌های کاربر
+                model_provider="user",
                 activity_type="feature_request",
                 prompt=f"درخواست قابلیت: {request.title}",
                 response=json.dumps({
