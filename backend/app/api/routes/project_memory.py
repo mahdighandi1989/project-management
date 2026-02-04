@@ -3814,7 +3814,7 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
     from ...services.ai_manager import get_ai_manager
     from ...services.ai_base import Message
     from ...models.project import ProjectFile
-    # ActivityLog is already imported at the top from project_journal
+    from .project_journal import ActivityLog  # 🔴 FIX: Import ActivityLog
     import asyncio
     import re
     import logging
@@ -3966,6 +3966,26 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
         target_models = target_field.get("target_models", ["claude"])
         if "all" in target_models:
             target_models = ["claude"]
+
+        # 🔴 FIX: Model ID mapping (alias -> actual ID)
+        MODEL_ALIASES = {
+            "openai": "gpt-4o-mini",
+            "gpt": "gpt-4o-mini",
+            "deepseek": "deepseek-chat",
+            "claude": "claude-sonnet-4-20250514",
+            "gemini": "gemini-1.5-flash",
+            "groq": "llama-3.1-70b-versatile",
+            "perplexity": "llama-3.1-sonar-small-128k-online",
+        }
+
+        # تبدیل alias ها به ID واقعی
+        resolved_models = []
+        for mid in target_models:
+            resolved_id = MODEL_ALIASES.get(mid.lower() if isinstance(mid, str) else mid, mid)
+            resolved_models.append(resolved_id)
+            if mid != resolved_id:
+                logger.info(f"[execute_field_internal] Model alias resolved: {mid} -> {resolved_id}")
+        target_models = resolved_models
 
         ai_manager = get_ai_manager()
         results = []
