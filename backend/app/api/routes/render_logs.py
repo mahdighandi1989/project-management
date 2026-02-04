@@ -1949,3 +1949,364 @@ async def get_latest_logs_for_stream(
         limit=limit,
         since_id=since_id
     )
+
+
+# =====================================
+# 🆕 Inspector Chat - چت با مدل‌های AI
+# =====================================
+
+class InspectorChatMessage(BaseModel):
+    """یک پیام در چت بازرس"""
+    role: str  # user, assistant
+    content: str
+
+
+class InspectorChatRequest(BaseModel):
+    """درخواست چت با بازرس"""
+    model_id: str
+    message: str
+    project_id: str
+    # Context
+    backend_logs: Optional[List[dict]] = None
+    frontend_url: Optional[str] = None
+    project_files: Optional[List[dict]] = None  # [{path, content}]
+    project_structure: Optional[dict] = None
+    chat_history: Optional[List[InspectorChatMessage]] = None
+    # تنظیمات
+    max_tokens: int = 4096
+    temperature: float = 0.7
+    stream: bool = False
+
+
+class InspectorMultiChatRequest(BaseModel):
+    """درخواست چت با چند مدل"""
+    model_ids: List[str]
+    message: str
+    project_id: str
+    # Context
+    backend_logs: Optional[List[dict]] = None
+    frontend_url: Optional[str] = None
+    project_files: Optional[List[dict]] = None
+    project_structure: Optional[dict] = None
+    chat_history: Optional[List[InspectorChatMessage]] = None
+    # تنظیمات
+    max_tokens: int = 4096
+    temperature: float = 0.7
+
+
+def build_inspector_system_prompt(
+    project_id: str,
+    backend_logs: Optional[List[dict]] = None,
+    frontend_url: Optional[str] = None,
+    project_files: Optional[List[dict]] = None,
+    project_structure: Optional[dict] = None,
+    db: Session = None
+) -> str:
+    """ساخت system prompt با تمام context های پروژه"""
+
+    prompt_parts = [
+        "# 🔍 بازرس ویژه پروژه",
+        "",
+        "تو یک بازرس هوشمند و متخصص هستی که به تمام داده‌های پروژه دسترسی داری.",
+        "وظیفه تو تحلیل، عیب‌یابی، بررسی امنیت و کمک به توسعه‌دهنده است.",
+        "",
+        "## دسترسی‌های تو:",
+        "- لاگ‌های بک‌اند (زنده)",
+        "- URL فرانت‌اند (پیش‌نمایش)",
+        "- فایل‌های پروژه",
+        "- ساختار پروژه",
+        "",
+    ]
+
+    # اطلاعات پروژه از دیتابیس
+    if db:
+        try:
+            from ...models.project import Project
+            project = db.query(Project).filter(Project.id == project_id).first()
+            if project:
+                prompt_parts.extend([
+                    f"## پروژه: {project.name}",
+                    f"- توضیحات: {project.description or 'ندارد'}",
+                    f"- نوع: {getattr(project, 'type', 'نامشخص')}",
+                    f"- تاریخ ایجاد: {project.created_at}",
+                    "",
+                ])
+        except Exception as e:
+            slog.warning("Could not fetch project info", error=str(e))
+
+    # لاگ‌های بک‌اند
+    if backend_logs:
+        prompt_parts.extend([
+            "## 📋 لاگ‌های بک‌اند (آخرین لاگ‌ها):",
+            "```",
+        ])
+        for log in backend_logs[-30:]:  # آخرین 30 لاگ
+            level = log.get('level', 'info').upper()
+            timestamp = log.get('timestamp', '')[:19]
+            message = log.get('message', '')[:200]
+            prompt_parts.append(f"[{timestamp}] [{level}] {message}")
+        prompt_parts.extend(["```", ""])
+
+        # خلاصه خطاها
+        errors = [l for l in backend_logs if l.get('level') == 'error']
+        if errors:
+            prompt_parts.extend([
+                f"### ⚠️ {len(errors)} خطا شناسایی شده:",
+            ])
+            for err in errors[-5:]:
+                prompt_parts.append(f"- {err.get('message', '')[:100]}")
+            prompt_parts.append("")
+
+    # URL فرانت‌اند
+    if frontend_url:
+        prompt_parts.extend([
+            f"## 🌐 URL فرانت‌اند:",
+            f"- {frontend_url}",
+            "",
+        ])
+
+    # ساختار پروژه
+    if project_structure:
+        prompt_parts.extend([
+            "## 📁 ساختار پروژه:",
+            "```",
+            json.dumps(project_structure, ensure_ascii=False, indent=2)[:2000],
+            "```",
+            "",
+        ])
+
+    # فایل‌های پروژه
+    if project_files:
+        prompt_parts.extend([
+            "## 📄 فایل‌های پروژه:",
+        ])
+        for f in project_files[:10]:  # حداکثر 10 فایل
+            path = f.get('path', '')
+            content = f.get('content', '')[:3000]  # حداکثر 3000 کاراکتر
+            prompt_parts.extend([
+                f"### {path}",
+                "```",
+                content,
+                "```",
+                "",
+            ])
+
+    prompt_parts.extend([
+        "---",
+        "## دستورالعمل:",
+        "1. پاسخ‌ها را به فارسی بده",
+        "2. اگر خطایی در لاگ‌ها دیدی، آن را تحلیل کن",
+        "3. پیشنهادات عملی و کاربردی بده",
+        "4. اگر کد نیاز بود، کد کامل و قابل اجرا بنویس",
+        "5. امنیت را همیشه در نظر بگیر",
+    ])
+
+    return "\n".join(prompt_parts)
+
+
+@router.post("/inspector/chat")
+async def inspector_chat(
+    request: InspectorChatRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    چت با مدل AI در تب بازرس ویژه
+
+    این endpoint تمام context های پروژه را به مدل می‌دهد:
+    - لاگ‌های بک‌اند
+    - URL فرانت‌اند
+    - فایل‌های پروژه
+    - ساختار پروژه
+    """
+    slog.api_request("POST", "/render/inspector/chat",
+        model=request.model_id,
+        project_id=request.project_id
+    )
+
+    try:
+        from ...services.ai_manager import get_ai_manager
+        from ...services.ai_base import Message
+
+        ai_manager = get_ai_manager()
+
+        # ساخت system prompt با context
+        system_prompt = build_inspector_system_prompt(
+            project_id=request.project_id,
+            backend_logs=request.backend_logs,
+            frontend_url=request.frontend_url,
+            project_files=request.project_files,
+            project_structure=request.project_structure,
+            db=db
+        )
+
+        # ساخت messages
+        messages = [Message(role="system", content=system_prompt)]
+
+        # افزودن تاریخچه چت
+        if request.chat_history:
+            for msg in request.chat_history[-10:]:  # آخرین 10 پیام
+                messages.append(Message(role=msg.role, content=msg.content))
+
+        # افزودن پیام جدید کاربر
+        messages.append(Message(role="user", content=request.message))
+
+        slog.ai_call(request.model_id, "inspector chat",
+            messages_count=len(messages),
+            has_logs=bool(request.backend_logs),
+            has_files=bool(request.project_files)
+        )
+
+        # ارسال به AI
+        response = await ai_manager.generate(
+            model_id=request.model_id,
+            messages=messages,
+            max_tokens=request.max_tokens,
+            temperature=request.temperature,
+        )
+
+        slog.success("Inspector chat response generated",
+            model=response.model_id,
+            tokens_used=response.tokens_used
+        )
+
+        return {
+            "success": True,
+            "model_id": response.model_id,
+            "content": response.content,
+            "tokens_used": response.tokens_used,
+            "latency_ms": response.latency_ms,
+            "finish_reason": response.finish_reason
+        }
+
+    except Exception as e:
+        slog.error("Inspector chat failed", exception=e, model=request.model_id)
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@router.post("/inspector/chat/multi")
+async def inspector_chat_multi(
+    request: InspectorMultiChatRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    چت با چند مدل AI به صورت موازی
+
+    پاسخ همه مدل‌های انتخاب شده را برمی‌گرداند
+    """
+    slog.api_request("POST", "/render/inspector/chat/multi",
+        models=request.model_ids,
+        project_id=request.project_id
+    )
+
+    try:
+        from ...services.ai_manager import get_ai_manager
+        from ...services.ai_base import Message
+
+        ai_manager = get_ai_manager()
+
+        # ساخت system prompt با context
+        system_prompt = build_inspector_system_prompt(
+            project_id=request.project_id,
+            backend_logs=request.backend_logs,
+            frontend_url=request.frontend_url,
+            project_files=request.project_files,
+            project_structure=request.project_structure,
+            db=db
+        )
+
+        # ساخت messages
+        messages = [Message(role="system", content=system_prompt)]
+
+        # افزودن تاریخچه چت
+        if request.chat_history:
+            for msg in request.chat_history[-10:]:
+                messages.append(Message(role=msg.role, content=msg.content))
+
+        # افزودن پیام جدید کاربر
+        messages.append(Message(role="user", content=request.message))
+
+        slog.ai_call(",".join(request.model_ids), "inspector multi-chat",
+            models_count=len(request.model_ids)
+        )
+
+        # ارسال به همه مدل‌ها به صورت موازی
+        responses = await ai_manager.generate_parallel(
+            model_ids=request.model_ids,
+            messages=messages,
+            max_tokens=request.max_tokens,
+            temperature=request.temperature,
+        )
+
+        successful = [r for r in responses if not r.error]
+        slog.success("Inspector multi-chat completed",
+            total=len(responses),
+            successful=len(successful)
+        )
+
+        return {
+            "success": True,
+            "responses": [
+                {
+                    "model_id": r.model_id,
+                    "content": r.content,
+                    "tokens_used": r.tokens_used,
+                    "latency_ms": r.latency_ms,
+                    "error": r.error
+                }
+                for r in responses
+            ],
+            "total_models": len(request.model_ids),
+            "successful_count": len(successful)
+        }
+
+    except Exception as e:
+        slog.error("Inspector multi-chat failed", exception=e)
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@router.get("/inspector/models")
+async def get_available_models_for_inspector():
+    """
+    دریافت لیست مدل‌های موجود برای استفاده در بازرس
+
+    فقط مدل‌های فعال برگردانده می‌شوند
+    """
+    try:
+        from ...core.models_registry import get_all_models
+
+        all_models = get_all_models()
+
+        # گروه‌بندی بر اساس provider
+        models_by_provider = {}
+        for model in all_models:
+            provider = str(model.provider.value) if hasattr(model.provider, 'value') else str(model.provider)
+            if provider not in models_by_provider:
+                models_by_provider[provider] = []
+            models_by_provider[provider].append({
+                "id": model.id,
+                "name": model.name,
+                "provider": provider,
+                "context_window": getattr(model, 'context_window', 4096),
+                "enabled": getattr(model, 'enabled', True)
+            })
+
+        return {
+            "success": True,
+            "models": all_models,
+            "models_by_provider": models_by_provider,
+            "total": len(all_models)
+        }
+
+    except Exception as e:
+        slog.error("Failed to get models for inspector", exception=e)
+        return {
+            "success": False,
+            "error": str(e)
+        }
+

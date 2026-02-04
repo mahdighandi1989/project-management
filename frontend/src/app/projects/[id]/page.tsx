@@ -288,6 +288,27 @@ export default function ProjectDetailPage() {
     role?: string;
   }>>([]);
   const [inspectorError, setInspectorError] = useState<string | null>(null);
+
+  // 🆕 Inspector Chat State - چت با مدل‌های AI
+  const [inspectorModels, setInspectorModels] = useState<Array<{
+    id: string;
+    name: string;
+    provider: string;
+    enabled: boolean;
+  }>>([]);
+  const [inspectorSelectedModels, setInspectorSelectedModels] = useState<string[]>([]);
+  const [inspectorChatMessages, setInspectorChatMessages] = useState<Array<{
+    id: string;
+    role: 'user' | 'assistant';
+    content: string;
+    model_id?: string;
+    timestamp: Date;
+    tokens_used?: number;
+  }>>([]);
+  const [inspectorChatInput, setInspectorChatInput] = useState('');
+  const [inspectorChatLoading, setInspectorChatLoading] = useState(false);
+  const [inspectorShowModelSelector, setInspectorShowModelSelector] = useState(false);
+
   const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
   const [selectedLog, setSelectedLog] = useState<ActivityLog | null>(null);
   const [reports, setReports] = useState<ProjectReport[]>([]);
@@ -698,7 +719,168 @@ export default function ProjectDetailPage() {
       // روشن کردن
       setInspectorPowerOn(true);
       await loadInspectorServices();
+      // لود مدل‌ها هم
+      await loadInspectorModels();
     }
+  };
+
+  // 🆕 لود مدل‌های موجود برای چت
+  const loadInspectorModels = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/models`);
+      const data = await res.json();
+
+      if (data.success && data.models_by_provider) {
+        // flatten کردن مدل‌ها
+        const allModels: Array<{id: string; name: string; provider: string; enabled: boolean}> = [];
+        Object.entries(data.models_by_provider).forEach(([provider, models]: [string, any]) => {
+          models.forEach((m: any) => {
+            allModels.push({
+              id: m.id,
+              name: m.name,
+              provider: provider,
+              enabled: m.enabled !== false
+            });
+          });
+        });
+        setInspectorModels(allModels);
+
+        // انتخاب اولین مدل فعال به صورت پیش‌فرض
+        const firstEnabled = allModels.find(m => m.enabled);
+        if (firstEnabled && inspectorSelectedModels.length === 0) {
+          setInspectorSelectedModels([firstEnabled.id]);
+        }
+      }
+    } catch (err) {
+      console.error('Error loading inspector models:', err);
+    }
+  };
+
+  // 🆕 ارسال پیام به AI
+  const sendInspectorChat = async () => {
+    if (!inspectorChatInput.trim() || inspectorSelectedModels.length === 0) return;
+
+    const userMessage = inspectorChatInput.trim();
+    setInspectorChatInput('');
+    setInspectorChatLoading(true);
+
+    // اضافه کردن پیام کاربر به چت
+    const userMsgId = `user_${Date.now()}`;
+    setInspectorChatMessages(prev => [...prev, {
+      id: userMsgId,
+      role: 'user',
+      content: userMessage,
+      timestamp: new Date()
+    }]);
+
+    try {
+      // آماده‌سازی context
+      const chatHistory = inspectorChatMessages.map(m => ({
+        role: m.role,
+        content: m.content
+      }));
+
+      // آماده‌سازی فایل‌ها (اگر موجود باشد)
+      const projectFiles = files.slice(0, 5).map(f => ({
+        path: f.path,
+        content: '' // محتوا بعداً می‌تواند از فایل‌های باز شده خوانده شود
+      }));
+
+      if (inspectorSelectedModels.length === 1) {
+        // چت با یک مدل
+        const res = await fetch(`${API_BASE}/api/render/inspector/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model_id: inspectorSelectedModels[0],
+            message: userMessage,
+            project_id: projectId,
+            backend_logs: inspectorBackendLogs,
+            frontend_url: inspectorFrontendUrl,
+            project_files: projectFiles,
+            chat_history: chatHistory
+          })
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          setInspectorChatMessages(prev => [...prev, {
+            id: `assistant_${Date.now()}`,
+            role: 'assistant',
+            content: data.content,
+            model_id: data.model_id,
+            timestamp: new Date(),
+            tokens_used: data.tokens_used
+          }]);
+        } else {
+          setInspectorChatMessages(prev => [...prev, {
+            id: `error_${Date.now()}`,
+            role: 'assistant',
+            content: `❌ خطا: ${data.error || 'خطای ناشناخته'}`,
+            timestamp: new Date()
+          }]);
+        }
+      } else {
+        // چت با چند مدل
+        const res = await fetch(`${API_BASE}/api/render/inspector/chat/multi`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model_ids: inspectorSelectedModels,
+            message: userMessage,
+            project_id: projectId,
+            backend_logs: inspectorBackendLogs,
+            frontend_url: inspectorFrontendUrl,
+            project_files: projectFiles,
+            chat_history: chatHistory
+          })
+        });
+
+        const data = await res.json();
+
+        if (data.success && data.responses) {
+          data.responses.forEach((r: any) => {
+            setInspectorChatMessages(prev => [...prev, {
+              id: `assistant_${Date.now()}_${r.model_id}`,
+              role: 'assistant',
+              content: r.error ? `❌ ${r.model_id}: ${r.error}` : r.content,
+              model_id: r.model_id,
+              timestamp: new Date(),
+              tokens_used: r.tokens_used
+            }]);
+          });
+        } else {
+          setInspectorChatMessages(prev => [...prev, {
+            id: `error_${Date.now()}`,
+            role: 'assistant',
+            content: `❌ خطا: ${data.error || 'خطای ناشناخته'}`,
+            timestamp: new Date()
+          }]);
+        }
+      }
+    } catch (err) {
+      console.error('Error sending inspector chat:', err);
+      setInspectorChatMessages(prev => [...prev, {
+        id: `error_${Date.now()}`,
+        role: 'assistant',
+        content: '❌ خطا در اتصال به سرور',
+        timestamp: new Date()
+      }]);
+    } finally {
+      setInspectorChatLoading(false);
+    }
+  };
+
+  // 🆕 Toggle انتخاب مدل
+  const toggleInspectorModel = (modelId: string) => {
+    setInspectorSelectedModels(prev => {
+      if (prev.includes(modelId)) {
+        return prev.filter(id => id !== modelId);
+      } else {
+        return [...prev, modelId];
+      }
+    });
   };
 
   // بارگذاری لاگ‌ها وقتی سرویس‌ها لود شدن
@@ -6749,73 +6931,172 @@ export default function ProjectDetailPage() {
                 </span>
               </div>
 
-              {/* چت باکس سمت راست (در RTL) - کوچک‌تر شده */}
-              <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 flex flex-col overflow-hidden" style={{ width: '320px', flexShrink: 0 }}>
-                {/* هدر چت */}
-                <div className="bg-gradient-to-r from-red-500 to-orange-500 text-white px-4 py-3 flex items-center gap-2">
-                  <span className="text-xl">🤖</span>
-                  <div>
-                    <h3 className="font-bold text-sm">دستیار بازرس</h3>
-                    <p className="text-xs opacity-80">آنلاین و آماده کمک</p>
+              {/* چت باکس سمت راست (در RTL) - با قابلیت چت با AI */}
+              <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 flex flex-col overflow-hidden" style={{ width: '380px', flexShrink: 0 }}>
+                {/* هدر چت با انتخاب مدل */}
+                <div className="bg-gradient-to-r from-red-500 to-orange-500 text-white px-4 py-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xl">🤖</span>
+                      <div>
+                        <h3 className="font-bold text-sm">دستیار بازرس هوشمند</h3>
+                        <p className="text-xs opacity-80">
+                          {inspectorSelectedModels.length > 0
+                            ? `${inspectorSelectedModels.length} مدل انتخاب شده`
+                            : 'مدلی انتخاب نشده'}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setInspectorShowModelSelector(!inspectorShowModelSelector)}
+                      className="p-2 bg-white/20 rounded-lg hover:bg-white/30 transition text-sm"
+                      title="انتخاب مدل‌های AI"
+                    >
+                      ⚙️
+                    </button>
                   </div>
+
+                  {/* انتخابگر مدل */}
+                  {inspectorShowModelSelector && (
+                    <div className="mt-3 bg-white/10 rounded-lg p-2 max-h-40 overflow-auto">
+                      <p className="text-xs mb-2 opacity-80">مدل‌های موجود (کلیک برای انتخاب):</p>
+                      <div className="flex flex-wrap gap-1">
+                        {inspectorModels.map(model => (
+                          <button
+                            key={model.id}
+                            onClick={() => toggleInspectorModel(model.id)}
+                            className={`text-xs px-2 py-1 rounded-full transition ${
+                              inspectorSelectedModels.includes(model.id)
+                                ? 'bg-white text-red-500 font-bold'
+                                : model.enabled
+                                  ? 'bg-white/20 hover:bg-white/30'
+                                  : 'bg-white/10 opacity-50'
+                            }`}
+                            disabled={!model.enabled}
+                          >
+                            {model.name}
+                          </button>
+                        ))}
+                      </div>
+                      {inspectorModels.length === 0 && (
+                        <p className="text-xs opacity-60">دکمه پاور را بزنید تا مدل‌ها لود شوند</p>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* محتوای چت */}
-                <div className="flex-1 p-4 overflow-auto bg-gray-50 dark:bg-gray-900 space-y-3">
-                  {/* پیام سیستم */}
-                  <div className="flex gap-2">
-                    <div className="w-8 h-8 rounded-full bg-red-500 flex items-center justify-center text-white text-sm flex-shrink-0">
-                      🔍
-                    </div>
-                    <div className="bg-white dark:bg-gray-800 rounded-lg rounded-tl-none p-3 shadow-sm max-w-[80%]">
-                      <p className="text-sm text-gray-700 dark:text-gray-300">
-                        سلام! من بازرس ویژه هستم. دکمه پاور را بزنید تا سرویس‌های پروژه را لود کنم.
-                      </p>
-                      <span className="text-xs text-gray-400 mt-1 block">الان</span>
-                    </div>
-                  </div>
+                <div className="flex-1 p-3 overflow-auto bg-gray-50 dark:bg-gray-900 space-y-3" style={{ maxHeight: '400px' }}>
+                  {/* پیام خوش‌آمد */}
+                  {inspectorChatMessages.length === 0 && (
+                    <>
+                      <div className="flex gap-2">
+                        <div className="w-8 h-8 rounded-full bg-red-500 flex items-center justify-center text-white text-sm flex-shrink-0">
+                          🔍
+                        </div>
+                        <div className="bg-white dark:bg-gray-800 rounded-lg rounded-tl-none p-3 shadow-sm max-w-[85%]">
+                          <p className="text-sm text-gray-700 dark:text-gray-300">
+                            سلام! من بازرس هوشمند هستم. به تمام داده‌های پروژه دسترسی دارم:
+                          </p>
+                          <ul className="text-xs text-gray-500 mt-2 space-y-1">
+                            <li>• لاگ‌های بک‌اند (زنده)</li>
+                            <li>• پیش‌نمایش فرانت‌اند</li>
+                            <li>• فایل‌های پروژه</li>
+                          </ul>
+                        </div>
+                      </div>
 
-                  {/* نمایش لاگ‌های خطا در چت */}
-                  {inspectorPowerOn && inspectorBackendLogs.filter(l => l.level === 'error').length > 0 && (
+                      {/* دکمه‌های سریع */}
+                      <div className="flex flex-wrap gap-1 px-2">
+                        <button
+                          onClick={() => { setInspectorChatInput('لاگ‌های خطا را تحلیل کن'); }}
+                          className="text-xs bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 px-2 py-1 rounded-full hover:bg-red-200 transition"
+                        >
+                          تحلیل خطاها
+                        </button>
+                        <button
+                          onClick={() => { setInspectorChatInput('امنیت پروژه را بررسی کن'); }}
+                          className="text-xs bg-orange-100 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400 px-2 py-1 rounded-full hover:bg-orange-200 transition"
+                        >
+                          بررسی امنیت
+                        </button>
+                        <button
+                          onClick={() => { setInspectorChatInput('باگ‌های احتمالی را پیدا کن'); }}
+                          className="text-xs bg-yellow-100 dark:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400 px-2 py-1 rounded-full hover:bg-yellow-200 transition"
+                        >
+                          یافتن باگ
+                        </button>
+                      </div>
+                    </>
+                  )}
+
+                  {/* نمایش خطاهای لاگ */}
+                  {inspectorPowerOn && inspectorBackendLogs.filter(l => l.level === 'error').length > 0 && inspectorChatMessages.length === 0 && (
                     <div className="flex gap-2">
                       <div className="w-8 h-8 rounded-full bg-red-600 flex items-center justify-center text-white text-sm flex-shrink-0">
                         ⚠️
                       </div>
-                      <div className="bg-red-50 dark:bg-red-900/30 rounded-lg rounded-tl-none p-3 shadow-sm max-w-[80%] border border-red-200 dark:border-red-800">
+                      <div className="bg-red-50 dark:bg-red-900/30 rounded-lg rounded-tl-none p-3 shadow-sm max-w-[85%] border border-red-200 dark:border-red-800">
                         <p className="text-sm text-red-700 dark:text-red-300 font-medium mb-1">
                           {inspectorBackendLogs.filter(l => l.level === 'error').length} خطا شناسایی شد!
                         </p>
-                        <div className="text-xs text-red-600 dark:text-red-400 space-y-1 max-h-24 overflow-auto">
+                        <div className="text-xs text-red-600 dark:text-red-400 space-y-1 max-h-20 overflow-auto">
                           {inspectorBackendLogs.filter(l => l.level === 'error').slice(0, 3).map(log => (
-                            <div key={log.id} className="truncate">• {log.message?.slice(0, 80)}</div>
+                            <div key={log.id} className="truncate">• {log.message?.slice(0, 60)}</div>
                           ))}
                         </div>
                       </div>
                     </div>
                   )}
 
-                  {/* پیام راهنما */}
-                  <div className="flex gap-2">
-                    <div className="w-8 h-8 rounded-full bg-red-500 flex items-center justify-center text-white text-sm flex-shrink-0">
-                      🔍
-                    </div>
-                    <div className="bg-white dark:bg-gray-800 rounded-lg rounded-tl-none p-3 shadow-sm max-w-[80%]">
-                      <p className="text-sm text-gray-700 dark:text-gray-300">
-                        چه کاری می‌تونم برات انجام بدم؟
-                      </p>
-                      <div className="flex flex-wrap gap-1 mt-2">
-                        <button className="text-xs bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 px-2 py-1 rounded-full hover:bg-red-200 dark:hover:bg-red-900/50 transition">
-                          تحلیل کد
-                        </button>
-                        <button className="text-xs bg-orange-100 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400 px-2 py-1 rounded-full hover:bg-orange-200 dark:hover:bg-orange-900/50 transition">
-                          بررسی امنیت
-                        </button>
-                        <button className="text-xs bg-yellow-100 dark:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400 px-2 py-1 rounded-full hover:bg-yellow-200 dark:hover:bg-yellow-900/50 transition">
-                          یافتن باگ
-                        </button>
+                  {/* پیام‌های چت */}
+                  {inspectorChatMessages.map(msg => (
+                    <div key={msg.id} className={`flex gap-2 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
+                      <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-sm flex-shrink-0 ${
+                        msg.role === 'user' ? 'bg-blue-500' : 'bg-red-500'
+                      }`}>
+                        {msg.role === 'user' ? '👤' : '🤖'}
+                      </div>
+                      <div className={`rounded-lg p-3 shadow-sm max-w-[85%] ${
+                        msg.role === 'user'
+                          ? 'bg-blue-500 text-white rounded-tr-none'
+                          : 'bg-white dark:bg-gray-800 rounded-tl-none'
+                      }`}>
+                        {msg.model_id && msg.role === 'assistant' && (
+                          <p className="text-xs text-gray-400 mb-1">{msg.model_id}</p>
+                        )}
+                        <p className={`text-sm whitespace-pre-wrap ${
+                          msg.role === 'user' ? '' : 'text-gray-700 dark:text-gray-300'
+                        }`}>
+                          {msg.content}
+                        </p>
+                        <div className="flex items-center gap-2 mt-1">
+                          <span className={`text-xs ${msg.role === 'user' ? 'opacity-70' : 'text-gray-400'}`}>
+                            {msg.timestamp.toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                          {msg.tokens_used && (
+                            <span className="text-xs text-gray-400">({msg.tokens_used} توکن)</span>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  ))}
+
+                  {/* در حال لود */}
+                  {inspectorChatLoading && (
+                    <div className="flex gap-2">
+                      <div className="w-8 h-8 rounded-full bg-red-500 flex items-center justify-center text-white text-sm flex-shrink-0 animate-pulse">
+                        🤖
+                      </div>
+                      <div className="bg-white dark:bg-gray-800 rounded-lg rounded-tl-none p-3 shadow-sm">
+                        <div className="flex items-center gap-2">
+                          <div className="w-2 h-2 bg-red-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                          <div className="w-2 h-2 bg-red-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                          <div className="w-2 h-2 bg-red-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* ورودی پیام */}
@@ -6823,13 +7104,28 @@ export default function ProjectDetailPage() {
                   <div className="flex gap-2">
                     <input
                       type="text"
-                      placeholder="پیام خود را بنویسید..."
-                      className="flex-1 bg-gray-100 dark:bg-gray-700 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500"
+                      value={inspectorChatInput}
+                      onChange={(e) => setInspectorChatInput(e.target.value)}
+                      onKeyPress={(e) => e.key === 'Enter' && !inspectorChatLoading && sendInspectorChat()}
+                      placeholder={inspectorSelectedModels.length > 0 ? "پیام خود را بنویسید..." : "ابتدا مدلی انتخاب کنید..."}
+                      disabled={inspectorSelectedModels.length === 0 || inspectorChatLoading}
+                      className="flex-1 bg-gray-100 dark:bg-gray-700 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50"
                     />
-                    <button className="bg-gradient-to-r from-red-500 to-orange-500 text-white rounded-full w-10 h-10 flex items-center justify-center hover:opacity-90 transition">
-                      <span>➤</span>
+                    <button
+                      onClick={sendInspectorChat}
+                      disabled={!inspectorChatInput.trim() || inspectorSelectedModels.length === 0 || inspectorChatLoading}
+                      className="bg-gradient-to-r from-red-500 to-orange-500 text-white rounded-full w-10 h-10 flex items-center justify-center hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {inspectorChatLoading ? (
+                        <span className="animate-spin">⏳</span>
+                      ) : (
+                        <span>➤</span>
+                      )}
                     </button>
                   </div>
+                  {inspectorSelectedModels.length === 0 && inspectorPowerOn && (
+                    <p className="text-xs text-red-500 mt-1 text-center">از بالا مدلی انتخاب کنید</p>
+                  )}
                 </div>
               </div>
             </div>
