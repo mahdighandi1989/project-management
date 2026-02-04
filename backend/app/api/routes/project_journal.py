@@ -3690,17 +3690,16 @@ async def engineering_step1_validate_fields(
     )
     db.commit()
 
+    # 🔴 FIX: Return flat structure for consistency - validated_count/rejected_count at top level
     return {
         "success": True,
         "step": 1,
         "step_name": "validate_fields",
         "model_used": model_id,
-        "results": {
-            "approved_count": approved_count,
-            "rejected_count": rejected_count,
-            "merged_count": merged_count,
-            "summary": result_data.get("summary", "")
-        }
+        "validated_count": approved_count,  # 🔴 renamed from results.approved_count
+        "rejected_count": rejected_count,   # 🔴 moved to top level
+        "merged_count": merged_count,
+        "summary": result_data.get("summary", "")
     }
 
 
@@ -4137,9 +4136,18 @@ async def engineering_step3_evaluate_models(
     # شمارش ایرادات هر مدل
     model_stats = {}
     for issue in health_issues:
-        source_models = issue.get("source_models", [issue.get("source_model", "unknown")])
-        if isinstance(source_models, str):
+        # 🔴 FIX: Handle all possible types for source_models
+        source_models = issue.get("source_models")
+        if source_models is None:
+            source_models = [issue.get("source_model", "unknown")]
+        elif isinstance(source_models, str):
             source_models = [source_models]
+        elif isinstance(source_models, (int, float)):
+            # 🔴 If source_models is a number (invalid), use default
+            source_models = [issue.get("source_model", "unknown")]
+        elif not isinstance(source_models, list):
+            # 🔴 Any other non-list type, convert to string and wrap
+            source_models = [str(source_models)]
 
         is_valid = not issue.get("archived") or issue.get("archived_reason", "").startswith("converted")
         is_rejected = issue.get("archived") and "rejected" in issue.get("archived_reason", "")

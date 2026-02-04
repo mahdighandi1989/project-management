@@ -1,8 +1,8 @@
 # 📋 گزارش جامع و به‌روز سیستم مدیریت پروژه هوشمند
 
-**تاریخ:** 2026-02-03
+**تاریخ:** 2026-02-04
 **شاخه:** `claude/update-system-report-izMLQ`
-**وضعیت:** به‌روز شده - نسخه 2.1 (اصلاحات کامل + زمان‌بندی پس‌زمینه)
+**وضعیت:** به‌روز شده - نسخه 2.2 (اصلاحات گزارش مهندسی ۴ مرحله‌ای)
 
 ---
 
@@ -35,10 +35,10 @@
 
 | وضعیت | تعداد | توضیح |
 |-------|-------|--------|
-| ✅ رفع شده | 18 | مشکلات اصلی + موارد ناقص |
-| ⚠️ نیاز به بهبود | 5 | موارد UI و Frontend |
+| ✅ رفع شده | 22 | مشکلات اصلی + موارد ناقص + باگ‌های گزارش مهندسی |
+| ⚠️ نیاز به بهبود | 4 | موارد UI و Frontend |
 | 🔴 باقیمانده | 2 | مشکلات جزئی |
-| 🆕 قابلیت جدید | 10 | پیاده‌سازی شده |
+| 🆕 قابلیت جدید | 11 | پیاده‌سازی شده |
 
 ---
 
@@ -227,14 +227,57 @@ async def pre_execution_validation():
     return {"can_execute": True}
 ```
 
-#### ⚠️ مشکلات باقیمانده
+#### ✅ اصلاحات اخیر (2026-02-04)
+
+| مشکل | راه‌حل |
+|------|--------|
+| خطای token limit در مراحل 1 و 2 | ✅ افزودن auto-truncation برای prompt های بزرگ |
+| خطای "can only concatenate list to list" در step3 | ✅ اصلاح نوع source_models و بررسی همه انواع داده |
+| آمار صفر در خروجی (validated_count = 0) | ✅ اصلاح ساختار بازگشتی step1 از nested به flat |
+| فرمت خروجی ضعیف | ✅ افزودن رندر 4 مرحله‌ای با آمار جداگانه |
+
+#### جزئیات فنی اصلاحات
+
+**1. Token Truncation در Step1 و Step2:**
+```python
+# محاسبه توکن‌های تخمینی
+estimated_tokens = (len(system_prompt) + len(user_prompt)) // 3
+max_prompt_tokens = int(max_context * 0.75)
+
+if estimated_tokens > max_prompt_tokens:
+    # کوتاه کردن داده‌ها
+    max_issues = max(5, int(len(issues) * excess_ratio * 0.7))
+    issues_truncated = issues[:max_issues]
+```
+
+**2. اصلاح نوع source_models در Step3:**
+```python
+source_models = issue.get("source_models")
+if source_models is None:
+    source_models = [issue.get("source_model", "unknown")]
+elif isinstance(source_models, str):
+    source_models = [source_models]
+elif isinstance(source_models, (int, float)):
+    # اگر عدد بود، از پیش‌فرض استفاده کن
+    source_models = [issue.get("source_model", "unknown")]
+```
+
+**3. ساختار بازگشتی flat برای Step1:**
+```python
+# قبل: nested
+return {"results": {"approved_count": x, "rejected_count": y}}
+
+# بعد: flat
+return {"validated_count": x, "rejected_count": y, "merged_count": z}
+```
+
+#### ⚠️ موارد باقیمانده
 
 | مشکل | وضعیت |
 |------|--------|
 | سرعت بیش از حد (حتی حالت عمیق زیر 2 دقیقه) | ⚠️ نیاز به بررسی |
 | عدم بایگانی ایرادات از همه منابع | ⚠️ نیاز به بهبود |
 | نقشه راه خالی بعد از اجرا | ⚠️ نیاز به بررسی |
-| فرمت خروجی ضعیف | ⚠️ نیاز به بهبود |
 
 ---
 
@@ -721,10 +764,10 @@ def log_critical_error(context: str, exception: Exception, extra_data: Dict = No
 
 | وضعیت | تعداد | درصد |
 |-------|-------|------|
-| ✅ رفع شده | 18 | 72% |
-| ⚠️ نیاز به بهبود | 5 | 20% |
-| 🔴 باقیمانده | 2 | 8% |
-| **کل** | **25** | **100%** |
+| ✅ رفع شده | 22 | 79% |
+| ⚠️ نیاز به بهبود | 4 | 14% |
+| 🔴 باقیمانده | 2 | 7% |
+| **کل** | **28** | **100%** |
 
 ### فایل‌های کلیدی تغییر یافته
 
@@ -749,16 +792,16 @@ def log_critical_error(context: str, exception: Exception, extra_data: Dict = No
 
 | Commit | توضیح |
 |--------|--------|
-| **13cc9a6** | **Fix: Complete implementation of incomplete/stub features** |
-| **fa61fb6** | **Feat: Add source tracking to fields created from AI Chat and Feature Request** |
-| **a2d90ed** | **Fix: Add comprehensive error logging for Engineering Report debugging** |
-| **e02e6e3** | **Feat: Implement complete background scheduler with all 6 trigger types** |
-| **dea2061** | **Fix: Ensure CORS headers are always present even on errors** |
-| **6f9a1e7** | **Fix: Add missing database migration and improve Quick Approval detection** |
-| 5fc9f0a | Add comprehensive system report with merged old/new analysis |
-| 8f99770 | Add frontend UI for Quick Approval and Feature Request |
-| 2b5a960 | Add Quick Approval system + Pre-execution validation |
-| a3abaa3 | Add POST /request-feature endpoint |
+| **NEW** | **Fix: Step1 flat return structure + Step3 source_models type handling** |
+| **659b98a** | **Fix: Add token truncation to step2 (health_to_fields)** |
+| **cfa1121** | **Fix: Token limit handling and step3 return structure** |
+| **cd15718** | **Fix: Force stop all executions when clicking stop button** |
+| **a71ce5f** | **Feat: Add close/stop buttons to ExecutingPromptsPanel** |
+| **34e5c12** | **Feat: Add proper rendering for 4-step engineering report format** |
+| 13cc9a6 | Fix: Complete implementation of incomplete/stub features |
+| fa61fb6 | Feat: Add source tracking to fields created from AI Chat and Feature Request |
+| a2d90ed | Fix: Add comprehensive error logging for Engineering Report debugging |
+| e02e6e3 | Feat: Implement complete background scheduler with all 6 trigger types |
 
 ---
 
@@ -792,13 +835,24 @@ def log_critical_error(context: str, exception: Exception, extra_data: Dict = No
 
 | معیار | قبل | بعد |
 |-------|-----|-----|
-| موارد رفع شده | 12 | 18 |
-| موارد نیازمند بهبود | 8 | 5 |
-| قابلیت‌های جدید | 6 | 10 |
+| موارد رفع شده | 18 | 22 |
+| موارد نیازمند بهبود | 5 | 4 |
+| قابلیت‌های جدید | 10 | 11 |
 | تریگرهای زمان‌بندی فعال | 1 | 6 |
+
+### 🔧 اصلاحات گزارش مهندسی ۴ مرحله‌ای (2026-02-04)
+
+| مشکل | وضعیت |
+|------|--------|
+| Token limit exceeded در Step1 | ✅ رفع شد - auto-truncation |
+| Token limit exceeded در Step2 | ✅ رفع شد - auto-truncation |
+| "can only concatenate list to list" در Step3 | ✅ رفع شد - بررسی نوع source_models |
+| آمار صفر (validated_count = 0) | ✅ رفع شد - ساختار flat برای step1 |
+| ExecutingPromptsPanel بدون دکمه بستن | ✅ رفع شد - دکمه‌های close/stop |
+| توقف ناقص اجراها | ✅ رفع شد - force=true parameter |
 
 ---
 
-**تاریخ به‌روزرسانی:** 2026-02-03
-**نسخه گزارش:** 2.1 (اصلاحات کامل + زمان‌بندی پس‌زمینه)
+**تاریخ به‌روزرسانی:** 2026-02-04
+**نسخه گزارش:** 2.2 (اصلاحات گزارش مهندسی ۴ مرحله‌ای)
 **شاخه:** `claude/update-system-report-izMLQ`
