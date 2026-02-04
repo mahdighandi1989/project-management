@@ -2338,3 +2338,426 @@ async def get_available_models_for_inspector(db: Session = Depends(get_db)):
             "error": str(e)
         }
 
+
+# =====================================
+# 🆕 انتخاب هوشمند و همکاری مدل‌ها
+# =====================================
+
+class SmartTaskRequest(BaseModel):
+    """درخواست اجرای کار هوشمند"""
+    task: str  # توضیح کار
+    project_id: str
+    auto_select: bool = True  # انتخاب خودکار مدل
+    collaborative: bool = True  # همکاری مدل‌ها
+    visual_mode: bool = False  # تعامل بصری با صفحه
+    # Context
+    backend_logs: Optional[List[dict]] = None
+    frontend_url: Optional[str] = None
+    project_files: Optional[List[dict]] = None
+    github_repo: Optional[str] = None  # مثل owner/repo
+
+
+class TaskAction(BaseModel):
+    """یک اقدام در جریان کار"""
+    id: str
+    model_id: str
+    action_type: str  # click, type, navigate, edit, read, analyze, log
+    description: str
+    target: Optional[str] = None  # مسیر فایل یا سلکتور CSS
+    data: Optional[dict] = None
+    status: str = "pending"  # pending, running, done, failed
+    result: Optional[str] = None
+
+
+# ذخیره وضعیت کارهای در حال اجرا (در محیط واقعی از Redis استفاده می‌شود)
+active_tasks = {}
+task_action_queues = {}
+
+
+def analyze_task_for_model_selection(task: str) -> dict:
+    """تحلیل کار برای انتخاب مدل‌های مناسب"""
+    task_lower = task.lower()
+
+    capabilities_needed = []
+    suggested_models = []
+
+    # تشخیص نیازهای کار
+    if any(x in task_lower for x in ["کد", "code", "برنامه", "program", "فایل", "file", "ویرایش", "edit"]):
+        capabilities_needed.append("coding")
+        suggested_models.extend(["claude-3-5-sonnet", "gpt-4o", "gpt-4-turbo"])
+
+    if any(x in task_lower for x in ["تحلیل", "analyze", "بررسی", "review", "خطا", "error", "باگ", "bug"]):
+        capabilities_needed.append("analysis")
+        suggested_models.extend(["claude-3-5-sonnet", "gpt-4o", "gemini-1.5-pro"])
+
+    if any(x in task_lower for x in ["امنیت", "security", "آسیب", "vulnerability"]):
+        capabilities_needed.append("security")
+        suggested_models.extend(["claude-3-5-sonnet", "gpt-4o"])
+
+    if any(x in task_lower for x in ["تست", "test", "آزمایش"]):
+        capabilities_needed.append("testing")
+        suggested_models.extend(["claude-3-5-sonnet", "gpt-4o"])
+
+    if any(x in task_lower for x in ["صفحه", "page", "کلیک", "click", "بصری", "visual", "ui", "رابط"]):
+        capabilities_needed.append("visual")
+        suggested_models.extend(["claude-3-5-sonnet", "gpt-4o"])  # مدل‌های با قابلیت vision
+
+    if any(x in task_lower for x in ["گیت", "git", "github", "کامیت", "commit", "پوش", "push"]):
+        capabilities_needed.append("git")
+        suggested_models.extend(["claude-3-5-sonnet", "gpt-4o"])
+
+    # حذف تکراری‌ها و حفظ ترتیب
+    seen = set()
+    unique_models = []
+    for m in suggested_models:
+        if m not in seen:
+            seen.add(m)
+            unique_models.append(m)
+
+    return {
+        "capabilities_needed": capabilities_needed,
+        "suggested_models": unique_models[:5],  # حداکثر 5 مدل
+        "requires_visual": "visual" in capabilities_needed,
+        "requires_git": "git" in capabilities_needed,
+        "task_complexity": "complex" if len(capabilities_needed) > 2 else "simple"
+    }
+
+
+@router.post("/inspector/smart-task")
+async def execute_smart_task(
+    request: SmartTaskRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    اجرای کار هوشمند با انتخاب خودکار مدل‌ها و همکاری
+
+    این endpoint:
+    1. کار را تحلیل می‌کند
+    2. مدل‌های مناسب را انتخاب می‌کند
+    3. مدل‌های غیرفعال را موقتاً فعال می‌کند
+    4. کار را بین مدل‌ها توزیع می‌کند
+    5. نتایج را جمع‌آوری می‌کند
+    """
+    import uuid
+
+    slog.api_request("POST", "/render/inspector/smart-task",
+        task=request.task[:100],
+        project_id=request.project_id,
+        auto_select=request.auto_select
+    )
+
+    task_id = str(uuid.uuid4())[:8]
+
+    try:
+        from ...core.models_registry import MODEL_REGISTRY
+        from ...services.ai_manager import get_ai_manager
+        from ...models.ai_profile import ModelSettings
+
+        # 1. تحلیل کار
+        analysis = analyze_task_for_model_selection(request.task)
+
+        # 2. دریافت مدل‌های موجود
+        ai_manager = get_ai_manager()
+        available_providers = ai_manager.get_available_providers()
+        available_provider_names = [str(p.value) if hasattr(p, 'value') else str(p) for p in available_providers]
+
+        # تنظیمات مدل‌ها
+        db_settings = db.query(ModelSettings).all()
+        settings_map = {s.model_id: s for s in db_settings}
+
+        # 3. انتخاب مدل‌ها
+        selected_models = []
+        temporarily_enabled = []
+
+        if request.auto_select:
+            for model_id in analysis["suggested_models"]:
+                if model_id in MODEL_REGISTRY:
+                    model = MODEL_REGISTRY[model_id]
+                    provider = str(model.provider.value) if hasattr(model.provider, 'value') else str(model.provider)
+
+                    if provider in available_provider_names:
+                        setting = settings_map.get(model_id)
+                        is_enabled = setting.enabled if setting else True
+
+                        if is_enabled:
+                            selected_models.append(model_id)
+                        elif request.auto_select:
+                            # فعال کردن موقت
+                            selected_models.append(model_id)
+                            temporarily_enabled.append(model_id)
+
+                            # در محیط واقعی: آپدیت موقت دیتابیس
+                            slog.info(f"Temporarily enabling model: {model_id}")
+
+        if not selected_models:
+            # Fallback به اولین مدل موجود
+            for model_id, model in MODEL_REGISTRY.items():
+                provider = str(model.provider.value) if hasattr(model.provider, 'value') else str(model.provider)
+                if provider in available_provider_names:
+                    selected_models.append(model_id)
+                    break
+
+        # 4. ایجاد Task
+        task_info = {
+            "id": task_id,
+            "description": request.task,
+            "models": selected_models,
+            "status": "running",
+            "actions": [],
+            "analysis": analysis,
+            "temporarily_enabled": temporarily_enabled,
+            "created_at": datetime.utcnow().isoformat()
+        }
+        active_tasks[task_id] = task_info
+
+        # 5. اجرای کار (ساده شده - در نسخه کامل از async workers استفاده می‌شود)
+        from ...services.ai_base import Message
+
+        # ساخت system prompt برای همکاری
+        collab_prompt = f"""# کار تیمی مدل‌ها
+
+شما بخشی از یک تیم هستید که روی این کار کار می‌کنید:
+{request.task}
+
+## مدل‌های تیم:
+{', '.join(selected_models)}
+
+## قوانین همکاری:
+1. هر اقدام خود را با فرمت زیر گزارش دهید:
+   [ACTION] نوع: توضیح
+   مثال: [ACTION] ANALYZE: در حال بررسی لاگ‌های خطا
+
+2. قبل از ویرایش فایل، بررسی کنید که مدل دیگری روی آن کار نمی‌کند
+
+3. نتایج را به صورت خلاصه و قابل فهم گزارش دهید
+
+## Context پروژه:
+- Frontend URL: {request.frontend_url or 'نامشخص'}
+- GitHub Repo: {request.github_repo or 'نامشخص'}
+"""
+
+        if request.backend_logs:
+            collab_prompt += f"\n## آخرین لاگ‌های بک‌اند:\n"
+            for log in request.backend_logs[-20:]:
+                collab_prompt += f"[{log.get('level', 'info').upper()}] {log.get('message', '')[:100]}\n"
+
+        # اجرای درخواست به مدل‌های انتخاب شده
+        results = []
+        for model_id in selected_models:
+            try:
+                messages = [
+                    Message(role="system", content=collab_prompt),
+                    Message(role="user", content=request.task)
+                ]
+
+                response = await ai_manager.generate(
+                    model_id=model_id,
+                    messages=messages,
+                    max_tokens=4096,
+                    temperature=0.7,
+                )
+
+                # ثبت action
+                action = {
+                    "id": f"action_{len(task_info['actions'])}",
+                    "model_id": model_id,
+                    "action_type": "analyze",
+                    "description": f"تحلیل و اجرای کار توسط {model_id}",
+                    "status": "done",
+                    "result": response.content,
+                    "tokens_used": response.tokens_used
+                }
+                task_info["actions"].append(action)
+
+                results.append({
+                    "model_id": model_id,
+                    "content": response.content,
+                    "tokens_used": response.tokens_used,
+                    "success": True
+                })
+
+            except Exception as e:
+                slog.error(f"Model {model_id} failed", exception=e)
+                results.append({
+                    "model_id": model_id,
+                    "content": str(e),
+                    "success": False
+                })
+
+        # 6. به‌روزرسانی وضعیت
+        task_info["status"] = "completed"
+        task_info["results"] = results
+
+        return {
+            "success": True,
+            "task_id": task_id,
+            "task": task_info,
+            "analysis": analysis,
+            "selected_models": selected_models,
+            "temporarily_enabled": temporarily_enabled,
+            "results": results
+        }
+
+    except Exception as e:
+        slog.error("Smart task failed", exception=e)
+        if task_id in active_tasks:
+            active_tasks[task_id]["status"] = "failed"
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@router.get("/inspector/task/{task_id}")
+async def get_task_status(task_id: str):
+    """دریافت وضعیت یک کار"""
+    if task_id not in active_tasks:
+        return {
+            "success": False,
+            "error": "Task not found"
+        }
+
+    return {
+        "success": True,
+        "task": active_tasks[task_id]
+    }
+
+
+@router.post("/inspector/task/{task_id}/action")
+async def add_task_action(task_id: str, action: TaskAction):
+    """افزودن یک اقدام به کار (برای لاگ real-time)"""
+    if task_id not in active_tasks:
+        return {
+            "success": False,
+            "error": "Task not found"
+        }
+
+    active_tasks[task_id]["actions"].append({
+        "id": action.id,
+        "model_id": action.model_id,
+        "action_type": action.action_type,
+        "description": action.description,
+        "target": action.target,
+        "status": action.status,
+        "timestamp": datetime.utcnow().isoformat()
+    })
+
+    return {
+        "success": True,
+        "action_count": len(active_tasks[task_id]["actions"])
+    }
+
+
+@router.get("/inspector/github/files/{owner}/{repo}")
+async def get_github_files(
+    owner: str,
+    repo: str,
+    path: str = "",
+    db: Session = Depends(get_db)
+):
+    """دریافت فایل‌های GitHub برای ویرایش"""
+    try:
+        from ...models.setting import Setting
+        import aiohttp
+
+        # دریافت توکن GitHub
+        token_setting = db.query(Setting).filter(Setting.key == "github_token").first()
+        if not token_setting:
+            return {
+                "success": False,
+                "error": "توکن GitHub تنظیم نشده است"
+            }
+
+        headers = {
+            "Authorization": f"token {token_setting.value}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+
+        url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return {
+                        "success": True,
+                        "files": data if isinstance(data, list) else [data],
+                        "path": path
+                    }
+                else:
+                    error = await response.text()
+                    return {
+                        "success": False,
+                        "error": f"GitHub API error: {response.status}"
+                    }
+
+    except Exception as e:
+        slog.error("GitHub files fetch failed", exception=e)
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@router.put("/inspector/github/files/{owner}/{repo}")
+async def update_github_file(
+    owner: str,
+    repo: str,
+    path: str,
+    content: str,
+    message: str,
+    sha: str,
+    db: Session = Depends(get_db)
+):
+    """ویرایش فایل در GitHub"""
+    try:
+        from ...models.setting import Setting
+        import aiohttp
+        import base64
+
+        # دریافت توکن GitHub
+        token_setting = db.query(Setting).filter(Setting.key == "github_token").first()
+        if not token_setting:
+            return {
+                "success": False,
+                "error": "توکن GitHub تنظیم نشده است"
+            }
+
+        headers = {
+            "Authorization": f"token {token_setting.value}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+
+        url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+
+        # محتوا باید base64 باشد
+        content_b64 = base64.b64encode(content.encode()).decode()
+
+        payload = {
+            "message": message,
+            "content": content_b64,
+            "sha": sha
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.put(url, headers=headers, json=payload) as response:
+                if response.status in [200, 201]:
+                    data = await response.json()
+                    return {
+                        "success": True,
+                        "commit": data.get("commit", {})
+                    }
+                else:
+                    error = await response.text()
+                    return {
+                        "success": False,
+                        "error": f"GitHub API error: {response.status}"
+                    }
+
+    except Exception as e:
+        slog.error("GitHub file update failed", exception=e)
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
