@@ -333,33 +333,53 @@ async def get_services_by_project(
     # 3. دسته‌بندی سرویس‌ها
     frontend_url = None
     backend_services = []
+    all_web_services = []  # همه سرویس‌های وب برای fallback
 
     for s in services:
+        service_url = f"https://{s.name}.onrender.com" if s.type in ["web_service", "static_site"] else None
         service_info = {
             "id": s.id,
             "name": s.name,
             "type": s.type,
             "status": s.status,
-            "url": f"https://{s.name}.onrender.com" if s.type in ["web_service", "static_site"] else None,
+            "url": service_url,
             "dashboard_url": f"https://dashboard.render.com/web/{s.id}"
         }
 
+        # ذخیره همه web_service ها
+        if s.type in ["web_service", "static_site"]:
+            all_web_services.append(service_info)
+
         # تشخیص فرانت‌اند vs بک‌اند
         name_lower = s.name.lower()
-        if any(x in name_lower for x in ["frontend", "front", "client", "web", "ui", "static"]):
-            if not frontend_url and s.type in ["web_service", "static_site"]:
-                frontend_url = service_info["url"]
+        is_frontend_like = any(x in name_lower for x in ["frontend", "front", "client", "ui", "static"])
+        is_backend_like = any(x in name_lower for x in ["backend", "back", "api", "server"])
+
+        if is_frontend_like and not is_backend_like:
+            # فقط فرانت‌اند
+            if not frontend_url and service_url:
+                frontend_url = service_url
             service_info["role"] = "frontend"
-        else:
+        elif is_backend_like and not is_frontend_like:
+            # فقط بک‌اند
             service_info["role"] = "backend"
             backend_services.append(service_info)
+        else:
+            # یکپارچه (هم فرانت هم بک) یا نامشخص
+            # برای لاگ‌ها به عنوان بک‌اند استفاده کن
+            service_info["role"] = "unified"
+            backend_services.append(service_info)
+            # برای پیش‌نمایش هم استفاده کن (اگر فرانت جدا نداریم)
+            if not frontend_url and service_url:
+                frontend_url = service_url
 
     # اگر فرانت‌اند پیدا نشد، اولین web_service را انتخاب کن
-    if not frontend_url:
-        for s in services:
-            if s.type in ["web_service", "static_site"]:
-                frontend_url = f"https://{s.name}.onrender.com"
-                break
+    if not frontend_url and all_web_services:
+        frontend_url = all_web_services[0]["url"]
+        # اگر این سرویس در backend_services نیست، اضافه کن
+        first_web_id = all_web_services[0]["id"]
+        if not any(bs["id"] == first_web_id for bs in backend_services):
+            backend_services.append(all_web_services[0])
 
     return {
         "success": True,
