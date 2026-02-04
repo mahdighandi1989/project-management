@@ -1108,13 +1108,24 @@ async def generate_engineering_report(
 
     def normalize_issue(issue, file_path=None, source_models=None):
         """نرمال‌سازی فرمت ایراد از منابع مختلف"""
+        # 🔴 FIX: Ensure source_models is always a list
+        sm = source_models or issue.get("source_models")
+        if sm is None:
+            sm = ["unknown"]
+        elif isinstance(sm, str):
+            sm = [sm]
+        elif isinstance(sm, (int, float)):
+            sm = [issue.get("source_model", "unknown")]
+        elif not isinstance(sm, list):
+            sm = [str(sm)]
+
         return {
             "file": issue.get("file") or file_path or "unknown",
             "type": issue.get("type") or issue.get("category") or "code_quality",
             "severity": issue.get("severity") or "medium",
             "message": issue.get("message") or issue.get("description") or issue.get("problem") or str(issue),
             "line": issue.get("line"),
-            "source_models": source_models or issue.get("source_models") or ["unknown"],
+            "source_models": sm,
         }
 
     # 1. دریافت از file_health_map (نتایج تحلیل هر فایل)
@@ -1988,13 +1999,19 @@ async def generate_engineering_report(
 
                     for validated in validation_data.get("validated_issues", []):
                         orig = validated.get("original_issue", {})
-                        models = orig.get("source_models", [orig.get("source_model")])
+                        # 🔴 FIX: Ensure models is always a list
+                        models = orig.get("source_models")
+                        if not isinstance(models, list):
+                            models = [orig.get("source_model", "unknown")]
                         if source_model in models:
                             correct_from_model += 1
 
                     for rejected in validation_data.get("rejected_issues", []):
                         orig = rejected.get("original_issue", {})
-                        models = orig.get("source_models", [orig.get("source_model")])
+                        # 🔴 FIX: Ensure models is always a list
+                        models = orig.get("source_models")
+                        if not isinstance(models, list):
+                            models = [orig.get("source_model", "unknown")]
                         if source_model in models:
                             false_positives_from_model += 1
 
