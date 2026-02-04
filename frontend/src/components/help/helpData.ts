@@ -321,13 +321,14 @@ export const projectDetailHelp: PageHelp = {
   title: 'جزئیات پروژه',
   description: 'صفحه کامل مدیریت یک پروژه با تمام قابلیت‌ها',
   path: '/projects/[id]',
-  overview: `صفحه جزئیات پروژه شامل تب‌های مختلف برای مدیریت کامل پروژه است: فایل‌ها، حافظه AI، ساختار، ژورنال تغییرات و سلامت پروژه.`,
+  overview: `صفحه جزئیات پروژه شامل تب‌های مختلف برای مدیریت کامل پروژه است: فایل‌ها، حافظه AI، ساختار، ژورنال تغییرات، سلامت پروژه و بازرس ویژه.`,
   features: [
     'مشاهده و ویرایش فایل‌ها',
     'حافظه هوشمند پروژه',
     'ساختار درختی فایل‌ها',
     'ژورنال تغییرات',
     'تحلیل سلامت پروژه',
+    'بازرس ویژه برای تحلیل عمیق',
     'آپلود فایل جدید',
   ],
   elements: [
@@ -363,6 +364,13 @@ export const projectDetailHelp: PageHelp = {
       description: 'تحلیل سلامت پروژه: کیفیت کد، امنیت، پوشش تست، مستندات و ...',
       type: 'tab',
       tips: ['نمره 0-100', 'پیشنهادات بهبود ارائه می‌شود'],
+    },
+    {
+      id: 'tab-inspector',
+      title: 'تب بازرس ویژه',
+      description: 'ابزار پیشرفته برای بازرسی و تحلیل عمیق پروژه. شامل بررسی‌های تخصصی و گزارش‌های دقیق.',
+      type: 'tab',
+      tips: ['تحلیل عمیق ساختار پروژه', 'شناسایی مشکلات پنهان', 'پیشنهادات بهینه‌سازی'],
     },
     {
       id: 'btn-upload',
@@ -419,6 +427,7 @@ export const projectDetailHelp: PageHelp = {
         Structure["ساختار"]
         Journal["ژورنال"]
         Health["سلامت"]
+        Inspector["🔍 بازرس ویژه"]
     end
 
     subgraph FilesTab["📄 تب فایل‌ها"]
@@ -433,11 +442,18 @@ export const projectDetailHelp: PageHelp = {
         Suggestions["پیشنهادات"]
     end
 
+    subgraph InspectorTab["🔍 بازرس ویژه"]
+        DeepAnalysis["تحلیل عمیق"]
+        Reports["گزارش‌های تخصصی"]
+        Issues["مشکلات پنهان"]
+    end
+
     Tabs --> Files
     Tabs --> Memory
     Tabs --> Structure
     Tabs --> Journal
     Tabs --> Health
+    Tabs --> Inspector
 
     Files --> FileList
     Files --> FileViewer
@@ -445,8 +461,13 @@ export const projectDetailHelp: PageHelp = {
 
     Health --> Score
     Health --> Diagram
-    Health --> Suggestions`,
+    Health --> Suggestions
+
+    Inspector --> DeepAnalysis
+    Inspector --> Reports
+    Inspector --> Issues`,
 };
+
 
 // ============================================
 // صفحه مناظره AI

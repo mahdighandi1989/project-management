@@ -242,7 +242,7 @@ export default function ProjectDetailPage() {
   const [deploying, setDeploying] = useState(false);
 
   // تب فعال
-  const [activeTab, setActiveTab] = useState<'files' | 'memory' | 'structure' | 'journal' | 'health'>('files');
+  const [activeTab, setActiveTab] = useState<'files' | 'memory' | 'structure' | 'journal' | 'health' | 'inspector'>('files');
 
   // Journal & Reports State
   const [journalLogs, setJournalLogs] = useState<ActivityLog[]>([]);
@@ -2880,6 +2880,16 @@ export default function ProjectDetailPage() {
             }`}
           >
             🏥 تحلیل سلامت
+          </button>
+          <button
+            onClick={() => setActiveTab('inspector')}
+            className={`px-6 py-3 font-medium ${
+              activeTab === 'inspector'
+                ? 'border-b-2 border-red-500 text-red-600'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            🔍 بازرس ویژه
           </button>
         </div>
 
@@ -6521,6 +6531,26 @@ export default function ProjectDetailPage() {
         {activeTab === 'health' && (
           <div className="space-y-6">
             <ProjectHealthPanel projectId={projectId as string} onHealthUpdate={loadProject} />
+          </div>
+        )}
+
+        {/* محتوای تب بازرس ویژه */}
+        {activeTab === 'inspector' && (
+          <div className="space-y-6">
+            <div className="bg-gradient-to-r from-red-50 to-orange-50 dark:from-red-900/20 dark:to-orange-900/20 rounded-xl p-6 border border-red-200 dark:border-red-800">
+              <div className="flex items-center gap-3 mb-4">
+                <span className="text-4xl">🔍</span>
+                <div>
+                  <h2 className="text-xl font-bold text-red-800 dark:text-red-200">بازرس ویژه</h2>
+                  <p className="text-red-600 dark:text-red-400 text-sm">ابزار پیشرفته برای بازرسی و تحلیل عمیق پروژه</p>
+                </div>
+              </div>
+              <div className="bg-white dark:bg-gray-800 rounded-lg p-4 mt-4">
+                <p className="text-gray-600 dark:text-gray-400 text-center">
+                  🚧 این بخش در حال توسعه است...
+                </p>
+              </div>
+            </div>
           </div>
         )}
 
