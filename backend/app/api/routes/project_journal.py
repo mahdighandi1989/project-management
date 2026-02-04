@@ -3161,10 +3161,10 @@ Full Traceback:
                             except:
                                 pass
 
-                        # نتایج تحلیل سلامت
-                        if project_obj.health_analysis_result:
+                        # نتایج تحلیل سلامت (از health_scores)
+                        if project_obj.health_scores:
                             try:
-                                health_analysis_data = json.loads(project_obj.health_analysis_result)
+                                health_analysis_data = json.loads(project_obj.health_scores)
                             except:
                                 pass
 
