@@ -4361,9 +4361,18 @@ async def engineering_step3_evaluate_models(
     health_issues = []
     if project.issues_found:
         try:
-            health_issues = json.loads(project.issues_found)
-        except:
-            pass
+            loaded_issues = json.loads(project.issues_found)
+            # 🔴🔴 FIX: Ensure health_issues is always a list of dicts
+            if isinstance(loaded_issues, list):
+                health_issues = [i for i in loaded_issues if isinstance(i, dict)]
+            elif isinstance(loaded_issues, dict):
+                health_issues = [loaded_issues]  # Single issue as dict
+            else:
+                logger.warning(f"[STEP3] issues_found is not list/dict: {type(loaded_issues)}")
+        except Exception as e:
+            logger.warning(f"[STEP3] Error parsing issues_found: {e}")
+
+    logger.info(f"[STEP3] Processing {len(health_issues)} health issues")
 
     # شمارش ایرادات هر مدل
     model_stats = {}
@@ -4468,9 +4477,14 @@ async def engineering_step3_evaluate_models(
     file_health_map = {}
     if project.file_health_map:
         try:
-            file_health_map = json.loads(project.file_health_map)
-        except:
-            pass
+            loaded_map = json.loads(project.file_health_map)
+            # 🔴🔴 FIX: Ensure file_health_map is always a dict
+            if isinstance(loaded_map, dict):
+                file_health_map = loaded_map
+            else:
+                logger.warning(f"[STEP3] file_health_map is not dict: {type(loaded_map)}")
+        except Exception as e:
+            logger.warning(f"[STEP3] Error parsing file_health_map: {e}")
 
     # شمارش ایرادات فعال هر فایل
     for issue in health_issues:
@@ -4480,14 +4494,24 @@ async def engineering_step3_evaluate_models(
         if file_path not in file_health_map:
             file_health_map[file_path] = {"score": 100, "issues": 0}
 
-        file_health_map[file_path]["issues"] = file_health_map[file_path].get("issues", 0) + 1
+        # 🔴🔴 FIX: Ensure entry is a dict before accessing
+        entry = file_health_map[file_path]
+        if not isinstance(entry, dict):
+            file_health_map[file_path] = {"score": 100, "issues": 0}
+            entry = file_health_map[file_path]
+
+        entry["issues"] = entry.get("issues", 0) + 1
         # کاهش امتیاز براساس تعداد ایرادات
         severity = issue.get("severity", "medium")
         penalty = {"critical": 25, "high": 15, "medium": 10, "low": 5}.get(severity, 10)
-        file_health_map[file_path]["score"] = max(0, file_health_map[file_path].get("score", 100) - penalty)
+        entry["score"] = max(0, entry.get("score", 100) - penalty)
 
     # محاسبه رنگ براساس امتیاز
     for file_path, data in file_health_map.items():
+        # 🔴🔴 FIX: Ensure data is a dict
+        if not isinstance(data, dict):
+            file_health_map[file_path] = {"score": 100, "issues": 0}
+            data = file_health_map[file_path]
         score = data.get("score", 100)
         if score >= 80:
             data["color"] = "#22c55e"  # سبز
