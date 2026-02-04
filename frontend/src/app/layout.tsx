@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Script from 'next/script';
 import Layout from '@/components/Layout';
+import { HelpProvider, HelpSystem } from '@/components/help';
 import '@/styles/globals.css';
 
 export const metadata: Metadata = {
@@ -31,7 +32,10 @@ export default function RootLayout({
         />
       </head>
       <body>
-        <Layout>{children}</Layout>
+        <HelpProvider>
+          <Layout>{children}</Layout>
+          <HelpSystem />
+        </HelpProvider>
       </body>
     </html>
   );
