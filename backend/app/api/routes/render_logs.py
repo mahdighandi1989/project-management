@@ -2321,25 +2321,29 @@ async def get_available_models_for_inspector(db: Session = Depends(get_db)):
                 models_by_provider[provider] = []
             models_by_provider[provider].append(model_info)
 
-        # بررسی اتصال GitHub
+        # بررسی اتصال GitHub - همان روش deploy-keys/status
         from ...models.setting import Setting
         import os
 
-        # روش 1: از دیتابیس
-        github_token = db.query(Setting).filter(Setting.key == "api_key_github").first()
-        github_connected_db = github_token and github_token.value and len(github_token.value) > 10
+        # روش 1: از environment
+        github_key = os.environ.get("GITHUB_TOKEN", "")
 
-        # روش 2: از environment variable
-        github_env = os.getenv("GITHUB_TOKEN", "")
-        github_connected_env = len(github_env) > 10
+        # روش 2: اگر نبود، از دیتابیس بخون و در environment ست کن
+        if not github_key:
+            try:
+                github_key = Setting.get_value(db, "api_key_github") or ""
+                if github_key:
+                    os.environ["GITHUB_TOKEN"] = github_key
+                    slog.info("Loaded GitHub token from database and set in environment")
+            except Exception as e:
+                slog.warning("Failed to get GitHub token from DB", error=str(e))
 
-        # ترکیب - اگر یکی متصل باشد کافی است
-        github_connected = github_connected_db or github_connected_env
+        github_connected = bool(github_key) and len(github_key) > 10
 
         slog.info("GitHub connection check",
-            db_connected=github_connected_db,
-            env_connected=github_connected_env,
-            final=github_connected
+            has_env_token=bool(os.environ.get("GITHUB_TOKEN")),
+            token_length=len(github_key) if github_key else 0,
+            connected=github_connected
         )
 
         return {
@@ -2637,10 +2641,12 @@ async def execute_smart_task(
         # 7. بررسی اتصال GitHub
         from ...models.setting import Setting
         import os
-        github_token = db.query(Setting).filter(Setting.key == "api_key_github").first()
-        github_connected_db = github_token and github_token.value and len(github_token.value) > 10
-        github_connected_env = len(os.getenv("GITHUB_TOKEN", "")) > 10
-        github_connected = github_connected_db or github_connected_env
+        github_key = os.environ.get("GITHUB_TOKEN", "")
+        if not github_key:
+            github_key = Setting.get_value(db, "api_key_github") or ""
+            if github_key:
+                os.environ["GITHUB_TOKEN"] = github_key
+        github_connected = bool(github_key) and len(github_key) > 10
 
         # 8. ساخت پاسخ یکپارچه
         combined_content = ""
@@ -3355,10 +3361,12 @@ async def synchronized_inspection(
         # بررسی اتصال GitHub
         from ...models.setting import Setting
         import os
-        github_token = db.query(Setting).filter(Setting.key == "api_key_github").first()
-        github_connected_db = github_token and github_token.value and len(github_token.value) > 10
-        github_connected_env = len(os.getenv("GITHUB_TOKEN", "")) > 10
-        github_connected = github_connected_db or github_connected_env
+        github_key = os.environ.get("GITHUB_TOKEN", "")
+        if not github_key:
+            github_key = Setting.get_value(db, "api_key_github") or ""
+            if github_key:
+                os.environ["GITHUB_TOKEN"] = github_key
+        github_connected = bool(github_key) and len(github_key) > 10
 
         return {
             "success": True,
