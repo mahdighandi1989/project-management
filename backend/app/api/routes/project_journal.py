@@ -2454,9 +2454,26 @@ async def generate_engineering_report(
 
             # 3. تولید فیلدهای جدید از roadmap
             roadmap = report_data.get("roadmap", {})
+            # 🔴 FIX: اگر roadmap یک string است به جای dict، skip کن
+            if isinstance(roadmap, str):
+                logger.warning(f"Roadmap is a string instead of dict, skipping roadmap field creation")
+                roadmap = {}
 
             for phase_name, phase_tasks in [("immediate", roadmap.get("immediate", [])), ("short_term", roadmap.get("short_term", []))]:
+                # 🔴 FIX: اگر phase_tasks یک string است، skip کن
+                if isinstance(phase_tasks, str):
+                    logger.warning(f"Roadmap {phase_name} is a string instead of list, skipping")
+                    continue
+                if not isinstance(phase_tasks, list):
+                    continue
+
                 for task in phase_tasks[:5]:
+                    # 🔴 FIX: اگر task یک string است به جای dict، تبدیل کن
+                    if isinstance(task, str):
+                        task = {"task": task, "description": task}
+                    if not isinstance(task, dict):
+                        continue
+
                     field_name = task.get("task", "تسک جدید")
                     field_value = task.get("description", "")
                     action_type = task.get("action_type", "display")
@@ -2499,14 +2516,36 @@ async def generate_engineering_report(
             # 4. 🆕 تولید فیلدهای عملیاتی از journal_analysis
             if "journal_analysis" in report_data:
                 journal_data = report_data["journal_analysis"]
+                # 🔴 FIX: اگر journal_data یک dict نیست، skip کن
+                if isinstance(journal_data, str):
+                    logger.warning(f"journal_analysis is a string instead of dict, skipping")
+                    journal_data = {}
+                if not isinstance(journal_data, dict):
+                    journal_data = {}
+
                 findings = journal_data.get("findings", [])
+                # 🔴 FIX: اگر findings یک list نیست، skip کن
+                if not isinstance(findings, list):
+                    logger.warning(f"journal_analysis.findings is not a list: {type(findings)}")
+                    findings = []
+
                 logger.info(f"Processing {len(findings)} journal findings for actionable fields")
 
                 for finding in findings:
+                    # 🔴 FIX: اگر finding یک dict نیست، skip کن
+                    if isinstance(finding, str):
+                        logger.warning(f"Journal finding is a string instead of dict, skipping")
+                        continue
+                    if not isinstance(finding, dict):
+                        continue
+
                     if not finding.get("create_actionable_field", False):
                         continue
 
                     suggested = finding.get("suggested_field", {})
+                    # 🔴 FIX: اگر suggested یک string است، skip کن
+                    if isinstance(suggested, str):
+                        suggested = {"value": suggested}
                     if not suggested:
                         continue
 
@@ -2576,7 +2615,19 @@ async def generate_engineering_report(
                 roadmap_updates = report_data["roadmap_status_updates"]
                 current_roadmap = project.roadmap_content or ""
 
+                # 🔴 FIX: اگر roadmap_updates یک list نیست، skip کن
+                if not isinstance(roadmap_updates, list):
+                    logger.warning(f"roadmap_status_updates is not a list: {type(roadmap_updates)}")
+                    roadmap_updates = []
+
                 for update in roadmap_updates:
+                    # 🔴 FIX: اگر update یک string است، skip کن
+                    if isinstance(update, str):
+                        logger.warning(f"Roadmap update is a string instead of dict, skipping: {update[:50]}")
+                        continue
+                    if not isinstance(update, dict):
+                        continue
+
                     item_name = update.get("item", "")
                     completed = update.get("completed", False)
 
@@ -2594,6 +2645,11 @@ async def generate_engineering_report(
                     elif update.get("create_field"):
                         # ایجاد فیلد برای آیتم‌های انجام نشده
                         field_details = update.get("field_details", {})
+                        # 🔴 FIX: اگر field_details یک dict نیست، به یک dict تبدیل کن
+                        if isinstance(field_details, str):
+                            field_details = {"value": field_details}
+                        if not isinstance(field_details, dict):
+                            field_details = {}
                         new_field = {
                             "id": str(uuid.uuid4()),
                             "name": f"[نقشه راه] {field_details.get('name', item_name)}",
