@@ -237,6 +237,7 @@ class ModelSettings(Base):
 
     # وضعیت فعال بودن
     enabled = Column(Integer, default=1)  # 1=فعال، 0=غیرفعال
+    temporary_enabled = Column(Integer, default=0)  # 1=موقتاً فعال برای یک task خاص
 
     # بخش‌های مجاز برای استفاده (JSON array)
     # مثال: ["chat", "analysis", "code_generation", "all"]
