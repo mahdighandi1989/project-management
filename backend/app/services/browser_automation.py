@@ -14,11 +14,33 @@ import json
 import re
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
-from playwright.async_api import async_playwright, Browser, Page, BrowserContext
 
 from ..core.logging_utils import StructuredLogger
 
 slog = StructuredLogger(__name__, "BROWSER-AUTO")
+
+# Playwright رو optional می‌کنیم - در صورت نصب نبودن، خطای واضح می‌دهیم
+PLAYWRIGHT_AVAILABLE = False
+try:
+    from playwright.async_api import async_playwright, Browser, Page, BrowserContext
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    slog.warning("Playwright not installed. Install with: pip install playwright && playwright install chromium")
+    async_playwright = None
+    Browser = None
+    Page = None
+    BrowserContext = None
+
+
+def check_playwright_available():
+    """بررسی نصب بودن Playwright"""
+    if not PLAYWRIGHT_AVAILABLE:
+        raise RuntimeError(
+            "Playwright is not installed. Please install it:\n"
+            "1. pip install playwright\n"
+            "2. playwright install chromium\n"
+            "Or on Render.com, add to requirements.txt and set PLAYWRIGHT_BROWSERS_PATH=/opt/render/.cache/ms-playwright"
+        )
 
 
 class BrowserSession:
@@ -37,6 +59,7 @@ class BrowserSession:
 
     async def start(self):
         """شروع مرورگر و باز کردن صفحه"""
+        check_playwright_available()
         playwright = await async_playwright().start()
         self.browser = await playwright.chromium.launch(
             headless=True,

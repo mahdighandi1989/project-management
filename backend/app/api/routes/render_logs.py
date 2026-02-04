@@ -2323,8 +2323,24 @@ async def get_available_models_for_inspector(db: Session = Depends(get_db)):
 
         # بررسی اتصال GitHub
         from ...models.setting import Setting
+        import os
+
+        # روش 1: از دیتابیس
         github_token = db.query(Setting).filter(Setting.key == "api_key_github").first()
-        github_connected = github_token and github_token.value and len(github_token.value) > 10
+        github_connected_db = github_token and github_token.value and len(github_token.value) > 10
+
+        # روش 2: از environment variable
+        github_env = os.getenv("GITHUB_TOKEN", "")
+        github_connected_env = len(github_env) > 10
+
+        # ترکیب - اگر یکی متصل باشد کافی است
+        github_connected = github_connected_db or github_connected_env
+
+        slog.info("GitHub connection check",
+            db_connected=github_connected_db,
+            env_connected=github_connected_env,
+            final=github_connected
+        )
 
         return {
             "success": True,
@@ -2489,12 +2505,26 @@ async def execute_smart_task(
                         if is_enabled:
                             selected_models.append(model_id)
                         elif request.auto_select:
-                            # فعال کردن موقت
+                            # 🆕 فعال کردن موقت در دیتابیس
                             selected_models.append(model_id)
                             temporarily_enabled.append(model_id)
 
-                            # در محیط واقعی: آپدیت موقت دیتابیس
-                            slog.info(f"Temporarily enabling model: {model_id}")
+                            # فعال‌سازی موقت در دیتابیس
+                            if setting:
+                                setting.enabled = True
+                                setting.temporary_enabled = True  # فلگ موقت
+                                db.commit()
+                                slog.info(f"Temporarily enabled model: {model_id}")
+                            else:
+                                # ایجاد تنظیمات جدید
+                                new_setting = ModelSettings(
+                                    model_id=model_id,
+                                    enabled=True,
+                                    temporary_enabled=True
+                                )
+                                db.add(new_setting)
+                                db.commit()
+                                slog.info(f"Created temporary model settings: {model_id}")
 
         if not selected_models:
             # Fallback به اولین مدل موجود
@@ -2595,10 +2625,22 @@ async def execute_smart_task(
         task_info["status"] = "completed"
         task_info["results"] = results
 
+        # 6.5. 🆕 غیرفعال کردن مدل‌های موقتاً فعال شده
+        for model_id in temporarily_enabled:
+            setting = db.query(ModelSettings).filter(ModelSettings.model_id == model_id).first()
+            if setting and setting.temporary_enabled:
+                setting.enabled = False
+                setting.temporary_enabled = False
+                db.commit()
+                slog.info(f"Disabled temporary model: {model_id}")
+
         # 7. بررسی اتصال GitHub
         from ...models.setting import Setting
+        import os
         github_token = db.query(Setting).filter(Setting.key == "api_key_github").first()
-        github_connected = github_token and github_token.value and len(github_token.value) > 10
+        github_connected_db = github_token and github_token.value and len(github_token.value) > 10
+        github_connected_env = len(os.getenv("GITHUB_TOKEN", "")) > 10
+        github_connected = github_connected_db or github_connected_env
 
         # 8. ساخت پاسخ یکپارچه
         combined_content = ""
@@ -3077,5 +3119,261 @@ async def ai_interact_with_page(
             "success": False,
             "error": str(e),
             "actions": []
+        }
+
+
+# =====================================
+# 🆕 بازرسی همزمان فرانت‌اند و بک‌اند
+# =====================================
+
+class SyncInspectionRequest(BaseModel):
+    """درخواست بازرسی همزمان فرانت‌اند و بک‌اند"""
+    task: str  # دستور کار
+    project_id: str
+    frontend_url: Optional[str] = None
+    backend_logs: Optional[List[dict]] = None
+    # مدل‌های انتخابی
+    frontend_model_ids: Optional[List[str]] = None  # مدل‌های فرانت
+    backend_model_ids: Optional[List[str]] = None   # مدل‌های بک‌اند
+    auto_select: bool = True  # انتخاب خودکار مدل‌ها
+    max_steps: int = 10
+
+
+@router.post("/inspector/sync-inspection")
+async def synchronized_inspection(
+    request: SyncInspectionRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    🔄 بازرسی همزمان فرانت‌اند و بک‌اند
+
+    این endpoint:
+    1. مدل‌های فرانت را روی صفحه پیش‌نمایش کار می‌گذارد
+    2. همزمان مدل‌های بک‌اند را روی لاگ‌ها می‌گذارد
+    3. نتایج هر دو را در لحظه گزارش می‌کند
+    4. اگر فرانت اقدامی انجام دهد، بک‌اند لاگ مربوطه را رصد می‌کند
+    """
+    import asyncio
+    from ...services.ai_manager import get_ai_manager
+    from ...models.ai_profile import ModelSettings
+    from ...services.ai_base import Message
+
+    slog.api_request("POST", "/inspector/sync-inspection",
+        task=request.task[:100],
+        project_id=request.project_id
+    )
+
+    try:
+        ai_manager = get_ai_manager()
+        available_providers = ai_manager.get_available_providers()
+        available_provider_names = [str(p.value) if hasattr(p, 'value') else str(p) for p in available_providers]
+
+        # دریافت تنظیمات مدل‌ها
+        db_settings = db.query(ModelSettings).all()
+        settings_map = {s.model_id: s for s in db_settings}
+
+        # انتخاب مدل‌ها
+        frontend_models = request.frontend_model_ids or []
+        backend_models = request.backend_model_ids or []
+
+        if request.auto_select:
+            # انتخاب خودکار بهترین مدل‌های vision برای فرانت
+            if not frontend_models:
+                vision_model = get_best_vision_model(ai_manager, db)
+                if vision_model:
+                    frontend_models = [vision_model]
+
+            # انتخاب خودکار مدل‌های تحلیل برای بک‌اند
+            if not backend_models:
+                from ...core.models_registry import MODEL_REGISTRY
+                analysis_models = ["claude-sonnet-4-20250514", "gpt-4o", "gemini-2.5-pro"]
+                for model_id in analysis_models:
+                    if model_id in MODEL_REGISTRY:
+                        model = MODEL_REGISTRY[model_id]
+                        provider = str(model.provider.value) if hasattr(model.provider, 'value') else str(model.provider)
+                        if provider in available_provider_names:
+                            setting = settings_map.get(model_id)
+                            if not setting or setting.enabled:
+                                backend_models = [model_id]
+                                break
+
+        # نتایج
+        results = {
+            "frontend": {"model": frontend_models, "actions": [], "status": "pending"},
+            "backend": {"model": backend_models, "actions": [], "status": "pending"},
+            "sync_events": []  # رویدادهای همگام‌سازی
+        }
+
+        # ==================
+        # تابع تحلیل بک‌اند
+        # ==================
+        async def analyze_backend_logs():
+            if not backend_models or not request.backend_logs:
+                results["backend"]["status"] = "skipped"
+                return
+
+            results["backend"]["status"] = "running"
+
+            backend_prompt = f"""شما یک تحلیل‌گر لاگ بک‌اند هستید.
+
+## وظیفه:
+{request.task}
+
+## لاگ‌های بک‌اند:
+```
+"""
+            for log in request.backend_logs[-50:]:
+                level = log.get('level', 'info').upper()
+                timestamp = log.get('timestamp', '')[:19]
+                message = log.get('message', '')[:200]
+                backend_prompt += f"[{timestamp}] {level}: {message}\n"
+
+            backend_prompt += """```
+
+## وظیفه شما:
+1. لاگ‌ها را تحلیل کنید
+2. خطاها و هشدارها را شناسایی کنید
+3. اگر مشکلی وجود دارد، راه‌حل پیشنهاد دهید
+4. گزارش مختصر بدهید
+
+فرمت پاسخ:
+- خلاصه: ...
+- خطاها: ...
+- پیشنهادات: ...
+"""
+
+            for model_id in backend_models:
+                try:
+                    messages = [
+                        Message(role="system", content="شما یک تحلیل‌گر متخصص لاگ‌های سرور هستید."),
+                        Message(role="user", content=backend_prompt)
+                    ]
+
+                    response = await ai_manager.generate(
+                        model_id=model_id,
+                        messages=messages,
+                        max_tokens=2048,
+                        temperature=0.3
+                    )
+
+                    results["backend"]["actions"].append({
+                        "model_id": model_id,
+                        "type": "analysis",
+                        "content": response.content,
+                        "tokens_used": response.tokens_used,
+                        "success": True
+                    })
+
+                    # رویداد همگام‌سازی
+                    results["sync_events"].append({
+                        "time": datetime.utcnow().isoformat(),
+                        "source": "backend",
+                        "model": model_id,
+                        "event": "تحلیل لاگ‌ها کامل شد"
+                    })
+
+                except Exception as e:
+                    results["backend"]["actions"].append({
+                        "model_id": model_id,
+                        "type": "error",
+                        "content": str(e),
+                        "success": False
+                    })
+
+            results["backend"]["status"] = "completed"
+
+        # ==================
+        # تابع تعامل فرانت‌اند
+        # ==================
+        async def interact_with_frontend():
+            if not frontend_models or not request.frontend_url:
+                results["frontend"]["status"] = "skipped"
+                return
+
+            results["frontend"]["status"] = "running"
+
+            try:
+                from ...services.browser_automation import create_session, execute_ai_agent_task, close_session, PLAYWRIGHT_AVAILABLE
+
+                if not PLAYWRIGHT_AVAILABLE:
+                    results["frontend"]["status"] = "error"
+                    results["frontend"]["actions"].append({
+                        "type": "error",
+                        "content": "Playwright not installed. Please install: pip install playwright && playwright install chromium"
+                    })
+                    return
+
+                import uuid
+                session_id = str(uuid.uuid4())[:8]
+
+                session = await create_session(session_id, request.frontend_url)
+
+                for model_id in frontend_models:
+                    result = await execute_ai_agent_task(
+                        session=session,
+                        task=request.task,
+                        ai_manager=ai_manager,
+                        model_id=model_id,
+                        max_steps=request.max_steps
+                    )
+
+                    results["frontend"]["actions"].append({
+                        "model_id": model_id,
+                        "type": "interaction",
+                        "steps": result.get("actions", []),
+                        "cursor_positions": result.get("cursor_positions", []),
+                        "success": result.get("success", False)
+                    })
+
+                    # رویدادهای همگام‌سازی برای هر اقدام
+                    for action in result.get("actions", []):
+                        results["sync_events"].append({
+                            "time": datetime.utcnow().isoformat(),
+                            "source": "frontend",
+                            "model": model_id,
+                            "event": f"{action.get('action')}: {action.get('description', '')[:50]}"
+                        })
+
+                await close_session(session_id)
+                results["frontend"]["status"] = "completed"
+
+            except Exception as e:
+                results["frontend"]["status"] = "error"
+                results["frontend"]["actions"].append({
+                    "type": "error",
+                    "content": str(e)
+                })
+
+        # ==================
+        # اجرای همزمان
+        # ==================
+        await asyncio.gather(
+            analyze_backend_logs(),
+            interact_with_frontend()
+        )
+
+        # بررسی اتصال GitHub
+        from ...models.setting import Setting
+        import os
+        github_token = db.query(Setting).filter(Setting.key == "api_key_github").first()
+        github_connected_db = github_token and github_token.value and len(github_token.value) > 10
+        github_connected_env = len(os.getenv("GITHUB_TOKEN", "")) > 10
+        github_connected = github_connected_db or github_connected_env
+
+        return {
+            "success": True,
+            "task": request.task,
+            "results": results,
+            "frontend_models": frontend_models,
+            "backend_models": backend_models,
+            "github_connected": github_connected,
+            "message": f"بازرسی همزمان کامل شد - فرانت: {len(results['frontend']['actions'])} اقدام، بک‌اند: {len(results['backend']['actions'])} تحلیل"
+        }
+
+    except Exception as e:
+        slog.error("Sync inspection failed", exception=e)
+        return {
+            "success": False,
+            "error": str(e)
         }
 
