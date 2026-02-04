@@ -391,6 +391,11 @@ def migrate_db():
                 cursor.execute("CREATE INDEX IF NOT EXISTS ix_render_services_project_id ON render_services(project_id)")
                 logger.info("Created index on render_services.project_id")
 
+            # 🆕 ستون URL واقعی سرویس (از Render API)
+            if "service_url" not in existing_cols:
+                cursor.execute("ALTER TABLE render_services ADD COLUMN service_url VARCHAR(500)")
+                logger.info("Added 'service_url' column to render_services table")
+
         # 🔴 Migration برای prompt_executions - ستون‌های پیشرفت real-time
         if "prompt_executions" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
             existing_cols = get_columns("prompt_executions")
