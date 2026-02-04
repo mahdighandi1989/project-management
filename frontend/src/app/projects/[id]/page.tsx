@@ -785,6 +785,38 @@ export default function ProjectDetailPage() {
     }
   };
 
+  // 🆕 تشخیص اینکه آیا این یک task ویژوال است
+  const isVisualTask = (message: string): boolean => {
+    const visualKeywords = [
+      'لاگین', 'login', 'ورود', 'sign in', 'وارد شو',
+      'کلیک', 'click', 'بزن', 'فشار بده',
+      'تایپ', 'type', 'بنویس', 'وارد کن',
+      'اسکرول', 'scroll', 'پایین برو', 'بالا برو',
+      'پیدا کن', 'find', 'جستجو', 'search',
+      'انتخاب کن', 'select', 'choose',
+      'صفحه', 'page', 'فرم', 'form'
+    ];
+    const lowerMessage = message.toLowerCase();
+    return visualKeywords.some(keyword => lowerMessage.includes(keyword));
+  };
+
+  // 🆕 انیمیشن cursor به صورت متوالی
+  const animateCursorSequence = async (positions: Array<{x: number; y: number; action: string}>) => {
+    for (const pos of positions) {
+      setInspectorVirtualCursor({
+        x: pos.x,
+        y: pos.y,
+        visible: true,
+        model_id: pos.action
+      });
+      await new Promise(resolve => setTimeout(resolve, 800)); // 800ms بین هر حرکت
+    }
+    // پنهان کردن بعد از آخرین حرکت
+    setTimeout(() => {
+      setInspectorVirtualCursor(prev => ({ ...prev, visible: false }));
+    }, 2000);
+  };
+
   // 🆕 ارسال پیام به AI
   const sendInspectorChat = async () => {
     // در حالت انتخاب خودکار، نیازی به انتخاب دستی مدل نیست
@@ -811,8 +843,65 @@ export default function ProjectDetailPage() {
         content: '' // محتوا بعداً می‌تواند از فایل‌های باز شده خوانده شود
       }));
 
-      // 🆕 اگر انتخاب خودکار فعال باشد، از smart-task استفاده کن
-      if (inspectorAutoSelect) {
+      // 🆕 تشخیص task ویژوال و استفاده از browser automation
+      if (inspectorAutoSelect && isVisualTask(userMessage) && inspectorFrontendUrl) {
+        // اضافه کردن پیام سیستم
+        setInspectorChatMessages(prev => [...prev, {
+          id: `system_${Date.now()}`,
+          role: 'assistant',
+          content: '🖥️ در حال باز کردن مرورگر و تحلیل صفحه...',
+          timestamp: new Date()
+        }]);
+
+        // استفاده از API تعامل هوشمند با مرورگر
+        const res = await fetch(`${API_BASE}/api/render/inspector/ai-interact?task=${encodeURIComponent(userMessage)}&url=${encodeURIComponent(inspectorFrontendUrl)}&model_id=gpt-4o`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        });
+
+        const data = await res.json();
+
+        // حذف پیام سیستم
+        setInspectorChatMessages(prev => prev.filter(m => !m.id.startsWith('system_')));
+
+        if (data.success) {
+          // نمایش مراحل انجام شده
+          const actionsText = (data.actions || []).map((a: any) =>
+            `${a.status === 'done' ? '✅' : a.status === 'failed' ? '❌' : '⏳'} ${a.message}`
+          ).join('\n');
+
+          setInspectorChatMessages(prev => [...prev, {
+            id: `assistant_${Date.now()}`,
+            role: 'assistant',
+            content: `🤖 **عملیات انجام شد**\n\n${actionsText}\n\n📸 Screenshot نهایی گرفته شد.`,
+            timestamp: new Date()
+          }]);
+
+          // انیمیشن cursor positions
+          if (data.cursor_positions && data.cursor_positions.length > 0) {
+            animateCursorSequence(data.cursor_positions);
+          }
+
+          // نمایش session_id برای ادامه کار
+          if (data.session_id) {
+            setInspectorChatMessages(prev => [...prev, {
+              id: `info_${Date.now()}`,
+              role: 'assistant',
+              content: `🔗 Session ID: ${data.session_id}\n\nمی‌توانید با دستورات بیشتر ادامه دهید.`,
+              timestamp: new Date()
+            }]);
+          }
+        } else {
+          setInspectorChatMessages(prev => [...prev, {
+            id: `error_${Date.now()}`,
+            role: 'assistant',
+            content: `❌ خطا: ${data.error || 'خطای ناشناخته'}\n\n${data.actions ? data.actions.map((a: any) => a.message).join('\n') : ''}`,
+            timestamp: new Date()
+          }]);
+        }
+
+      // 🆕 اگر انتخاب خودکار فعال باشد ولی task ویژوال نیست، از smart-task استفاده کن
+      } else if (inspectorAutoSelect) {
         // اضافه کردن پیام سیستم که نشان می‌دهد در حال تحلیل است
         setInspectorChatMessages(prev => [...prev, {
           id: `system_${Date.now()}`,
@@ -867,7 +956,7 @@ export default function ProjectDetailPage() {
           // نمایش اکشن‌های انجام شده
           if (data.actions && data.actions.length > 0) {
             const actionsText = data.actions.map((a: any) =>
-              `${a.status === 'done' ? '✅' : a.status === 'running' ? '⏳' : '⏸️'} [${a.model_id}] ${a.action}`
+              `${a.status === 'done' ? '✅' : a.status === 'running' ? '⏳' : '⏸️'} [${a.model_id || 'AI'}] ${a.description || a.action}`
             ).join('\n');
 
             setInspectorChatMessages(prev => [...prev, {
