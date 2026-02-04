@@ -2323,7 +2323,7 @@ async def get_available_models_for_inspector(db: Session = Depends(get_db)):
 
         # بررسی اتصال GitHub
         from ...models.setting import Setting
-        github_token = db.query(Setting).filter(Setting.key == "github_token").first()
+        github_token = db.query(Setting).filter(Setting.key == "api_key_github").first()
         github_connected = github_token and github_token.value and len(github_token.value) > 10
 
         return {
@@ -2597,7 +2597,7 @@ async def execute_smart_task(
 
         # 7. بررسی اتصال GitHub
         from ...models.setting import Setting
-        github_token = db.query(Setting).filter(Setting.key == "github_token").first()
+        github_token = db.query(Setting).filter(Setting.key == "api_key_github").first()
         github_connected = github_token and github_token.value and len(github_token.value) > 10
 
         # 8. ساخت پاسخ یکپارچه
@@ -2687,7 +2687,7 @@ async def get_github_files(
         import aiohttp
 
         # دریافت توکن GitHub
-        token_setting = db.query(Setting).filter(Setting.key == "github_token").first()
+        token_setting = db.query(Setting).filter(Setting.key == "api_key_github").first()
         if not token_setting:
             return {
                 "success": False,
@@ -2742,7 +2742,7 @@ async def update_github_file(
         import base64
 
         # دریافت توکن GitHub
-        token_setting = db.query(Setting).filter(Setting.key == "github_token").first()
+        token_setting = db.query(Setting).filter(Setting.key == "api_key_github").first()
         if not token_setting:
             return {
                 "success": False,
@@ -2905,8 +2905,76 @@ class AIInteractRequest(BaseModel):
     """درخواست تعامل AI با صفحه"""
     task: str
     url: str
-    model_id: Optional[str] = "gpt-4o"
+    model_id: Optional[str] = None  # اگر None باشد، خودکار انتخاب می‌شود
     max_steps: Optional[int] = 10
+
+
+def get_best_vision_model(ai_manager, db) -> Optional[str]:
+    """
+    انتخاب بهترین مدل vision موجود
+
+    اولویت:
+    1. Claude (بهترین برای تحلیل و تصمیم‌گیری)
+    2. GPT-4o (قدرتمند در vision)
+    3. Gemini (سریع و مقرون به صرفه)
+    """
+    from ...core.models_registry import get_vision_models, MODEL_REGISTRY
+    from ...models.ai_profile import ModelSettings
+
+    # مدل‌های vision به ترتیب اولویت
+    priority_order = [
+        "claude-sonnet-4-20250514",
+        "claude-3-5-sonnet-20241022",
+        "gpt-4o",
+        "gpt-4-turbo",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
+        "gpt-4o-mini",
+    ]
+
+    # دریافت provider های فعال
+    available_providers = []
+    try:
+        available_providers = ai_manager.get_available_providers()
+        available_provider_names = [str(p.value) if hasattr(p, 'value') else str(p) for p in available_providers]
+    except:
+        available_provider_names = []
+
+    # دریافت تنظیمات مدل‌ها
+    try:
+        db_settings = db.query(ModelSettings).all() if db else []
+        settings_map = {s.model_id: s for s in db_settings}
+    except:
+        settings_map = {}
+
+    # پیدا کردن اولین مدل موجود
+    for model_id in priority_order:
+        if model_id in MODEL_REGISTRY:
+            model = MODEL_REGISTRY[model_id]
+            provider = str(model.provider.value) if hasattr(model.provider, 'value') else str(model.provider)
+
+            # بررسی فعال بودن provider
+            if provider not in available_provider_names:
+                continue
+
+            # بررسی تنظیمات کاربر
+            setting = settings_map.get(model_id)
+            if setting and not setting.enabled:
+                continue
+
+            # بررسی قابلیت vision
+            if model.supports_images:
+                slog.info(f"Selected vision model: {model_id}")
+                return model_id
+
+    # Fallback به اولین مدل vision موجود
+    vision_models = get_vision_models()
+    for model in vision_models:
+        provider = str(model.provider.value) if hasattr(model.provider, 'value') else str(model.provider)
+        if provider in available_provider_names:
+            return model.id
+
+    return None
 
 
 @router.post("/inspector/ai-interact")
@@ -2923,6 +2991,10 @@ async def ai_interact_with_page(
     - اقدام می‌کند (کلیک، تایپ، اسکرول)
     - نتیجه را می‌بیند و تکرار می‌کند تا task کامل شود
 
+    مدل انتخابی:
+    - اگر model_id داده نشود، بهترین مدل vision موجود انتخاب می‌شود
+    - اولویت: Claude > GPT-4o > Gemini
+
     مثال‌ها:
     - "لاگین کن" → فرم لاگین را پیدا می‌کند و لاگین می‌کند
     - "برو به منوی Settings" → منو را پیدا می‌کند و کلیک می‌کند
@@ -2935,32 +3007,43 @@ async def ai_interact_with_page(
 
     session_id = str(uuid.uuid4())[:8]
 
+    # 1. دریافت AI manager
+    ai_manager = get_ai_manager()
+
+    # 2. انتخاب مدل vision (داینامیک یا مشخص شده)
+    selected_model = request.model_id
+    if not selected_model:
+        selected_model = get_best_vision_model(ai_manager, db)
+
+    if not selected_model:
+        return {
+            "success": False,
+            "error": "هیچ مدل vision فعالی یافت نشد. لطفاً API key یکی از مدل‌های vision (OpenAI, Claude, Gemini) را تنظیم کنید."
+        }
+
     slog.api_request("POST", "/inspector/ai-interact",
         task=request.task[:100],
         url=request.url,
-        model_id=request.model_id
+        model_id=selected_model
     )
 
     try:
-        # 1. باز کردن مرورگر
+        # 3. باز کردن مرورگر
         session = await create_session(session_id, request.url)
         page_info = await session.get_page_info()
 
-        slog.info(f"Browser opened", session_id=session_id, title=page_info.get('title'))
+        slog.info(f"Browser opened", session_id=session_id, title=page_info.get('title'), model=selected_model)
 
-        # 2. دریافت AI manager
-        ai_manager = get_ai_manager()
-
-        # 3. اجرای task با AI Agent
+        # 4. اجرای task با AI Agent
         result = await execute_ai_agent_task(
             session=session,
             task=request.task,
             ai_manager=ai_manager,
-            model_id=request.model_id,
+            model_id=selected_model,
             max_steps=request.max_steps
         )
 
-        # 4. فرمت کردن اکشن‌ها برای نمایش
+        # 5. فرمت کردن اکشن‌ها برای نمایش
         formatted_actions = []
         for action in result.get("actions", []):
             formatted_actions.append({
@@ -2975,11 +3058,12 @@ async def ai_interact_with_page(
             "success": result.get("success", False),
             "session_id": session_id,
             "task": request.task,
+            "selected_model": selected_model,  # 🆕 نمایش مدل انتخاب شده
             "actions": formatted_actions,
             "cursor_positions": result.get("cursor_positions", []),
             "final_screenshot": result.get("final_screenshot"),
             "total_steps": result.get("total_steps", 0),
-            "message": f"کار انجام شد: {result.get('total_steps', 0)} مرحله",
+            "message": f"کار انجام شد: {result.get('total_steps', 0)} مرحله (مدل: {selected_model})",
             "page_info": page_info
         }
 

@@ -854,14 +854,15 @@ export default function ProjectDetailPage() {
         }]);
 
         // استفاده از API تعامل هوشمند با مرورگر (AI Agent)
+        // model_id نفرستادن = انتخاب خودکار بهترین مدل vision
         const res = await fetch(`${API_BASE}/api/render/inspector/ai-interact`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             task: userMessage,
             url: inspectorFrontendUrl,
-            model_id: 'gpt-4o',
-            max_steps: 10  // حداکثر 10 اقدام
+            // model_id حذف شد - بک‌اند خودش بهترین مدل vision را انتخاب می‌کند
+            max_steps: 15  // حداکثر 15 اقدام
           })
         });
 
@@ -871,15 +872,17 @@ export default function ProjectDetailPage() {
         setInspectorChatMessages(prev => prev.filter(m => !m.id.startsWith('system_')));
 
         if (data.success) {
-          // نمایش مراحل انجام شده
+          // نمایش مدل انتخاب شده و مراحل
+          const selectedModel = data.selected_model || 'نامشخص';
           const actionsText = (data.actions || []).map((a: any) =>
-            `${a.status === 'done' ? '✅' : a.status === 'failed' ? '❌' : '⏳'} ${a.message}`
+            `${a.status === 'done' ? '✅' : a.status === 'failed' ? '❌' : '⏳'} ${a.message || a.element || a.action}`
           ).join('\n');
 
           setInspectorChatMessages(prev => [...prev, {
             id: `assistant_${Date.now()}`,
             role: 'assistant',
-            content: `🤖 **عملیات انجام شد**\n\n${actionsText}\n\n📸 Screenshot نهایی گرفته شد.`,
+            content: `🤖 **عملیات انجام شد**\n\n🧠 مدل: **${selectedModel}**\n\n${actionsText}\n\n📸 Screenshot نهایی گرفته شد.`,
+            model_id: selectedModel,
             timestamp: new Date()
           }]);
 
@@ -893,7 +896,7 @@ export default function ProjectDetailPage() {
             setInspectorChatMessages(prev => [...prev, {
               id: `info_${Date.now()}`,
               role: 'assistant',
-              content: `🔗 Session ID: ${data.session_id}\n\nمی‌توانید با دستورات بیشتر ادامه دهید.`,
+              content: `🔗 Session فعال: ${data.session_id}`,
               timestamp: new Date()
             }]);
           }
