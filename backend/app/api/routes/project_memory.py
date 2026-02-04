@@ -1587,6 +1587,33 @@ async def enhanced_project_chat(
     - امکان انتخاب چندین مدل همزمان
     - تبدیل خودکار پاسخ به فیلدهای پویا
     """
+    import logging
+    import traceback
+    logger = logging.getLogger(__name__)
+
+    # 🔴 FIX: Model ID mapping (alias -> actual ID)
+    MODEL_ALIASES = {
+        "openai": "gpt-4o-mini",
+        "gpt": "gpt-4o-mini",
+        "deepseek": "deepseek-chat",
+        "claude": "claude-sonnet-4-20250514",
+        "gemini": "gemini-1.5-flash",
+        "groq": "llama-3.1-70b-versatile",
+        "perplexity": "llama-3.1-sonar-small-128k-online",
+    }
+
+    # تبدیل alias ها به ID واقعی
+    resolved_model_ids = []
+    for mid in request.model_ids:
+        resolved_id = MODEL_ALIASES.get(mid.lower(), mid)
+        resolved_model_ids.append(resolved_id)
+        if mid != resolved_id:
+            logger.info(f"[Enhanced Chat] Model alias resolved: {mid} -> {resolved_id}")
+
+    # 🔴 جایگزینی model_ids با نسخه resolved
+    original_model_ids = request.model_ids
+    request.model_ids = resolved_model_ids
+
     from ...services.ai_manager import get_ai_manager
     from ...services.ai_base import Message
     from ...models.project import ProjectFile
