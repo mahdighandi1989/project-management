@@ -1,8 +1,8 @@
-# 📋 گزارش جامع و به‌روز سیستم مدیریت پروژه هوشمند
+# گزارش جامع سیستم مدیریت پروژه هوشمند
 
 **تاریخ:** 2026-02-04
 **شاخه:** `claude/update-system-report-izMLQ`
-**وضعیت:** به‌روز شده - نسخه 2.2 (اصلاحات گزارش مهندسی ۴ مرحله‌ای)
+**وضعیت:** به‌روز شده - نسخه 2.3 (اصلاحات کامل گزارش مهندسی + رفع باگ‌های Type Safety)
 
 ---
 
@@ -35,7 +35,7 @@
 
 | وضعیت | تعداد | توضیح |
 |-------|-------|--------|
-| ✅ رفع شده | 22 | مشکلات اصلی + موارد ناقص + باگ‌های گزارش مهندسی |
+| ✅ رفع شده | 28 | مشکلات اصلی + باگ‌های Type Safety + مشکلات ActivityLog |
 | ⚠️ نیاز به بهبود | 4 | موارد UI و Frontend |
 | 🔴 باقیمانده | 2 | مشکلات جزئی |
 | 🆕 قابلیت جدید | 11 | پیاده‌سازی شده |
@@ -227,48 +227,122 @@ async def pre_execution_validation():
     return {"can_execute": True}
 ```
 
-#### ✅ اصلاحات اخیر (2026-02-04)
+#### ✅ اصلاحات کامل (2026-02-04 - جلسه فعلی)
 
-| مشکل | راه‌حل |
-|------|--------|
-| خطای token limit در مراحل 1 و 2 | ✅ افزودن auto-truncation برای prompt های بزرگ |
-| خطای "can only concatenate list to list" در step3 | ✅ اصلاح نوع source_models و بررسی همه انواع داده |
-| آمار صفر در خروجی (validated_count = 0) | ✅ اصلاح ساختار بازگشتی step1 از nested به flat |
-| فرمت خروجی ضعیف | ✅ افزودن رندر 4 مرحله‌ای با آمار جداگانه |
+| مشکل | راه‌حل | کامیت |
+|------|--------|--------|
+| خطای token limit در مراحل 1 و 2 | ✅ افزودن auto-truncation برای prompt های بزرگ | قبلی |
+| خطای "can only concatenate list to list" در step3 | ✅ بررسی نوع source_models + score_history + last_scores_by_task | `6e5cb0b`, `615b83d` |
+| آمار صفر در خروجی (validated_count = 0) | ✅ اصلاح ساختار بازگشتی step1 از nested به flat | قبلی |
+| React Error #31: Objects are not valid as React child | ✅ اطمینان از string بودن executive_summary | `3886f92` |
+| 'str' object has no attribute 'get' | ✅ Type checking برای roadmap, journal_analysis, field_details | `5905dda` |
+| NameError: 'ActivityLog' is not defined (project_chat) | ✅ اضافه کردن import داخل تابع | `fd76792` |
+| NameError: 'ActivityLog' is not defined (execute_field_internal) | ✅ اضافه کردن import داخل تابع | `4208cf5` |
+| Model not found \| model_id=openai | ✅ اضافه کردن MODEL_ALIASES در execute_field_internal | `4208cf5` |
 
-#### جزئیات فنی اصلاحات
+#### جزئیات فنی اصلاحات جدید (2026-02-04)
 
-**1. Token Truncation در Step1 و Step2:**
+**1. اصلاح executive_summary:**
 ```python
-# محاسبه توکن‌های تخمینی
-estimated_tokens = (len(system_prompt) + len(user_prompt)) // 3
-max_prompt_tokens = int(max_context * 0.75)
+# قبل: ممکن بود object باشد
+report_data["executive_summary"] = content.get("executive_summary", "")
 
-if estimated_tokens > max_prompt_tokens:
-    # کوتاه کردن داده‌ها
-    max_issues = max(5, int(len(issues) * excess_ratio * 0.7))
-    issues_truncated = issues[:max_issues]
+# بعد: همیشه string
+exec_summary = content.get("executive_summary", "")
+if isinstance(exec_summary, dict):
+    exec_summary = exec_summary.get("summary", str(exec_summary))
+elif not isinstance(exec_summary, str):
+    exec_summary = str(exec_summary)
+report_data["executive_summary"] = exec_summary
 ```
 
-**2. اصلاح نوع source_models در Step3:**
+**2. Type checking برای roadmap و field_details:**
 ```python
-source_models = issue.get("source_models")
-if source_models is None:
-    source_models = [issue.get("source_model", "unknown")]
-elif isinstance(source_models, str):
-    source_models = [source_models]
-elif isinstance(source_models, (int, float)):
-    # اگر عدد بود، از پیش‌فرض استفاده کن
-    source_models = [issue.get("source_model", "unknown")]
+# قبل: مستقیم .get() روی احتمالاً string
+roadmap = content.get("roadmap", {})
+field_details = roadmap.get("immediate", [])
+
+# بعد: بررسی نوع قبل از استفاده
+roadmap = content.get("roadmap", {})
+if isinstance(roadmap, str):
+    logger.warning("[STEP2] roadmap is string, skipping field creation")
+    continue  # یا skip
+if isinstance(roadmap, dict):
+    immediate = roadmap.get("immediate", [])
+    if isinstance(immediate, str):
+        continue
 ```
 
-**3. ساختار بازگشتی flat برای Step1:**
+**3. اصلاح score_history و last_scores_by_task در model_profiler.py:**
 ```python
-# قبل: nested
-return {"results": {"approved_count": x, "rejected_count": y}}
+# 🔴 FIX: Ensure score_history is always a list
+history = profile.score_history
+if not isinstance(history, list):
+    history = []
+history.append(history_entry)
+if len(history) > 1000:
+    history = history[-1000:]
+profile.score_history = history
 
-# بعد: flat
-return {"validated_count": x, "rejected_count": y, "merged_count": z}
+# 🔴 FIX: Ensure last_scores_by_task is always a dict
+last_scores = profile.last_scores_by_task
+if not isinstance(last_scores, dict):
+    last_scores = {}
+last_scores[task_type] = history_entry['scores']
+profile.last_scores_by_task = last_scores
+```
+
+**4. بررسی جامع در Step 3:**
+```python
+# دریافت ایرادات برای شمارش
+health_issues = []
+if project.issues_found:
+    try:
+        loaded_issues = json.loads(project.issues_found)
+        # 🔴 FIX: Ensure health_issues is always a list of dicts
+        if isinstance(loaded_issues, list):
+            health_issues = [i for i in loaded_issues if isinstance(i, dict)]
+        elif isinstance(loaded_issues, dict):
+            health_issues = [loaded_issues]
+        else:
+            logger.warning(f"[STEP3] issues_found is not list/dict: {type(loaded_issues)}")
+    except Exception as e:
+        logger.warning(f"[STEP3] Error parsing issues_found: {e}")
+
+# به‌روزرسانی file_health_map
+file_health_map = {}
+if project.file_health_map:
+    try:
+        loaded_map = json.loads(project.file_health_map)
+        if isinstance(loaded_map, dict):
+            file_health_map = loaded_map
+        else:
+            logger.warning(f"[STEP3] file_health_map is not dict: {type(loaded_map)}")
+    except Exception as e:
+        logger.warning(f"[STEP3] Error parsing file_health_map: {e}")
+```
+
+**5. Model Alias Mapping در execute_field_internal:**
+```python
+# 🔴 FIX: Model ID mapping (alias -> actual ID)
+MODEL_ALIASES = {
+    "openai": "gpt-4o-mini",
+    "gpt": "gpt-4o-mini",
+    "deepseek": "deepseek-chat",
+    "claude": "claude-sonnet-4-20250514",
+    "gemini": "gemini-1.5-flash",
+    "groq": "llama-3.1-70b-versatile",
+    "perplexity": "llama-3.1-sonar-small-128k-online",
+}
+
+# تبدیل alias ها به ID واقعی
+resolved_models = []
+for mid in target_models:
+    resolved_id = MODEL_ALIASES.get(mid.lower() if isinstance(mid, str) else mid, mid)
+    resolved_models.append(resolved_id)
+    if mid != resolved_id:
+        logger.info(f"[execute_field_internal] Model alias resolved: {mid} -> {resolved_id}")
+target_models = resolved_models
 ```
 
 #### ⚠️ موارد باقیمانده
@@ -431,7 +505,19 @@ class ProjectLockManager:
 
 **۴. db.rollback() در exception handlers**
 
-### 🆕 قابلیت‌های جدید پیاده‌سازی شده
+### 🆕 اصلاحات Type Safety (جلسه فعلی - 2026-02-04)
+
+این جلسه روی پروژه بانکی ALLIN1 که از GitHub ایمپورت شده بود تمرکز داشت و خطاهای متعددی در گزارش مهندسی رفع شد:
+
+| # | مشکل | علت ریشه‌ای | راه‌حل |
+|---|------|-----------|--------|
+| 1 | React Error #31 | AI گاهی `executive_summary` را به صورت object برمی‌گرداند | بررسی isinstance و تبدیل به string |
+| 2 | 'str' has no attribute 'get' | AI گاهی `roadmap`، `journal_analysis`، `field_details` را به صورت string برمی‌گرداند | بررسی isinstance قبل از .get() |
+| 3 | can only concatenate list to list | `score_history` یا `last_scores_by_task` از دیتابیس int/float برگشته | بررسی isinstance و مقداردهی پیش‌فرض |
+| 4 | NameError: ActivityLog not defined | import نشده در `project_chat` و `execute_field_internal` | import داخل تابع |
+| 5 | Model not found: openai | فیلدها از alias استفاده می‌کردند نه model ID واقعی | اضافه کردن MODEL_ALIASES |
+
+### 🆕 قابلیت‌های جدید پیاده‌سازی شده (جلسات قبلی)
 
 | قابلیت | فایل | خطوط |
 |--------|------|------|
@@ -460,107 +546,6 @@ class ProjectLockManager:
 | ۵ | Auto Archive Old Issues | بایگانی خودکار ایرادات قدیمی | هر 1440 دقیقه (روزانه) |
 | ۶ | Auto Render Log Sync | همگام‌سازی لاگ‌های Render | هر 30 دقیقه |
 
-#### تنظیمات جدید دیتابیس (RenderLogSettings)
-
-```python
-# ستون‌های جدید برای هر تریگر
-auto_security_transfer_enabled: Boolean
-auto_security_transfer_interval_minutes: Integer
-auto_security_transfer_last_run: DateTime
-
-auto_test_coverage_transfer_enabled: Boolean
-auto_test_coverage_transfer_interval_minutes: Integer
-auto_test_coverage_transfer_last_run: DateTime
-
-# و مشابه برای سایر تریگرها...
-```
-
-### 🆕 ردیابی منبع فیلدها (Source Tracking)
-
-فیلدهای جدید برای هر فیلد پویا:
-
-| فیلد | توضیح |
-|------|--------|
-| `source` | منبع ایجاد: `ai_chat` یا `feature_request` |
-| `source_prompt` | متن درخواست کاربر (300 کاراکتر اول) |
-| `created_via` | روش ایجاد: "پرسش از AI" یا "دکمه قابلیت جدید" |
-
-### 🆕 سیستم لاگ‌گیری پیشرفته
-
-**فایل:** `backend/app/core/logging_utils.py`
-
-```python
-def log_critical_error(context: str, exception: Exception, extra_data: Dict = None):
-    """لاگ خطای بحرانی با traceback کامل"""
-    full_traceback = traceback.format_exc()
-    logger.error(f"""
-    ╔══════════════════════════════════════════════════════════════════╗
-    ║            🔴 CRITICAL ERROR: {context}                          ║
-    ╠══════════════════════════════════════════════════════════════════╣
-    ║ Exception: {type(exception).__name__}
-    ║ Message: {str(exception)}
-    ║ Full Traceback:
-    {full_traceback}
-    ╚══════════════════════════════════════════════════════════════════╝
-    """)
-```
-
-### جریان داده جدید
-
-```
-                        ┌─────────────────┐
-                        │  کاربر درخواست  │
-                        │  قابلیت می‌دهد   │
-                        └────────┬────────┘
-                                 │
-                                 ▼
-                   ┌─────────────────────────┐
-                   │    /request-feature     │
-                   │  چک تکراری با           │
-                   │  IntelligentFieldCreator │
-                   └────────────┬────────────┘
-                                │
-                    ┌───────────┴───────────┐
-                    │                       │
-                    ▼                       ▼
-            ┌───────────────┐       ┌───────────────┐
-            │   تکراری      │       │   یکتا        │
-            │   هشدار       │       │   ایجاد فیلد  │
-            └───────────────┘       │   pending     │
-                                    └───────┬───────┘
-                                            │
-                        ┌───────────────────┴───────────────────┐
-                        │                                       │
-                        ▼                                       ▼
-                ┌───────────────┐                       ┌───────────────┐
-                │ Quick Approval │                       │ Engineering   │
-                │ (یک کلیک)      │                       │ Report (کامل) │
-                └───────┬───────┘                       └───────┬───────┘
-                        │                                       │
-                        ▼                                       ▼
-                ┌───────────────┐                       ┌───────────────┐
-                │ quick_approved │                       │ engineering_  │
-                │                │                       │ approved      │
-                └───────┬───────┘                       └───────┬───────┘
-                        │                                       │
-                        └───────────────────┬───────────────────┘
-                                            │
-                                            ▼
-                                ┌───────────────────────┐
-                                │  Pre-Execution        │
-                                │  Validation           │
-                                │  (آیا ایراد حل شده؟)  │
-                                └───────────┬───────────┘
-                                            │
-                                ┌───────────┴───────────┐
-                                │                       │
-                                ▼                       ▼
-                        ┌───────────────┐       ┌───────────────┐
-                        │   هشدار       │       │   اجرا        │
-                        │   + تایید     │       │   فیلد        │
-                        └───────────────┘       └───────────────┘
-```
-
 ---
 
 ## 4. وضعیت مشکلات گزارش شده
@@ -583,6 +568,11 @@ def log_critical_error(context: str, exception: Exception, extra_data: Dict = No
 | ۲-۳ | عدم بایگانی ایرادات | ⚠️ نیاز به بهبود |
 | ۲-۴ | نقشه راه خالی | ⚠️ نیاز به بررسی |
 | ۲-۵ | فرمت خروجی ضعیف | ⚠️ نیاز به بهبود |
+| ۲-۶ | React Error #31 (Objects as children) | ✅ رفع شده |
+| ۲-۷ | 'str' has no attribute 'get' | ✅ رفع شده |
+| ۲-۸ | can only concatenate list to list | ✅ رفع شده |
+| ۲-۹ | NameError: ActivityLog not defined | ✅ رفع شده |
+| ۲-۱۰ | Model not found: openai | ✅ رفع شده |
 
 ### دسته ۳: تحلیل سلامت
 
@@ -764,40 +754,38 @@ def log_critical_error(context: str, exception: Exception, extra_data: Dict = No
 
 | وضعیت | تعداد | درصد |
 |-------|-------|------|
-| ✅ رفع شده | 22 | 79% |
-| ⚠️ نیاز به بهبود | 4 | 14% |
-| 🔴 باقیمانده | 2 | 7% |
-| **کل** | **28** | **100%** |
+| ✅ رفع شده | 28 | 82% |
+| ⚠️ نیاز به بهبود | 4 | 12% |
+| 🔴 باقیمانده | 2 | 6% |
+| **کل** | **34** | **100%** |
 
-### فایل‌های کلیدی تغییر یافته
+### فایل‌های کلیدی تغییر یافته (جلسه فعلی)
 
 | فایل | نوع تغییر | توضیح |
 |------|----------|------|
-| backend/app/api/routes/project_health.py | ویرایش | MERGE logic |
-| backend/app/api/routes/project_memory.py | ویرایش | +370 + source tracking |
-| backend/app/api/routes/project_structure.py | ویرایش | رفع باگ دیاگرام خالی |
-| backend/app/api/routes/orchestrator.py | ویرایش | استخراج تکنولوژی |
-| backend/app/services/deep_analysis_service.py | ویرایش | MERGE + rollback |
-| backend/app/services/project_auto_setup.py | ویرایش | MERGE helpers |
-| backend/app/services/quick_approval_service.py | **جدید** | 827 خط |
-| backend/app/services/background_scheduler.py | ویرایش | 6 نوع تریگر |
-| backend/app/services/smart_orchestrator.py | ویرایش | ذخیره تاریخچه عملکرد |
-| backend/app/core/database.py | ویرایش | ProjectLockManager + migrations |
-| backend/app/core/logging_utils.py | ویرایش | لاگ‌گیری پیشرفته |
-| backend/app/models/render_log.py | ویرایش | ستون‌های تریگر |
-| backend/app/models/project.py | ویرایش | +converted_field_id |
-| frontend/src/app/projects/[id]/page.tsx | ویرایش | +513 |
+| backend/app/api/routes/project_memory.py | ویرایش | ActivityLog import + MODEL_ALIASES |
+| backend/app/api/routes/project_journal.py | ویرایش | Type checking برای step 2 و step 3 |
+| backend/app/services/model_profiler.py | ویرایش | Type checking برای score_history |
 
-### Commits اخیر
+### کامیت‌های جلسه فعلی (2026-02-04)
 
 | Commit | توضیح |
 |--------|--------|
-| **NEW** | **Fix: Step1 flat return structure + Step3 source_models type handling** |
-| **659b98a** | **Fix: Add token truncation to step2 (health_to_fields)** |
-| **cfa1121** | **Fix: Token limit handling and step3 return structure** |
-| **cd15718** | **Fix: Force stop all executions when clicking stop button** |
-| **a71ce5f** | **Feat: Add close/stop buttons to ExecutingPromptsPanel** |
-| **34e5c12** | **Feat: Add proper rendering for 4-step engineering report format** |
+| `4208cf5` | Fix: Add ActivityLog import and model alias mapping in execute_field_internal |
+| `615b83d` | Fix: Add comprehensive type checking in step 3 model evaluation |
+| `6e5cb0b` | Fix: Ensure score_history is list and last_scores_by_task is dict |
+| `5905dda` | Fix: Handle string values in report_data where dict expected |
+| `3886f92` | Fix: Ensure executive_summary is string in report_data content |
+
+### کامیت‌های قبلی
+
+| Commit | توضیح |
+|--------|--------|
+| **659b98a** | Fix: Add token truncation to step2 (health_to_fields) |
+| **cfa1121** | Fix: Token limit handling and step3 return structure |
+| **cd15718** | Fix: Force stop all executions when clicking stop button |
+| **a71ce5f** | Feat: Add close/stop buttons to ExecutingPromptsPanel |
+| **34e5c12** | Feat: Add proper rendering for 4-step engineering report format |
 | 13cc9a6 | Fix: Complete implementation of incomplete/stub features |
 | fa61fb6 | Feat: Add source tracking to fields created from AI Chat and Feature Request |
 | a2d90ed | Fix: Add comprehensive error logging for Engineering Report debugging |
@@ -820,8 +808,7 @@ def log_critical_error(context: str, exception: Exception, extra_data: Dict = No
 9. **🆕 زمان‌بندی پس‌زمینه:** 6 نوع تریگر خودکار برای همه عملیات
 10. **🆕 ردیابی منبع فیلدها:** دانستن اینکه هر فیلد از کجا آمده
 11. **🆕 لاگ‌گیری پیشرفته:** خطاها با traceback کامل ثبت می‌شوند
-12. **🆕 استخراج تکنولوژی:** شناسایی خودکار تکنولوژی‌های پروژه
-13. **🆕 ذخیره تاریخچه عملکرد:** مدل‌ها بر اساس عملکرد واقعی انتخاب می‌شوند
+12. **🆕 Type Safety:** بررسی کامل انواع داده قبل از استفاده
 
 ### ⚠️ موارد نیازمند توجه (کاهش یافته)
 
@@ -835,24 +822,22 @@ def log_critical_error(context: str, exception: Exception, extra_data: Dict = No
 
 | معیار | قبل | بعد |
 |-------|-----|-----|
-| موارد رفع شده | 18 | 22 |
-| موارد نیازمند بهبود | 5 | 4 |
-| قابلیت‌های جدید | 10 | 11 |
-| تریگرهای زمان‌بندی فعال | 1 | 6 |
+| موارد رفع شده | 22 | 28 |
+| موارد نیازمند بهبود | 4 | 4 |
+| قابلیت‌های جدید | 11 | 11 |
+| تریگرهای زمان‌بندی فعال | 6 | 6 |
 
-### 🔧 اصلاحات گزارش مهندسی ۴ مرحله‌ای (2026-02-04)
+### 🔧 چالش‌های رفع شده در جلسه فعلی
 
-| مشکل | وضعیت |
-|------|--------|
-| Token limit exceeded در Step1 | ✅ رفع شد - auto-truncation |
-| Token limit exceeded در Step2 | ✅ رفع شد - auto-truncation |
-| "can only concatenate list to list" در Step3 | ✅ رفع شد - بررسی نوع source_models |
-| آمار صفر (validated_count = 0) | ✅ رفع شد - ساختار flat برای step1 |
-| ExecutingPromptsPanel بدون دکمه بستن | ✅ رفع شد - دکمه‌های close/stop |
-| توقف ناقص اجراها | ✅ رفع شد - force=true parameter |
+| چالش | علت | راه‌حل |
+|------|-----|--------|
+| پروژه بانکی ALLIN1 گزارش مهندسی نمی‌داد | داده‌های پیچیده و غیرمنتظره از AI | اضافه کردن Type Safety جامع |
+| خطای React در نمایش گزارش | AI گاهی object به جای string برمی‌گرداند | تبدیل اجباری به string |
+| فیلدها اجرا نمی‌شدند | Model alias به جای model ID واقعی | اضافه کردن MODEL_ALIASES |
+| NameError در چت و batch execute | ActivityLog import نشده بود | Import داخل تابع |
 
 ---
 
 **تاریخ به‌روزرسانی:** 2026-02-04
-**نسخه گزارش:** 2.2 (اصلاحات گزارش مهندسی ۴ مرحله‌ای)
+**نسخه گزارش:** 2.3 (اصلاحات Type Safety + رفع باگ‌های ActivityLog و Model Alias)
 **شاخه:** `claude/update-system-report-izMLQ`
