@@ -3880,9 +3880,21 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
                                 logger.info(f"[Batch Execute] Commit result: {commit_result.get('success')}")
 
                             elif action_type == "github_multi_commit":
+                                # 🔴 لاگ برای دیباگ multi_commit
+                                logger.info(f"[Batch Execute] === Multi-Commit Debug Start ===")
+                                logger.info(f"[Batch Execute] AI Response length: {len(response.content)} chars")
+                                logger.info(f"[Batch Execute] AI Response preview: {response.content[:500]}...")
+
                                 code_blocks = await extract_code_blocks(response.content)
-                                for block in code_blocks:
-                                    logger.info(f"[Batch Execute] Multi-committing: {block['path']}")
+                                logger.info(f"[Batch Execute] Extracted {len(code_blocks)} code blocks")
+
+                                if not code_blocks:
+                                    logger.warning(f"[Batch Execute] ⚠️ No code blocks extracted! AI may not have used correct format.")
+                                    logger.warning(f"[Batch Execute] Expected format: ```language:path/to/file.ext")
+                                    result["github_error"] = f"هیچ بلوک کدی از پاسخ AI استخراج نشد. AI باید از فرمت ```language:path استفاده کند"
+
+                                for i, block in enumerate(code_blocks):
+                                    logger.info(f"[Batch Execute] Block {i+1}: path={block['path']}, content_len={len(block['content'])}")
                                     commit_result = await commit_to_github(
                                         owner=owner,
                                         repo=repo,
@@ -3893,6 +3905,9 @@ async def execute_field_internal(project_id: str, field_id: str, db: Session, fi
                                         branch=github_info.get("branch", "main")
                                     )
                                     github_commits.append(commit_result)
+                                    logger.info(f"[Batch Execute] Commit result for {block['path']}: success={commit_result.get('success')}, error={commit_result.get('error', 'none')[:100] if commit_result.get('error') else 'none'}")
+
+                                logger.info(f"[Batch Execute] === Multi-Commit Debug End ===")
 
                             result["github_commits"] = github_commits
                         else:
@@ -5554,20 +5569,24 @@ async def github_commit_diagnostic(
     # تحلیل فیلدها
     fields_analysis = []
     for field in active_fields[:10]:  # فقط ۱۰ تای اول
+        action_type = field.get("action_type", "display")
         analysis = {
             "name": field.get("name", "بدون نام"),
             "id": field.get("id"),
-            "action_type": field.get("action_type", "display"),
+            "action_type": action_type,
             "target_path": field.get("target_path"),
             "can_commit": False,
             "issues": []
         }
 
-        # بررسی مشکلات
-        if field.get("action_type", "display") == "display":
-            analysis["issues"].append("⚠️ action_type='display' - باید 'github_commit' باشد")
-        if not field.get("target_path"):
-            analysis["issues"].append("⚠️ target_path ندارد - مسیر فایل هدف مشخص نیست")
+        # بررسی مشکلات بر اساس نوع action
+        if action_type == "display":
+            analysis["issues"].append("⚠️ action_type='display' - باید 'github_commit' یا 'github_multi_commit' باشد")
+        elif action_type == "github_commit" and not field.get("target_path"):
+            # github_commit نیاز به target_path داره
+            analysis["issues"].append("⚠️ action_type='github_commit' ولی target_path ندارد")
+        # github_multi_commit نیازی به target_path نداره - مسیرها از پاسخ AI استخراج میشن
+
         if github_info.get("source") != "github":
             analysis["issues"].append("⚠️ پروژه از GitHub ایمپورت نشده (source != 'github')")
 
