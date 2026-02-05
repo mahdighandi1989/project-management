@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import ProjectHealthPanel from '@/components/ProjectHealthPanel';
@@ -347,6 +347,38 @@ export default function ProjectDetailPage() {
     targetFound: false,
     intersection: null
   });
+
+  // 🆕 Live Action Tracking - رصد لحظه‌ای فعالیت کاربر در پیش‌نمایش
+  const [inspectorActionTracking, setInspectorActionTracking] = useState({
+    enabled: true,  // آیا ردیابی فعال است
+    lastAction: null as {
+      type: 'click' | 'scroll' | 'input' | 'navigate';
+      x: number;
+      y: number;
+      timestamp: Date;
+      elementInfo?: string;
+    } | null,
+  });
+
+  const [inspectorTransientMessages, setInspectorTransientMessages] = useState<Array<{
+    id: string;
+    content: string;
+    type: 'action' | 'backend' | 'error' | 'info';
+    source?: string;  // کدام مدل این گزارش را داده
+    timestamp: Date;
+    fadeOut: boolean;  // آیا در حال محو شدن است
+  }>>([]);
+
+  const [inspectorPaused, setInspectorPaused] = useState(false);  // متوقف شده به دلیل خطا
+  const [inspectorPausedError, setInspectorPausedError] = useState<{
+    message: string;
+    details: string;
+    analyzing: boolean;  // در حال تحلیل علت خطا
+    sourceFiles?: Array<{path: string; issue: string}>;
+  } | null>(null);
+
+  const inspectorIframeRef = useRef<HTMLIFrameElement>(null);
+  const inspectorOverlayRef = useRef<HTMLDivElement>(null);
 
   const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
   const [selectedLog, setSelectedLog] = useState<ActivityLog | null>(null);
@@ -980,6 +1012,248 @@ export default function ProjectDetailPage() {
       throw error;
     }
   };
+
+  // ============================================
+  // 🆕🆕🆕 Live Action Tracking - رصد لحظه‌ای فعالیت کاربر
+  // ============================================
+
+  // اضافه کردن پیام موقت (گزارش لحظه‌ای)
+  const addTransientMessage = (content: string, type: 'action' | 'backend' | 'error' | 'info', source?: string) => {
+    const id = `transient_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const newMessage = {
+      id,
+      content,
+      type,
+      source,
+      timestamp: new Date(),
+      fadeOut: false
+    };
+
+    setInspectorTransientMessages(prev => [...prev, newMessage]);
+
+    // شروع محو شدن بعد از 3 ثانیه
+    setTimeout(() => {
+      setInspectorTransientMessages(prev =>
+        prev.map(m => m.id === id ? { ...m, fadeOut: true } : m)
+      );
+    }, 3000);
+
+    // حذف کامل بعد از 4 ثانیه
+    setTimeout(() => {
+      setInspectorTransientMessages(prev => prev.filter(m => m.id !== id));
+    }, 4000);
+  };
+
+  // تحلیل بصری اقدام کاربر با AI
+  const analyzeUserAction = async (actionType: string, x: number, y: number) => {
+    if (!inspectorFrontendUrl || !inspectorActionTracking.enabled) return;
+    if (inspectorPaused) return; // اگر متوقف شده، کاری نکن
+
+    try {
+      // ارسال به backend برای تحلیل بصری
+      const res = await fetch(`${API_BASE}/api/render/inspector/analyze-action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: inspectorFrontendUrl,
+          action_type: actionType,
+          position: { x, y },
+          project_id: id,
+          selected_models: inspectorSelectedModels.length > 0 ? inspectorSelectedModels : ['gemini-2.0-flash-exp']
+        })
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        // گزارش عمل انجام شده
+        if (data.action_description) {
+          addTransientMessage(data.action_description, 'action', data.visual_model);
+        }
+
+        // گزارش از بک‌اند (اگر وجود داشت)
+        if (data.backend_status) {
+          addTransientMessage(
+            data.backend_status.message,
+            data.backend_status.has_error ? 'error' : 'backend',
+            data.backend_model
+          );
+        }
+
+        // بررسی خطا
+        if (data.has_error) {
+          handleInspectorError(data.error_info);
+        }
+
+        // آپدیت URL اگر صفحه تغییر کرده
+        if (data.new_url && data.new_url !== inspectorFrontendUrl) {
+          addTransientMessage(`صفحه ${data.page_name || 'جدید'} باز شد`, 'info');
+          setInspectorFrontendUrl(data.new_url);
+        }
+      }
+    } catch (err) {
+      console.error('Error analyzing user action:', err);
+    }
+  };
+
+  // مدیریت خطای شناسایی شده
+  const handleInspectorError = async (errorInfo: {
+    message: string;
+    log_details?: string;
+    source_hint?: string;
+  }) => {
+    // توقف فوری - غیرفعال کردن تعامل
+    setInspectorPaused(true);
+    setInspectorPausedError({
+      message: errorInfo.message,
+      details: errorInfo.log_details || '',
+      analyzing: true
+    });
+
+    addTransientMessage(`⛔ خطا شناسایی شد: ${errorInfo.message}`, 'error');
+    addTransientMessage('🔍 در حال بررسی علت خطا در کد منبع...', 'info');
+
+    try {
+      // درخواست تحلیل عمیق از GitHub
+      const analysisRes = await fetch(`${API_BASE}/api/render/inspector/analyze-error`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: id,
+          error_message: errorInfo.message,
+          log_details: errorInfo.log_details,
+          source_hint: errorInfo.source_hint,
+          selected_models: inspectorSelectedModels.length > 0 ? inspectorSelectedModels : ['claude-3-5-sonnet-20241022']
+        })
+      });
+
+      const analysis = await analysisRes.json();
+
+      if (analysis.success) {
+        // آپدیت با نتایج تحلیل
+        setInspectorPausedError(prev => prev ? {
+          ...prev,
+          analyzing: false,
+          sourceFiles: analysis.source_files || [],
+          details: analysis.detailed_report || prev.details
+        } : null);
+
+        // نمایش گزارش نهایی در چت
+        const reportMsg = {
+          id: `error_report_${Date.now()}`,
+          role: 'assistant' as const,
+          content: `## ⚠️ گزارش خطا
+
+**خطا:** ${errorInfo.message}
+
+**تحلیل:**
+${analysis.analysis || 'در حال بررسی...'}
+
+**فایل‌های مرتبط:**
+${(analysis.source_files || []).map((f: any) => `- \`${f.path}\`: ${f.issue}`).join('\n') || 'نامشخص'}
+
+**پیشنهاد رفع:**
+${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
+
+---
+*گزارش از: ${analysis.model_used || 'AI'}*`,
+          model_id: analysis.model_used,
+          timestamp: new Date()
+        };
+
+        setInspectorChatMessages(prev => [...prev, reportMsg]);
+      }
+    } catch (err) {
+      console.error('Error analyzing source:', err);
+      setInspectorPausedError(prev => prev ? {
+        ...prev,
+        analyzing: false,
+        details: 'خطا در تحلیل کد منبع'
+      } : null);
+    }
+  };
+
+  // ادامه کار بعد از خطا
+  const resumeAfterError = () => {
+    setInspectorPaused(false);
+    setInspectorPausedError(null);
+    addTransientMessage('✅ ادامه کار...', 'info');
+  };
+
+  // مدیریت کلیک روی overlay
+  const handleOverlayClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!inspectorOverlayRef.current || inspectorPaused) return;
+
+    const rect = inspectorOverlayRef.current.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
+
+    // ثبت آخرین اقدام
+    setInspectorActionTracking(prev => ({
+      ...prev,
+      lastAction: { type: 'click', x, y, timestamp: new Date() }
+    }));
+
+    // تحلیل با AI
+    analyzeUserAction('click', x, y);
+  };
+
+  // مدیریت اسکرول
+  const handleOverlayScroll = (e: React.WheelEvent<HTMLDivElement>) => {
+    if (inspectorPaused) return;
+
+    const direction = e.deltaY > 0 ? 'down' : 'up';
+    addTransientMessage(`اسکرول به ${direction === 'down' ? 'پایین' : 'بالا'}`, 'action');
+
+    // فقط یک تحلیل هر 500ms
+    if (!inspectorActionTracking.lastAction ||
+        new Date().getTime() - inspectorActionTracking.lastAction.timestamp.getTime() > 500) {
+      analyzeUserAction('scroll', 50, direction === 'down' ? 75 : 25);
+    }
+  };
+
+  // 🆕 شروع رصد لاگ‌های بک‌اند برای خطا
+  const startBackendLogMonitoring = () => {
+    // این interval لاگ‌های بک‌اند را رصد می‌کند
+    const interval = setInterval(async () => {
+      if (!inspectorPowerOn || !inspectorActionTracking.enabled) {
+        clearInterval(interval);
+        return;
+      }
+
+      try {
+        // چک کردن لاگ‌های جدید برای خطا
+        const recentLogs = inspectorBackendLogs.slice(0, 5);
+        const hasError = recentLogs.some(log => log.level === 'error');
+
+        if (hasError && !inspectorPaused) {
+          const errorLog = recentLogs.find(log => log.level === 'error');
+          if (errorLog) {
+            handleInspectorError({
+              message: errorLog.message || 'خطای ناشناخته',
+              log_details: JSON.stringify(errorLog)
+            });
+          }
+        }
+      } catch (err) {
+        console.error('Error monitoring backend logs:', err);
+      }
+    }, 2000); // هر 2 ثانیه چک کن
+
+    return () => clearInterval(interval);
+  };
+
+  // Effect برای شروع رصد وقتی inspector روشن می‌شود
+  useEffect(() => {
+    if (inspectorPowerOn && inspectorActionTracking.enabled) {
+      const cleanup = startBackendLogMonitoring();
+      return cleanup;
+    }
+  }, [inspectorPowerOn, inspectorActionTracking.enabled]);
+
+  // ============================================
+  // پایان Live Action Tracking
+  // ============================================
 
   // 🆕 ارسال پیام به AI
   const sendInspectorChat = async () => {
@@ -7368,11 +7642,80 @@ export default function ProjectDetailPage() {
                         ) : inspectorPowerOn && inspectorFrontendUrl ? (
                           <div className="relative w-full h-full">
                             <iframe
+                              ref={inspectorIframeRef}
                               src={inspectorFrontendUrl}
                               className="w-full h-full border-0 bg-white"
                               title="پیش‌نمایش فرانت‌اند"
                               sandbox="allow-scripts allow-same-origin allow-forms"
                             />
+
+                            {/* 🆕 لایه ردیابی فعالیت کاربر (کلیک‌ها را رصد می‌کند) */}
+                            <div
+                              ref={inspectorOverlayRef}
+                              className={`absolute inset-0 z-30 ${inspectorPaused ? 'cursor-not-allowed' : 'cursor-crosshair'}`}
+                              style={{ pointerEvents: inspectorActionTracking.enabled ? 'auto' : 'none' }}
+                              onClick={handleOverlayClick}
+                              onWheel={handleOverlayScroll}
+                            >
+                              {/* پیام‌های موقت (گزارش لحظه‌ای) */}
+                              <div className="absolute top-2 right-2 flex flex-col gap-1 z-50" dir="rtl">
+                                {inspectorTransientMessages.map(msg => (
+                                  <div
+                                    key={msg.id}
+                                    className={`px-3 py-1.5 rounded-lg text-xs font-medium shadow-lg transition-all duration-500 max-w-[280px] ${
+                                      msg.fadeOut ? 'opacity-0 transform translate-x-4' : 'opacity-100'
+                                    } ${
+                                      msg.type === 'action' ? 'bg-blue-500/90 text-white' :
+                                      msg.type === 'backend' ? 'bg-purple-500/90 text-white' :
+                                      msg.type === 'error' ? 'bg-red-500/90 text-white' :
+                                      'bg-gray-700/90 text-white'
+                                    }`}
+                                  >
+                                    <div className="flex items-center gap-2">
+                                      <span>
+                                        {msg.type === 'action' ? '👆' :
+                                         msg.type === 'backend' ? '⚙️' :
+                                         msg.type === 'error' ? '⚠️' : 'ℹ️'}
+                                      </span>
+                                      <span className="truncate">{msg.content}</span>
+                                    </div>
+                                    {msg.source && (
+                                      <div className="text-[10px] opacity-70 mt-0.5">از: {msg.source}</div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+
+                              {/* لایه توقف (وقتی خطا شناسایی شده) */}
+                              {inspectorPaused && (
+                                <div className="absolute inset-0 bg-red-900/50 backdrop-blur-sm flex items-center justify-center z-40">
+                                  <div className="bg-white dark:bg-gray-800 rounded-xl p-4 shadow-2xl max-w-md text-center">
+                                    <div className="text-4xl mb-2">⛔</div>
+                                    <h3 className="text-lg font-bold text-red-600 mb-2">خطا شناسایی شد</h3>
+                                    {inspectorPausedError && (
+                                      <>
+                                        <p className="text-sm text-gray-700 dark:text-gray-300 mb-3">
+                                          {inspectorPausedError.message}
+                                        </p>
+                                        {inspectorPausedError.analyzing ? (
+                                          <div className="flex items-center justify-center gap-2 text-sm text-blue-600">
+                                            <div className="animate-spin">🔍</div>
+                                            <span>در حال بررسی کد منبع...</span>
+                                          </div>
+                                        ) : (
+                                          <button
+                                            onClick={resumeAfterError}
+                                            className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 text-sm"
+                                          >
+                                            ✅ ادامه کار
+                                          </button>
+                                        )}
+                                      </>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
                             {/* 🆕 نشانگر موس مجازی */}
                             {inspectorVirtualCursor.visible && (
                               <div
