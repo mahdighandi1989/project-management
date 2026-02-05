@@ -4743,3 +4743,140 @@ async def set_project_github_path(
     except Exception as e:
         slog.error("Set GitHub path failed", exception=e)
         return {"success": False, "error": str(e)}
+
+
+@router.get("/inspector/debug-bridge/{project_id}")
+async def debug_bridge_injection(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    🔍 Debug endpoint برای بررسی وضعیت Bridge Script
+
+    نشان می‌دهد:
+    - آیا پروژه به GitHub متصل است
+    - کدام فایل HTML پیدا شده
+    - آیا Bridge Script در فایل هست
+    - محتوای فایل (قسمتی از آن)
+    """
+    from ...models.project import Project
+    from ...models.setting import Setting
+    import os
+    import httpx
+    import base64
+
+    try:
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if not project:
+            return {"success": False, "error": "پروژه یافت نشد"}
+
+        result = {
+            "project_id": project_id,
+            "project_name": project.name,
+            "github_path": project.github_path,
+            "project_type": project.project_type,
+        }
+
+        # چک توکن
+        github_token = os.environ.get("GITHUB_TOKEN", "")
+        if not github_token:
+            github_token = Setting.get_value(db, "api_key_github") or ""
+
+        if not github_token:
+            result["error"] = "توکن GitHub تنظیم نشده"
+            return result
+
+        github_path = project.github_path
+        if not github_path:
+            # تلاش برای استخراج از extra_data
+            extra_data = getattr(project, 'extra_data', None)
+            if extra_data:
+                try:
+                    extra = json.loads(extra_data) if isinstance(extra_data, str) else extra_data
+                    if extra.get('owner') and extra.get('repo'):
+                        github_path = f"{extra['owner']}/{extra['repo']}"
+                        result["github_path_source"] = "extra_data"
+                except:
+                    pass
+
+        if not github_path:
+            result["error"] = "github_path یافت نشد"
+            return result
+
+        github_path_clean = github_path.replace("https://github.com/", "").replace(".git", "").strip("/")
+        parts = github_path_clean.split("/")
+        if len(parts) < 2:
+            result["error"] = f"فرمت نامعتبر: {github_path}"
+            return result
+
+        owner, repo = parts[0], parts[1]
+        result["owner"] = owner
+        result["repo"] = repo
+
+        headers = {
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+
+        async with httpx.AsyncClient() as client:
+            # دریافت لیست فایل‌ها
+            tree_res = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo}/git/trees/main?recursive=1",
+                headers=headers,
+                timeout=15.0
+            )
+
+            if tree_res.status_code == 404:
+                tree_res = await client.get(
+                    f"https://api.github.com/repos/{owner}/{repo}/git/trees/master?recursive=1",
+                    headers=headers,
+                    timeout=15.0
+                )
+
+            if tree_res.status_code != 200:
+                result["error"] = f"خطا در دریافت فایل‌ها: {tree_res.status_code}"
+                return result
+
+            tree_data = tree_res.json()
+            all_files = [item["path"] for item in tree_data.get("tree", []) if item["type"] == "blob"]
+            html_files = [f for f in all_files if f.endswith('.html')]
+
+            result["total_files"] = len(all_files)
+            result["html_files"] = html_files
+
+            # بررسی هر فایل HTML برای وجود Bridge
+            files_with_bridge = []
+            for html_path in html_files[:10]:  # حداکثر 10 فایل
+                try:
+                    content_res = await client.get(
+                        f"https://api.github.com/repos/{owner}/{repo}/contents/{html_path}",
+                        headers=headers,
+                        timeout=10.0
+                    )
+                    if content_res.status_code == 200:
+                        data = content_res.json()
+                        if data.get("encoding") == "base64":
+                            content = base64.b64decode(data["content"]).decode('utf-8')
+                            has_bridge = "Inspector Bridge Script" in content
+                            if has_bridge:
+                                files_with_bridge.append({
+                                    "path": html_path,
+                                    "has_bridge": True,
+                                    "preview": content[:500] + "..." if len(content) > 500 else content
+                                })
+                except:
+                    continue
+
+            result["files_with_bridge"] = files_with_bridge
+            result["bridge_injected"] = len(files_with_bridge) > 0
+
+            if not files_with_bridge:
+                result["message"] = "Bridge Script در هیچ فایل HTML یافت نشد!"
+            else:
+                result["message"] = f"Bridge Script در {len(files_with_bridge)} فایل یافت شد"
+
+        return result
+
+    except Exception as e:
+        slog.error("Debug bridge failed", exception=e)
+        return {"success": False, "error": str(e)}
