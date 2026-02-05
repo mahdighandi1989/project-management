@@ -583,12 +583,26 @@ async def analyze_with_vision_ai(
         )
     ]
 
+    slog.info(f"🔍 Sending to AI Vision",
+        model=model_id,
+        task=task[:50],
+        image_size=len(screenshot_base64),
+        image_prefix=screenshot_base64[:20]  # برای تأیید PNG/JPEG
+    )
+
     try:
         response = await ai_manager.generate(
             model_id=model_id,
             messages=messages,
             max_tokens=1024,
             temperature=0.2
+        )
+
+        # 🔍 لاگ کامل پاسخ AI
+        slog.info(f"🤖 AI Vision RAW response",
+            model=model_id,
+            content_length=len(response.content),
+            content_preview=response.content[:500]
         )
 
         # تلاش برای parse JSON
@@ -687,6 +701,7 @@ async def execute_ai_agent_task(
     """
     actions_log = []
     cursor_positions = []
+    ai_responses = []  # 🆕 برای debug - پاسخ‌های خام AI
     step = 0
 
     slog.info(f"Starting AI agent task", task=task[:100], model=model_id, max_steps=max_steps)
@@ -719,6 +734,12 @@ async def execute_ai_agent_task(
                 "status": "failed"
             })
             break
+
+        # 🆕 ذخیره پاسخ خام AI برای debug
+        ai_responses.append({
+            "step": step,
+            "raw_decision": ai_decision
+        })
 
         action = ai_decision.get("action", "done")
         params = ai_decision.get("params", {})
@@ -816,5 +837,6 @@ async def execute_ai_agent_task(
         "actions": actions_log,
         "cursor_positions": cursor_positions,
         "final_screenshot": final_screenshot,
+        "ai_responses": ai_responses,  # 🆕 برای debug
         "task": task
     }

@@ -2955,6 +2955,7 @@ class AIInteractRequest(BaseModel):
     url: str
     model_id: Optional[str] = None  # اگر None باشد، خودکار انتخاب می‌شود
     max_steps: Optional[int] = 10
+    debug: Optional[bool] = False  # 🆕 برای دیدن پاسخ خام AI
 
 
 def get_best_vision_model(ai_manager, db) -> Optional[str]:
@@ -3102,11 +3103,11 @@ async def ai_interact_with_page(
                 "status": action.get("status", "done")
             })
 
-        return {
+        response_data = {
             "success": result.get("success", False),
             "session_id": session_id,
             "task": request.task,
-            "selected_model": selected_model,  # 🆕 نمایش مدل انتخاب شده
+            "selected_model": selected_model,
             "actions": formatted_actions,
             "cursor_positions": result.get("cursor_positions", []),
             "final_screenshot": result.get("final_screenshot"),
@@ -3114,6 +3115,15 @@ async def ai_interact_with_page(
             "message": f"کار انجام شد: {result.get('total_steps', 0)} مرحله (مدل: {selected_model})",
             "page_info": page_info
         }
+
+        # 🆕 اضافه کردن debug info
+        if request.debug:
+            response_data["debug"] = {
+                "raw_actions": result.get("actions", []),
+                "ai_responses": result.get("ai_responses", [])
+            }
+
+        return response_data
 
     except Exception as e:
         slog.error("AI interaction failed", exception=e)
