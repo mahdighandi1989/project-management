@@ -673,6 +673,189 @@ class BrowserSession:
         """صبر کردن"""
         await asyncio.sleep(ms / 1000)
 
+    async def find_text_on_page(self, search_text: str) -> Dict:
+        """
+        🆕 جستجوی متن در صفحه و برگرداندن مختصات دقیق
+
+        این تابع صفحه را برای پیدا کردن متن خاص اسکن می‌کند
+        و مختصات دقیق المان حاوی آن متن را برمی‌گرداند.
+
+        Returns:
+            {
+                "found": bool,
+                "element": { "x", "y", "width", "height", "text", "percent_x", "percent_y" },
+                "all_matches": [...],  # همه تطابق‌ها
+                "scan_positions": [...]  # مواضع اسکن برای انیمیشن
+            }
+        """
+        if not self.page:
+            return {"found": False, "error": "No page"}
+
+        slog.info(f"🔍 Searching for text: '{search_text}'")
+
+        try:
+            # جستجو در همه المان‌های قابل مشاهده
+            matches = []
+            scan_positions = []
+
+            # استفاده از JavaScript برای پیدا کردن همه المان‌های حاوی متن
+            elements_data = await self.page.evaluate(f"""() => {{
+                const searchText = "{search_text}".toLowerCase();
+                const results = [];
+
+                // همه المان‌های متنی را پیدا کن
+                const walker = document.createTreeWalker(
+                    document.body,
+                    NodeFilter.SHOW_TEXT,
+                    null,
+                    false
+                );
+
+                let node;
+                while (node = walker.nextNode()) {{
+                    const text = node.textContent.trim().toLowerCase();
+                    if (text.includes(searchText)) {{
+                        const parent = node.parentElement;
+                        if (parent) {{
+                            const rect = parent.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0) {{
+                                results.push({{
+                                    text: node.textContent.trim().substring(0, 100),
+                                    x: rect.left + rect.width / 2,
+                                    y: rect.top + rect.height / 2,
+                                    width: rect.width,
+                                    height: rect.height,
+                                    tag: parent.tagName.toLowerCase(),
+                                    visible: rect.top >= 0 && rect.top < window.innerHeight
+                                }});
+                            }}
+                        }}
+                    }}
+                }}
+
+                // همچنین المان‌هایی با aria-label یا title مطابق
+                document.querySelectorAll('[aria-label], [title], button, a').forEach(el => {{
+                    const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+                    const title = (el.getAttribute('title') || '').toLowerCase();
+                    const innerText = (el.innerText || '').toLowerCase();
+
+                    if (ariaLabel.includes(searchText) || title.includes(searchText) || innerText.includes(searchText)) {{
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {{
+                            // جلوگیری از تکرار
+                            const exists = results.some(r =>
+                                Math.abs(r.x - (rect.left + rect.width/2)) < 10 &&
+                                Math.abs(r.y - (rect.top + rect.height/2)) < 10
+                            );
+                            if (!exists) {{
+                                results.push({{
+                                    text: el.innerText?.trim().substring(0, 100) || ariaLabel || title,
+                                    x: rect.left + rect.width / 2,
+                                    y: rect.top + rect.height / 2,
+                                    width: rect.width,
+                                    height: rect.height,
+                                    tag: el.tagName.toLowerCase(),
+                                    visible: rect.top >= 0 && rect.top < window.innerHeight
+                                }});
+                            }}
+                        }}
+                    }}
+                }});
+
+                return results;
+            }}""")
+
+            for el in elements_data:
+                percent_x = (el["x"] / self.viewport["width"]) * 100
+                percent_y = (el["y"] / self.viewport["height"]) * 100
+
+                matches.append({
+                    "text": el["text"],
+                    "x": el["x"],
+                    "y": el["y"],
+                    "width": el["width"],
+                    "height": el["height"],
+                    "tag": el["tag"],
+                    "visible": el["visible"],
+                    "percent_x": round(percent_x, 2),
+                    "percent_y": round(percent_y, 2)
+                })
+
+                # موقعیت اسکن برای انیمیشن نوار
+                scan_positions.append({
+                    "x": percent_x,
+                    "y": percent_y
+                })
+
+            if matches:
+                # اولویت با المان‌های visible
+                visible_matches = [m for m in matches if m["visible"]]
+                best_match = visible_matches[0] if visible_matches else matches[0]
+
+                slog.info(f"✅ Found {len(matches)} matches for '{search_text}', best: {best_match['text'][:50]}")
+
+                return {
+                    "found": True,
+                    "element": best_match,
+                    "all_matches": matches,
+                    "scan_positions": scan_positions,
+                    "total_matches": len(matches)
+                }
+            else:
+                slog.info(f"❌ Text '{search_text}' not found on page")
+                return {
+                    "found": False,
+                    "scan_positions": [],
+                    "message": f"متن '{search_text}' در صفحه پیدا نشد"
+                }
+
+        except Exception as e:
+            slog.error(f"Text search failed", exception=e)
+            return {"found": False, "error": str(e)}
+
+    async def scan_and_click_text(self, search_text: str) -> Dict:
+        """
+        🆕 اسکن صفحه برای پیدا کردن متن و کلیک روی آن
+
+        این تابع ترکیبی از جستجو و کلیک است که برای
+        دستوراتی مثل "برو به Settings" استفاده می‌شود.
+
+        Returns:
+            موقعیت‌های اسکن برای انیمیشن + نتیجه کلیک
+        """
+        # اول جستجو
+        search_result = await self.find_text_on_page(search_text)
+
+        if not search_result.get("found"):
+            return {
+                "success": False,
+                "scan_positions": [],
+                "message": f"المان '{search_text}' پیدا نشد"
+            }
+
+        element = search_result["element"]
+
+        # کلیک روی المان پیدا شده
+        old_url = self.page.url
+        await self.page.mouse.click(element["x"], element["y"])
+        await self.page.wait_for_timeout(1000)
+
+        new_url = self.page.url
+        url_changed = new_url != old_url
+
+        return {
+            "success": True,
+            "scan_positions": search_result["scan_positions"],
+            "clicked_element": element,
+            "cursor_position": {
+                "x": element["percent_x"],
+                "y": element["percent_y"]
+            },
+            "url_changed": url_changed,
+            "url": new_url,
+            "total_matches": search_result["total_matches"]
+        }
+
     async def close(self):
         """بستن مرورگر"""
         if self.context:
@@ -1183,25 +1366,31 @@ async def execute_ai_agent_task(
         if on_action_callback:
             await on_action_callback(action_entry)
 
-        # 4. بررسی اقدام "done" (با verification)
+        # 4. بررسی اقدام "done"
         if action == "done":
-            # 🆕 بررسی آیا واقعاً URL تغییر کرده
-            url_actually_changed = current_url != initial_url
+            # 🆕 برای SPA ها: بررسی آیا کلیک موفقی انجام شده (حتی اگر URL تغییر نکرده)
+            url_changed = current_url != initial_url
+            had_successful_click = any(
+                a.get("action") == "click_element" and
+                a.get("status") == "done"
+                for a in actions_log
+            )
 
-            if url_actually_changed:
+            if url_changed or had_successful_click:
                 action_entry["status"] = "done"
-                action_entry["description"] = f"✅ کار تکمیل شد - صفحه تغییر کرد به: {current_url}"
+                if url_changed:
+                    action_entry["description"] = f"✅ کار تکمیل شد - صفحه تغییر کرد به: {current_url}"
+                else:
+                    action_entry["description"] = f"✅ کار تکمیل شد - کلیک موفق انجام شد (SPA)"
                 actions_log.append(action_entry)
-                slog.info(f"Task completed at step {step} - URL changed from {initial_url} to {current_url}")
+                slog.info(f"Task completed at step {step}")
                 break
             else:
-                # 🆕 AI اشتباه کرده - باید ادامه دهد
-                slog.warning(f"AI said 'done' but URL not changed! initial={initial_url}, current={current_url}")
+                # هنوز هیچ کلیک موفقی نداشتیم
+                slog.warning(f"AI said 'done' but no successful click yet!")
                 action_entry["status"] = "rejected"
-                action_entry["description"] = f"⚠️ AI گفت تمام شد اما صفحه تغییر نکرده! ادامه می‌دهیم..."
-                action_entry["url_still_same"] = True
+                action_entry["description"] = f"⚠️ هنوز کلیک موفقی انجام نشده! ادامه می‌دهیم..."
                 actions_log.append(action_entry)
-                # ادامه بده، break نکن!
                 continue
 
         # 5. اجرای اقدام (حتی اگر is_complete=true باشد، اول اقدام را انجام بده)

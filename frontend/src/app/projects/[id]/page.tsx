@@ -333,6 +333,21 @@ export default function ProjectDetailPage() {
   }>({ x: 0, y: 0, visible: false });
   const [inspectorGithubConnected, setInspectorGithubConnected] = useState(false);
 
+  // 🆕 Visual Scan - نوارهای اسکن بصری
+  const [inspectorScanBars, setInspectorScanBars] = useState<{
+    verticalX: number;  // موقعیت نوار عمودی (درصد از چپ)
+    horizontalY: number;  // موقعیت نوار افقی (درصد از بالا)
+    scanning: boolean;  // آیا در حال اسکن است
+    targetFound: boolean;  // آیا هدف پیدا شد
+    intersection: { x: number; y: number; text: string } | null;  // نقطه تقاطع
+  }>({
+    verticalX: 0,
+    horizontalY: 0,
+    scanning: false,
+    targetFound: false,
+    intersection: null
+  });
+
   const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
   const [selectedLog, setSelectedLog] = useState<ActivityLog | null>(null);
   const [reports, setReports] = useState<ProjectReport[]>([]);
@@ -816,6 +831,42 @@ export default function ProjectDetailPage() {
     return visualKeywords.some(keyword => lowerMessage.includes(keyword));
   };
 
+  // 🆕 استخراج متن هدف از پیام کاربر
+  const extractTargetText = (message: string): string => {
+    // الگوهای رایج برای استخراج هدف
+    const patterns = [
+      // فارسی
+      /برو (?:به |روی )?(?:قسمت |بخش |صفحه |تب )?(.+)/i,
+      /(?:کلیک|بزن) (?:روی |بر روی )?(.+)/i,
+      /وارد (?:قسمت |بخش |صفحه )?(.+) (?:شو|بشو)/i,
+      /(?:باز کن|بازکن|نمایش بده) (.+)/i,
+      /پیدا کن (.+)/i,
+      // انگلیسی
+      /go to (.+)/i,
+      /click (?:on )?(.+)/i,
+      /navigate to (.+)/i,
+      /open (.+)/i,
+      /find (.+)/i,
+      /show (.+)/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = message.match(pattern);
+      if (match && match[1]) {
+        // پاکسازی نتیجه
+        return match[1].trim().replace(/[.،؟!]/g, '');
+      }
+    }
+
+    // اگر الگویی پیدا نشد، کل پیام را برگردان (بدون کلمات کمکی)
+    const cleanMessage = message
+      .replace(/برو|وارد|کلیک|بزن|باز کن|نمایش/gi, '')
+      .replace(/به|روی|شو|بشو|قسمت|بخش|صفحه/gi, '')
+      .trim();
+
+    return cleanMessage || message;
+  };
+
   // 🆕 انیمیشن cursor به صورت متوالی
   const animateCursorSequence = async (positions: Array<{x: number; y: number; action: string}>) => {
     for (const pos of positions) {
@@ -831,6 +882,101 @@ export default function ProjectDetailPage() {
     setTimeout(() => {
       setInspectorVirtualCursor(prev => ({ ...prev, visible: false }));
     }, 2000);
+  };
+
+  // 🆕 اسکن بصری با نوارهای متحرک سبز
+  const runVisualScan = async (searchText: string) => {
+    if (!inspectorFrontendUrl) return;
+
+    // شروع انیمیشن اسکن
+    setInspectorScanBars({
+      verticalX: 0,
+      horizontalY: 0,
+      scanning: true,
+      targetFound: false,
+      intersection: null
+    });
+
+    try {
+      // صدا زدن API
+      const res = await fetch(`${API_BASE}/api/render/inspector/visual-scan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: inspectorFrontendUrl,
+          search_text: searchText,
+          click_on_find: true
+        })
+      });
+
+      const data = await res.json();
+
+      if (data.success && data.scan_animation) {
+        // انیمیشن نوار عمودی (از راست به چپ برای RTL)
+        const verticalSteps = data.scan_animation.vertical_bar || [];
+        const horizontalSteps = data.scan_animation.horizontal_bar || [];
+
+        // اجرای همزمان دو نوار
+        const animateVertical = async () => {
+          for (const step of verticalSteps) {
+            setInspectorScanBars(prev => ({ ...prev, verticalX: step.x }));
+            await new Promise(resolve => setTimeout(resolve, step.duration));
+          }
+        };
+
+        const animateHorizontal = async () => {
+          for (const step of horizontalSteps) {
+            setInspectorScanBars(prev => ({ ...prev, horizontalY: step.y }));
+            await new Promise(resolve => setTimeout(resolve, step.duration));
+          }
+        };
+
+        // اجرای همزمان
+        await Promise.all([animateVertical(), animateHorizontal()]);
+
+        // نشان دادن نقطه تقاطع
+        if (data.scan_animation.intersection) {
+          setInspectorScanBars(prev => ({
+            ...prev,
+            targetFound: true,
+            intersection: data.scan_animation.intersection
+          }));
+
+          // نمایش cursor روی هدف
+          setInspectorVirtualCursor({
+            x: data.scan_animation.intersection.x,
+            y: data.scan_animation.intersection.y,
+            visible: true,
+            model_id: `🎯 ${data.scan_animation.intersection.text}`
+          });
+
+          // پنهان کردن بعد از 3 ثانیه
+          setTimeout(() => {
+            setInspectorScanBars(prev => ({ ...prev, scanning: false, targetFound: false }));
+            setInspectorVirtualCursor(prev => ({ ...prev, visible: false }));
+          }, 3000);
+        }
+
+        return data;
+      } else {
+        // اسکن کامل صفحه بدون پیدا کردن
+        // انیمیشن کامل
+        for (let x = 0; x <= 100; x += 2) {
+          setInspectorScanBars(prev => ({ ...prev, verticalX: x }));
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        for (let y = 0; y <= 100; y += 2) {
+          setInspectorScanBars(prev => ({ ...prev, horizontalY: y }));
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+
+        setInspectorScanBars(prev => ({ ...prev, scanning: false }));
+        return { success: false, message: 'پیدا نشد' };
+      }
+    } catch (error) {
+      setInspectorScanBars(prev => ({ ...prev, scanning: false }));
+      throw error;
+    }
   };
 
   // 🆕 ارسال پیام به AI
@@ -859,23 +1005,58 @@ export default function ProjectDetailPage() {
         content: '' // محتوا بعداً می‌تواند از فایل‌های باز شده خوانده شود
       }));
 
-      // 🆕🆕🆕 تشخیص task ویژوال - همیشه از ai-interact استفاده شود (حتی با انتخاب دستی)
+      // 🆕🆕🆕 تشخیص task ویژوال
       const shouldUseVision = isVisualTask(userMessage) && inspectorFrontendUrl;
 
       if (shouldUseVision) {
-        // اضافه کردن پیام سیستم
+        // استخراج متن هدف از پیام
+        const targetText = extractTargetText(userMessage);
+
+        // 🆕 ابتدا از Visual Scan سریع استفاده کن (بدون AI)
         setInspectorChatMessages(prev => [...prev, {
           id: `system_${Date.now()}`,
           role: 'assistant',
-          content: '🖥️ در حال باز کردن مرورگر و تحلیل صفحه...',
+          content: `🔍 در حال اسکن صفحه برای پیدا کردن "${targetText}"...`,
+          timestamp: new Date()
+        }]);
+
+        // اجرای اسکن بصری سریع
+        try {
+          const scanResult = await runVisualScan(targetText);
+
+          // حذف پیام سیستم
+          setInspectorChatMessages(prev => prev.filter(m => !m.id.startsWith('system_')));
+
+          if (scanResult && scanResult.success) {
+            // اسکن موفق - نیازی به AI نیست
+            setInspectorChatMessages(prev => [...prev, {
+              id: `assistant_${Date.now()}`,
+              role: 'assistant',
+              content: `✅ **پیدا شد و کلیک شد!**\n\n🎯 المان: **${scanResult.message || targetText}**\n📍 موقعیت: (${scanResult.target_position?.x?.toFixed(1)}%, ${scanResult.target_position?.y?.toFixed(1)}%)${scanResult.url_changed ? '\n🔄 صفحه تغییر کرد' : ''}`,
+              timestamp: new Date()
+            }]);
+            setInspectorChatLoading(false);
+            return;
+          }
+        } catch (scanError) {
+          console.log('Visual scan failed, falling back to AI...', scanError);
+        }
+
+        // حذف پیام سیستم قبلی
+        setInspectorChatMessages(prev => prev.filter(m => !m.id.startsWith('system_')));
+
+        // 🆕 اگر اسکن سریع کار نکرد، از AI استفاده کن
+        setInspectorChatMessages(prev => [...prev, {
+          id: `system_${Date.now()}`,
+          role: 'assistant',
+          content: '🤖 اسکن ساده پیدا نکرد، AI در حال تحلیل...',
           timestamp: new Date()
         }]);
 
         // استفاده از API تعامل هوشمند با مرورگر (AI Agent)
-        // 🆕 اگر مدل دستی انتخاب شده، آن را بفرست؛ در غیر این صورت null برای انتخاب خودکار
         const selectedModelForVision = (!inspectorAutoSelect && inspectorSelectedModels.length > 0)
-          ? inspectorSelectedModels[0]  // اولین مدل انتخاب شده دستی
-          : null;  // انتخاب خودکار
+          ? inspectorSelectedModels[0]
+          : null;
 
         const res = await fetch(`${API_BASE}/api/render/inspector/ai-interact`, {
           method: 'POST',
@@ -883,7 +1064,7 @@ export default function ProjectDetailPage() {
           body: JSON.stringify({
             task: userMessage,
             url: inspectorFrontendUrl,
-            model_id: selectedModelForVision, // 🆕 ارسال مدل انتخاب شده دستی یا null
+            model_id: selectedModelForVision,
             max_steps: 15
           })
         });
@@ -7183,6 +7364,55 @@ export default function ProjectDetailPage() {
                                 {/* افکت کلیک */}
                                 <div className="absolute inset-0 w-6 h-6 bg-red-500/30 rounded-full animate-ping" />
                               </div>
+                            )}
+
+                            {/* 🆕 نوارهای اسکن بصری */}
+                            {inspectorScanBars.scanning && (
+                              <>
+                                {/* نوار عمودی - حرکت از چپ به راست */}
+                                <div
+                                  className="absolute top-0 bottom-0 w-0.5 bg-green-500 pointer-events-none z-40 transition-all duration-75"
+                                  style={{
+                                    left: `${inspectorScanBars.verticalX}%`,
+                                    boxShadow: '0 0 8px 2px rgba(34, 197, 94, 0.6), 0 0 20px 4px rgba(34, 197, 94, 0.3)'
+                                  }}
+                                />
+
+                                {/* نوار افقی - حرکت از بالا به پایین */}
+                                <div
+                                  className="absolute left-0 right-0 h-0.5 bg-green-500 pointer-events-none z-40 transition-all duration-75"
+                                  style={{
+                                    top: `${inspectorScanBars.horizontalY}%`,
+                                    boxShadow: '0 0 8px 2px rgba(34, 197, 94, 0.6), 0 0 20px 4px rgba(34, 197, 94, 0.3)'
+                                  }}
+                                />
+
+                                {/* نقطه تقاطع (هدف) */}
+                                {inspectorScanBars.targetFound && inspectorScanBars.intersection && (
+                                  <div
+                                    className="absolute pointer-events-none z-50"
+                                    style={{
+                                      left: `${inspectorScanBars.intersection.x}%`,
+                                      top: `${inspectorScanBars.intersection.y}%`,
+                                      transform: 'translate(-50%, -50%)'
+                                    }}
+                                  >
+                                    {/* دایره هدف */}
+                                    <div className="w-8 h-8 border-2 border-green-500 rounded-full animate-ping" />
+                                    <div className="absolute inset-0 w-8 h-8 border-2 border-green-400 rounded-full" />
+                                    <div className="absolute inset-2 w-4 h-4 bg-green-500 rounded-full" />
+                                    {/* برچسب هدف */}
+                                    <div className="absolute -bottom-8 left-1/2 -translate-x-1/2 bg-green-500 text-white text-[10px] px-2 py-1 rounded whitespace-nowrap shadow-lg">
+                                      🎯 {inspectorScanBars.intersection.text}
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* نشانگر درصد اسکن */}
+                                <div className="absolute bottom-2 left-2 bg-black/70 text-green-400 text-[10px] px-2 py-1 rounded font-mono">
+                                  اسکن: {Math.round(Math.max(inspectorScanBars.verticalX, inspectorScanBars.horizontalY))}%
+                                </div>
+                              </>
                             )}
                           </div>
                         ) : inspectorPowerOn && inspectorError ? (
