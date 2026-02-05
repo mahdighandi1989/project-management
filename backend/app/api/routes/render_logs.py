@@ -3210,6 +3210,116 @@ async def ai_interact_with_page(
 
 
 # =====================================
+# 🆕 اسکن بصری و کلیک مستقیم
+# =====================================
+
+class VisualScanRequest(BaseModel):
+    """درخواست اسکن بصری صفحه"""
+    url: str
+    search_text: str  # متنی که باید پیدا شود
+    click_on_find: bool = True  # آیا بعد از پیدا کردن کلیک کند
+
+
+@router.post("/inspector/visual-scan")
+async def visual_scan_and_click(request: VisualScanRequest):
+    """
+    🔍 اسکن بصری صفحه با نوارهای متحرک
+
+    این endpoint:
+    1. صفحه را باز می‌کند
+    2. متن مورد نظر را جستجو می‌کند
+    3. مختصات اسکن را برای انیمیشن نوار برمی‌گرداند
+    4. اگر click_on_find=true باشد، کلیک می‌کند
+
+    Response شامل:
+    - scan_animation: مراحل انیمیشن نوار اسکن
+    - target_position: موقعیت هدف (درصد)
+    - clicked: آیا کلیک شد
+    """
+    import uuid
+    from ...services.browser_automation import create_session, close_session
+
+    session_id = str(uuid.uuid4())[:8]
+
+    slog.api_request("POST", "/inspector/visual-scan",
+        url=request.url,
+        search_text=request.search_text
+    )
+
+    try:
+        # 1. باز کردن مرورگر
+        session = await create_session(session_id, request.url)
+
+        # 2. جستجوی متن
+        if request.click_on_find:
+            result = await session.scan_and_click_text(request.search_text)
+        else:
+            result = await session.find_text_on_page(request.search_text)
+
+        # 3. ساخت انیمیشن اسکن
+        # نوار عمودی از چپ به راست، نوار افقی از بالا به پایین
+        scan_animation = {
+            "vertical_bar": [],   # نوار عمودی - حرکت افقی
+            "horizontal_bar": [], # نوار افقی - حرکت عمودی
+            "intersection": None  # نقطه تقاطع (هدف)
+        }
+
+        if result.get("found") or result.get("success"):
+            target = result.get("element") or result.get("clicked_element")
+            if target:
+                target_x = target["percent_x"]
+                target_y = target["percent_y"]
+
+                # انیمیشن نوار عمودی (از چپ به راست تا x هدف)
+                for x in range(0, int(target_x) + 1, 5):
+                    scan_animation["vertical_bar"].append({"x": x, "duration": 30})
+
+                # انیمیشن نوار افقی (از بالا به پایین تا y هدف)
+                for y in range(0, int(target_y) + 1, 5):
+                    scan_animation["horizontal_bar"].append({"y": y, "duration": 30})
+
+                # نقطه تقاطع
+                scan_animation["intersection"] = {
+                    "x": target_x,
+                    "y": target_y,
+                    "text": target.get("text", "")[:50]
+                }
+
+        # 4. گرفتن screenshot
+        screenshot = await session.take_screenshot()
+
+        # 5. بستن session
+        await close_session(session_id)
+
+        return {
+            "success": result.get("found", False) or result.get("success", False),
+            "scan_animation": scan_animation,
+            "target_position": result.get("cursor_position") or (
+                {"x": result["element"]["percent_x"], "y": result["element"]["percent_y"]}
+                if result.get("element") else None
+            ),
+            "clicked": request.click_on_find and result.get("success", False),
+            "url_changed": result.get("url_changed", False),
+            "final_url": result.get("url", request.url),
+            "total_matches": result.get("total_matches", 0),
+            "screenshot": screenshot,
+            "message": f"پیدا شد: {result.get('element', {}).get('text', '')[:50]}" if result.get("found") else "پیدا نشد"
+        }
+
+    except Exception as e:
+        slog.error("Visual scan failed", exception=e)
+        try:
+            await close_session(session_id)
+        except:
+            pass
+        return {
+            "success": False,
+            "error": str(e),
+            "scan_animation": {"vertical_bar": [], "horizontal_bar": [], "intersection": None}
+        }
+
+
+# =====================================
 # 🆕 بازرسی همزمان فرانت‌اند و بک‌اند
 # =====================================
 
