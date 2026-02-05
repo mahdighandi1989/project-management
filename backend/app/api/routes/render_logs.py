@@ -4455,6 +4455,11 @@ async def inject_bridge_script(
             index_path = None
             index_content = None
             index_sha = None
+            found_html_files = []
+            is_framework_without_html = False
+            is_nextjs = False
+            is_nuxt = False
+            is_gatsby = False
 
             # اگر مسیر سفارشی داده شده، اول آن را امتحان کن
             if request.custom_path:
@@ -4498,6 +4503,12 @@ async def inject_bridge_script(
                         tree_data = tree_res.json()
                         all_files = [item["path"] for item in tree_data.get("tree", []) if item["type"] == "blob"]
 
+                        # 🔍 تشخیص نوع پروژه
+                        is_nextjs = any(f in all_files for f in ['next.config.js', 'next.config.ts', 'next.config.mjs'])
+                        is_nuxt = any(f in all_files for f in ['nuxt.config.js', 'nuxt.config.ts'])
+                        is_gatsby = 'gatsby-config.js' in all_files
+                        is_framework_without_html = is_nextjs or is_nuxt or is_gatsby
+
                         # فیلتر فایل‌های HTML
                         html_files = [f for f in all_files if f.endswith('.html')]
 
@@ -4530,6 +4541,9 @@ async def inject_bridge_script(
                         html_files_scored = [(f, score_html_file(f)) for f in html_files]
                         html_files_scored.sort(key=lambda x: -x[1])
 
+                        # ذخیره لیست فایل‌ها برای استفاده بعدی
+                        found_html_files = [f for f, _ in html_files_scored[:10]]
+
                         # بهترین فایل را انتخاب کن
                         for html_path, score in html_files_scored[:5]:  # 5 کاندید برتر را بررسی کن
                             try:
@@ -4554,14 +4568,30 @@ async def inject_bridge_script(
 
                 except Exception as e:
                     slog.warn(f"Smart HTML search failed: {e}")
+                    found_html_files = []
+                    is_framework_without_html = False
 
             if not index_path:
-                return {
+                # تشخیص بهتر نوع مشکل
+                error_response = {
                     "success": False,
-                    "error": "فایل HTML اصلی پروژه یافت نشد",
-                    "hint": "می‌توانید مسیر فایل HTML را دستی وارد کنید",
                     "need_custom_path": True
                 }
+
+                if is_framework_without_html:
+                    error_response["error"] = "این پروژه از فریم‌ورکی استفاده می‌کند که HTML در زمان build ساخته می‌شود"
+                    error_response["framework_detected"] = "Next.js" if is_nextjs else ("Nuxt" if is_nuxt else "Gatsby")
+                    error_response["hint"] = "برای این نوع پروژه‌ها، باید فایل _document.js یا _app.js را ویرایش کنید یا از روش دیگری استفاده کنید"
+                    error_response["alternative_hint"] = "می‌توانید اسکریپت Bridge را مستقیماً در کد پروژه اضافه کنید"
+                elif found_html_files:
+                    error_response["error"] = "فایل HTML اصلی به‌صورت خودکار پیدا نشد"
+                    error_response["hint"] = "فایل‌های HTML زیر پیدا شدند - یکی را انتخاب کنید:"
+                    error_response["found_html_files"] = found_html_files
+                else:
+                    error_response["error"] = "هیچ فایل HTML در پروژه یافت نشد"
+                    error_response["hint"] = "مسیر فایل HTML را دستی وارد کنید یا مطمئن شوید پروژه فایل HTML دارد"
+
+                return error_response
 
             # بررسی وجود اسکریپت قبلی
             bridge_marker = "Inspector Bridge Script - Auto-injected"
