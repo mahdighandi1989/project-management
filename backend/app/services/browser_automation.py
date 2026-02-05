@@ -124,6 +124,149 @@ class BrowserSession:
 
         return result
 
+    async def extract_interactive_elements(self) -> List[Dict]:
+        """
+        استخراج تمام المان‌های قابل تعامل از صفحه
+
+        این تابع لینک‌ها، دکمه‌ها و المان‌های کلیک‌پذیر را پیدا می‌کند
+        و موقعیت دقیق هر کدام را برمی‌گرداند.
+
+        Returns:
+            لیستی از المان‌ها با index, text, type, و bounding_box
+        """
+        if not self.page:
+            return []
+
+        elements = []
+        index = 0
+
+        # سلکتورهای المان‌های قابل کلیک
+        selectors = [
+            'a[href]',           # لینک‌ها
+            'button',            # دکمه‌ها
+            '[role="button"]',   # المان‌های با نقش دکمه
+            'input[type="submit"]',
+            'input[type="button"]',
+            '[onclick]',         # المان‌های با onclick
+            '.nav-link',         # لینک‌های نویگیشن
+            '.menu-item',        # آیتم‌های منو
+            '[class*="btn"]',    # کلاس‌های حاوی btn
+        ]
+
+        for selector in selectors:
+            try:
+                found = await self.page.query_selector_all(selector)
+                for el in found:
+                    try:
+                        # چک کنیم که المان visible باشد
+                        is_visible = await el.is_visible()
+                        if not is_visible:
+                            continue
+
+                        box = await el.bounding_box()
+                        if not box or box["width"] < 5 or box["height"] < 5:
+                            continue
+
+                        # گرفتن متن المان
+                        text = ""
+                        try:
+                            text = await el.inner_text()
+                            text = text.strip()[:50]  # حداکثر 50 کاراکتر
+                        except:
+                            pass
+
+                        if not text:
+                            try:
+                                text = await el.get_attribute("aria-label") or ""
+                            except:
+                                pass
+
+                        if not text:
+                            try:
+                                text = await el.get_attribute("title") or ""
+                            except:
+                                pass
+
+                        # جلوگیری از تکرار
+                        center_x = box["x"] + box["width"] / 2
+                        center_y = box["y"] + box["height"] / 2
+
+                        # چک برای تکراری نبودن (موقعیت مشابه)
+                        is_duplicate = False
+                        for existing in elements:
+                            if abs(existing["center_x"] - center_x) < 10 and abs(existing["center_y"] - center_y) < 10:
+                                is_duplicate = True
+                                break
+
+                        if is_duplicate:
+                            continue
+
+                        tag = await el.evaluate("el => el.tagName.toLowerCase()")
+
+                        elements.append({
+                            "index": index,
+                            "text": text if text else f"[{tag}]",
+                            "tag": tag,
+                            "selector": selector,
+                            "box": {
+                                "x": box["x"],
+                                "y": box["y"],
+                                "width": box["width"],
+                                "height": box["height"]
+                            },
+                            "center_x": center_x,
+                            "center_y": center_y,
+                            # درصد نسبت به viewport
+                            "percent_x": round((center_x / self.viewport["width"]) * 100, 1),
+                            "percent_y": round((center_y / self.viewport["height"]) * 100, 1)
+                        })
+                        index += 1
+
+                    except Exception as e:
+                        continue
+
+            except Exception as e:
+                slog.warning(f"Selector failed: {selector}", error=str(e))
+                continue
+
+        # مرتب‌سازی بر اساس موقعیت (بالا به پایین، راست به چپ برای RTL)
+        elements.sort(key=lambda e: (e["center_y"], -e["center_x"]))
+
+        # بازنشانی index بعد از مرتب‌سازی
+        for i, el in enumerate(elements):
+            el["index"] = i
+
+        slog.info(f"Extracted {len(elements)} interactive elements")
+        return elements
+
+    async def click_element_by_index(self, elements: List[Dict], index: int) -> Dict:
+        """
+        کلیک روی المان با شماره index
+
+        Args:
+            elements: لیست المان‌ها از extract_interactive_elements
+            index: شماره المان
+
+        Returns:
+            نتیجه کلیک
+        """
+        if index < 0 or index >= len(elements):
+            return {"success": False, "error": f"Invalid index: {index}"}
+
+        element = elements[index]
+        x = element["center_x"]
+        y = element["center_y"]
+
+        try:
+            await self.click(x, y)
+            return {
+                "success": True,
+                "clicked_element": element["text"],
+                "position": {"x": x, "y": y}
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     async def analyze_page_for_login(self) -> Dict:
         """تحلیل صفحه برای پیدا کردن فرم لاگین"""
         if not self.page:
@@ -521,12 +664,16 @@ async def analyze_with_vision_ai(
     model_id: str,
     screenshot_base64: str,
     task: str,
-    previous_actions: List[Dict] = None
+    previous_actions: List[Dict] = None,
+    interactive_elements: List[Dict] = None  # 🆕 لیست المان‌های قابل کلیک
 ) -> Dict:
     """
     تحلیل screenshot با AI Vision و تصمیم‌گیری برای اقدام بعدی
 
-    این تابع از مدل‌های vision مثل GPT-4V استفاده می‌کند
+    رویکرد جدید:
+    - لیست المان‌های قابل کلیک با موقعیت دقیق به AI داده می‌شود
+    - AI با شماره index المان را انتخاب می‌کند
+    - دیگر نیاز به حدس زدن مختصات نیست
     """
     from ..services.ai_base import Message
 
@@ -536,52 +683,39 @@ async def analyze_with_vision_ai(
             f"- {a.get('action')}: {a.get('description', '')}" for a in previous_actions
         ])
 
-    # ساخت پیام با تصویر - با راهنمای دقیق مختصات
+    # ساخت لیست المان‌ها برای نمایش به AI
+    elements_list = ""
+    if interactive_elements:
+        elements_list = "\n\n## المان‌های قابل کلیک در صفحه:\n"
+        for el in interactive_elements[:30]:  # حداکثر 30 المان
+            elements_list += f"[{el['index']}] \"{el['text']}\" ({el['tag']}) - موقعیت: x={el['percent_x']}%, y={el['percent_y']}%\n"
+
+    # پرامپت جدید - انتخاب با index
     system_prompt = """شما یک AI Agent هستید که صفحات وب را کنترل می‌کنید.
 
-## ابعاد صفحه:
-- عرض: 1280 پیکسل (0% = چپ، 100% = راست)
-- ارتفاع: 720 پیکسل (0% = بالا، 100% = پایین)
-
-## سیستم مختصات (مهم):
-مختصات به **درصد** داده می‌شود:
-- x=0: لبه چپ صفحه
-- x=50: وسط افقی صفحه
-- x=100: لبه راست صفحه
-- y=0: بالای صفحه
-- y=50: وسط عمودی صفحه
-- y=100: پایین صفحه
-
-## نقاط مرجع:
-- گوشه بالا-چپ: x=0, y=0
-- وسط صفحه: x=50, y=50
-- گوشه بالا-راست: x=100, y=0
-- گوشه پایین-چپ: x=0, y=100
-- گوشه پایین-راست: x=100, y=100
-
-## نکته مهم برای سایت‌های فارسی (RTL):
-- در سایت‌های فارسی معمولاً منو در سمت **راست** است (x بالای 70)
-- لوگو معمولاً سمت راست-بالا است
-- sidebar معمولاً سمت راست است
+## روش کار:
+لیست المان‌های قابل کلیک صفحه به شما داده شده است. هر المان یک شماره (index) دارد.
+برای کلیک، فقط کافیست شماره المان را بدهید.
 
 ## قابلیت‌ها:
-1. **click**: کلیک روی المان - x,y به درصد (0-100)
+1. **click_element**: کلیک روی المان با شماره - params: {"index": شماره}
 2. **type**: تایپ متن - params: {"text": "متن"}
-3. **scroll**: اسکرول - params: {"direction": "up" یا "down"}
-4. **wait**: صبر - params: {"seconds": عدد}
-5. **done**: کار تمام شد
+3. **scroll**: اسکرول برای دیدن المان‌های بیشتر - params: {"direction": "up" یا "down"}
+4. **wait**: صبر برای لود صفحه - params: {"seconds": عدد}
+5. **done**: وظیفه انجام شد (فقط وقتی صفحه مورد نظر باز شد)
 
-## قوانین:
-- قبل از دادن مختصات، المان را در تصویر پیدا کن و موقعیتش را توضیح بده
-- مختصات باید دقیقاً روی المان باشد (وسط المان)
-- هر بار فقط یک اقدام
-- فقط وقتی done بگو که صفحه تغییر کرده و به هدف رسیدی
+## قوانین مهم:
+- اگر المان مورد نظر در لیست هست، شماره‌اش را بده
+- اگر المان مورد نظر در لیست نیست، scroll کن تا پیدا شود
+- تصویر صفحه را با لیست المان‌ها تطبیق بده
+- فقط وقتی done بگو که URL صفحه تغییر کرده و به هدف رسیدی
+- اگر همان صفحه قبلی است، done نگو!
 
-## فرمت پاسخ (JSON):
+## فرمت پاسخ (فقط JSON):
 {
-    "thinking": "می‌بینم [توضیح دقیق چه می‌بینی]. المان X در [موقعیت توضیحی: مثلاً بالا-راست، وسط صفحه، پایین منو] قرار دارد.",
-    "action": "click",
-    "params": {"x": عدد, "y": عدد},
+    "thinking": "توضیح: چه می‌بینم، کدام المان مربوط به وظیفه است",
+    "action": "click_element",
+    "params": {"index": شماره_المان},
     "element_description": "نام المان",
     "is_complete": false
 }"""
@@ -589,16 +723,17 @@ async def analyze_with_vision_ai(
     user_prompt = f"""## وظیفه:
 {task}
 {previous_context}
+{elements_list}
 
-## تصویر صفحه ضمیمه شده (1280x720 پیکسل).
+## تصویر صفحه ضمیمه شده.
 
 **دستورالعمل:**
-1. تصویر را دقیق ببین
-2. المان مورد نظر را پیدا کن
-3. موقعیت دقیق آن را توضیح بده (مثال: "لینک لیست دروس در منوی سمت راست، حدود 30% از بالا")
-4. مختصات درصدی را محاسبه کن
+1. تصویر را ببین
+2. لیست المان‌ها را بررسی کن
+3. المانی که مربوط به وظیفه "{task}" است را پیدا کن
+4. شماره (index) آن المان را در پاسخ بده
 
-پاسخ را به فرمت JSON بده."""
+پاسخ را فقط به فرمت JSON بده."""
 
     # ساخت پیام با فرمت صحیح - استفاده از فیلد images
     messages = [
@@ -733,24 +868,36 @@ async def execute_ai_agent_task(
 
     slog.info(f"Starting AI agent task", task=task[:100], model=model_id, max_steps=max_steps)
 
+    # ذخیره المان‌ها برای استفاده در کلیک
+    current_elements = []
+
     while step < max_steps:
         step += 1
 
-        # 1. گرفتن screenshot
+        # 1. استخراج المان‌های قابل کلیک
+        try:
+            current_elements = await session.extract_interactive_elements()
+            slog.info(f"Step {step}: Found {len(current_elements)} interactive elements")
+        except Exception as e:
+            slog.warning(f"Element extraction failed at step {step}", exception=e)
+            current_elements = []
+
+        # 2. گرفتن screenshot
         try:
             screenshot = await session.take_screenshot()
         except Exception as e:
             slog.error(f"Screenshot failed at step {step}", exception=e)
             break
 
-        # 2. ارسال به AI Vision
+        # 3. ارسال به AI Vision با لیست المان‌ها
         try:
             ai_decision = await analyze_with_vision_ai(
                 ai_manager=ai_manager,
                 model_id=model_id,
                 screenshot_base64=screenshot,
                 task=task,
-                previous_actions=actions_log
+                previous_actions=actions_log,
+                interactive_elements=current_elements  # 🆕 ارسال لیست المان‌ها
             )
         except Exception as e:
             slog.error(f"AI analysis failed at step {step}", exception=e)
@@ -797,7 +944,37 @@ async def execute_ai_agent_task(
 
         # 5. اجرای اقدام (حتی اگر is_complete=true باشد، اول اقدام را انجام بده)
         try:
-            if action == "click":
+            # 🆕 کلیک با شماره المان (روش جدید و دقیق)
+            if action == "click_element":
+                element_index = params.get("index", -1)
+
+                if element_index >= 0 and element_index < len(current_elements):
+                    element = current_elements[element_index]
+                    x_pixel = element["center_x"]
+                    y_pixel = element["center_y"]
+                    x_percent = element["percent_x"]
+                    y_percent = element["percent_y"]
+
+                    await session.click(x_pixel, y_pixel)
+
+                    action_entry["description"] = f"کلیک روی [{element_index}] {element['text']} (x:{x_percent}%, y:{y_percent}%)"
+                    action_entry["status"] = "done"
+
+                    cursor_positions.append({
+                        "step": step,
+                        "action": f"click: {element['text']}",
+                        "x": x_percent,
+                        "y": y_percent
+                    })
+
+                    slog.info(f"Clicked element [{element_index}]: {element['text']} at ({x_pixel}, {y_pixel})")
+                else:
+                    action_entry["description"] = f"المان با شماره {element_index} پیدا نشد"
+                    action_entry["status"] = "failed"
+                    slog.warning(f"Invalid element index: {element_index}, available: 0-{len(current_elements)-1}")
+
+            # کلیک قدیمی با درصد (برای backward compatibility)
+            elif action == "click":
                 x_percent = params.get("x", 50)
                 y_percent = params.get("y", 50)
 
