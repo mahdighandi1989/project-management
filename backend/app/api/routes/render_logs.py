@@ -4575,18 +4575,18 @@ async def inject_bridge_script(
                 # تشخیص بهتر نوع مشکل
                 error_response = {
                     "success": False,
-                    "need_custom_path": True
+                    "need_custom_path": True,
+                    "found_html_files": found_html_files,  # همیشه برگردون
+                    "framework_detected": "Next.js" if is_nextjs else ("Nuxt" if is_nuxt else ("Gatsby" if is_gatsby else None))
                 }
 
                 if is_framework_without_html:
                     error_response["error"] = "این پروژه از فریم‌ورکی استفاده می‌کند که HTML در زمان build ساخته می‌شود"
-                    error_response["framework_detected"] = "Next.js" if is_nextjs else ("Nuxt" if is_nuxt else "Gatsby")
                     error_response["hint"] = "برای این نوع پروژه‌ها، باید فایل _document.js یا _app.js را ویرایش کنید یا از روش دیگری استفاده کنید"
                     error_response["alternative_hint"] = "می‌توانید اسکریپت Bridge را مستقیماً در کد پروژه اضافه کنید"
                 elif found_html_files:
                     error_response["error"] = "فایل HTML اصلی به‌صورت خودکار پیدا نشد"
                     error_response["hint"] = "فایل‌های HTML زیر پیدا شدند - یکی را انتخاب کنید:"
-                    error_response["found_html_files"] = found_html_files
                 else:
                     error_response["error"] = "هیچ فایل HTML در پروژه یافت نشد"
                     error_response["hint"] = "مسیر فایل HTML را دستی وارد کنید یا مطمئن شوید پروژه فایل HTML دارد"
