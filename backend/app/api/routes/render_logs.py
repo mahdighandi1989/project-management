@@ -4372,8 +4372,30 @@ async def inject_bridge_script(
 
         # استخراج owner/repo از github_path
         github_path = getattr(project, 'github_path', None)
+
+        # اگر github_path خالی بود، چک کن شاید در extra_data باشد
         if not github_path:
-            return {"success": False, "error": "این پروژه به GitHub متصل نیست. لطفاً ابتدا پروژه را از GitHub ایمپورت کنید."}
+            extra_data = getattr(project, 'extra_data', None)
+            if extra_data:
+                try:
+                    extra = json.loads(extra_data) if isinstance(extra_data, str) else extra_data
+                    github_path = extra.get('github_path') or extra.get('github_url') or extra.get('repository_url')
+                except:
+                    pass
+
+        if not github_path:
+            # برگرداندن اطلاعات تشخیصی
+            return {
+                "success": False,
+                "error": "این پروژه به GitHub متصل نیست.",
+                "debug_info": {
+                    "project_id": project.id,
+                    "project_name": project.name,
+                    "github_path": getattr(project, 'github_path', 'N/A'),
+                    "extra_data_preview": str(getattr(project, 'extra_data', ''))[:200] if getattr(project, 'extra_data', None) else None,
+                    "hint": "برای اتصال، از قسمت تنظیمات پروژه آدرس GitHub را وارد کنید"
+                }
+            }
 
         # پارس کردن github_path که می‌تواند به فرمت‌های مختلف باشد:
         # - owner/repo
@@ -4577,4 +4599,58 @@ async def check_bridge_status(
 
     except Exception as e:
         slog.error("Check bridge status failed", exception=e)
+        return {"success": False, "error": str(e)}
+
+
+class SetGitHubPathRequest(BaseModel):
+    """درخواست تنظیم آدرس GitHub برای پروژه"""
+    project_id: str
+    github_path: str  # مثال: owner/repo یا https://github.com/owner/repo
+
+
+@router.post("/inspector/set-github-path")
+async def set_project_github_path(
+    request: SetGitHubPathRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    🔗 تنظیم آدرس GitHub برای پروژه
+
+    این endpoint برای پروژه‌هایی که github_path ندارند یا اشتباه است.
+    """
+    from ...models.project import Project
+
+    slog.api_request("POST", "/inspector/set-github-path",
+        project_id=request.project_id,
+        github_path=request.github_path
+    )
+
+    try:
+        project = db.query(Project).filter(Project.id == request.project_id).first()
+        if not project:
+            return {"success": False, "error": "پروژه یافت نشد"}
+
+        # نرمال‌سازی github_path
+        github_path = request.github_path.strip()
+        github_path = github_path.replace("https://github.com/", "").replace(".git", "").strip("/")
+
+        # اعتبارسنجی فرمت
+        parts = github_path.split("/")
+        if len(parts) < 2:
+            return {"success": False, "error": "فرمت نامعتبر. باید به شکل owner/repo باشد"}
+
+        # ذخیره
+        project.github_path = github_path
+        db.commit()
+
+        slog.info(f"GitHub path set for project", project_id=request.project_id, github_path=github_path)
+
+        return {
+            "success": True,
+            "message": f"آدرس GitHub با موفقیت تنظیم شد: {github_path}",
+            "github_path": github_path
+        }
+
+    except Exception as e:
+        slog.error("Set GitHub path failed", exception=e)
         return {"success": False, "error": str(e)}

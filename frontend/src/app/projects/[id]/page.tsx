@@ -393,6 +393,11 @@ export default function ProjectDetailPage() {
     has_bridge: false
   });
 
+  // 🔗 دیالوگ تنظیم آدرس GitHub
+  const [showGitHubPathDialog, setShowGitHubPathDialog] = useState(false);
+  const [gitHubPathInput, setGitHubPathInput] = useState('');
+  const [settingGitHubPath, setSettingGitHubPath] = useState(false);
+
   const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
   const [selectedLog, setSelectedLog] = useState<ActivityLog | null>(null);
   const [reports, setReports] = useState<ProjectReport[]>([]);
@@ -1314,6 +1319,42 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         injecting: false,
         error: 'خطا در ارتباط با سرور'
       }));
+    }
+  };
+
+  // 🔗 تنظیم آدرس GitHub برای پروژه
+  const setGitHubPath = async () => {
+    if (!gitHubPathInput.trim()) {
+      showError('لطفاً آدرس GitHub را وارد کنید');
+      return;
+    }
+
+    setSettingGitHubPath(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/set-github-path`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: projectId,
+          github_path: gitHubPathInput.trim()
+        })
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        showSuccess(data.message || 'آدرس GitHub تنظیم شد');
+        setShowGitHubPathDialog(false);
+        setGitHubPathInput('');
+        // بررسی مجدد وضعیت Bridge
+        checkBridgeStatus();
+      } else {
+        showError(data.error || 'خطا در تنظیم آدرس');
+      }
+    } catch (err) {
+      showError('خطا در ارتباط با سرور');
+    } finally {
+      setSettingGitHubPath(false);
     }
   };
 
@@ -7999,15 +8040,26 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 {inspectorPowerOn && (
                   <div className="mt-3 flex flex-col items-center">
                     <button
-                      onClick={toggleBridgeScript}
+                      onClick={() => {
+                        // اگر خطای عدم اتصال به GitHub داشت، دیالوگ باز شود
+                        if (inspectorBridgeStatus.error?.includes('GitHub متصل نیست')) {
+                          setShowGitHubPathDialog(true);
+                        } else {
+                          toggleBridgeScript();
+                        }
+                      }}
                       disabled={inspectorBridgeStatus.checking || inspectorBridgeStatus.injecting}
                       className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
                         inspectorBridgeStatus.has_bridge
                           ? 'bg-green-500 text-white hover:bg-green-600'
+                          : inspectorBridgeStatus.error?.includes('GitHub')
+                          ? 'bg-yellow-500 text-white hover:bg-yellow-600'
                           : 'bg-orange-500 text-white hover:bg-orange-600'
                       } ${(inspectorBridgeStatus.checking || inspectorBridgeStatus.injecting) ? 'opacity-50 cursor-wait' : ''}`}
                       title={inspectorBridgeStatus.has_bridge
                         ? 'حذف اسکریپت رصد از پروژه'
+                        : inspectorBridgeStatus.error?.includes('GitHub')
+                        ? 'اتصال به GitHub'
                         : 'فعال‌سازی رصد کلیک/تایپ داخل پروژه'}
                     >
                       {inspectorBridgeStatus.checking ? (
@@ -8016,6 +8068,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         '⏳ در حال اعمال...'
                       ) : inspectorBridgeStatus.has_bridge ? (
                         '🌉 Bridge فعال'
+                      ) : inspectorBridgeStatus.error?.includes('GitHub') ? (
+                        '⚠️ اتصال GitHub'
                       ) : (
                         '🔗 فعال‌سازی Bridge'
                       )}
@@ -8023,11 +8077,48 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     <span className="text-[10px] text-gray-500 mt-1 text-center max-w-[90px]">
                       {inspectorBridgeStatus.has_bridge
                         ? 'رصد کلیک/تایپ فعال'
+                        : inspectorBridgeStatus.error?.includes('GitHub')
+                        ? 'ابتدا GitHub را وصل کنید'
                         : 'برای رصد کامل فعال کنید'}
                     </span>
-                    {inspectorBridgeStatus.error && (
+                    {inspectorBridgeStatus.error && !inspectorBridgeStatus.error.includes('GitHub') && (
                       <span className="text-[10px] text-red-500 mt-0.5">{inspectorBridgeStatus.error}</span>
                     )}
+                  </div>
+                )}
+
+                {/* 🔗 دیالوگ تنظیم آدرس GitHub */}
+                {showGitHubPathDialog && (
+                  <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowGitHubPathDialog(false)}>
+                    <div className="bg-white dark:bg-gray-800 rounded-xl p-6 max-w-md w-full mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
+                      <h3 className="text-lg font-bold mb-4 text-gray-900 dark:text-white">🔗 اتصال به GitHub</h3>
+                      <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                        برای فعال‌سازی Bridge، آدرس ریپوی GitHub پروژه را وارد کنید:
+                      </p>
+                      <input
+                        type="text"
+                        value={gitHubPathInput}
+                        onChange={(e) => setGitHubPathInput(e.target.value)}
+                        placeholder="مثال: username/repo-name"
+                        className="w-full px-4 py-2 border rounded-lg mb-4 text-left dir-ltr dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                        dir="ltr"
+                      />
+                      <div className="flex gap-2 justify-end">
+                        <button
+                          onClick={() => setShowGitHubPathDialog(false)}
+                          className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg dark:text-gray-300 dark:hover:bg-gray-700"
+                        >
+                          انصراف
+                        </button>
+                        <button
+                          onClick={setGitHubPath}
+                          disabled={settingGitHubPath || !gitHubPathInput.trim()}
+                          className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50"
+                        >
+                          {settingGitHubPath ? '⏳ در حال ذخیره...' : '✓ ذخیره'}
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>
