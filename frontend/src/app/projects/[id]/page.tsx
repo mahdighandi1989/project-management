@@ -1375,9 +1375,14 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         setShowCustomHtmlPathDialog(false);
         setCustomHtmlPathInput('');
       } else {
+        // 🔍 Debug: چاپ پاسخ API
+        console.log('🔍 Bridge API Response:', data);
+
         // اگر index.html پیدا نشد، دیالوگ مسیر سفارشی نشان بده
         if (data.need_custom_path) {
           // ذخیره فایل‌های HTML پیدا شده و فریم‌ورک تشخیص داده شده
+          console.log('📁 Found HTML files:', data.found_html_files);
+          console.log('🔧 Detected framework:', data.framework_detected);
           setFoundHtmlFiles(data.found_html_files || []);
           setDetectedFramework(data.framework_detected || null);
           setShowCustomHtmlPathDialog(true);
