@@ -537,45 +537,39 @@ async def analyze_with_vision_ai(
         ])
 
     # ساخت پیام با تصویر
-    system_prompt = """شما یک AI Agent هستید که می‌توانید صفحات وب را کنترل کنید.
+    system_prompt = """شما یک AI Agent هستید که صفحات وب را کنترل می‌کنید.
 
 ## قابلیت‌های شما:
-1. **click**: کلیک روی المان - نیاز به مختصات x,y (درصد از عرض و ارتفاع صفحه، 0-100)
-2. **type**: تایپ متن در فیلد فعلی
-3. **scroll**: اسکرول صفحه (up/down)
-4. **wait**: صبر کردن
-5. **done**: کار تمام شد
+1. **click**: کلیک روی المان - x,y به درصد (0-100)
+2. **type**: تایپ متن
+3. **scroll**: اسکرول (up/down)
+4. **wait**: صبر
+5. **done**: فقط وقتی واقعاً کار تمام شد
 
-## قوانین مهم:
-- تصویر صفحه را دقیق ببینید
-- مختصات را به صورت درصد بدهید (مثلا x:50, y:30 یعنی وسط افقی، 30% از بالا)
-- هر بار فقط یک اقدام پیشنهاد دهید
-- اگر کار تمام شد، action را "done" قرار دهید
+## قوانین حیاتی:
+- مختصات به درصد: x=50 یعنی وسط افقی، y=30 یعنی 30% از بالا
+- هر بار فقط یک اقدام
+- اگر وظیفه "برو به صفحه X" است، باید روی لینک یا منوی مربوطه کلیک کنی
+- اگر وظیفه "لاگین کن" است، فیلدها را پر کن و دکمه را بزن
+- فقط وقتی done بگو که واقعاً به هدف رسیدی
+- اگر صفحه خالی یا loading است، wait کن
 
-## فرمت پاسخ (JSON):
-```json
+## فرمت پاسخ (فقط JSON خالص):
 {
-    "thinking": "توضیح کوتاه از آنچه می‌بینم و تصمیمم",
-    "action": "click|type|scroll|wait|done",
-    "params": {
-        "x": 50,           // برای click - درصد افقی
-        "y": 30,           // برای click - درصد عمودی
-        "text": "...",     // برای type
-        "direction": "down", // برای scroll
-        "seconds": 1       // برای wait
-    },
-    "element_description": "توضیح المانی که روی آن کلیک می‌کنم",
-    "is_complete": false,
-    "next_expectation": "انتظار دارم بعد از این اقدام چه اتفاقی بیفتد"
-}
-```"""
+    "thinking": "چه می‌بینم و چه می‌کنم",
+    "action": "click",
+    "params": {"x": 50, "y": 30},
+    "element_description": "دکمه/لینک X",
+    "is_complete": false
+}"""
 
-    user_prompt = f"""## وظیفه کاربر:
+    user_prompt = f"""## وظیفه:
 {task}
 {previous_context}
 
-## تصویر فعلی صفحه:
-(تصویر پیوست شده)
+## تصویر صفحه پیوست شده.
+
+مهم: تصویر را دقیق ببین. المان مورد نظر را پیدا کن و مختصاتش را تخمین بزن.
 
 لطفا تصویر را تحلیل کنید و اقدام بعدی را مشخص کنید."""
 
@@ -599,12 +593,50 @@ async def analyze_with_vision_ai(
 
         # تلاش برای parse JSON
         try:
-            # پیدا کردن JSON در پاسخ
-            json_match = re.search(r'\{[\s\S]*?\}', response.content)
-            if json_match:
-                result = json.loads(json_match.group())
-                slog.info(f"AI Vision decision", action=result.get("action"), thinking=result.get("thinking", "")[:100])
+            # پیدا کردن JSON در پاسخ - با پشتیبانی از nested objects
+            content = response.content
+
+            # ابتدا سعی کن کل پاسخ را parse کنی
+            try:
+                result = json.loads(content)
+                slog.info(f"AI Vision decision (direct parse)", action=result.get("action"), thinking=result.get("thinking", "")[:100])
                 return result
+            except:
+                pass
+
+            # پیدا کردن JSON block در پاسخ
+            # ابتدا markdown code block
+            code_block_match = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', content)
+            if code_block_match:
+                try:
+                    result = json.loads(code_block_match.group(1))
+                    slog.info(f"AI Vision decision (code block)", action=result.get("action"), thinking=result.get("thinking", "")[:100])
+                    return result
+                except:
+                    pass
+
+            # پیدا کردن JSON با شمارش براکت‌ها
+            start_idx = content.find('{')
+            if start_idx != -1:
+                bracket_count = 0
+                end_idx = start_idx
+                for i, char in enumerate(content[start_idx:]):
+                    if char == '{':
+                        bracket_count += 1
+                    elif char == '}':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            end_idx = start_idx + i + 1
+                            break
+
+                json_str = content[start_idx:end_idx]
+                try:
+                    result = json.loads(json_str)
+                    slog.info(f"AI Vision decision (bracket count)", action=result.get("action"), thinking=result.get("thinking", "")[:100])
+                    return result
+                except Exception as e:
+                    slog.warning(f"JSON parse failed", error=str(e), json_str=json_str[:200])
+
         except Exception as parse_error:
             slog.warning(f"JSON parse failed", error=str(parse_error), content=response.content[:200])
 
