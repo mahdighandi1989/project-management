@@ -258,6 +258,9 @@ class BrowserSession:
             return {"success": False, "error": "No page"}
 
         handle_index = element_info.get("handle_index", -1)
+        element_text = element_info.get("text", "unknown")
+
+        slog.info(f"🖱️ Attempting direct click on '{element_text}', handle_index={handle_index}, total_handles={len(self._element_handles)}")
 
         if handle_index < 0 or handle_index >= len(self._element_handles):
             # Fallback به کلیک با مختصات
@@ -268,26 +271,41 @@ class BrowserSession:
         old_url = self.page.url
 
         try:
+            # چک کنیم المان هنوز موجود و visible هست
+            is_visible = await element_handle.is_visible()
+            slog.info(f"Element visible check: {is_visible}")
+
+            if not is_visible:
+                slog.warning(f"Element not visible, trying coordinate click")
+                return await self.click(element_info["center_x"], element_info["center_y"])
+
             # کلیک مستقیم روی المان - Playwright خودش scroll می‌کند اگر لازم باشد
+            slog.info(f"🖱️ Executing element.click() on '{element_text}'")
             await element_handle.click(timeout=5000)
+            slog.info(f"✅ Click executed on '{element_text}'")
 
             # صبر برای navigation
-            await self.page.wait_for_timeout(500)
+            await self.page.wait_for_timeout(1000)  # بیشتر صبر کن
 
-            if self.page.url != old_url:
+            new_url = self.page.url
+            slog.info(f"URL after click: old={old_url}, new={new_url}")
+
+            if new_url != old_url:
                 await self.page.wait_for_load_state('networkidle', timeout=10000)
-                slog.info(f"Navigation after direct click: {old_url} -> {self.page.url}")
+                slog.info(f"✅ Navigation after direct click: {old_url} -> {new_url}")
 
             return {
                 "success": True,
                 "method": "direct_click",
-                "element": element_info.get("text", ""),
-                "url": self.page.url
+                "element": element_text,
+                "url": new_url,
+                "url_changed": new_url != old_url
             }
 
         except Exception as e:
-            slog.warning(f"Direct click failed, trying coordinate click", error=str(e))
+            slog.warning(f"❌ Direct click failed on '{element_text}'", error=str(e))
             # Fallback به کلیک با مختصات
+            slog.info(f"Trying coordinate fallback: x={element_info['center_x']}, y={element_info['center_y']}")
             return await self.click(element_info["center_x"], element_info["center_y"])
 
     async def click_element_by_index(self, elements: List[Dict], index: int) -> Dict:
