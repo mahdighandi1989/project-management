@@ -876,7 +876,9 @@ async def analyze_with_vision_ai(
     screenshot_base64: str,
     task: str,
     previous_actions: List[Dict] = None,
-    interactive_elements: List[Dict] = None  # 🆕 لیست المان‌های قابل کلیک
+    interactive_elements: List[Dict] = None,  # 🆕 لیست المان‌های قابل کلیک
+    current_url: str = None,  # 🆕 URL فعلی صفحه
+    initial_url: str = None   # 🆕 URL اولیه برای مقایسه
 ) -> Dict:
     """
     تحلیل screenshot با AI Vision و تصمیم‌گیری برای اقدام بعدی
@@ -890,9 +892,18 @@ async def analyze_with_vision_ai(
 
     previous_context = ""
     if previous_actions:
-        previous_context = "\n\n## اقدامات قبلی:\n" + "\n".join([
-            f"- {a.get('action')}: {a.get('description', '')}" for a in previous_actions
-        ])
+        previous_context = "\n\n## اقدامات قبلی:\n"
+        for a in previous_actions:
+            action_str = f"- {a.get('action')}: {a.get('description', '')}"
+            # 🆕 اضافه کردن نتیجه کلیک
+            if a.get('url_changed') is not None:
+                if a.get('url_changed'):
+                    action_str += f" ✅ (صفحه تغییر کرد -> {a.get('url_after', '')})"
+                else:
+                    action_str += f" ⚠️ (صفحه تغییر نکرد! هنوز همان صفحه است)"
+            if a.get('status') == 'failed':
+                action_str += f" ❌ (شکست خورد)"
+            previous_context += action_str + "\n"
 
     # ساخت لیست المان‌ها برای نمایش به AI
     elements_list = ""
@@ -901,6 +912,15 @@ async def analyze_with_vision_ai(
         for el in interactive_elements[:30]:  # حداکثر 30 المان
             href_info = f" -> {el['href']}" if el.get('href') else ""
             elements_list += f"[{el['index']}] \"{el['text']}\" ({el['tag']}{href_info})\n"
+
+    # 🆕 اطلاعات URL برای پرامپت
+    url_info = ""
+    if current_url:
+        url_info = f"\n\n## 📍 آدرس فعلی صفحه:\n{current_url}"
+        if initial_url and current_url != initial_url:
+            url_info += f"\n✅ صفحه از {initial_url} تغییر کرده است."
+        elif initial_url:
+            url_info += f"\n⚠️ هنوز در همان صفحه اولیه هستید!"
 
     # پرامپت جدید - انتخاب با index
     system_prompt = """شما یک AI Agent هستید که صفحات وب را کنترل می‌کنید.
@@ -914,18 +934,21 @@ async def analyze_with_vision_ai(
 2. **type**: تایپ متن - params: {"text": "متن"}
 3. **scroll**: اسکرول برای دیدن المان‌های بیشتر - params: {"direction": "up" یا "down"}
 4. **wait**: صبر برای لود صفحه - params: {"seconds": عدد}
-5. **done**: وظیفه انجام شد (فقط وقتی صفحه مورد نظر باز شد)
+5. **done**: وظیفه انجام شد
 
-## قوانین مهم:
+## ⚠️ قوانین مهم (حتماً رعایت کنید):
 - اگر المان مورد نظر در لیست هست، شماره‌اش را بده
 - اگر المان مورد نظر در لیست نیست، scroll کن تا پیدا شود
 - تصویر صفحه را با لیست المان‌ها تطبیق بده
-- فقط وقتی done بگو که URL صفحه تغییر کرده و به هدف رسیدی
-- اگر همان صفحه قبلی است، done نگو!
+- **🔴 فقط وقتی done بگو که:**
+  1. URL صفحه تغییر کرده باشد (در بخش "آدرس فعلی" بررسی کن)
+  2. در اقدامات قبلی ببینی که "✅ صفحه تغییر کرد" نوشته شده
+- **❌ اگر در اقدامات قبلی نوشته "⚠️ صفحه تغییر نکرد"، باید دوباره تلاش کنی!**
+- **❌ اگر هنوز URL اولیه هستی، done نگو!**
 
 ## فرمت پاسخ (فقط JSON):
 {
-    "thinking": "توضیح: چه می‌بینم، کدام المان مربوط به وظیفه است",
+    "thinking": "توضیح: چه می‌بینم، کدام المان مربوط به وظیفه است، آیا URL تغییر کرده",
     "action": "click_element",
     "params": {"index": شماره_المان},
     "element_description": "نام المان",
@@ -934,16 +957,21 @@ async def analyze_with_vision_ai(
 
     user_prompt = f"""## وظیفه:
 {task}
+{url_info}
 {previous_context}
 {elements_list}
 
 ## تصویر صفحه ضمیمه شده.
 
 **دستورالعمل:**
-1. تصویر را ببین
-2. لیست المان‌ها را بررسی کن
-3. المانی که مربوط به وظیفه "{task}" است را پیدا کن
-4. شماره (index) آن المان را در پاسخ بده
+1. ابتدا URL فعلی را ببین - آیا به هدف رسیده‌ای؟
+2. اگر URL تغییر کرده و به صفحه مورد نظر رسیدی → done بگو
+3. اگر هنوز صفحه اولیه است:
+   - تصویر را ببین
+   - لیست المان‌ها را بررسی کن
+   - المانی که مربوط به وظیفه "{task}" است را پیدا کن
+   - شماره (index) آن المان را در پاسخ بده
+4. اگر کلیک قبلی کار نکرد (صفحه تغییر نکرد)، المان دیگری امتحان کن
 
 پاسخ را فقط به فرمت JSON بده."""
 
@@ -1083,6 +1111,10 @@ async def execute_ai_agent_task(
     # ذخیره المان‌ها برای استفاده در کلیک
     current_elements = []
 
+    # 🆕 ذخیره URL اولیه برای تشخیص تغییر صفحه
+    initial_url = session.page.url if session.page else ""
+    slog.info(f"Initial URL: {initial_url}")
+
     while step < max_steps:
         step += 1
 
@@ -1101,6 +1133,9 @@ async def execute_ai_agent_task(
             slog.error(f"Screenshot failed at step {step}", exception=e)
             break
 
+        # 🆕 گرفتن URL فعلی
+        current_url = session.page.url if session.page else ""
+
         # 3. ارسال به AI Vision با لیست المان‌ها
         try:
             ai_decision = await analyze_with_vision_ai(
@@ -1109,7 +1144,9 @@ async def execute_ai_agent_task(
                 screenshot_base64=screenshot,
                 task=task,
                 previous_actions=actions_log,
-                interactive_elements=current_elements  # 🆕 ارسال لیست المان‌ها
+                interactive_elements=current_elements,  # 🆕 ارسال لیست المان‌ها
+                current_url=current_url,  # 🆕 URL فعلی
+                initial_url=initial_url   # 🆕 URL اولیه
             )
         except Exception as e:
             slog.error(f"AI analysis failed at step {step}", exception=e)
@@ -1146,13 +1183,26 @@ async def execute_ai_agent_task(
         if on_action_callback:
             await on_action_callback(action_entry)
 
-        # 4. بررسی اقدام "done" (بدون نیاز به اجرا)
+        # 4. بررسی اقدام "done" (با verification)
         if action == "done":
-            action_entry["status"] = "done"
-            action_entry["description"] = "کار تکمیل شد"
-            actions_log.append(action_entry)
-            slog.info(f"Task completed at step {step}")
-            break
+            # 🆕 بررسی آیا واقعاً URL تغییر کرده
+            url_actually_changed = current_url != initial_url
+
+            if url_actually_changed:
+                action_entry["status"] = "done"
+                action_entry["description"] = f"✅ کار تکمیل شد - صفحه تغییر کرد به: {current_url}"
+                actions_log.append(action_entry)
+                slog.info(f"Task completed at step {step} - URL changed from {initial_url} to {current_url}")
+                break
+            else:
+                # 🆕 AI اشتباه کرده - باید ادامه دهد
+                slog.warning(f"AI said 'done' but URL not changed! initial={initial_url}, current={current_url}")
+                action_entry["status"] = "rejected"
+                action_entry["description"] = f"⚠️ AI گفت تمام شد اما صفحه تغییر نکرده! ادامه می‌دهیم..."
+                action_entry["url_still_same"] = True
+                actions_log.append(action_entry)
+                # ادامه بده، break نکن!
+                continue
 
         # 5. اجرای اقدام (حتی اگر is_complete=true باشد، اول اقدام را انجام بده)
         try:
@@ -1244,8 +1294,14 @@ async def execute_ai_agent_task(
 
         # 6. بررسی is_complete بعد از اجرای اقدام
         if is_complete:
-            slog.info(f"Task marked complete after executing action at step {step}")
-            break
+            # 🆕 بررسی آیا URL واقعاً تغییر کرده
+            current_url_now = session.page.url if session.page else ""
+            if current_url_now != initial_url:
+                slog.info(f"Task marked complete after executing action at step {step} - URL changed to {current_url_now}")
+                break
+            else:
+                slog.warning(f"AI set is_complete=true but URL not changed! Continuing...")
+                # ادامه می‌دهیم، break نمی‌کنیم
 
         # 7. صبر کوتاه بین اقدامات
         await session.wait(500)

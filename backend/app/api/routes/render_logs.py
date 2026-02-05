@@ -3174,6 +3174,13 @@ async def ai_interact_with_page(
         # 🆕 اضافه کردن اطلاعات فعال‌سازی موقت به response
         response_data["temporarily_enabled"] = temporarily_enabled
 
+        # 🆕 بستن session مرورگر بعد از اتمام کار (جلوگیری از نشت حافظه)
+        try:
+            await close_session(session_id)
+            slog.info(f"Browser session closed successfully: {session_id}")
+        except Exception as close_error:
+            slog.warning(f"Failed to close browser session", session_id=session_id, error=str(close_error))
+
         return response_data
 
     except Exception as e:
@@ -3259,9 +3266,10 @@ async def synchronized_inspection(
         if request.auto_select:
             # انتخاب خودکار بهترین مدل‌های vision برای فرانت
             if not frontend_models:
-                vision_model = get_best_vision_model(ai_manager, db)
-                if vision_model:
-                    frontend_models = [vision_model]
+                # 🆕 get_best_vision_model returns tuple (model_id, temporarily_enabled)
+                vision_result = get_best_vision_model(ai_manager, db)
+                if vision_result and vision_result[0]:
+                    frontend_models = [vision_result[0]]
 
             # انتخاب خودکار مدل‌های تحلیل برای بک‌اند
             if not backend_models:
