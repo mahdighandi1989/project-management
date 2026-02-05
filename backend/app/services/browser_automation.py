@@ -579,14 +579,13 @@ async def analyze_with_vision_ai(
 
 لطفا تصویر را تحلیل کنید و اقدام بعدی را مشخص کنید."""
 
+    # ساخت پیام با فرمت صحیح - استفاده از فیلد images
     messages = [
         Message(role="system", content=system_prompt),
         Message(
             role="user",
-            content=[
-                {"type": "text", "text": user_prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_base64}"}}
-            ]
+            content=user_prompt,
+            images=[screenshot_base64]  # تصویر به صورت base64
         )
     ]
 
