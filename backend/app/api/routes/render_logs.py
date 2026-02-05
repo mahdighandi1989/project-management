@@ -4371,8 +4371,10 @@ async def inject_bridge_script(
                 "error": "توکن GitHub تنظیم نشده است"
             }
 
-        # استخراج owner/repo از github_path
+        # استخراج owner/repo از github_path یا extra_data
         github_path = getattr(project, 'github_path', None)
+        owner = None
+        repo = None
 
         # اگر github_path خالی بود، چک کن شاید در extra_data باشد
         if not github_path:
@@ -4380,9 +4382,22 @@ async def inject_bridge_script(
             if extra_data:
                 try:
                     extra = json.loads(extra_data) if isinstance(extra_data, str) else extra_data
-                    github_path = extra.get('github_path') or extra.get('github_url') or extra.get('repository_url')
-                except:
-                    pass
+
+                    # روش 1: github_path یا github_url مستقیم
+                    github_path = extra.get('github_path') or extra.get('github_url') or extra.get('repository_url') or extra.get('source_url') or extra.get('clone_url')
+
+                    # روش 2: owner و repo جداگانه
+                    if not github_path and extra.get('owner') and extra.get('repo'):
+                        owner = extra.get('owner')
+                        repo = extra.get('repo')
+                        github_path = f"{owner}/{repo}"
+
+                        # 🆕 خودکار ست کردن github_path برای دفعات بعد
+                        project.github_path = github_path
+                        db.commit()
+                        slog.info(f"Auto-set github_path from extra_data: {github_path}")
+                except Exception as e:
+                    slog.warn(f"Failed to parse extra_data: {e}")
 
         if not github_path:
             # برگرداندن اطلاعات تشخیصی
@@ -4415,54 +4430,12 @@ async def inject_bridge_script(
         }
 
         async with httpx.AsyncClient() as client:
-            # یافتن index.html در مسیرهای مختلف
-            possible_paths = [
-                # React / Vite / Vue
-                "index.html",
-                "public/index.html",
-                "src/index.html",
-                # Build outputs
-                "dist/index.html",
-                "build/index.html",
-                ".next/server/pages/index.html",
-                "out/index.html",
-                # Python/Flask/Django
-                "app/templates/index.html",
-                "templates/index.html",
-                "frontend/index.html",
-                "frontend/public/index.html",
-                "client/index.html",
-                "client/public/index.html",
-                # Monorepo structures
-                "packages/frontend/index.html",
-                "packages/web/index.html",
-                "apps/web/index.html",
-                "apps/frontend/index.html",
-            ]
-
             index_path = None
             index_content = None
             index_sha = None
 
-            for path in possible_paths:
-                try:
-                    res = await client.get(
-                        f"https://api.github.com/repos/{owner}/{repo}/contents/{path}",
-                        headers=headers,
-                        timeout=10.0
-                    )
-                    if res.status_code == 200:
-                        data = res.json()
-                        if data.get("encoding") == "base64":
-                            index_content = base64.b64decode(data["content"]).decode('utf-8')
-                            index_sha = data["sha"]
-                            index_path = path
-                            break
-                except:
-                    continue
-
             # اگر مسیر سفارشی داده شده، اول آن را امتحان کن
-            if request.custom_path and not index_path:
+            if request.custom_path:
                 try:
                     res = await client.get(
                         f"https://api.github.com/repos/{owner}/{repo}/contents/{request.custom_path}",
@@ -4482,12 +4455,89 @@ async def inject_bridge_script(
                         "detail": str(e)
                     }
 
+            # 🆕 جستجوی هوشمند: دریافت لیست تمام فایل‌های پروژه از GitHub
+            if not index_path:
+                try:
+                    tree_res = await client.get(
+                        f"https://api.github.com/repos/{owner}/{repo}/git/trees/main?recursive=1",
+                        headers=headers,
+                        timeout=15.0
+                    )
+
+                    # اگر branch main نبود، master را امتحان کن
+                    if tree_res.status_code == 404:
+                        tree_res = await client.get(
+                            f"https://api.github.com/repos/{owner}/{repo}/git/trees/master?recursive=1",
+                            headers=headers,
+                            timeout=15.0
+                        )
+
+                    if tree_res.status_code == 200:
+                        tree_data = tree_res.json()
+                        all_files = [item["path"] for item in tree_data.get("tree", []) if item["type"] == "blob"]
+
+                        # فیلتر فایل‌های HTML
+                        html_files = [f for f in all_files if f.endswith('.html')]
+
+                        # امتیازدهی به فایل‌ها برای پیدا کردن بهترین گزینه
+                        def score_html_file(path: str) -> int:
+                            score = 0
+                            path_lower = path.lower()
+
+                            # فایل‌هایی که index.html هستند امتیاز بالا
+                            if path_lower.endswith('index.html'):
+                                score += 100
+
+                            # مسیرهای ترجیحی
+                            preferred_dirs = ['public/', 'src/', 'frontend/', 'client/', 'web/', 'app/']
+                            for pref in preferred_dirs:
+                                if pref in path_lower:
+                                    score += 50
+
+                            # جریمه برای build/dist (فایل‌های خروجی)
+                            if 'dist/' in path_lower or 'build/' in path_lower or 'node_modules/' in path_lower:
+                                score -= 30
+
+                            # جریمه برای مسیرهای عمیق
+                            depth = path.count('/')
+                            score -= depth * 5
+
+                            return score
+
+                        # مرتب‌سازی بر اساس امتیاز
+                        html_files_scored = [(f, score_html_file(f)) for f in html_files]
+                        html_files_scored.sort(key=lambda x: -x[1])
+
+                        # بهترین فایل را انتخاب کن
+                        for html_path, score in html_files_scored[:5]:  # 5 کاندید برتر را بررسی کن
+                            try:
+                                content_res = await client.get(
+                                    f"https://api.github.com/repos/{owner}/{repo}/contents/{html_path}",
+                                    headers=headers,
+                                    timeout=10.0
+                                )
+                                if content_res.status_code == 200:
+                                    data = content_res.json()
+                                    if data.get("encoding") == "base64":
+                                        content = base64.b64decode(data["content"]).decode('utf-8')
+                                        # بررسی که فایل HTML معتبر باشد (داشتن تگ‌های اصلی)
+                                        if '<html' in content.lower() or '<!doctype' in content.lower() or '<head' in content.lower():
+                                            index_content = content
+                                            index_sha = data["sha"]
+                                            index_path = html_path
+                                            slog.info(f"Smart search found HTML file: {html_path} (score: {score})")
+                                            break
+                            except:
+                                continue
+
+                except Exception as e:
+                    slog.warn(f"Smart HTML search failed: {e}")
+
             if not index_path:
                 return {
                     "success": False,
-                    "error": "فایل index.html در پروژه یافت نشد",
-                    "searched_paths": possible_paths,
-                    "hint": "می‌توانید مسیر سفارشی فایل HTML را وارد کنید (مثال: frontend/public/index.html)",
+                    "error": "فایل HTML اصلی پروژه یافت نشد",
+                    "hint": "می‌توانید مسیر فایل HTML را دستی وارد کنید",
                     "need_custom_path": True
                 }
 

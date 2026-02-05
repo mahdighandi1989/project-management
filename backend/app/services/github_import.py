@@ -542,6 +542,11 @@ class GitHubImportService:
                     "primary_language": import_result.get("primary_language"),
                 }
 
+                # ساخت github_path از owner و repo
+                github_path = None
+                if import_result.get("owner") and import_result.get("repo"):
+                    github_path = f"{import_result['owner']}/{import_result['repo']}"
+
                 if existing:
                     # بروزرسانی
                     existing.name = import_result["name"]
@@ -550,6 +555,9 @@ class GitHubImportService:
                     existing.structure = json.dumps(structure, ensure_ascii=False)
                     existing.extra_data = json.dumps(metadata, ensure_ascii=False)
                     existing.status = "imported"
+                    # 🆕 ست کردن github_path
+                    if github_path:
+                        existing.github_path = github_path
                 else:
                     # ایجاد جدید
                     project = Project(
@@ -562,6 +570,7 @@ class GitHubImportService:
                         features=json.dumps(import_result.get("topics", []), ensure_ascii=False),
                         structure=json.dumps(structure, ensure_ascii=False),
                         extra_data=json.dumps(metadata, ensure_ascii=False),
+                        github_path=github_path,  # 🆕 ست کردن github_path
                     )
                     db.add(project)
 
