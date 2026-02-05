@@ -884,15 +884,13 @@ export default function ProjectDetailPage() {
     }, 2000);
   };
 
-  // 🆕 اسکن بصری با نوارهای متحرک سبز - نوارها از ابتدا حرکت می‌کنند
+  // 🆕 اسکن بصری واقعی - نوارها از روی المان‌ها رد می‌شوند و واقعاً چک می‌کنند
   const runVisualScan = async (searchText: string) => {
     if (!inspectorFrontendUrl) return;
 
-    // متغیر برای کنترل انیمیشن
-    let scanComplete = false;
-    let targetPosition: { x: number; y: number; text: string } | null = null;
+    const searchLower = searchText.toLowerCase();
 
-    // شروع انیمیشن اسکن - فوری!
+    // شروع اسکن
     setInspectorScanBars({
       verticalX: 0,
       horizontalY: 0,
@@ -901,130 +899,107 @@ export default function ProjectDetailPage() {
       intersection: null
     });
 
-    // 🆕 تابع انیمیشن اسکن - از ابتدا شروع می‌شود
-    const runScanAnimation = async () => {
-      let x = 0;
-      let y = 0;
-
-      // اسکن ردیف به ردیف و ستون به ستون
-      while (!scanComplete && (x <= 100 || y <= 100)) {
-        // حرکت نوار عمودی (از چپ به راست)
-        if (x <= 100) {
-          x += 1;
-          setInspectorScanBars(prev => ({ ...prev, verticalX: Math.min(x, 100) }));
-        }
-
-        // حرکت نوار افقی (از بالا به پایین) - کمی آهسته‌تر
-        if (y <= 100 && x % 2 === 0) {
-          y += 1;
-          setInspectorScanBars(prev => ({ ...prev, horizontalY: Math.min(y, 100) }));
-        }
-
-        // اگر هدف پیدا شد، سریع برو سمتش
-        if (targetPosition) {
-          // انیمیشن سریع به سمت هدف
-          const targetX = targetPosition.x;
-          const targetY = targetPosition.y;
-
-          // حرکت سریع به سمت X هدف
-          while (Math.abs(x - targetX) > 1) {
-            x += (targetX > x ? 3 : -3);
-            x = Math.max(0, Math.min(100, x));
-            setInspectorScanBars(prev => ({ ...prev, verticalX: x }));
-            await new Promise(resolve => setTimeout(resolve, 15));
-          }
-
-          // حرکت سریع به سمت Y هدف
-          while (Math.abs(y - targetY) > 1) {
-            y += (targetY > y ? 3 : -3);
-            y = Math.max(0, Math.min(100, y));
-            setInspectorScanBars(prev => ({ ...prev, horizontalY: y }));
-            await new Promise(resolve => setTimeout(resolve, 15));
-          }
-
-          // رسیدیم به هدف!
-          setInspectorScanBars(prev => ({
-            ...prev,
-            verticalX: targetX,
-            horizontalY: targetY,
-            targetFound: true,
-            intersection: targetPosition
-          }));
-
-          break;
-        }
-
-        await new Promise(resolve => setTimeout(resolve, 25)); // سرعت اسکن
-      }
-    };
-
-    // 🆕 همزمان: شروع انیمیشن + صدا زدن API
-    const animationPromise = runScanAnimation();
-
     try {
-      // صدا زدن API همزمان با انیمیشن
-      const res = await fetch(`${API_BASE}/api/render/inspector/visual-scan`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: inspectorFrontendUrl,
-          search_text: searchText,
-          click_on_find: true
-        })
+      // 1. ابتدا لیست همه المان‌های صفحه را بگیر
+      const elementsRes = await fetch(`${API_BASE}/api/render/inspector/get-elements?url=${encodeURIComponent(inspectorFrontendUrl)}`, {
+        method: 'POST'
       });
+      const elementsData = await elementsRes.json();
 
-      const data = await res.json();
+      if (!elementsData.success || !elementsData.elements?.length) {
+        // المانی نیست - اسکن کامل صفحه نمایشی
+        for (let p = 0; p <= 100; p += 2) {
+          setInspectorScanBars(prev => ({ ...prev, verticalX: p, horizontalY: p }));
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        setInspectorScanBars(prev => ({ ...prev, scanning: false }));
+        return { success: false, message: 'المانی در صفحه پیدا نشد' };
+      }
 
-      if (data.success && data.target_position) {
-        // هدف پیدا شد! به انیمیشن اطلاع بده
-        targetPosition = {
-          x: data.target_position.x,
-          y: data.target_position.y,
-          text: data.message || searchText
-        };
-        scanComplete = true;
+      const elements = elementsData.elements;
 
-        // صبر کن انیمیشن به هدف برسد
-        await animationPromise;
+      // 2. اسکن واقعی - یکی یکی از روی المان‌ها رد شو و چکشان کن
+      for (let i = 0; i < elements.length; i++) {
+        const el = elements[i];
+        const percentX = el.percent_x;
+        const percentY = el.percent_y;
 
-        // نمایش cursor روی هدف
-        setInspectorVirtualCursor({
-          x: targetPosition.x,
-          y: targetPosition.y,
-          visible: true,
-          model_id: `🎯 ${targetPosition.text}`
-        });
-
-        // پنهان کردن بعد از 3 ثانیه
-        setTimeout(() => {
-          setInspectorScanBars(prev => ({
-            ...prev,
-            scanning: false,
-            targetFound: false,
-            intersection: null
-          }));
-          setInspectorVirtualCursor(prev => ({ ...prev, visible: false }));
-        }, 3000);
-
-        return data;
-      } else {
-        // پیدا نشد - اسکن کامل شود
-        scanComplete = true;
-        await animationPromise;
-
-        // نوارها را به انتها ببر
+        // حرکت نوارها به سمت این المان (انیمیشن آرام)
         setInspectorScanBars(prev => ({
           ...prev,
-          verticalX: 100,
-          horizontalY: 100
+          verticalX: percentX,
+          horizontalY: percentY
         }));
 
-        await new Promise(resolve => setTimeout(resolve, 500));
-        setInspectorScanBars(prev => ({ ...prev, scanning: false }));
-        return { success: false, message: 'پیدا نشد' };
+        // صبر برای نمایش اسکن (80ms = سرعت قابل مشاهده)
+        await new Promise(resolve => setTimeout(resolve, 80));
+
+        // 3. چک واقعی: آیا متن این المان با جستجو مطابقت دارد؟
+        const elText = (el.text || '').toLowerCase();
+        const elHref = (el.href || '').toLowerCase();
+
+        if (elText.includes(searchLower) || elHref.includes(searchLower)) {
+          // ✅ پیدا شد!
+          console.log(`🎯 Found: "${el.text}" at (${percentX}%, ${percentY}%)`);
+
+          // نمایش هدف پیدا شده
+          setInspectorScanBars(prev => ({
+            ...prev,
+            targetFound: true,
+            intersection: { x: percentX, y: percentY, text: el.text || searchText }
+          }));
+
+          // نمایش cursor
+          setInspectorVirtualCursor({
+            x: percentX,
+            y: percentY,
+            visible: true,
+            model_id: `🎯 ${el.text || searchText}`
+          });
+
+          await new Promise(resolve => setTimeout(resolve, 500));
+
+          // 4. کلیک روی المان پیدا شده
+          const clickRes = await fetch(`${API_BASE}/api/render/inspector/click-at?url=${encodeURIComponent(inspectorFrontendUrl)}&x=${el.center_x}&y=${el.center_y}`, {
+            method: 'POST'
+          });
+          const clickData = await clickRes.json();
+
+          // پنهان کردن بعد از 3 ثانیه
+          setTimeout(() => {
+            setInspectorScanBars(prev => ({
+              ...prev,
+              scanning: false,
+              targetFound: false,
+              intersection: null
+            }));
+            setInspectorVirtualCursor(prev => ({ ...prev, visible: false }));
+          }, 3000);
+
+          return {
+            success: true,
+            message: `پیدا شد: ${el.text}`,
+            target_position: { x: percentX, y: percentY },
+            clicked: true,
+            url_changed: clickData?.url_changed || false
+          };
+        }
       }
+
+      // 5. همه المان‌ها چک شدند ولی پیدا نشد
+      console.log(`❌ Not found: "${searchText}" - checked ${elements.length} elements`);
+      setInspectorScanBars(prev => ({
+        ...prev,
+        verticalX: 100,
+        horizontalY: 100
+      }));
+      await new Promise(resolve => setTimeout(resolve, 300));
+      setInspectorScanBars(prev => ({ ...prev, scanning: false }));
+
+      return { success: false, message: `"${searchText}" پیدا نشد` };
+
     } catch (error) {
-      scanComplete = true;
+      console.error('Visual scan error:', error);
       setInspectorScanBars(prev => ({ ...prev, scanning: false }));
       throw error;
     }

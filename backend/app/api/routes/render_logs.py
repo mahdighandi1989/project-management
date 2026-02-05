@@ -3220,6 +3220,81 @@ class VisualScanRequest(BaseModel):
     click_on_find: bool = True  # آیا بعد از پیدا کردن کلیک کند
 
 
+@router.post("/inspector/get-elements")
+async def get_page_elements(url: str):
+    """
+    🔍 دریافت همه المان‌های صفحه برای اسکن واقعی در فرانت‌اند
+
+    این endpoint صفحه را باز می‌کند و لیست همه المان‌های قابل کلیک را
+    با موقعیت دقیقشان برمی‌گرداند. فرانت‌اند می‌تواند این المان‌ها را
+    یکی یکی اسکن کند.
+    """
+    import uuid
+    from ...services.browser_automation import create_session, close_session
+
+    session_id = str(uuid.uuid4())[:8]
+
+    slog.api_request("POST", "/inspector/get-elements", url=url)
+
+    try:
+        session = await create_session(session_id, url)
+
+        # استخراج همه المان‌های قابل کلیک
+        elements = await session.extract_interactive_elements()
+
+        # مرتب‌سازی بر اساس موقعیت: از بالا به پایین، چپ به راست
+        elements_sorted = sorted(elements, key=lambda e: (e["center_y"], e["center_x"]))
+
+        await close_session(session_id)
+
+        return {
+            "success": True,
+            "elements": elements_sorted,
+            "total": len(elements_sorted)
+        }
+
+    except Exception as e:
+        slog.error("Get elements failed", exception=e)
+        try:
+            await close_session(session_id)
+        except:
+            pass
+        return {"success": False, "error": str(e), "elements": []}
+
+
+@router.post("/inspector/click-at")
+async def click_at_position(url: str, x: float, y: float):
+    """
+    🖱️ کلیک در موقعیت مشخص (پیکسل)
+    """
+    import uuid
+    from ...services.browser_automation import create_session, close_session
+
+    session_id = str(uuid.uuid4())[:8]
+
+    try:
+        session = await create_session(session_id, url)
+        result = await session.click(x, y)
+        await session.wait(1000)
+        new_url = session.page.url if session.page else url
+        await close_session(session_id)
+
+        return {
+            "success": True,
+            "clicked_at": {"x": x, "y": y},
+            "url_changed": new_url != url,
+            "new_url": new_url
+        }
+
+    except Exception as e:
+        slog.error("Click failed", exception=e)
+        try:
+            await close_session(session_id)
+        except:
+            pass
+        return {"success": False, "error": str(e)}
+
+
 @router.post("/inspector/visual-scan")
 async def visual_scan_and_click(request: VisualScanRequest):
     """
