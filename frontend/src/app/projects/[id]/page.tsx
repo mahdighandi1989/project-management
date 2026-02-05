@@ -380,6 +380,19 @@ export default function ProjectDetailPage() {
   const inspectorIframeRef = useRef<HTMLIFrameElement>(null);
   const inspectorOverlayRef = useRef<HTMLDivElement>(null);
 
+  // 🌉 وضعیت Bridge Script - اسکریپت ارتباطی با iframe
+  const [inspectorBridgeStatus, setInspectorBridgeStatus] = useState<{
+    checking: boolean;
+    injecting: boolean;
+    has_bridge: boolean;
+    file_path?: string;
+    error?: string;
+  }>({
+    checking: false,
+    injecting: false,
+    has_bridge: false
+  });
+
   const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
   const [selectedLog, setSelectedLog] = useState<ActivityLog | null>(null);
   const [reports, setReports] = useState<ProjectReport[]>([]);
@@ -718,6 +731,63 @@ export default function ProjectDetailPage() {
       return () => clearTimeout(timer);
     }
   }, [activeWorkflow]);
+
+  // 🆕 Message Listener برای دریافت event ها از Bridge Script داخل iframe
+  useEffect(() => {
+    const handleBridgeMessage = (event: MessageEvent) => {
+      // بررسی پیام از bridge script
+      if (event.data?.type === 'inspector-bridge-event') {
+        const { action, target, position, elementInfo, pageUrl } = event.data;
+
+        // گزارش اکشن دریافت شده
+        const actionLabels: Record<string, string> = {
+          'click': 'کلیک کردی',
+          'scroll': 'اسکرول کردی',
+          'input': 'تایپ کردی',
+          'focus': 'فوکوس کردی',
+          'hover': 'موس بردی روی'
+        };
+
+        const actionLabel = actionLabels[action] || action;
+        const targetInfo = elementInfo || target || 'عنصر ناشناخته';
+
+        // افزودن پیام موقت
+        addTransientMessage(
+          `${actionLabel} روی ${targetInfo}`,
+          'action',
+          'Bridge Script'
+        );
+
+        // فراخوانی تحلیل عمیق‌تر اگر فعال باشد
+        if (inspectorActionTracking.enabled && position) {
+          analyzeUserAction(action, position.xPercent || 50, position.yPercent || 50);
+        }
+      }
+
+      // پیام اتصال موفق bridge
+      if (event.data?.type === 'inspector-bridge-ready') {
+        addTransientMessage('🔗 اتصال به پروژه برقرار شد', 'info', 'Bridge');
+      }
+
+      // پیام خطا از bridge
+      if (event.data?.type === 'inspector-bridge-error') {
+        addTransientMessage(`خطا: ${event.data.message}`, 'error', 'Bridge');
+      }
+    };
+
+    window.addEventListener('message', handleBridgeMessage);
+
+    return () => {
+      window.removeEventListener('message', handleBridgeMessage);
+    };
+  }, [inspectorActionTracking.enabled, inspectorFrontendUrl]);
+
+  // 🌉 بررسی وضعیت Bridge وقتی Inspector روشن می‌شود
+  useEffect(() => {
+    if (inspectorPowerOn && projectId && activeTab === 'inspector') {
+      checkBridgeStatus();
+    }
+  }, [inspectorPowerOn, projectId, activeTab]);
 
   const showError = (msg: string) => {
     setError(msg);
@@ -1178,6 +1248,73 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     setInspectorPaused(false);
     setInspectorPausedError(null);
     addTransientMessage('✅ ادامه کار...', 'info');
+  };
+
+  // 🌉 بررسی وضعیت Bridge Script
+  const checkBridgeStatus = async () => {
+    setInspectorBridgeStatus(prev => ({ ...prev, checking: true, error: undefined }));
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/bridge-status/${projectId}`);
+      const data = await res.json();
+      setInspectorBridgeStatus(prev => ({
+        ...prev,
+        checking: false,
+        has_bridge: data.has_bridge || false,
+        file_path: data.file_path
+      }));
+    } catch (err) {
+      setInspectorBridgeStatus(prev => ({
+        ...prev,
+        checking: false,
+        error: 'خطا در بررسی وضعیت'
+      }));
+    }
+  };
+
+  // 🌉 تزریق یا حذف Bridge Script
+  const toggleBridgeScript = async () => {
+    const isRemoving = inspectorBridgeStatus.has_bridge;
+    setInspectorBridgeStatus(prev => ({ ...prev, injecting: true, error: undefined }));
+
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/inject-bridge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: projectId,
+          remove: isRemoving
+        })
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        setInspectorBridgeStatus(prev => ({
+          ...prev,
+          injecting: false,
+          has_bridge: !isRemoving,
+          file_path: data.file_path
+        }));
+        addTransientMessage(
+          isRemoving ? '🔧 اسکریپت Bridge حذف شد' : '🌉 اسکریپت Bridge تزریق شد - منتظر deploy باشید',
+          'info'
+        );
+        showSuccess(data.message || (isRemoving ? 'حذف شد' : 'تزریق شد'));
+      } else {
+        setInspectorBridgeStatus(prev => ({
+          ...prev,
+          injecting: false,
+          error: data.error
+        }));
+        showError(data.error || 'خطا در عملیات');
+      }
+    } catch (err) {
+      setInspectorBridgeStatus(prev => ({
+        ...prev,
+        injecting: false,
+        error: 'خطا در ارتباط با سرور'
+      }));
+    }
   };
 
   // مدیریت کلیک روی overlay
@@ -7856,6 +7993,42 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   >
                     {inspectorActionTracking.enabled ? '🔴 رصد فعال' : '⚪ رصد غیرفعال'}
                   </button>
+                )}
+
+                {/* 🌉 دکمه Bridge Script - رصد فعالیت داخل iframe */}
+                {inspectorPowerOn && (
+                  <div className="mt-3 flex flex-col items-center">
+                    <button
+                      onClick={toggleBridgeScript}
+                      disabled={inspectorBridgeStatus.checking || inspectorBridgeStatus.injecting}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                        inspectorBridgeStatus.has_bridge
+                          ? 'bg-green-500 text-white hover:bg-green-600'
+                          : 'bg-orange-500 text-white hover:bg-orange-600'
+                      } ${(inspectorBridgeStatus.checking || inspectorBridgeStatus.injecting) ? 'opacity-50 cursor-wait' : ''}`}
+                      title={inspectorBridgeStatus.has_bridge
+                        ? 'حذف اسکریپت رصد از پروژه'
+                        : 'فعال‌سازی رصد کلیک/تایپ داخل پروژه'}
+                    >
+                      {inspectorBridgeStatus.checking ? (
+                        '⏳ بررسی...'
+                      ) : inspectorBridgeStatus.injecting ? (
+                        '⏳ در حال اعمال...'
+                      ) : inspectorBridgeStatus.has_bridge ? (
+                        '🌉 Bridge فعال'
+                      ) : (
+                        '🔗 فعال‌سازی Bridge'
+                      )}
+                    </button>
+                    <span className="text-[10px] text-gray-500 mt-1 text-center max-w-[90px]">
+                      {inspectorBridgeStatus.has_bridge
+                        ? 'رصد کلیک/تایپ فعال'
+                        : 'برای رصد کامل فعال کنید'}
+                    </span>
+                    {inspectorBridgeStatus.error && (
+                      <span className="text-[10px] text-red-500 mt-0.5">{inspectorBridgeStatus.error}</span>
+                    )}
+                  </div>
                 )}
               </div>
 
