@@ -4179,18 +4179,29 @@ INSPECTOR_BRIDGE_SCRIPT = '''
 <!-- Inspector Bridge Script - Auto-injected -->
 <script>
 (function() {
+  console.log('🌉 Inspector Bridge: Script starting...');
+
   // جلوگیری از اجرای چندباره
-  if (window.__inspectorBridgeLoaded) return;
+  if (window.__inspectorBridgeLoaded) {
+    console.log('🌉 Inspector Bridge: Already loaded, skipping');
+    return;
+  }
   window.__inspectorBridgeLoaded = true;
+
+  // بررسی اینکه آیا در iframe هستیم
+  const isInIframe = window !== window.parent;
+  console.log('🌉 Inspector Bridge: In iframe?', isInIframe);
+  console.log('🌉 Inspector Bridge: Page URL:', window.location.href);
 
   // تنظیمات
   const DEBOUNCE_MS = 100;
   let lastEventTime = 0;
+  let messagesSent = 0;
 
   // تابع ارسال پیام به parent (پنل مدیریت)
   function sendToInspector(action, data) {
     try {
-      window.parent.postMessage({
+      const message = {
         type: 'inspector-bridge-event',
         action: action,
         target: data.target || '',
@@ -4198,7 +4209,10 @@ INSPECTOR_BRIDGE_SCRIPT = '''
         position: data.position || { xPercent: 50, yPercent: 50 },
         pageUrl: window.location.href,
         timestamp: Date.now()
-      }, '*');
+      };
+      window.parent.postMessage(message, '*');
+      messagesSent++;
+      console.log('🌉 Inspector Bridge: Sent message #' + messagesSent, action, data.elementInfo);
     } catch (e) {
       console.warn('Inspector bridge: failed to send message', e);
     }
@@ -4317,12 +4331,20 @@ INSPECTOR_BRIDGE_SCRIPT = '''
   }, true);
 
   // اعلام آماده بودن
-  window.parent.postMessage({
-    type: 'inspector-bridge-ready',
-    pageUrl: window.location.href
-  }, '*');
+  try {
+    window.parent.postMessage({
+      type: 'inspector-bridge-ready',
+      pageUrl: window.location.href,
+      isInIframe: isInIframe,
+      timestamp: Date.now()
+    }, '*');
+    console.log('🌉 Inspector Bridge: Ready message sent to parent');
+  } catch (readyErr) {
+    console.warn('🌉 Inspector Bridge: Failed to send ready message', readyErr);
+  }
 
-  console.log('🌉 Inspector Bridge Script loaded');
+  console.log('🌉 Inspector Bridge: Script loaded and active!');
+  console.log('🌉 Inspector Bridge: Click, scroll, or type to test');
 })();
 </script>
 '''
@@ -4742,4 +4764,171 @@ async def set_project_github_path(
 
     except Exception as e:
         slog.error("Set GitHub path failed", exception=e)
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/inspector/debug-bridge/{project_id}")
+async def debug_bridge_injection(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    🔍 Debug endpoint برای بررسی وضعیت Bridge Script
+
+    نشان می‌دهد:
+    - آیا پروژه به GitHub متصل است
+    - کدام فایل HTML پیدا شده
+    - آیا Bridge Script در فایل هست
+    - محتوای فایل (قسمتی از آن)
+    """
+    from ...models.project import Project
+    from ...models.setting import Setting
+    import os
+    import httpx
+    import base64
+
+    try:
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if not project:
+            return {"success": False, "error": "پروژه یافت نشد"}
+
+        result = {
+            "project_id": project_id,
+            "project_name": project.name,
+            "github_path": project.github_path,
+            "project_type": project.project_type,
+        }
+
+        # چک توکن
+        github_token = os.environ.get("GITHUB_TOKEN", "")
+        if not github_token:
+            github_token = Setting.get_value(db, "api_key_github") or ""
+
+        if not github_token:
+            result["error"] = "توکن GitHub تنظیم نشده"
+            return result
+
+        github_path = project.github_path
+        if not github_path:
+            # تلاش برای استخراج از extra_data
+            extra_data = getattr(project, 'extra_data', None)
+            if extra_data:
+                try:
+                    extra = json.loads(extra_data) if isinstance(extra_data, str) else extra_data
+                    if extra.get('owner') and extra.get('repo'):
+                        github_path = f"{extra['owner']}/{extra['repo']}"
+                        result["github_path_source"] = "extra_data"
+                except:
+                    pass
+
+        if not github_path:
+            result["error"] = "github_path یافت نشد"
+            return result
+
+        github_path_clean = github_path.replace("https://github.com/", "").replace(".git", "").strip("/")
+        parts = github_path_clean.split("/")
+        if len(parts) < 2:
+            result["error"] = f"فرمت نامعتبر: {github_path}"
+            return result
+
+        owner, repo = parts[0], parts[1]
+        result["owner"] = owner
+        result["repo"] = repo
+
+        headers = {
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+
+        async with httpx.AsyncClient() as client:
+            # دریافت لیست فایل‌ها
+            tree_res = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo}/git/trees/main?recursive=1",
+                headers=headers,
+                timeout=15.0
+            )
+
+            if tree_res.status_code == 404:
+                tree_res = await client.get(
+                    f"https://api.github.com/repos/{owner}/{repo}/git/trees/master?recursive=1",
+                    headers=headers,
+                    timeout=15.0
+                )
+
+            if tree_res.status_code != 200:
+                result["error"] = f"خطا در دریافت فایل‌ها: {tree_res.status_code}"
+                return result
+
+            tree_data = tree_res.json()
+            all_files = [item["path"] for item in tree_data.get("tree", []) if item["type"] == "blob"]
+            html_files = [f for f in all_files if f.endswith('.html')]
+
+            result["total_files"] = len(all_files)
+            result["html_files"] = html_files
+
+            # بررسی هر فایل HTML برای وجود Bridge
+            files_with_bridge = []
+            for html_path in html_files[:10]:  # حداکثر 10 فایل
+                try:
+                    content_res = await client.get(
+                        f"https://api.github.com/repos/{owner}/{repo}/contents/{html_path}",
+                        headers=headers,
+                        timeout=10.0
+                    )
+                    if content_res.status_code == 200:
+                        data = content_res.json()
+                        if data.get("encoding") == "base64":
+                            content = base64.b64decode(data["content"]).decode('utf-8')
+                            has_bridge = "Inspector Bridge Script" in content
+                            if has_bridge:
+                                files_with_bridge.append({
+                                    "path": html_path,
+                                    "has_bridge": True,
+                                    "preview": content[:500] + "..." if len(content) > 500 else content
+                                })
+                except:
+                    continue
+
+            result["files_with_bridge"] = files_with_bridge
+            result["bridge_injected"] = len(files_with_bridge) > 0
+
+            if not files_with_bridge:
+                result["message"] = "Bridge Script در هیچ فایل HTML یافت نشد!"
+            else:
+                result["message"] = f"Bridge Script در {len(files_with_bridge)} فایل یافت شد"
+
+            # 🔍 بررسی سایت دیپلوی شده
+            preview_url = project.preview_url
+            if preview_url:
+                result["preview_url"] = preview_url
+                try:
+                    deployed_res = await client.get(
+                        preview_url,
+                        timeout=15.0,
+                        follow_redirects=True
+                    )
+                    if deployed_res.status_code == 200:
+                        deployed_html = deployed_res.text
+                        result["deployed_has_bridge"] = "Inspector Bridge Script" in deployed_html
+                        result["deployed_has_bridge_marker"] = "__inspectorBridgeLoaded" in deployed_html
+
+                        # اگر در سورس هست ولی در دیپلوی نیست
+                        if result["bridge_injected"] and not result["deployed_has_bridge"]:
+                            result["diagnosis"] = "⚠️ اسکریپت در GitHub هست ولی در سایت دیپلوی شده نیست! احتمالاً deploy هنوز انجام نشده یا build process اسکریپت را حذف کرده"
+                        elif result["deployed_has_bridge"]:
+                            result["diagnosis"] = "✅ اسکریپت در سایت دیپلوی شده موجود است"
+                        else:
+                            result["diagnosis"] = "❌ اسکریپت نه در GitHub و نه در سایت دیپلوی شده موجود است"
+                    else:
+                        result["deployed_check_error"] = f"HTTP {deployed_res.status_code}"
+                except Exception as deploy_check_err:
+                    result["deployed_check_error"] = str(deploy_check_err)
+            else:
+                result["preview_url"] = None
+                result["diagnosis"] = "⚠️ URL پیش‌نمایش پروژه تنظیم نشده"
+
+        return result
+
+    except Exception as e:
+        slog.error("Debug bridge failed", exception=e)
         return {"success": False, "error": str(e)}

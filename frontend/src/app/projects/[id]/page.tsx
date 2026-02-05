@@ -402,6 +402,19 @@ export default function ProjectDetailPage() {
   const [showCustomHtmlPathDialog, setShowCustomHtmlPathDialog] = useState(false);
   const [customHtmlPathInput, setCustomHtmlPathInput] = useState('');
 
+  // 🔍 Debug Bridge - برای تشخیص مشکلات
+  const [bridgeDebugInfo, setBridgeDebugInfo] = useState<{
+    loading: boolean;
+    data?: {
+      bridge_injected?: boolean;
+      deployed_has_bridge?: boolean;
+      diagnosis?: string;
+      files_with_bridge?: Array<{path: string; has_bridge: boolean}>;
+      html_files?: string[];
+      preview_url?: string;
+    };
+  }>({ loading: false });
+
   const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
   const [selectedLog, setSelectedLog] = useState<ActivityLog | null>(null);
   const [reports, setReports] = useState<ProjectReport[]>([]);
@@ -1311,6 +1324,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         checking: false,
         error: 'خطا در بررسی وضعیت'
       }));
+    }
+  };
+
+  // 🔍 تشخیص مشکلات Bridge Script
+  const debugBridgeStatus = async () => {
+    setBridgeDebugInfo({ loading: true });
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/debug-bridge/${projectId}`);
+      const data = await res.json();
+      setBridgeDebugInfo({ loading: false, data });
+      console.log('🔍 Bridge Debug Info:', data);
+    } catch (err) {
+      setBridgeDebugInfo({ loading: false, data: { diagnosis: 'خطا در بررسی: ' + err } });
     }
   };
 
@@ -8134,6 +8160,37 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     </span>
                     {inspectorBridgeStatus.error && !inspectorBridgeStatus.error.includes('GitHub') && (
                       <span className="text-[10px] text-red-500 mt-0.5">{inspectorBridgeStatus.error}</span>
+                    )}
+                    {/* دکمه Debug */}
+                    <button
+                      onClick={debugBridgeStatus}
+                      disabled={bridgeDebugInfo.loading}
+                      className="mt-1 px-2 py-0.5 text-[10px] text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded transition-all"
+                      title="بررسی دقیق وضعیت Bridge"
+                    >
+                      {bridgeDebugInfo.loading ? '⏳' : '🔍 تشخیص'}
+                    </button>
+                    {/* نمایش نتیجه Debug */}
+                    {bridgeDebugInfo.data && (
+                      <div className={`mt-1 p-2 rounded text-[10px] ${
+                        bridgeDebugInfo.data.deployed_has_bridge
+                          ? 'bg-green-100 text-green-700'
+                          : bridgeDebugInfo.data.bridge_injected
+                          ? 'bg-yellow-100 text-yellow-700'
+                          : 'bg-red-100 text-red-700'
+                      }`}>
+                        <div className="font-bold">{bridgeDebugInfo.data.diagnosis}</div>
+                        {bridgeDebugInfo.data.files_with_bridge && bridgeDebugInfo.data.files_with_bridge.length > 0 && (
+                          <div className="mt-1">
+                            📁 فایل: {bridgeDebugInfo.data.files_with_bridge[0]?.path}
+                          </div>
+                        )}
+                        {bridgeDebugInfo.data.bridge_injected && !bridgeDebugInfo.data.deployed_has_bridge && (
+                          <div className="mt-1 text-yellow-600">
+                            💡 Deploy جدید انجام دهید و کمی صبر کنید
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                 )}
