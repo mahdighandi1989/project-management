@@ -56,6 +56,7 @@ class BrowserSession:
         self.last_screenshot: Optional[str] = None  # base64
         self.viewport = {"width": 1280, "height": 720}
         self.action_log: List[Dict] = []
+        self._element_handles: List = []  # 🆕 برای کلیک مستقیم روی المان
 
     async def start(self):
         """شروع مرورگر و باز کردن صفحه"""
@@ -140,6 +141,9 @@ class BrowserSession:
         elements = []
         index = 0
 
+        # 🆕 ذخیره element handles برای کلیک مستقیم
+        self._element_handles = []
+
         # سلکتورهای المان‌های قابل کلیک
         selectors = [
             'a[href]',           # لینک‌ها
@@ -203,8 +207,12 @@ class BrowserSession:
 
                         tag = await el.evaluate("el => el.tagName.toLowerCase()")
 
+                        # 🆕 ذخیره element handle برای کلیک مستقیم
+                        self._element_handles.append(el)
+
                         elements.append({
                             "index": index,
+                            "handle_index": len(self._element_handles) - 1,  # 🆕
                             "text": text if text else f"[{tag}]",
                             "tag": tag,
                             "selector": selector,
@@ -238,6 +246,49 @@ class BrowserSession:
 
         slog.info(f"Extracted {len(elements)} interactive elements")
         return elements
+
+    async def click_element_directly(self, element_info: Dict) -> Dict:
+        """
+        🆕 کلیک مستقیم روی المان با استفاده از Playwright element.click()
+
+        این روش دقیق‌تر از mouse.click() است چون Playwright
+        خودش مرکز المان را پیدا می‌کند و کلیک می‌کند.
+        """
+        if not self.page:
+            return {"success": False, "error": "No page"}
+
+        handle_index = element_info.get("handle_index", -1)
+
+        if handle_index < 0 or handle_index >= len(self._element_handles):
+            # Fallback به کلیک با مختصات
+            slog.warning(f"Invalid handle_index {handle_index}, falling back to coordinate click")
+            return await self.click(element_info["center_x"], element_info["center_y"])
+
+        element_handle = self._element_handles[handle_index]
+        old_url = self.page.url
+
+        try:
+            # کلیک مستقیم روی المان - Playwright خودش scroll می‌کند اگر لازم باشد
+            await element_handle.click(timeout=5000)
+
+            # صبر برای navigation
+            await self.page.wait_for_timeout(500)
+
+            if self.page.url != old_url:
+                await self.page.wait_for_load_state('networkidle', timeout=10000)
+                slog.info(f"Navigation after direct click: {old_url} -> {self.page.url}")
+
+            return {
+                "success": True,
+                "method": "direct_click",
+                "element": element_info.get("text", ""),
+                "url": self.page.url
+            }
+
+        except Exception as e:
+            slog.warning(f"Direct click failed, trying coordinate click", error=str(e))
+            # Fallback به کلیک با مختصات
+            return await self.click(element_info["center_x"], element_info["center_y"])
 
     async def click_element_by_index(self, elements: List[Dict], index: int) -> Dict:
         """
@@ -374,20 +425,40 @@ class BrowserSession:
             "url": self.page.url
         }
 
-    async def click(self, x: float, y: float) -> Dict:
+    async def click(self, x: float, y: float, wait_for_navigation: bool = True) -> Dict:
         """کلیک در موقعیت مشخص"""
         if not self.page:
             return {"success": False, "error": "No page"}
 
+        old_url = self.page.url
+
         await self.page.mouse.click(x, y)
+
+        # صبر برای navigation احتمالی
+        if wait_for_navigation:
+            try:
+                # صبر کوتاه برای شروع navigation
+                await self.page.wait_for_timeout(500)
+
+                # اگر URL تغییر کرد، صبر برای لود کامل
+                if self.page.url != old_url:
+                    await self.page.wait_for_load_state('networkidle', timeout=10000)
+                    slog.info(f"Navigation detected: {old_url} -> {self.page.url}")
+                else:
+                    # شاید SPA باشد - صبر بیشتر برای تغییرات DOM
+                    await self.page.wait_for_timeout(1000)
+            except Exception as e:
+                slog.warning(f"Wait after click failed", error=str(e))
+
         self.action_log.append({
             "action": "click",
             "x": x,
             "y": y,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
+            "url_after": self.page.url
         })
 
-        return {"success": True, "x": x, "y": y}
+        return {"success": True, "x": x, "y": y, "url": self.page.url}
 
     async def click_selector(self, selector: str) -> Dict:
         """کلیک روی المان با selector"""
@@ -950,15 +1021,16 @@ async def execute_ai_agent_task(
 
                 if element_index >= 0 and element_index < len(current_elements):
                     element = current_elements[element_index]
-                    x_pixel = element["center_x"]
-                    y_pixel = element["center_y"]
                     x_percent = element["percent_x"]
                     y_percent = element["percent_y"]
 
-                    await session.click(x_pixel, y_pixel)
+                    # 🆕 استفاده از کلیک مستقیم روی المان (دقیق‌تر از کلیک مختصاتی)
+                    click_result = await session.click_element_directly(element)
 
                     action_entry["description"] = f"کلیک روی [{element_index}] {element['text']} (x:{x_percent}%, y:{y_percent}%)"
-                    action_entry["status"] = "done"
+                    action_entry["status"] = "done" if click_result.get("success") else "failed"
+                    action_entry["click_method"] = click_result.get("method", "unknown")
+                    action_entry["url_after"] = click_result.get("url", "")
 
                     cursor_positions.append({
                         "step": step,
@@ -967,7 +1039,6 @@ async def execute_ai_agent_task(
                         "y": y_percent
                     })
 
-                    slog.info(f"Clicked element [{element_index}]: {element['text']} at ({x_pixel}, {y_pixel})")
                 else:
                     action_entry["description"] = f"المان با شماره {element_index} پیدا نشد"
                     action_entry["status"] = "failed"
