@@ -425,6 +425,15 @@ def migrate_db():
                 cursor.execute("ALTER TABLE project_issues ADD COLUMN converted_field_id VARCHAR(50)")
                 logger.info("Added 'converted_field_id' column to project_issues table")
 
+        # 🆕 Migration برای جدول model_settings - ستون فعال‌سازی موقت
+        if "model_settings" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
+            existing_cols = get_columns("model_settings")
+
+            # ستون فعال‌سازی موقت مدل
+            if "temporary_enabled" not in existing_cols:
+                cursor.execute("ALTER TABLE model_settings ADD COLUMN temporary_enabled INTEGER DEFAULT 0")
+                logger.info("Added 'temporary_enabled' column to model_settings table")
+
         conn.commit()
         logger.info("Database migration completed")
 
