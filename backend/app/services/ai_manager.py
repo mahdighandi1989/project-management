@@ -211,26 +211,28 @@ class AIManager:
 
         return caps
 
-    def find_fallback_model(self, disabled_model_id: str, task_type: Optional[str] = None) -> Optional[str]:
+    def find_fallback_model(self, disabled_model_id: str, task_type: Optional[str] = None, require_vision: bool = False) -> Optional[str]:
         """
         یافتن نزدیک‌ترین مدل فعال به مدل غیرفعال شده
 
         استراتژی (بهبود یافته):
-        1. 🆕 استفاده از امتیازات واقعی از model_profiler
-        2. مدل‌های هم‌provider با قابلیت‌های مشابه
-        3. مدل‌های دیگر provider با قابلیت‌های مشابه
-        4. اگر فقط یک مدل فعال بود، همان را برگردان
+        1. 🆕 اگر مدل غیرفعال VISION داشت، فقط مدل‌های VISION را انتخاب کن
+        2. استفاده از امتیازات واقعی از model_profiler
+        3. مدل‌های هم‌provider با قابلیت‌های مشابه
+        4. مدل‌های دیگر provider با قابلیت‌های مشابه
 
         Args:
             disabled_model_id: شناسه مدل غیرفعال
             task_type: نوع کار برای فیلتر اضافی
+            require_vision: آیا حتماً باید vision داشته باشد
 
         Returns:
             شناسه مدل fallback یا None
         """
         slog.info("Finding fallback model",
             disabled_model=disabled_model_id,
-            task_type=task_type
+            task_type=task_type,
+            require_vision=require_vision
         )
 
         # دریافت اطلاعات مدل غیرفعال
@@ -239,12 +241,28 @@ class AIManager:
             slog.warning("Cannot find fallback - disabled model not found", model_id=disabled_model_id)
             return None
 
+        # 🆕 بررسی آیا مدل غیرفعال vision داشت
+        disabled_has_vision = ModelCapability.VISION in disabled_model.capabilities
+        needs_vision = require_vision or disabled_has_vision
+
+        if needs_vision:
+            slog.info("Fallback must have VISION capability", original_model=disabled_model_id)
+
         # دریافت مدل‌های فعال
         available_models = self.get_available_models(task_type=task_type)
 
         if not available_models:
             slog.warning("No available models for fallback")
             return None
+
+        # 🆕 فیلتر مدل‌های دارای vision اگر نیاز است
+        if needs_vision:
+            vision_models = [m for m in available_models if ModelCapability.VISION in m.capabilities]
+            if vision_models:
+                available_models = vision_models
+                slog.info(f"Filtered to {len(vision_models)} vision-capable models")
+            else:
+                slog.warning("No vision-capable models available for fallback, using all models")
 
         # اگر فقط یک مدل فعال بود، همان را برگردان
         if len(available_models) == 1:
@@ -419,7 +437,12 @@ class AIManager:
 
             # 🆕 استفاده از fallback به جای خطا
             if allow_fallback:
-                fallback_model_id = self.find_fallback_model(model_id, task_type=task_type)
+                # 🆕 بررسی آیا پیام‌ها تصویر دارند - اگر بله، حتماً مدل vision نیاز است
+                has_images = any(msg.images for msg in messages if hasattr(msg, 'images') and msg.images)
+                if has_images:
+                    slog.info("Messages contain images, requiring vision-capable fallback")
+
+                fallback_model_id = self.find_fallback_model(model_id, task_type=task_type, require_vision=has_images)
                 if fallback_model_id:
                     slog.info("Using fallback model",
                         original=model_id,
