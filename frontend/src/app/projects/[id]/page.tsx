@@ -917,30 +917,74 @@ export default function ProjectDetailPage() {
       }
 
       const elements = elementsData.elements;
+      console.log(`📋 Total elements: ${elements.length}`);
 
-      // 2. اسکن واقعی - یکی یکی از روی المان‌ها رد شو و چکشان کن
+      // 2. ابتدا همه match ها را پیدا کن و امتیازدهی کن
+      interface MatchResult {
+        element: typeof elements[0];
+        score: number;
+        matchType: string;
+      }
+      const matches: MatchResult[] = [];
+
+      for (const el of elements) {
+        const elText = (el.text || '').toLowerCase();
+        const elHref = (el.href || '').toLowerCase();
+
+        // امتیازدهی: exact match > starts with > includes
+        // همچنین: متن کوتاه‌تر = امتیاز بالاتر (المان دقیق‌تر)
+        let score = 0;
+        let matchType = '';
+
+        if (elText === searchLower) {
+          score = 1000;  // exact match - بهترین
+          matchType = 'exact';
+        } else if (elText.startsWith(searchLower)) {
+          score = 500 - elText.length;  // شروع با - خوب
+          matchType = 'starts';
+        } else if (elText.includes(searchLower)) {
+          score = 200 - elText.length;  // شامل - قابل قبول
+          matchType = 'includes';
+        } else if (elHref.includes(searchLower)) {
+          score = 100 - elHref.length;  // در href
+          matchType = 'href';
+        }
+
+        if (score > 0) {
+          matches.push({ element: el, score, matchType });
+          console.log(`  ✓ Match: "${el.text}" (score: ${score}, type: ${matchType})`);
+        }
+      }
+
+      // مرتب‌سازی بر اساس امتیاز (بالاترین اول)
+      matches.sort((a, b) => b.score - a.score);
+      console.log(`🎯 Best matches:`, matches.slice(0, 3).map(m => `${m.element.text} (${m.score})`));
+
+      // 3. اسکن واقعی - یکی یکی از روی المان‌ها رد شو
+      const bestMatch = matches[0]?.element;
+      let foundTarget = false;
+
       for (let i = 0; i < elements.length; i++) {
         const el = elements[i];
         const percentX = el.percent_x;
         const percentY = el.percent_y;
 
-        // حرکت نوارها به سمت این المان (انیمیشن آرام)
+        // حرکت نوارها به سمت این المان
         setInspectorScanBars(prev => ({
           ...prev,
           verticalX: percentX,
           horizontalY: percentY
         }));
 
-        // صبر برای نمایش اسکن (80ms = سرعت قابل مشاهده)
-        await new Promise(resolve => setTimeout(resolve, 80));
+        // سرعت اسکن - سریع‌تر اگر به هدف نزدیک نیستیم
+        const isTarget = bestMatch && el.index === bestMatch.index;
+        const delay = isTarget ? 300 : 30;  // روی هدف بیشتر مکث کن
+        await new Promise(resolve => setTimeout(resolve, delay));
 
-        // 3. چک واقعی: آیا متن این المان با جستجو مطابقت دارد؟
-        const elText = (el.text || '').toLowerCase();
-        const elHref = (el.href || '').toLowerCase();
-
-        if (elText.includes(searchLower) || elHref.includes(searchLower)) {
-          // ✅ پیدا شد!
-          console.log(`🎯 Found: "${el.text}" at (${percentX}%, ${percentY}%)`);
+        // آیا این المان هدف ماست؟
+        if (isTarget) {
+          foundTarget = true;
+          console.log(`🎯 Found target: "${el.text}" at (${percentX}%, ${percentY}%)`);
 
           // نمایش هدف پیدا شده
           setInspectorScanBars(prev => ({
@@ -959,7 +1003,7 @@ export default function ProjectDetailPage() {
 
           await new Promise(resolve => setTimeout(resolve, 500));
 
-          // 4. کلیک روی المان پیدا شده
+          // کلیک روی المان
           const clickRes = await fetch(`${API_BASE}/api/render/inspector/click-at?url=${encodeURIComponent(inspectorFrontendUrl)}&x=${el.center_x}&y=${el.center_y}`, {
             method: 'POST'
           });
