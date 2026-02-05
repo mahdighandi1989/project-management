@@ -3367,7 +3367,8 @@ async def find_element_and_click(url: str, search_text: str):
                                 "center_y": center_y,
                                 "percent_x": round((center_x / session.viewport["width"]) * 100, 1),
                                 "percent_y": round((center_y / session.viewport["height"]) * 100, 1),
-                                "box": box
+                                "box": box,
+                                "element": el  # 🆕 نگه‌داری element handle برای کلیک مستقیم
                             })
 
                     except Exception as e:
@@ -3391,9 +3392,22 @@ async def find_element_and_click(url: str, search_text: str):
 
         # بهترین match را انتخاب و کلیک کن
         best = candidates[0]
-        slog.info(f"Clicking on '{best['text']}' at ({best['center_x']}, {best['center_y']})")
+        element = best.get("element")
 
-        await session.page.mouse.click(best["center_x"], best["center_y"])
+        slog.info(f"Clicking DIRECTLY on element '{best['text']}' (not coordinates)")
+
+        # ✅ روش حرفه‌ای: کلیک مستقیم روی element، نه روی مختصات
+        if element:
+            try:
+                await element.click(timeout=5000)
+                slog.info("✅ Element click successful")
+            except Exception as click_err:
+                slog.warning(f"Element click failed, trying coordinate: {click_err}")
+                await session.page.mouse.click(best["center_x"], best["center_y"])
+        else:
+            # Fallback به مختصات
+            await session.page.mouse.click(best["center_x"], best["center_y"])
+
         await session.wait(1000)
         new_url = session.page.url if session.page else url
 
