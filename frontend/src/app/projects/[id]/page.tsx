@@ -956,10 +956,11 @@ export default function ProjectDetailPage() {
 
         return {
           success: true,
-          message: `پیدا شد: ${findResult.found} (${findResult.match_type})`,
+          message: `پیدا شد: ${findResult.found} (${findResult.click_method})`,
           target_position: { x: percent_x, y: percent_y },
           clicked: true,
-          url_changed: findResult.url_changed
+          url_changed: findResult.url_changed,
+          new_url: findResult.new_url  // 🆕 URL جدید برای آپدیت iframe
         };
       }
 
@@ -1036,6 +1037,13 @@ export default function ProjectDetailPage() {
               content: `✅ **پیدا شد و کلیک شد!**\n\n🎯 المان: **${scanResult.message || targetText}**\n📍 موقعیت: (${scanResult.target_position?.x?.toFixed(1)}%, ${scanResult.target_position?.y?.toFixed(1)}%)${scanResult.url_changed ? '\n🔄 صفحه تغییر کرد' : ''}`,
               timestamp: new Date()
             }]);
+
+            // 🆕🆕🆕 آپدیت iframe با URL جدید
+            if (scanResult.new_url && scanResult.new_url !== inspectorFrontendUrl) {
+              console.log('🔄 Updating iframe to:', scanResult.new_url);
+              setInspectorFrontendUrl(scanResult.new_url);
+            }
+
             setInspectorChatLoading(false);
             return;
           }
