@@ -3262,6 +3262,168 @@ async def get_page_elements(url: str):
         return {"success": False, "error": str(e), "elements": []}
 
 
+@router.post("/inspector/find-and-click")
+async def find_element_and_click(url: str, search_text: str):
+    """
+    🎯 پیدا کردن المان با متن دقیق و کلیک روی آن
+
+    این endpoint از XPath استفاده می‌کند تا المانی که متن مستقیمش
+    برابر با search_text است را پیدا کند (نه المان‌های parent).
+    """
+    import uuid
+    from ...services.browser_automation import create_session, close_session
+
+    session_id = str(uuid.uuid4())[:8]
+    slog.api_request("POST", "/inspector/find-and-click", url=url, search_text=search_text)
+
+    try:
+        session = await create_session(session_id, url)
+
+        if not session.page:
+            await close_session(session_id)
+            return {"success": False, "error": "Page not loaded"}
+
+        # جستجوی دقیق با XPath - فقط المان‌هایی که متن مستقیمشان مطابقت دارد
+        # این روش المان‌های leaf (برگ) را پیدا می‌کند نه parent ها
+        search_lower = search_text.lower().strip()
+
+        # روش 1: پیدا کردن تمام المان‌ها و فیلتر کردن
+        candidates = []
+
+        # جستجو در المان‌های مختلف
+        selectors = [
+            'a', 'button', 'span', 'div', 'p', 'li',
+            '[role="button"]', '[role="link"]', '[role="menuitem"]'
+        ]
+
+        for selector in selectors:
+            try:
+                elements = await session.page.query_selector_all(selector)
+                for el in elements:
+                    try:
+                        is_visible = await el.is_visible()
+                        if not is_visible:
+                            continue
+
+                        box = await el.bounding_box()
+                        if not box or box["width"] < 5 or box["height"] < 5:
+                            continue
+
+                        # گرفتن متن مستقیم (بدون فرزندان) با evaluate
+                        direct_text = await el.evaluate("""el => {
+                            // فقط متن مستقیم این node، نه فرزندان
+                            let text = '';
+                            for (let node of el.childNodes) {
+                                if (node.nodeType === Node.TEXT_NODE) {
+                                    text += node.textContent;
+                                }
+                            }
+                            // اگر متن مستقیم نداشت، از innerText استفاده کن
+                            if (!text.trim() && el.children.length === 0) {
+                                text = el.innerText || '';
+                            }
+                            return text.trim();
+                        }""")
+
+                        # نرمال‌سازی
+                        direct_text_clean = ' '.join((direct_text or '').split()).strip().lower()
+
+                        if not direct_text_clean:
+                            continue
+
+                        # بررسی تطابق
+                        match_score = 0
+                        match_type = ''
+
+                        if direct_text_clean == search_lower:
+                            match_score = 1000
+                            match_type = 'exact'
+                        elif direct_text_clean.startswith(search_lower):
+                            match_score = 800 - len(direct_text_clean)
+                            match_type = 'starts'
+                        elif search_lower in direct_text_clean and len(direct_text_clean) < len(search_lower) * 3:
+                            # فقط اگر متن خیلی بلندتر نباشد
+                            match_score = 500 - len(direct_text_clean)
+                            match_type = 'contains'
+
+                        if match_score > 0:
+                            center_x = box["x"] + box["width"] / 2
+                            center_y = box["y"] + box["height"] / 2
+
+                            # چک تکراری نبودن
+                            is_dup = False
+                            for c in candidates:
+                                if abs(c["center_x"] - center_x) < 10 and abs(c["center_y"] - center_y) < 10:
+                                    is_dup = True
+                                    break
+                            if is_dup:
+                                continue
+
+                            candidates.append({
+                                "text": direct_text,
+                                "score": match_score,
+                                "match_type": match_type,
+                                "center_x": center_x,
+                                "center_y": center_y,
+                                "percent_x": round((center_x / session.viewport["width"]) * 100, 1),
+                                "percent_y": round((center_y / session.viewport["height"]) * 100, 1),
+                                "box": box
+                            })
+
+                    except Exception as e:
+                        continue
+            except:
+                continue
+
+        # مرتب‌سازی بر اساس امتیاز
+        candidates.sort(key=lambda x: -x["score"])
+
+        slog.info(f"Found {len(candidates)} candidates for '{search_text}'",
+                  top_matches=[c["text"] for c in candidates[:5]])
+
+        if not candidates:
+            await close_session(session_id)
+            return {
+                "success": False,
+                "error": f"'{search_text}' پیدا نشد",
+                "candidates": []
+            }
+
+        # بهترین match را انتخاب و کلیک کن
+        best = candidates[0]
+        slog.info(f"Clicking on '{best['text']}' at ({best['center_x']}, {best['center_y']})")
+
+        await session.page.mouse.click(best["center_x"], best["center_y"])
+        await session.wait(1000)
+        new_url = session.page.url if session.page else url
+
+        await close_session(session_id)
+
+        return {
+            "success": True,
+            "found": best["text"],
+            "match_type": best["match_type"],
+            "score": best["score"],
+            "position": {
+                "x": best["center_x"],
+                "y": best["center_y"],
+                "percent_x": best["percent_x"],
+                "percent_y": best["percent_y"]
+            },
+            "url_changed": new_url != url,
+            "new_url": new_url,
+            "all_candidates": [{"text": c["text"], "score": c["score"]} for c in candidates[:10]]
+        }
+
+    except Exception as e:
+        slog.error("Find and click failed", exception=e)
+        try:
+            await close_session(session_id)
+        except:
+            pass
+        return {"success": False, "error": str(e)}
+
+
 @router.post("/inspector/click-at")
 async def click_at_position(url: str, x: float, y: float):
     """
