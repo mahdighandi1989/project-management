@@ -207,6 +207,13 @@ class BrowserSession:
 
                         tag = await el.evaluate("el => el.tagName.toLowerCase()")
 
+                        # 🆕 گرفتن href برای لینک‌ها
+                        href = ""
+                        try:
+                            href = await el.get_attribute("href") or ""
+                        except:
+                            pass
+
                         # 🆕 ذخیره element handle برای کلیک مستقیم
                         self._element_handles.append(el)
 
@@ -215,6 +222,7 @@ class BrowserSession:
                             "handle_index": len(self._element_handles) - 1,  # 🆕
                             "text": text if text else f"[{tag}]",
                             "tag": tag,
+                            "href": href,  # 🆕 آدرس لینک
                             "selector": selector,
                             "box": {
                                 "x": box["x"],
@@ -250,14 +258,16 @@ class BrowserSession:
     async def click_element_directly(self, element_info: Dict) -> Dict:
         """
         🆕 کلیک مستقیم روی المان - چندین روش تلاش می‌کند
+        اگر کلیک کار نکرد، از href مستقیم استفاده می‌کند
         """
         if not self.page:
             return {"success": False, "error": "No page"}
 
         handle_index = element_info.get("handle_index", -1)
         element_text = element_info.get("text", "unknown")
+        element_href = element_info.get("href", "")
 
-        slog.info(f"🖱️ CLICK ATTEMPT | element='{element_text}' | handle_index={handle_index} | total_handles={len(self._element_handles)}")
+        slog.info(f"🖱️ CLICK ATTEMPT | element='{element_text}' | href='{element_href}' | handle_index={handle_index} | total_handles={len(self._element_handles)}")
 
         if handle_index < 0 or handle_index >= len(self._element_handles):
             slog.warning(f"Invalid handle_index, using coordinate click")
@@ -267,19 +277,37 @@ class BrowserSession:
         old_url = self.page.url
         slog.info(f"Current URL before click: {old_url}")
 
+        # 🆕 تأیید که المان درست است - گرفتن متن و href از handle فعلی
+        try:
+            actual_text = await element_handle.inner_text()
+            actual_text = actual_text.strip()[:50] if actual_text else ""
+        except:
+            actual_text = ""
+
+        try:
+            current_href = await element_handle.get_attribute("href")
+        except:
+            current_href = element_href
+
+        slog.info(f"📋 ELEMENT VERIFICATION | expected='{element_text}' | actual='{actual_text}' | href='{current_href}'")
+
+        # 🚨 اگر متن مطابقت نداشت، هشدار بده
+        if actual_text and element_text and actual_text != element_text:
+            slog.warning(f"⚠️ MISMATCH! Expected '{element_text}' but handle points to '{actual_text}'")
+
         try:
             # روش 1: JavaScript click (قوی‌ترین روش)
             slog.info(f"🖱️ Method 1: JavaScript el.click()")
             try:
                 await self.page.evaluate("el => el.click()", element_handle)
-                slog.info(f"✅ JavaScript click SUCCESS")
+                slog.info(f"✅ JavaScript click executed")
             except Exception as js_err:
                 slog.warning(f"JavaScript click failed: {js_err}")
 
                 # روش 2: Playwright force click
                 slog.info(f"🖱️ Method 2: Playwright force click")
                 await element_handle.click(timeout=5000, force=True)
-                slog.info(f"✅ Playwright force click SUCCESS")
+                slog.info(f"✅ Playwright force click executed")
 
             # صبر برای navigation
             slog.info(f"⏳ Waiting for navigation...")
@@ -289,17 +317,42 @@ class BrowserSession:
             url_changed = new_url != old_url
             slog.info(f"📍 URL after click: '{new_url}' | changed={url_changed}")
 
+            # 🆕 روش 3: اگر کلیک کار نکرد و href معتبر داریم، مستقیم برو
+            if not url_changed and current_href:
+                # چک کنیم href معتبر باشد (نه # یا javascript:)
+                if current_href.startswith("http") or (current_href.startswith("/") and not current_href.startswith("//")):
+                    slog.info(f"🔗 Method 3: Direct navigation to href: '{current_href}'")
+
+                    # ساخت URL کامل اگر نسبی بود
+                    if current_href.startswith("/"):
+                        base_url = f"{self.page.url.split('://')[0]}://{self.page.url.split('/')[2]}"
+                        full_url = base_url + current_href
+                    else:
+                        full_url = current_href
+
+                    slog.info(f"🌐 Navigating to: '{full_url}'")
+                    try:
+                        await self.page.goto(full_url, wait_until='networkidle', timeout=15000)
+                        new_url = self.page.url
+                        url_changed = new_url != old_url
+                        slog.info(f"✅ Direct navigation complete! URL: '{new_url}' | changed={url_changed}")
+                    except Exception as nav_err:
+                        slog.warning(f"Direct navigation failed: {nav_err}")
+                else:
+                    slog.info(f"⚠️ href is not navigable: '{current_href}' (starts with # or javascript:)")
+
             if url_changed:
                 try:
                     await self.page.wait_for_load_state('networkidle', timeout=10000)
-                    slog.info(f"✅ Navigation complete!")
+                    slog.info(f"✅ Page loaded!")
                 except Exception as nav_err:
-                    slog.warning(f"Navigation wait timeout: {nav_err}")
+                    slog.warning(f"Load wait timeout: {nav_err}")
 
             return {
                 "success": True,
-                "method": "direct_click",
+                "method": "direct_click" if url_changed else "click_no_nav",
                 "element": element_text,
+                "href": current_href,
                 "url": new_url,
                 "url_changed": url_changed
             }
@@ -779,7 +832,8 @@ async def analyze_with_vision_ai(
     if interactive_elements:
         elements_list = "\n\n## المان‌های قابل کلیک در صفحه:\n"
         for el in interactive_elements[:30]:  # حداکثر 30 المان
-            elements_list += f"[{el['index']}] \"{el['text']}\" ({el['tag']}) - موقعیت: x={el['percent_x']}%, y={el['percent_y']}%\n"
+            href_info = f" -> {el['href']}" if el.get('href') else ""
+            elements_list += f"[{el['index']}] \"{el['text']}\" ({el['tag']}{href_info})\n"
 
     # پرامپت جدید - انتخاب با index
     system_prompt = """شما یک AI Agent هستید که صفحات وب را کنترل می‌کنید.
@@ -1047,10 +1101,14 @@ async def execute_ai_agent_task(
                     # 🆕 استفاده از کلیک مستقیم روی المان (دقیق‌تر از کلیک مختصاتی)
                     click_result = await session.click_element_directly(element)
 
-                    action_entry["description"] = f"کلیک روی [{element_index}] {element['text']} (x:{x_percent}%, y:{y_percent}%)"
+                    url_changed = click_result.get("url_changed", False)
+                    nav_status = "✅ صفحه تغییر کرد" if url_changed else "⚠️ صفحه تغییر نکرد!"
+
+                    action_entry["description"] = f"کلیک روی [{element_index}] {element['text']} - {nav_status}"
                     action_entry["status"] = "done" if click_result.get("success") else "failed"
                     action_entry["click_method"] = click_result.get("method", "unknown")
                     action_entry["url_after"] = click_result.get("url", "")
+                    action_entry["url_changed"] = url_changed  # 🆕 برای اطلاع AI
 
                     cursor_positions.append({
                         "step": step,
