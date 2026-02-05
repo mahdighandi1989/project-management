@@ -788,22 +788,29 @@ export default function ProjectDetailPage() {
   // 🆕 تشخیص اینکه آیا این یک task ویژوال است
   const isVisualTask = (message: string): boolean => {
     const visualKeywords = [
-      // ناوبری
-      'برو', 'navigate', 'go to', 'open', 'باز کن', 'برو به', 'نمایش بده',
+      // ناوبری - فارسی
+      'برو', 'وارد', 'بازکن', 'باز کن', 'نمایش', 'نشان بده', 'برو به', 'وارد شو',
+      'نمایش بده', 'ببین', 'مشاهده', 'رفتن به', 'بروید', 'واردشو',
+      // ناوبری - انگلیسی
+      'navigate', 'go to', 'open', 'show', 'visit', 'enter', 'access',
       // لاگین
-      'لاگین', 'login', 'ورود', 'sign in', 'وارد شو',
+      'لاگین', 'login', 'ورود', 'sign in', 'ثبت نام', 'register', 'logout', 'خروج',
       // کلیک
-      'کلیک', 'click', 'بزن', 'فشار بده', 'روی',
+      'کلیک', 'click', 'بزن', 'فشار بده', 'روی', 'انتخاب', 'tap', 'press',
       // تایپ
-      'تایپ', 'type', 'بنویس', 'وارد کن',
+      'تایپ', 'type', 'بنویس', 'وارد کن', 'پر کن', 'fill',
       // اسکرول
-      'اسکرول', 'scroll', 'پایین برو', 'بالا برو',
+      'اسکرول', 'scroll', 'پایین برو', 'بالا برو', 'scroll down', 'scroll up',
       // جستجو
-      'پیدا کن', 'find', 'جستجو', 'search',
+      'پیدا کن', 'find', 'جستجو', 'search', 'بگرد',
       // انتخاب
-      'انتخاب کن', 'select', 'choose',
+      'انتخاب کن', 'select', 'choose', 'گزینه',
       // عناصر صفحه
-      'صفحه', 'page', 'فرم', 'form', 'دکمه', 'button', 'لینک', 'link', 'منو', 'menu'
+      'صفحه', 'page', 'فرم', 'form', 'دکمه', 'button', 'لینک', 'link', 'منو', 'menu',
+      'لیست', 'list', 'جدول', 'table', 'تب', 'tab', 'پنل', 'panel',
+      // اقدامات خاص
+      'ببند', 'close', 'حذف', 'delete', 'ویرایش', 'edit', 'ذخیره', 'save',
+      'ارسال', 'submit', 'تایید', 'confirm', 'لغو', 'cancel'
     ];
     const lowerMessage = message.toLowerCase();
     return visualKeywords.some(keyword => lowerMessage.includes(keyword));
@@ -852,8 +859,10 @@ export default function ProjectDetailPage() {
         content: '' // محتوا بعداً می‌تواند از فایل‌های باز شده خوانده شود
       }));
 
-      // 🆕 تشخیص task ویژوال و استفاده از browser automation
-      if (inspectorAutoSelect && isVisualTask(userMessage) && inspectorFrontendUrl) {
+      // 🆕🆕🆕 تشخیص task ویژوال - همیشه از ai-interact استفاده شود (حتی با انتخاب دستی)
+      const shouldUseVision = isVisualTask(userMessage) && inspectorFrontendUrl;
+
+      if (shouldUseVision) {
         // اضافه کردن پیام سیستم
         setInspectorChatMessages(prev => [...prev, {
           id: `system_${Date.now()}`,
@@ -863,15 +872,19 @@ export default function ProjectDetailPage() {
         }]);
 
         // استفاده از API تعامل هوشمند با مرورگر (AI Agent)
-        // model_id نفرستادن = انتخاب خودکار بهترین مدل vision
+        // 🆕 اگر مدل دستی انتخاب شده، آن را بفرست؛ در غیر این صورت null برای انتخاب خودکار
+        const selectedModelForVision = (!inspectorAutoSelect && inspectorSelectedModels.length > 0)
+          ? inspectorSelectedModels[0]  // اولین مدل انتخاب شده دستی
+          : null;  // انتخاب خودکار
+
         const res = await fetch(`${API_BASE}/api/render/inspector/ai-interact`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             task: userMessage,
             url: inspectorFrontendUrl,
-            // model_id حذف شد - بک‌اند خودش بهترین مدل vision را انتخاب می‌کند
-            max_steps: 15  // حداکثر 15 اقدام
+            model_id: selectedModelForVision, // 🆕 ارسال مدل انتخاب شده دستی یا null
+            max_steps: 15
           })
         });
 
@@ -931,8 +944,8 @@ export default function ProjectDetailPage() {
           }]);
         }
 
-      // 🆕 اگر انتخاب خودکار فعال باشد ولی task ویژوال نیست، از smart-task استفاده کن
-      } else if (inspectorAutoSelect) {
+      // 🆕 اگر task ویژوال نیست و انتخاب خودکار فعال است، از smart-task استفاده کن
+      } else if (inspectorAutoSelect && !shouldUseVision) {
         // اضافه کردن پیام سیستم که نشان می‌دهد در حال تحلیل است
         setInspectorChatMessages(prev => [...prev, {
           id: `system_${Date.now()}`,
