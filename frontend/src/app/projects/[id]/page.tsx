@@ -1058,7 +1058,7 @@ export default function ProjectDetailPage() {
           url: inspectorFrontendUrl,
           action_type: actionType,
           position: { x, y },
-          project_id: id,
+          project_id: projectId,
           selected_models: inspectorSelectedModels.length > 0 ? inspectorSelectedModels : ['gemini-2.0-flash-exp']
         })
       });
@@ -1119,7 +1119,7 @@ export default function ProjectDetailPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          project_id: id,
+          project_id: projectId,
           error_message: errorInfo.message,
           log_details: errorInfo.log_details,
           source_hint: errorInfo.source_hint,
