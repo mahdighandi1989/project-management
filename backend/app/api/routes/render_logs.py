@@ -3265,10 +3265,12 @@ async def get_page_elements(url: str):
 @router.post("/inspector/find-and-click")
 async def find_element_and_click(url: str, search_text: str):
     """
-    🎯 پیدا کردن المان با متن دقیق و کلیک روی آن
+    🎯 پیدا کردن المان با متن و کلیک روی آن - روش حرفه‌ای Playwright
 
-    این endpoint از XPath استفاده می‌کند تا المانی که متن مستقیمش
-    برابر با search_text است را پیدا کند (نه المان‌های parent).
+    از locator های built-in Playwright استفاده می‌کند که:
+    1. خودش المان کلیک‌پذیر را پیدا می‌کند
+    2. صبر می‌کند تا المان قابل کلیک شود
+    3. scroll می‌کند اگر لازم باشد
     """
     import uuid
     from ...services.browser_automation import create_session, close_session
@@ -3283,150 +3285,101 @@ async def find_element_and_click(url: str, search_text: str):
             await close_session(session_id)
             return {"success": False, "error": "Page not loaded"}
 
-        # جستجوی دقیق با XPath - فقط المان‌هایی که متن مستقیمشان مطابقت دارد
-        # این روش المان‌های leaf (برگ) را پیدا می‌کند نه parent ها
-        search_lower = search_text.lower().strip()
+        page = session.page
+        search_clean = search_text.strip()
 
-        # روش 1: پیدا کردن تمام المان‌ها و فیلتر کردن
-        candidates = []
+        slog.info(f"🔍 Searching for clickable element with text: '{search_clean}'")
 
-        # جستجو در المان‌های مختلف
-        selectors = [
-            'a', 'button', 'span', 'div', 'p', 'li',
-            '[role="button"]', '[role="link"]', '[role="menuitem"]'
+        # روش‌های مختلف برای پیدا کردن و کلیک - به ترتیب اولویت
+        methods = [
+            # 1. لینک با متن دقیق
+            ("link_exact", lambda: page.get_by_role("link", name=search_clean, exact=True)),
+            # 2. دکمه با متن دقیق
+            ("button_exact", lambda: page.get_by_role("button", name=search_clean, exact=True)),
+            # 3. آیتم منو
+            ("menuitem", lambda: page.get_by_role("menuitem", name=search_clean)),
+            # 4. لینک با متن (نه دقیق)
+            ("link_contains", lambda: page.get_by_role("link", name=search_clean)),
+            # 5. دکمه با متن (نه دقیق)
+            ("button_contains", lambda: page.get_by_role("button", name=search_clean)),
+            # 6. هر المان با متن دقیق
+            ("text_exact", lambda: page.get_by_text(search_clean, exact=True)),
+            # 7. هر المان با متن
+            ("text_contains", lambda: page.get_by_text(search_clean)),
         ]
 
-        for selector in selectors:
+        clicked = False
+        click_method = None
+        element_info = None
+
+        for method_name, get_locator in methods:
             try:
-                elements = await session.page.query_selector_all(selector)
-                for el in elements:
+                locator = get_locator()
+                count = await locator.count()
+
+                if count == 0:
+                    continue
+
+                slog.info(f"  Found {count} elements with method '{method_name}'")
+
+                # اگه چند تا پیدا شد، اولی که visible هست رو بگیر
+                for i in range(min(count, 5)):  # حداکثر 5 تا چک کن
                     try:
+                        el = locator.nth(i)
                         is_visible = await el.is_visible()
                         if not is_visible:
                             continue
 
+                        # گرفتن اطلاعات المان
                         box = await el.bounding_box()
-                        if not box or box["width"] < 5 or box["height"] < 5:
-                            continue
-
-                        # گرفتن متن مستقیم (بدون فرزندان) با evaluate
-                        direct_text = await el.evaluate("""el => {
-                            // فقط متن مستقیم این node، نه فرزندان
-                            let text = '';
-                            for (let node of el.childNodes) {
-                                if (node.nodeType === Node.TEXT_NODE) {
-                                    text += node.textContent;
-                                }
-                            }
-                            // اگر متن مستقیم نداشت، از innerText استفاده کن
-                            if (!text.trim() && el.children.length === 0) {
-                                text = el.innerText || '';
-                            }
-                            return text.trim();
-                        }""")
-
-                        # نرمال‌سازی
-                        direct_text_clean = ' '.join((direct_text or '').split()).strip().lower()
-
-                        if not direct_text_clean:
-                            continue
-
-                        # بررسی تطابق
-                        match_score = 0
-                        match_type = ''
-
-                        if direct_text_clean == search_lower:
-                            match_score = 1000
-                            match_type = 'exact'
-                        elif direct_text_clean.startswith(search_lower):
-                            match_score = 800 - len(direct_text_clean)
-                            match_type = 'starts'
-                        elif search_lower in direct_text_clean and len(direct_text_clean) < len(search_lower) * 3:
-                            # فقط اگر متن خیلی بلندتر نباشد
-                            match_score = 500 - len(direct_text_clean)
-                            match_type = 'contains'
-
-                        if match_score > 0:
-                            center_x = box["x"] + box["width"] / 2
-                            center_y = box["y"] + box["height"] / 2
-
-                            # چک تکراری نبودن
-                            is_dup = False
-                            for c in candidates:
-                                if abs(c["center_x"] - center_x) < 10 and abs(c["center_y"] - center_y) < 10:
-                                    is_dup = True
-                                    break
-                            if is_dup:
-                                continue
-
-                            candidates.append({
-                                "text": direct_text,
-                                "score": match_score,
-                                "match_type": match_type,
-                                "center_x": center_x,
-                                "center_y": center_y,
-                                "percent_x": round((center_x / session.viewport["width"]) * 100, 1),
-                                "percent_y": round((center_y / session.viewport["height"]) * 100, 1),
+                        if box:
+                            element_info = {
+                                "method": method_name,
+                                "index": i,
                                 "box": box,
-                                "element": el  # 🆕 نگه‌داری element handle برای کلیک مستقیم
-                            })
+                                "percent_x": round((box["x"] + box["width"]/2) / session.viewport["width"] * 100, 1),
+                                "percent_y": round((box["y"] + box["height"]/2) / session.viewport["height"] * 100, 1)
+                            }
+
+                        # کلیک!
+                        slog.info(f"  ✅ Clicking element {i} with method '{method_name}'")
+                        await el.click(timeout=5000)
+                        clicked = True
+                        click_method = method_name
+                        break
 
                     except Exception as e:
+                        slog.warning(f"  Element {i} click failed: {e}")
                         continue
-            except:
+
+                if clicked:
+                    break
+
+            except Exception as e:
+                slog.debug(f"  Method '{method_name}' failed: {e}")
                 continue
 
-        # مرتب‌سازی بر اساس امتیاز
-        candidates.sort(key=lambda x: -x["score"])
-
-        slog.info(f"Found {len(candidates)} candidates for '{search_text}'",
-                  top_matches=[c["text"] for c in candidates[:5]])
-
-        if not candidates:
+        if not clicked:
             await close_session(session_id)
             return {
                 "success": False,
-                "error": f"'{search_text}' پیدا نشد",
-                "candidates": []
+                "error": f"'{search_text}' پیدا نشد یا قابل کلیک نیست",
+                "tried_methods": [m[0] for m in methods]
             }
 
-        # بهترین match را انتخاب و کلیک کن
-        best = candidates[0]
-        element = best.get("element")
-
-        slog.info(f"Clicking DIRECTLY on element '{best['text']}' (not coordinates)")
-
-        # ✅ روش حرفه‌ای: کلیک مستقیم روی element، نه روی مختصات
-        if element:
-            try:
-                await element.click(timeout=5000)
-                slog.info("✅ Element click successful")
-            except Exception as click_err:
-                slog.warning(f"Element click failed, trying coordinate: {click_err}")
-                await session.page.mouse.click(best["center_x"], best["center_y"])
-        else:
-            # Fallback به مختصات
-            await session.page.mouse.click(best["center_x"], best["center_y"])
-
-        await session.wait(1000)
-        new_url = session.page.url if session.page else url
+        # صبر برای navigation
+        await session.wait(1500)
+        new_url = page.url
 
         await close_session(session_id)
 
         return {
             "success": True,
-            "found": best["text"],
-            "match_type": best["match_type"],
-            "score": best["score"],
-            "position": {
-                "x": best["center_x"],
-                "y": best["center_y"],
-                "percent_x": best["percent_x"],
-                "percent_y": best["percent_y"]
-            },
+            "found": search_clean,
+            "click_method": click_method,
+            "position": element_info,
             "url_changed": new_url != url,
-            "new_url": new_url,
-            "all_candidates": [{"text": c["text"], "score": c["score"]} for c in candidates[:10]]
+            "new_url": new_url
         }
 
     except Exception as e:
