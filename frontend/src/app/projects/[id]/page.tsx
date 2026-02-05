@@ -900,6 +900,19 @@ export default function ProjectDetailPage() {
             animateCursorSequence(data.cursor_positions);
           }
 
+          // 🆕 به‌روزرسانی iframe با URL نهایی (بعد از navigation)
+          if (data.final_url && data.final_url !== inspectorFrontendUrl) {
+            console.log('🔄 Updating iframe to final URL:', data.final_url);
+            setInspectorFrontendUrl(data.final_url);
+            // اضافه کردن پیام ناوبری
+            setInspectorChatMessages(prev => [...prev, {
+              id: `nav_${Date.now()}`,
+              role: 'assistant',
+              content: `🔄 صفحه به‌روزرسانی شد: ${data.final_url}`,
+              timestamp: new Date()
+            }]);
+          }
+
           // نمایش session_id برای ادامه کار
           if (data.session_id) {
             setInspectorChatMessages(prev => [...prev, {

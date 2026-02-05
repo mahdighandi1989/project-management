@@ -3103,6 +3103,13 @@ async def ai_interact_with_page(
                 "status": action.get("status", "done")
             })
 
+        # 🆕 دریافت اطلاعات صفحه بعد از اجرای task (URL نهایی)
+        final_page_info = await session.get_page_info()
+        slog.info(f"Final page after task",
+            final_url=final_page_info.get('url'),
+            final_title=final_page_info.get('title')
+        )
+
         response_data = {
             "success": result.get("success", False),
             "session_id": session_id,
@@ -3113,7 +3120,10 @@ async def ai_interact_with_page(
             "final_screenshot": result.get("final_screenshot"),
             "total_steps": result.get("total_steps", 0),
             "message": f"کار انجام شد: {result.get('total_steps', 0)} مرحله (مدل: {selected_model})",
-            "page_info": page_info
+            "page_info": page_info,
+            # 🆕 URL نهایی برای به‌روزرسانی iframe فرانت‌اند
+            "final_url": final_page_info.get('url'),
+            "final_page_info": final_page_info
         }
 
         # 🆕 اضافه کردن debug info
