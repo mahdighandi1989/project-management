@@ -884,11 +884,15 @@ export default function ProjectDetailPage() {
     }, 2000);
   };
 
-  // 🆕 اسکن بصری با نوارهای متحرک سبز
+  // 🆕 اسکن بصری با نوارهای متحرک سبز - نوارها از ابتدا حرکت می‌کنند
   const runVisualScan = async (searchText: string) => {
     if (!inspectorFrontendUrl) return;
 
-    // شروع انیمیشن اسکن
+    // متغیر برای کنترل انیمیشن
+    let scanComplete = false;
+    let targetPosition: { x: number; y: number; text: string } | null = null;
+
+    // شروع انیمیشن اسکن - فوری!
     setInspectorScanBars({
       verticalX: 0,
       horizontalY: 0,
@@ -897,8 +901,68 @@ export default function ProjectDetailPage() {
       intersection: null
     });
 
+    // 🆕 تابع انیمیشن اسکن - از ابتدا شروع می‌شود
+    const runScanAnimation = async () => {
+      let x = 0;
+      let y = 0;
+
+      // اسکن ردیف به ردیف و ستون به ستون
+      while (!scanComplete && (x <= 100 || y <= 100)) {
+        // حرکت نوار عمودی (از چپ به راست)
+        if (x <= 100) {
+          x += 1;
+          setInspectorScanBars(prev => ({ ...prev, verticalX: Math.min(x, 100) }));
+        }
+
+        // حرکت نوار افقی (از بالا به پایین) - کمی آهسته‌تر
+        if (y <= 100 && x % 2 === 0) {
+          y += 1;
+          setInspectorScanBars(prev => ({ ...prev, horizontalY: Math.min(y, 100) }));
+        }
+
+        // اگر هدف پیدا شد، سریع برو سمتش
+        if (targetPosition) {
+          // انیمیشن سریع به سمت هدف
+          const targetX = targetPosition.x;
+          const targetY = targetPosition.y;
+
+          // حرکت سریع به سمت X هدف
+          while (Math.abs(x - targetX) > 1) {
+            x += (targetX > x ? 3 : -3);
+            x = Math.max(0, Math.min(100, x));
+            setInspectorScanBars(prev => ({ ...prev, verticalX: x }));
+            await new Promise(resolve => setTimeout(resolve, 15));
+          }
+
+          // حرکت سریع به سمت Y هدف
+          while (Math.abs(y - targetY) > 1) {
+            y += (targetY > y ? 3 : -3);
+            y = Math.max(0, Math.min(100, y));
+            setInspectorScanBars(prev => ({ ...prev, horizontalY: y }));
+            await new Promise(resolve => setTimeout(resolve, 15));
+          }
+
+          // رسیدیم به هدف!
+          setInspectorScanBars(prev => ({
+            ...prev,
+            verticalX: targetX,
+            horizontalY: targetY,
+            targetFound: true,
+            intersection: targetPosition
+          }));
+
+          break;
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 25)); // سرعت اسکن
+      }
+    };
+
+    // 🆕 همزمان: شروع انیمیشن + صدا زدن API
+    const animationPromise = runScanAnimation();
+
     try {
-      // صدا زدن API
+      // صدا زدن API همزمان با انیمیشن
       const res = await fetch(`${API_BASE}/api/render/inspector/visual-scan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -911,69 +975,56 @@ export default function ProjectDetailPage() {
 
       const data = await res.json();
 
-      if (data.success && data.scan_animation) {
-        // انیمیشن نوار عمودی (از راست به چپ برای RTL)
-        const verticalSteps = data.scan_animation.vertical_bar || [];
-        const horizontalSteps = data.scan_animation.horizontal_bar || [];
-
-        // اجرای همزمان دو نوار
-        const animateVertical = async () => {
-          for (const step of verticalSteps) {
-            setInspectorScanBars(prev => ({ ...prev, verticalX: step.x }));
-            await new Promise(resolve => setTimeout(resolve, step.duration));
-          }
+      if (data.success && data.target_position) {
+        // هدف پیدا شد! به انیمیشن اطلاع بده
+        targetPosition = {
+          x: data.target_position.x,
+          y: data.target_position.y,
+          text: data.message || searchText
         };
+        scanComplete = true;
 
-        const animateHorizontal = async () => {
-          for (const step of horizontalSteps) {
-            setInspectorScanBars(prev => ({ ...prev, horizontalY: step.y }));
-            await new Promise(resolve => setTimeout(resolve, step.duration));
-          }
-        };
+        // صبر کن انیمیشن به هدف برسد
+        await animationPromise;
 
-        // اجرای همزمان
-        await Promise.all([animateVertical(), animateHorizontal()]);
+        // نمایش cursor روی هدف
+        setInspectorVirtualCursor({
+          x: targetPosition.x,
+          y: targetPosition.y,
+          visible: true,
+          model_id: `🎯 ${targetPosition.text}`
+        });
 
-        // نشان دادن نقطه تقاطع
-        if (data.scan_animation.intersection) {
+        // پنهان کردن بعد از 3 ثانیه
+        setTimeout(() => {
           setInspectorScanBars(prev => ({
             ...prev,
-            targetFound: true,
-            intersection: data.scan_animation.intersection
+            scanning: false,
+            targetFound: false,
+            intersection: null
           }));
-
-          // نمایش cursor روی هدف
-          setInspectorVirtualCursor({
-            x: data.scan_animation.intersection.x,
-            y: data.scan_animation.intersection.y,
-            visible: true,
-            model_id: `🎯 ${data.scan_animation.intersection.text}`
-          });
-
-          // پنهان کردن بعد از 3 ثانیه
-          setTimeout(() => {
-            setInspectorScanBars(prev => ({ ...prev, scanning: false, targetFound: false }));
-            setInspectorVirtualCursor(prev => ({ ...prev, visible: false }));
-          }, 3000);
-        }
+          setInspectorVirtualCursor(prev => ({ ...prev, visible: false }));
+        }, 3000);
 
         return data;
       } else {
-        // اسکن کامل صفحه بدون پیدا کردن
-        // انیمیشن کامل
-        for (let x = 0; x <= 100; x += 2) {
-          setInspectorScanBars(prev => ({ ...prev, verticalX: x }));
-          await new Promise(resolve => setTimeout(resolve, 20));
-        }
-        for (let y = 0; y <= 100; y += 2) {
-          setInspectorScanBars(prev => ({ ...prev, horizontalY: y }));
-          await new Promise(resolve => setTimeout(resolve, 20));
-        }
+        // پیدا نشد - اسکن کامل شود
+        scanComplete = true;
+        await animationPromise;
 
+        // نوارها را به انتها ببر
+        setInspectorScanBars(prev => ({
+          ...prev,
+          verticalX: 100,
+          horizontalY: 100
+        }));
+
+        await new Promise(resolve => setTimeout(resolve, 500));
         setInspectorScanBars(prev => ({ ...prev, scanning: false }));
         return { success: false, message: 'پیدا نشد' };
       }
     } catch (error) {
+      scanComplete = true;
       setInspectorScanBars(prev => ({ ...prev, scanning: false }));
       throw error;
     }
