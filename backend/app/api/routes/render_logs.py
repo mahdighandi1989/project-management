@@ -3265,12 +3265,17 @@ async def get_page_elements(url: str):
 @router.post("/inspector/find-and-click")
 async def find_element_and_click(url: str, search_text: str):
     """
-    🎯 پیدا کردن المان با متن و کلیک روی آن - روش حرفه‌ای Playwright
+    🔍 جستجوی Ctrl+F style - پیدا کردن متن در صفحه و کلیک
 
-    از locator های built-in Playwright استفاده می‌کند که:
-    1. خودش المان کلیک‌پذیر را پیدا می‌کند
-    2. صبر می‌کند تا المان قابل کلیک شود
-    3. scroll می‌کند اگر لازم باشد
+    مثل Ctrl+F مرورگر:
+    1. متن رو در صفحه جستجو میکنه
+    2. اگه پیدا شد، المان رو highlight میکنه (چشمک)
+    3. scroll میکنه تا دیده بشه
+    4. کلیک میکنه
+
+    برمیگردونه:
+    - found_elements: لیست همه المان‌های پیدا شده با موقعیت
+    - clicked_index: کدوم کلیک شد
     """
     import uuid
     from ...services.browser_automation import create_session, close_session
@@ -3288,90 +3293,117 @@ async def find_element_and_click(url: str, search_text: str):
         page = session.page
         search_clean = search_text.strip()
 
-        slog.info(f"🔍 Searching for clickable element with text: '{search_clean}'")
+        slog.info(f"🔍 Ctrl+F search for: '{search_clean}'")
 
-        # روش‌های مختلف برای پیدا کردن و کلیک - به ترتیب اولویت
-        methods = [
-            # 1. آیتم منو یا لینک در navigation
-            ("nav_link", lambda: page.locator("nav a, aside a, [class*='nav'] a, [class*='menu'] a, [class*='sidebar'] a").filter(has_text=search_clean)),
-            # 2. لینک با متن دقیق
-            ("link_exact", lambda: page.get_by_role("link", name=search_clean, exact=True)),
-            # 3. آیتم منو
-            ("menuitem", lambda: page.get_by_role("menuitem", name=search_clean)),
-            # 4. لینک با متن (نه دقیق)
-            ("link_contains", lambda: page.get_by_role("link", name=search_clean)),
-            # 5. المان کلیک‌پذیر در nav/sidebar
-            ("nav_clickable", lambda: page.locator("nav, aside, [class*='nav'], [class*='menu'], [class*='sidebar']").get_by_text(search_clean)),
-            # 6. دکمه با متن دقیق
-            ("button_exact", lambda: page.get_by_role("button", name=search_clean, exact=True)),
-            # 7. دکمه با متن (نه دقیق)
-            ("button_contains", lambda: page.get_by_role("button", name=search_clean)),
-            # 8. هر المان با متن دقیق
-            ("text_exact", lambda: page.get_by_text(search_clean, exact=True)),
-            # 9. هر المان با متن
-            ("text_contains", lambda: page.get_by_text(search_clean)),
-        ]
+        # 1. جستجوی متن با getByText (مثل Ctrl+F)
+        locator = page.get_by_text(search_clean, exact=False)
+        count = await locator.count()
 
-        clicked = False
-        click_method = None
-        element_info = None
+        slog.info(f"Found {count} matches for '{search_clean}'")
 
-        for method_name, get_locator in methods:
-            try:
-                locator = get_locator()
-                count = await locator.count()
-
-                if count == 0:
-                    continue
-
-                slog.info(f"  Found {count} elements with method '{method_name}'")
-
-                # اگه چند تا پیدا شد، اولی که visible هست رو بگیر
-                for i in range(min(count, 5)):  # حداکثر 5 تا چک کن
-                    try:
-                        el = locator.nth(i)
-                        is_visible = await el.is_visible()
-                        if not is_visible:
-                            continue
-
-                        # گرفتن اطلاعات المان
-                        box = await el.bounding_box()
-                        if box:
-                            element_info = {
-                                "method": method_name,
-                                "index": i,
-                                "box": box,
-                                "percent_x": round((box["x"] + box["width"]/2) / session.viewport["width"] * 100, 1),
-                                "percent_y": round((box["y"] + box["height"]/2) / session.viewport["height"] * 100, 1)
-                            }
-
-                        # کلیک!
-                        slog.info(f"  ✅ Clicking element {i} with method '{method_name}'")
-                        await el.click(timeout=5000)
-                        clicked = True
-                        click_method = method_name
-                        break
-
-                    except Exception as e:
-                        slog.warning(f"  Element {i} click failed: {e}")
-                        continue
-
-                if clicked:
-                    break
-
-            except Exception as e:
-                slog.debug(f"  Method '{method_name}' failed: {e}")
-                continue
-
-        if not clicked:
+        if count == 0:
             await close_session(session_id)
             return {
                 "success": False,
-                "error": f"'{search_text}' پیدا نشد یا قابل کلیک نیست",
-                "tried_methods": [m[0] for m in methods]
+                "error": f"'{search_text}' در این صفحه پیدا نشد",
+                "found_count": 0
             }
 
-        # صبر برای navigation
+        # 2. جمع‌آوری اطلاعات همه المان‌های پیدا شده
+        found_elements = []
+        for i in range(min(count, 20)):  # حداکثر 20 تا
+            try:
+                el = locator.nth(i)
+                is_visible = await el.is_visible()
+                if not is_visible:
+                    continue
+
+                box = await el.bounding_box()
+                if not box or box["width"] < 3 or box["height"] < 3:
+                    continue
+
+                text = await el.text_content()
+                text = (text or "").strip()[:100]
+
+                found_elements.append({
+                    "index": i,
+                    "text": text,
+                    "box": box,
+                    "center_x": box["x"] + box["width"] / 2,
+                    "center_y": box["y"] + box["height"] / 2,
+                    "percent_x": round((box["x"] + box["width"]/2) / session.viewport["width"] * 100, 1),
+                    "percent_y": round((box["y"] + box["height"]/2) / session.viewport["height"] * 100, 1)
+                })
+            except:
+                continue
+
+        if not found_elements:
+            await close_session(session_id)
+            return {
+                "success": False,
+                "error": f"'{search_text}' پیدا شد ولی visible نیست",
+                "found_count": count
+            }
+
+        slog.info(f"Found {len(found_elements)} visible elements")
+
+        # 3. پیدا کردن بهترین المان برای کلیک
+        # اولویت: المان کوتاه‌تر (دقیق‌تر) و در موقعیت طبیعی
+        found_elements.sort(key=lambda e: (len(e["text"]), e["center_y"]))
+        best_element = found_elements[0]
+        best_index = best_element["index"]
+
+        slog.info(f"Best match: '{best_element['text'][:30]}' at ({best_element['percent_x']}%, {best_element['percent_y']}%)")
+
+        # 4. Scroll تا المان دیده بشه
+        el = locator.nth(best_index)
+        await el.scroll_into_view_if_needed()
+        await session.wait(300)
+
+        # 5. Highlight animation (چشمک زدن)
+        try:
+            await el.evaluate("""el => {
+                const originalOutline = el.style.outline;
+                const originalBg = el.style.backgroundColor;
+                const originalTransition = el.style.transition;
+
+                el.style.transition = 'all 0.2s ease';
+                let count = 0;
+                const blink = setInterval(() => {
+                    if (count % 2 === 0) {
+                        el.style.outline = '3px solid #00ff00';
+                        el.style.backgroundColor = 'rgba(0, 255, 0, 0.3)';
+                    } else {
+                        el.style.outline = originalOutline;
+                        el.style.backgroundColor = originalBg;
+                    }
+                    count++;
+                    if (count >= 6) {
+                        clearInterval(blink);
+                        el.style.outline = originalOutline;
+                        el.style.backgroundColor = originalBg;
+                        el.style.transition = originalTransition;
+                    }
+                }, 150);
+            }""")
+            await session.wait(1000)  # صبر برای انیمیشن
+        except Exception as e:
+            slog.warning(f"Highlight failed: {e}")
+
+        # 6. آپدیت موقعیت بعد از scroll
+        box = await el.bounding_box()
+        if box:
+            best_element["box"] = box
+            best_element["center_x"] = box["x"] + box["width"] / 2
+            best_element["center_y"] = box["y"] + box["height"] / 2
+            best_element["percent_x"] = round((box["x"] + box["width"]/2) / session.viewport["width"] * 100, 1)
+            best_element["percent_y"] = round((box["y"] + box["height"]/2) / session.viewport["height"] * 100, 1)
+
+        # 7. کلیک!
+        await el.click(timeout=5000)
+        slog.info(f"✅ Clicked on '{best_element['text'][:30]}'")
+
+        # 8. صبر برای navigation
         await session.wait(1500)
         new_url = page.url
 
@@ -3379,9 +3411,11 @@ async def find_element_and_click(url: str, search_text: str):
 
         return {
             "success": True,
-            "found": search_clean,
-            "click_method": click_method,
-            "position": element_info,
+            "found": best_element["text"],
+            "found_count": len(found_elements),
+            "found_elements": found_elements[:5],  # 5 تای اول برای نمایش
+            "clicked_index": best_index,
+            "position": best_element,
             "url_changed": new_url != url,
             "new_url": new_url
         }
