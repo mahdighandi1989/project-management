@@ -788,13 +788,22 @@ export default function ProjectDetailPage() {
   // 🆕 تشخیص اینکه آیا این یک task ویژوال است
   const isVisualTask = (message: string): boolean => {
     const visualKeywords = [
+      // ناوبری
+      'برو', 'navigate', 'go to', 'open', 'باز کن', 'برو به', 'نمایش بده',
+      // لاگین
       'لاگین', 'login', 'ورود', 'sign in', 'وارد شو',
-      'کلیک', 'click', 'بزن', 'فشار بده',
+      // کلیک
+      'کلیک', 'click', 'بزن', 'فشار بده', 'روی',
+      // تایپ
       'تایپ', 'type', 'بنویس', 'وارد کن',
+      // اسکرول
       'اسکرول', 'scroll', 'پایین برو', 'بالا برو',
+      // جستجو
       'پیدا کن', 'find', 'جستجو', 'search',
+      // انتخاب
       'انتخاب کن', 'select', 'choose',
-      'صفحه', 'page', 'فرم', 'form'
+      // عناصر صفحه
+      'صفحه', 'page', 'فرم', 'form', 'دکمه', 'button', 'لینک', 'link', 'منو', 'menu'
     ];
     const lowerMessage = message.toLowerCase();
     return visualKeywords.some(keyword => lowerMessage.includes(keyword));
