@@ -888,9 +888,7 @@ export default function ProjectDetailPage() {
   const runVisualScan = async (searchText: string) => {
     if (!inspectorFrontendUrl) return;
 
-    const searchLower = searchText.toLowerCase();
-
-    // شروع اسکن
+    // شروع اسکن - انیمیشن سریع
     setInspectorScanBars({
       verticalX: 0,
       horizontalY: 0,
@@ -900,147 +898,80 @@ export default function ProjectDetailPage() {
     });
 
     try {
-      // 1. ابتدا لیست همه المان‌های صفحه را بگیر
-      const elementsRes = await fetch(`${API_BASE}/api/render/inspector/get-elements?url=${encodeURIComponent(inspectorFrontendUrl)}`, {
-        method: 'POST'
-      });
-      const elementsData = await elementsRes.json();
-
-      if (!elementsData.success || !elementsData.elements?.length) {
-        // المانی نیست - اسکن کامل صفحه نمایشی
-        for (let p = 0; p <= 100; p += 2) {
-          setInspectorScanBars(prev => ({ ...prev, verticalX: p, horizontalY: p }));
-          await new Promise(resolve => setTimeout(resolve, 20));
+      // انیمیشن اسکن سریع (در حالی که بکند کار میکنه)
+      const scanAnimation = async () => {
+        for (let p = 0; p <= 100; p += 3) {
+          setInspectorScanBars(prev => {
+            if (prev.targetFound) return prev;  // اگه پیدا شد متوقف شو
+            return { ...prev, verticalX: p, horizontalY: p };
+          });
+          await new Promise(resolve => setTimeout(resolve, 15));
         }
-        setInspectorScanBars(prev => ({ ...prev, scanning: false }));
-        return { success: false, message: 'المانی در صفحه پیدا نشد' };
-      }
+      };
 
-      const elements = elementsData.elements;
-      console.log(`📋 Total elements: ${elements.length}`);
+      // همزمان: انیمیشن + درخواست به بکند
+      const [_, findResult] = await Promise.all([
+        scanAnimation(),
+        fetch(`${API_BASE}/api/render/inspector/find-and-click?url=${encodeURIComponent(inspectorFrontendUrl)}&search_text=${encodeURIComponent(searchText)}`, {
+          method: 'POST'
+        }).then(res => res.json())
+      ]);
 
-      // 2. ابتدا همه match ها را پیدا کن و امتیازدهی کن
-      interface MatchResult {
-        element: typeof elements[0];
-        score: number;
-        matchType: string;
-      }
-      const matches: MatchResult[] = [];
+      console.log('🎯 Find result:', findResult);
 
-      for (const el of elements) {
-        const elText = (el.text || '').toLowerCase();
-        const elHref = (el.href || '').toLowerCase();
+      if (findResult.success && findResult.position) {
+        // پیدا شد! نمایش موقعیت
+        const { percent_x, percent_y } = findResult.position;
 
-        // امتیازدهی: exact match > starts with > includes
-        // همچنین: متن کوتاه‌تر = امتیاز بالاتر (المان دقیق‌تر)
-        let score = 0;
-        let matchType = '';
+        setInspectorScanBars({
+          verticalX: percent_x,
+          horizontalY: percent_y,
+          scanning: true,
+          targetFound: true,
+          intersection: { x: percent_x, y: percent_y, text: findResult.found }
+        });
 
-        if (elText === searchLower) {
-          score = 1000;  // exact match - بهترین
-          matchType = 'exact';
-        } else if (elText.startsWith(searchLower)) {
-          score = 500 - elText.length;  // شروع با - خوب
-          matchType = 'starts';
-        } else if (elText.includes(searchLower)) {
-          score = 200 - elText.length;  // شامل - قابل قبول
-          matchType = 'includes';
-        } else if (elHref.includes(searchLower)) {
-          score = 100 - elHref.length;  // در href
-          matchType = 'href';
+        setInspectorVirtualCursor({
+          x: percent_x,
+          y: percent_y,
+          visible: true,
+          model_id: `🎯 ${findResult.found}`
+        });
+
+        // نمایش candidates در console برای debug
+        if (findResult.all_candidates) {
+          console.log('📋 All candidates:', findResult.all_candidates);
         }
 
-        if (score > 0) {
-          matches.push({ element: el, score, matchType });
-          console.log(`  ✓ Match: "${el.text}" (score: ${score}, type: ${matchType})`);
-        }
-      }
-
-      // مرتب‌سازی بر اساس امتیاز (بالاترین اول)
-      matches.sort((a, b) => b.score - a.score);
-      console.log(`🎯 Best matches:`, matches.slice(0, 3).map(m => `${m.element.text} (${m.score})`));
-
-      // 3. اسکن واقعی - یکی یکی از روی المان‌ها رد شو
-      const bestMatch = matches[0]?.element;
-      let foundTarget = false;
-
-      for (let i = 0; i < elements.length; i++) {
-        const el = elements[i];
-        const percentX = el.percent_x;
-        const percentY = el.percent_y;
-
-        // حرکت نوارها به سمت این المان
-        setInspectorScanBars(prev => ({
-          ...prev,
-          verticalX: percentX,
-          horizontalY: percentY
-        }));
-
-        // سرعت اسکن - سریع‌تر اگر به هدف نزدیک نیستیم
-        const isTarget = bestMatch && el.index === bestMatch.index;
-        const delay = isTarget ? 300 : 30;  // روی هدف بیشتر مکث کن
-        await new Promise(resolve => setTimeout(resolve, delay));
-
-        // آیا این المان هدف ماست؟
-        if (isTarget) {
-          foundTarget = true;
-          console.log(`🎯 Found target: "${el.text}" at (${percentX}%, ${percentY}%)`);
-
-          // نمایش هدف پیدا شده
+        // پنهان کردن بعد از 3 ثانیه
+        setTimeout(() => {
           setInspectorScanBars(prev => ({
             ...prev,
-            targetFound: true,
-            intersection: { x: percentX, y: percentY, text: el.text || searchText }
+            scanning: false,
+            targetFound: false,
+            intersection: null
           }));
+          setInspectorVirtualCursor(prev => ({ ...prev, visible: false }));
+        }, 3000);
 
-          // نمایش cursor
-          setInspectorVirtualCursor({
-            x: percentX,
-            y: percentY,
-            visible: true,
-            model_id: `🎯 ${el.text || searchText}`
-          });
-
-          await new Promise(resolve => setTimeout(resolve, 500));
-
-          // کلیک روی المان
-          const clickRes = await fetch(`${API_BASE}/api/render/inspector/click-at?url=${encodeURIComponent(inspectorFrontendUrl)}&x=${el.center_x}&y=${el.center_y}`, {
-            method: 'POST'
-          });
-          const clickData = await clickRes.json();
-
-          // پنهان کردن بعد از 3 ثانیه
-          setTimeout(() => {
-            setInspectorScanBars(prev => ({
-              ...prev,
-              scanning: false,
-              targetFound: false,
-              intersection: null
-            }));
-            setInspectorVirtualCursor(prev => ({ ...prev, visible: false }));
-          }, 3000);
-
-          return {
-            success: true,
-            message: `پیدا شد: ${el.text}`,
-            target_position: { x: percentX, y: percentY },
-            clicked: true,
-            url_changed: clickData?.url_changed || false
-          };
-        }
+        return {
+          success: true,
+          message: `پیدا شد: ${findResult.found} (${findResult.match_type})`,
+          target_position: { x: percent_x, y: percent_y },
+          clicked: true,
+          url_changed: findResult.url_changed
+        };
       }
 
-      // 5. همه المان‌ها چک شدند ولی پیدا نشد
-      console.log(`❌ Not found: "${searchText}" - checked ${elements.length} elements`);
-      setInspectorScanBars(prev => ({
-        ...prev,
-        verticalX: 100,
-        horizontalY: 100
-      }));
-      await new Promise(resolve => setTimeout(resolve, 300));
+      // پیدا نشد
+      console.log('❌ Not found:', searchText, findResult.all_candidates || []);
       setInspectorScanBars(prev => ({ ...prev, scanning: false }));
 
-      return { success: false, message: `"${searchText}" پیدا نشد` };
+      return {
+        success: false,
+        message: findResult.error || `"${searchText}" پیدا نشد`,
+        candidates: findResult.all_candidates
+      };
 
     } catch (error) {
       console.error('Visual scan error:', error);
