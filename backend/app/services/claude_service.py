@@ -44,11 +44,13 @@ class ClaudeService(AIServiceBase):
                     # پیام با تصویر
                     content = [{"type": "text", "text": msg.content}]
                     for img in msg.images:
+                        # تشخیص نوع تصویر از header (PNG: iVBORw0K, JPEG: /9j/)
+                        media_type = "image/png" if img.startswith("iVBORw0K") else "image/jpeg"
                         content.append({
                             "type": "image",
                             "source": {
                                 "type": "base64",
-                                "media_type": "image/jpeg",
+                                "media_type": media_type,
                                 "data": img,
                             }
                         })

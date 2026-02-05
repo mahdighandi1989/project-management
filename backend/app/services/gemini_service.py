@@ -37,9 +37,11 @@ class GeminiService(AIServiceBase):
 
                 if msg.images:
                     for img in msg.images:
+                        # تشخیص نوع تصویر از header (PNG: iVBORw0K, JPEG: /9j/)
+                        mime_type = "image/png" if img.startswith("iVBORw0K") else "image/jpeg"
                         parts.append({
                             "inline_data": {
-                                "mime_type": "image/jpeg",
+                                "mime_type": mime_type,
                                 "data": img
                             }
                         })

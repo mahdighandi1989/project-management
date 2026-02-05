@@ -37,11 +37,17 @@ class OpenAIService(AIServiceBase):
                 # پیام با تصویر (vision)
                 content = [{"type": "text", "text": msg.content}]
                 for img in msg.images:
+                    # تشخیص نوع تصویر از header (PNG: iVBORw0K, JPEG: /9j/)
+                    if img.startswith("http"):
+                        image_url = img
+                    elif img.startswith("iVBORw0K"):
+                        image_url = f"data:image/png;base64,{img}"
+                    else:
+                        image_url = f"data:image/jpeg;base64,{img}"
+
                     content.append({
                         "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{img}" if not img.startswith("http") else img
-                        }
+                        "image_url": {"url": image_url}
                     })
                 formatted.append({"role": msg.role, "content": content})
             else:
