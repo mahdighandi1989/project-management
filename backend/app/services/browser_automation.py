@@ -171,25 +171,46 @@ class BrowserSession:
                         if not box or box["width"] < 5 or box["height"] < 5:
                             continue
 
-                        # گرفتن متن المان
+                        # گرفتن متن المان - روش‌های مختلف
                         text = ""
+                        text_content = ""
+
+                        # روش 1: innerText (متن قابل مشاهده)
                         try:
                             text = await el.inner_text()
-                            text = text.strip()[:50]  # حداکثر 50 کاراکتر
+                            # نرمال‌سازی: حذف فاصله‌های اضافی و newline ها
+                            text = ' '.join(text.split()).strip()[:100]
                         except:
                             pass
 
-                        if not text:
-                            try:
-                                text = await el.get_attribute("aria-label") or ""
-                            except:
-                                pass
+                        # روش 2: textContent (تمام متن‌ها)
+                        try:
+                            text_content = await el.evaluate("el => el.textContent")
+                            text_content = ' '.join(text_content.split()).strip()[:100] if text_content else ""
+                        except:
+                            pass
 
-                        if not text:
-                            try:
-                                text = await el.get_attribute("title") or ""
-                            except:
-                                pass
+                        # روش 3: aria-label
+                        aria_label = ""
+                        try:
+                            aria_label = await el.get_attribute("aria-label") or ""
+                        except:
+                            pass
+
+                        # روش 4: title
+                        title_attr = ""
+                        try:
+                            title_attr = await el.get_attribute("title") or ""
+                        except:
+                            pass
+
+                        # انتخاب بهترین متن (کوتاه‌تر و معنادارتر)
+                        if not text and text_content:
+                            text = text_content
+                        if not text and aria_label:
+                            text = aria_label
+                        if not text and title_attr:
+                            text = title_attr
 
                         # جلوگیری از تکرار
                         center_x = box["x"] + box["width"] / 2
