@@ -349,8 +349,9 @@ export default function ProjectDetailPage() {
   });
 
   // 🆕 Live Action Tracking - رصد لحظه‌ای فعالیت کاربر در پیش‌نمایش
+  // ⚠️ فعلاً غیرفعال - نیاز به رفع مشکل CORS در بک‌اند
   const [inspectorActionTracking, setInspectorActionTracking] = useState({
-    enabled: true,  // آیا ردیابی فعال است
+    enabled: false,  // آیا ردیابی فعال است - فعلاً غیرفعال
     lastAction: null as {
       type: 'click' | 'scroll' | 'input' | 'navigate';
       x: number;
@@ -7649,16 +7650,13 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               sandbox="allow-scripts allow-same-origin allow-forms"
                             />
 
-                            {/* 🆕 لایه ردیابی فعالیت کاربر (کلیک‌ها را رصد می‌کند) */}
+                            {/* 🆕 لایه ردیابی فعالیت کاربر - فقط برای نمایش پیام‌ها */}
                             <div
                               ref={inspectorOverlayRef}
-                              className={`absolute inset-0 z-30 ${inspectorPaused ? 'cursor-not-allowed' : 'cursor-crosshair'}`}
-                              style={{ pointerEvents: inspectorActionTracking.enabled ? 'auto' : 'none' }}
-                              onClick={handleOverlayClick}
-                              onWheel={handleOverlayScroll}
+                              className="absolute inset-0 z-30 pointer-events-none"
                             >
                               {/* پیام‌های موقت (گزارش لحظه‌ای) */}
-                              <div className="absolute top-2 right-2 flex flex-col gap-1 z-50" dir="rtl">
+                              <div className="absolute top-2 right-2 flex flex-col gap-1 z-50 pointer-events-auto" dir="rtl">
                                 {inspectorTransientMessages.map(msg => (
                                   <div
                                     key={msg.id}
