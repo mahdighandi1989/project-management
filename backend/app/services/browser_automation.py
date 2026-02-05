@@ -304,14 +304,81 @@ class BrowserSession:
             except Exception as js_err:
                 slog.warning(f"JavaScript click failed: {js_err}")
 
-                # روش 2: Playwright force click
-                slog.info(f"🖱️ Method 2: Playwright force click")
-                await element_handle.click(timeout=5000, force=True)
-                slog.info(f"✅ Playwright force click executed")
+            # صبر کوتاه
+            await self.page.wait_for_timeout(500)
+
+            # چک اولیه - آیا URL تغییر کرد؟
+            new_url = self.page.url
+            if new_url != old_url:
+                slog.info(f"✅ URL changed after Method 1! {old_url} -> {new_url}")
+            else:
+                # روش 2: dispatch کردن mouse events کامل
+                slog.info(f"🖱️ Method 2: Full mouse event dispatch (mousedown + mouseup + click)")
+                try:
+                    await self.page.evaluate("""(el) => {
+                        const rect = el.getBoundingClientRect();
+                        const x = rect.left + rect.width / 2;
+                        const y = rect.top + rect.height / 2;
+
+                        // Focus the element first
+                        el.focus();
+
+                        // Dispatch mouseenter
+                        el.dispatchEvent(new MouseEvent('mouseenter', {bubbles: true, cancelable: true, clientX: x, clientY: y}));
+
+                        // Dispatch mousedown
+                        el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0}));
+
+                        // Dispatch mouseup
+                        el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0}));
+
+                        // Dispatch click
+                        el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0}));
+                    }""", element_handle)
+                    slog.info(f"✅ Mouse events dispatched")
+                except Exception as e:
+                    slog.warning(f"Mouse event dispatch failed: {e}")
+
+                await self.page.wait_for_timeout(500)
+                new_url = self.page.url
+
+                if new_url == old_url:
+                    # روش 3: کلیک با Playwright force
+                    slog.info(f"🖱️ Method 3: Playwright force click")
+                    try:
+                        await element_handle.click(timeout=5000, force=True)
+                        slog.info(f"✅ Playwright force click executed")
+                    except Exception as pw_err:
+                        slog.warning(f"Playwright click failed: {pw_err}")
+
+                    await self.page.wait_for_timeout(500)
+                    new_url = self.page.url
+
+                    if new_url == old_url:
+                        # روش 4: چک کردن parent element برای href
+                        slog.info(f"🖱️ Method 4: Check parent elements for href")
+                        try:
+                            parent_href = await self.page.evaluate("""(el) => {
+                                let current = el;
+                                for (let i = 0; i < 5; i++) {
+                                    if (current.tagName === 'A' && current.href) {
+                                        return current.href;
+                                    }
+                                    current = current.parentElement;
+                                    if (!current) break;
+                                }
+                                return null;
+                            }""", element_handle)
+
+                            if parent_href:
+                                slog.info(f"📎 Found parent href: {parent_href}")
+                                current_href = parent_href
+                        except Exception as e:
+                            slog.warning(f"Parent href check failed: {e}")
 
             # صبر برای navigation
             slog.info(f"⏳ Waiting for navigation...")
-            await self.page.wait_for_timeout(2000)
+            await self.page.wait_for_timeout(1500)
 
             new_url = self.page.url
             url_changed = new_url != old_url
