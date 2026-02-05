@@ -2958,7 +2958,7 @@ class AIInteractRequest(BaseModel):
     debug: Optional[bool] = False  # 🆕 برای دیدن پاسخ خام AI
 
 
-def get_best_vision_model(ai_manager, db) -> Optional[str]:
+def get_best_vision_model(ai_manager, db, allow_temporary_enable: bool = True) -> tuple:
     """
     انتخاب بهترین مدل vision موجود
 
@@ -2966,6 +2966,9 @@ def get_best_vision_model(ai_manager, db) -> Optional[str]:
     1. Claude (بهترین برای تحلیل و تصمیم‌گیری)
     2. GPT-4o (قدرتمند در vision)
     3. Gemini (سریع و مقرون به صرفه)
+
+    Returns:
+        tuple: (model_id, temporarily_enabled: bool)
     """
     from ...core.models_registry import get_vision_models, MODEL_REGISTRY
     from ...models.ai_profile import ModelSettings
@@ -2996,7 +2999,10 @@ def get_best_vision_model(ai_manager, db) -> Optional[str]:
     except:
         settings_map = {}
 
-    # پیدا کردن اولین مدل موجود
+    # 🆕 لیست مدل‌های غیرفعال که می‌توانند موقتاً فعال شوند
+    disabled_vision_models = []
+
+    # پیدا کردن اولین مدل فعال موجود
     for model_id in priority_order:
         if model_id in MODEL_REGISTRY:
             model = MODEL_REGISTRY[model_id]
@@ -3006,24 +3012,40 @@ def get_best_vision_model(ai_manager, db) -> Optional[str]:
             if provider not in available_provider_names:
                 continue
 
+            # بررسی قابلیت vision
+            if not model.supports_images:
+                continue
+
             # بررسی تنظیمات کاربر
             setting = settings_map.get(model_id)
             if setting and not setting.enabled:
+                # 🆕 ذخیره برای فعال‌سازی موقت
+                disabled_vision_models.append((model_id, setting))
                 continue
 
-            # بررسی قابلیت vision
-            if model.supports_images:
-                slog.info(f"Selected vision model: {model_id}")
-                return model_id
+            slog.info(f"Selected vision model (enabled): {model_id}")
+            return model_id, False  # False = not temporarily enabled
+
+    # 🆕 اگر مدل فعال پیدا نشد و اجازه فعال‌سازی موقت داریم
+    if allow_temporary_enable and disabled_vision_models:
+        model_id, setting = disabled_vision_models[0]  # بهترین مدل غیرفعال
+
+        # فعال‌سازی موقت در دیتابیس
+        slog.info(f"Temporarily enabling vision model: {model_id}")
+        setting.enabled = True
+        setting.temporary_enabled = True
+        db.commit()
+
+        return model_id, True  # True = temporarily enabled
 
     # Fallback به اولین مدل vision موجود
     vision_models = get_vision_models()
     for model in vision_models:
         provider = str(model.provider.value) if hasattr(model.provider, 'value') else str(model.provider)
         if provider in available_provider_names:
-            return model.id
+            return model.id, False
 
-    return None
+    return None, False
 
 
 @router.post("/inspector/ai-interact")
@@ -3053,8 +3075,10 @@ async def ai_interact_with_page(
     import uuid
     from ...services.browser_automation import create_session, execute_ai_agent_task, close_session
     from ...services.ai_manager import get_ai_manager
+    from ...models.ai_profile import ModelSettings
 
     session_id = str(uuid.uuid4())[:8]
+    temporarily_enabled = False  # 🆕 آیا مدل موقتاً فعال شده
 
     # 1. دریافت AI manager
     ai_manager = get_ai_manager()
@@ -3062,7 +3086,7 @@ async def ai_interact_with_page(
     # 2. انتخاب مدل vision (داینامیک یا مشخص شده)
     selected_model = request.model_id
     if not selected_model:
-        selected_model = get_best_vision_model(ai_manager, db)
+        selected_model, temporarily_enabled = get_best_vision_model(ai_manager, db)
 
     if not selected_model:
         return {
@@ -3073,7 +3097,8 @@ async def ai_interact_with_page(
     slog.api_request("POST", "/inspector/ai-interact",
         task=request.task[:100],
         url=request.url,
-        model_id=selected_model
+        model_id=selected_model,
+        temporarily_enabled=temporarily_enabled
     )
 
     try:
@@ -3081,7 +3106,8 @@ async def ai_interact_with_page(
         session = await create_session(session_id, request.url)
         page_info = await session.get_page_info()
 
-        slog.info(f"Browser opened", session_id=session_id, title=page_info.get('title'), model=selected_model)
+        slog.info(f"Browser opened", session_id=session_id, title=page_info.get('title'), model=selected_model,
+            temp_enabled=temporarily_enabled)
 
         # 4. اجرای task با AI Agent
         result = await execute_ai_agent_task(
@@ -3103,6 +3129,13 @@ async def ai_interact_with_page(
                 "status": action.get("status", "done")
             })
 
+        # 🆕 دریافت اطلاعات صفحه بعد از اجرای task (URL نهایی)
+        final_page_info = await session.get_page_info()
+        slog.info(f"Final page after task",
+            final_url=final_page_info.get('url'),
+            final_title=final_page_info.get('title')
+        )
+
         response_data = {
             "success": result.get("success", False),
             "session_id": session_id,
@@ -3113,7 +3146,10 @@ async def ai_interact_with_page(
             "final_screenshot": result.get("final_screenshot"),
             "total_steps": result.get("total_steps", 0),
             "message": f"کار انجام شد: {result.get('total_steps', 0)} مرحله (مدل: {selected_model})",
-            "page_info": page_info
+            "page_info": page_info,
+            # 🆕 URL نهایی برای به‌روزرسانی iframe فرانت‌اند
+            "final_url": final_page_info.get('url'),
+            "final_page_info": final_page_info
         }
 
         # 🆕 اضافه کردن debug info
@@ -3123,10 +3159,38 @@ async def ai_interact_with_page(
                 "ai_responses": result.get("ai_responses", [])
             }
 
+        # 🆕 غیرفعال کردن مدل موقتاً فعال شده
+        if temporarily_enabled and selected_model:
+            try:
+                setting = db.query(ModelSettings).filter(ModelSettings.model_id == selected_model).first()
+                if setting and setting.temporary_enabled:
+                    setting.enabled = False
+                    setting.temporary_enabled = False
+                    db.commit()
+                    slog.info(f"Disabled temporarily enabled model: {selected_model}")
+            except Exception as cleanup_error:
+                slog.warning(f"Failed to disable temporary model", error=str(cleanup_error))
+
+        # 🆕 اضافه کردن اطلاعات فعال‌سازی موقت به response
+        response_data["temporarily_enabled"] = temporarily_enabled
+
         return response_data
 
     except Exception as e:
         slog.error("AI interaction failed", exception=e)
+
+        # 🆕 غیرفعال کردن مدل موقت حتی در صورت خطا
+        if temporarily_enabled and selected_model:
+            try:
+                setting = db.query(ModelSettings).filter(ModelSettings.model_id == selected_model).first()
+                if setting and setting.temporary_enabled:
+                    setting.enabled = False
+                    setting.temporary_enabled = False
+                    db.commit()
+                    slog.info(f"Disabled temporarily enabled model after error: {selected_model}")
+            except:
+                pass
+
         try:
             await close_session(session_id)
         except:
