@@ -1014,12 +1014,84 @@ export default function ProjectDetailPage() {
         // استخراج متن هدف از پیام
         const targetText = extractTargetText(userMessage);
 
-        // 🆕🆕🆕 مستقیماً از AI Vision استفاده کن (text matching نادقیقه)
-        // AI میتونه با چشم ببینه که المان دقیقاً کجاست
+        // 🔍 روش Ctrl+F: جستجوی سریع متن در صفحه
         setInspectorChatMessages(prev => [...prev, {
           id: `system_${Date.now()}`,
           role: 'assistant',
-          content: '🤖 اسکن ساده پیدا نکرد، AI در حال تحلیل...',
+          content: `🔍 جستجوی "${targetText}" در صفحه...`,
+          timestamp: new Date()
+        }]);
+
+        try {
+          // 1. جستجوی Ctrl+F style
+          const searchRes = await fetch(`${API_BASE}/api/render/inspector/find-and-click?url=${encodeURIComponent(inspectorFrontendUrl)}&search_text=${encodeURIComponent(targetText)}`, {
+            method: 'POST'
+          });
+          const searchData = await searchRes.json();
+
+          // حذف پیام سیستم
+          setInspectorChatMessages(prev => prev.filter(m => !m.id.startsWith('system_')));
+
+          if (searchData.success) {
+            // ✅ پیدا شد و کلیک شد
+            const pos = searchData.position;
+
+            // نمایش نشانگر مجازی روی المان
+            if (pos) {
+              setInspectorVirtualCursor({
+                x: pos.percent_x,
+                y: pos.percent_y,
+                visible: true,
+                model_id: `🎯 ${searchData.found?.slice(0, 20) || targetText}`
+              });
+
+              // پنهان کردن بعد از 3 ثانیه
+              setTimeout(() => {
+                setInspectorVirtualCursor(prev => ({ ...prev, visible: false }));
+              }, 3000);
+            }
+
+            // نمایش نتیجه
+            setInspectorChatMessages(prev => [...prev, {
+              id: `assistant_${Date.now()}`,
+              role: 'assistant',
+              content: `✅ **پیدا شد!**\n\n🎯 "${searchData.found}"\n📍 موقعیت: (${pos?.percent_x?.toFixed(1)}%, ${pos?.percent_y?.toFixed(1)}%)\n📊 ${searchData.found_count} مورد در صفحه${searchData.url_changed ? '\n🔄 صفحه تغییر کرد' : ''}`,
+              timestamp: new Date()
+            }]);
+
+            // آپدیت iframe با URL جدید
+            if (searchData.new_url && searchData.new_url !== inspectorFrontendUrl) {
+              console.log('🔄 Updating iframe to:', searchData.new_url);
+              setInspectorFrontendUrl(searchData.new_url);
+            }
+
+            setInspectorChatLoading(false);
+            return;
+          }
+
+          // ❌ پیدا نشد - نمایش پیام خطا
+          if (searchData.found_count === 0) {
+            setInspectorChatMessages(prev => [...prev, {
+              id: `assistant_${Date.now()}`,
+              role: 'assistant',
+              content: `❌ "${targetText}" در این صفحه پیدا نشد.\n\n💡 سعی کن متن دقیق‌تری بنویسی یا از AI کمک بخواه.`,
+              timestamp: new Date()
+            }]);
+            setInspectorChatLoading(false);
+            return;
+          }
+
+        } catch (searchError) {
+          console.log('Ctrl+F search failed, falling back to AI...', searchError);
+          // حذف پیام سیستم و ادامه با AI
+          setInspectorChatMessages(prev => prev.filter(m => !m.id.startsWith('system_')));
+        }
+
+        // 🤖 اگه Ctrl+F کار نکرد، از AI استفاده کن
+        setInspectorChatMessages(prev => [...prev, {
+          id: `system_${Date.now()}`,
+          role: 'assistant',
+          content: '🤖 جستجوی ساده کار نکرد، AI در حال تحلیل...',
           timestamp: new Date()
         }]);
 
