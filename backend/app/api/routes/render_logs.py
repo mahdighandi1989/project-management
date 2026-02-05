@@ -3819,3 +3819,444 @@ async def synchronized_inspection(
             "error": str(e)
         }
 
+
+# ============================================
+# 🆕🆕🆕 Live Action Tracking - رصد لحظه‌ای فعالیت کاربر
+# ============================================
+
+class AnalyzeActionRequest(BaseModel):
+    """درخواست تحلیل اقدام کاربر"""
+    url: str
+    action_type: str  # click, scroll, input
+    position: dict  # {x: number, y: number}
+    project_id: str
+    selected_models: Optional[List[str]] = None
+
+
+class AnalyzeErrorRequest(BaseModel):
+    """درخواست تحلیل خطا از GitHub"""
+    project_id: str
+    error_message: str
+    log_details: Optional[str] = None
+    source_hint: Optional[str] = None
+    selected_models: Optional[List[str]] = None
+
+
+@router.post("/inspector/analyze-action")
+async def analyze_user_action(
+    request: AnalyzeActionRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    🎯 تحلیل بصری اقدام کاربر در صفحه پیش‌نمایش
+
+    این endpoint:
+    1. اسکرین‌شات می‌گیرد از URL
+    2. با AI Vision تحلیل می‌کند که کاربر کجا کلیک کرده
+    3. نام المان و عملکرد آن را برمی‌گرداند
+    4. لاگ‌های بک‌اند را برای خطا چک می‌کند
+    """
+    from playwright.async_api import async_playwright
+    import base64
+    from ...services.ai_manager import get_ai_manager
+
+    slog.api_request("POST", "/inspector/analyze-action",
+        url=request.url[:100],
+        action_type=request.action_type,
+        position=request.position
+    )
+
+    try:
+        # انتخاب مدل vision
+        ai_manager = get_ai_manager()
+        vision_model = None
+
+        if request.selected_models:
+            vision_model = request.selected_models[0]
+        else:
+            # انتخاب خودکار بهترین مدل vision
+            vision_result = get_best_vision_model(ai_manager, db)
+            if vision_result:
+                vision_model = vision_result[0]
+
+        if not vision_model:
+            vision_model = "gemini-2.0-flash-exp"  # پیش‌فرض
+
+        # گرفتن اسکرین‌شات با Playwright
+        screenshot_base64 = None
+        new_url = None
+        page_title = ""
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page(viewport={"width": 1280, "height": 720})
+
+            try:
+                await page.goto(request.url, wait_until="networkidle", timeout=15000)
+                await page.wait_for_timeout(1000)
+
+                page_title = await page.title()
+                new_url = page.url
+
+                # گرفتن اسکرین‌شات
+                screenshot_bytes = await page.screenshot(type="png")
+                screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+
+            except Exception as e:
+                slog.warn(f"Screenshot failed: {e}")
+            finally:
+                await browser.close()
+
+        # تحلیل با AI Vision
+        action_description = ""
+        backend_status = None
+
+        if screenshot_base64 and vision_model:
+            from ...services.ai_base import Message
+
+            # محاسبه موقعیت پیکسلی
+            pixel_x = int(request.position.get("x", 50) * 1280 / 100)
+            pixel_y = int(request.position.get("y", 50) * 720 / 100)
+
+            vision_prompt = f"""شما یک تحلیل‌گر رابط کاربری هستید.
+
+کاربر روی صفحه‌ای با عنوان "{page_title}" یک {
+    "کلیک" if request.action_type == "click" else
+    "اسکرول" if request.action_type == "scroll" else
+    "عملیات"
+} انجام داده است.
+
+موقعیت تقریبی: X={pixel_x}px, Y={pixel_y}px (از گوشه بالا-چپ)
+
+## وظیفه شما:
+1. تصویر را ببینید
+2. تشخیص دهید این موقعیت روی چه المانی قرار دارد
+3. یک جمله کوتاه فارسی بنویسید که چه کاری انجام شده
+
+## فرمت پاسخ (فقط یک خط):
+روی [نام المان] کلیک کردی
+
+یا
+
+[توضیح کار انجام شده]
+
+## مثال‌ها:
+- روی دکمه «ورود» کلیک کردی
+- روی منوی «تنظیمات» کلیک کردی
+- به پایین صفحه اسکرول کردی
+- روی فیلد «نام کاربری» کلیک کردی
+
+فقط یک جمله کوتاه بنویس، بدون توضیح اضافی."""
+
+            try:
+                messages = [
+                    Message(
+                        role="user",
+                        content=[
+                            {"type": "text", "text": vision_prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{screenshot_base64}"
+                                }
+                            }
+                        ]
+                    )
+                ]
+
+                response = await ai_manager.generate(
+                    model_id=vision_model,
+                    messages=messages,
+                    max_tokens=200,
+                    temperature=0.1
+                )
+
+                action_description = response.content.strip()
+                # حذف علائم اضافی
+                action_description = action_description.replace("**", "").replace("```", "").strip()
+                if action_description.startswith("-"):
+                    action_description = action_description[1:].strip()
+
+            except Exception as e:
+                slog.warn(f"Vision analysis failed: {e}")
+                action_description = f"{request.action_type} در موقعیت ({request.position.get('x', 0):.0f}%, {request.position.get('y', 0):.0f}%)"
+
+        # بررسی لاگ‌های بک‌اند برای خطا
+        from ...models.project import Project
+        project = db.query(Project).filter(Project.id == request.project_id).first()
+
+        if project and hasattr(project, 'render_service_ids') and project.render_service_ids:
+            # دریافت لاگ‌های اخیر
+            service_ids = project.render_service_ids.split(',') if isinstance(project.render_service_ids, str) else project.render_service_ids
+            recent_logs = db.query(RenderLog).filter(
+                RenderLog.service_id.in_(service_ids),
+                RenderLog.created_at >= datetime.utcnow() - timedelta(seconds=10)
+            ).order_by(desc(RenderLog.created_at)).limit(5).all()
+
+            has_error = any(log.level == 'error' for log in recent_logs)
+            error_log = next((log for log in recent_logs if log.level == 'error'), None)
+
+            if has_error and error_log:
+                backend_status = {
+                    "has_error": True,
+                    "message": f"⚠️ خطا در بک‌اند: {error_log.message[:100] if error_log.message else 'نامشخص'}"
+                }
+            else:
+                backend_status = {
+                    "has_error": False,
+                    "message": "✅ بک‌اند: عملیات موفق"
+                }
+
+        return {
+            "success": True,
+            "action_type": request.action_type,
+            "position": request.position,
+            "action_description": action_description,
+            "visual_model": vision_model,
+            "page_title": page_title,
+            "new_url": new_url if new_url != request.url else None,
+            "page_name": page_title or None,
+            "backend_status": backend_status,
+            "backend_model": None,
+            "has_error": backend_status.get("has_error", False) if backend_status else False,
+            "error_info": {
+                "message": backend_status.get("message", ""),
+                "log_details": None
+            } if backend_status and backend_status.get("has_error") else None
+        }
+
+    except Exception as e:
+        slog.error("Analyze action failed", exception=e)
+        return {
+            "success": False,
+            "error": str(e),
+            "action_description": f"{request.action_type} انجام شد"
+        }
+
+
+@router.post("/inspector/analyze-error")
+async def analyze_error_from_source(
+    request: AnalyzeErrorRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    🔍 تحلیل عمیق خطا با بررسی کد منبع از GitHub
+
+    این endpoint:
+    1. پیام خطا را تحلیل می‌کند
+    2. به GitHub پروژه مراجعه می‌کند
+    3. فایل‌های مرتبط را پیدا می‌کند
+    4. علت خطا را شناسایی می‌کند
+    5. راه‌حل پیشنهاد می‌دهد
+    """
+    from ...services.ai_manager import get_ai_manager
+    from ...models.project import Project
+    from ...models.setting import Setting
+    import os
+    import httpx
+
+    slog.api_request("POST", "/inspector/analyze-error",
+        project_id=request.project_id,
+        error_message=request.error_message[:100]
+    )
+
+    try:
+        # دریافت پروژه
+        project = db.query(Project).filter(Project.id == request.project_id).first()
+        if not project:
+            return {"success": False, "error": "پروژه یافت نشد"}
+
+        # توکن GitHub
+        github_token = os.environ.get("GITHUB_TOKEN", "")
+        if not github_token:
+            github_token = Setting.get_value(db, "api_key_github") or ""
+
+        if not github_token:
+            return {
+                "success": False,
+                "error": "توکن GitHub تنظیم نشده است",
+                "analysis": "برای بررسی کد منبع، ابتدا توکن GitHub را در تنظیمات وارد کنید."
+            }
+
+        # استخراج owner/repo از پروژه
+        github_url = getattr(project, 'github_url', None) or getattr(project, 'repository_url', None)
+        if not github_url:
+            return {
+                "success": False,
+                "error": "این پروژه به GitHub متصل نیست",
+                "analysis": request.error_message
+            }
+
+        # پارس کردن URL
+        parts = github_url.replace("https://github.com/", "").replace(".git", "").split("/")
+        if len(parts) < 2:
+            return {"success": False, "error": "فرمت URL GitHub نامعتبر است"}
+
+        owner, repo = parts[0], parts[1]
+
+        # انتخاب مدل تحلیل
+        ai_manager = get_ai_manager()
+        analysis_model = None
+
+        if request.selected_models:
+            analysis_model = request.selected_models[0]
+        else:
+            # انتخاب بهترین مدل تحلیل
+            for model_id in ["claude-sonnet-4-20250514", "gpt-4o", "gemini-2.5-pro"]:
+                try:
+                    # تست سریع
+                    analysis_model = model_id
+                    break
+                except:
+                    continue
+
+        if not analysis_model:
+            analysis_model = "gpt-4o-mini"
+
+        # دریافت لیست فایل‌ها از GitHub
+        headers = {
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+
+        source_files = []
+        file_contents = {}
+
+        async with httpx.AsyncClient() as client:
+            # دریافت tree برای پیدا کردن فایل‌های مرتبط
+            tree_res = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo}/git/trees/main?recursive=1",
+                headers=headers,
+                timeout=15.0
+            )
+
+            if tree_res.status_code == 200:
+                tree_data = tree_res.json()
+                all_files = [item["path"] for item in tree_data.get("tree", []) if item["type"] == "blob"]
+
+                # فیلتر فایل‌های کد
+                code_files = [f for f in all_files if f.endswith(('.py', '.js', '.ts', '.tsx', '.jsx', '.vue', '.go', '.rs'))]
+
+                # پیدا کردن فایل‌های مرتبط با خطا
+                error_keywords = request.error_message.lower().split()
+                relevant_files = []
+
+                for file_path in code_files[:100]:  # محدودیت
+                    file_lower = file_path.lower()
+                    # امتیاز بر اساس تطابق کلمات
+                    score = sum(1 for kw in error_keywords if kw in file_lower and len(kw) > 3)
+                    if score > 0:
+                        relevant_files.append((file_path, score))
+
+                # اگر فایل مرتبط نبود، فایل‌های اصلی را بگیر
+                if not relevant_files:
+                    main_files = [f for f in code_files if any(x in f.lower() for x in ['main', 'app', 'index', 'server', 'api', 'route'])]
+                    relevant_files = [(f, 1) for f in main_files[:5]]
+
+                # مرتب‌سازی بر اساس امتیاز
+                relevant_files.sort(key=lambda x: -x[1])
+                relevant_files = relevant_files[:5]  # حداکثر 5 فایل
+
+                # دریافت محتوای فایل‌ها
+                for file_path, _ in relevant_files:
+                    try:
+                        content_res = await client.get(
+                            f"https://api.github.com/repos/{owner}/{repo}/contents/{file_path}",
+                            headers=headers,
+                            timeout=10.0
+                        )
+                        if content_res.status_code == 200:
+                            import base64
+                            content_data = content_res.json()
+                            if content_data.get("encoding") == "base64":
+                                content = base64.b64decode(content_data["content"]).decode('utf-8', errors='ignore')
+                                file_contents[file_path] = content[:5000]  # محدودیت سایز
+                                source_files.append({"path": file_path, "issue": "در حال بررسی..."})
+                    except Exception as e:
+                        slog.warn(f"Failed to fetch {file_path}: {e}")
+
+        # تحلیل با AI
+        from ...services.ai_base import Message
+
+        analysis_prompt = f"""شما یک مهندس نرم‌افزار متخصص هستید که باید خطا را تحلیل کنید.
+
+## خطای گزارش شده:
+{request.error_message}
+
+## جزئیات لاگ:
+{request.log_details or 'ندارد'}
+
+## فایل‌های کد پروژه:
+"""
+        for file_path, content in file_contents.items():
+            analysis_prompt += f"\n### {file_path}\n```\n{content[:3000]}\n```\n"
+
+        analysis_prompt += """
+
+## وظیفه شما:
+1. علت اصلی خطا را شناسایی کنید
+2. فایل یا فایل‌های مسبب را مشخص کنید
+3. راه‌حل دقیق برای رفع خطا پیشنهاد دهید
+
+## فرمت پاسخ (JSON):
+{
+  "analysis": "توضیح علت خطا به فارسی",
+  "source_files": [
+    {"path": "مسیر فایل", "issue": "مشکل این فایل چیست"}
+  ],
+  "suggested_fix": "راه‌حل پیشنهادی به فارسی"
+}
+
+فقط JSON خالص برگردانید، بدون توضیح اضافی."""
+
+        try:
+            messages = [
+                Message(role="system", content="شما یک مهندس نرم‌افزار متخصص در debugging هستید. پاسخ را به صورت JSON خالص برگردانید."),
+                Message(role="user", content=analysis_prompt)
+            ]
+
+            response = await ai_manager.generate(
+                model_id=analysis_model,
+                messages=messages,
+                max_tokens=2000,
+                temperature=0.2
+            )
+
+            # پارس کردن پاسخ JSON
+            response_text = response.content.strip()
+            # حذف markdown اگر وجود دارد
+            if response_text.startswith("```"):
+                response_text = response_text.split("```")[1]
+                if response_text.startswith("json"):
+                    response_text = response_text[4:]
+
+            result = json.loads(response_text)
+
+            return {
+                "success": True,
+                "analysis": result.get("analysis", "تحلیل انجام شد"),
+                "source_files": result.get("source_files", source_files),
+                "suggested_fix": result.get("suggested_fix", "بررسی فایل‌های مرتبط"),
+                "model_used": analysis_model,
+                "detailed_report": f"تحلیل توسط {analysis_model}:\n\n{result.get('analysis', '')}"
+            }
+
+        except json.JSONDecodeError:
+            # اگر JSON نبود، متن خام را برگردان
+            return {
+                "success": True,
+                "analysis": response.content if 'response' in dir() else "خطا در تحلیل",
+                "source_files": source_files,
+                "suggested_fix": "بررسی فایل‌های مرتبط",
+                "model_used": analysis_model,
+                "detailed_report": response.content if 'response' in dir() else ""
+            }
+
+    except Exception as e:
+        slog.error("Analyze error from source failed", exception=e)
+        return {
+            "success": False,
+            "error": str(e),
+            "analysis": f"خطا در تحلیل: {str(e)}"
+        }
+
