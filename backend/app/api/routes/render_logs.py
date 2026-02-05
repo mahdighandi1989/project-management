@@ -3848,181 +3848,81 @@ async def analyze_user_action(
     db: Session = Depends(get_db)
 ):
     """
-    🎯 تحلیل بصری اقدام کاربر در صفحه پیش‌نمایش
+    🎯 تحلیل سریع اقدام کاربر - بدون Playwright
 
-    این endpoint:
-    1. اسکرین‌شات می‌گیرد از URL
-    2. با AI Vision تحلیل می‌کند که کاربر کجا کلیک کرده
-    3. نام المان و عملکرد آن را برمی‌گرداند
-    4. لاگ‌های بک‌اند را برای خطا چک می‌کند
+    این endpoint سریع پاسخ می‌دهد و فقط لاگ‌های بک‌اند را برای خطا چک می‌کند.
     """
-    from playwright.async_api import async_playwright
-    import base64
-    from ...services.ai_manager import get_ai_manager
-
     slog.api_request("POST", "/inspector/analyze-action",
-        url=request.url[:100],
         action_type=request.action_type,
         position=request.position
     )
 
     try:
-        # انتخاب مدل vision
-        ai_manager = get_ai_manager()
-        vision_model = None
+        # تولید توضیح ساده بر اساس نوع عمل
+        action_type_fa = {
+            "click": "کلیک",
+            "scroll": "اسکرول",
+            "input": "تایپ",
+            "navigate": "ناوبری"
+        }
 
-        if request.selected_models:
-            vision_model = request.selected_models[0]
-        else:
-            # انتخاب خودکار بهترین مدل vision
-            vision_result = get_best_vision_model(ai_manager, db)
-            if vision_result:
-                vision_model = vision_result[0]
-
-        if not vision_model:
-            vision_model = "gemini-2.0-flash-exp"  # پیش‌فرض
-
-        # گرفتن اسکرین‌شات با Playwright
-        screenshot_base64 = None
-        new_url = None
-        page_title = ""
-
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page(viewport={"width": 1280, "height": 720})
-
-            try:
-                await page.goto(request.url, wait_until="networkidle", timeout=15000)
-                await page.wait_for_timeout(1000)
-
-                page_title = await page.title()
-                new_url = page.url
-
-                # گرفتن اسکرین‌شات
-                screenshot_bytes = await page.screenshot(type="png")
-                screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')
-
-            except Exception as e:
-                slog.warn(f"Screenshot failed: {e}")
-            finally:
-                await browser.close()
-
-        # تحلیل با AI Vision
-        action_description = ""
-        backend_status = None
-
-        if screenshot_base64 and vision_model:
-            from ...services.ai_base import Message
-
-            # محاسبه موقعیت پیکسلی
-            pixel_x = int(request.position.get("x", 50) * 1280 / 100)
-            pixel_y = int(request.position.get("y", 50) * 720 / 100)
-
-            vision_prompt = f"""شما یک تحلیل‌گر رابط کاربری هستید.
-
-کاربر روی صفحه‌ای با عنوان "{page_title}" یک {
-    "کلیک" if request.action_type == "click" else
-    "اسکرول" if request.action_type == "scroll" else
-    "عملیات"
-} انجام داده است.
-
-موقعیت تقریبی: X={pixel_x}px, Y={pixel_y}px (از گوشه بالا-چپ)
-
-## وظیفه شما:
-1. تصویر را ببینید
-2. تشخیص دهید این موقعیت روی چه المانی قرار دارد
-3. یک جمله کوتاه فارسی بنویسید که چه کاری انجام شده
-
-## فرمت پاسخ (فقط یک خط):
-روی [نام المان] کلیک کردی
-
-یا
-
-[توضیح کار انجام شده]
-
-## مثال‌ها:
-- روی دکمه «ورود» کلیک کردی
-- روی منوی «تنظیمات» کلیک کردی
-- به پایین صفحه اسکرول کردی
-- روی فیلد «نام کاربری» کلیک کردی
-
-فقط یک جمله کوتاه بنویس، بدون توضیح اضافی."""
-
-            try:
-                messages = [
-                    Message(
-                        role="user",
-                        content=[
-                            {"type": "text", "text": vision_prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{screenshot_base64}"
-                                }
-                            }
-                        ]
-                    )
-                ]
-
-                response = await ai_manager.generate(
-                    model_id=vision_model,
-                    messages=messages,
-                    max_tokens=200,
-                    temperature=0.1
-                )
-
-                action_description = response.content.strip()
-                # حذف علائم اضافی
-                action_description = action_description.replace("**", "").replace("```", "").strip()
-                if action_description.startswith("-"):
-                    action_description = action_description[1:].strip()
-
-            except Exception as e:
-                slog.warn(f"Vision analysis failed: {e}")
-                action_description = f"{request.action_type} در موقعیت ({request.position.get('x', 0):.0f}%, {request.position.get('y', 0):.0f}%)"
+        action_description = f"{action_type_fa.get(request.action_type, 'عملیات')} در موقعیت ({request.position.get('x', 0):.0f}%, {request.position.get('y', 0):.0f}%)"
 
         # بررسی لاگ‌های بک‌اند برای خطا
+        backend_status = None
+        has_error = False
+        error_info = None
+
         from ...models.project import Project
         project = db.query(Project).filter(Project.id == request.project_id).first()
 
-        if project and hasattr(project, 'render_service_ids') and project.render_service_ids:
-            # دریافت لاگ‌های اخیر
-            service_ids = project.render_service_ids.split(',') if isinstance(project.render_service_ids, str) else project.render_service_ids
-            recent_logs = db.query(RenderLog).filter(
-                RenderLog.service_id.in_(service_ids),
-                RenderLog.created_at >= datetime.utcnow() - timedelta(seconds=10)
-            ).order_by(desc(RenderLog.created_at)).limit(5).all()
+        if project:
+            # بررسی render_service_ids
+            service_ids = []
+            if hasattr(project, 'render_service_ids') and project.render_service_ids:
+                if isinstance(project.render_service_ids, str):
+                    service_ids = [s.strip() for s in project.render_service_ids.split(',') if s.strip()]
+                else:
+                    service_ids = project.render_service_ids
 
-            has_error = any(log.level == 'error' for log in recent_logs)
-            error_log = next((log for log in recent_logs if log.level == 'error'), None)
+            if service_ids:
+                # دریافت لاگ‌های اخیر (10 ثانیه آخر)
+                recent_logs = db.query(RenderLog).filter(
+                    RenderLog.service_id.in_(service_ids),
+                    RenderLog.created_at >= datetime.utcnow() - timedelta(seconds=10)
+                ).order_by(desc(RenderLog.created_at)).limit(5).all()
 
-            if has_error and error_log:
-                backend_status = {
-                    "has_error": True,
-                    "message": f"⚠️ خطا در بک‌اند: {error_log.message[:100] if error_log.message else 'نامشخص'}"
-                }
-            else:
-                backend_status = {
-                    "has_error": False,
-                    "message": "✅ بک‌اند: عملیات موفق"
-                }
+                error_log = next((log for log in recent_logs if log.level == 'error'), None)
+
+                if error_log:
+                    has_error = True
+                    backend_status = {
+                        "has_error": True,
+                        "message": f"⚠️ خطا در بک‌اند: {error_log.message[:100] if error_log.message else 'نامشخص'}"
+                    }
+                    error_info = {
+                        "message": error_log.message or "خطای ناشناخته",
+                        "log_details": f"[{error_log.level}] {error_log.message}"
+                    }
+                else:
+                    backend_status = {
+                        "has_error": False,
+                        "message": "✅ بک‌اند: عملیات موفق"
+                    }
 
         return {
             "success": True,
             "action_type": request.action_type,
             "position": request.position,
             "action_description": action_description,
-            "visual_model": vision_model,
-            "page_title": page_title,
-            "new_url": new_url if new_url != request.url else None,
-            "page_name": page_title or None,
+            "visual_model": None,
+            "page_title": None,
+            "new_url": None,
+            "page_name": None,
             "backend_status": backend_status,
             "backend_model": None,
-            "has_error": backend_status.get("has_error", False) if backend_status else False,
-            "error_info": {
-                "message": backend_status.get("message", ""),
-                "log_details": None
-            } if backend_status and backend_status.get("has_error") else None
+            "has_error": has_error,
+            "error_info": error_info
         }
 
     except Exception as e:

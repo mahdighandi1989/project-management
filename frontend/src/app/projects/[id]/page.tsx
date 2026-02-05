@@ -349,9 +349,8 @@ export default function ProjectDetailPage() {
   });
 
   // 🆕 Live Action Tracking - رصد لحظه‌ای فعالیت کاربر در پیش‌نمایش
-  // ⚠️ فعلاً غیرفعال - نیاز به رفع مشکل CORS در بک‌اند
   const [inspectorActionTracking, setInspectorActionTracking] = useState({
-    enabled: false,  // آیا ردیابی فعال است - فعلاً غیرفعال
+    enabled: true,  // آیا ردیابی فعال است
     lastAction: null as {
       type: 'click' | 'scroll' | 'input' | 'navigate';
       x: number;
@@ -7843,6 +7842,21 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 <span className={`text-xs mt-1 ${inspectorPowerOn ? 'text-green-600' : 'text-gray-500'}`}>
                   {inspectorLoading ? 'در حال اتصال...' : inspectorPowerOn ? 'روشن' : 'خاموش'}
                 </span>
+
+                {/* 🆕 دکمه رصد لاگ‌ها */}
+                {inspectorPowerOn && (
+                  <button
+                    onClick={() => setInspectorActionTracking(prev => ({ ...prev, enabled: !prev.enabled }))}
+                    className={`mt-3 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                      inspectorActionTracking.enabled
+                        ? 'bg-blue-500 text-white hover:bg-blue-600'
+                        : 'bg-gray-200 text-gray-600 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-300'
+                    }`}
+                    title={inspectorActionTracking.enabled ? 'غیرفعال کردن رصد لاگ' : 'فعال کردن رصد لاگ'}
+                  >
+                    {inspectorActionTracking.enabled ? '🔴 رصد فعال' : '⚪ رصد غیرفعال'}
+                  </button>
+                )}
               </div>
 
               {/* چت باکس سمت راست (در RTL) - با قابلیت چت با AI */}
