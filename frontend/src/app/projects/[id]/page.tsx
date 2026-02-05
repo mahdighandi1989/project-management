@@ -744,6 +744,11 @@ export default function ProjectDetailPage() {
   // 🆕 Message Listener برای دریافت event ها از Bridge Script داخل iframe
   useEffect(() => {
     const handleBridgeMessage = (event: MessageEvent) => {
+      // 🔍 Debug: لاگ همه پیام‌ها
+      if (event.data?.type?.startsWith('inspector-bridge')) {
+        console.log('🌉 Bridge message received:', event.data);
+      }
+
       // بررسی پیام از bridge script
       if (event.data?.type === 'inspector-bridge-event') {
         const { action, target, position, elementInfo, pageUrl } = event.data;
@@ -760,36 +765,65 @@ export default function ProjectDetailPage() {
         const actionLabel = actionLabels[action] || action;
         const targetInfo = elementInfo || target || 'عنصر ناشناخته';
 
-        // افزودن پیام موقت
-        addTransientMessage(
-          `${actionLabel} روی ${targetInfo}`,
-          'action',
-          'Bridge Script'
-        );
+        console.log('🎯 Action:', actionLabel, targetInfo);
 
-        // فراخوانی تحلیل عمیق‌تر اگر فعال باشد
-        if (inspectorActionTracking.enabled && position) {
-          analyzeUserAction(action, position.xPercent || 50, position.yPercent || 50);
-        }
+        // افزودن پیام موقت - مستقیماً از setState استفاده می‌کنیم
+        const id = `transient_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const newMessage = {
+          id,
+          content: `${actionLabel} روی ${targetInfo}`,
+          type: 'action' as const,
+          source: 'Bridge Script',
+          timestamp: new Date(),
+          fadeOut: false
+        };
+
+        setInspectorTransientMessages(prev => [...prev, newMessage]);
+
+        // شروع محو شدن بعد از 3 ثانیه
+        setTimeout(() => {
+          setInspectorTransientMessages(prev =>
+            prev.map(m => m.id === id ? { ...m, fadeOut: true } : m)
+          );
+        }, 3000);
+
+        // حذف کامل بعد از 4 ثانیه
+        setTimeout(() => {
+          setInspectorTransientMessages(prev => prev.filter(m => m.id !== id));
+        }, 4000);
       }
 
       // پیام اتصال موفق bridge
       if (event.data?.type === 'inspector-bridge-ready') {
-        addTransientMessage('🔗 اتصال به پروژه برقرار شد', 'info', 'Bridge');
+        console.log('✅ Bridge connected!', event.data.pageUrl);
+        const id = `ready_${Date.now()}`;
+        setInspectorTransientMessages(prev => [...prev, {
+          id,
+          content: '🔗 اتصال به پروژه برقرار شد',
+          type: 'info' as const,
+          source: 'Bridge',
+          timestamp: new Date(),
+          fadeOut: false
+        }]);
+        setTimeout(() => {
+          setInspectorTransientMessages(prev => prev.filter(m => m.id !== id));
+        }, 4000);
       }
 
       // پیام خطا از bridge
       if (event.data?.type === 'inspector-bridge-error') {
-        addTransientMessage(`خطا: ${event.data.message}`, 'error', 'Bridge');
+        console.error('❌ Bridge error:', event.data.message);
       }
     };
 
     window.addEventListener('message', handleBridgeMessage);
+    console.log('👂 Bridge message listener added');
 
     return () => {
       window.removeEventListener('message', handleBridgeMessage);
+      console.log('🔇 Bridge message listener removed');
     };
-  }, [inspectorActionTracking.enabled, inspectorFrontendUrl]);
+  }, []); // بدون dependency تا همیشه فعال باشه
 
   // 🌉 بررسی وضعیت Bridge وقتی Inspector روشن می‌شود
   useEffect(() => {
