@@ -401,6 +401,8 @@ export default function ProjectDetailPage() {
   // 📁 دیالوگ مسیر سفارشی فایل HTML
   const [showCustomHtmlPathDialog, setShowCustomHtmlPathDialog] = useState(false);
   const [customHtmlPathInput, setCustomHtmlPathInput] = useState('');
+  const [foundHtmlFiles, setFoundHtmlFiles] = useState<string[]>([]);
+  const [detectedFramework, setDetectedFramework] = useState<string | null>(null);
 
   // 🔍 Debug Bridge - برای تشخیص مشکلات
   const [bridgeDebugInfo, setBridgeDebugInfo] = useState<{
@@ -1375,11 +1377,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       } else {
         // اگر index.html پیدا نشد، دیالوگ مسیر سفارشی نشان بده
         if (data.need_custom_path) {
+          // ذخیره فایل‌های HTML پیدا شده و فریم‌ورک تشخیص داده شده
+          setFoundHtmlFiles(data.found_html_files || []);
+          setDetectedFramework(data.framework_detected || null);
           setShowCustomHtmlPathDialog(true);
           setInspectorBridgeStatus(prev => ({
             ...prev,
             injecting: false,
-            error: 'فایل HTML یافت نشد - مسیر را وارد کنید'
+            error: data.framework_detected
+              ? `پروژه ${data.framework_detected} است - HTML در build ساخته می‌شود`
+              : 'فایل HTML یافت نشد - مسیر را وارد کنید'
           }));
         } else {
           setInspectorBridgeStatus(prev => ({
@@ -8233,33 +8240,80 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 {/* 📁 دیالوگ مسیر سفارشی فایل HTML */}
                 {showCustomHtmlPathDialog && (
                   <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowCustomHtmlPathDialog(false)}>
-                    <div className="bg-white dark:bg-gray-800 rounded-xl p-6 max-w-md w-full mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
+                    <div className="bg-white dark:bg-gray-800 rounded-xl p-6 max-w-lg w-full mx-4 shadow-2xl max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
                       <h3 className="text-lg font-bold mb-4 text-gray-900 dark:text-white">📁 مسیر فایل HTML</h3>
-                      <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
-                        فایل index.html در مسیرهای استاندارد یافت نشد.
-                      </p>
-                      <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-                        مسیر فایل HTML اصلی پروژه را وارد کنید:
-                      </p>
-                      <input
-                        type="text"
-                        value={customHtmlPathInput}
-                        onChange={(e) => setCustomHtmlPathInput(e.target.value)}
-                        placeholder="مثال: frontend/public/index.html"
-                        className="w-full px-4 py-2 border rounded-lg mb-4 text-left dir-ltr dark:bg-gray-700 dark:border-gray-600 dark:text-white font-mono text-sm"
-                        dir="ltr"
-                      />
-                      <div className="text-xs text-gray-500 mb-4">
-                        مثال‌ها:
-                        <ul className="list-disc list-inside mt-1 space-y-0.5">
-                          <li>frontend/index.html</li>
-                          <li>client/public/index.html</li>
-                          <li>web/src/index.html</li>
-                        </ul>
+
+                      {/* هشدار فریم‌ورک */}
+                      {detectedFramework && (
+                        <div className="bg-yellow-100 dark:bg-yellow-900/30 border border-yellow-300 dark:border-yellow-700 rounded-lg p-3 mb-4">
+                          <div className="flex items-center gap-2 text-yellow-800 dark:text-yellow-300 font-bold text-sm mb-1">
+                            ⚠️ پروژه {detectedFramework} تشخیص داده شد
+                          </div>
+                          <p className="text-xs text-yellow-700 dark:text-yellow-400">
+                            این فریم‌ورک HTML را در زمان build می‌سازد و فایل HTML ثابت ندارد.
+                            <br />
+                            برای این پروژه باید اسکریپت را مستقیماً در کد اضافه کنید.
+                          </p>
+                        </div>
+                      )}
+
+                      {/* لیست فایل‌های HTML پیدا شده */}
+                      {foundHtmlFiles.length > 0 && (
+                        <div className="mb-4">
+                          <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
+                            فایل‌های HTML پیدا شده - روی یکی کلیک کنید:
+                          </p>
+                          <div className="space-y-1 max-h-40 overflow-y-auto">
+                            {foundHtmlFiles.map((file, idx) => (
+                              <button
+                                key={idx}
+                                onClick={() => {
+                                  setCustomHtmlPathInput(file);
+                                  toggleBridgeScript(file);
+                                }}
+                                disabled={inspectorBridgeStatus.injecting}
+                                className="w-full text-left px-3 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-blue-100 dark:hover:bg-blue-900 rounded-lg text-sm font-mono transition-all disabled:opacity-50"
+                                dir="ltr"
+                              >
+                                📄 {file}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* فرم ورود دستی */}
+                      <div className="border-t pt-4 mt-2">
+                        <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
+                          {foundHtmlFiles.length > 0 ? 'یا مسیر را دستی وارد کنید:' : 'مسیر فایل HTML اصلی پروژه را وارد کنید:'}
+                        </p>
+                        <input
+                          type="text"
+                          value={customHtmlPathInput}
+                          onChange={(e) => setCustomHtmlPathInput(e.target.value)}
+                          placeholder="مثال: frontend/public/index.html"
+                          className="w-full px-4 py-2 border rounded-lg mb-3 text-left dir-ltr dark:bg-gray-700 dark:border-gray-600 dark:text-white font-mono text-sm"
+                          dir="ltr"
+                        />
+                        {foundHtmlFiles.length === 0 && !detectedFramework && (
+                          <div className="text-xs text-gray-500 mb-3">
+                            مثال‌ها:
+                            <ul className="list-disc list-inside mt-1 space-y-0.5">
+                              <li>frontend/index.html</li>
+                              <li>client/public/index.html</li>
+                              <li>web/src/index.html</li>
+                            </ul>
+                          </div>
+                        )}
                       </div>
-                      <div className="flex gap-2 justify-end">
+
+                      <div className="flex gap-2 justify-end mt-4">
                         <button
-                          onClick={() => setShowCustomHtmlPathDialog(false)}
+                          onClick={() => {
+                            setShowCustomHtmlPathDialog(false);
+                            setFoundHtmlFiles([]);
+                            setDetectedFramework(null);
+                          }}
                           className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg dark:text-gray-300 dark:hover:bg-gray-700"
                         >
                           انصراف
