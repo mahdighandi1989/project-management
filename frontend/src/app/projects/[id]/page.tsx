@@ -398,6 +398,10 @@ export default function ProjectDetailPage() {
   const [gitHubPathInput, setGitHubPathInput] = useState('');
   const [settingGitHubPath, setSettingGitHubPath] = useState(false);
 
+  // 📁 دیالوگ مسیر سفارشی فایل HTML
+  const [showCustomHtmlPathDialog, setShowCustomHtmlPathDialog] = useState(false);
+  const [customHtmlPathInput, setCustomHtmlPathInput] = useState('');
+
   const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
   const [selectedLog, setSelectedLog] = useState<ActivityLog | null>(null);
   const [reports, setReports] = useState<ProjectReport[]>([]);
@@ -1277,7 +1281,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   };
 
   // 🌉 تزریق یا حذف Bridge Script
-  const toggleBridgeScript = async () => {
+  const toggleBridgeScript = async (customPath?: string) => {
     const isRemoving = inspectorBridgeStatus.has_bridge;
     setInspectorBridgeStatus(prev => ({ ...prev, injecting: true, error: undefined }));
 
@@ -1287,7 +1291,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           project_id: projectId,
-          remove: isRemoving
+          remove: isRemoving,
+          custom_path: customPath || undefined
         })
       });
 
@@ -1305,13 +1310,25 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           'info'
         );
         showSuccess(data.message || (isRemoving ? 'حذف شد' : 'تزریق شد'));
+        setShowCustomHtmlPathDialog(false);
+        setCustomHtmlPathInput('');
       } else {
-        setInspectorBridgeStatus(prev => ({
-          ...prev,
-          injecting: false,
-          error: data.error
-        }));
-        showError(data.error || 'خطا در عملیات');
+        // اگر index.html پیدا نشد، دیالوگ مسیر سفارشی نشان بده
+        if (data.need_custom_path) {
+          setShowCustomHtmlPathDialog(true);
+          setInspectorBridgeStatus(prev => ({
+            ...prev,
+            injecting: false,
+            error: 'فایل HTML یافت نشد - مسیر را وارد کنید'
+          }));
+        } else {
+          setInspectorBridgeStatus(prev => ({
+            ...prev,
+            injecting: false,
+            error: data.error
+          }));
+          showError(data.error || 'خطا در عملیات');
+        }
       }
     } catch (err) {
       setInspectorBridgeStatus(prev => ({
@@ -8116,6 +8133,52 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50"
                         >
                           {settingGitHubPath ? '⏳ در حال ذخیره...' : '✓ ذخیره'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 📁 دیالوگ مسیر سفارشی فایل HTML */}
+                {showCustomHtmlPathDialog && (
+                  <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowCustomHtmlPathDialog(false)}>
+                    <div className="bg-white dark:bg-gray-800 rounded-xl p-6 max-w-md w-full mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
+                      <h3 className="text-lg font-bold mb-4 text-gray-900 dark:text-white">📁 مسیر فایل HTML</h3>
+                      <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
+                        فایل index.html در مسیرهای استاندارد یافت نشد.
+                      </p>
+                      <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                        مسیر فایل HTML اصلی پروژه را وارد کنید:
+                      </p>
+                      <input
+                        type="text"
+                        value={customHtmlPathInput}
+                        onChange={(e) => setCustomHtmlPathInput(e.target.value)}
+                        placeholder="مثال: frontend/public/index.html"
+                        className="w-full px-4 py-2 border rounded-lg mb-4 text-left dir-ltr dark:bg-gray-700 dark:border-gray-600 dark:text-white font-mono text-sm"
+                        dir="ltr"
+                      />
+                      <div className="text-xs text-gray-500 mb-4">
+                        مثال‌ها:
+                        <ul className="list-disc list-inside mt-1 space-y-0.5">
+                          <li>frontend/index.html</li>
+                          <li>client/public/index.html</li>
+                          <li>web/src/index.html</li>
+                        </ul>
+                      </div>
+                      <div className="flex gap-2 justify-end">
+                        <button
+                          onClick={() => setShowCustomHtmlPathDialog(false)}
+                          className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg dark:text-gray-300 dark:hover:bg-gray-700"
+                        >
+                          انصراف
+                        </button>
+                        <button
+                          onClick={() => toggleBridgeScript(customHtmlPathInput.trim())}
+                          disabled={inspectorBridgeStatus.injecting || !customHtmlPathInput.trim()}
+                          className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50"
+                        >
+                          {inspectorBridgeStatus.injecting ? '⏳ در حال تزریق...' : '✓ تزریق Bridge'}
                         </button>
                       </div>
                     </div>

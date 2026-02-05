@@ -4171,6 +4171,7 @@ class InjectBridgeRequest(BaseModel):
     """درخواست تزریق Bridge Script"""
     project_id: str
     remove: bool = False  # True = حذف اسکریپت
+    custom_path: Optional[str] = None  # مسیر سفارشی به فایل HTML (مثال: "frontend/public/index.html")
 
 
 # محتوای Bridge Script که به پروژه‌ها تزریق می‌شود
@@ -4414,14 +4415,29 @@ async def inject_bridge_script(
         }
 
         async with httpx.AsyncClient() as client:
-            # یافتن index.html
+            # یافتن index.html در مسیرهای مختلف
             possible_paths = [
+                # React / Vite / Vue
                 "index.html",
                 "public/index.html",
                 "src/index.html",
+                # Build outputs
                 "dist/index.html",
                 "build/index.html",
-                "app/templates/index.html"
+                ".next/server/pages/index.html",
+                "out/index.html",
+                # Python/Flask/Django
+                "app/templates/index.html",
+                "templates/index.html",
+                "frontend/index.html",
+                "frontend/public/index.html",
+                "client/index.html",
+                "client/public/index.html",
+                # Monorepo structures
+                "packages/frontend/index.html",
+                "packages/web/index.html",
+                "apps/web/index.html",
+                "apps/frontend/index.html",
             ]
 
             index_path = None
@@ -4445,11 +4461,34 @@ async def inject_bridge_script(
                 except:
                     continue
 
+            # اگر مسیر سفارشی داده شده، اول آن را امتحان کن
+            if request.custom_path and not index_path:
+                try:
+                    res = await client.get(
+                        f"https://api.github.com/repos/{owner}/{repo}/contents/{request.custom_path}",
+                        headers=headers,
+                        timeout=10.0
+                    )
+                    if res.status_code == 200:
+                        data = res.json()
+                        if data.get("encoding") == "base64":
+                            index_content = base64.b64decode(data["content"]).decode('utf-8')
+                            index_sha = data["sha"]
+                            index_path = request.custom_path
+                except Exception as e:
+                    return {
+                        "success": False,
+                        "error": f"فایل در مسیر سفارشی یافت نشد: {request.custom_path}",
+                        "detail": str(e)
+                    }
+
             if not index_path:
                 return {
                     "success": False,
                     "error": "فایل index.html در پروژه یافت نشد",
-                    "searched_paths": possible_paths
+                    "searched_paths": possible_paths,
+                    "hint": "می‌توانید مسیر سفارشی فایل HTML را وارد کنید (مثال: frontend/public/index.html)",
+                    "need_custom_path": True
                 }
 
             # بررسی وجود اسکریپت قبلی
