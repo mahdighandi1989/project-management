@@ -613,7 +613,7 @@ async def analyze_with_vision_ai(
             # ابتدا سعی کن کل پاسخ را parse کنی
             try:
                 result = json.loads(content)
-                slog.info(f"AI Vision decision (direct parse)", action=result.get("action"), thinking=result.get("thinking", "")[:100])
+                slog.info(f"AI Vision decision (direct parse)", ai_action=result.get("action"), ai_thinking=result.get("thinking", "")[:100])
                 return result
             except:
                 pass
@@ -624,7 +624,7 @@ async def analyze_with_vision_ai(
             if code_block_match:
                 try:
                     result = json.loads(code_block_match.group(1))
-                    slog.info(f"AI Vision decision (code block)", action=result.get("action"), thinking=result.get("thinking", "")[:100])
+                    slog.info(f"AI Vision decision (code block)", ai_action=result.get("action"), ai_thinking=result.get("thinking", "")[:100])
                     return result
                 except:
                     pass
@@ -646,10 +646,10 @@ async def analyze_with_vision_ai(
                 json_str = content[start_idx:end_idx]
                 try:
                     result = json.loads(json_str)
-                    slog.info(f"AI Vision decision (bracket count)", action=result.get("action"), thinking=result.get("thinking", "")[:100])
+                    slog.info(f"AI Vision decision (bracket count)", ai_action=result.get("action"), ai_thinking=result.get("thinking", "")[:100])
                     return result
                 except Exception as e:
-                    slog.warning(f"JSON parse failed", error=str(e), json_str=json_str[:200])
+                    slog.warning(f"JSON parse failed", parse_error=str(e), json_preview=json_str[:200])
 
         except Exception as parse_error:
             slog.warning(f"JSON parse failed", error=str(parse_error), content=response.content[:200])
@@ -816,7 +816,7 @@ async def execute_ai_agent_task(
                 action_entry["status"] = "skipped"
 
         except Exception as e:
-            slog.error(f"Action execution failed", action=action, exception=e)
+            slog.error(f"Action execution failed", action_type=action, exception=e)
             action_entry["status"] = "failed"
             action_entry["error"] = str(e)
 
