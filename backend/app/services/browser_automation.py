@@ -760,15 +760,15 @@ async def execute_ai_agent_task(
         if on_action_callback:
             await on_action_callback(action_entry)
 
-        # 4. بررسی تکمیل
-        if action == "done" or is_complete:
+        # 4. بررسی اقدام "done" (بدون نیاز به اجرا)
+        if action == "done":
             action_entry["status"] = "done"
             action_entry["description"] = "کار تکمیل شد"
             actions_log.append(action_entry)
             slog.info(f"Task completed at step {step}")
             break
 
-        # 5. اجرای اقدام
+        # 5. اجرای اقدام (حتی اگر is_complete=true باشد، اول اقدام را انجام بده)
         try:
             if action == "click":
                 x_percent = params.get("x", 50)
@@ -822,7 +822,12 @@ async def execute_ai_agent_task(
 
         actions_log.append(action_entry)
 
-        # 6. صبر کوتاه بین اقدامات
+        # 6. بررسی is_complete بعد از اجرای اقدام
+        if is_complete:
+            slog.info(f"Task marked complete after executing action at step {step}")
+            break
+
+        # 7. صبر کوتاه بین اقدامات
         await session.wait(500)
 
     # گرفتن screenshot نهایی
