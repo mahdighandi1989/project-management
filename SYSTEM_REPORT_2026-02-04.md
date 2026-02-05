@@ -914,6 +914,181 @@ class ProjectLockManager:
 
 ---
 
-**تاریخ به‌روزرسانی:** 2026-02-04
-**نسخه گزارش:** 2.4 (اضافه شدن سیستم راهنمای جامع + Tooltips + دیاگرام ساختاری)
-**شاخه:** `claude/review-project-structure-mmAqK`
+**تاریخ به‌روزرسانی:** 2026-02-05
+**نسخه گزارش:** 2.5 (اضافه شدن بخش بازرس ویژه - متوقف شده)
+**شاخه:** `claude/review-inspection-tab-VJGlq`
+
+---
+
+## 9. بازرس ویژه (Inspector Tab) - ⏸️ متوقف شده
+
+### وضعیت کلی
+
+| معیار | وضعیت |
+|-------|--------|
+| وضعیت | ⏸️ **متوقف شده** - نیاز به بازنگری اساسی |
+| درصد پیشرفت | ~40% |
+| مشکل اصلی | کلیک روی المان صحیح در صفحه هدف |
+| تاریخ شروع | 2026-02-04 |
+| تاریخ توقف | 2026-02-05 |
+
+### شرح قابلیت
+
+تب "بازرس ویژه" یک ابزار پیشرفته برای:
+- **پیش‌نمایش زنده** صفحات وب در iframe
+- **چت با AI** برای دستورات بصری (مثل "برو به تنظیمات")
+- **اتوماسیون مرورگر** با Playwright
+- **تعامل هوشمند** با المان‌های صفحه
+
+### مشکل اصلی شناسایی شده
+
+**وقتی کاربر دستور "برو به مرکز آزمون" را می‌دهد:**
+1. سیستم متن "مرکز آزمون" را در صفحه پیدا می‌کند ✅
+2. **ولی روی المان اشتباهی کلیک می‌کند** ❌
+3. چندین المان با متن مشابه وجود دارد (منو، breadcrumb، محتوا)
+4. سیستم نمی‌فهمد کدام المان مقصود کاربر است
+
+### راه‌حل‌های امتحان شده (همگی ناموفق)
+
+#### راه‌حل 1: Text Matching ساده
+```python
+page.get_by_text("مرکز آزمون").click()
+```
+**نتیجه:** ❌ چند المان با این متن پیدا می‌شود، اولی کلیک می‌شود که اشتباه است
+
+#### راه‌حل 2: امتیازدهی به Match ها
+```python
+# exact match = 1000, starts = 800, contains = 500
+# المان کوتاه‌تر = امتیاز بیشتر
+```
+**نتیجه:** ❌ المان کوتاه لزوماً درست نیست
+
+#### راه‌حل 3: محدود کردن به nav/sidebar
+```python
+page.locator("nav, aside, [class*='menu']").get_by_text(...)
+```
+**نتیجه:** ❌ همه سایت‌ها از این کلاس‌ها استفاده نمی‌کنند
+
+#### راه‌حل 4: Playwright Roles
+```python
+page.get_by_role("link", name="مرکز آزمون")
+page.get_by_role("button", name="مرکز آزمون")
+page.get_by_role("menuitem", name="مرکز آزمون")
+```
+**نتیجه:** ❌ سایت‌ها از semantic HTML استفاده نمی‌کنند (div با onclick)
+
+#### راه‌حل 5: Element.click() به جای مختصات
+```python
+await element.click()  # به جای mouse.click(x, y)
+```
+**نتیجه:** ❌ المان پیدا می‌شود ولی اشتباهی است
+
+#### راه‌حل 6: AI Vision
+```python
+# Screenshot بگیر → به AI بده → مختصات بگیر → کلیک کن
+```
+**نتیجه:** ❌ کار می‌کند ولی:
+- خیلی کند است (5-10 ثانیه)
+- هزینه API دارد
+- AI هم گاهی اشتباه می‌کند
+
+#### راه‌حل 7: Ctrl+F Style با Highlight
+```python
+# جستجو → highlight با چشمک → کلیک
+```
+**نتیجه:** ❌
+- Highlight توی headless browser انجام می‌شود
+- کاربر توی iframe نمی‌بیند
+- iframe و Playwright session جدا هستند
+
+### مشکل معماری اصلی
+
+```
+┌─────────────────────────────────────────────────┐
+│                    Frontend                      │
+│  ┌─────────────────┐    ┌──────────────────┐    │
+│  │     iframe      │    │   Chat Panel     │    │
+│  │  (instance A)   │    │                  │    │
+│  │                 │◄───┤  دستور: "برو X"  │    │
+│  │  صفحه وب       │    │                  │    │
+│  └─────────────────┘    └──────────────────┘    │
+└──────────────────────────┬──────────────────────┘
+                           │ API Call
+                           ▼
+┌─────────────────────────────────────────────────┐
+│                    Backend                       │
+│  ┌─────────────────────────────────────────┐    │
+│  │           Playwright Browser            │    │
+│  │           (instance B - جدا)            │    │
+│  │                                         │    │
+│  │  ✅ جستجو موفق                          │    │
+│  │  ✅ Highlight موفق (ولی کاربر نمی‌بینه)  │    │
+│  │  ❌ کلیک روی المان اشتباه               │    │
+│  │                                         │    │
+│  └─────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────┘
+```
+
+**مشکل:** iframe که کاربر می‌بیند و Playwright که عمل می‌کند **دو instance جدا** هستند.
+
+### چرا حرفه‌ای‌ها می‌توانند؟
+
+ابزارهای حرفه‌ای مثل:
+- **Anthropic Computer Use** - کنترل کامل desktop
+- **Selenium IDE** - کاربر خودش کلیک می‌کند و ضبط می‌شود
+- **Playwright Codegen** - همینطور
+- **Browser Extensions** - دسترسی مستقیم به DOM
+
+همه این‌ها **کنترل مستقیم** به مرورگر یا صفحه دارند، نه از طریق iframe محدود.
+
+### راه‌حل‌های پیشنهادی برای آینده
+
+#### 1. Browser Extension (توصیه شده)
+- نصب extension روی مرورگر کاربر
+- دسترسی مستقیم به DOM
+- Inject script برای highlight و کلیک
+
+#### 2. Puppeteer CDP Protocol
+- اتصال به مرورگر کاربر از طریق DevTools Protocol
+- کنترل مستقیم بدون iframe
+
+#### 3. انتخاب تعاملی
+- نمایش همه المان‌های پیدا شده به کاربر
+- کاربر انتخاب کند کدام را می‌خواهد
+- سپس کلیک
+
+#### 4. WebSocket Real-time
+- اتصال WebSocket بین frontend و backend
+- Sync کردن state بین iframe و Playwright
+
+### کامیت‌های انجام شده
+
+| Commit | توضیح |
+|--------|--------|
+| dadd60c | Implement Ctrl+F style search with highlight animation |
+| 6a70001 | Use AI Vision directly instead of unreliable text matching |
+| 37e160a | Prioritize nav/sidebar elements in click search |
+| e3900f2 | Fix iframe not updating after successful click navigation |
+| cbc0e3e | Use Playwright built-in locators for reliable clicking |
+| bbe5baf | Use element.click() instead of coordinate click |
+| 43e5060 | Add find-and-click endpoint with direct text matching |
+| b8863da | Improve element matching accuracy in visual scan |
+| 8a949d5 | Implement real element-by-element visual scanning |
+| 5d6c9f8 | Fix visual scan: scan bars now animate from start immediately |
+| 85dce78 | Add visual scan system with animated green scan bars |
+
+### فایل‌های تغییر یافته
+
+| فایل | نوع تغییر |
+|------|----------|
+| backend/app/api/routes/render_logs.py | اضافه شدن endpoint های جدید |
+| backend/app/services/browser_automation.py | بهبود text extraction |
+| frontend/src/app/projects/[id]/page.tsx | UI اسکن بصری و نشانگر |
+
+### نتیجه‌گیری
+
+این قابلیت نیاز به **بازنگری معماری اساسی** دارد. راه‌حل‌های فعلی (iframe + headless browser) محدودیت‌های ذاتی دارند که بدون تغییر رویکرد قابل حل نیستند.
+
+**پیشنهاد:** استفاده از Browser Extension یا CDP Protocol برای دسترسی مستقیم به مرورگر کاربر.
+
+---
