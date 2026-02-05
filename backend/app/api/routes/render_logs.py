@@ -3292,19 +3292,23 @@ async def find_element_and_click(url: str, search_text: str):
 
         # روش‌های مختلف برای پیدا کردن و کلیک - به ترتیب اولویت
         methods = [
-            # 1. لینک با متن دقیق
+            # 1. آیتم منو یا لینک در navigation
+            ("nav_link", lambda: page.locator("nav a, aside a, [class*='nav'] a, [class*='menu'] a, [class*='sidebar'] a").filter(has_text=search_clean)),
+            # 2. لینک با متن دقیق
             ("link_exact", lambda: page.get_by_role("link", name=search_clean, exact=True)),
-            # 2. دکمه با متن دقیق
-            ("button_exact", lambda: page.get_by_role("button", name=search_clean, exact=True)),
             # 3. آیتم منو
             ("menuitem", lambda: page.get_by_role("menuitem", name=search_clean)),
             # 4. لینک با متن (نه دقیق)
             ("link_contains", lambda: page.get_by_role("link", name=search_clean)),
-            # 5. دکمه با متن (نه دقیق)
+            # 5. المان کلیک‌پذیر در nav/sidebar
+            ("nav_clickable", lambda: page.locator("nav, aside, [class*='nav'], [class*='menu'], [class*='sidebar']").get_by_text(search_clean)),
+            # 6. دکمه با متن دقیق
+            ("button_exact", lambda: page.get_by_role("button", name=search_clean, exact=True)),
+            # 7. دکمه با متن (نه دقیق)
             ("button_contains", lambda: page.get_by_role("button", name=search_clean)),
-            # 6. هر المان با متن دقیق
+            # 8. هر المان با متن دقیق
             ("text_exact", lambda: page.get_by_text(search_clean, exact=True)),
-            # 7. هر المان با متن
+            # 9. هر المان با متن
             ("text_contains", lambda: page.get_by_text(search_clean)),
         ]
 
