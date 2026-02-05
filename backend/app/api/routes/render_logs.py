@@ -3978,19 +3978,20 @@ async def analyze_error_from_source(
                 "analysis": "برای بررسی کد منبع، ابتدا توکن GitHub را در تنظیمات وارد کنید."
             }
 
-        # استخراج owner/repo از پروژه
-        github_url = getattr(project, 'github_url', None) or getattr(project, 'repository_url', None)
-        if not github_url:
+        # استخراج owner/repo از github_path پروژه
+        github_path = getattr(project, 'github_path', None)
+        if not github_path:
             return {
                 "success": False,
                 "error": "این پروژه به GitHub متصل نیست",
                 "analysis": request.error_message
             }
 
-        # پارس کردن URL
-        parts = github_url.replace("https://github.com/", "").replace(".git", "").split("/")
+        # پارس کردن github_path
+        github_path_clean = github_path.replace("https://github.com/", "").replace(".git", "").strip("/")
+        parts = github_path_clean.split("/")
         if len(parts) < 2:
-            return {"success": False, "error": "فرمت URL GitHub نامعتبر است"}
+            return {"success": False, "error": f"فرمت GitHub path نامعتبر: {github_path}"}
 
         owner, repo = parts[0], parts[1]
 
@@ -4369,14 +4370,19 @@ async def inject_bridge_script(
                 "error": "توکن GitHub تنظیم نشده است"
             }
 
-        # استخراج owner/repo
-        github_url = getattr(project, 'github_url', None) or getattr(project, 'repository_url', None)
-        if not github_url:
-            return {"success": False, "error": "این پروژه به GitHub متصل نیست"}
+        # استخراج owner/repo از github_path
+        github_path = getattr(project, 'github_path', None)
+        if not github_path:
+            return {"success": False, "error": "این پروژه به GitHub متصل نیست. لطفاً ابتدا پروژه را از GitHub ایمپورت کنید."}
 
-        parts = github_url.replace("https://github.com/", "").replace(".git", "").split("/")
+        # پارس کردن github_path که می‌تواند به فرمت‌های مختلف باشد:
+        # - owner/repo
+        # - https://github.com/owner/repo
+        # - https://github.com/owner/repo.git
+        github_path_clean = github_path.replace("https://github.com/", "").replace(".git", "").strip("/")
+        parts = github_path_clean.split("/")
         if len(parts) < 2:
-            return {"success": False, "error": "فرمت URL GitHub نامعتبر است"}
+            return {"success": False, "error": f"فرمت GitHub path نامعتبر است: {github_path}"}
 
         owner, repo = parts[0], parts[1]
 
@@ -4524,13 +4530,14 @@ async def check_bridge_status(
         if not github_token:
             return {"success": False, "has_bridge": False, "error": "توکن GitHub تنظیم نشده"}
 
-        github_url = getattr(project, 'github_url', None) or getattr(project, 'repository_url', None)
-        if not github_url:
+        github_path = getattr(project, 'github_path', None)
+        if not github_path:
             return {"success": False, "has_bridge": False, "error": "پروژه به GitHub متصل نیست"}
 
-        parts = github_url.replace("https://github.com/", "").replace(".git", "").split("/")
+        github_path_clean = github_path.replace("https://github.com/", "").replace(".git", "").strip("/")
+        parts = github_path_clean.split("/")
         if len(parts) < 2:
-            return {"success": False, "error": "فرمت URL نامعتبر"}
+            return {"success": False, "error": f"فرمت GitHub path نامعتبر: {github_path}"}
 
         owner, repo = parts[0], parts[1]
 
