@@ -1014,47 +1014,8 @@ export default function ProjectDetailPage() {
         // استخراج متن هدف از پیام
         const targetText = extractTargetText(userMessage);
 
-        // 🆕 ابتدا از Visual Scan سریع استفاده کن (بدون AI)
-        setInspectorChatMessages(prev => [...prev, {
-          id: `system_${Date.now()}`,
-          role: 'assistant',
-          content: `🔍 در حال اسکن صفحه برای پیدا کردن "${targetText}"...`,
-          timestamp: new Date()
-        }]);
-
-        // اجرای اسکن بصری سریع
-        try {
-          const scanResult = await runVisualScan(targetText);
-
-          // حذف پیام سیستم
-          setInspectorChatMessages(prev => prev.filter(m => !m.id.startsWith('system_')));
-
-          if (scanResult && scanResult.success) {
-            // اسکن موفق - نیازی به AI نیست
-            setInspectorChatMessages(prev => [...prev, {
-              id: `assistant_${Date.now()}`,
-              role: 'assistant',
-              content: `✅ **پیدا شد و کلیک شد!**\n\n🎯 المان: **${scanResult.message || targetText}**\n📍 موقعیت: (${scanResult.target_position?.x?.toFixed(1)}%, ${scanResult.target_position?.y?.toFixed(1)}%)${scanResult.url_changed ? '\n🔄 صفحه تغییر کرد' : ''}`,
-              timestamp: new Date()
-            }]);
-
-            // 🆕🆕🆕 آپدیت iframe با URL جدید
-            if (scanResult.new_url && scanResult.new_url !== inspectorFrontendUrl) {
-              console.log('🔄 Updating iframe to:', scanResult.new_url);
-              setInspectorFrontendUrl(scanResult.new_url);
-            }
-
-            setInspectorChatLoading(false);
-            return;
-          }
-        } catch (scanError) {
-          console.log('Visual scan failed, falling back to AI...', scanError);
-        }
-
-        // حذف پیام سیستم قبلی
-        setInspectorChatMessages(prev => prev.filter(m => !m.id.startsWith('system_')));
-
-        // 🆕 اگر اسکن سریع کار نکرد، از AI استفاده کن
+        // 🆕🆕🆕 مستقیماً از AI Vision استفاده کن (text matching نادقیقه)
+        // AI میتونه با چشم ببینه که المان دقیقاً کجاست
         setInspectorChatMessages(prev => [...prev, {
           id: `system_${Date.now()}`,
           role: 'assistant',
