@@ -4179,18 +4179,29 @@ INSPECTOR_BRIDGE_SCRIPT = '''
 <!-- Inspector Bridge Script - Auto-injected -->
 <script>
 (function() {
+  console.log('🌉 Inspector Bridge: Script starting...');
+
   // جلوگیری از اجرای چندباره
-  if (window.__inspectorBridgeLoaded) return;
+  if (window.__inspectorBridgeLoaded) {
+    console.log('🌉 Inspector Bridge: Already loaded, skipping');
+    return;
+  }
   window.__inspectorBridgeLoaded = true;
+
+  // بررسی اینکه آیا در iframe هستیم
+  const isInIframe = window !== window.parent;
+  console.log('🌉 Inspector Bridge: In iframe?', isInIframe);
+  console.log('🌉 Inspector Bridge: Page URL:', window.location.href);
 
   // تنظیمات
   const DEBOUNCE_MS = 100;
   let lastEventTime = 0;
+  let messagesSent = 0;
 
   // تابع ارسال پیام به parent (پنل مدیریت)
   function sendToInspector(action, data) {
     try {
-      window.parent.postMessage({
+      const message = {
         type: 'inspector-bridge-event',
         action: action,
         target: data.target || '',
@@ -4198,7 +4209,10 @@ INSPECTOR_BRIDGE_SCRIPT = '''
         position: data.position || { xPercent: 50, yPercent: 50 },
         pageUrl: window.location.href,
         timestamp: Date.now()
-      }, '*');
+      };
+      window.parent.postMessage(message, '*');
+      messagesSent++;
+      console.log('🌉 Inspector Bridge: Sent message #' + messagesSent, action, data.elementInfo);
     } catch (e) {
       console.warn('Inspector bridge: failed to send message', e);
     }
@@ -4317,12 +4331,20 @@ INSPECTOR_BRIDGE_SCRIPT = '''
   }, true);
 
   // اعلام آماده بودن
-  window.parent.postMessage({
-    type: 'inspector-bridge-ready',
-    pageUrl: window.location.href
-  }, '*');
+  try {
+    window.parent.postMessage({
+      type: 'inspector-bridge-ready',
+      pageUrl: window.location.href,
+      isInIframe: isInIframe,
+      timestamp: Date.now()
+    }, '*');
+    console.log('🌉 Inspector Bridge: Ready message sent to parent');
+  } catch (readyErr) {
+    console.warn('🌉 Inspector Bridge: Failed to send ready message', readyErr);
+  }
 
-  console.log('🌉 Inspector Bridge Script loaded');
+  console.log('🌉 Inspector Bridge: Script loaded and active!');
+  console.log('🌉 Inspector Bridge: Click, scroll, or type to test');
 })();
 </script>
 '''
@@ -4874,6 +4896,36 @@ async def debug_bridge_injection(
                 result["message"] = "Bridge Script در هیچ فایل HTML یافت نشد!"
             else:
                 result["message"] = f"Bridge Script در {len(files_with_bridge)} فایل یافت شد"
+
+            # 🔍 بررسی سایت دیپلوی شده
+            preview_url = project.preview_url
+            if preview_url:
+                result["preview_url"] = preview_url
+                try:
+                    deployed_res = await client.get(
+                        preview_url,
+                        timeout=15.0,
+                        follow_redirects=True
+                    )
+                    if deployed_res.status_code == 200:
+                        deployed_html = deployed_res.text
+                        result["deployed_has_bridge"] = "Inspector Bridge Script" in deployed_html
+                        result["deployed_has_bridge_marker"] = "__inspectorBridgeLoaded" in deployed_html
+
+                        # اگر در سورس هست ولی در دیپلوی نیست
+                        if result["bridge_injected"] and not result["deployed_has_bridge"]:
+                            result["diagnosis"] = "⚠️ اسکریپت در GitHub هست ولی در سایت دیپلوی شده نیست! احتمالاً deploy هنوز انجام نشده یا build process اسکریپت را حذف کرده"
+                        elif result["deployed_has_bridge"]:
+                            result["diagnosis"] = "✅ اسکریپت در سایت دیپلوی شده موجود است"
+                        else:
+                            result["diagnosis"] = "❌ اسکریپت نه در GitHub و نه در سایت دیپلوی شده موجود است"
+                    else:
+                        result["deployed_check_error"] = f"HTTP {deployed_res.status_code}"
+                except Exception as deploy_check_err:
+                    result["deployed_check_error"] = str(deploy_check_err)
+            else:
+                result["preview_url"] = None
+                result["diagnosis"] = "⚠️ URL پیش‌نمایش پروژه تنظیم نشده"
 
         return result
 
