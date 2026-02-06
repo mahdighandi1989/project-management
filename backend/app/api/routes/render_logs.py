@@ -4707,14 +4707,18 @@ async def inject_bridge_script(
                         all_package_jsons = [f for f in all_files if f.endswith('package.json') and 'node_modules' not in f]
                         slog.info(f"📦 Found {len(all_package_jsons)} package.json files: {all_package_jsons}")
 
-                        # اگر در root پیدا نشد، بقیه رو چک کن
-                        if not package_json_found and all_package_jsons:
+                        # 🔑 تغییر مهم: اگر فریم‌ورک تشخیص داده نشده، پوشه‌های nested رو چک کن
+                        # (حتی اگر root package.json وجود داشته باشه)
+                        if not detected_framework and all_package_jsons:
                             # اولویت با پوشه‌های frontend-like
                             frontend_folders = ['frontend/', 'client/', 'web/', 'app/', 'ui/', 'src/']
-                            sorted_pkgs = sorted(all_package_jsons, key=lambda p: (
+                            # فقط package.json های nested (نه root)
+                            nested_pkgs = [p for p in all_package_jsons if '/' in p]
+                            sorted_pkgs = sorted(nested_pkgs, key=lambda p: (
                                 0 if any(p.startswith(f) for f in frontend_folders) else 1,
                                 len(p)  # کوتاه‌تر = نزدیک‌تر به root
                             ))
+                            slog.info(f"📦 Checking nested packages: {sorted_pkgs}")
 
                             for pkg_path in sorted_pkgs:
                                 try:
@@ -4793,6 +4797,9 @@ async def inject_bridge_script(
                             path_lower = path.lower()
                             if path_lower.endswith('index.html'):
                                 score += 100
+                            # 🔑 پوشه‌های frontend-like امتیاز بالا
+                            if 'frontend/' in path_lower or 'client/' in path_lower or 'web/' in path_lower:
+                                score += 90
                             if 'public/' in path_lower:
                                 score += 80
                             # 🐍 Python templates folder
@@ -4812,7 +4819,9 @@ async def inject_bridge_script(
                         html_files_scored.sort(key=lambda x: -x[1])
 
                         # اگر HTML با امتیاز بالا پیدا شد، از اون استفاده کن
+                        slog.info(f"🔍 Checking {len(html_files_scored)} HTML files for injection...")
                         for html_path, score in html_files_scored:
+                            slog.info(f"  📄 {html_path} (score: {score})")
                             if score >= 50:  # فقط HTML های خوب
                                 try:
                                     content_res = await client.get(
@@ -4820,19 +4829,37 @@ async def inject_bridge_script(
                                         headers=headers,
                                         timeout=10.0
                                     )
+                                    slog.info(f"  📥 Fetch status: {content_res.status_code}")
                                     if content_res.status_code == 200:
                                         data = content_res.json()
                                         if data.get("encoding") == "base64":
                                             content = base64.b64decode(data["content"]).decode('utf-8')
-                                            if '<html' in content.lower() or '<!doctype' in content.lower():
-                                                if 'Inspector Bridge Script' not in content:
-                                                    index_content = content
-                                                    index_sha = data["sha"]
-                                                    index_path = html_path
-                                                    is_js_file = False
-                                                    slog.info(f"✅ Found HTML: {html_path} (score: {score})")
-                                                    break
-                                except:
+                                            content_preview = content[:200].replace('\n', ' ')
+                                            slog.info(f"  📝 Content preview: {content_preview}")
+
+                                            # 🔑 بررسی ساده‌تر: فقط چک کن که HTML باشه
+                                            # (حتی Vite minimal HTML هم قبول کن)
+                                            is_html = ('<html' in content.lower() or
+                                                      '<!doctype' in content.lower() or
+                                                      '<head' in content.lower() or
+                                                      '<body' in content.lower() or
+                                                      html_path.endswith('.html'))  # اعتماد به پسوند فایل
+
+                                            has_bridge = 'Inspector Bridge Script' in content
+
+                                            slog.info(f"  ✓ Is HTML: {is_html}, Has Bridge: {has_bridge}")
+
+                                            if is_html and not has_bridge:
+                                                index_content = content
+                                                index_sha = data["sha"]
+                                                index_path = html_path
+                                                is_js_file = False
+                                                slog.info(f"✅ Selected HTML for injection: {html_path} (score: {score})")
+                                                break
+                                            elif has_bridge:
+                                                slog.info(f"  ⏭️ Skipped (already has bridge): {html_path}")
+                                except Exception as e:
+                                    slog.warn(f"  ❌ Error checking {html_path}: {e}")
                                     continue
 
                         # 🔍 مرحله ۴: اگر HTML پیدا نشد، از entry candidates استفاده کن
