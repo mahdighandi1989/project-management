@@ -1165,12 +1165,20 @@ export default function ProjectDetailPage() {
   };
 
   // 🔍 Inspector Functions - بازرس ویژه
-  const loadInspectorServices = async () => {
+  const loadInspectorServices = async (refresh: boolean = false) => {
     setInspectorLoading(true);
     setInspectorError(null);
     setInspectorIframeLoaded(false);
     setInspectorIframeError(false);
     try {
+      // اول سرویس‌ها رو از Render API رفرش کن (اگر خواسته شده)
+      if (refresh) {
+        try {
+          await fetch(`${API_BASE}/api/render/services?refresh=true`);
+          console.log('🔄 Services refreshed from Render API');
+        } catch (e) { console.warn('Service refresh failed:', e); }
+      }
+
       const res = await fetch(`${API_BASE}/api/render/services/by-project/${projectId}`);
       const data = await res.json();
 
@@ -1179,18 +1187,24 @@ export default function ProjectDetailPage() {
 
         if (data.services?.length === 0) {
           setInspectorError(data.message || 'هیچ سرویسی یافت نشد');
-        } else if (data.frontend_url) {
-          // بررسی دسترس‌پذیری URL قبل از لود در iframe
-          console.log('🔍 Checking frontend URL accessibility:', data.frontend_url);
-          try {
-            const healthCheck = await fetch(data.frontend_url, { method: 'HEAD', mode: 'no-cors' });
-            // mode: 'no-cors' همیشه opaque response برمیگردونه ولی حداقل ارتباط رو تست میکنه
-            setInspectorFrontendUrl(data.frontend_url);
-            console.log('✅ Frontend URL accessible');
-          } catch (healthErr) {
-            console.warn('⚠️ Frontend URL may be unreachable:', healthErr);
-            // بازم URL رو ست کن - شاید CORS مشکل داشته ولی iframe کار کنه
-            setInspectorFrontendUrl(data.frontend_url);
+        } else {
+          // شروع fetch لاگ‌ها برای سرویس‌های این پروژه
+          for (const svc of (data.services || [])) {
+            fetch(`${API_BASE}/api/render/logs/fetch?service_id=${svc.id}`, { method: 'POST' })
+              .then(() => console.log(`📋 Fetched logs for ${svc.name}`))
+              .catch(err => console.warn(`Log fetch failed for ${svc.name}:`, err));
+          }
+
+          if (data.frontend_url) {
+            console.log('🔍 Checking frontend URL accessibility:', data.frontend_url);
+            try {
+              await fetch(data.frontend_url, { method: 'HEAD', mode: 'no-cors' });
+              setInspectorFrontendUrl(data.frontend_url);
+              console.log('✅ Frontend URL accessible');
+            } catch (healthErr) {
+              console.warn('⚠️ Frontend URL may be unreachable:', healthErr);
+              setInspectorFrontendUrl(data.frontend_url);
+            }
           }
         }
       } else {
@@ -1239,10 +1253,10 @@ export default function ProjectDetailPage() {
       setInspectorServices([]);
     } else {
       // روشن کردن - اول سشن رو بساز، بعد power رو روشن کن
-      // (تا وقتی WS وصل میشه، سشن آماده باشه)
       await initInspectorSession();
       setInspectorPowerOn(true);
-      await loadInspectorServices();
+      // رفرش سرویس‌ها از Render API (نه cache)
+      await loadInspectorServices(true);
       await loadInspectorModels();
     }
   };

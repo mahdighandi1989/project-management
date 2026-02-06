@@ -6280,11 +6280,18 @@ async def verify_inspector_message(
         }
 
     try:
-        # دریافت لاگ‌های اخیر بک‌اند (60 ثانیه اخیر - بازه بیشتر برای اطمینان)
-        cutoff = datetime.utcnow() - timedelta(seconds=60)
-        recent_logs = db.query(RenderLog).filter(
-            RenderLog.timestamp >= cutoff
-        ).order_by(desc(RenderLog.timestamp)).limit(30).all()
+        # پیدا کردن سرویس‌های مرتبط با این پروژه
+        project_services = db.query(RenderService).filter(
+            RenderService.project_id == project_id
+        ).all()
+        service_ids = [s.id for s in project_services]
+
+        # دریافت لاگ‌های اخیر بک‌اند (120 ثانیه اخیر)
+        cutoff = datetime.utcnow() - timedelta(seconds=120)
+        log_query = db.query(RenderLog).filter(RenderLog.timestamp >= cutoff)
+        if service_ids:
+            log_query = log_query.filter(RenderLog.service_id.in_(service_ids))
+        recent_logs = log_query.order_by(desc(RenderLog.timestamp)).limit(30).all()
 
         logs_text = ""
         error_logs = []
@@ -6303,15 +6310,16 @@ async def verify_inspector_message(
 
         # اگر لاگی نبود، تأیید بزن ولی وضعیت رو واضح بگو
         if len(recent_logs) == 0:
+            _no_log_summary = f"بدون لاگ ({len(service_ids)} سرویس بررسی شد)" if service_ids else "سرویسی یافت نشد"
             msg.backend_verified = True
-            msg.backend_log_summary = "بدون لاگ در ۶۰ ثانیه اخیر"
+            msg.backend_log_summary = _no_log_summary
             msg.verified_by_model = "no-logs"
             db.commit()
             return {
                 "success": True,
                 "message_id": message_id,
                 "verified": True,
-                "summary": "بدون لاگ در ۶۰ ثانیه اخیر",
+                "summary": _no_log_summary,
                 "model_used": "no-logs",
                 "logs_checked": 0,
                 "error_logs_count": 0,
@@ -6328,7 +6336,7 @@ async def verify_inspector_message(
 
 اکشن کاربر: {msg.content}
 
-لاگ‌های اخیر بک‌اند ({len(recent_logs)} لاگ در ۶۰ ثانیه اخیر):
+لاگ‌های اخیر بک‌اند ({len(recent_logs)} لاگ در ۱۲۰ ثانیه اخیر، {len(service_ids)} سرویس):
 {logs_text}
 
 وظیفه شما:
@@ -6364,7 +6372,7 @@ ERROR: [توضیح مختصر خطا]"""
                 msg.backend_log_summary = f"خطا در لاگ: {error_logs[0][:100]}"
             else:
                 msg.backend_verified = True
-                msg.backend_log_summary = f"سالم ({len(recent_logs)} لاگ بررسی شد)"
+                msg.backend_log_summary = f"سالم - {len(recent_logs)} لاگ بررسی شد"
             msg.verified_by_model = "rule-based"
             db.commit()
             return {
