@@ -4549,6 +4549,8 @@ async def inject_bridge_script(
             tree_status = None
             deps_found = {}
             default_branch = 'main'
+            all_package_jsons = []  # همه package.json های پیدا شده
+            html_files = []  # همه فایل‌های HTML پیدا شده
 
             if not index_path:
                 try:
@@ -4699,6 +4701,81 @@ async def inject_bridge_script(
                         tree_data = tree_res.json()
                         all_files = [item["path"] for item in tree_data.get("tree", []) if item["type"] == "blob"]
                         slog.info(f"📁 Total files in repo: {len(all_files)}")
+
+                        # 🔍 مرحله ۲.۵: جستجوی هوشمند در همه پوشه‌ها
+                        # پیدا کردن همه package.json ها (نه فقط root)
+                        all_package_jsons = [f for f in all_files if f.endswith('package.json') and 'node_modules' not in f]
+                        slog.info(f"📦 Found {len(all_package_jsons)} package.json files: {all_package_jsons}")
+
+                        # اگر در root پیدا نشد، بقیه رو چک کن
+                        if not package_json_found and all_package_jsons:
+                            # اولویت با پوشه‌های frontend-like
+                            frontend_folders = ['frontend/', 'client/', 'web/', 'app/', 'ui/', 'src/']
+                            sorted_pkgs = sorted(all_package_jsons, key=lambda p: (
+                                0 if any(p.startswith(f) for f in frontend_folders) else 1,
+                                len(p)  # کوتاه‌تر = نزدیک‌تر به root
+                            ))
+
+                            for pkg_path in sorted_pkgs:
+                                try:
+                                    pkg_res2 = await client.get(
+                                        f"https://api.github.com/repos/{owner}/{repo}/contents/{pkg_path}",
+                                        headers=headers,
+                                        timeout=10.0
+                                    )
+                                    if pkg_res2.status_code == 200:
+                                        pkg_data2 = pkg_res2.json()
+                                        if pkg_data2.get("encoding") == "base64":
+                                            pkg_content2 = json.loads(base64.b64decode(pkg_data2["content"]).decode('utf-8'))
+                                            deps2 = {**pkg_content2.get('dependencies', {}), **pkg_content2.get('devDependencies', {})}
+                                            pkg_folder = '/'.join(pkg_path.split('/')[:-1])
+                                            if pkg_folder:
+                                                pkg_folder += '/'
+
+                                            slog.info(f"📦 Checking nested package.json: {pkg_path} (folder: {pkg_folder})")
+                                            slog.info(f"📦 Dependencies: {list(deps2.keys())[:10]}")
+
+                                            # تشخیص فریم‌ورک
+                                            if 'next' in deps2:
+                                                detected_framework = 'nextjs'
+                                                entry_candidates = [
+                                                    f'{pkg_folder}pages/_app.tsx', f'{pkg_folder}pages/_app.js',
+                                                    f'{pkg_folder}app/layout.tsx', f'{pkg_folder}src/app/layout.tsx'
+                                                ]
+                                            elif 'react' in deps2 or 'react-dom' in deps2:
+                                                detected_framework = 'react'
+                                                if 'vite' in deps2:
+                                                    entry_candidates = [
+                                                        f'{pkg_folder}index.html',
+                                                        f'{pkg_folder}src/main.tsx', f'{pkg_folder}src/main.jsx'
+                                                    ]
+                                                else:
+                                                    entry_candidates = [
+                                                        f'{pkg_folder}public/index.html',
+                                                        f'{pkg_folder}src/index.tsx', f'{pkg_folder}src/index.jsx'
+                                                    ]
+                                            elif 'vue' in deps2:
+                                                detected_framework = 'vue'
+                                                entry_candidates = [
+                                                    f'{pkg_folder}index.html',
+                                                    f'{pkg_folder}public/index.html',
+                                                    f'{pkg_folder}src/main.js'
+                                                ]
+                                            elif 'svelte' in deps2:
+                                                detected_framework = 'svelte'
+                                                entry_candidates = [f'{pkg_folder}src/App.svelte', f'{pkg_folder}index.html']
+                                            elif 'angular' in deps2 or '@angular/core' in deps2:
+                                                detected_framework = 'angular'
+                                                entry_candidates = [f'{pkg_folder}src/index.html']
+
+                                            if detected_framework:
+                                                slog.info(f"✅ Found frontend in {pkg_folder}: {detected_framework}")
+                                                package_json_found = True
+                                                deps_found = list(deps2.keys())[:20]
+                                                break
+                                except Exception as e:
+                                    slog.warn(f"Failed to check {pkg_path}: {e}")
+                                    continue
 
                         # 🎯 مرحله ۳: پیدا کردن بهترین فایل برای تزریق
 
@@ -4872,10 +4949,12 @@ async def inject_bridge_script(
                         "default_branch": default_branch,
                         "total_files_found": len(all_files),
                         "html_files_count": len(found_html_files),
+                        "all_html_files": html_files[:20],
+                        "all_package_jsons": all_package_jsons,
                         "search_error": search_error,
                         "detected_framework_raw": detected_framework,
                         "entry_candidates": entry_candidates,
-                        "files_sample": all_files[:20] if all_files else [],
+                        "files_sample": all_files[:30] if all_files else [],  # نمایش ۳۰ فایل
                         "package_json_found": package_json_found,
                         "package_json_status": package_json_status,
                         "tree_status": tree_status,

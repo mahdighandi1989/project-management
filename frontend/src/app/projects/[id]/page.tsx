@@ -1389,8 +1389,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           console.log('  - Detected Framework:', data.debug.detected_framework_raw);
           console.log('  - Total Files:', data.debug.total_files_found);
           console.log('  - HTML Files:', data.debug.html_files_count);
+          console.log('  - All HTML Files:', JSON.stringify(data.debug.all_html_files));
+          console.log('  - All package.json files:', JSON.stringify(data.debug.all_package_jsons));
           console.log('  - Entry Candidates:', JSON.stringify(data.debug.entry_candidates));
-          console.log('  - Files Sample:', JSON.stringify(data.debug.files_sample, null, 2));
+          console.log('  - Files Sample (30):', JSON.stringify(data.debug.files_sample, null, 2));
           console.log('  - Dependencies Sample:', JSON.stringify(data.debug.deps_sample));
           console.log('  - Search Error:', data.debug.search_error);
         }
