@@ -48,6 +48,7 @@ class InspectorMessage(Base):
     tokens_used = Column(Integer, nullable=True)
     backend_verified = Column(Boolean, nullable=True)  # null=pending, True=ok, False=error
     backend_log_summary = Column(Text, nullable=True)  # خلاصه بررسی لاگ بک‌اند
+    verified_by_model = Column(String(100), nullable=True)  # مدلی که تأیید رو انجام داده
     timestamp = Column(DateTime, server_default=func.now())
 
     session = relationship("InspectorSession", back_populates="messages")
@@ -63,5 +64,6 @@ class InspectorMessage(Base):
             "tokens_used": self.tokens_used,
             "backend_verified": self.backend_verified,
             "backend_log_summary": self.backend_log_summary,
+            "verified_by_model": self.verified_by_model,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
         }
