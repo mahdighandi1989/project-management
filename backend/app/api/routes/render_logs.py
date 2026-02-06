@@ -4174,7 +4174,7 @@ class InjectBridgeRequest(BaseModel):
     custom_path: Optional[str] = None  # مسیر سفارشی به فایل HTML (مثال: "frontend/public/index.html")
 
 
-# محتوای Bridge Script که به پروژه‌ها تزریق می‌شود
+# محتوای Bridge Script که به پروژه‌ها تزریق می‌شود (نسخه HTML)
 INSPECTOR_BRIDGE_SCRIPT = '''
 <!-- Inspector Bridge Script - Auto-injected -->
 <script>
@@ -4349,6 +4349,61 @@ INSPECTOR_BRIDGE_SCRIPT = '''
 </script>
 '''
 
+# 🆕 محتوای Bridge Script برای پروژه‌های React/Next.js (نسخه JS/TS)
+INSPECTOR_BRIDGE_SCRIPT_JS = '''
+// 🌉 Inspector Bridge Script - Auto-injected
+// این کد را در ابتدای فایل اصلی پروژه اضافه کنید
+if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
+  window.__inspectorBridgeLoaded = true;
+
+  const isInIframe = window !== window.parent;
+  if (isInIframe) {
+    console.log('🌉 Inspector Bridge: Active in iframe');
+
+    const sendToInspector = (action, data) => {
+      try {
+        window.parent.postMessage({
+          type: 'inspector-bridge-event',
+          action,
+          elementInfo: data.elementInfo || '',
+          position: data.position || { xPercent: 50, yPercent: 50 },
+          pageUrl: window.location.href,
+          timestamp: Date.now()
+        }, '*');
+      } catch (e) { console.warn('Bridge send failed:', e); }
+    };
+
+    const getElementInfo = (el) => {
+      if (!el) return '';
+      const text = (el.innerText || el.value || '').trim().slice(0, 30);
+      const tag = el.tagName?.toLowerCase() || '';
+      return text ? `${tag} "${text}"` : tag;
+    };
+
+    document.addEventListener('click', (e) => {
+      sendToInspector('click', { elementInfo: getElementInfo(e.target) });
+    }, true);
+
+    document.addEventListener('input', (e) => {
+      if (e.target?.tagName === 'INPUT' || e.target?.tagName === 'TEXTAREA') {
+        sendToInspector('input', { elementInfo: getElementInfo(e.target) });
+      }
+    }, true);
+
+    let scrollTimeout;
+    document.addEventListener('scroll', () => {
+      clearTimeout(scrollTimeout);
+      scrollTimeout = setTimeout(() => {
+        sendToInspector('scroll', { elementInfo: 'صفحه' });
+      }, 200);
+    }, true);
+
+    window.parent.postMessage({ type: 'inspector-bridge-ready', pageUrl: window.location.href }, '*');
+  }
+}
+// 🌉 End of Inspector Bridge Script
+'''
+
 
 @router.post("/inspector/inject-bridge")
 async def inject_bridge_script(
@@ -4462,6 +4517,7 @@ async def inject_bridge_script(
             is_gatsby = False
             all_files = []  # لیست همه فایل‌ها
             search_error = None  # خطای جستجو
+            is_js_file = False  # آیا فایل پیدا شده JS/TS است؟
 
             # اگر مسیر سفارشی داده شده، اول آن را امتحان کن
             if request.custom_path:
@@ -4575,6 +4631,64 @@ async def inject_bridge_script(
                             except:
                                 continue
 
+                        # 🆕 اگر HTML پیدا نشد، دنبال فایل‌های JS/TS بگرد
+                        if not index_path and not html_files:
+                            slog.info("No HTML files found, searching for JS/TS entry points...")
+
+                            # لیست فایل‌های entry point به ترتیب اولویت
+                            js_entry_points = [
+                                # Next.js
+                                'pages/_app.tsx', 'pages/_app.js', 'pages/_app.jsx',
+                                'src/pages/_app.tsx', 'src/pages/_app.js',
+                                'app/layout.tsx', 'app/layout.js', 'src/app/layout.tsx',
+                                # React (Create React App / Vite)
+                                'src/App.tsx', 'src/App.jsx', 'src/App.js',
+                                'src/index.tsx', 'src/index.jsx', 'src/index.js',
+                                'src/main.tsx', 'src/main.jsx', 'src/main.js',
+                                # Vue
+                                'src/App.vue', 'src/main.ts', 'src/main.js',
+                                # Generic
+                                'app/App.tsx', 'app/App.js', 'App.tsx', 'App.js',
+                                'index.tsx', 'index.js', 'main.tsx', 'main.js'
+                            ]
+
+                            # پیدا کردن فایل entry point
+                            found_js_files = []
+                            for entry in js_entry_points:
+                                if entry in all_files:
+                                    found_js_files.append(entry)
+
+                            slog.info(f"📄 JS/TS entry points found: {found_js_files[:5]}")
+
+                            # تلاش برای تزریق به اولین فایل پیدا شده
+                            for js_path in found_js_files[:3]:
+                                try:
+                                    content_res = await client.get(
+                                        f"https://api.github.com/repos/{owner}/{repo}/contents/{js_path}",
+                                        headers=headers,
+                                        timeout=10.0
+                                    )
+                                    if content_res.status_code == 200:
+                                        data = content_res.json()
+                                        if data.get("encoding") == "base64":
+                                            content = base64.b64decode(data["content"]).decode('utf-8')
+                                            # بررسی که Bridge قبلاً اضافه نشده باشد
+                                            if 'Inspector Bridge Script' not in content:
+                                                index_content = content
+                                                index_sha = data["sha"]
+                                                index_path = js_path
+                                                # علامت‌گذاری که این یک فایل JS است نه HTML
+                                                is_js_file = True
+                                                slog.info(f"Found JS/TS entry point: {js_path}")
+                                                break
+                                except Exception as js_err:
+                                    slog.warn(f"Failed to fetch {js_path}: {js_err}")
+                                    continue
+
+                            # ذخیره لیست فایل‌های JS برای نمایش به کاربر
+                            if not index_path and found_js_files:
+                                found_html_files = found_js_files  # استفاده از همان متغیر
+
                 except Exception as e:
                     slog.warn(f"Smart HTML search failed: {e}")
                     found_html_files = []
@@ -4611,7 +4725,7 @@ async def inject_bridge_script(
                 return error_response
 
             # بررسی وجود اسکریپت قبلی
-            bridge_marker = "Inspector Bridge Script - Auto-injected"
+            bridge_marker = "Inspector Bridge Script"
             has_bridge = bridge_marker in index_content
 
             if request.remove:
@@ -4621,27 +4735,42 @@ async def inject_bridge_script(
 
                 # حذف اسکریپت با regex
                 import re
-                new_content = re.sub(
-                    r'<!-- Inspector Bridge Script - Auto-injected -->.*?</script>',
-                    '',
-                    index_content,
-                    flags=re.DOTALL
-                )
+                if is_js_file:
+                    # حذف نسخه JS
+                    new_content = re.sub(
+                        r'// 🌉 Inspector Bridge Script - Auto-injected.*?// 🌉 End of Inspector Bridge Script\n?',
+                        '',
+                        index_content,
+                        flags=re.DOTALL
+                    )
+                else:
+                    # حذف نسخه HTML
+                    new_content = re.sub(
+                        r'<!-- Inspector Bridge Script - Auto-injected -->.*?</script>',
+                        '',
+                        index_content,
+                        flags=re.DOTALL
+                    )
                 commit_message = "🔧 Remove Inspector Bridge Script"
             else:
                 # اضافه کردن اسکریپت
                 if has_bridge:
                     return {"success": True, "message": "اسکریپت از قبل تزریق شده است", "already_injected": True}
 
-                # تزریق قبل از </head> یا </body>
-                if "</head>" in index_content:
-                    new_content = index_content.replace("</head>", INSPECTOR_BRIDGE_SCRIPT + "\n</head>")
-                elif "</body>" in index_content:
-                    new_content = index_content.replace("</body>", INSPECTOR_BRIDGE_SCRIPT + "\n</body>")
+                if is_js_file:
+                    # 🆕 تزریق نسخه JS/TS - در ابتدای فایل
+                    slog.info(f"Injecting JS version into {index_path}")
+                    new_content = INSPECTOR_BRIDGE_SCRIPT_JS + "\n" + index_content
+                    commit_message = "🌉 Add Inspector Bridge Script (JS version)"
                 else:
-                    new_content = index_content + "\n" + INSPECTOR_BRIDGE_SCRIPT
-
-                commit_message = "🌉 Add Inspector Bridge Script for live tracking"
+                    # تزریق نسخه HTML - قبل از </head> یا </body>
+                    if "</head>" in index_content:
+                        new_content = index_content.replace("</head>", INSPECTOR_BRIDGE_SCRIPT + "\n</head>")
+                    elif "</body>" in index_content:
+                        new_content = index_content.replace("</body>", INSPECTOR_BRIDGE_SCRIPT + "\n</body>")
+                    else:
+                        new_content = index_content + "\n" + INSPECTOR_BRIDGE_SCRIPT
+                    commit_message = "🌉 Add Inspector Bridge Script for live tracking"
 
             # آپدیت فایل در GitHub
             update_res = await client.put(
