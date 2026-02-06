@@ -1394,6 +1394,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           console.log('  - Entry Candidates:', JSON.stringify(data.debug.entry_candidates));
           console.log('  - 📂 Frontend Files:', JSON.stringify(data.debug.frontend_files));
           console.log('  - 🔍 Pattern Match Files:', JSON.stringify(data.debug.pattern_match_files));
+          console.log('  - ❓ Pattern Search Reason:', data.debug.pattern_search_reason);
           console.log('  - Dependencies Sample:', JSON.stringify(data.debug.deps_sample));
           console.log('  - Search Error:', data.debug.search_error);
         }
