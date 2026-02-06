@@ -1377,6 +1377,22 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       } else {
         // 🔍 Debug: چاپ پاسخ API
         console.log('🔍 Bridge API Response:', data);
+        // Debug info کامل
+        if (data.debug) {
+          console.log('🔍 DEBUG INFO:');
+          console.log('  - GitHub Path:', data.debug.github_path);
+          console.log('  - Default Branch:', data.debug.default_branch);
+          console.log('  - Package.json Found:', data.debug.package_json_found);
+          console.log('  - Package.json Status:', data.debug.package_json_status);
+          console.log('  - Tree Status:', data.debug.tree_status);
+          console.log('  - Detected Framework:', data.debug.detected_framework_raw);
+          console.log('  - Total Files:', data.debug.total_files_found);
+          console.log('  - HTML Files:', data.debug.html_files_count);
+          console.log('  - Entry Candidates:', data.debug.entry_candidates);
+          console.log('  - Files Sample:', data.debug.files_sample);
+          console.log('  - Dependencies Sample:', data.debug.deps_sample);
+          console.log('  - Search Error:', data.debug.search_error);
+        }
 
         // اگر index.html پیدا نشد، دیالوگ مسیر سفارشی نشان بده
         if (data.need_custom_path) {
