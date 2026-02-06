@@ -4891,8 +4891,11 @@ async def inject_bridge_script(
                     error_response["error"] = "فایل HTML اصلی به‌صورت خودکار پیدا نشد"
                     error_response["hint"] = "فایل‌های HTML زیر پیدا شدند - یکی را انتخاب کنید:"
                 else:
-                    error_response["error"] = "هیچ فایل HTML در پروژه یافت نشد"
-                    error_response["hint"] = "مسیر فایل HTML را دستی وارد کنید یا مطمئن شوید پروژه فایل HTML دارد"
+                    # 🚫 پروژه Backend-only - هیچ HTML ندارد
+                    error_response["error"] = "⚠️ این پروژه فرانت‌اند ندارد (Backend-only)"
+                    error_response["hint"] = "Bridge Script فقط روی پروژه‌هایی با فایل HTML کار می‌کند"
+                    error_response["is_backend_only"] = True
+                    error_response["suggestion"] = "اگر فرانت‌اند جداگانه دارید، Bridge را روی آن پروژه فعال کنید"
 
                 return error_response
 

@@ -403,6 +403,7 @@ export default function ProjectDetailPage() {
   const [customHtmlPathInput, setCustomHtmlPathInput] = useState('');
   const [foundHtmlFiles, setFoundHtmlFiles] = useState<string[]>([]);
   const [detectedFramework, setDetectedFramework] = useState<string | null>(null);
+  const [isBackendOnly, setIsBackendOnly] = useState(false);
 
   // 🔍 Debug Bridge - برای تشخیص مشکلات
   const [bridgeDebugInfo, setBridgeDebugInfo] = useState<{
@@ -1399,15 +1400,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           // ذخیره فایل‌های HTML پیدا شده و فریم‌ورک تشخیص داده شده
           console.log('📁 Found HTML files:', data.found_html_files);
           console.log('🔧 Detected framework:', data.framework_detected);
+          console.log('🚫 Is Backend-only:', data.is_backend_only);
           setFoundHtmlFiles(data.found_html_files || []);
           setDetectedFramework(data.framework_detected || null);
+          setIsBackendOnly(data.is_backend_only || false);
           setShowCustomHtmlPathDialog(true);
           setInspectorBridgeStatus(prev => ({
             ...prev,
             injecting: false,
-            error: data.framework_detected
-              ? `پروژه ${data.framework_detected} است - HTML در build ساخته می‌شود`
-              : 'فایل HTML یافت نشد - مسیر را وارد کنید'
+            error: data.is_backend_only
+              ? 'این پروژه فرانت‌اند ندارد (Backend-only)'
+              : data.framework_detected
+                ? `پروژه ${data.framework_detected} است - HTML در build ساخته می‌شود`
+                : 'فایل HTML یافت نشد - مسیر را وارد کنید'
           }));
         } else {
           setInspectorBridgeStatus(prev => ({
@@ -8264,8 +8269,25 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     <div className="bg-white dark:bg-gray-800 rounded-xl p-6 max-w-lg w-full mx-4 shadow-2xl max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
                       <h3 className="text-lg font-bold mb-4 text-gray-900 dark:text-white">📁 مسیر فایل HTML</h3>
 
+                      {/* 🚫 هشدار پروژه Backend-only */}
+                      {isBackendOnly && (
+                        <div className="bg-red-100 dark:bg-red-900/30 border border-red-300 dark:border-red-700 rounded-lg p-4 mb-4">
+                          <div className="flex items-center gap-2 text-red-800 dark:text-red-300 font-bold text-sm mb-2">
+                            🚫 این پروژه فرانت‌اند ندارد (Backend-only)
+                          </div>
+                          <p className="text-xs text-red-700 dark:text-red-400 mb-2">
+                            Bridge Script فقط روی پروژه‌هایی با فایل HTML کار می‌کند.
+                            <br />
+                            این پروژه فقط Backend/API است و فایل HTML ندارد.
+                          </p>
+                          <p className="text-xs text-red-600 dark:text-red-300 font-medium">
+                            💡 راه‌حل: اگر فرانت‌اند جداگانه دارید، Bridge را روی آن پروژه فعال کنید.
+                          </p>
+                        </div>
+                      )}
+
                       {/* هشدار فریم‌ورک */}
-                      {detectedFramework && (
+                      {detectedFramework && !isBackendOnly && (
                         <div className="bg-yellow-100 dark:bg-yellow-900/30 border border-yellow-300 dark:border-yellow-700 rounded-lg p-3 mb-4">
                           <div className="flex items-center gap-2 text-yellow-800 dark:text-yellow-300 font-bold text-sm mb-1">
                             ⚠️ پروژه {detectedFramework} تشخیص داده شد
@@ -8334,6 +8356,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             setShowCustomHtmlPathDialog(false);
                             setFoundHtmlFiles([]);
                             setDetectedFramework(null);
+                            setIsBackendOnly(false);
                           }}
                           className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg dark:text-gray-300 dark:hover:bg-gray-700"
                         >
