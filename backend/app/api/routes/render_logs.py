@@ -4541,21 +4541,29 @@ async def inject_bridge_script(
                     }
 
             # 🆕 جستجوی فوق‌هوشمند: اول package.json رو بخون، بعد تصمیم بگیر
+            # متغیرهای tracking برای debug
+            detected_framework = None
+            entry_candidates = []
+            package_json_found = False
+            package_json_status = None
+            tree_status = None
+            deps_found = {}
+
             if not index_path:
                 try:
                     slog.info(f"🔍 Smart search starting for {owner}/{repo}")
 
                     # 📦 مرحله ۱: خواندن package.json برای تشخیص فریم‌ورک
-                    detected_framework = None
-                    entry_candidates = []
-
                     pkg_res = await client.get(
                         f"https://api.github.com/repos/{owner}/{repo}/contents/package.json",
                         headers=headers,
                         timeout=10.0
                     )
+                    package_json_status = pkg_res.status_code
+                    slog.info(f"📦 package.json status: {package_json_status}")
 
                     if pkg_res.status_code == 200:
+                        package_json_found = True
                         pkg_data = pkg_res.json()
                         if pkg_data.get("encoding") == "base64":
                             pkg_content = json.loads(base64.b64decode(pkg_data["content"]).decode('utf-8'))
@@ -4563,6 +4571,9 @@ async def inject_bridge_script(
 
                             # تشخیص فریم‌ورک از dependencies
                             deps = {**pkg_content.get('dependencies', {}), **pkg_content.get('devDependencies', {})}
+                            # ذخیره لیست dependency ها برای debug
+                            deps_found = list(deps.keys())[:20]  # فقط ۲۰ تای اول
+                            slog.info(f"📦 Dependencies found: {deps_found}")
 
                             if 'next' in deps:
                                 detected_framework = 'nextjs'
@@ -4613,7 +4624,8 @@ async def inject_bridge_script(
                             timeout=15.0
                         )
 
-                    slog.info(f"GitHub tree response: {tree_res.status_code}")
+                    tree_status = tree_res.status_code
+                    slog.info(f"🌳 GitHub tree response: {tree_status}")
 
                     if tree_res.status_code == 200:
                         tree_data = tree_res.json()
@@ -4745,17 +4757,38 @@ async def inject_bridge_script(
 
             if not index_path:
                 # تشخیص بهتر نوع مشکل
+                # 🔍 اطلاعات فریم‌ورک برای نمایش
+                framework_name = None
+                if detected_framework:
+                    framework_map = {
+                        'nextjs': 'Next.js',
+                        'nuxt': 'Nuxt',
+                        'gatsby': 'Gatsby',
+                        'react': 'React',
+                        'vue': 'Vue',
+                        'svelte': 'Svelte',
+                        'angular': 'Angular'
+                    }
+                    framework_name = framework_map.get(detected_framework, detected_framework)
+
                 error_response = {
                     "success": False,
                     "need_custom_path": True,
                     "found_html_files": found_html_files,  # همیشه برگردون
-                    "framework_detected": "Next.js" if is_nextjs else ("Nuxt" if is_nuxt else ("Gatsby" if is_gatsby else None)),
-                    # 🔍 Debug info
+                    "framework_detected": framework_name,
+                    # 🔍 Debug info - اطلاعات کامل برای عیب‌یابی
                     "debug": {
                         "github_path": f"{owner}/{repo}",
                         "total_files_found": len(all_files),
                         "html_files_count": len(found_html_files),
-                        "search_error": search_error
+                        "search_error": search_error,
+                        "detected_framework_raw": detected_framework,
+                        "entry_candidates": entry_candidates,
+                        "files_sample": all_files[:20] if all_files else [],
+                        "package_json_found": package_json_found,
+                        "package_json_status": package_json_status,
+                        "tree_status": tree_status,
+                        "deps_sample": deps_found[:10] if isinstance(deps_found, list) else []
                     }
                 }
 
