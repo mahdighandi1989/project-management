@@ -380,6 +380,11 @@ export default function ProjectDetailPage() {
   const inspectorIframeRef = useRef<HTMLIFrameElement>(null);
   const inspectorOverlayRef = useRef<HTMLDivElement>(null);
 
+  // 🌐 WebSocket Bridge - ارتباط مستقیم با Bridge Script بدون وابستگی به iframe/postMessage
+  const bridgeWsRef = useRef<WebSocket | null>(null);
+  const [bridgeWsConnected, setBridgeWsConnected] = useState(false);
+  const [bridgePeerConnected, setBridgePeerConnected] = useState(false);
+
   // 🌉 وضعیت Bridge Script - اسکریپت ارتباطی با iframe
   const [inspectorBridgeStatus, setInspectorBridgeStatus] = useState<{
     checking: boolean;
@@ -841,12 +846,211 @@ export default function ProjectDetailPage() {
     };
   }, []); // بدون dependency تا همیشه فعال باشه
 
+  // 🌐 WebSocket Bridge Connection - ارتباط مستقیم با Bridge Script
+  useEffect(() => {
+    if (!inspectorPowerOn || !projectId || activeTab !== 'inspector') {
+      // قطع اتصال وقتی inspector خاموشه
+      if (bridgeWsRef.current) {
+        bridgeWsRef.current.close();
+        bridgeWsRef.current = null;
+        setBridgeWsConnected(false);
+        setBridgePeerConnected(false);
+      }
+      return;
+    }
+
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let isCancelled = false;
+
+    const connectBridgeWs = () => {
+      if (isCancelled) return;
+
+      // ساخت WebSocket URL از API_BASE
+      const wsBase = API_BASE.replace('https://', 'wss://').replace('http://', 'ws://');
+      const wsUrl = `${wsBase}/api/render/ws/bridge/${projectId}`;
+
+      console.log('🌐 Bridge WS: Connecting to', wsUrl);
+
+      try {
+        ws = new WebSocket(wsUrl);
+        bridgeWsRef.current = ws;
+
+        ws.onopen = () => {
+          if (isCancelled) { ws?.close(); return; }
+          console.log('🌐 Bridge WS: Connected, registering as inspector');
+          ws?.send(JSON.stringify({ type: 'register', role: 'inspector' }));
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+
+            if (data.type === 'registered') {
+              setBridgeWsConnected(true);
+              console.log('🌐 Bridge WS: Registered as inspector');
+              return;
+            }
+
+            if (data.type === 'pong') return;
+
+            if (data.type === 'peer_connected' && data.peer_role === 'bridge') {
+              setBridgePeerConnected(true);
+              console.log('🌐 Bridge WS: Bridge peer connected');
+              // اطلاع در چت
+              const id = `ws_ready_${Date.now()}`;
+              setInspectorTransientMessages(prev => [...prev, {
+                id,
+                content: '🌐 اتصال WebSocket به پروژه برقرار شد',
+                type: 'info' as const,
+                source: 'WebSocket Bridge',
+                timestamp: new Date(),
+                fadeOut: false
+              }]);
+              setTimeout(() => {
+                setInspectorTransientMessages(prev => prev.filter(m => m.id !== id));
+              }, 4000);
+              return;
+            }
+
+            if (data.type === 'peer_disconnected' && data.peer_role === 'bridge') {
+              setBridgePeerConnected(false);
+              console.log('🌐 Bridge WS: Bridge peer disconnected');
+              return;
+            }
+
+            // پردازش event های Bridge (relay شده از طریق backend)
+            if (data.type === 'inspector-bridge-event') {
+              const { action, target, position, elementInfo, pageUrl } = data;
+
+              const actionLabels: Record<string, string> = {
+                'click': 'کلیک کردی',
+                'scroll': 'اسکرول کردی',
+                'input': 'تایپ کردی',
+                'focus': 'فوکوس کردی',
+                'hover': 'موس بردی روی'
+              };
+
+              const actionLabel = actionLabels[action] || action;
+              const targetInfo = elementInfo || target || 'عنصر ناشناخته';
+
+              console.log('🌐 Bridge WS Event:', actionLabel, targetInfo);
+
+              const id = `ws_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+              const newMessage = {
+                id,
+                content: `${actionLabel} روی ${targetInfo}`,
+                type: 'action' as const,
+                source: 'WebSocket Bridge',
+                timestamp: new Date(),
+                fadeOut: false
+              };
+
+              setInspectorTransientMessages(prev => [...prev, newMessage]);
+
+              setTimeout(() => {
+                setInspectorTransientMessages(prev =>
+                  prev.map(m => m.id === id ? { ...m, fadeOut: true } : m)
+                );
+              }, 3000);
+
+              setTimeout(() => {
+                setInspectorTransientMessages(prev => prev.filter(m => m.id !== id));
+              }, 4000);
+            }
+
+            // پیام آماده بودن bridge
+            if (data.type === 'inspector-bridge-ready') {
+              setBridgePeerConnected(true);
+              console.log('🌐 Bridge WS: Bridge ready!', data.pageUrl);
+              const id = `ws_bridge_ready_${Date.now()}`;
+              setInspectorTransientMessages(prev => [...prev, {
+                id,
+                content: '🌐 Bridge Script از طریق WebSocket متصل شد',
+                type: 'info' as const,
+                source: 'WebSocket Bridge',
+                timestamp: new Date(),
+                fadeOut: false
+              }]);
+              setTimeout(() => {
+                setInspectorTransientMessages(prev => prev.filter(m => m.id !== id));
+              }, 4000);
+            }
+
+            // لیست المان‌ها از bridge
+            if (data.type === 'inspector-bridge-event' && data.action === 'elements-list') {
+              console.log('🌐 Bridge WS: Received elements list', data.elementInfo);
+            }
+
+          } catch (e) {
+            console.warn('🌐 Bridge WS: Parse error', e);
+          }
+        };
+
+        ws.onclose = () => {
+          setBridgeWsConnected(false);
+          setBridgePeerConnected(false);
+          bridgeWsRef.current = null;
+          if (!isCancelled) {
+            console.log('🌐 Bridge WS: Disconnected, reconnecting in 3s...');
+            reconnectTimer = setTimeout(connectBridgeWs, 3000);
+          }
+        };
+
+        ws.onerror = (e) => {
+          console.warn('🌐 Bridge WS: Error', e);
+        };
+
+        // Heartbeat هر 25 ثانیه
+        heartbeatTimer = setInterval(() => {
+          if (ws?.readyState === WebSocket.OPEN) {
+            try { ws.send(JSON.stringify({ type: 'ping' })); } catch(e) {}
+          }
+        }, 25000);
+
+      } catch (e) {
+        console.warn('🌐 Bridge WS: Failed to connect', e);
+        if (!isCancelled) {
+          reconnectTimer = setTimeout(connectBridgeWs, 3000);
+        }
+      }
+    };
+
+    connectBridgeWs();
+
+    return () => {
+      isCancelled = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (ws) {
+        try { ws.close(); } catch(e) {}
+      }
+      bridgeWsRef.current = null;
+      setBridgeWsConnected(false);
+      setBridgePeerConnected(false);
+    };
+  }, [inspectorPowerOn, projectId, activeTab]);
+
   // 🌉 بررسی وضعیت Bridge وقتی Inspector روشن می‌شود
   useEffect(() => {
     if (inspectorPowerOn && projectId && activeTab === 'inspector') {
       checkBridgeStatus();
     }
   }, [inspectorPowerOn, projectId, activeTab]);
+
+  // 🌐 ارسال دستور به Bridge از طریق WebSocket
+  const sendBridgeCommand = (command: string, data: Record<string, any> = {}) => {
+    if (bridgeWsRef.current?.readyState === WebSocket.OPEN) {
+      bridgeWsRef.current.send(JSON.stringify({
+        type: 'command',
+        command,
+        ...data
+      }));
+      return true;
+    }
+    return false;
+  };
 
   const showError = (msg: string) => {
     setError(msg);
@@ -8197,6 +8401,17 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     </span>
                     {inspectorBridgeStatus.error && !inspectorBridgeStatus.error.includes('GitHub') && (
                       <span className="text-[10px] text-red-500 mt-0.5">{inspectorBridgeStatus.error}</span>
+                    )}
+                    {/* 🌐 وضعیت WebSocket Bridge */}
+                    {inspectorPowerOn && (
+                      <div className={`mt-1 flex items-center gap-1 text-[10px] ${
+                        bridgePeerConnected ? 'text-green-600' : bridgeWsConnected ? 'text-yellow-600' : 'text-gray-400'
+                      }`}>
+                        <span className={`w-2 h-2 rounded-full ${
+                          bridgePeerConnected ? 'bg-green-500 animate-pulse' : bridgeWsConnected ? 'bg-yellow-500' : 'bg-gray-400'
+                        }`} />
+                        {bridgePeerConnected ? 'WS: متصل' : bridgeWsConnected ? 'WS: منتظر Bridge' : 'WS: در حال اتصال...'}
+                      </div>
                     )}
                     {/* دکمه Debug */}
                     <button
