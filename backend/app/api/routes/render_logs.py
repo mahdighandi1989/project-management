@@ -4554,6 +4554,7 @@ async def inject_bridge_script(
             pattern_match_files = []  # فایل‌های پیدا شده با pattern search
             frontend_files = []  # فایل‌های داخل پوشه frontend
             pattern_search_reason = None  # دلیل عدم استفاده از pattern match
+            bridge_already_installed_in = None  # فایلی که قبلاً bridge دارد
 
             if not index_path:
                 try:
@@ -4920,6 +4921,7 @@ async def inject_bridge_script(
                             slog.info(f"  📂 Found {len(matching_files)} matching files: {matching_files[:10]}")
                             pattern_match_files = matching_files.copy()  # ذخیره برای debug
                             pattern_search_reason = None  # دلیل عدم استفاده
+                            bridge_already_installed_in = None  # فایلی که قبلاً bridge دارد
 
                             # اولویت با فایل‌های در پوشه frontend
                             matching_files.sort(key=lambda x: (
@@ -4952,7 +4954,9 @@ async def inject_bridge_script(
                                                 break
                                             else:
                                                 pattern_search_reason = f"File {match_file} already has bridge script"
-                                                slog.info(f"  ⏭️ Skipped (already has bridge): {match_file}")
+                                                bridge_already_installed_in = match_file  # ذخیره فایل
+                                                slog.info(f"  ✅ Bridge already installed in: {match_file}")
+                                                break  # نیازی به ادامه نیست
                                     else:
                                         pattern_search_reason = f"Failed to fetch {match_file}: HTTP {content_res.status_code}"
                                         slog.warn(f"  ❌ Fetch failed: HTTP {content_res.status_code}")
@@ -5017,6 +5021,29 @@ async def inject_bridge_script(
                     found_html_files = []
                     is_framework_without_html = False
                     search_error = str(e)
+
+            # ✅ اگر Bridge قبلاً نصب شده، موفقیت برگردان
+            if not index_path and bridge_already_installed_in:
+                framework_name = None
+                if detected_framework:
+                    framework_map = {
+                        'nextjs': 'Next.js', 'nuxt': 'Nuxt', 'gatsby': 'Gatsby',
+                        'react': 'React', 'vue': 'Vue', 'svelte': 'Svelte', 'angular': 'Angular'
+                    }
+                    framework_name = framework_map.get(detected_framework, detected_framework)
+
+                slog.info(f"✅ Bridge already installed in {bridge_already_installed_in}")
+                return {
+                    "success": True,
+                    "message": "Bridge script is already installed",
+                    "already_installed": True,
+                    "file_path": bridge_already_installed_in,
+                    "framework_detected": framework_name,
+                    "debug": {
+                        "github_path": f"{owner}/{repo}",
+                        "bridge_file": bridge_already_installed_in
+                    }
+                }
 
             if not index_path:
                 # تشخیص بهتر نوع مشکل
