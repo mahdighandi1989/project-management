@@ -312,6 +312,7 @@ export default function ProjectDetailPage() {
     backend_log_summary?: string;
   }>>([]);
   const [inspectorSessionId, setInspectorSessionId] = useState<number | null>(null);
+  const inspectorSessionIdRef = useRef<number | null>(null);
   const [inspectorArchivedSessions, setInspectorArchivedSessions] = useState<Array<{
     id: number;
     title: string;
@@ -813,15 +814,16 @@ export default function ProjectDetailPage() {
           backend_verified: null,
         }]);
 
-        // ذخیره در DB و verify (اگر سشن فعال داریم)
-        if (inspectorSessionId) {
+        // ذخیره در DB و verify (از ref استفاده میکنیم چون closure ممکنه قدیمی باشه)
+        const currentSessionId = inspectorSessionIdRef.current;
+        if (currentSessionId) {
           (async () => {
             try {
               const saveRes = await fetch(`${API_BASE}/api/render/inspector/session/message`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                  session_id: inspectorSessionId,
+                  session_id: currentSessionId,
                   role: 'action',
                   content: `${actionLabel} روی ${targetInfo}`,
                   action_type: action,
@@ -995,13 +997,18 @@ export default function ProjectDetailPage() {
 
               // ذخیره در دیتابیس و درخواست تأیید لاگ بک‌اند
               (async () => {
+                const currentSessionId = inspectorSessionIdRef.current;
+                if (!currentSessionId) {
+                  console.warn('⚠️ No active session, skipping save');
+                  return;
+                }
                 try {
                   // ذخیره پیام
                   const saveRes = await fetch(`${API_BASE}/api/render/inspector/session/message`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                      session_id: inspectorSessionId,
+                      session_id: currentSessionId,
                       role: 'action',
                       content: chatMsg.content,
                       action_type: action,
@@ -1242,6 +1249,7 @@ export default function ProjectDetailPage() {
 
       if (data.success && data.session) {
         setInspectorSessionId(data.session.id);
+        inspectorSessionIdRef.current = data.session.id;
 
         // بارگذاری پیام‌های قبلی سشن
         const msgRes = await fetch(`${API_BASE}/api/render/inspector/session/${data.session.id}/messages`);
@@ -1294,6 +1302,7 @@ export default function ProjectDetailPage() {
         // پاک کردن چت فعلی
         setInspectorChatMessages([]);
         setInspectorSessionId(null);
+        inspectorSessionIdRef.current = null;
 
         // ایجاد سشن جدید
         await initInspectorSession();
@@ -1333,7 +1342,8 @@ export default function ProjectDetailPage() {
   // ذخیره خودکار پیام‌های assistant در دیتابیس
   const lastSavedMsgCountRef = useRef(0);
   useEffect(() => {
-    if (!inspectorSessionId) return;
+    const currentSessionId = inspectorSessionIdRef.current;
+    if (!currentSessionId) return;
     const newMsgs = inspectorChatMessages.slice(lastSavedMsgCountRef.current);
     for (const msg of newMsgs) {
       if ((msg.role === 'assistant' || msg.role === 'system') && !msg.db_id) {
@@ -1341,7 +1351,7 @@ export default function ProjectDetailPage() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            session_id: inspectorSessionId,
+            session_id: currentSessionId,
             role: msg.role,
             content: msg.content,
             model_id: msg.model_id,
@@ -2034,11 +2044,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     }]);
 
     // ذخیره پیام کاربر در دیتابیس
-    if (inspectorSessionId) {
+    if (inspectorSessionIdRef.current) {
       fetch(`${API_BASE}/api/render/inspector/session/message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: inspectorSessionId, role: 'user', content: userMessage })
+        body: JSON.stringify({ session_id: inspectorSessionIdRef.current, role: 'user', content: userMessage })
       }).catch(err => console.error('Save user msg failed:', err));
     }
 
