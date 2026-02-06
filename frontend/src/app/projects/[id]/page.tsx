@@ -272,6 +272,8 @@ export default function ProjectDetailPage() {
   const [inspectorPowerOn, setInspectorPowerOn] = useState(false);
   const [inspectorLoading, setInspectorLoading] = useState(false);
   const [inspectorFrontendUrl, setInspectorFrontendUrl] = useState<string | null>(null);
+  const [inspectorIframeLoaded, setInspectorIframeLoaded] = useState(false);
+  const [inspectorIframeError, setInspectorIframeError] = useState(false);
   const [inspectorBackendLogs, setInspectorBackendLogs] = useState<Array<{
     id: string;
     timestamp: string;
@@ -1066,16 +1068,30 @@ export default function ProjectDetailPage() {
   const loadInspectorServices = async () => {
     setInspectorLoading(true);
     setInspectorError(null);
+    setInspectorIframeLoaded(false);
+    setInspectorIframeError(false);
     try {
       const res = await fetch(`${API_BASE}/api/render/services/by-project/${projectId}`);
       const data = await res.json();
 
       if (data.success) {
         setInspectorServices(data.services || []);
-        setInspectorFrontendUrl(data.frontend_url);
 
         if (data.services?.length === 0) {
           setInspectorError(data.message || 'هیچ سرویسی یافت نشد');
+        } else if (data.frontend_url) {
+          // بررسی دسترس‌پذیری URL قبل از لود در iframe
+          console.log('🔍 Checking frontend URL accessibility:', data.frontend_url);
+          try {
+            const healthCheck = await fetch(data.frontend_url, { method: 'HEAD', mode: 'no-cors' });
+            // mode: 'no-cors' همیشه opaque response برمیگردونه ولی حداقل ارتباط رو تست میکنه
+            setInspectorFrontendUrl(data.frontend_url);
+            console.log('✅ Frontend URL accessible');
+          } catch (healthErr) {
+            console.warn('⚠️ Frontend URL may be unreachable:', healthErr);
+            // بازم URL رو ست کن - شاید CORS مشکل داشته ولی iframe کار کنه
+            setInspectorFrontendUrl(data.frontend_url);
+          }
         }
       } else {
         setInspectorError(data.error || 'خطا در دریافت سرویس‌ها');
@@ -1117,6 +1133,8 @@ export default function ProjectDetailPage() {
       // خاموش کردن
       setInspectorPowerOn(false);
       setInspectorFrontendUrl(null);
+      setInspectorIframeLoaded(false);
+      setInspectorIframeError(false);
       setInspectorBackendLogs([]);
       setInspectorServices([]);
     } else {
@@ -1637,6 +1655,54 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         injecting: false,
         error: 'خطا در ارتباط با سرور'
       }));
+    }
+  };
+
+  // 🔄 به‌روزرسانی Bridge Script (حذف نسخه قدیمی و تزریق نسخه جدید با WebSocket)
+  const reInjectBridge = async () => {
+    setInspectorBridgeStatus(prev => ({ ...prev, injecting: true, error: undefined }));
+    addTransientMessage('🔄 حذف نسخه قدیمی Bridge...', 'info');
+
+    try {
+      // مرحله 1: حذف نسخه قدیمی
+      const removeRes = await fetch(`${API_BASE}/api/render/inspector/inject-bridge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_id: projectId, remove: true })
+      });
+      const removeData = await removeRes.json();
+      console.log('🔄 Remove result:', removeData);
+
+      // مرحله 2: تزریق نسخه جدید با WebSocket
+      addTransientMessage('🌐 تزریق نسخه جدید با WebSocket...', 'info');
+      const injectRes = await fetch(`${API_BASE}/api/render/inspector/inject-bridge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_id: projectId, remove: false })
+      });
+      const injectData = await injectRes.json();
+      console.log('🌐 Inject result:', injectData);
+
+      if (injectData.success) {
+        setInspectorBridgeStatus(prev => ({
+          ...prev,
+          injecting: false,
+          has_bridge: true,
+          file_path: injectData.file_path
+        }));
+        addTransientMessage(
+          injectData.ws_url
+            ? '🌐 Bridge با WebSocket تزریق شد - منتظر deploy باشید'
+            : '🌉 Bridge تزریق شد - منتظر deploy باشید',
+          'info'
+        );
+        showSuccess('Bridge به‌روزرسانی شد! پس از deploy مجدد، از طریق WebSocket متصل می‌شود');
+      } else {
+        setInspectorBridgeStatus(prev => ({ ...prev, injecting: false, error: injectData.error }));
+        showError(injectData.error || 'خطا در تزریق مجدد');
+      }
+    } catch (err) {
+      setInspectorBridgeStatus(prev => ({ ...prev, injecting: false, error: 'خطا در ارتباط با سرور' }));
     }
   };
 
@@ -8142,8 +8208,49 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               src={inspectorFrontendUrl}
                               className="w-full h-full border-0 bg-white"
                               title="پیش‌نمایش فرانت‌اند"
-                              sandbox="allow-scripts allow-same-origin allow-forms"
+                              sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                              onLoad={() => {
+                                setInspectorIframeLoaded(true);
+                                setInspectorIframeError(false);
+                                console.log('✅ iframe loaded successfully');
+                              }}
+                              onError={() => {
+                                setInspectorIframeError(true);
+                                setInspectorIframeLoaded(false);
+                                console.error('❌ iframe failed to load');
+                              }}
                             />
+                            {/* نمایش خطای بارگذاری iframe */}
+                            {inspectorIframeError && (
+                              <div className="absolute inset-0 z-40 flex items-center justify-center bg-gray-900/80">
+                                <div className="text-center p-4">
+                                  <div className="text-4xl mb-3">🔴</div>
+                                  <p className="text-red-400 text-sm font-medium mb-2">صفحه پیش‌نمایش بارگذاری نشد</p>
+                                  <p className="text-gray-400 text-xs mb-3">سرویس ممکن است خاموش یا در حال راه‌اندازی باشد (503)</p>
+                                  <button
+                                    onClick={() => {
+                                      setInspectorIframeError(false);
+                                      setInspectorIframeLoaded(false);
+                                      if (inspectorIframeRef.current) {
+                                        inspectorIframeRef.current.src = inspectorFrontendUrl + '?t=' + Date.now();
+                                      }
+                                    }}
+                                    className="px-4 py-2 bg-blue-600 text-white text-xs rounded-lg hover:bg-blue-700 transition-colors"
+                                  >
+                                    تلاش مجدد
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                            {/* نمایش وضعیت بارگذاری */}
+                            {!inspectorIframeLoaded && !inspectorIframeError && (
+                              <div className="absolute inset-0 z-40 flex items-center justify-center bg-gray-900/60 pointer-events-none">
+                                <div className="text-center">
+                                  <div className="animate-spin text-2xl mb-2">⏳</div>
+                                  <p className="text-gray-300 text-xs">بارگذاری صفحه پیش‌نمایش...</p>
+                                </div>
+                              </div>
+                            )}
 
                             {/* 🆕 لایه ردیابی فعالیت کاربر - فقط برای نمایش پیام‌ها */}
                             <div
@@ -8413,15 +8520,29 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         {bridgePeerConnected ? 'WS: متصل' : bridgeWsConnected ? 'WS: منتظر Bridge' : 'WS: در حال اتصال...'}
                       </div>
                     )}
-                    {/* دکمه Debug */}
-                    <button
-                      onClick={debugBridgeStatus}
-                      disabled={bridgeDebugInfo.loading}
-                      className="mt-1 px-2 py-0.5 text-[10px] text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded transition-all"
-                      title="بررسی دقیق وضعیت Bridge"
-                    >
-                      {bridgeDebugInfo.loading ? '⏳' : '🔍 تشخیص'}
-                    </button>
+                    {/* دکمه‌های کمکی */}
+                    <div className="flex gap-1 mt-1">
+                      {/* دکمه به‌روزرسانی Bridge (re-inject با WebSocket) */}
+                      {inspectorBridgeStatus.has_bridge && bridgeWsConnected && !bridgePeerConnected && (
+                        <button
+                          onClick={reInjectBridge}
+                          disabled={inspectorBridgeStatus.injecting}
+                          className="px-2 py-0.5 text-[10px] text-orange-500 hover:text-orange-700 hover:bg-orange-50 rounded transition-all"
+                          title="به‌روزرسانی Bridge با نسخه WebSocket - حل مشکل cross-origin"
+                        >
+                          {inspectorBridgeStatus.injecting ? '⏳' : '🔄 به‌روزرسانی'}
+                        </button>
+                      )}
+                      {/* دکمه Debug */}
+                      <button
+                        onClick={debugBridgeStatus}
+                        disabled={bridgeDebugInfo.loading}
+                        className="px-2 py-0.5 text-[10px] text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded transition-all"
+                        title="بررسی دقیق وضعیت Bridge"
+                      >
+                        {bridgeDebugInfo.loading ? '⏳' : '🔍 تشخیص'}
+                      </button>
+                    </div>
                     {/* نمایش نتیجه Debug */}
                     {bridgeDebugInfo.data && (
                       <div className={`mt-1 p-2 rounded text-[10px] ${
