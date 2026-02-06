@@ -4609,6 +4609,51 @@ async def inject_bridge_script(
                             slog.info(f"🔧 Detected framework from package.json: {detected_framework}")
                             slog.info(f"📄 Entry candidates: {entry_candidates}")
 
+                    # 🐍 مرحله ۱.۵: اگر package.json نبود، requirements.txt رو چک کن (پروژه‌های Python)
+                    if not package_json_found:
+                        slog.info("📦 No package.json, checking for Python project (requirements.txt)...")
+                        req_res = await client.get(
+                            f"https://api.github.com/repos/{owner}/{repo}/contents/requirements.txt",
+                            headers=headers,
+                            timeout=10.0
+                        )
+                        if req_res.status_code == 200:
+                            req_data = req_res.json()
+                            if req_data.get("encoding") == "base64":
+                                req_content = base64.b64decode(req_data["content"]).decode('utf-8').lower()
+                                slog.info(f"🐍 Found requirements.txt")
+
+                                # تشخیص فریم‌ورک Python
+                                if 'flask' in req_content:
+                                    detected_framework = 'flask'
+                                    entry_candidates = [
+                                        'templates/index.html', 'templates/base.html',
+                                        'app/templates/index.html', 'app/templates/base.html',
+                                        'src/templates/index.html'
+                                    ]
+                                    slog.info("🐍 Detected Flask project")
+                                elif 'django' in req_content:
+                                    detected_framework = 'django'
+                                    entry_candidates = [
+                                        'templates/base.html', 'templates/index.html',
+                                        'app/templates/base.html', 'core/templates/base.html'
+                                    ]
+                                    slog.info("🐍 Detected Django project")
+                                elif 'fastapi' in req_content or 'starlette' in req_content:
+                                    detected_framework = 'fastapi'
+                                    entry_candidates = [
+                                        'templates/index.html', 'static/index.html',
+                                        'frontend/index.html'
+                                    ]
+                                    slog.info("🐍 Detected FastAPI project")
+                                else:
+                                    detected_framework = 'python'
+                                    entry_candidates = [
+                                        'templates/index.html', 'templates/base.html',
+                                        'static/index.html', 'public/index.html'
+                                    ]
+                                    slog.info("🐍 Detected generic Python project")
+
                     # 🌳 مرحله ۲: دریافت لیست فایل‌ها
                     # اول اطلاعات ریپو رو بگیر برای default branch
                     default_branch = 'main'
@@ -4657,8 +4702,13 @@ async def inject_bridge_script(
 
                         # 🎯 مرحله ۳: پیدا کردن بهترین فایل برای تزریق
 
-                        # اول فایل‌های HTML رو چک کن
-                        html_files = [f for f in all_files if f.endswith('.html') and 'node_modules' not in f]
+                        # اول فایل‌های HTML و template رو چک کن
+                        # پشتیبانی از فرمت‌های مختلف: .html, .htm, .jinja, .jinja2, .j2
+                        template_extensions = ('.html', '.htm', '.jinja', '.jinja2', '.j2')
+                        html_files = [f for f in all_files
+                                    if any(f.lower().endswith(ext) for ext in template_extensions)
+                                    and 'node_modules' not in f]
+                        slog.info(f"🔍 Found {len(html_files)} HTML/template files: {html_files[:10]}")
 
                         # امتیازدهی به HTML ها
                         def score_html_file(path: str) -> int:
@@ -4668,8 +4718,15 @@ async def inject_bridge_script(
                                 score += 100
                             if 'public/' in path_lower:
                                 score += 80
+                            # 🐍 Python templates folder
+                            if 'templates/' in path_lower:
+                                score += 70
+                                if 'base.html' in path_lower or 'layout.html' in path_lower:
+                                    score += 30  # base templates are good for injection
                             if 'src/' in path_lower and 'public/' not in path_lower:
                                 score += 30
+                            if 'static/' in path_lower:
+                                score += 40
                             if 'dist/' in path_lower or 'build/' in path_lower:
                                 score -= 50
                             return score
@@ -4731,7 +4788,7 @@ async def inject_bridge_script(
                         if not index_path:
                             slog.info("Trying generic search for any entry file...")
                             generic_patterns = [
-                                # فایل‌های entry point رایج
+                                # فایل‌های entry point رایج - JavaScript/TypeScript
                                 'src/App.tsx', 'src/App.jsx', 'src/App.js',
                                 'src/index.tsx', 'src/index.jsx', 'src/index.js',
                                 'src/main.tsx', 'src/main.jsx', 'src/main.js', 'src/main.ts',
@@ -4739,7 +4796,12 @@ async def inject_bridge_script(
                                 'App.tsx', 'App.js', 'App.jsx',
                                 'index.tsx', 'index.js',
                                 # HTML های عمومی
-                                'index.html', 'public/index.html'
+                                'index.html', 'public/index.html',
+                                # 🐍 Python templates
+                                'templates/index.html', 'templates/base.html', 'templates/layout.html',
+                                'app/templates/index.html', 'app/templates/base.html',
+                                'frontend/index.html', 'static/index.html',
+                                'client/index.html', 'web/index.html'
                             ]
 
                             for pattern in generic_patterns:
@@ -4790,7 +4852,12 @@ async def inject_bridge_script(
                         'react': 'React',
                         'vue': 'Vue',
                         'svelte': 'Svelte',
-                        'angular': 'Angular'
+                        'angular': 'Angular',
+                        # Python frameworks
+                        'flask': 'Flask',
+                        'django': 'Django',
+                        'fastapi': 'FastAPI',
+                        'python': 'Python'
                     }
                     framework_name = framework_map.get(detected_framework, detected_framework)
 
