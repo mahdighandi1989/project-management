@@ -1235,13 +1235,12 @@ export default function ProjectDetailPage() {
       setInspectorBackendLogs([]);
       setInspectorServices([]);
     } else {
-      // روشن کردن
+      // روشن کردن - اول سشن رو بساز، بعد power رو روشن کن
+      // (تا وقتی WS وصل میشه، سشن آماده باشه)
+      await initInspectorSession();
       setInspectorPowerOn(true);
       await loadInspectorServices();
-      // لود مدل‌ها هم
       await loadInspectorModels();
-      // ایجاد یا بارگذاری سشن بازرسی
-      await initInspectorSession();
     }
   };
 
@@ -1339,6 +1338,7 @@ export default function ProjectDetailPage() {
           timestamp: new Date(m.timestamp),
           backend_verified: m.backend_verified,
           backend_log_summary: m.backend_log_summary,
+          verified_by_model: m.verified_by_model,
         }));
         setInspectorChatMessages(loadedMessages);
       }
