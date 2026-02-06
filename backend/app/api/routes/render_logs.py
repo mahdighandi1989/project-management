@@ -1961,6 +1961,13 @@ class InspectorChatMessage(BaseModel):
     content: str
 
 
+class InspectorSessionContext(BaseModel):
+    """اطلاعات جلسه برای چت هوشمند"""
+    has_investigation: bool = False
+    has_errors: bool = False
+    models_from_investigation: bool = False
+
+
 class InspectorChatRequest(BaseModel):
     """درخواست چت با بازرس"""
     model_id: str
@@ -1972,6 +1979,7 @@ class InspectorChatRequest(BaseModel):
     project_files: Optional[List[dict]] = None  # [{path, content}]
     project_structure: Optional[dict] = None
     chat_history: Optional[List[InspectorChatMessage]] = None
+    session_context: Optional[InspectorSessionContext] = None
     # تنظیمات
     max_tokens: int = 4096
     temperature: float = 0.7
@@ -1989,6 +1997,7 @@ class InspectorMultiChatRequest(BaseModel):
     project_files: Optional[List[dict]] = None
     project_structure: Optional[dict] = None
     chat_history: Optional[List[InspectorChatMessage]] = None
+    session_context: Optional[InspectorSessionContext] = None
     # تنظیمات
     max_tokens: int = 4096
     temperature: float = 0.7
@@ -2000,7 +2009,8 @@ def build_inspector_system_prompt(
     frontend_url: Optional[str] = None,
     project_files: Optional[List[dict]] = None,
     project_structure: Optional[dict] = None,
-    db: Session = None
+    db: Session = None,
+    session_context: Optional[dict] = None
 ) -> str:
     """ساخت system prompt با تمام context های پروژه"""
 
@@ -2101,6 +2111,45 @@ def build_inspector_system_prompt(
         "5. امنیت را همیشه در نظر بگیر",
     ])
 
+    # 🆕 دستورالعمل‌های هوشمند بر اساس context جلسه
+    if session_context:
+        has_investigation = session_context.get('has_investigation', False)
+        has_errors = session_context.get('has_errors', False)
+        from_investigation = session_context.get('models_from_investigation', False)
+
+        if has_investigation or has_errors:
+            prompt_parts.extend([
+                "",
+                "## ⚡ زمینه جلسه فعال:",
+            ])
+
+            if has_investigation:
+                prompt_parts.extend([
+                    "- در این جلسه قبلاً یک بررسی ریشه‌ای خطا (investigation) انجام شده.",
+                    "- گزارش بررسی در تاریخچه چت موجود است. از آن استفاده کن.",
+                    "- اگر کاربر سؤالی درباره خطا بپرسد، بر اساس گزارش بررسی قبلی پاسخ بده.",
+                ])
+
+            if has_errors:
+                prompt_parts.extend([
+                    "- خطاهای فرانت‌اند (JavaScript errors) در تاریخچه ثبت شده‌اند.",
+                    "- این خطاها از مرورگر کاربر گرفته شده‌اند (window.onerror, console.error).",
+                ])
+
+            if from_investigation:
+                prompt_parts.extend([
+                    "- مدل فعلی از مودال بررسی/اصلاح انتخاب شده.",
+                    "- کاربر احتمالاً ادامه بررسی خطا را می‌خواهد.",
+                ])
+
+            prompt_parts.extend([
+                "",
+                "### نحوه پاسخ‌دهی هوشمند:",
+                "- اگر سؤال است: مستقیم و دقیق پاسخ بده با ارجاع به گزارش/خطاهای قبلی",
+                "- اگر درخواست اقدام است: مراحل دقیق را بنویس و کد اصلاحی کامل ارائه بده",
+                "- همیشه به تاریخچه چت نگاه کن و context قبلی را از دست نده",
+            ])
+
     return "\n".join(prompt_parts)
 
 
@@ -2130,22 +2179,27 @@ async def inspector_chat(
         ai_manager = get_ai_manager()
 
         # ساخت system prompt با context
+        session_ctx = request.session_context.dict() if request.session_context else None
         system_prompt = build_inspector_system_prompt(
             project_id=request.project_id,
             backend_logs=request.backend_logs,
             frontend_url=request.frontend_url,
             project_files=request.project_files,
             project_structure=request.project_structure,
-            db=db
+            db=db,
+            session_context=session_ctx
         )
 
         # ساخت messages
         messages = [Message(role="system", content=system_prompt)]
 
-        # افزودن تاریخچه چت
+        # افزودن تاریخچه چت - بیشتر اگر context جلسه داریم
+        history_limit = 20 if session_ctx else 10
         if request.chat_history:
-            for msg in request.chat_history[-10:]:  # آخرین 10 پیام
-                messages.append(Message(role=msg.role, content=msg.content))
+            for msg in request.chat_history[-history_limit:]:
+                # نقش system را به user تبدیل کن (بعضی مدل‌ها system اضافی نمی‌پذیرند)
+                role = msg.role if msg.role in ('user', 'assistant') else 'user'
+                messages.append(Message(role=role, content=msg.content))
 
         # افزودن پیام جدید کاربر
         messages.append(Message(role="user", content=request.message))
@@ -2153,7 +2207,8 @@ async def inspector_chat(
         slog.ai_call(request.model_id, "inspector chat",
             messages_count=len(messages),
             has_logs=bool(request.backend_logs),
-            has_files=bool(request.project_files)
+            has_files=bool(request.project_files),
+            has_session_context=bool(session_ctx)
         )
 
         # ارسال به AI
@@ -2208,28 +2263,33 @@ async def inspector_chat_multi(
         ai_manager = get_ai_manager()
 
         # ساخت system prompt با context
+        session_ctx = request.session_context.dict() if request.session_context else None
         system_prompt = build_inspector_system_prompt(
             project_id=request.project_id,
             backend_logs=request.backend_logs,
             frontend_url=request.frontend_url,
             project_files=request.project_files,
             project_structure=request.project_structure,
-            db=db
+            db=db,
+            session_context=session_ctx
         )
 
         # ساخت messages
         messages = [Message(role="system", content=system_prompt)]
 
-        # افزودن تاریخچه چت
+        # افزودن تاریخچه چت - بیشتر اگر context جلسه داریم
+        history_limit = 20 if session_ctx else 10
         if request.chat_history:
-            for msg in request.chat_history[-10:]:
-                messages.append(Message(role=msg.role, content=msg.content))
+            for msg in request.chat_history[-history_limit:]:
+                role = msg.role if msg.role in ('user', 'assistant') else 'user'
+                messages.append(Message(role=role, content=msg.content))
 
         # افزودن پیام جدید کاربر
         messages.append(Message(role="user", content=request.message))
 
         slog.ai_call(",".join(request.model_ids), "inspector multi-chat",
-            models_count=len(request.model_ids)
+            models_count=len(request.model_ids),
+            has_session_context=bool(session_ctx)
         )
 
         # ارسال به همه مدل‌ها به صورت موازی

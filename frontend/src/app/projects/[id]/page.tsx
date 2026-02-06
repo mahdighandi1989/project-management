@@ -348,6 +348,12 @@ export default function ProjectDetailPage() {
   const [fixSelectedModels, setFixSelectedModels] = useState<string[]>([]);
   const [fixLoading, setFixLoading] = useState(false);
 
+  // 🔒 قفل عملیات - iframe و چت قفل میشن هنگام بررسی/اصلاح
+  const [inspectorOpLock, setInspectorOpLock] = useState(false);
+  const [inspectorOpPaused, setInspectorOpPaused] = useState(false);
+  const inspectorOpAbortRef = useRef<AbortController | null>(null);
+  const [inspectorOpType, setInspectorOpType] = useState<'investigate' | 'fix' | null>(null);
+
   // 🆕 انتخاب خودکار مدل و همکاری
   const [inspectorAutoSelect, setInspectorAutoSelect] = useState(true); // پیش‌فرض فعال
   const [inspectorCollaborativeMode, setInspectorCollaborativeMode] = useState(true);
@@ -1487,6 +1493,15 @@ export default function ProjectDetailPage() {
     setInvestigateLoading(true);
     setInvestigateModalMsgId(null); // بستن مودال
 
+    // 🔒 قفل کردن iframe + chat + سینک مدل‌ها
+    setInspectorOpLock(true);
+    setInspectorOpType('investigate');
+    setInspectorOpPaused(false);
+    inspectorOpAbortRef.current = new AbortController();
+    // سینک مدل‌های انتخاب شده با چت
+    setInspectorSelectedModels(investigateSelectedModels);
+    setInspectorAutoSelect(false);
+
     // اضافه کردن پیام شروع بررسی
     const startMsgId = `investigate_start_${Date.now()}`;
     setInspectorChatMessages(prev => [...prev, {
@@ -1504,7 +1519,8 @@ export default function ProjectDetailPage() {
           message_id: errorMsg.db_id || 0,
           project_id: projectId,
           model_ids: investigateSelectedModels,
-        })
+        }),
+        signal: inspectorOpAbortRef.current?.signal,
       });
 
       const reader = res.body?.getReader();
@@ -1574,6 +1590,9 @@ export default function ProjectDetailPage() {
       }]);
     } finally {
       setInvestigateLoading(false);
+      // 🔓 آزاد کردن قفل بعد از پایان بررسی (قبل از اصلاح)
+      setInspectorOpLock(false);
+      setInspectorOpType(null);
     }
   };
 
@@ -1583,6 +1602,14 @@ export default function ProjectDetailPage() {
 
     setFixLoading(true);
     setFixModalOpen(false);
+
+    // 🔒 قفل کردن + سینک مدل‌ها
+    setInspectorOpLock(true);
+    setInspectorOpType('fix');
+    setInspectorOpPaused(false);
+    inspectorOpAbortRef.current = new AbortController();
+    setInspectorSelectedModels(fixSelectedModels);
+    setInspectorAutoSelect(false);
 
     setInspectorChatMessages(prev => [...prev, {
       id: `fix_start_${Date.now()}`,
@@ -1601,7 +1628,8 @@ export default function ProjectDetailPage() {
           investigation_report: investigateReport.report,
           files_to_fix: investigateReport.files_to_fix || [],
           error_message: investigateReport.error_content,
-        })
+        }),
+        signal: inspectorOpAbortRef.current?.signal,
       });
 
       const reader = res.body?.getReader();
@@ -1672,6 +1700,9 @@ export default function ProjectDetailPage() {
     } finally {
       setFixLoading(false);
       setInvestigateReport(null);
+      // 🔓 آزاد کردن قفل بعد از پایان اصلاح
+      setInspectorOpLock(false);
+      setInspectorOpType(null);
     }
   };
 
@@ -2591,11 +2622,33 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           });
         }
       } else {
-        // حالت انتخاب دستی - کد قبلی
-        const chatHistory = inspectorChatMessages.map(m => ({
-          role: m.role,
-          content: m.content
-        }));
+        // حالت انتخاب دستی - با تاریخچه غنی‌شده از جلسه
+        // ساخت تاریخچه غنی: شامل گزارش‌های بررسی، خطاها و پیام‌های مهم
+        const chatHistory = inspectorChatMessages
+          .filter(m => {
+            // فیلتر پیام‌های مهم (حذف progress های تکراری)
+            if (m.role === 'system' && m.content?.startsWith('🔍 شروع')) return true; // شروع بررسی
+            if (m.role === 'system' && m.content?.startsWith('🔧 شروع')) return true; // شروع اصلاح
+            if (m.role === 'system' && m.content?.startsWith('⏹')) return true; // لغو
+            if (m.role === 'system' && m.content?.startsWith('❌')) return true; // خطاها
+            if ((m as any).action_type === 'investigate_report') return true; // گزارش بررسی
+            if ((m as any).action_type === 'error' || (m as any).action_type === 'console-error') return true; // خطاهای فرانت
+            if (m.role === 'user') return true; // پیام‌های کاربر
+            if (m.role === 'assistant' && !(m.content?.startsWith('🔍 در حال'))) return true; // پاسخ‌های مدل
+            if (m.role === 'action' && (m as any).backend_verified === false) return true; // اکشن‌های ✕
+            return false;
+          })
+          .slice(-30) // آخرین 30 پیام مهم
+          .map(m => ({
+            role: m.role === 'action' ? 'system' : m.role,
+            content: (m as any).action_type === 'investigate_report'
+              ? `[گزارش بررسی از ${m.model_id || 'AI'}]:\n${m.content}`
+              : (m as any).action_type === 'error' || (m as any).action_type === 'console-error'
+                ? `[خطای فرانت‌اند]: ${m.content}`
+                : m.role === 'action'
+                  ? `[اکشن کاربر - ${(m as any).action_type}]: ${m.content}${(m as any).backend_verified === false ? ' (تأیید نشده ✕)' : ''}`
+                  : m.content
+          }));
 
         if (inspectorSelectedModels.length === 1) {
           // چت با یک مدل
@@ -2609,7 +2662,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
               backend_logs: inspectorBackendLogs,
               frontend_url: inspectorFrontendUrl,
               project_files: projectFiles,
-              chat_history: chatHistory
+              chat_history: chatHistory,
+              session_context: {
+                has_investigation: inspectorChatMessages.some(m => (m as any).action_type === 'investigate_report'),
+                has_errors: inspectorChatMessages.some(m => (m as any).action_type === 'error' || (m as any).action_type === 'console-error'),
+                models_from_investigation: !inspectorAutoSelect,
+              }
             })
           });
 
@@ -2644,7 +2702,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
               backend_logs: inspectorBackendLogs,
               frontend_url: inspectorFrontendUrl,
               project_files: projectFiles,
-              chat_history: chatHistory
+              chat_history: chatHistory,
+              session_context: {
+                has_investigation: inspectorChatMessages.some(m => (m as any).action_type === 'investigate_report'),
+                has_errors: inspectorChatMessages.some(m => (m as any).action_type === 'error' || (m as any).action_type === 'console-error'),
+                models_from_investigation: !inspectorAutoSelect,
+              }
             })
           });
 
@@ -8711,6 +8774,46 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                 console.error('❌ iframe failed to load');
                               }}
                             />
+                            {/* 🔒 قفل iframe هنگام عملیات بررسی/اصلاح */}
+                            {inspectorOpLock && (
+                              <div className="absolute inset-0 z-50 bg-black/20 backdrop-blur-[1px] flex flex-col items-center justify-center cursor-not-allowed"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <div className="bg-gray-900/90 rounded-xl px-6 py-4 text-center shadow-2xl border border-gray-700">
+                                  <div className="text-2xl mb-2 animate-pulse">
+                                    {inspectorOpType === 'investigate' ? '🔍' : '🔧'}
+                                  </div>
+                                  <p className="text-white text-sm font-medium mb-1">
+                                    {inspectorOpType === 'investigate' ? 'در حال بررسی خطا...' : 'در حال اصلاح خودکار...'}
+                                  </p>
+                                  <p className="text-gray-400 text-xs">
+                                    صفحه پیش‌نمایش قفل است
+                                  </p>
+                                  {/* دکمه لغو */}
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (inspectorOpAbortRef.current) {
+                                        inspectorOpAbortRef.current.abort();
+                                      }
+                                      setInspectorOpLock(false);
+                                      setInspectorOpType(null);
+                                      setInvestigateLoading(false);
+                                      setFixLoading(false);
+                                      setInspectorChatMessages(prev => [...prev, {
+                                        id: `cancel_${Date.now()}`,
+                                        role: 'system' as const,
+                                        content: '⏹ عملیات توسط کاربر لغو شد',
+                                        timestamp: new Date(),
+                                      }]);
+                                    }}
+                                    className="mt-3 px-4 py-1.5 bg-red-600/80 hover:bg-red-600 text-white text-xs rounded-lg transition-colors"
+                                  >
+                                    ⏹ لغو عملیات
+                                  </button>
+                                </div>
+                              </div>
+                            )}
                             {/* نمایش خطای بارگذاری iframe */}
                             {inspectorIframeError && (
                               <div className="absolute inset-0 z-40 flex items-center justify-center bg-gray-900/80">
@@ -9782,8 +9885,44 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
                 {/* ورودی پیام */}
                 <div className="p-3 border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
+                  {/* 🔒 نمایش وضعیت قفل عملیات */}
+                  {inspectorOpLock && (
+                    <div className="mb-2 p-2 bg-amber-50 dark:bg-amber-900/20 rounded-lg text-xs border border-amber-200 dark:border-amber-800">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-amber-700 dark:text-amber-400">
+                          <span className="animate-pulse">{inspectorOpType === 'investigate' ? '🔍' : '🔧'}</span>
+                          <span className="font-medium">
+                            {inspectorOpType === 'investigate' ? 'بررسی در حال انجام...' : 'اصلاح در حال انجام...'}
+                          </span>
+                        </div>
+                        <button
+                          onClick={() => {
+                            if (inspectorOpAbortRef.current) {
+                              inspectorOpAbortRef.current.abort();
+                            }
+                            setInspectorOpLock(false);
+                            setInspectorOpType(null);
+                            setInvestigateLoading(false);
+                            setFixLoading(false);
+                            setInspectorChatMessages(prev => [...prev, {
+                              id: `cancel_${Date.now()}`,
+                              role: 'system' as const,
+                              content: '⏹ عملیات توسط کاربر لغو شد',
+                              timestamp: new Date(),
+                            }]);
+                          }}
+                          className="px-3 py-1 bg-red-500 hover:bg-red-600 text-white text-[10px] rounded-md transition-colors"
+                        >
+                          ⏹ لغو
+                        </button>
+                      </div>
+                      <p className="text-amber-600/70 dark:text-amber-500/70 text-[10px] mt-1">
+                        ارسال پیام و تعامل با پیش‌نمایش تا پایان عملیات غیرفعال است
+                      </p>
+                    </div>
+                  )}
                   {/* 🆕 نمایش تسک فعال */}
-                  {inspectorActiveTask && inspectorActiveTask.status === 'running' && (
+                  {!inspectorOpLock && inspectorActiveTask && inspectorActiveTask.status === 'running' && (
                     <div className="mb-2 p-2 bg-blue-50 dark:bg-blue-900/20 rounded-lg text-xs">
                       <div className="flex items-center gap-2 text-blue-600 dark:text-blue-400">
                         <span className="animate-spin">⚙️</span>
@@ -9800,24 +9939,28 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                       type="text"
                       value={inspectorChatInput}
                       onChange={(e) => setInspectorChatInput(e.target.value)}
-                      onKeyPress={(e) => e.key === 'Enter' && !inspectorChatLoading && sendInspectorChat()}
+                      onKeyPress={(e) => e.key === 'Enter' && !inspectorChatLoading && !inspectorOpLock && sendInspectorChat()}
                       placeholder={
-                        inspectorAutoSelect
-                          ? "درخواست خود را بنویسید... (مدل‌ها خودکار انتخاب می‌شوند)"
-                          : inspectorSelectedModels.length > 0
-                            ? "پیام خود را بنویسید..."
-                            : "ابتدا مدلی انتخاب کنید..."
+                        inspectorOpLock
+                          ? (inspectorOpType === 'investigate' ? '🔒 در حال بررسی... لطفاً صبر کنید' : '🔒 در حال اصلاح... لطفاً صبر کنید')
+                          : inspectorAutoSelect
+                            ? "درخواست خود را بنویسید... (مدل‌ها خودکار انتخاب می‌شوند)"
+                            : inspectorSelectedModels.length > 0
+                              ? "پیام خود را بنویسید..."
+                              : "ابتدا مدلی انتخاب کنید..."
                       }
-                      disabled={(!inspectorAutoSelect && inspectorSelectedModels.length === 0) || inspectorChatLoading}
-                      className="flex-1 bg-gray-100 dark:bg-gray-700 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50"
+                      disabled={(!inspectorAutoSelect && inspectorSelectedModels.length === 0) || inspectorChatLoading || inspectorOpLock}
+                      className={`flex-1 bg-gray-100 dark:bg-gray-700 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50 ${inspectorOpLock ? 'cursor-not-allowed' : ''}`}
                     />
                     <button
                       onClick={sendInspectorChat}
-                      disabled={!inspectorChatInput.trim() || (!inspectorAutoSelect && inspectorSelectedModels.length === 0) || inspectorChatLoading}
+                      disabled={!inspectorChatInput.trim() || (!inspectorAutoSelect && inspectorSelectedModels.length === 0) || inspectorChatLoading || inspectorOpLock}
                       className="bg-gradient-to-r from-red-500 to-orange-500 text-white rounded-full w-10 h-10 flex items-center justify-center hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {inspectorChatLoading ? (
                         <span className="animate-spin">⏳</span>
+                      ) : inspectorOpLock ? (
+                        <span>🔒</span>
                       ) : (
                         <span>➤</span>
                       )}
