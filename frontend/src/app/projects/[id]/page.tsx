@@ -2469,14 +2469,125 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         content: '' // محتوا بعداً می‌تواند از فایل‌های باز شده خوانده شود
       }));
 
-      // 🆕🆕🆕 تشخیص task ویژوال
-      const shouldUseVision = isVisualTask(userMessage) && inspectorFrontendUrl;
+      // 🧠 وقتی مدل‌ها دستی انتخاب شدن (مثلاً بعد از بررسی خطا)، مستقیم از smart-chat استفاده کن
+      // تشخیص ویژوال فقط در حالت auto-select اعمال میشه
+      // همچنین پیام‌های بلند (بیش از 200 کاراکتر) احتمالاً لاگ خطا هستن نه دستور ویژوال
+      const isLongMessage = userMessage.length > 200;
+      const shouldUseVision = inspectorAutoSelect && !isLongMessage && isVisualTask(userMessage) && inspectorFrontendUrl;
 
-      if (shouldUseVision) {
-        // استخراج متن هدف از پیام
+      if (!inspectorAutoSelect) {
+        // 🧠 حالت چت هوشمند - SSE streaming با تاریخچه کامل
+        // وقتی مدل‌ها دستی انتخاب شدن (مثلاً بعد از بررسی خطا)
+        const chatHistory = inspectorChatMessages
+          .filter(m => {
+            if (m.role === 'system' && m.content?.startsWith('🔍 شروع')) return true;
+            if (m.role === 'system' && m.content?.startsWith('🔧 شروع')) return true;
+            if (m.role === 'system' && m.content?.startsWith('⏹')) return true;
+            if (m.role === 'system' && m.content?.startsWith('❌')) return true;
+            if ((m as any).action_type === 'investigate_report') return true;
+            if ((m as any).action_type === 'error' || (m as any).action_type === 'console-error') return true;
+            if (m.role === 'user') return true;
+            if (m.role === 'assistant' && !(m.content?.startsWith('🔍 در حال'))) return true;
+            if (m.role === 'action' && (m as any).backend_verified === false) return true;
+            return false;
+          })
+          .slice(-50)
+          .map(m => ({
+            role: m.role === 'action' ? 'system' : m.role,
+            content: (m as any).action_type === 'investigate_report'
+              ? `[گزارش بررسی از ${m.model_id || 'AI'}]:\n${m.content}`
+              : (m as any).action_type === 'error' || (m as any).action_type === 'console-error'
+                ? `[خطای فرانت‌اند]: ${m.content}`
+                : m.role === 'action'
+                  ? `[اکشن کاربر - ${(m as any).action_type}]: ${m.content}${(m as any).backend_verified === false ? ' (تأیید نشده ✕)' : ''}`
+                  : m.content
+          }));
+
+        // 🔒 قفل کردن صفحه هنگام تحلیل
+        setInspectorOpLock(true);
+        setInspectorOpType('investigate');
+        inspectorOpAbortRef.current = new AbortController();
+
+        // استفاده از smart-chat SSE endpoint
+        const res = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            project_id: projectId,
+            model_ids: inspectorSelectedModels,
+            message: userMessage,
+            chat_history: chatHistory,
+            backend_logs: inspectorBackendLogs,
+            frontend_url: inspectorFrontendUrl,
+          }),
+          signal: inspectorOpAbortRef.current?.signal,
+        });
+
+        const reader = res.body?.getReader();
+        const decoder = new TextDecoder();
+        let sseBuffer = '';
+
+        if (!reader) throw new Error('No reader');
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          sseBuffer += decoder.decode(value, { stream: true });
+          const lines = sseBuffer.split('\n');
+          sseBuffer = lines.pop() || '';
+
+          let eventType = '';
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              eventType = line.slice(7).trim();
+            } else if (line.startsWith('data: ') && eventType) {
+              try {
+                const data = JSON.parse(line.slice(6));
+
+                if (eventType === 'progress') {
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: `smart_p_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                    role: 'system' as const,
+                    content: data.message,
+                    timestamp: new Date(),
+                  }]);
+                } else if (eventType === 'error') {
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: `smart_err_${Date.now()}`,
+                    role: 'system' as const,
+                    content: `❌ ${data.message}`,
+                    timestamp: new Date(),
+                  }]);
+                } else if (eventType === 'response') {
+                  const responseId = `smart_response_${Date.now()}`;
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: responseId,
+                    role: 'assistant' as const,
+                    content: data.content,
+                    model_id: data.model_used,
+                    timestamp: new Date(),
+                    tokens_used: data.tokens_used,
+                    action_type: data.has_action ? 'smart_action' as any : undefined,
+                    action_plan: data.action_plan,
+                    original_message: userMessage,
+                  } as any]);
+
+                  // 🔓 آزاد کردن قفل بعد از دریافت پاسخ
+                  setInspectorOpLock(false);
+                  setInspectorOpType(null);
+                }
+              } catch (e) {
+                // ignore parse errors
+              }
+              eventType = '';
+            }
+          }
+        }
+
+      } else if (shouldUseVision) {
+        // 🔍 تشخیص ویژوال: Ctrl+F + AI interact (فقط auto-select + پیام کوتاه)
         const targetText = extractTargetText(userMessage);
-
-        // 🔍 روش Ctrl+F: جستجوی سریع متن در صفحه
         setInspectorChatMessages(prev => [...prev, {
           id: `system_${Date.now()}`,
           role: 'assistant',
@@ -2485,156 +2596,76 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         }]);
 
         try {
-          // 1. جستجوی Ctrl+F style
           const searchRes = await fetch(`${API_BASE}/api/render/inspector/find-and-click?url=${encodeURIComponent(inspectorFrontendUrl)}&search_text=${encodeURIComponent(targetText)}`, {
             method: 'POST'
           });
           const searchData = await searchRes.json();
-
-          // حذف پیام سیستم
           setInspectorChatMessages(prev => prev.filter(m => !m.id.startsWith('system_')));
 
           if (searchData.success) {
-            // ✅ پیدا شد و کلیک شد
             const pos = searchData.position;
-
-            // نمایش نشانگر مجازی روی المان
             if (pos) {
-              setInspectorVirtualCursor({
-                x: pos.percent_x,
-                y: pos.percent_y,
-                visible: true,
-                model_id: `🎯 ${searchData.found?.slice(0, 20) || targetText}`
-              });
-
-              // پنهان کردن بعد از 3 ثانیه
-              setTimeout(() => {
-                setInspectorVirtualCursor(prev => ({ ...prev, visible: false }));
-              }, 3000);
+              setInspectorVirtualCursor({ x: pos.percent_x, y: pos.percent_y, visible: true, model_id: `🎯 ${searchData.found?.slice(0, 20) || targetText}` });
+              setTimeout(() => setInspectorVirtualCursor(prev => ({ ...prev, visible: false })), 3000);
             }
-
-            // نمایش نتیجه
             setInspectorChatMessages(prev => [...prev, {
-              id: `assistant_${Date.now()}`,
-              role: 'assistant',
-              content: `✅ **پیدا شد!**\n\n🎯 "${searchData.found}"\n📍 موقعیت: (${pos?.percent_x?.toFixed(1)}%, ${pos?.percent_y?.toFixed(1)}%)\n📊 ${searchData.found_count} مورد در صفحه${searchData.url_changed ? '\n🔄 صفحه تغییر کرد' : ''}`,
+              id: `assistant_${Date.now()}`, role: 'assistant',
+              content: `✅ **پیدا شد!**\n\n🎯 "${searchData.found}"\n📍 (${pos?.percent_x?.toFixed(1)}%, ${pos?.percent_y?.toFixed(1)}%)\n📊 ${searchData.found_count} مورد${searchData.url_changed ? '\n🔄 صفحه تغییر کرد' : ''}`,
               timestamp: new Date()
             }]);
-
-            // آپدیت iframe با URL جدید
-            if (searchData.new_url && searchData.new_url !== inspectorFrontendUrl) {
-              console.log('🔄 Updating iframe to:', searchData.new_url);
-              setInspectorFrontendUrl(searchData.new_url);
-            }
-
+            if (searchData.new_url && searchData.new_url !== inspectorFrontendUrl) setInspectorFrontendUrl(searchData.new_url);
             setInspectorChatLoading(false);
             return;
           }
-
-          // ❌ پیدا نشد - نمایش پیام خطا
           if (searchData.found_count === 0) {
             setInspectorChatMessages(prev => [...prev, {
-              id: `assistant_${Date.now()}`,
-              role: 'assistant',
-              content: `❌ "${targetText}" در این صفحه پیدا نشد.\n\n💡 سعی کن متن دقیق‌تری بنویسی یا از AI کمک بخواه.`,
+              id: `assistant_${Date.now()}`, role: 'assistant',
+              content: `❌ "${targetText}" پیدا نشد.\n\n💡 متن دقیق‌تری بنویسید.`,
               timestamp: new Date()
             }]);
             setInspectorChatLoading(false);
             return;
           }
-
         } catch (searchError) {
-          console.log('Ctrl+F search failed, falling back to AI...', searchError);
-          // حذف پیام سیستم و ادامه با AI
+          console.log('Ctrl+F failed, falling back to AI...', searchError);
           setInspectorChatMessages(prev => prev.filter(m => !m.id.startsWith('system_')));
         }
 
-        // 🤖 اگه Ctrl+F کار نکرد، از AI استفاده کن
+        // 🤖 فالبک: AI interact
         setInspectorChatMessages(prev => [...prev, {
-          id: `system_${Date.now()}`,
-          role: 'assistant',
-          content: '🤖 جستجوی ساده کار نکرد، AI در حال تحلیل...',
-          timestamp: new Date()
+          id: `system_${Date.now()}`, role: 'assistant',
+          content: '🤖 AI در حال تحلیل...', timestamp: new Date()
         }]);
 
-        // استفاده از API تعامل هوشمند با مرورگر (AI Agent)
-        const selectedModelForVision = (!inspectorAutoSelect && inspectorSelectedModels.length > 0)
-          ? inspectorSelectedModels[0]
-          : null;
-
-        const res = await fetch(`${API_BASE}/api/render/inspector/ai-interact`, {
+        const visionRes = await fetch(`${API_BASE}/api/render/inspector/ai-interact`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            task: userMessage,
-            url: inspectorFrontendUrl,
-            model_id: selectedModelForVision,
-            max_steps: 15
-          })
+          body: JSON.stringify({ task: userMessage, url: inspectorFrontendUrl, model_id: null, max_steps: 15 })
         });
-
-        const data = await res.json();
-
-        // حذف پیام سیستم
+        const visionData = await visionRes.json();
         setInspectorChatMessages(prev => prev.filter(m => !m.id.startsWith('system_')));
 
-        if (data.success) {
-          // نمایش مدل انتخاب شده و مراحل
-          const selectedModel = data.selected_model || 'نامشخص';
-          const actionsText = (data.actions || []).map((a: any) =>
-            `${a.status === 'done' ? '✅' : a.status === 'failed' ? '❌' : '⏳'} ${a.message || a.element || a.action}`
-          ).join('\n');
-
+        if (visionData.success) {
+          const selectedModel = visionData.selected_model || 'AI';
+          const actionsText = (visionData.actions || []).map((a: any) => `${a.status === 'done' ? '✅' : '❌'} ${a.message || a.action}`).join('\n');
           setInspectorChatMessages(prev => [...prev, {
-            id: `assistant_${Date.now()}`,
-            role: 'assistant',
-            content: `🤖 **عملیات انجام شد**\n\n🧠 مدل: **${selectedModel}**\n\n${actionsText}\n\n📸 Screenshot نهایی گرفته شد.`,
-            model_id: selectedModel,
-            timestamp: new Date()
+            id: `assistant_${Date.now()}`, role: 'assistant',
+            content: `🤖 **انجام شد**\n\n🧠 مدل: **${selectedModel}**\n${actionsText}`,
+            model_id: selectedModel, timestamp: new Date()
           }]);
-
-          // انیمیشن cursor positions
-          if (data.cursor_positions && data.cursor_positions.length > 0) {
-            animateCursorSequence(data.cursor_positions);
-          }
-
-          // 🆕 به‌روزرسانی iframe با URL نهایی (بعد از navigation)
-          if (data.final_url && data.final_url !== inspectorFrontendUrl) {
-            console.log('🔄 Updating iframe to final URL:', data.final_url);
-            setInspectorFrontendUrl(data.final_url);
-            // اضافه کردن پیام ناوبری
-            setInspectorChatMessages(prev => [...prev, {
-              id: `nav_${Date.now()}`,
-              role: 'assistant',
-              content: `🔄 صفحه به‌روزرسانی شد: ${data.final_url}`,
-              timestamp: new Date()
-            }]);
-          }
-
-          // نمایش session_id برای ادامه کار
-          if (data.session_id) {
-            setInspectorChatMessages(prev => [...prev, {
-              id: `info_${Date.now()}`,
-              role: 'assistant',
-              content: `🔗 Session فعال: ${data.session_id}`,
-              timestamp: new Date()
-            }]);
-          }
+          if (visionData.cursor_positions?.length > 0) animateCursorSequence(visionData.cursor_positions);
+          if (visionData.final_url && visionData.final_url !== inspectorFrontendUrl) setInspectorFrontendUrl(visionData.final_url);
         } else {
           setInspectorChatMessages(prev => [...prev, {
-            id: `error_${Date.now()}`,
-            role: 'assistant',
-            content: `❌ خطا: ${data.error || 'خطای ناشناخته'}\n\n${data.actions ? data.actions.map((a: any) => a.message).join('\n') : ''}`,
-            timestamp: new Date()
+            id: `error_${Date.now()}`, role: 'assistant',
+            content: `❌ خطا: ${visionData.error || 'ناشناخته'}`, timestamp: new Date()
           }]);
         }
 
-      // 🆕 اگر task ویژوال نیست و انتخاب خودکار فعال است، از smart-task استفاده کن
-      } else if (inspectorAutoSelect && !shouldUseVision) {
-        // اضافه کردن پیام سیستم که نشان می‌دهد در حال تحلیل است
+      // 🆕 حالت auto-select بدون ویژوال: smart-task
+      } else {
         setInspectorChatMessages(prev => [...prev, {
-          id: `system_${Date.now()}`,
-          role: 'assistant',
+          id: `system_${Date.now()}`, role: 'assistant',
           content: '🔍 در حال تحلیل درخواست و انتخاب مدل‌های مناسب...',
           timestamp: new Date()
         }]);
@@ -2724,117 +2755,6 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
               timestamp: new Date()
             }];
           });
-        }
-      } else {
-        // 🧠 حالت چت هوشمند - SSE streaming با تاریخچه کامل
-        // ساخت تاریخچه غنی: شامل گزارش‌های بررسی، خطاها و پیام‌های مهم
-        const chatHistory = inspectorChatMessages
-          .filter(m => {
-            if (m.role === 'system' && m.content?.startsWith('🔍 شروع')) return true;
-            if (m.role === 'system' && m.content?.startsWith('🔧 شروع')) return true;
-            if (m.role === 'system' && m.content?.startsWith('⏹')) return true;
-            if (m.role === 'system' && m.content?.startsWith('❌')) return true;
-            if ((m as any).action_type === 'investigate_report') return true;
-            if ((m as any).action_type === 'error' || (m as any).action_type === 'console-error') return true;
-            if (m.role === 'user') return true;
-            if (m.role === 'assistant' && !(m.content?.startsWith('🔍 در حال'))) return true;
-            if (m.role === 'action' && (m as any).backend_verified === false) return true;
-            return false;
-          })
-          .slice(-50)
-          .map(m => ({
-            role: m.role === 'action' ? 'system' : m.role,
-            content: (m as any).action_type === 'investigate_report'
-              ? `[گزارش بررسی از ${m.model_id || 'AI'}]:\n${m.content}`
-              : (m as any).action_type === 'error' || (m as any).action_type === 'console-error'
-                ? `[خطای فرانت‌اند]: ${m.content}`
-                : m.role === 'action'
-                  ? `[اکشن کاربر - ${(m as any).action_type}]: ${m.content}${(m as any).backend_verified === false ? ' (تأیید نشده ✕)' : ''}`
-                  : m.content
-          }));
-
-        // 🔒 قفل کردن صفحه هنگام تحلیل
-        setInspectorOpLock(true);
-        setInspectorOpType('investigate');
-        inspectorOpAbortRef.current = new AbortController();
-
-        // استفاده از smart-chat SSE endpoint
-        const res = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            project_id: projectId,
-            model_ids: inspectorSelectedModels,
-            message: userMessage,
-            chat_history: chatHistory,
-            backend_logs: inspectorBackendLogs,
-            frontend_url: inspectorFrontendUrl,
-          }),
-          signal: inspectorOpAbortRef.current?.signal,
-        });
-
-        const reader = res.body?.getReader();
-        const decoder = new TextDecoder();
-        let sseBuffer = '';
-
-        if (!reader) throw new Error('No reader');
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          sseBuffer += decoder.decode(value, { stream: true });
-          const lines = sseBuffer.split('\n');
-          sseBuffer = lines.pop() || '';
-
-          let eventType = '';
-          for (const line of lines) {
-            if (line.startsWith('event: ')) {
-              eventType = line.slice(7).trim();
-            } else if (line.startsWith('data: ') && eventType) {
-              try {
-                const data = JSON.parse(line.slice(6));
-
-                if (eventType === 'progress') {
-                  setInspectorChatMessages(prev => [...prev, {
-                    id: `smart_p_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-                    role: 'system' as const,
-                    content: data.message,
-                    timestamp: new Date(),
-                  }]);
-                } else if (eventType === 'error') {
-                  setInspectorChatMessages(prev => [...prev, {
-                    id: `smart_err_${Date.now()}`,
-                    role: 'system' as const,
-                    content: `❌ ${data.message}`,
-                    timestamp: new Date(),
-                  }]);
-                } else if (eventType === 'response') {
-                  // پاسخ نهایی: ممکنه has_action داشته باشه
-                  const responseId = `smart_response_${Date.now()}`;
-                  setInspectorChatMessages(prev => [...prev, {
-                    id: responseId,
-                    role: 'assistant' as const,
-                    content: data.content,
-                    model_id: data.model_used,
-                    timestamp: new Date(),
-                    tokens_used: data.tokens_used,
-                    // ذخیره action_plan برای دکمه اعمال
-                    action_type: data.has_action ? 'smart_action' as any : undefined,
-                    action_plan: data.action_plan,
-                    original_message: userMessage,
-                  } as any]);
-
-                  // 🔓 آزاد کردن قفل بعد از دریافت پاسخ
-                  setInspectorOpLock(false);
-                  setInspectorOpType(null);
-                }
-              } catch (e) {
-                // ignore parse errors
-              }
-              eventType = '';
-            }
-          }
         }
       }
     } catch (err: any) {
