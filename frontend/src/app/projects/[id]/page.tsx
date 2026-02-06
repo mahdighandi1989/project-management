@@ -1661,45 +1661,35 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   // 🔄 به‌روزرسانی Bridge Script (حذف نسخه قدیمی و تزریق نسخه جدید با WebSocket)
   const reInjectBridge = async () => {
     setInspectorBridgeStatus(prev => ({ ...prev, injecting: true, error: undefined }));
-    addTransientMessage('🔄 حذف نسخه قدیمی Bridge...', 'info');
+    addTransientMessage('🔄 به‌روزرسانی Bridge با نسخه WebSocket...', 'info');
 
     try {
-      // مرحله 1: حذف نسخه قدیمی
-      const removeRes = await fetch(`${API_BASE}/api/render/inspector/inject-bridge`, {
+      // یک درخواست force_update - حذف قدیمی + تزریق جدید در یک مرحله
+      const res = await fetch(`${API_BASE}/api/render/inspector/inject-bridge`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_id: projectId, remove: true })
+        body: JSON.stringify({ project_id: projectId, remove: false, force_update: true })
       });
-      const removeData = await removeRes.json();
-      console.log('🔄 Remove result:', removeData);
+      const data = await res.json();
+      console.log('🔄 Force update result:', data);
 
-      // مرحله 2: تزریق نسخه جدید با WebSocket
-      addTransientMessage('🌐 تزریق نسخه جدید با WebSocket...', 'info');
-      const injectRes = await fetch(`${API_BASE}/api/render/inspector/inject-bridge`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_id: projectId, remove: false })
-      });
-      const injectData = await injectRes.json();
-      console.log('🌐 Inject result:', injectData);
-
-      if (injectData.success) {
+      if (data.success) {
         setInspectorBridgeStatus(prev => ({
           ...prev,
           injecting: false,
           has_bridge: true,
-          file_path: injectData.file_path
+          file_path: data.file_path
         }));
         addTransientMessage(
-          injectData.ws_url
+          data.ws_url
             ? '🌐 Bridge با WebSocket تزریق شد - منتظر deploy باشید'
             : '🌉 Bridge تزریق شد - منتظر deploy باشید',
           'info'
         );
-        showSuccess('Bridge به‌روزرسانی شد! پس از deploy مجدد، از طریق WebSocket متصل می‌شود');
+        showSuccess(data.message || 'Bridge به‌روزرسانی شد!');
       } else {
-        setInspectorBridgeStatus(prev => ({ ...prev, injecting: false, error: injectData.error }));
-        showError(injectData.error || 'خطا در تزریق مجدد');
+        setInspectorBridgeStatus(prev => ({ ...prev, injecting: false, error: data.error }));
+        showError(data.error || 'خطا در به‌روزرسانی');
       }
     } catch (err) {
       setInspectorBridgeStatus(prev => ({ ...prev, injecting: false, error: 'خطا در ارتباط با سرور' }));
@@ -8523,7 +8513,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     {/* دکمه‌های کمکی */}
                     <div className="flex gap-1 mt-1">
                       {/* دکمه به‌روزرسانی Bridge (re-inject با WebSocket) */}
-                      {inspectorBridgeStatus.has_bridge && bridgeWsConnected && !bridgePeerConnected && (
+                      {inspectorBridgeStatus.has_bridge && inspectorPowerOn && (
                         <button
                           onClick={reInjectBridge}
                           disabled={inspectorBridgeStatus.injecting}

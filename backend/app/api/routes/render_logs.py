@@ -4171,6 +4171,7 @@ class InjectBridgeRequest(BaseModel):
     """درخواست تزریق Bridge Script"""
     project_id: str
     remove: bool = False  # True = حذف اسکریپت
+    force_update: bool = False  # True = حذف نسخه قدیمی و تزریق نسخه جدید
     custom_path: Optional[str] = None  # مسیر سفارشی به فایل HTML (مثال: "frontend/public/index.html")
 
 
@@ -5290,28 +5291,50 @@ async def inject_bridge_script(
                     is_framework_without_html = False
                     search_error = str(e)
 
-            # ✅ اگر Bridge قبلاً نصب شده، موفقیت برگردان
+            # ✅ اگر Bridge قبلاً نصب شده
             if not index_path and bridge_already_installed_in:
-                framework_name = None
-                if detected_framework:
-                    framework_map = {
-                        'nextjs': 'Next.js', 'nuxt': 'Nuxt', 'gatsby': 'Gatsby',
-                        'react': 'React', 'vue': 'Vue', 'svelte': 'Svelte', 'angular': 'Angular'
-                    }
-                    framework_name = framework_map.get(detected_framework, detected_framework)
+                # اگر درخواست حذف یا re-inject هست، فایل رو بخون تا بتونیم عمل کنیم
+                if request.remove or getattr(request, 'force_update', False):
+                    slog.info(f"Bridge found in {bridge_already_installed_in}, loading for {'remove' if request.remove else 'update'}")
+                    try:
+                        content_res = await client.get(
+                            f"https://api.github.com/repos/{owner}/{repo}/contents/{bridge_already_installed_in}",
+                            headers=headers,
+                            timeout=10.0
+                        )
+                        if content_res.status_code == 200:
+                            data = content_res.json()
+                            if data.get("encoding") == "base64":
+                                index_content = base64.b64decode(data["content"]).decode('utf-8')
+                                index_sha = data["sha"]
+                                index_path = bridge_already_installed_in
+                                is_js_file = not bridge_already_installed_in.endswith('.html')
+                                slog.info(f"✅ Loaded bridge file for modification: {bridge_already_installed_in}")
+                    except Exception as e:
+                        slog.warn(f"Failed to load bridge file: {e}")
 
-                slog.info(f"✅ Bridge already installed in {bridge_already_installed_in}")
-                return {
-                    "success": True,
-                    "message": "Bridge script is already installed",
-                    "already_installed": True,
-                    "file_path": bridge_already_installed_in,
-                    "framework_detected": framework_name,
-                    "debug": {
-                        "github_path": f"{owner}/{repo}",
-                        "bridge_file": bridge_already_installed_in
+                # اگر هنوز index_path ست نشده (یعنی درخواست inject عادی بود)
+                if not index_path:
+                    framework_name = None
+                    if detected_framework:
+                        framework_map = {
+                            'nextjs': 'Next.js', 'nuxt': 'Nuxt', 'gatsby': 'Gatsby',
+                            'react': 'React', 'vue': 'Vue', 'svelte': 'Svelte', 'angular': 'Angular'
+                        }
+                        framework_name = framework_map.get(detected_framework, detected_framework)
+
+                    slog.info(f"✅ Bridge already installed in {bridge_already_installed_in}")
+                    return {
+                        "success": True,
+                        "message": "Bridge script is already installed",
+                        "already_installed": True,
+                        "file_path": bridge_already_installed_in,
+                        "framework_detected": framework_name,
+                        "debug": {
+                            "github_path": f"{owner}/{repo}",
+                            "bridge_file": bridge_already_installed_in
+                        }
                     }
-                }
 
             if not index_path:
                 # تشخیص بهتر نوع مشکل
@@ -5407,8 +5430,38 @@ async def inject_bridge_script(
                 commit_message = "🔧 Remove Inspector Bridge Script"
             else:
                 # اضافه کردن اسکریپت
-                if has_bridge:
+                if has_bridge and not request.force_update:
                     return {"success": True, "message": "اسکریپت از قبل تزریق شده است", "already_injected": True}
+
+                # 🔄 force_update: حذف نسخه قدیمی قبل از تزریق نسخه جدید
+                if has_bridge and request.force_update:
+                    slog.info(f"Force updating bridge in {index_path}")
+                    import re as _re
+                    if is_js_file:
+                        index_content = _re.sub(
+                            r'// 🌉 Inspector Bridge Script - Auto-injected.*?// 🌉 End of Inspector Bridge Script\n?',
+                            '',
+                            index_content,
+                            flags=_re.DOTALL
+                        )
+                    else:
+                        index_content = _re.sub(
+                            r'<!-- Inspector Bridge Script - Auto-injected -->.*?</script>',
+                            '',
+                            index_content,
+                            flags=_re.DOTALL
+                        )
+                    # حذف import InspectorBridge اگر هست
+                    index_content = _re.sub(
+                        r'import\s+InspectorBridge\s+from\s+["\']\.\/InspectorBridge["\'];?\s*\n?',
+                        '',
+                        index_content
+                    )
+                    # حذف <InspectorBridge /> از JSX
+                    index_content = index_content.replace('{<InspectorBridge />}\n        ', '')
+                    index_content = index_content.replace('<InspectorBridge />\n', '')
+                    index_content = index_content.replace('<InspectorBridge />', '')
+                    slog.info(f"Old bridge code removed from {index_path}")
 
                 # 🌐 ساخت WebSocket URL برای Bridge Script
                 import os as _os
@@ -5433,11 +5486,18 @@ async def inject_bridge_script(
                 def replace_bridge_placeholders(script_content: str) -> str:
                     return script_content.replace("__BRIDGE_WS_URL__", bridge_ws_url).replace("__BRIDGE_PROJECT_ID__", str(request.project_id))
 
-                # 🆕 تشخیص Next.js App Router - نیاز به Client Component
+                # 🆕 تشخیص نوع فایل bridge
+                is_bridge_component_file = index_path.endswith('InspectorBridge.tsx')
                 is_nextjs_app_router = ('/app/layout.tsx' in index_path or '/src/app/layout.tsx' in index_path or
                                         '/app/layout.js' in index_path or '/src/app/layout.js' in index_path)
 
-                if is_nextjs_app_router:
+                if is_bridge_component_file:
+                    # 🔄 فایل InspectorBridge.tsx - مستقیماً محتوا رو جایگزین کن
+                    slog.info(f"Replacing InspectorBridge.tsx content directly")
+                    new_content = replace_bridge_placeholders(INSPECTOR_BRIDGE_CLIENT_COMPONENT)
+                    commit_message = "🌉 Update Inspector Bridge Client Component"
+
+                elif is_nextjs_app_router:
                     # 🆕 Next.js App Router: باید فایل جداگانه Client Component بسازیم
                     slog.info(f"Detected Next.js App Router, creating client component")
 
@@ -5612,7 +5672,22 @@ async def check_bridge_status(
             "Accept": "application/vnd.github.v3+json"
         }
 
-        possible_paths = ["index.html", "public/index.html", "src/index.html"]
+        # مسیرهای HTML و همچنین فایل‌های فریم‌ورک (Next.js, React, etc.)
+        possible_paths = [
+            "index.html", "public/index.html", "src/index.html",
+            # Next.js App Router
+            "src/app/InspectorBridge.tsx", "app/InspectorBridge.tsx",
+            "frontend/src/app/InspectorBridge.tsx", "frontend/app/InspectorBridge.tsx",
+            # Next.js Pages Router
+            "pages/_app.tsx", "pages/_app.js", "src/pages/_app.tsx",
+            # React
+            "src/main.tsx", "src/main.jsx", "src/index.tsx",
+            # Layout files (check for import)
+            "src/app/layout.tsx", "app/layout.tsx",
+            "frontend/src/app/layout.tsx", "frontend/app/layout.tsx",
+        ]
+        # مارکرهای بررسی وجود bridge
+        bridge_markers = ["Inspector Bridge Script", "InspectorBridge", "__inspectorBridgeLoaded", "__BRIDGE_WS_URL__"]
 
         async with httpx.AsyncClient() as client:
             for path in possible_paths:
@@ -5626,19 +5701,24 @@ async def check_bridge_status(
                         data = res.json()
                         if data.get("encoding") == "base64":
                             content = base64.b64decode(data["content"]).decode('utf-8')
-                            has_bridge = "Inspector Bridge Script - Auto-injected" in content
-                            return {
-                                "success": True,
-                                "has_bridge": has_bridge,
-                                "file_path": path
-                            }
+                            has_bridge = any(marker in content for marker in bridge_markers)
+                            if has_bridge:
+                                # بررسی اینکه نسخه WebSocket هست یا قدیمی
+                                has_websocket = "__BRIDGE_WS_URL__" not in content and "WebSocket" in content
+                                return {
+                                    "success": True,
+                                    "has_bridge": True,
+                                    "file_path": path,
+                                    "has_websocket": has_websocket,
+                                    "version": "websocket" if has_websocket else "postmessage_only"
+                                }
                 except:
                     continue
 
         return {
             "success": True,
             "has_bridge": False,
-            "error": "فایل index.html یافت نشد"
+            "error": "فایل bridge یافت نشد"
         }
 
     except Exception as e:
@@ -5831,7 +5911,7 @@ async def debug_bridge_injection(
                 result["message"] = f"Bridge Script در {len(files_with_bridge)} فایل یافت شد"
 
             # 🔍 بررسی سایت دیپلوی شده
-            preview_url = project.preview_url
+            preview_url = getattr(project, 'deploy_url', None) or getattr(project, 'preview_url', None)
             if preview_url:
                 result["preview_url"] = preview_url
                 try:
