@@ -4460,6 +4460,8 @@ async def inject_bridge_script(
             is_nextjs = False
             is_nuxt = False
             is_gatsby = False
+            all_files = []  # لیست همه فایل‌ها
+            search_error = None  # خطای جستجو
 
             # اگر مسیر سفارشی داده شده، اول آن را امتحان کن
             if request.custom_path:
@@ -4485,6 +4487,7 @@ async def inject_bridge_script(
             # 🆕 جستجوی هوشمند: دریافت لیست تمام فایل‌های پروژه از GitHub
             if not index_path:
                 try:
+                    slog.info(f"🔍 Smart search starting for {owner}/{repo}")
                     tree_res = await client.get(
                         f"https://api.github.com/repos/{owner}/{repo}/git/trees/main?recursive=1",
                         headers=headers,
@@ -4493,24 +4496,30 @@ async def inject_bridge_script(
 
                     # اگر branch main نبود، master را امتحان کن
                     if tree_res.status_code == 404:
+                        slog.info("Branch 'main' not found, trying 'master'")
                         tree_res = await client.get(
                             f"https://api.github.com/repos/{owner}/{repo}/git/trees/master?recursive=1",
                             headers=headers,
                             timeout=15.0
                         )
 
+                    slog.info(f"GitHub tree response: {tree_res.status_code}")
+
                     if tree_res.status_code == 200:
                         tree_data = tree_res.json()
                         all_files = [item["path"] for item in tree_data.get("tree", []) if item["type"] == "blob"]
+                        slog.info(f"📁 Total files in repo: {len(all_files)}")
 
                         # 🔍 تشخیص نوع پروژه
                         is_nextjs = any(f in all_files for f in ['next.config.js', 'next.config.ts', 'next.config.mjs'])
                         is_nuxt = any(f in all_files for f in ['nuxt.config.js', 'nuxt.config.ts'])
                         is_gatsby = 'gatsby-config.js' in all_files
                         is_framework_without_html = is_nextjs or is_nuxt or is_gatsby
+                        slog.info(f"🔧 Framework detection: Next.js={is_nextjs}, Nuxt={is_nuxt}, Gatsby={is_gatsby}")
 
                         # فیلتر فایل‌های HTML
                         html_files = [f for f in all_files if f.endswith('.html')]
+                        slog.info(f"📄 HTML files found: {len(html_files)} - {html_files[:10]}")
 
                         # امتیازدهی به فایل‌ها برای پیدا کردن بهترین گزینه
                         def score_html_file(path: str) -> int:
@@ -4570,6 +4579,7 @@ async def inject_bridge_script(
                     slog.warn(f"Smart HTML search failed: {e}")
                     found_html_files = []
                     is_framework_without_html = False
+                    search_error = str(e)
 
             if not index_path:
                 # تشخیص بهتر نوع مشکل
@@ -4577,7 +4587,14 @@ async def inject_bridge_script(
                     "success": False,
                     "need_custom_path": True,
                     "found_html_files": found_html_files,  # همیشه برگردون
-                    "framework_detected": "Next.js" if is_nextjs else ("Nuxt" if is_nuxt else ("Gatsby" if is_gatsby else None))
+                    "framework_detected": "Next.js" if is_nextjs else ("Nuxt" if is_nuxt else ("Gatsby" if is_gatsby else None)),
+                    # 🔍 Debug info
+                    "debug": {
+                        "github_path": f"{owner}/{repo}",
+                        "total_files_found": len(all_files),
+                        "html_files_count": len(found_html_files),
+                        "search_error": search_error
+                    }
                 }
 
                 if is_framework_without_html:
