@@ -332,6 +332,22 @@ export default function ProjectDetailPage() {
   const [inspectorChatLoading, setInspectorChatLoading] = useState(false);
   const [inspectorShowModelSelector, setInspectorShowModelSelector] = useState(false);
 
+  // 🔍 بررسی و اصلاح خطا
+  const [investigateModalMsgId, setInvestigateModalMsgId] = useState<string | null>(null);  // شناسه پیام خطا
+  const [investigateModels, setInvestigateModels] = useState<Array<{
+    id: string; name: string; provider: string; enabled: boolean; provider_available: boolean;
+    capabilities: string[]; context_window: number; recommendation_score: number; recommended: boolean;
+  }>>([]);
+  const [investigateSelectedModels, setInvestigateSelectedModels] = useState<string[]>([]);
+  const [investigateLoading, setInvestigateLoading] = useState(false);
+  const [investigateReport, setInvestigateReport] = useState<{
+    report: string; files_investigated: string[]; files_to_fix: Array<{path: string}>;
+    error_content: string; github_repo: string; model_used: string;
+  } | null>(null);
+  const [fixModalOpen, setFixModalOpen] = useState(false);
+  const [fixSelectedModels, setFixSelectedModels] = useState<string[]>([]);
+  const [fixLoading, setFixLoading] = useState(false);
+
   // 🆕 انتخاب خودکار مدل و همکاری
   const [inspectorAutoSelect, setInspectorAutoSelect] = useState(true); // پیش‌فرض فعال
   const [inspectorCollaborativeMode, setInspectorCollaborativeMode] = useState(true);
@@ -1426,6 +1442,236 @@ export default function ProjectDetailPage() {
       }
     } catch (err) {
       console.error('Error loading inspector models:', err);
+    }
+  };
+
+  // 🔍 باز کردن مودال بررسی خطا
+  const openInvestigateModal = async (msgId: string) => {
+    setInvestigateModalMsgId(msgId);
+    setInvestigateSelectedModels([]);
+    setInvestigateReport(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/models/for-investigation/${projectId}`);
+      const data = await res.json();
+      if (data.success) {
+        setInvestigateModels(data.models);
+        // انتخاب مدل‌های پیشنهادی
+        const recommended = data.models.filter((m: any) => m.recommended).map((m: any) => m.id);
+        setInvestigateSelectedModels(recommended.slice(0, 2));
+      }
+    } catch (err) {
+      console.error('Error loading investigation models:', err);
+    }
+  };
+
+  // فعال‌سازی سریع مدل از مودال بررسی
+  const quickEnableModel = async (modelId: string) => {
+    try {
+      await fetch(`${API_BASE}/api/render/inspector/models/quick-enable/${modelId}`, { method: 'POST' });
+      // آپدیت لیست مدل‌ها
+      setInvestigateModels(prev => prev.map(m =>
+        m.id === modelId ? { ...m, enabled: true } : m
+      ));
+    } catch (err) {
+      console.error('Error enabling model:', err);
+    }
+  };
+
+  // شروع بررسی خطا با SSE
+  const startInvestigation = async () => {
+    if (!investigateModalMsgId || investigateSelectedModels.length === 0) return;
+
+    const errorMsg = inspectorChatMessages.find(m => m.id === investigateModalMsgId);
+    if (!errorMsg) return;
+
+    setInvestigateLoading(true);
+    setInvestigateModalMsgId(null); // بستن مودال
+
+    // اضافه کردن پیام شروع بررسی
+    const startMsgId = `investigate_start_${Date.now()}`;
+    setInspectorChatMessages(prev => [...prev, {
+      id: startMsgId,
+      role: 'system' as const,
+      content: `🔍 شروع بررسی ریشه‌ای خطا با مدل‌ ${investigateSelectedModels.join(', ')}...`,
+      timestamp: new Date(),
+    }]);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/investigate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message_id: errorMsg.db_id || 0,
+          project_id: projectId,
+          model_ids: investigateSelectedModels,
+        })
+      });
+
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      if (!reader) throw new Error('No reader');
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        let eventType = '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            eventType = line.slice(7).trim();
+          } else if (line.startsWith('data: ') && eventType) {
+            try {
+              const data = JSON.parse(line.slice(6));
+
+              if (eventType === 'progress') {
+                const progressId = `inv_progress_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+                setInspectorChatMessages(prev => [...prev, {
+                  id: progressId,
+                  role: 'system' as const,
+                  content: data.message,
+                  timestamp: new Date(),
+                  model_id: data.model,
+                }]);
+              } else if (eventType === 'error') {
+                const errId = `inv_error_${Date.now()}`;
+                setInspectorChatMessages(prev => [...prev, {
+                  id: errId,
+                  role: 'system' as const,
+                  content: `❌ ${data.message}`,
+                  timestamp: new Date(),
+                }]);
+              } else if (eventType === 'report') {
+                setInvestigateReport(data);
+                const reportId = `inv_report_${Date.now()}`;
+                setInspectorChatMessages(prev => [...prev, {
+                  id: reportId,
+                  role: 'assistant' as const,
+                  content: data.report,
+                  timestamp: new Date(),
+                  model_id: data.model_used,
+                  action_type: 'investigate_report' as any,
+                }]);
+              }
+            } catch (e) {
+              // ignore parse errors
+            }
+            eventType = '';
+          }
+        }
+      }
+    } catch (err) {
+      setInspectorChatMessages(prev => [...prev, {
+        id: `inv_fail_${Date.now()}`,
+        role: 'system' as const,
+        content: `❌ خطا در بررسی: ${(err as Error).message}`,
+        timestamp: new Date(),
+      }]);
+    } finally {
+      setInvestigateLoading(false);
+    }
+  };
+
+  // شروع اصلاح خطا با SSE
+  const startFix = async () => {
+    if (!investigateReport || fixSelectedModels.length === 0) return;
+
+    setFixLoading(true);
+    setFixModalOpen(false);
+
+    setInspectorChatMessages(prev => [...prev, {
+      id: `fix_start_${Date.now()}`,
+      role: 'system' as const,
+      content: `🔧 شروع اصلاح خودکار با مدل ${fixSelectedModels.join(', ')}...`,
+      timestamp: new Date(),
+    }]);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/fix`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: projectId,
+          model_ids: fixSelectedModels,
+          investigation_report: investigateReport.report,
+          files_to_fix: investigateReport.files_to_fix || [],
+          error_message: investigateReport.error_content,
+        })
+      });
+
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      if (!reader) throw new Error('No reader');
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        let eventType = '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            eventType = line.slice(7).trim();
+          } else if (line.startsWith('data: ') && eventType) {
+            try {
+              const data = JSON.parse(line.slice(6));
+
+              if (eventType === 'progress') {
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `fix_p_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                  role: 'system' as const,
+                  content: data.message,
+                  timestamp: new Date(),
+                  model_id: data.model,
+                }]);
+              } else if (eventType === 'error') {
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `fix_err_${Date.now()}`,
+                  role: 'system' as const,
+                  content: `❌ ${data.message}`,
+                  timestamp: new Date(),
+                }]);
+              } else if (eventType === 'fix_complete') {
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `fix_done_${Date.now()}`,
+                  role: 'assistant' as const,
+                  content: data.message + (data.pr_url ? `\n\n🔗 [مشاهده Pull Request](${data.pr_url})` : ''),
+                  timestamp: new Date(),
+                  model_id: data.model_used,
+                }]);
+                // آزاد کردن صفحه پیش‌نمایش برای تست
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `fix_test_${Date.now()}`,
+                  role: 'system' as const,
+                  content: '🧪 الان برو اون قسمت رو تست کن و ببین آیا مشکل حل شده!',
+                  timestamp: new Date(),
+                }]);
+              }
+            } catch (e) {}
+            eventType = '';
+          }
+        }
+      }
+    } catch (err) {
+      setInspectorChatMessages(prev => [...prev, {
+        id: `fix_fail_${Date.now()}`,
+        role: 'system' as const,
+        content: `❌ خطا در اصلاح: ${(err as Error).message}`,
+        timestamp: new Date(),
+      }]);
+    } finally {
+      setFixLoading(false);
+      setInvestigateReport(null);
     }
   };
 
@@ -8952,7 +9198,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
               </div>
 
               {/* چت باکس سمت راست (در RTL) - با قابلیت چت با AI */}
-              <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 flex flex-col overflow-hidden" style={{ width: '380px', flexShrink: 0 }}>
+              <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 flex flex-col overflow-hidden relative" style={{ width: '380px', flexShrink: 0 }}>
                 {/* هدر چت با انتخاب مدل */}
                 <div className="bg-gradient-to-r from-red-500 to-orange-500 text-white px-4 py-3">
                   <div className="flex items-center justify-between">
@@ -9220,6 +9466,26 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                '○'}
                             </span>
                           )}
+                          {/* دکمه بررسی خطا */}
+                          {msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); openInvestigateModal(msg.id); }}
+                              className="text-[10px] bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 px-1.5 py-0.5 rounded hover:bg-red-200 dark:hover:bg-red-800/40 transition-colors"
+                              disabled={investigateLoading}
+                            >
+                              {investigateLoading ? '...' : '🔍 بررسی'}
+                            </button>
+                          )}
+                          {/* دکمه اصلاح روی گزارش بررسی */}
+                          {(msg as any).action_type === 'investigate_report' && investigateReport && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setFixModalOpen(true); }}
+                              className="text-[10px] bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 px-1.5 py-0.5 rounded hover:bg-blue-200 dark:hover:bg-blue-800/40 transition-colors"
+                              disabled={fixLoading}
+                            >
+                              {fixLoading ? '...' : '🔧 اصلاح'}
+                            </button>
+                          )}
                           {/* دکمه info */}
                           <button
                             onClick={(e) => { e.stopPropagation(); setInspectorMsgInfoId(inspectorMsgInfoId === msg.id ? null : msg.id); }}
@@ -9375,6 +9641,141 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     </div>
                   )}
                 </div>
+
+                {/* 🔍 مودال انتخاب مدل برای بررسی خطا */}
+                {investigateModalMsgId && (
+                  <div className="absolute inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+                    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-md max-h-[80%] overflow-hidden" dir="rtl">
+                      <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+                        <h3 className="font-bold text-sm">🔍 انتخاب مدل برای بررسی خطا</h3>
+                        <button onClick={() => setInvestigateModalMsgId(null)} className="text-gray-400 hover:text-gray-600 text-lg">&times;</button>
+                      </div>
+                      <div className="p-3 max-h-[50vh] overflow-y-auto space-y-1.5">
+                        {investigateModels.length === 0 ? (
+                          <div className="text-center py-4 text-gray-400 text-sm">در حال بارگذاری مدل‌ها...</div>
+                        ) : investigateModels.map(model => (
+                          <label
+                            key={model.id}
+                            className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer transition-colors ${
+                              investigateSelectedModels.includes(model.id)
+                                ? 'bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-700'
+                                : 'hover:bg-gray-50 dark:hover:bg-gray-750 border border-transparent'
+                            } ${!model.enabled || !model.provider_available ? 'opacity-60' : ''}`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={investigateSelectedModels.includes(model.id)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setInvestigateSelectedModels(prev => [...prev, model.id]);
+                                } else {
+                                  setInvestigateSelectedModels(prev => prev.filter(id => id !== model.id));
+                                }
+                              }}
+                              disabled={!model.enabled || !model.provider_available}
+                              className="rounded"
+                            />
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-xs font-medium truncate">{model.name}</span>
+                                {model.recommended && (
+                                  <span className="text-[9px] bg-green-100 dark:bg-green-900/30 text-green-600 px-1 rounded">پیشنهادی</span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-1.5 mt-0.5">
+                                <span className="text-[10px] text-gray-400">{model.provider}</span>
+                                {model.capabilities.includes('CODE') && (
+                                  <span className="text-[9px] bg-purple-100 dark:bg-purple-900/30 text-purple-600 px-1 rounded">کد</span>
+                                )}
+                                {model.capabilities.includes('REASONING') && (
+                                  <span className="text-[9px] bg-orange-100 dark:bg-orange-900/30 text-orange-600 px-1 rounded">استدلال</span>
+                                )}
+                              </div>
+                            </div>
+                            {!model.enabled && (
+                              <button
+                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); quickEnableModel(model.id); }}
+                                className="text-[10px] bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400 px-2 py-1 rounded hover:bg-yellow-200 transition-colors flex-shrink-0"
+                              >
+                                فعال‌سازی
+                              </button>
+                            )}
+                            {model.enabled && !model.provider_available && (
+                              <span className="text-[10px] text-red-400 flex-shrink-0">بدون API</span>
+                            )}
+                          </label>
+                        ))}
+                      </div>
+                      <div className="p-3 border-t border-gray-200 dark:border-gray-700 flex items-center justify-between">
+                        <span className="text-[11px] text-gray-400">{investigateSelectedModels.length} مدل انتخاب شده</span>
+                        <button
+                          onClick={startInvestigation}
+                          disabled={investigateSelectedModels.length === 0}
+                          className="px-4 py-2 bg-red-500 text-white text-sm rounded-lg hover:bg-red-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        >
+                          🔍 شروع بررسی
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 🔧 مودال انتخاب مدل برای اصلاح */}
+                {fixModalOpen && (
+                  <div className="absolute inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+                    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-md max-h-[80%] overflow-hidden" dir="rtl">
+                      <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+                        <h3 className="font-bold text-sm">🔧 انتخاب مدل برای اصلاح خودکار</h3>
+                        <button onClick={() => setFixModalOpen(false)} className="text-gray-400 hover:text-gray-600 text-lg">&times;</button>
+                      </div>
+                      <div className="p-3 text-xs text-gray-500 bg-yellow-50 dark:bg-yellow-900/10 border-b border-gray-200 dark:border-gray-700">
+                        ⚠️ مدل انتخابی branch جدید ایجاد کرده و تغییرات را commit می‌کند. سپس Pull Request ایجاد می‌شود.
+                      </div>
+                      <div className="p-3 max-h-[50vh] overflow-y-auto space-y-1.5">
+                        {investigateModels.filter(m => m.enabled && m.provider_available).map(model => (
+                          <label
+                            key={model.id}
+                            className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer transition-colors ${
+                              fixSelectedModels.includes(model.id)
+                                ? 'bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-700'
+                                : 'hover:bg-gray-50 dark:hover:bg-gray-750 border border-transparent'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={fixSelectedModels.includes(model.id)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setFixSelectedModels(prev => [...prev, model.id]);
+                                } else {
+                                  setFixSelectedModels(prev => prev.filter(id => id !== model.id));
+                                }
+                              }}
+                              className="rounded"
+                            />
+                            <div className="flex-1 min-w-0">
+                              <span className="text-xs font-medium">{model.name}</span>
+                              <span className="text-[10px] text-gray-400 mr-1">({model.provider})</span>
+                              {model.recommended && (
+                                <span className="text-[9px] bg-green-100 text-green-600 px-1 rounded mr-1">پیشنهادی</span>
+                              )}
+                            </div>
+                          </label>
+                        ))}
+                      </div>
+                      <div className="p-3 border-t border-gray-200 dark:border-gray-700 flex items-center justify-between">
+                        <span className="text-[11px] text-gray-400">{fixSelectedModels.length} مدل انتخاب شده</span>
+                        <button
+                          onClick={startFix}
+                          disabled={fixSelectedModels.length === 0}
+                          className="px-4 py-2 bg-blue-500 text-white text-sm rounded-lg hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        >
+                          🔧 شروع اصلاح
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* ورودی پیام */}
                 <div className="p-3 border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
