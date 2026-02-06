@@ -6863,6 +6863,25 @@ async def investigate_error(request: InvestigateRequest, db: Session = Depends(g
             "message": f"📋 {len(selected_files)} فایل مرتبط شناسایی شد: {', '.join(f.split('/')[-1] for f in selected_files)}"
         })
 
+        # --- مرحله ۲.۵: اضافه کردن خودکار فایل‌های مدل/اسکیما ---
+        # وقتی خطا مربوط به دیتابیس باشه، فایل‌های models/ و schemas/ هم لازمن
+        db_keywords = ["column", "table", "migration", "ستون", "جدول", "database", "sql",
+                       "column", "field", "model", "schema", "alembic", "migrate"]
+        error_lower = error_content.lower()
+        has_db_error = any(kw in error_lower for kw in db_keywords)
+
+        if has_db_error:
+            model_files = [f for f in code_files
+                           if any(p in f.lower() for p in ["models/", "schemas/", "model.", "schema.", "alembic/"])
+                           and f not in selected_files]
+            if model_files:
+                extra = model_files[:5]
+                selected_files.extend(extra)
+                yield sse("progress", {
+                    "step": "auto_add_models",
+                    "message": f"🗄️ خطای دیتابیس شناسایی شد - {len(extra)} فایل مدل/اسکیما اضافه شد: {', '.join(f.split('/')[-1] for f in extra)}"
+                })
+
         # --- مرحله ۳: خواندن محتوای فایل‌ها ---
         file_contents = {}
         for i, file_path in enumerate(selected_files):
@@ -6979,6 +6998,93 @@ async def investigate_error(request: InvestigateRequest, db: Session = Depends(g
             yield sse("done", {"success": False})
             return
 
+        # --- مرحله ۴.۵: دو مرحله‌ای - اگر AI فایل‌هایی رو لازم داشت که نخونده ---
+        # بررسی اینکه آیا AI اشاره به فایل‌هایی کرده که نداشته
+        missing_file_markers = ["نداریم", "ارائه نشده", "در دسترس نیست",
+                                "نداشتیم", "ندیدیم", "فرضی", "فرض می‌کنیم",
+                                "کد مدل را نداریم", "این فایل", "not provided",
+                                "not available", "couldn't read"]
+        needs_second_pass = any(marker in report for marker in missing_file_markers)
+
+        if needs_second_pass:
+            yield sse("progress", {
+                "step": "second_pass",
+                "message": "🔄 مدل فایل‌های بیشتری نیاز دارد. شناسایی و خواندن فایل‌های ناخوانده..."
+            })
+
+            # از AI بخواه بگه دقیقاً چه فایلی لازم داره
+            try:
+                missing_resp = await ai_manager.generate(
+                    model_id=primary_model,
+                    messages=[
+                        Message(role="system", content="فقط مسیر فایل‌هایی را بنویسید که برای تکمیل تحلیل نیاز دارید. هر مسیر در یک خط."),
+                        Message(role="user", content=f"گزارش شما:\n{report[:2000]}\n\nفایل‌هایی که خواندید:\n{chr(10).join(file_contents.keys())}\n\nتمام فایل‌های موجود در پروژه:\n{file_list_text[:3000]}\n\nکدام فایل‌ها را نخوانده‌اید که نیاز دارید؟ فقط مسیر بنویسید.")
+                    ],
+                    max_tokens=300,
+                    temperature=0.1
+                )
+
+                extra_files = []
+                for line in missing_resp.content.strip().split("\n"):
+                    line = line.strip().strip("`").strip("- ").strip()
+                    if line and line in code_files and line not in file_contents:
+                        extra_files.append(line)
+
+                # خواندن فایل‌های جدید
+                extra_contents = {}
+                for fp in extra_files[:5]:
+                    yield sse("progress", {
+                        "step": "reading_extra",
+                        "message": f"📖 خواندن فایل اضافی: {fp}...",
+                        "file": fp
+                    })
+                    try:
+                        result = await github_svc.get_file_content(owner, repo, fp, token=token)
+                        if result.get("success"):
+                            content = result.get("content", "")
+                            if len(content) > 15000:
+                                content = content[:15000] + "\n... [truncated]"
+                            extra_contents[fp] = content
+                            file_contents[fp] = content
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.2)
+
+                if extra_contents:
+                    # تحلیل مجدد با فایل‌های جدید
+                    extra_context = ""
+                    for path, content in extra_contents.items():
+                        extra_context += f"\n\n=== {path} ===\n{content}"
+
+                    yield sse("progress", {
+                        "step": "reanalysis",
+                        "message": f"🔬 تحلیل مجدد با {len(extra_contents)} فایل اضافی...",
+                        "model": primary_model
+                    })
+
+                    reanalysis = await ai_manager.generate(
+                        model_id=primary_model,
+                        messages=[
+                            Message(role="system", content=system_msg),
+                            Message(role="user", content=f"تحلیل قبلی شما:\n{report}\n\nفایل‌های جدیدی که درخواست کرده بودید:\n{extra_context}\n\nلطفاً تحلیل خود را با اطلاعات جدید بازنویسی و تکمیل کنید. فرمت قبلی را حفظ کنید.")
+                        ],
+                        max_tokens=4000,
+                        temperature=0.2,
+                        task_type="debugging"
+                    )
+                    report = reanalysis.content
+
+                    yield sse("progress", {
+                        "step": "reanalysis_done",
+                        "message": "✅ تحلیل مجدد با فایل‌های کامل‌تر انجام شد"
+                    })
+
+            except Exception as e:
+                yield sse("progress", {
+                    "step": "second_pass_error",
+                    "message": f"⚠️ خطا در مرحله دوم: {str(e)[:60]}"
+                })
+
         # --- مرحله ۵: اگر مدل دوم هم بود، بررسی متقابل ---
         if len(model_ids) > 1:
             second_model = model_ids[1]
@@ -7009,13 +7115,20 @@ async def investigate_error(request: InvestigateRequest, db: Session = Depends(g
                 })
 
         # --- مرحله ۶: استخراج فایل‌های نیاز به تغییر ---
+        # هم از فایل‌های خوانده شده و هم از تمام فایل‌های پروژه
         files_to_fix = []
+        report_lower = report.lower()
+        seen_paths = set()
+        # اول فایل‌های خوانده شده
         for path in file_contents.keys():
-            if path.lower() in report.lower():
-                files_to_fix.append({
-                    "path": path,
-                    "in_report": True
-                })
+            if path.lower() in report_lower:
+                files_to_fix.append({"path": path, "in_report": True})
+                seen_paths.add(path)
+        # بعد فایل‌هایی که در گزارش اشاره شده ولی نخوانده شدن
+        for path in code_files:
+            if path not in seen_paths and path.lower() in report_lower:
+                files_to_fix.append({"path": path, "in_report": True, "not_read": True})
+                seen_paths.add(path)
 
         # --- ارسال گزارش نهایی ---
         yield sse("report", {
