@@ -361,10 +361,13 @@ class RenderAPIService:
             return "info"
 
     async def _save_services_to_db(self, services: List[Dict]):
-        """ذخیره سرویس‌ها در دیتابیس"""
+        """ذخیره سرویس‌ها در دیتابیس (با حذف سرویس‌های حذف شده)"""
         try:
             db = SessionLocal()
             from ..models.render_log import RenderService
+
+            # شناسه سرویس‌های فعلی از API
+            api_service_ids = {service["id"] for service in services}
 
             for service in services:
                 existing = db.query(RenderService).filter(
@@ -389,6 +392,14 @@ class RenderAPIService:
                         service_url=service.get("service_url")  # 🆕 URL سرویس
                     )
                     db.add(new_service)
+
+            # حذف سرویس‌هایی که دیگر در Render وجود ندارند
+            deleted_count = db.query(RenderService).filter(
+                ~RenderService.id.in_(api_service_ids)
+            ).delete(synchronize_session='fetch')
+
+            if deleted_count > 0:
+                slog.info("Removed stale services from database", deleted=deleted_count)
 
             db.commit()
             db.close()
