@@ -450,7 +450,7 @@ def init_db():
     این تابع در startup اپلیکیشن فراخوانی می‌شود
     """
     # Import models تا register شوند
-    from ..models import project, debate, setting, ai_log, ai_profile, system_prompt
+    from ..models import project, debate, setting, ai_log, ai_profile, system_prompt, inspector_session
 
     # اول migration رو اجرا کن (برای جداول موجود)
     migrate_db()

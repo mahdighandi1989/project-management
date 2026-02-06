@@ -301,13 +301,26 @@ export default function ProjectDetailPage() {
   const [inspectorSelectedModels, setInspectorSelectedModels] = useState<string[]>([]);
   const [inspectorChatMessages, setInspectorChatMessages] = useState<Array<{
     id: string;
+    db_id?: number;  // آیدی دیتابیس برای verification
     role: 'user' | 'assistant' | 'system' | 'action';
     content: string;
     model_id?: string;
     timestamp: Date;
     tokens_used?: number;
-    action_type?: 'click' | 'type' | 'navigate' | 'edit' | 'read' | 'log';
+    action_type?: 'click' | 'type' | 'navigate' | 'edit' | 'read' | 'log' | 'scroll' | 'focus' | 'hover';
+    backend_verified?: boolean | null;  // null=pending, true=ok, false=error
+    backend_log_summary?: string;
   }>>([]);
+  const [inspectorSessionId, setInspectorSessionId] = useState<number | null>(null);
+  const [inspectorArchivedSessions, setInspectorArchivedSessions] = useState<Array<{
+    id: number;
+    title: string;
+    created_at: string;
+    closed_at: string;
+    message_count: number;
+    status: string;
+  }>>([]);
+  const [showArchivedSessions, setShowArchivedSessions] = useState(false);
   const [inspectorChatInput, setInspectorChatInput] = useState('');
   const [inspectorChatLoading, setInspectorChatLoading] = useState(false);
   const [inspectorShowModelSelector, setInspectorShowModelSelector] = useState(false);
@@ -772,11 +785,10 @@ export default function ProjectDetailPage() {
         console.log('🌉 Bridge message received:', event.data);
       }
 
-      // بررسی پیام از bridge script
+      // بررسی پیام از bridge script (postMessage fallback)
       if (event.data?.type === 'inspector-bridge-event') {
         const { action, target, position, elementInfo, pageUrl } = event.data;
 
-        // گزارش اکشن دریافت شده
         const actionLabels: Record<string, string> = {
           'click': 'کلیک کردی',
           'scroll': 'اسکرول کردی',
@@ -788,32 +800,61 @@ export default function ProjectDetailPage() {
         const actionLabel = actionLabels[action] || action;
         const targetInfo = elementInfo || target || 'عنصر ناشناخته';
 
-        console.log('🎯 Action:', actionLabel, targetInfo);
+        console.log('🎯 Action (postMessage):', actionLabel, targetInfo);
 
-        // افزودن پیام موقت - مستقیماً از setState استفاده می‌کنیم
-        const id = `transient_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        const newMessage = {
-          id,
+        // اضافه کردن به پیام‌های دائمی چت
+        const msgId = `action_pm_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        setInspectorChatMessages(prev => [...prev, {
+          id: msgId,
+          role: 'action' as const,
           content: `${actionLabel} روی ${targetInfo}`,
-          type: 'action' as const,
-          source: 'Bridge Script',
           timestamp: new Date(),
-          fadeOut: false
-        };
+          action_type: action as any,
+          backend_verified: null,
+        }]);
 
-        setInspectorTransientMessages(prev => [...prev, newMessage]);
-
-        // شروع محو شدن بعد از 3 ثانیه
-        setTimeout(() => {
-          setInspectorTransientMessages(prev =>
-            prev.map(m => m.id === id ? { ...m, fadeOut: true } : m)
-          );
-        }, 3000);
-
-        // حذف کامل بعد از 4 ثانیه
-        setTimeout(() => {
-          setInspectorTransientMessages(prev => prev.filter(m => m.id !== id));
-        }, 4000);
+        // ذخیره در DB و verify (اگر سشن فعال داریم)
+        if (inspectorSessionId) {
+          (async () => {
+            try {
+              const saveRes = await fetch(`${API_BASE}/api/render/inspector/session/message`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  session_id: inspectorSessionId,
+                  role: 'action',
+                  content: `${actionLabel} روی ${targetInfo}`,
+                  action_type: action,
+                })
+              });
+              const saveData = await saveRes.json();
+              if (saveData.success && saveData.message?.id) {
+                const dbId = saveData.message.id;
+                setInspectorChatMessages(prev =>
+                  prev.map(m => m.id === msgId ? { ...m, db_id: dbId } : m)
+                );
+                setTimeout(async () => {
+                  try {
+                    const verifyRes = await fetch(
+                      `${API_BASE}/api/render/inspector/message/${dbId}/verify?project_id=${projectId}`,
+                      { method: 'POST' }
+                    );
+                    const verifyData = await verifyRes.json();
+                    if (verifyData.success) {
+                      setInspectorChatMessages(prev =>
+                        prev.map(m => m.id === msgId ? {
+                          ...m,
+                          backend_verified: verifyData.verified,
+                          backend_log_summary: verifyData.summary,
+                        } : m)
+                      );
+                    }
+                  } catch (err) { console.error('Verify failed:', err); }
+                }, 3000);
+              }
+            } catch (err) { console.error('Save message failed:', err); }
+          })();
+        }
       }
 
       // پیام اتصال موفق bridge
@@ -939,27 +980,69 @@ export default function ProjectDetailPage() {
 
               console.log('🌐 Bridge WS Event:', actionLabel, targetInfo);
 
-              const id = `ws_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-              const newMessage = {
-                id,
+              // اضافه کردن به پیام‌های دائمی چت (نه موقتی)
+              const msgId = `action_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+              const chatMsg = {
+                id: msgId,
+                role: 'action' as const,
                 content: `${actionLabel} روی ${targetInfo}`,
-                type: 'action' as const,
-                source: 'WebSocket Bridge',
                 timestamp: new Date(),
-                fadeOut: false
+                action_type: action as any,
+                backend_verified: null as boolean | null,  // pending - منتظر تأیید
               };
 
-              setInspectorTransientMessages(prev => [...prev, newMessage]);
+              setInspectorChatMessages(prev => [...prev, chatMsg]);
 
-              setTimeout(() => {
-                setInspectorTransientMessages(prev =>
-                  prev.map(m => m.id === id ? { ...m, fadeOut: true } : m)
-                );
-              }, 3000);
+              // ذخیره در دیتابیس و درخواست تأیید لاگ بک‌اند
+              (async () => {
+                try {
+                  // ذخیره پیام
+                  const saveRes = await fetch(`${API_BASE}/api/render/inspector/session/message`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      session_id: inspectorSessionId,
+                      role: 'action',
+                      content: chatMsg.content,
+                      action_type: action,
+                    })
+                  });
+                  const saveData = await saveRes.json();
 
-              setTimeout(() => {
-                setInspectorTransientMessages(prev => prev.filter(m => m.id !== id));
-              }, 4000);
+                  if (saveData.success && saveData.message?.id) {
+                    const dbId = saveData.message.id;
+                    // آپدیت db_id در state
+                    setInspectorChatMessages(prev =>
+                      prev.map(m => m.id === msgId ? { ...m, db_id: dbId } : m)
+                    );
+
+                    // بررسی لاگ بک‌اند بعد از 3 ثانیه (تا لاگ‌ها ثبت بشن)
+                    setTimeout(async () => {
+                      try {
+                        const verifyRes = await fetch(
+                          `${API_BASE}/api/render/inspector/message/${dbId}/verify?project_id=${projectId}`,
+                          { method: 'POST' }
+                        );
+                        const verifyData = await verifyRes.json();
+
+                        if (verifyData.success) {
+                          setInspectorChatMessages(prev =>
+                            prev.map(m => m.id === msgId ? {
+                              ...m,
+                              backend_verified: verifyData.verified,
+                              backend_log_summary: verifyData.summary,
+                            } : m)
+                          );
+                        }
+                      } catch (err) {
+                        console.error('❌ Verify failed:', err);
+                      }
+                    }, 3000);
+                  }
+                } catch (err) {
+                  console.error('❌ Save message failed:', err);
+                }
+              })();
             }
 
             // پیام آماده بودن bridge
@@ -1143,8 +1226,132 @@ export default function ProjectDetailPage() {
       await loadInspectorServices();
       // لود مدل‌ها هم
       await loadInspectorModels();
+      // ایجاد یا بارگذاری سشن بازرسی
+      await initInspectorSession();
     }
   };
+
+  // 📋 ایجاد یا بارگذاری سشن بازرسی
+  const initInspectorSession = async () => {
+    try {
+      // ایجاد یا دریافت سشن فعال
+      const res = await fetch(`${API_BASE}/api/render/inspector/session/create?project_id=${projectId}`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+
+      if (data.success && data.session) {
+        setInspectorSessionId(data.session.id);
+
+        // بارگذاری پیام‌های قبلی سشن
+        const msgRes = await fetch(`${API_BASE}/api/render/inspector/session/${data.session.id}/messages`);
+        const msgData = await msgRes.json();
+
+        if (msgData.success && msgData.messages) {
+          const loadedMessages = msgData.messages.map((m: any) => ({
+            id: `db_${m.id}`,
+            db_id: m.id,
+            role: m.role,
+            content: m.content,
+            action_type: m.action_type,
+            model_id: m.model_id,
+            tokens_used: m.tokens_used,
+            timestamp: new Date(m.timestamp),
+            backend_verified: m.backend_verified,
+            backend_log_summary: m.backend_log_summary,
+          }));
+          setInspectorChatMessages(loadedMessages);
+        }
+
+        console.log('📋 Inspector session:', data.existing ? 'loaded' : 'created', data.session.id);
+      }
+
+      // بارگذاری سشن‌های آرشیو شده
+      const archiveRes = await fetch(`${API_BASE}/api/render/inspector/sessions/${projectId}?status=archived`);
+      const archiveData = await archiveRes.json();
+      if (archiveData.success) {
+        setInspectorArchivedSessions(archiveData.sessions || []);
+      }
+    } catch (err) {
+      console.error('Error initializing inspector session:', err);
+    }
+  };
+
+  // آرشیو کردن سشن فعلی و شروع سشن جدید
+  const archiveInspectorSession = async () => {
+    if (!inspectorSessionId) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/session/${inspectorSessionId}/archive`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        // اضافه کردن به لیست آرشیو
+        if (data.session) {
+          setInspectorArchivedSessions(prev => [data.session, ...prev]);
+        }
+        // پاک کردن چت فعلی
+        setInspectorChatMessages([]);
+        setInspectorSessionId(null);
+
+        // ایجاد سشن جدید
+        await initInspectorSession();
+        addTransientMessage('سشن آرشیو شد و سشن جدید شروع شد', 'info');
+      }
+    } catch (err) {
+      console.error('Error archiving session:', err);
+    }
+  };
+
+  // بارگذاری پیام‌های یک سشن آرشیو شده (فقط نمایش)
+  const loadArchivedSession = async (sessionId: number) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/session/${sessionId}/messages`);
+      const data = await res.json();
+
+      if (data.success && data.messages) {
+        const loadedMessages = data.messages.map((m: any) => ({
+          id: `db_${m.id}`,
+          db_id: m.id,
+          role: m.role,
+          content: m.content,
+          action_type: m.action_type,
+          model_id: m.model_id,
+          tokens_used: m.tokens_used,
+          timestamp: new Date(m.timestamp),
+          backend_verified: m.backend_verified,
+          backend_log_summary: m.backend_log_summary,
+        }));
+        setInspectorChatMessages(loadedMessages);
+      }
+    } catch (err) {
+      console.error('Error loading archived session:', err);
+    }
+  };
+
+  // ذخیره خودکار پیام‌های assistant در دیتابیس
+  const lastSavedMsgCountRef = useRef(0);
+  useEffect(() => {
+    if (!inspectorSessionId) return;
+    const newMsgs = inspectorChatMessages.slice(lastSavedMsgCountRef.current);
+    for (const msg of newMsgs) {
+      if ((msg.role === 'assistant' || msg.role === 'system') && !msg.db_id) {
+        fetch(`${API_BASE}/api/render/inspector/session/message`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: inspectorSessionId,
+            role: msg.role,
+            content: msg.content,
+            model_id: msg.model_id,
+            tokens_used: msg.tokens_used,
+          })
+        }).catch(err => console.error('Auto-save msg failed:', err));
+      }
+    }
+    lastSavedMsgCountRef.current = inspectorChatMessages.length;
+  }, [inspectorChatMessages.length, inspectorSessionId]);
 
   // 🆕 لود مدل‌های موجود برای چت
   const loadInspectorModels = async () => {
@@ -1825,6 +2032,15 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       content: userMessage,
       timestamp: new Date()
     }]);
+
+    // ذخیره پیام کاربر در دیتابیس
+    if (inspectorSessionId) {
+      fetch(`${API_BASE}/api/render/inspector/session/message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: inspectorSessionId, role: 'user', content: userMessage })
+      }).catch(err => console.error('Save user msg failed:', err));
+    }
 
     try {
       // آماده‌سازی فایل‌ها (اگر موجود باشد)
@@ -8242,39 +8458,30 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               </div>
                             )}
 
-                            {/* 🆕 لایه ردیابی فعالیت کاربر - فقط برای نمایش پیام‌ها */}
+                            {/* لایه ردیابی فعالیت کاربر */}
                             <div
                               ref={inspectorOverlayRef}
                               className="absolute inset-0 z-30 pointer-events-none"
                             >
-                              {/* پیام‌های موقت (گزارش لحظه‌ای) */}
-                              <div className="absolute top-2 right-2 flex flex-col gap-1 z-50 pointer-events-auto" dir="rtl">
-                                {inspectorTransientMessages.map(msg => (
-                                  <div
-                                    key={msg.id}
-                                    className={`px-3 py-1.5 rounded-lg text-xs font-medium shadow-lg transition-all duration-500 max-w-[280px] ${
-                                      msg.fadeOut ? 'opacity-0 transform translate-x-4' : 'opacity-100'
-                                    } ${
-                                      msg.type === 'action' ? 'bg-blue-500/90 text-white' :
-                                      msg.type === 'backend' ? 'bg-purple-500/90 text-white' :
-                                      msg.type === 'error' ? 'bg-red-500/90 text-white' :
-                                      'bg-gray-700/90 text-white'
-                                    }`}
-                                  >
-                                    <div className="flex items-center gap-2">
-                                      <span>
-                                        {msg.type === 'action' ? '👆' :
-                                         msg.type === 'backend' ? '⚙️' :
-                                         msg.type === 'error' ? '⚠️' : 'ℹ️'}
-                                      </span>
+                              {/* پیام‌های سیستمی موقت (فقط info/error، نه action) */}
+                              {inspectorTransientMessages.filter(m => m.type !== 'action').length > 0 && (
+                                <div className="absolute top-2 right-2 flex flex-col gap-1 z-50 pointer-events-auto" dir="rtl">
+                                  {inspectorTransientMessages.filter(m => m.type !== 'action').map(msg => (
+                                    <div
+                                      key={msg.id}
+                                      className={`px-3 py-1.5 rounded-lg text-xs font-medium shadow-lg transition-all duration-500 max-w-[280px] ${
+                                        msg.fadeOut ? 'opacity-0 transform translate-x-4' : 'opacity-100'
+                                      } ${
+                                        msg.type === 'backend' ? 'bg-purple-500/90 text-white' :
+                                        msg.type === 'error' ? 'bg-red-500/90 text-white' :
+                                        'bg-gray-700/90 text-white'
+                                      }`}
+                                    >
                                       <span className="truncate">{msg.content}</span>
                                     </div>
-                                    {msg.source && (
-                                      <div className="text-[10px] opacity-70 mt-0.5">از: {msg.source}</div>
-                                    )}
-                                  </div>
-                                ))}
-                              </div>
+                                  ))}
+                                </div>
+                              )}
 
                               {/* لایه توقف (وقتی خطا شناسایی شده) */}
                               {inspectorPaused && (
@@ -8721,13 +8928,35 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         </p>
                       </div>
                     </div>
-                    <button
-                      onClick={() => setInspectorShowModelSelector(!inspectorShowModelSelector)}
-                      className="p-2 bg-white/20 rounded-lg hover:bg-white/30 transition text-sm"
-                      title="انتخاب مدل‌های AI"
-                    >
-                      ⚙️
-                    </button>
+                    <div className="flex items-center gap-1">
+                      {/* دکمه آرشیو سشن */}
+                      {inspectorSessionId && inspectorChatMessages.length > 0 && (
+                        <button
+                          onClick={archiveInspectorSession}
+                          className="p-2 bg-white/20 rounded-lg hover:bg-white/30 transition text-sm"
+                          title="بستن و آرشیو این سشن"
+                        >
+                          📥
+                        </button>
+                      )}
+                      {/* دکمه نمایش آرشیو */}
+                      {inspectorArchivedSessions.length > 0 && (
+                        <button
+                          onClick={() => setShowArchivedSessions(!showArchivedSessions)}
+                          className={`p-2 rounded-lg transition text-sm ${showArchivedSessions ? 'bg-white/40' : 'bg-white/20 hover:bg-white/30'}`}
+                          title="سشن‌های آرشیو شده"
+                        >
+                          📋
+                        </button>
+                      )}
+                      <button
+                        onClick={() => setInspectorShowModelSelector(!inspectorShowModelSelector)}
+                        className="p-2 bg-white/20 rounded-lg hover:bg-white/30 transition text-sm"
+                        title="انتخاب مدل‌های AI"
+                      >
+                        ⚙️
+                      </button>
+                    </div>
                   </div>
 
                   {/* انتخابگر مدل */}
@@ -8808,6 +9037,26 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   )}
                 </div>
 
+                {/* پنل سشن‌های آرشیو شده */}
+                {showArchivedSessions && (
+                  <div className="bg-gray-100 dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 p-2 max-h-40 overflow-auto">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-bold text-gray-600 dark:text-gray-400">سشن‌های قبلی</span>
+                      <button onClick={() => setShowArchivedSessions(false)} className="text-xs text-gray-400 hover:text-gray-600">✕</button>
+                    </div>
+                    {inspectorArchivedSessions.map(s => (
+                      <button
+                        key={s.id}
+                        onClick={() => { loadArchivedSession(s.id); setShowArchivedSessions(false); }}
+                        className="w-full text-right px-2 py-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-800 transition text-xs flex items-center justify-between"
+                      >
+                        <span className="text-gray-600 dark:text-gray-400">{s.title || `سشن #${s.id}`}</span>
+                        <span className="text-gray-400 text-[10px]">{s.message_count} پیام</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+
                 {/* محتوای چت */}
                 <div className="flex-1 p-3 overflow-auto bg-gray-50 dark:bg-gray-900 space-y-3" style={{ maxHeight: '400px' }}>
                   {/* پیام خوش‌آمد */}
@@ -8876,31 +9125,68 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   {inspectorChatMessages.map(msg => (
                     <div key={msg.id} className={`flex gap-2 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
                       <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-sm flex-shrink-0 ${
-                        msg.role === 'user' ? 'bg-blue-500' : 'bg-red-500'
+                        msg.role === 'user' ? 'bg-blue-500' :
+                        msg.role === 'action' ? 'bg-emerald-500' :
+                        'bg-red-500'
                       }`}>
-                        {msg.role === 'user' ? '👤' : '🤖'}
+                        {msg.role === 'user' ? '👤' :
+                         msg.role === 'action' ? '👆' :
+                         '🤖'}
                       </div>
-                      <div className={`rounded-lg p-3 shadow-sm max-w-[85%] ${
+                      <div className={`rounded-lg p-2.5 shadow-sm max-w-[85%] ${
                         msg.role === 'user'
                           ? 'bg-blue-500 text-white rounded-tr-none'
-                          : 'bg-white dark:bg-gray-800 rounded-tl-none'
+                          : msg.role === 'action'
+                            ? 'bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-tl-none'
+                            : 'bg-white dark:bg-gray-800 rounded-tl-none'
                       }`}>
                         {msg.model_id && msg.role === 'assistant' && (
                           <p className="text-xs text-gray-400 mb-1">{msg.model_id}</p>
                         )}
                         <p className={`text-sm whitespace-pre-wrap ${
-                          msg.role === 'user' ? '' : 'text-gray-700 dark:text-gray-300'
+                          msg.role === 'user' ? '' :
+                          msg.role === 'action' ? 'text-emerald-800 dark:text-emerald-200' :
+                          'text-gray-700 dark:text-gray-300'
                         }`}>
                           {msg.content}
                         </p>
                         <div className="flex items-center gap-2 mt-1">
-                          <span className={`text-xs ${msg.role === 'user' ? 'opacity-70' : 'text-gray-400'}`}>
+                          <span className={`text-xs ${
+                            msg.role === 'user' ? 'opacity-70' :
+                            msg.role === 'action' ? 'text-emerald-500' :
+                            'text-gray-400'
+                          }`}>
                             {msg.timestamp.toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' })}
                           </span>
                           {msg.tokens_used && (
                             <span className="text-xs text-gray-400">({msg.tokens_used} توکن)</span>
                           )}
+                          {/* تیک تأیید بک‌اند (مثل پیام‌رسان‌ها) */}
+                          {msg.role === 'action' && (
+                            <span
+                              className={`text-xs font-bold ${
+                                msg.backend_verified === true ? 'text-blue-500' :
+                                msg.backend_verified === false ? 'text-red-500' :
+                                'text-gray-300'
+                              }`}
+                              title={
+                                msg.backend_verified === true ? `تأیید شد: ${msg.backend_log_summary || 'سالم'}` :
+                                msg.backend_verified === false ? `خطا: ${msg.backend_log_summary || 'مشکلی در لاگ'}` :
+                                'در حال بررسی لاگ بک‌اند...'
+                              }
+                            >
+                              {msg.backend_verified === true ? '✓✓' :
+                               msg.backend_verified === false ? '✕' :
+                               '○'}
+                            </span>
+                          )}
                         </div>
+                        {/* نمایش خلاصه خطای بک‌اند */}
+                        {msg.role === 'action' && msg.backend_verified === false && msg.backend_log_summary && (
+                          <div className="mt-1 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 rounded px-2 py-1">
+                            {msg.backend_log_summary}
+                          </div>
+                        )}
                       </div>
                     </div>
                   ))}

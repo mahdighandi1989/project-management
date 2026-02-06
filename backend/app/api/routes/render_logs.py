@@ -6106,3 +6106,296 @@ async def get_bridge_connections(project_id: str):
         "inspectors_connected": len(conns["inspectors"]),
         "is_active": len(conns["bridges"]) > 0 and len(conns["inspectors"]) > 0
     }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 📋 Inspector Session & Message Persistence
+# ─────────────────────────────────────────────────────────────────────
+
+
+@router.post("/inspector/session/create")
+async def create_inspector_session(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """ایجاد سشن جدید بازرس هوشمند"""
+    from ...models.inspector_session import InspectorSession
+
+    # بررسی سشن فعال موجود
+    active = db.query(InspectorSession).filter(
+        InspectorSession.project_id == project_id,
+        InspectorSession.status == "active"
+    ).first()
+
+    if active:
+        return {"success": True, "session": active.to_dict(), "existing": True}
+
+    session = InspectorSession(
+        project_id=project_id,
+        status="active",
+        title=f"سشن بازرسی"
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+
+    slog.info("Inspector session created", project_id=project_id, session_id=session.id)
+    return {"success": True, "session": session.to_dict(), "existing": False}
+
+
+@router.get("/inspector/sessions/{project_id}")
+async def list_inspector_sessions(
+    project_id: str,
+    status: str = None,
+    db: Session = Depends(get_db)
+):
+    """لیست سشن‌های بازرس هوشمند (فعال + آرشیو)"""
+    from ...models.inspector_session import InspectorSession
+
+    query = db.query(InspectorSession).filter(InspectorSession.project_id == project_id)
+    if status:
+        query = query.filter(InspectorSession.status == status)
+    sessions = query.order_by(InspectorSession.created_at.desc()).all()
+
+    return {
+        "success": True,
+        "sessions": [s.to_dict() for s in sessions],
+        "total": len(sessions)
+    }
+
+
+@router.get("/inspector/session/{session_id}/messages")
+async def get_inspector_messages(
+    session_id: int,
+    db: Session = Depends(get_db)
+):
+    """دریافت پیام‌های یک سشن"""
+    from ...models.inspector_session import InspectorSession, InspectorMessage
+
+    session = db.query(InspectorSession).filter(InspectorSession.id == session_id).first()
+    if not session:
+        return {"success": False, "error": "سشن یافت نشد"}
+
+    messages = db.query(InspectorMessage).filter(
+        InspectorMessage.session_id == session_id
+    ).order_by(InspectorMessage.timestamp.asc()).all()
+
+    return {
+        "success": True,
+        "session": session.to_dict(),
+        "messages": [m.to_dict() for m in messages]
+    }
+
+
+class SaveMessageRequest(BaseModel):
+    session_id: int
+    role: str  # user, assistant, system, action
+    content: str
+    action_type: str = None  # click, scroll, input, navigate, focus, hover
+    model_id: str = None
+    tokens_used: int = None
+
+
+@router.post("/inspector/session/message")
+async def save_inspector_message(
+    request: SaveMessageRequest,
+    db: Session = Depends(get_db)
+):
+    """ذخیره پیام در سشن بازرس"""
+    from ...models.inspector_session import InspectorSession, InspectorMessage
+
+    session = db.query(InspectorSession).filter(InspectorSession.id == request.session_id).first()
+    if not session:
+        return {"success": False, "error": "سشن یافت نشد"}
+
+    msg = InspectorMessage(
+        session_id=request.session_id,
+        role=request.role,
+        content=request.content,
+        action_type=request.action_type,
+        model_id=request.model_id,
+        tokens_used=request.tokens_used,
+        backend_verified=None  # pending
+    )
+    db.add(msg)
+    db.commit()
+    db.refresh(msg)
+
+    return {"success": True, "message": msg.to_dict()}
+
+
+@router.post("/inspector/session/{session_id}/archive")
+async def archive_inspector_session(
+    session_id: int,
+    db: Session = Depends(get_db)
+):
+    """آرشیو کردن سشن بازرس و پاک کردن صفحه چت"""
+    from ...models.inspector_session import InspectorSession
+    from datetime import datetime
+
+    session = db.query(InspectorSession).filter(InspectorSession.id == session_id).first()
+    if not session:
+        return {"success": False, "error": "سشن یافت نشد"}
+
+    # شمارش پیام‌ها برای عنوان
+    msg_count = len(session.messages) if session.messages else 0
+    if not session.title or session.title == "سشن بازرسی":
+        session.title = f"سشن بازرسی ({msg_count} پیام)"
+
+    session.status = "archived"
+    session.closed_at = datetime.utcnow()
+    db.commit()
+
+    slog.info("Inspector session archived", session_id=session_id, message_count=msg_count)
+    return {"success": True, "message": "سشن آرشیو شد", "session": session.to_dict()}
+
+
+@router.post("/inspector/message/{message_id}/verify")
+async def verify_inspector_message(
+    message_id: int,
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    بررسی لاگ‌های بک‌اند برای یک اکشن و زدن تیک تأیید
+    مدل AI لاگ‌های اخیر رو بررسی میکنه و اعلام میکنه آیا خطایی رخ داده یا نه
+    """
+    from ...models.inspector_session import InspectorMessage
+    from ...models.render_log import RenderLog
+    from datetime import datetime, timedelta
+    from sqlalchemy import desc
+
+    msg = db.query(InspectorMessage).filter(InspectorMessage.id == message_id).first()
+    if not msg:
+        return {"success": False, "error": "پیام یافت نشد"}
+
+    # اگر قبلاً بررسی شده، نتیجه رو برگردون
+    if msg.backend_verified is not None:
+        return {
+            "success": True,
+            "message_id": message_id,
+            "verified": msg.backend_verified,
+            "summary": msg.backend_log_summary,
+            "already_checked": True
+        }
+
+    try:
+        # دریافت لاگ‌های اخیر بک‌اند (15 ثانیه اخیر)
+        cutoff = datetime.utcnow() - timedelta(seconds=15)
+        recent_logs = db.query(RenderLog).filter(
+            RenderLog.created_at >= cutoff
+        ).order_by(desc(RenderLog.created_at)).limit(20).all()
+
+        logs_text = ""
+        error_logs = []
+        for log in recent_logs:
+            log_line = f"[{log.level}] {log.message}"
+            logs_text += log_line + "\n"
+            if log.level and log.level.upper() in ("ERROR", "CRITICAL", "FATAL"):
+                error_logs.append(log_line)
+
+        # استفاده از AI برای بررسی لاگ‌ها
+        from ...services.ai_manager import get_ai_manager
+        from ...services.ai_base import Message
+
+        ai_manager = get_ai_manager()
+
+        verify_prompt = f"""شما بازرس لاگ هستید. لاگ‌های اخیر بک‌اند را بررسی کنید.
+
+اکشن کاربر: {msg.content}
+
+لاگ‌های اخیر بک‌اند (15 ثانیه اخیر):
+{logs_text if logs_text.strip() else "(لاگ جدیدی ثبت نشده)"}
+
+وظیفه شما:
+1. آیا خطایی مرتبط با این اکشن وجود دارد؟
+2. اگر خطا هست، مختصر توضیح دهید.
+3. اگر خطا نیست، بنویسید "سالم"
+
+پاسخ خود را دقیقاً در یکی از این فرمت‌ها بدهید:
+OK: سالم
+یا
+ERROR: [توضیح مختصر خطا]"""
+
+        messages = [
+            Message(role="system", content="شما یک بازرس لاگ هستید. فقط وضعیت را گزارش کنید. پاسخ کوتاه و مختصر."),
+            Message(role="user", content=verify_prompt)
+        ]
+
+        # استفاده از سریع‌ترین مدل موجود
+        available = ai_manager.get_available_models()
+        # اولویت: gemini-flash > gpt-4o-mini > هر مدل دیگه
+        fast_model = None
+        for preferred in ["gemini-2.0-flash", "gemini-1.5-flash", "gpt-4o-mini", "claude-3-haiku"]:
+            if preferred in available:
+                fast_model = preferred
+                break
+        if not fast_model and available:
+            fast_model = available[0]
+
+        if not fast_model:
+            # اگر مدلی موجود نیست، فقط بر اساس لاگ‌ها بررسی کن
+            if error_logs:
+                msg.backend_verified = False
+                msg.backend_log_summary = f"خطا در لاگ: {error_logs[0][:100]}"
+            else:
+                msg.backend_verified = True
+                msg.backend_log_summary = "سالم - بدون خطا"
+            db.commit()
+            return {
+                "success": True,
+                "message_id": message_id,
+                "verified": msg.backend_verified,
+                "summary": msg.backend_log_summary
+            }
+
+        response = await ai_manager.generate(
+            model_id=fast_model,
+            messages=messages,
+            max_tokens=150,
+            temperature=0.1
+        )
+
+        ai_result = response.content.strip() if response and response.content else ""
+
+        if ai_result.startswith("OK:") or "سالم" in ai_result:
+            msg.backend_verified = True
+            msg.backend_log_summary = ai_result.replace("OK:", "").strip()
+        elif ai_result.startswith("ERROR:") or "خطا" in ai_result:
+            msg.backend_verified = False
+            msg.backend_log_summary = ai_result.replace("ERROR:", "").strip()
+        else:
+            # اگر فرمت نامشخص بود، بر اساس وجود خطا در لاگ‌ها تصمیم بگیر
+            if error_logs:
+                msg.backend_verified = False
+                msg.backend_log_summary = ai_result or f"خطا: {error_logs[0][:100]}"
+            else:
+                msg.backend_verified = True
+                msg.backend_log_summary = ai_result or "سالم"
+
+        db.commit()
+
+        return {
+            "success": True,
+            "message_id": message_id,
+            "verified": msg.backend_verified,
+            "summary": msg.backend_log_summary,
+            "model_used": fast_model
+        }
+
+    except Exception as e:
+        slog.error("Verify inspector message failed", exception=e, message_id=message_id)
+        # در صورت خطا، فقط بر اساس لاگ‌ها تصمیم بگیر
+        if error_logs:
+            msg.backend_verified = False
+            msg.backend_log_summary = f"خطا در بررسی: {str(e)}"
+        else:
+            msg.backend_verified = True
+            msg.backend_log_summary = "سالم (بررسی AI ناموفق)"
+        db.commit()
+        return {
+            "success": True,
+            "message_id": message_id,
+            "verified": msg.backend_verified,
+            "summary": msg.backend_log_summary
+        }
