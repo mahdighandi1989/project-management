@@ -434,6 +434,14 @@ def migrate_db():
                 cursor.execute("ALTER TABLE model_settings ADD COLUMN temporary_enabled INTEGER DEFAULT 0")
                 logger.info("Added 'temporary_enabled' column to model_settings table")
 
+        # 🆕 Migration برای جدول inspector_messages - ستون verified_by_model
+        if "inspector_messages" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
+            existing_cols = get_columns("inspector_messages")
+
+            if "verified_by_model" not in existing_cols:
+                cursor.execute("ALTER TABLE inspector_messages ADD COLUMN verified_by_model VARCHAR(100)")
+                logger.info("Added 'verified_by_model' column to inspector_messages table")
+
         conn.commit()
         logger.info("Database migration completed")
 
