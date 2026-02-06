@@ -4540,10 +4540,64 @@ async def inject_bridge_script(
                         "detail": str(e)
                     }
 
-            # 🆕 جستجوی هوشمند: دریافت لیست تمام فایل‌های پروژه از GitHub
+            # 🆕 جستجوی فوق‌هوشمند: اول package.json رو بخون، بعد تصمیم بگیر
             if not index_path:
                 try:
                     slog.info(f"🔍 Smart search starting for {owner}/{repo}")
+
+                    # 📦 مرحله ۱: خواندن package.json برای تشخیص فریم‌ورک
+                    detected_framework = None
+                    entry_candidates = []
+
+                    pkg_res = await client.get(
+                        f"https://api.github.com/repos/{owner}/{repo}/contents/package.json",
+                        headers=headers,
+                        timeout=10.0
+                    )
+
+                    if pkg_res.status_code == 200:
+                        pkg_data = pkg_res.json()
+                        if pkg_data.get("encoding") == "base64":
+                            pkg_content = json.loads(base64.b64decode(pkg_data["content"]).decode('utf-8'))
+                            slog.info(f"📦 Found package.json: {pkg_content.get('name', 'unnamed')}")
+
+                            # تشخیص فریم‌ورک از dependencies
+                            deps = {**pkg_content.get('dependencies', {}), **pkg_content.get('devDependencies', {})}
+
+                            if 'next' in deps:
+                                detected_framework = 'nextjs'
+                                entry_candidates = [
+                                    'pages/_app.tsx', 'pages/_app.js', 'pages/_app.jsx',
+                                    'src/pages/_app.tsx', 'src/pages/_app.js',
+                                    'app/layout.tsx', 'app/layout.js', 'src/app/layout.tsx', 'src/app/layout.js'
+                                ]
+                            elif 'nuxt' in deps:
+                                detected_framework = 'nuxt'
+                                entry_candidates = ['app.vue', 'layouts/default.vue', 'pages/index.vue']
+                            elif 'gatsby' in deps:
+                                detected_framework = 'gatsby'
+                                entry_candidates = ['gatsby-browser.js', 'src/pages/index.js', 'src/pages/index.tsx']
+                            elif 'vue' in deps:
+                                detected_framework = 'vue'
+                                entry_candidates = ['src/App.vue', 'src/main.js', 'src/main.ts', 'app/App.vue']
+                            elif 'react' in deps or 'react-dom' in deps:
+                                detected_framework = 'react'
+                                # بررسی اینکه Vite هست یا CRA
+                                if 'vite' in deps:
+                                    entry_candidates = ['src/main.tsx', 'src/main.jsx', 'src/main.js', 'index.html']
+                                else:
+                                    entry_candidates = ['src/index.tsx', 'src/index.jsx', 'src/index.js', 'public/index.html']
+                            elif 'svelte' in deps:
+                                detected_framework = 'svelte'
+                                entry_candidates = ['src/App.svelte', 'src/main.js', 'src/main.ts']
+                            elif 'angular' in deps or '@angular/core' in deps:
+                                detected_framework = 'angular'
+                                entry_candidates = ['src/main.ts', 'src/index.html']
+
+                            slog.info(f"🔧 Detected framework from package.json: {detected_framework}")
+                            slog.info(f"📄 Entry candidates: {entry_candidates}")
+
+                    # 🌳 مرحله ۲: دریافت لیست فایل‌ها
                     tree_res = await client.get(
                         f"https://api.github.com/repos/{owner}/{repo}/git/trees/main?recursive=1",
                         headers=headers,
@@ -4566,105 +4620,34 @@ async def inject_bridge_script(
                         all_files = [item["path"] for item in tree_data.get("tree", []) if item["type"] == "blob"]
                         slog.info(f"📁 Total files in repo: {len(all_files)}")
 
-                        # 🔍 تشخیص نوع پروژه
-                        is_nextjs = any(f in all_files for f in ['next.config.js', 'next.config.ts', 'next.config.mjs'])
-                        is_nuxt = any(f in all_files for f in ['nuxt.config.js', 'nuxt.config.ts'])
-                        is_gatsby = 'gatsby-config.js' in all_files
-                        is_framework_without_html = is_nextjs or is_nuxt or is_gatsby
-                        slog.info(f"🔧 Framework detection: Next.js={is_nextjs}, Nuxt={is_nuxt}, Gatsby={is_gatsby}")
+                        # 🎯 مرحله ۳: پیدا کردن بهترین فایل برای تزریق
 
-                        # فیلتر فایل‌های HTML
-                        html_files = [f for f in all_files if f.endswith('.html')]
-                        slog.info(f"📄 HTML files found: {len(html_files)} - {html_files[:10]}")
+                        # اول فایل‌های HTML رو چک کن
+                        html_files = [f for f in all_files if f.endswith('.html') and 'node_modules' not in f]
 
-                        # امتیازدهی به فایل‌ها برای پیدا کردن بهترین گزینه
+                        # امتیازدهی به HTML ها
                         def score_html_file(path: str) -> int:
                             score = 0
                             path_lower = path.lower()
-
-                            # فایل‌هایی که index.html هستند امتیاز بالا
                             if path_lower.endswith('index.html'):
                                 score += 100
-
-                            # مسیرهای ترجیحی
-                            preferred_dirs = ['public/', 'src/', 'frontend/', 'client/', 'web/', 'app/']
-                            for pref in preferred_dirs:
-                                if pref in path_lower:
-                                    score += 50
-
-                            # جریمه برای build/dist (فایل‌های خروجی)
-                            if 'dist/' in path_lower or 'build/' in path_lower or 'node_modules/' in path_lower:
-                                score -= 30
-
-                            # جریمه برای مسیرهای عمیق
-                            depth = path.count('/')
-                            score -= depth * 5
-
+                            if 'public/' in path_lower:
+                                score += 80
+                            if 'src/' in path_lower and 'public/' not in path_lower:
+                                score += 30
+                            if 'dist/' in path_lower or 'build/' in path_lower:
+                                score -= 50
                             return score
 
-                        # مرتب‌سازی بر اساس امتیاز
                         html_files_scored = [(f, score_html_file(f)) for f in html_files]
                         html_files_scored.sort(key=lambda x: -x[1])
 
-                        # ذخیره لیست فایل‌ها برای استفاده بعدی
-                        found_html_files = [f for f, _ in html_files_scored[:10]]
-
-                        # بهترین فایل را انتخاب کن
-                        for html_path, score in html_files_scored[:5]:  # 5 کاندید برتر را بررسی کن
-                            try:
-                                content_res = await client.get(
-                                    f"https://api.github.com/repos/{owner}/{repo}/contents/{html_path}",
-                                    headers=headers,
-                                    timeout=10.0
-                                )
-                                if content_res.status_code == 200:
-                                    data = content_res.json()
-                                    if data.get("encoding") == "base64":
-                                        content = base64.b64decode(data["content"]).decode('utf-8')
-                                        # بررسی که فایل HTML معتبر باشد (داشتن تگ‌های اصلی)
-                                        if '<html' in content.lower() or '<!doctype' in content.lower() or '<head' in content.lower():
-                                            index_content = content
-                                            index_sha = data["sha"]
-                                            index_path = html_path
-                                            slog.info(f"Smart search found HTML file: {html_path} (score: {score})")
-                                            break
-                            except:
-                                continue
-
-                        # 🆕 اگر HTML پیدا نشد، دنبال فایل‌های JS/TS بگرد
-                        if not index_path and not html_files:
-                            slog.info("No HTML files found, searching for JS/TS entry points...")
-
-                            # لیست فایل‌های entry point به ترتیب اولویت
-                            js_entry_points = [
-                                # Next.js
-                                'pages/_app.tsx', 'pages/_app.js', 'pages/_app.jsx',
-                                'src/pages/_app.tsx', 'src/pages/_app.js',
-                                'app/layout.tsx', 'app/layout.js', 'src/app/layout.tsx',
-                                # React (Create React App / Vite)
-                                'src/App.tsx', 'src/App.jsx', 'src/App.js',
-                                'src/index.tsx', 'src/index.jsx', 'src/index.js',
-                                'src/main.tsx', 'src/main.jsx', 'src/main.js',
-                                # Vue
-                                'src/App.vue', 'src/main.ts', 'src/main.js',
-                                # Generic
-                                'app/App.tsx', 'app/App.js', 'App.tsx', 'App.js',
-                                'index.tsx', 'index.js', 'main.tsx', 'main.js'
-                            ]
-
-                            # پیدا کردن فایل entry point
-                            found_js_files = []
-                            for entry in js_entry_points:
-                                if entry in all_files:
-                                    found_js_files.append(entry)
-
-                            slog.info(f"📄 JS/TS entry points found: {found_js_files[:5]}")
-
-                            # تلاش برای تزریق به اولین فایل پیدا شده
-                            for js_path in found_js_files[:3]:
+                        # اگر HTML با امتیاز بالا پیدا شد، از اون استفاده کن
+                        for html_path, score in html_files_scored:
+                            if score >= 50:  # فقط HTML های خوب
                                 try:
                                     content_res = await client.get(
-                                        f"https://api.github.com/repos/{owner}/{repo}/contents/{js_path}",
+                                        f"https://api.github.com/repos/{owner}/{repo}/contents/{html_path}",
                                         headers=headers,
                                         timeout=10.0
                                     )
@@ -4672,22 +4655,87 @@ async def inject_bridge_script(
                                         data = content_res.json()
                                         if data.get("encoding") == "base64":
                                             content = base64.b64decode(data["content"]).decode('utf-8')
-                                            # بررسی که Bridge قبلاً اضافه نشده باشد
-                                            if 'Inspector Bridge Script' not in content:
-                                                index_content = content
-                                                index_sha = data["sha"]
-                                                index_path = js_path
-                                                # علامت‌گذاری که این یک فایل JS است نه HTML
-                                                is_js_file = True
-                                                slog.info(f"Found JS/TS entry point: {js_path}")
-                                                break
-                                except Exception as js_err:
-                                    slog.warn(f"Failed to fetch {js_path}: {js_err}")
+                                            if '<html' in content.lower() or '<!doctype' in content.lower():
+                                                if 'Inspector Bridge Script' not in content:
+                                                    index_content = content
+                                                    index_sha = data["sha"]
+                                                    index_path = html_path
+                                                    is_js_file = False
+                                                    slog.info(f"✅ Found HTML: {html_path} (score: {score})")
+                                                    break
+                                except:
                                     continue
 
-                            # ذخیره لیست فایل‌های JS برای نمایش به کاربر
-                            if not index_path and found_js_files:
-                                found_html_files = found_js_files  # استفاده از همان متغیر
+                        # 🔍 مرحله ۴: اگر HTML پیدا نشد، از entry candidates استفاده کن
+                        if not index_path and entry_candidates:
+                            slog.info(f"No good HTML found, trying framework entry points: {entry_candidates}")
+                            for candidate in entry_candidates:
+                                if candidate in all_files:
+                                    try:
+                                        content_res = await client.get(
+                                            f"https://api.github.com/repos/{owner}/{repo}/contents/{candidate}",
+                                            headers=headers,
+                                            timeout=10.0
+                                        )
+                                        if content_res.status_code == 200:
+                                            data = content_res.json()
+                                            if data.get("encoding") == "base64":
+                                                content = base64.b64decode(data["content"]).decode('utf-8')
+                                                if 'Inspector Bridge Script' not in content:
+                                                    index_content = content
+                                                    index_sha = data["sha"]
+                                                    index_path = candidate
+                                                    is_js_file = not candidate.endswith('.html')
+                                                    slog.info(f"✅ Found entry point: {candidate}")
+                                                    break
+                                    except Exception as e:
+                                        slog.warn(f"Failed to fetch {candidate}: {e}")
+                                        continue
+
+                        # 🔎 مرحله ۵: اگر هنوز پیدا نشد، جستجوی عمومی
+                        if not index_path:
+                            slog.info("Trying generic search for any entry file...")
+                            generic_patterns = [
+                                # فایل‌های entry point رایج
+                                'src/App.tsx', 'src/App.jsx', 'src/App.js',
+                                'src/index.tsx', 'src/index.jsx', 'src/index.js',
+                                'src/main.tsx', 'src/main.jsx', 'src/main.js', 'src/main.ts',
+                                'app/App.tsx', 'app/App.js',
+                                'App.tsx', 'App.js', 'App.jsx',
+                                'index.tsx', 'index.js',
+                                # HTML های عمومی
+                                'index.html', 'public/index.html'
+                            ]
+
+                            for pattern in generic_patterns:
+                                if pattern in all_files:
+                                    try:
+                                        content_res = await client.get(
+                                            f"https://api.github.com/repos/{owner}/{repo}/contents/{pattern}",
+                                            headers=headers,
+                                            timeout=10.0
+                                        )
+                                        if content_res.status_code == 200:
+                                            data = content_res.json()
+                                            if data.get("encoding") == "base64":
+                                                content = base64.b64decode(data["content"]).decode('utf-8')
+                                                if 'Inspector Bridge Script' not in content:
+                                                    index_content = content
+                                                    index_sha = data["sha"]
+                                                    index_path = pattern
+                                                    is_js_file = not pattern.endswith('.html')
+                                                    slog.info(f"✅ Found via generic search: {pattern}")
+                                                    break
+                                    except:
+                                        continue
+
+                        # 📝 ذخیره اطلاعات برای نمایش به کاربر
+                        found_html_files = [f for f, _ in html_files_scored[:10]]
+                        if detected_framework:
+                            is_framework_without_html = detected_framework in ['nextjs', 'nuxt', 'gatsby']
+                            is_nextjs = detected_framework == 'nextjs'
+                            is_nuxt = detected_framework == 'nuxt'
+                            is_gatsby = detected_framework == 'gatsby'
 
                 except Exception as e:
                     slog.warn(f"Smart HTML search failed: {e}")
