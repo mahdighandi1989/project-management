@@ -4548,6 +4548,7 @@ async def inject_bridge_script(
             package_json_status = None
             tree_status = None
             deps_found = {}
+            default_branch = 'main'
 
             if not index_path:
                 try:
@@ -4609,13 +4610,35 @@ async def inject_bridge_script(
                             slog.info(f"📄 Entry candidates: {entry_candidates}")
 
                     # 🌳 مرحله ۲: دریافت لیست فایل‌ها
+                    # اول اطلاعات ریپو رو بگیر برای default branch
+                    default_branch = 'main'
+                    try:
+                        repo_info = await client.get(
+                            f"https://api.github.com/repos/{owner}/{repo}",
+                            headers=headers,
+                            timeout=10.0
+                        )
+                        if repo_info.status_code == 200:
+                            default_branch = repo_info.json().get('default_branch', 'main')
+                            slog.info(f"🌿 Default branch: {default_branch}")
+                    except Exception as e:
+                        slog.warn(f"Failed to get repo info: {e}")
+
                     tree_res = await client.get(
-                        f"https://api.github.com/repos/{owner}/{repo}/git/trees/main?recursive=1",
+                        f"https://api.github.com/repos/{owner}/{repo}/git/trees/{default_branch}?recursive=1",
                         headers=headers,
                         timeout=15.0
                     )
 
-                    # اگر branch main نبود، master را امتحان کن
+                    # اگر branch پیش‌فرض کار نکرد، main و master رو امتحان کن
+                    if tree_res.status_code == 404 and default_branch != 'main':
+                        slog.info(f"Branch '{default_branch}' not found, trying 'main'")
+                        tree_res = await client.get(
+                            f"https://api.github.com/repos/{owner}/{repo}/git/trees/main?recursive=1",
+                            headers=headers,
+                            timeout=15.0
+                        )
+
                     if tree_res.status_code == 404:
                         slog.info("Branch 'main' not found, trying 'master'")
                         tree_res = await client.get(
@@ -4779,6 +4802,7 @@ async def inject_bridge_script(
                     # 🔍 Debug info - اطلاعات کامل برای عیب‌یابی
                     "debug": {
                         "github_path": f"{owner}/{repo}",
+                        "default_branch": default_branch,
                         "total_files_found": len(all_files),
                         "html_files_count": len(found_html_files),
                         "search_error": search_error,

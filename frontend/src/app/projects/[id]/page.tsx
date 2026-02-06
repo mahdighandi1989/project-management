@@ -1381,6 +1381,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         if (data.debug) {
           console.log('🔍 DEBUG INFO:');
           console.log('  - GitHub Path:', data.debug.github_path);
+          console.log('  - Default Branch:', data.debug.default_branch);
           console.log('  - Package.json Found:', data.debug.package_json_found);
           console.log('  - Package.json Status:', data.debug.package_json_status);
           console.log('  - Tree Status:', data.debug.tree_status);
