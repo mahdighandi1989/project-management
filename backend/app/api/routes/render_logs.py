@@ -2194,7 +2194,7 @@ async def inspector_chat(
         messages = [Message(role="system", content=system_prompt)]
 
         # افزودن تاریخچه چت - بیشتر اگر context جلسه داریم
-        history_limit = 20 if session_ctx else 10
+        history_limit = 50 if session_ctx else 20
         if request.chat_history:
             for msg in request.chat_history[-history_limit:]:
                 # نقش system را به user تبدیل کن (بعضی مدل‌ها system اضافی نمی‌پذیرند)
@@ -2278,7 +2278,7 @@ async def inspector_chat_multi(
         messages = [Message(role="system", content=system_prompt)]
 
         # افزودن تاریخچه چت - بیشتر اگر context جلسه داریم
-        history_limit = 20 if session_ctx else 10
+        history_limit = 50 if session_ctx else 20
         if request.chat_history:
             for msg in request.chat_history[-history_limit:]:
                 role = msg.role if msg.role in ('user', 'assistant') else 'user'
@@ -7485,6 +7485,734 @@ async def fix_error(request: FixRequest, db: Session = Depends(get_db)):
 
     return StreamingResponse(
         fix_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+# ============================================
+# 🧠 چت هوشمند - Smart Chat (پس از بررسی/اصلاح)
+# ============================================
+
+class SmartChatRequest(BaseModel):
+    """درخواست چت هوشمند با context کامل جلسه"""
+    project_id: str
+    model_ids: List[str]
+    message: str
+    chat_history: Optional[List[InspectorChatMessage]] = None
+    backend_logs: Optional[List[dict]] = None
+    frontend_url: Optional[str] = None
+
+
+class ApplyActionRequest(BaseModel):
+    """درخواست اجرای اکشن پیشنهادی"""
+    project_id: str
+    model_ids: List[str]
+    action_description: str
+    action_files: List[dict]  # [{path, content, operation: 'modify'|'create'|'delete'}]
+    commit_message: str
+    original_message: str  # پیام اصلی کاربر
+
+
+@router.post("/inspector/smart-chat")
+async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
+    """
+    چت هوشمند: پیام کاربر رو تحلیل میکنه و:
+    1. اگر سؤال باشه: با اشراف کامل پاسخ میده
+    2. اگر درخواست اقدام باشه: تحلیل + پیشنهاد اصلاح + دکمه اعمال
+    SSE streaming برای گزارش لحظه‌ای
+    """
+    import os
+    from fastapi.responses import StreamingResponse
+    from ...models.project import Project
+    from ...services.github_import import get_github_import_service
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+
+    project = db.query(Project).filter(Project.id == request.project_id).first()
+    if not project:
+        return {"success": False, "error": "پروژه یافت نشد"}
+
+    # استخراج اطلاعات GitHub
+    extra_data = {}
+    if project.extra_data:
+        try:
+            extra_data = json.loads(project.extra_data) if isinstance(project.extra_data, str) else project.extra_data
+        except Exception:
+            extra_data = {}
+
+    owner = extra_data.get("owner", "")
+    repo = extra_data.get("repo", "")
+    github_path = project.github_path or ""
+    if not owner and "/" in github_path:
+        owner, repo = github_path.split("/", 1)
+
+    token = os.environ.get("GITHUB_TOKEN", "")
+    model_ids = request.model_ids
+    primary_model = model_ids[0] if model_ids else "gemini-2.0-flash"
+
+    async def event_stream():
+        github_svc = get_github_import_service()
+        ai_manager = get_ai_manager()
+
+        def sse(event: str, data: dict) -> str:
+            return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        # --- مرحله ۱: ساخت context کامل از تاریخچه ---
+        yield sse("progress", {
+            "step": "analyzing",
+            "message": f"🤖 مدل {primary_model} در حال تحلیل درخواست شما..."
+        })
+
+        # ساخت تاریخچه غنی برای مدل
+        history_text = ""
+        if request.chat_history:
+            for msg in request.chat_history[-50:]:
+                role_label = "کاربر" if msg.role == "user" else "AI" if msg.role == "assistant" else "سیستم"
+                history_text += f"[{role_label}]: {msg.content}\n"
+
+        # ساخت context لاگ‌ها
+        logs_text = ""
+        if request.backend_logs:
+            errors = [l for l in request.backend_logs if l.get('level') in ('error', 'warn')]
+            for log in errors[-15:]:
+                logs_text += f"[{log.get('level', 'info').upper()}] {log.get('message', '')[:200]}\n"
+
+        # --- مرحله ۲: طبقه‌بندی پیام (سؤال vs اقدام) ---
+        classify_prompt = f"""پیام کاربر را طبقه‌بندی کن:
+
+## تاریخچه مکالمه:
+{history_text[-3000:]}
+
+## پیام جدید کاربر:
+{request.message}
+
+## دستورالعمل:
+- اگر فقط سؤال است و نیاز به تغییر کد ندارد: بنویس QUESTION
+- اگر نیاز به تغییر/اصلاح/ارتقای کد دارد: بنویس ACTION
+- اگر لاگ خطای دیپلوی یا خطای runtime است: بنویس ERROR_LOG
+- فقط یک کلمه بنویس: QUESTION یا ACTION یا ERROR_LOG"""
+
+        try:
+            classify_response = await ai_manager.generate(
+                model_id=primary_model,
+                messages=[
+                    Message(role="system", content="طبقه‌بند پیام. فقط یک کلمه بنویس."),
+                    Message(role="user", content=classify_prompt)
+                ],
+                max_tokens=20,
+                temperature=0.1
+            )
+            msg_type = classify_response.content.strip().upper()
+            if "ACTION" in msg_type:
+                msg_type = "ACTION"
+            elif "ERROR" in msg_type:
+                msg_type = "ERROR_LOG"
+            else:
+                msg_type = "QUESTION"
+        except Exception:
+            msg_type = "QUESTION"
+
+        yield sse("progress", {
+            "step": "classified",
+            "message": f"📋 نوع درخواست: {'سؤال' if msg_type == 'QUESTION' else 'لاگ خطا' if msg_type == 'ERROR_LOG' else 'درخواست اقدام'}",
+            "msg_type": msg_type
+        })
+
+        # --- مرحله ۳: پاسخ بر اساس نوع پیام ---
+
+        if msg_type == "QUESTION":
+            # سؤال ساده: پاسخ با context کامل
+            answer_prompt = f"""شما بازرس هوشمند پروژه {owner}/{repo} هستید.
+
+## تاریخچه کامل مکالمه:
+{history_text[-4000:]}
+
+## لاگ‌های اخیر:
+{logs_text[-1500:] if logs_text else 'لاگی موجود نیست'}
+
+## URL فرانت‌اند: {request.frontend_url or 'نامشخص'}
+
+## پیام جدید کاربر:
+{request.message}
+
+## دستورالعمل:
+- بر اساس تمام اطلاعات موجود (تاریخچه + لاگ‌ها + گزارش‌های قبلی) پاسخ بده
+- اگر پیام مربوط به خطای قبلی است، به گزارش بررسی قبلی ارجاع بده
+- اگر لاگ خطایی paste شده، آن را دقیق تحلیل کن و ارتباطش با مکالمات قبلی را بگو
+- پاسخ دقیق، عملی و به فارسی بده"""
+
+            try:
+                response = await ai_manager.generate(
+                    model_id=primary_model,
+                    messages=[
+                        Message(role="system", content="بازرس هوشمند هستی. با اشراف کامل پاسخ بده."),
+                        Message(role="user", content=answer_prompt)
+                    ],
+                    max_tokens=4096,
+                    temperature=0.7
+                )
+
+                yield sse("response", {
+                    "type": "answer",
+                    "content": response.content,
+                    "model_used": response.model_id,
+                    "tokens_used": response.tokens_used,
+                    "has_action": False,
+                })
+
+            except Exception as e:
+                yield sse("error", {"message": f"خطا در پاسخ‌دهی: {str(e)[:100]}"})
+
+        elif msg_type == "ERROR_LOG":
+            # لاگ خطا: تحلیل و ارتباط با مکالمات قبلی
+            yield sse("progress", {
+                "step": "analyzing_error_log",
+                "message": "🔍 در حال تحلیل لاگ خطا و ارتباط آن با مکالمات قبلی..."
+            })
+
+            # خواندن فایل‌های مرتبط از GitHub اگر دسترسی داریم
+            code_context = ""
+            if owner and repo:
+                try:
+                    tree_result = await github_svc.get_repo_tree(owner, repo, token=token)
+                    if tree_result.get("success"):
+                        all_files = [f for f in tree_result.get("tree", []) if f.get("type") == "blob"]
+                        code_files = [f["path"] for f in all_files
+                                      if f.get("size", 0) < 200000
+                                      and not any(skip in f["path"] for skip in [
+                                          "node_modules/", ".git/", "dist/", "build/", ".next/",
+                                          "__pycache__/", ".cache/", "vendor/", "package-lock.json",
+                                          "yarn.lock", ".png", ".jpg", ".svg", ".ico", ".woff",
+                                          "InspectorBridge", "inspector-bridge"
+                                      ])]
+
+                        # AI انتخاب فایل بر اساس لاگ خطا
+                        select_prompt = f"""بر اساس این خطا، فایل‌های مرتبط را انتخاب کن:
+
+خطا/لاگ:
+{request.message[:2000]}
+
+تاریخچه (خلاصه):
+{history_text[-1000:]}
+
+فایل‌های پروژه:
+{chr(10).join(code_files[:300])}
+
+حداکثر ۵ فایل مرتبط. فقط مسیرها، هر کدام در یک خط."""
+
+                        select_response = await ai_manager.generate(
+                            model_id=primary_model,
+                            messages=[
+                                Message(role="system", content="فقط مسیر فایل‌ها را بنویس."),
+                                Message(role="user", content=select_prompt)
+                            ],
+                            max_tokens=300,
+                            temperature=0.2
+                        )
+
+                        selected = []
+                        for line in select_response.content.strip().split("\n"):
+                            line = line.strip().strip("`").strip("- ")
+                            if line in code_files:
+                                selected.append(line)
+                            if len(selected) >= 5:
+                                break
+
+                        for file_path in selected:
+                            yield sse("progress", {
+                                "step": "reading_file",
+                                "message": f"📖 در حال خواندن {file_path}..."
+                            })
+                            try:
+                                result = await github_svc.get_file_content(owner, repo, file_path, token=token)
+                                if result.get("success"):
+                                    content = result.get("content", "")
+                                    if len(content) > 10000:
+                                        content = content[:10000] + "\n... [truncated]"
+                                    code_context += f"\n\n=== {file_path} ===\n{content}"
+                            except Exception:
+                                pass
+                            await asyncio.sleep(0.2)
+
+                except Exception as e:
+                    yield sse("progress", {
+                        "step": "github_error",
+                        "message": f"⚠️ دسترسی به GitHub محدود: {str(e)[:60]}"
+                    })
+
+            error_analysis_prompt = f"""شما بازرس ارشد پروژه {owner}/{repo} هستید.
+
+## ⚠️ مهم: این پیام کاربر حاوی لاگ خطا یا گزارش مشکل دیپلوی است.
+آن را در ارتباط با تمام مکالمات قبلی این جلسه تحلیل کنید.
+
+## تاریخچه کامل مکالمه:
+{history_text[-4000:]}
+
+## پیام جدید کاربر (حاوی لاگ خطا):
+{request.message}
+
+## لاگ‌های بک‌اند:
+{logs_text[-1500:] if logs_text else 'موجود نیست'}
+
+{f'## کد فایل‌های مرتبط:{code_context}' if code_context else ''}
+
+## وظیفه:
+1. لاگ خطا را دقیق بخوان
+2. ارتباط آن را با بررسی/اصلاح قبلی در این جلسه شناسایی کن
+3. علت دقیق خطا را بگو
+4. اگر اصلاح قبلی مشکل‌ساز بوده، صادقانه بگو
+5. راه‌حل دقیق ارائه بده
+
+## فرمت:
+### 🔗 ارتباط با مکالمات قبلی
+[توضیح ارتباط]
+
+### 🔍 تحلیل خطا
+[تحلیل دقیق]
+
+### 🛠️ راه‌حل پیشنهادی
+[کد اصلاحی و مراحل]
+
+### 📁 فایل‌هایی که باید تغییر کنند
+[لیست فایل‌ها با توضیح تغییرات - هر فایل در فرمت: `مسیر/فایل`: توضیح]
+
+### 📝 action_plan
+```json
+{{
+  "files": [
+    {{
+      "path": "مسیر/فایل",
+      "operation": "modify",
+      "description": "توضیح تغییر",
+      "content": "محتوای کامل فایل اصلاح‌شده"
+    }}
+  ],
+  "commit_message": "پیام کامیت مناسب"
+}}
+```
+⚠️ اگر نمی‌توانی محتوای کامل فایل اصلاح‌شده را ارائه دهی، action_plan را خالی بگذار."""
+
+            try:
+                response = await ai_manager.generate(
+                    model_id=primary_model,
+                    messages=[
+                        Message(role="system", content="بازرس ارشد هستی. لاگ خطا را با context قبلی تحلیل کن."),
+                        Message(role="user", content=error_analysis_prompt)
+                    ],
+                    max_tokens=6144,
+                    temperature=0.5
+                )
+
+                # استخراج action_plan
+                import re
+                action_plan = None
+                try:
+                    json_match = re.search(r'```json\s*\n(.*?)\n```', response.content, re.DOTALL)
+                    if json_match:
+                        parsed = json.loads(json_match.group(1))
+                        if parsed.get("files") and len(parsed["files"]) > 0:
+                            action_plan = parsed
+                except Exception:
+                    pass
+
+                has_code_action = action_plan is not None or any(marker in response.content for marker in [
+                    "```", "فایل‌هایی که باید تغییر", "اصلاح کنید"
+                ])
+
+                yield sse("response", {
+                    "type": "error_analysis",
+                    "content": response.content,
+                    "model_used": response.model_id,
+                    "tokens_used": response.tokens_used,
+                    "has_action": has_code_action,
+                    "action_plan": action_plan,
+                })
+
+            except Exception as e:
+                yield sse("error", {"message": f"خطا: {str(e)[:100]}"})
+
+        else:  # ACTION
+            # درخواست اقدام: تحلیل عمیق + آماده‌سازی تغییرات
+            yield sse("progress", {
+                "step": "reading_project",
+                "message": f"📂 در حال خواندن ساختار پروژه {owner}/{repo}..."
+            })
+
+            code_context = ""
+            code_files = []
+            if owner and repo:
+                try:
+                    tree_result = await github_svc.get_repo_tree(owner, repo, token=token)
+                    if tree_result.get("success"):
+                        all_files = [f for f in tree_result.get("tree", []) if f.get("type") == "blob"]
+                        code_files = [f["path"] for f in all_files
+                                      if f.get("size", 0) < 200000
+                                      and not any(skip in f["path"] for skip in [
+                                          "node_modules/", ".git/", "dist/", "build/", ".next/",
+                                          "__pycache__/", ".cache/", "vendor/", "package-lock.json",
+                                          "yarn.lock", ".png", ".jpg", ".svg", ".ico", ".woff",
+                                          "InspectorBridge", "inspector-bridge"
+                                      ])]
+
+                        yield sse("progress", {
+                            "step": "tree_loaded",
+                            "message": f"✅ ساختار پروژه خوانده شد ({len(code_files)} فایل)"
+                        })
+
+                        # AI انتخاب فایل‌های مرتبط
+                        yield sse("progress", {
+                            "step": "selecting_files",
+                            "message": f"🤖 مدل {primary_model} در حال شناسایی فایل‌های مرتبط..."
+                        })
+
+                        select_prompt = f"""بر اساس درخواست و تاریخچه، فایل‌های مرتبط را انتخاب کن:
+
+درخواست کاربر:
+{request.message}
+
+تاریخچه (خلاصه):
+{history_text[-2000:]}
+
+فایل‌های پروژه:
+{chr(10).join(code_files[:500])}
+
+⚠️ فایل‌هایی را انتخاب کن که:
+- مستقیماً باید تغییر کنند
+- وابستگی‌های مرتبط هستند (imports, types, configs)
+- برای فهم ساختار لازمند
+
+حداکثر ۱۰ فایل. فقط مسیرها، هر کدام در یک خط."""
+
+                        select_response = await ai_manager.generate(
+                            model_id=primary_model,
+                            messages=[
+                                Message(role="system", content="فقط مسیر فایل‌ها."),
+                                Message(role="user", content=select_prompt)
+                            ],
+                            max_tokens=500,
+                            temperature=0.2
+                        )
+
+                        selected = []
+                        for line in select_response.content.strip().split("\n"):
+                            line = line.strip().strip("`").strip("- ")
+                            if line in code_files:
+                                selected.append(line)
+                            if len(selected) >= 10:
+                                break
+
+                        yield sse("progress", {
+                            "step": "files_selected",
+                            "message": f"📋 {len(selected)} فایل مرتبط شناسایی شد"
+                        })
+
+                        # خواندن فایل‌ها
+                        for i, file_path in enumerate(selected):
+                            yield sse("progress", {
+                                "step": "reading_file",
+                                "message": f"📖 خواندن {file_path} ({i+1}/{len(selected)})..."
+                            })
+                            try:
+                                result = await github_svc.get_file_content(owner, repo, file_path, token=token)
+                                if result.get("success"):
+                                    content = result.get("content", "")
+                                    if len(content) > 12000:
+                                        content = content[:12000] + "\n... [truncated]"
+                                    code_context += f"\n\n=== {file_path} ===\n{content}"
+                            except Exception:
+                                pass
+                            await asyncio.sleep(0.2)
+
+                except Exception as e:
+                    yield sse("progress", {
+                        "step": "github_error",
+                        "message": f"⚠️ خطا در دسترسی GitHub: {str(e)[:60]}"
+                    })
+
+            # --- تحلیل عمیق و تولید پاسخ + اکشن ---
+            yield sse("progress", {
+                "step": "deep_analysis",
+                "message": f"🧠 مدل {primary_model} در حال تحلیل عمیق و آماده‌سازی تغییرات..."
+            })
+
+            action_prompt = f"""شما بازرس ارشد و توسعه‌دهنده پروژه {owner}/{repo} هستید.
+
+## تاریخچه کامل مکالمه:
+{history_text[-4000:]}
+
+## درخواست جدید کاربر:
+{request.message}
+
+## لاگ‌های اخیر:
+{logs_text[-1000:] if logs_text else 'موجود نیست'}
+
+## کد فایل‌های مرتبط:
+{code_context if code_context else 'دسترسی به GitHub محدود است'}
+
+## ⚠️ قوانین:
+1. هیچ حدس و گمانی در کار نباشد - فقط بر اساس کد واقعی
+2. تمام وابستگی‌ها (imports, types, configs) را بررسی کن
+3. تغییرات باید با ساختار فعلی پروژه سازگار باشد
+4. اگر فایلی لازم است که ندیده‌ای، صادقانه بگو
+
+## فرمت پاسخ (حتماً JSON معتبر در بلوک action_plan):
+
+### 📋 تحلیل درخواست
+[توضیح دقیق چه چیزی باید تغییر کنه]
+
+### 🔍 بررسی وابستگی‌ها
+[چه فایل‌هایی تحت تأثیر قرار می‌گیرند]
+
+### 🛠️ تغییرات پیشنهادی
+[توضیح کامل هر تغییر]
+
+### 📝 action_plan
+```json
+{{
+  "files": [
+    {{
+      "path": "مسیر/فایل",
+      "operation": "modify",
+      "description": "توضیح تغییر",
+      "content": "محتوای کامل فایل جدید (نه فقط تکه‌ای از آن)"
+    }}
+  ],
+  "commit_message": "پیام کامیت مناسب"
+}}
+```
+
+⚠️ اگر نمی‌توانی محتوای کامل فایل را ارائه دهی (مثلاً فایل را نخوانده‌ای):
+- در action_plan آن فایل را نذار
+- صادقانه بگو کدام فایل‌ها را نداری"""
+
+            try:
+                response = await ai_manager.generate(
+                    model_id=primary_model,
+                    messages=[
+                        Message(role="system", content="توسعه‌دهنده ارشد. تغییرات دقیق و action_plan معتبر ارائه بده."),
+                        Message(role="user", content=action_prompt)
+                    ],
+                    max_tokens=8192,
+                    temperature=0.4
+                )
+
+                # استخراج action_plan از پاسخ
+                import re
+                action_plan = None
+                content = response.content
+                try:
+                    # پیدا کردن JSON در بلوک action_plan
+                    json_match = re.search(r'```json\s*\n(.*?)\n```', content, re.DOTALL)
+                    if json_match:
+                        action_plan = json.loads(json_match.group(1))
+                except Exception:
+                    pass
+
+                yield sse("response", {
+                    "type": "action",
+                    "content": content,
+                    "model_used": response.model_id,
+                    "tokens_used": response.tokens_used,
+                    "has_action": action_plan is not None,
+                    "action_plan": action_plan,
+                })
+
+            except Exception as e:
+                yield sse("error", {"message": f"خطا: {str(e)[:100]}"})
+
+        yield sse("done", {"success": True})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+@router.post("/inspector/apply-action")
+async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db)):
+    """
+    اعمال تغییرات پیشنهادی: ساخت branch، commit و PR
+    SSE streaming برای گزارش لحظه‌ای
+    """
+    import os
+    from fastapi.responses import StreamingResponse
+    from ...models.project import Project
+    from ...services.github_pr_service import get_github_pr_service
+
+    project = db.query(Project).filter(Project.id == request.project_id).first()
+    if not project:
+        return {"success": False, "error": "پروژه یافت نشد"}
+
+    extra_data = {}
+    if project.extra_data:
+        try:
+            extra_data = json.loads(project.extra_data) if isinstance(project.extra_data, str) else project.extra_data
+        except Exception:
+            extra_data = {}
+
+    owner = extra_data.get("owner", "")
+    repo = extra_data.get("repo", "")
+    github_path = project.github_path or ""
+    if not owner and "/" in github_path:
+        owner, repo = github_path.split("/", 1)
+
+    if not owner or not repo:
+        return {"success": False, "error": "اطلاعات GitHub پروژه یافت نشد"}
+
+    token = os.environ.get("GITHUB_TOKEN", "")
+
+    async def event_stream():
+        pr_svc = get_github_pr_service()
+
+        def sse(event: str, data: dict) -> str:
+            return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        # --- ساخت branch ---
+        branch_name = f"inspector/smart-fix-{int(datetime.now().timestamp())}"
+        yield sse("progress", {
+            "step": "creating_branch",
+            "message": f"🌿 در حال ساخت branch: {branch_name}..."
+        })
+
+        try:
+            branch_result = await pr_svc.create_branch(
+                owner=owner,
+                repo=repo,
+                new_branch=branch_name,
+                token=token
+            )
+            if not branch_result.get("success"):
+                yield sse("error", {"message": f"خطا در ساخت branch: {branch_result.get('error', 'unknown')}"})
+                yield sse("done", {"success": False})
+                return
+
+            yield sse("progress", {
+                "step": "branch_created",
+                "message": f"✅ Branch ساخته شد: {branch_name}"
+            })
+        except Exception as e:
+            yield sse("error", {"message": f"خطا: {str(e)[:80]}"})
+            yield sse("done", {"success": False})
+            return
+
+        # --- Commit فایل‌ها ---
+        committed_files = []
+        for i, f in enumerate(request.action_files):
+            file_path = f.get("path", "")
+            file_content = f.get("content", "")
+            operation = f.get("operation", "modify")
+
+            if not file_path or not file_content:
+                continue
+
+            yield sse("progress", {
+                "step": "committing_file",
+                "message": f"📝 Commit {file_path} ({i+1}/{len(request.action_files)})...",
+                "file": file_path
+            })
+
+            try:
+                commit_result = await pr_svc.create_or_update_file(
+                    owner=owner,
+                    repo=repo,
+                    path=file_path,
+                    content=file_content,
+                    message=f"fix: {request.commit_message} - {file_path}",
+                    branch=branch_name,
+                    token=token
+                )
+
+                if commit_result.get("success"):
+                    committed_files.append(file_path)
+                    yield sse("progress", {
+                        "step": "file_committed",
+                        "message": f"✅ {file_path} commit شد"
+                    })
+                else:
+                    yield sse("progress", {
+                        "step": "file_error",
+                        "message": f"⚠️ خطا در commit {file_path}: {commit_result.get('error', '')[:60]}"
+                    })
+            except Exception as e:
+                yield sse("progress", {
+                    "step": "file_error",
+                    "message": f"⚠️ خطا: {str(e)[:60]}"
+                })
+            await asyncio.sleep(0.3)
+
+        if not committed_files:
+            yield sse("error", {"message": "هیچ فایلی commit نشد"})
+            yield sse("done", {"success": False})
+            return
+
+        # --- ساخت PR ---
+        yield sse("progress", {
+            "step": "creating_pr",
+            "message": "📋 در حال ساخت Pull Request..."
+        })
+
+        try:
+            pr_body = f"""## 🔧 اعمال تغییرات بازرس ویژه
+
+**درخواست کاربر:**
+{request.original_message[:200]}
+
+**توضیح تغییرات:**
+{request.commit_message}
+
+**فایل‌های تغییر یافته:**
+{chr(10).join(f'- `{f}`' for f in committed_files)}
+
+---
+_ساخته شده توسط بازرس ویژه (Inspector)_"""
+
+            pr_result = await pr_svc.create_pull_request(
+                owner=owner,
+                repo=repo,
+                title=f"🔧 Inspector: {request.commit_message[:60]}",
+                body=pr_body,
+                head_branch=branch_name,
+                token=token
+            )
+
+            if pr_result.get("success"):
+                pr_url = pr_result.get("html_url", pr_result.get("url", ""))
+                yield sse("apply_complete", {
+                    "success": True,
+                    "message": f"✅ Pull Request ساخته شد!\n\n🔗 {pr_url}",
+                    "pr_url": pr_url,
+                    "branch": branch_name,
+                    "files_committed": committed_files,
+                })
+            else:
+                yield sse("apply_complete", {
+                    "success": True,
+                    "message": f"✅ فایل‌ها commit شدند در branch {branch_name}\n⚠️ ساخت PR ناموفق: {pr_result.get('error', '')[:80]}",
+                    "branch": branch_name,
+                    "files_committed": committed_files,
+                })
+        except Exception as e:
+            yield sse("apply_complete", {
+                "success": True,
+                "message": f"✅ فایل‌ها commit شدند در branch {branch_name}\n⚠️ خطا در ساخت PR: {str(e)[:80]}",
+                "branch": branch_name,
+                "files_committed": committed_files,
+            })
+
+        yield sse("done", {"success": True})
+
+    return StreamingResponse(
+        event_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

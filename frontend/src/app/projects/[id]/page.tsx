@@ -1706,6 +1706,110 @@ export default function ProjectDetailPage() {
     }
   };
 
+  // 🧠 اعمال تغییرات پیشنهادی (دکمه "اعمال" در پاسخ‌های smart-chat)
+  const applySmartAction = async (msgId: string) => {
+    const msg = inspectorChatMessages.find(m => m.id === msgId) as any;
+    if (!msg?.action_plan?.files || msg.action_plan.files.length === 0) {
+      setInspectorChatMessages(prev => [...prev, {
+        id: `apply_err_${Date.now()}`,
+        role: 'system' as const,
+        content: '⚠️ اطلاعات تغییرات پیدا نشد. لطفاً مجدد درخواست بدهید.',
+        timestamp: new Date(),
+      }]);
+      return;
+    }
+
+    // 🔒 قفل
+    setInspectorOpLock(true);
+    setInspectorOpType('fix');
+    inspectorOpAbortRef.current = new AbortController();
+
+    setInspectorChatMessages(prev => [...prev, {
+      id: `apply_start_${Date.now()}`,
+      role: 'system' as const,
+      content: `🔧 شروع اعمال تغییرات (${msg.action_plan.files.length} فایل)...`,
+      timestamp: new Date(),
+    }]);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/apply-action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: projectId,
+          model_ids: inspectorSelectedModels,
+          action_description: msg.action_plan.commit_message || 'Smart fix',
+          action_files: msg.action_plan.files,
+          commit_message: msg.action_plan.commit_message || 'Inspector smart fix',
+          original_message: msg.original_message || '',
+        }),
+        signal: inspectorOpAbortRef.current?.signal,
+      });
+
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = '';
+
+      if (!reader) throw new Error('No reader');
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        sseBuffer += decoder.decode(value, { stream: true });
+        const lines = sseBuffer.split('\n');
+        sseBuffer = lines.pop() || '';
+
+        let eventType = '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            eventType = line.slice(7).trim();
+          } else if (line.startsWith('data: ') && eventType) {
+            try {
+              const data = JSON.parse(line.slice(6));
+
+              if (eventType === 'progress') {
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `apply_p_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                  role: 'system' as const,
+                  content: data.message,
+                  timestamp: new Date(),
+                }]);
+              } else if (eventType === 'error') {
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `apply_err_${Date.now()}`,
+                  role: 'system' as const,
+                  content: `❌ ${data.message}`,
+                  timestamp: new Date(),
+                }]);
+              } else if (eventType === 'apply_complete') {
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `apply_done_${Date.now()}`,
+                  role: 'assistant' as const,
+                  content: data.message + (data.pr_url ? `\n\n🔗 [مشاهده Pull Request](${data.pr_url})` : ''),
+                  timestamp: new Date(),
+                }]);
+              }
+            } catch (e) {}
+            eventType = '';
+          }
+        }
+      }
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        setInspectorChatMessages(prev => [...prev, {
+          id: `apply_fail_${Date.now()}`,
+          role: 'system' as const,
+          content: `❌ خطا در اعمال تغییرات: ${err.message}`,
+          timestamp: new Date(),
+        }]);
+      }
+    } finally {
+      setInspectorOpLock(false);
+      setInspectorOpType(null);
+    }
+  };
+
   // 🆕 تشخیص اینکه آیا این یک task ویژوال است
   const isVisualTask = (message: string): boolean => {
     const visualKeywords = [
@@ -2622,23 +2726,22 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           });
         }
       } else {
-        // حالت انتخاب دستی - با تاریخچه غنی‌شده از جلسه
+        // 🧠 حالت چت هوشمند - SSE streaming با تاریخچه کامل
         // ساخت تاریخچه غنی: شامل گزارش‌های بررسی، خطاها و پیام‌های مهم
         const chatHistory = inspectorChatMessages
           .filter(m => {
-            // فیلتر پیام‌های مهم (حذف progress های تکراری)
-            if (m.role === 'system' && m.content?.startsWith('🔍 شروع')) return true; // شروع بررسی
-            if (m.role === 'system' && m.content?.startsWith('🔧 شروع')) return true; // شروع اصلاح
-            if (m.role === 'system' && m.content?.startsWith('⏹')) return true; // لغو
-            if (m.role === 'system' && m.content?.startsWith('❌')) return true; // خطاها
-            if ((m as any).action_type === 'investigate_report') return true; // گزارش بررسی
-            if ((m as any).action_type === 'error' || (m as any).action_type === 'console-error') return true; // خطاهای فرانت
-            if (m.role === 'user') return true; // پیام‌های کاربر
-            if (m.role === 'assistant' && !(m.content?.startsWith('🔍 در حال'))) return true; // پاسخ‌های مدل
-            if (m.role === 'action' && (m as any).backend_verified === false) return true; // اکشن‌های ✕
+            if (m.role === 'system' && m.content?.startsWith('🔍 شروع')) return true;
+            if (m.role === 'system' && m.content?.startsWith('🔧 شروع')) return true;
+            if (m.role === 'system' && m.content?.startsWith('⏹')) return true;
+            if (m.role === 'system' && m.content?.startsWith('❌')) return true;
+            if ((m as any).action_type === 'investigate_report') return true;
+            if ((m as any).action_type === 'error' || (m as any).action_type === 'console-error') return true;
+            if (m.role === 'user') return true;
+            if (m.role === 'assistant' && !(m.content?.startsWith('🔍 در حال'))) return true;
+            if (m.role === 'action' && (m as any).backend_verified === false) return true;
             return false;
           })
-          .slice(-30) // آخرین 30 پیام مهم
+          .slice(-50)
           .map(m => ({
             role: m.role === 'action' ? 'system' : m.role,
             content: (m as any).action_type === 'investigate_report'
@@ -2650,103 +2753,110 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   : m.content
           }));
 
-        if (inspectorSelectedModels.length === 1) {
-          // چت با یک مدل
-          const res = await fetch(`${API_BASE}/api/render/inspector/chat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              model_id: inspectorSelectedModels[0],
-              message: userMessage,
-              project_id: projectId,
-              backend_logs: inspectorBackendLogs,
-              frontend_url: inspectorFrontendUrl,
-              project_files: projectFiles,
-              chat_history: chatHistory,
-              session_context: {
-                has_investigation: inspectorChatMessages.some(m => (m as any).action_type === 'investigate_report'),
-                has_errors: inspectorChatMessages.some(m => (m as any).action_type === 'error' || (m as any).action_type === 'console-error'),
-                models_from_investigation: !inspectorAutoSelect,
+        // 🔒 قفل کردن صفحه هنگام تحلیل
+        setInspectorOpLock(true);
+        setInspectorOpType('investigate');
+        inspectorOpAbortRef.current = new AbortController();
+
+        // استفاده از smart-chat SSE endpoint
+        const res = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            project_id: projectId,
+            model_ids: inspectorSelectedModels,
+            message: userMessage,
+            chat_history: chatHistory,
+            backend_logs: inspectorBackendLogs,
+            frontend_url: inspectorFrontendUrl,
+          }),
+          signal: inspectorOpAbortRef.current?.signal,
+        });
+
+        const reader = res.body?.getReader();
+        const decoder = new TextDecoder();
+        let sseBuffer = '';
+
+        if (!reader) throw new Error('No reader');
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          sseBuffer += decoder.decode(value, { stream: true });
+          const lines = sseBuffer.split('\n');
+          sseBuffer = lines.pop() || '';
+
+          let eventType = '';
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              eventType = line.slice(7).trim();
+            } else if (line.startsWith('data: ') && eventType) {
+              try {
+                const data = JSON.parse(line.slice(6));
+
+                if (eventType === 'progress') {
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: `smart_p_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                    role: 'system' as const,
+                    content: data.message,
+                    timestamp: new Date(),
+                  }]);
+                } else if (eventType === 'error') {
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: `smart_err_${Date.now()}`,
+                    role: 'system' as const,
+                    content: `❌ ${data.message}`,
+                    timestamp: new Date(),
+                  }]);
+                } else if (eventType === 'response') {
+                  // پاسخ نهایی: ممکنه has_action داشته باشه
+                  const responseId = `smart_response_${Date.now()}`;
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: responseId,
+                    role: 'assistant' as const,
+                    content: data.content,
+                    model_id: data.model_used,
+                    timestamp: new Date(),
+                    tokens_used: data.tokens_used,
+                    // ذخیره action_plan برای دکمه اعمال
+                    action_type: data.has_action ? 'smart_action' as any : undefined,
+                    action_plan: data.action_plan,
+                    original_message: userMessage,
+                  } as any]);
+
+                  // 🔓 آزاد کردن قفل بعد از دریافت پاسخ
+                  setInspectorOpLock(false);
+                  setInspectorOpType(null);
+                }
+              } catch (e) {
+                // ignore parse errors
               }
-            })
-          });
-
-          const data = await res.json();
-
-          if (data.success) {
-            setInspectorChatMessages(prev => [...prev, {
-              id: `assistant_${Date.now()}`,
-              role: 'assistant',
-              content: data.content,
-              model_id: data.model_id,
-              timestamp: new Date(),
-              tokens_used: data.tokens_used
-            }]);
-          } else {
-            setInspectorChatMessages(prev => [...prev, {
-              id: `error_${Date.now()}`,
-              role: 'assistant',
-              content: `❌ خطا: ${data.error || 'خطای ناشناخته'}`,
-              timestamp: new Date()
-            }]);
-          }
-        } else {
-          // چت با چند مدل
-          const res = await fetch(`${API_BASE}/api/render/inspector/chat/multi`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              model_ids: inspectorSelectedModels,
-              message: userMessage,
-              project_id: projectId,
-              backend_logs: inspectorBackendLogs,
-              frontend_url: inspectorFrontendUrl,
-              project_files: projectFiles,
-              chat_history: chatHistory,
-              session_context: {
-                has_investigation: inspectorChatMessages.some(m => (m as any).action_type === 'investigate_report'),
-                has_errors: inspectorChatMessages.some(m => (m as any).action_type === 'error' || (m as any).action_type === 'console-error'),
-                models_from_investigation: !inspectorAutoSelect,
-              }
-            })
-          });
-
-          const data = await res.json();
-
-          if (data.success && data.responses) {
-            data.responses.forEach((r: any) => {
-              setInspectorChatMessages(prev => [...prev, {
-                id: `assistant_${Date.now()}_${r.model_id}`,
-                role: 'assistant',
-                content: r.error ? `❌ ${r.model_id}: ${r.error}` : r.content,
-                model_id: r.model_id,
-                timestamp: new Date(),
-                tokens_used: r.tokens_used
-              }]);
-            });
-          } else {
-            setInspectorChatMessages(prev => [...prev, {
-              id: `error_${Date.now()}`,
-              role: 'assistant',
-              content: `❌ خطا: ${data.error || 'خطای ناشناخته'}`,
-              timestamp: new Date()
-            }]);
+              eventType = '';
+            }
           }
         }
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error sending inspector chat:', err);
-      setInspectorChatMessages(prev => {
-        const filtered = prev.filter(m => !m.id.startsWith('system_'));
-        return [...filtered, {
-          id: `error_${Date.now()}`,
-          role: 'assistant',
-          content: '❌ خطا در اتصال به سرور',
-          timestamp: new Date()
-        }];
-      });
+      if (err.name !== 'AbortError') {
+        setInspectorChatMessages(prev => {
+          const filtered = prev.filter(m => !m.id.startsWith('system_'));
+          return [...filtered, {
+            id: `error_${Date.now()}`,
+            role: 'assistant',
+            content: '❌ خطا در اتصال به سرور',
+            timestamp: new Date()
+          }];
+        });
+      }
     } finally {
       setInspectorChatLoading(false);
+      // آزاد کردن قفل اگر هنوز فعاله (در صورت خطا یا لغو)
+      if (inspectorOpLock) {
+        setInspectorOpLock(false);
+        setInspectorOpType(null);
+      }
     }
   };
 
@@ -9591,6 +9701,22 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             >
                               {fixLoading ? '...' : '🔧 اصلاح'}
                             </button>
+                          )}
+                          {/* 🧠 دکمه اعمال تغییرات روی پاسخ‌های smart-chat */}
+                          {(msg as any).action_type === 'smart_action' && (msg as any).action_plan && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); applySmartAction(msg.id); }}
+                              className="text-[10px] bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 px-2 py-0.5 rounded hover:bg-green-200 dark:hover:bg-green-800/40 transition-colors font-medium"
+                              disabled={inspectorOpLock}
+                            >
+                              {inspectorOpLock ? '⏳ ...' : '✅ اعمال تغییرات'}
+                            </button>
+                          )}
+                          {/* نشانگر has_action بدون action_plan (نیاز به درخواست مجدد) */}
+                          {(msg as any).action_type === 'smart_action' && !(msg as any).action_plan && (
+                            <span className="text-[9px] text-amber-500 dark:text-amber-400 px-1.5 py-0.5">
+                              ⚠️ کد کامل در دسترس نیست - دوباره درخواست بدهید
+                            </span>
                           )}
                           {/* دکمه info */}
                           <button
