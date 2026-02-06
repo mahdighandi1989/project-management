@@ -9467,7 +9467,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             </span>
                           )}
                           {/* دکمه بررسی خطا */}
-                          {msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && (
+                          {/* دکمه بررسی خطا - روی پیام‌های خطا یا پیام‌هایی با ✕ */}
+                          {msg.role === 'action' && (
+                            msg.action_type === 'error' || msg.action_type === 'console-error' || msg.backend_verified === false
+                          ) && (
                             <button
                               onClick={(e) => { e.stopPropagation(); openInvestigateModal(msg.id); }}
                               className="text-[10px] bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 px-1.5 py-0.5 rounded hover:bg-red-200 dark:hover:bg-red-800/40 transition-colors"
