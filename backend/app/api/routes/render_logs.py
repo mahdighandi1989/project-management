@@ -6692,6 +6692,26 @@ async def investigate_error(request: InvestigateRequest, db: Session = Depends(g
     if not msg:
         return {"success": False, "error": "پیام یافت نشد"}
 
+    # جمع‌آوری context: خطاهای فرانت‌اند نزدیک + لاگ‌های بک‌اند
+    # پیام‌های خطای JS نزدیک (۶۰ ثانیه قبل و بعد) از همین سشن
+    from sqlalchemy import or_
+    nearby_errors = db.query(InspectorMessage).filter(
+        InspectorMessage.session_id == msg.session_id,
+        or_(
+            InspectorMessage.action_type == 'error',
+            InspectorMessage.action_type == 'console-error'
+        ),
+        InspectorMessage.timestamp >= (msg.timestamp - timedelta(seconds=60)) if msg.timestamp else True,
+        InspectorMessage.timestamp <= (msg.timestamp + timedelta(seconds=60)) if msg.timestamp else True,
+    ).order_by(InspectorMessage.timestamp).limit(10).all()
+
+    error_context_lines = []
+    for em in nearby_errors:
+        error_context_lines.append(f"[{em.action_type}] {em.content}")
+
+    # لاگ summary از تیک بررسی
+    backend_summary = msg.backend_log_summary or ""
+
     # دریافت اطلاعات پروژه
     project = db.query(Project).filter(Project.id == request.project_id).first()
     if not project:
@@ -6715,8 +6735,18 @@ async def investigate_error(request: InvestigateRequest, db: Session = Depends(g
         return {"success": False, "error": "اطلاعات GitHub پروژه یافت نشد. لطفاً پروژه را از GitHub ایمپورت کنید."}
 
     token = os.environ.get("GITHUB_TOKEN", "")
-    error_content = msg.content
     model_ids = request.model_ids
+
+    # ساخت context کامل خطا
+    error_content_parts = [f"اکشن کاربر: {msg.content}"]
+    if backend_summary:
+        error_content_parts.append(f"نتیجه بررسی بک‌اند: {backend_summary}")
+    if error_context_lines:
+        error_content_parts.append(f"خطاهای فرانت‌اند مرتبط ({len(error_context_lines)} خطا):")
+        error_content_parts.extend(error_context_lines)
+    else:
+        error_content_parts.append("⚠️ هیچ خطای JavaScript فرانت‌اند ضبط نشده. bridge script ممکن است خطاها را دریافت نکرده باشد.")
+    error_content = "\n".join(error_content_parts)
 
     async def event_stream():
         github_svc = get_github_import_service()
@@ -6747,12 +6777,14 @@ async def investigate_error(request: InvestigateRequest, db: Session = Depends(g
         primary_model = model_ids[0] if model_ids else "gemini-2.0-flash"
 
         # فهرست فایل‌های مرتبط (فیلتر شده)
+        # ⚠️ InspectorBridge فایل inject شده ماست - نباید بررسی بشه
         code_files = [f["path"] for f in all_files
                       if f.get("size", 0) < 200000
                       and not any(skip in f["path"] for skip in [
                           "node_modules/", ".git/", "dist/", "build/", ".next/",
                           "__pycache__/", ".cache/", "vendor/", "package-lock.json",
-                          "yarn.lock", ".png", ".jpg", ".svg", ".ico", ".woff"
+                          "yarn.lock", ".png", ".jpg", ".svg", ".ico", ".woff",
+                          "InspectorBridge", "inspector-bridge", "inspectorBridge"
                       ])]
 
         file_list_text = "\n".join(code_files[:500])
@@ -6764,15 +6796,19 @@ async def investigate_error(request: InvestigateRequest, db: Session = Depends(g
         })
 
         # از AI بخواه فایل‌های مرتبط رو انتخاب کنه
-        select_prompt = f"""شما بازرس خطای پروژه هستید.
+        select_prompt = f"""شما بازرس خطای پروژه {owner}/{repo} هستید.
 
-خطای فرانت‌اند:
+⚠️ قوانین مهم:
+- فایل‌های InspectorBridge بخش پروژه نیستند (ابزار دیباگ inject شده). آنها را نادیده بگیرید.
+- فقط فایل‌های اصلی پروژه را بررسی کنید.
+
+## اطلاعات خطا:
 {error_content}
 
-لیست فایل‌های پروژه:
+## لیست فایل‌های پروژه:
 {file_list_text}
 
-بر اساس خطا، حداکثر ۸ فایل که احتمالاً مرتبط با این خطا هستند را انتخاب کنید.
+بر اساس خطا و اطلاعات موجود، حداکثر ۸ فایل مرتبط را انتخاب کنید.
 فقط مسیر فایل‌ها را بنویسید، هر کدام در یک خط جدید.
 هیچ توضیح اضافی ندهید."""
 
@@ -6863,37 +6899,50 @@ async def investigate_error(request: InvestigateRequest, db: Session = Depends(g
         for path, content in file_contents.items():
             code_context += f"\n\n=== {path} ===\n{content}"
 
-        investigate_prompt = f"""شما یک بازرس ارشد کد هستید. خطای فرانت‌اند زیر را ریشه‌ای بررسی کنید.
+        investigate_prompt = f"""شما بازرس ارشد کد پروژه {owner}/{repo} هستید.
 
-## خطا:
+## ⚠️ قوانین حیاتی:
+1. فایل InspectorBridge یک ابزار دیباگ inject شده است و جزو پروژه اصلی نیست. آن را نادیده بگیرید.
+2. اگر خطای JavaScript دقیقی در دسترس نیست، صادقانه بگویید "خطای دقیقی ضبط نشده" - حدس نزنید.
+3. فقط بر اساس شواهد موجود در کد تحلیل کنید، نه حدس و گمان.
+4. اگر مشکل واضح نیست، چند احتمال را با درصد اطمینان ذکر کنید.
+
+## اطلاعات خطا:
 {error_content}
 
-## کد پروژه ({owner}/{repo}):
+## کد پروژه:
 {code_context}
 
 ## وظیفه شما:
-1. علت ریشه‌ای خطا را پیدا کنید
-2. دقیقاً کدام فایل و کدام خط مشکل دارد
-3. توضیح دهید چرا این خطا رخ می‌دهد
-4. راه‌حل دقیق را پیشنهاد دهید
+1. آیا خطای JavaScript دقیقی وجود دارد؟ اگر بله، آن را تحلیل کنید.
+2. اگر خطای دقیقی نیست، کد را برای مشکلات رایج بررسی کنید (null reference, import errors, routing issues, etc.)
+3. هر مشکلی که پیدا کردید را با شماره خط دقیق مشخص کنید.
+4. راه‌حل دقیق و عملی ارائه دهید.
 
 ## فرمت پاسخ:
+
+### 📊 سطح اطمینان
+[بالا / متوسط / پایین - بر اساس اینکه خطای دقیقی دارید یا نه]
+
 ### 🔍 علت ریشه‌ای
-[توضیح]
+[فقط بر اساس شواهد واقعی از کد - نه حدس]
 
 ### 📍 محل مشکل
-- فایل: `[مسیر]`
-- خط: [شماره تقریبی]
-- کد مشکل‌دار: [کد]
+- فایل: `[مسیر دقیق]`
+- خط: [شماره دقیق]
+- کد مشکل‌دار:
+```
+[کد واقعی از فایل]
+```
 
 ### 💡 راه‌حل
-[توضیح کامل راه‌حل]
+[راه‌حل مشخص و عملی]
 
-### 🔧 دستورالعمل اصلاح (پرامپت)
-[دقیقاً بگویید در کدام فایل، چه تغییری باید انجام شود - به صورت مرحله‌ای و قابل اجرا]
+### 🔧 دستورالعمل اصلاح
+[دقیقاً در کدام فایل، چه خطی، چه تغییری - به صورت diff]
 
 ### 📝 فایل‌های نیاز به تغییر
-[لیست فایل‌ها با تغییرات مورد نیاز]"""
+[فقط فایل‌هایی که واقعاً نیاز به تغییر دارند]"""
 
         # اگر چند مدل انتخاب شده، از اولی برای تحلیل اصلی استفاده کن
         yield sse("progress", {
@@ -6902,15 +6951,24 @@ async def investigate_error(request: InvestigateRequest, db: Session = Depends(g
             "model": primary_model
         })
 
+        system_msg = """شما یک بازرس ارشد کد هستید.
+
+قوانین:
+- فقط بر اساس شواهد واقعی تحلیل کنید. اگر خطای دقیقی ندارید، صادق باشید.
+- فایل InspectorBridge ابزار دیباگ inject شده و مربوط به پروژه نیست. هرگز آن را مقصر ندانید.
+- Layout.tsx اصلی پروژه را تغییر ندهید مگر مشکل واضحاً از آنجا باشد.
+- حدس نزنید. اگر مطمئن نیستید، بگویید "مطمئن نیستم" با چند احتمال.
+- پاسخ فارسی و مختصر."""
+
         try:
             analysis = await ai_manager.generate(
                 model_id=primary_model,
                 messages=[
-                    Message(role="system", content="شما یک بازرس ارشد کد با تجربه بالا هستید. دقیق و مختصر پاسخ دهید."),
+                    Message(role="system", content=system_msg),
                     Message(role="user", content=investigate_prompt)
                 ],
                 max_tokens=4000,
-                temperature=0.3,
+                temperature=0.2,
                 task_type="debugging"
             )
 
@@ -6934,8 +6992,8 @@ async def investigate_error(request: InvestigateRequest, db: Session = Depends(g
                 review_response = await ai_manager.generate(
                     model_id=second_model,
                     messages=[
-                        Message(role="system", content="شما بازرس کد هستید. گزارش همکارتان را بررسی و تکمیل کنید."),
-                        Message(role="user", content=f"خطا: {error_content}\n\nگزارش مدل اول:\n{report}\n\nاگر نکته اضافی دارید بنویسید. اگر موافقید بنویسید 'تأیید'")
+                        Message(role="system", content="شما بازرس متقابل کد هستید. گزارش همکارتان را نقادانه بررسی کنید. آیا تحلیل بر اساس شواهد واقعی است یا حدس؟ آیا InspectorBridge (ابزار inject شده) به اشتباه مقصر شناخته شده؟ اگر مشکلی می‌بینید بگویید."),
+                        Message(role="user", content=f"خطا: {error_content}\n\nگزارش مدل اول:\n{report}\n\nآیا این تحلیل صحیح و مبتنی بر شواهد است؟ اگر خطا دارد تصحیح کنید. اگر درست است بنویسید 'تأیید'.")
                     ],
                     max_tokens=1500,
                     temperature=0.3
@@ -7121,7 +7179,7 @@ async def fix_error(request: FixRequest, db: Session = Depends(get_db)):
                 fix_response = await ai_manager.generate(
                     model_id=primary_model,
                     messages=[
-                        Message(role="system", content="شما توسعه‌دهنده ارشد هستید. فقط کد اصلاح شده را برگردانید."),
+                        Message(role="system", content="شما توسعه‌دهنده ارشد هستید. فقط کد اصلاح شده را برگردانید. فایل InspectorBridge مربوط به سیستم دیباگ inject شده است - هرگز آن را تغییر ندهید."),
                         Message(role="user", content=fix_prompt)
                     ],
                     max_tokens=8000,
