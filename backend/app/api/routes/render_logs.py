@@ -4551,6 +4551,8 @@ async def inject_bridge_script(
             default_branch = 'main'
             all_package_jsons = []  # همه package.json های پیدا شده
             html_files = []  # همه فایل‌های HTML پیدا شده
+            pattern_match_files = []  # فایل‌های پیدا شده با pattern search
+            frontend_files = []  # فایل‌های داخل پوشه frontend
 
             if not index_path:
                 try:
@@ -4701,6 +4703,10 @@ async def inject_bridge_script(
                         tree_data = tree_res.json()
                         all_files = [item["path"] for item in tree_data.get("tree", []) if item["type"] == "blob"]
                         slog.info(f"📁 Total files in repo: {len(all_files)}")
+
+                        # 📂 فایل‌های داخل پوشه‌های frontend-like
+                        frontend_files = [f for f in all_files if any(f.startswith(p) for p in ['frontend/', 'client/', 'web/', 'ui/'])]
+                        slog.info(f"📂 Frontend folder files: {frontend_files[:20]}")
 
                         # 🔍 مرحله ۲.۵: جستجوی هوشمند در همه پوشه‌ها
                         # پیدا کردن همه package.json ها (نه فقط root)
@@ -4911,6 +4917,7 @@ async def inject_bridge_script(
                                         break
 
                             slog.info(f"  📂 Found {len(matching_files)} matching files: {matching_files[:10]}")
+                            pattern_match_files = matching_files.copy()  # ذخیره برای debug
 
                             # اولویت با فایل‌های در پوشه frontend
                             matching_files.sort(key=lambda x: (
@@ -5035,6 +5042,8 @@ async def inject_bridge_script(
                         "search_error": search_error,
                         "detected_framework_raw": detected_framework,
                         "entry_candidates": entry_candidates,
+                        "frontend_files": frontend_files[:30],  # 🆕 فایل‌های frontend
+                        "pattern_match_files": pattern_match_files[:20],  # 🆕 فایل‌های یافته شده با pattern
                         "files_sample": all_files[:30] if all_files else [],  # نمایش ۳۰ فایل
                         "package_json_found": package_json_found,
                         "package_json_status": package_json_status,
