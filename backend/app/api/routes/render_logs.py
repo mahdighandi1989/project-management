@@ -4193,15 +4193,100 @@ INSPECTOR_BRIDGE_SCRIPT = '''
   console.log('🌉 Inspector Bridge: In iframe?', isInIframe);
   console.log('🌉 Inspector Bridge: Page URL:', window.location.href);
 
-  // تنظیمات
+  // تنظیمات WebSocket
+  const WS_URL = '__BRIDGE_WS_URL__';
+  const PROJECT_ID = '__BRIDGE_PROJECT_ID__';
   const DEBOUNCE_MS = 100;
   let lastEventTime = 0;
   let messagesSent = 0;
+  let ws = null;
+  let wsReady = false;
+  let reconnectTimer = null;
+  let messageQueue = [];
 
-  // تابع ارسال پیام به parent (پنل مدیریت)
+  // 🌐 اتصال WebSocket به Backend Hub
+  function connectWebSocket() {
+    if (!WS_URL || WS_URL === '__BRIDGE_WS_URL__') {
+      console.log('🌉 Inspector Bridge: No WS URL configured, using postMessage only');
+      return;
+    }
+    try {
+      ws = new WebSocket(WS_URL);
+      ws.onopen = function() {
+        console.log('🌉 Inspector Bridge: WebSocket connected');
+        ws.send(JSON.stringify({ type: 'register', role: 'bridge' }));
+      };
+      ws.onmessage = function(event) {
+        try {
+          var msg = JSON.parse(event.data);
+          if (msg.type === 'registered') {
+            wsReady = true;
+            console.log('🌉 Inspector Bridge: Registered as bridge via WebSocket');
+            // ارسال پیام‌های در صف
+            while (messageQueue.length > 0) {
+              var queued = messageQueue.shift();
+              ws.send(JSON.stringify(queued));
+            }
+            // ارسال پیام آماده بودن
+            ws.send(JSON.stringify({
+              type: 'inspector-bridge-ready',
+              pageUrl: window.location.href,
+              isInIframe: isInIframe,
+              timestamp: Date.now()
+            }));
+          } else if (msg.type === 'pong') {
+            // heartbeat response
+          } else if (msg.type === 'command') {
+            // دریافت دستور از Inspector
+            console.log('🌉 Inspector Bridge: Received command:', msg);
+            handleInspectorCommand(msg);
+          }
+        } catch (e) {
+          console.warn('🌉 Inspector Bridge: WS message parse error', e);
+        }
+      };
+      ws.onclose = function() {
+        wsReady = false;
+        console.log('🌉 Inspector Bridge: WebSocket disconnected, reconnecting in 3s...');
+        reconnectTimer = setTimeout(connectWebSocket, 3000);
+      };
+      ws.onerror = function(e) {
+        console.warn('🌉 Inspector Bridge: WebSocket error', e);
+      };
+    } catch (e) {
+      console.warn('🌉 Inspector Bridge: Failed to create WebSocket', e);
+    }
+  }
+
+  // پردازش دستورات از Inspector
+  function handleInspectorCommand(msg) {
+    if (msg.command === 'click') {
+      // کلیک روی المان با selector
+      var el = document.querySelector(msg.selector);
+      if (el) { el.click(); sendToInspector('command-result', { success: true, command: 'click', selector: msg.selector }); }
+      else { sendToInspector('command-result', { success: false, command: 'click', error: 'Element not found' }); }
+    } else if (msg.command === 'navigate') {
+      window.location.href = msg.url;
+    } else if (msg.command === 'get-elements') {
+      var elements = [];
+      document.querySelectorAll('a, button, input, textarea, select, [role="button"], [onclick]').forEach(function(el, i) {
+        elements.push({
+          index: i,
+          tag: el.tagName.toLowerCase(),
+          text: (el.innerText || el.value || '').trim().slice(0, 50),
+          id: el.id || '',
+          className: (el.className || '').toString().slice(0, 50),
+          href: el.href || ''
+        });
+      });
+      sendToInspector('elements-list', { elements: elements });
+    }
+  }
+
+  // تابع ارسال پیام (WebSocket اولویت اول، postMessage فالبک)
   function sendToInspector(action, data) {
     try {
-      const message = {
+      var message = {
         type: 'inspector-bridge-event',
         action: action,
         target: data.target || '',
@@ -4210,13 +4295,35 @@ INSPECTOR_BRIDGE_SCRIPT = '''
         pageUrl: window.location.href,
         timestamp: Date.now()
       };
-      window.parent.postMessage(message, '*');
+
+      // ارسال از طریق WebSocket
+      if (ws && wsReady) {
+        ws.send(JSON.stringify(message));
+      } else if (ws && !wsReady) {
+        messageQueue.push(message);
+      }
+
+      // همیشه postMessage هم بفرست (فالبک)
+      if (isInIframe) {
+        window.parent.postMessage(message, '*');
+      }
+
       messagesSent++;
       console.log('🌉 Inspector Bridge: Sent message #' + messagesSent, action, data.elementInfo);
     } catch (e) {
       console.warn('Inspector bridge: failed to send message', e);
     }
   }
+
+  // شروع اتصال WebSocket
+  connectWebSocket();
+
+  // Heartbeat هر 25 ثانیه
+  setInterval(function() {
+    if (ws && wsReady) {
+      try { ws.send(JSON.stringify({ type: 'ping' })); } catch(e) {}
+    }
+  }, 25000);
 
   // گرفتن اطلاعات المنت
   function getElementInfo(el) {
@@ -4352,61 +4459,107 @@ INSPECTOR_BRIDGE_SCRIPT = '''
 # 🆕 محتوای Bridge Script برای پروژه‌های React/Next.js (نسخه JS/TS)
 INSPECTOR_BRIDGE_SCRIPT_JS = '''
 // 🌉 Inspector Bridge Script - Auto-injected
-// این کد را در ابتدای فایل اصلی پروژه اضافه کنید
+// ارتباط با Inspector از طریق WebSocket (حل مشکل cross-origin)
 if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
   window.__inspectorBridgeLoaded = true;
 
   const isInIframe = window !== window.parent;
+  const WS_URL = '__BRIDGE_WS_URL__';
+  let ws = null;
+  let wsReady = false;
+  let messageQueue = [];
+
+  console.log('🌉 Inspector Bridge: Active (WebSocket mode)');
+
+  // اتصال WebSocket
+  const connectWS = () => {
+    if (!WS_URL || WS_URL === '__BRIDGE_WS_URL__') return;
+    try {
+      ws = new WebSocket(WS_URL);
+      ws.onopen = () => { ws.send(JSON.stringify({ type: 'register', role: 'bridge' })); };
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'registered') {
+            wsReady = true;
+            console.log('🌉 Inspector Bridge: WebSocket connected');
+            messageQueue.forEach(m => ws.send(JSON.stringify(m)));
+            messageQueue = [];
+            ws.send(JSON.stringify({ type: 'inspector-bridge-ready', pageUrl: window.location.href, isInIframe, timestamp: Date.now() }));
+          } else if (msg.type === 'command') {
+            handleCommand(msg);
+          }
+        } catch (e) {}
+      };
+      ws.onclose = () => { wsReady = false; setTimeout(connectWS, 3000); };
+      ws.onerror = () => {};
+    } catch (e) {}
+  };
+
+  const handleCommand = (msg) => {
+    if (msg.command === 'click') {
+      const el = document.querySelector(msg.selector);
+      if (el) el.click();
+    } else if (msg.command === 'navigate') {
+      window.location.href = msg.url;
+    } else if (msg.command === 'get-elements') {
+      const elements = [];
+      document.querySelectorAll('a, button, input, textarea, select, [role="button"]').forEach((el, i) => {
+        elements.push({ index: i, tag: el.tagName.toLowerCase(), text: (el.innerText || el.value || '').trim().slice(0, 50), id: el.id, href: el.href || '' });
+      });
+      sendToInspector('elements-list', { elements });
+    }
+  };
+
+  const sendToInspector = (action, data) => {
+    const message = {
+      type: 'inspector-bridge-event', action,
+      elementInfo: data.elementInfo || '', position: data.position || { xPercent: 50, yPercent: 50 },
+      pageUrl: window.location.href, timestamp: Date.now()
+    };
+    if (ws && wsReady) ws.send(JSON.stringify(message));
+    else if (ws) messageQueue.push(message);
+    if (isInIframe) { try { window.parent.postMessage(message, '*'); } catch(e) {} }
+  };
+
+  const getElementInfo = (el) => {
+    if (!el) return '';
+    const text = (el.innerText || el.value || '').trim().slice(0, 30);
+    const tag = el.tagName?.toLowerCase() || '';
+    return text ? `${tag} "${text}"` : tag;
+  };
+
+  document.addEventListener('click', (e) => {
+    sendToInspector('click', { elementInfo: getElementInfo(e.target) });
+  }, true);
+
+  document.addEventListener('input', (e) => {
+    if (e.target?.tagName === 'INPUT' || e.target?.tagName === 'TEXTAREA') {
+      sendToInspector('input', { elementInfo: getElementInfo(e.target) });
+    }
+  }, true);
+
+  let scrollTimeout;
+  document.addEventListener('scroll', () => {
+    clearTimeout(scrollTimeout);
+    scrollTimeout = setTimeout(() => { sendToInspector('scroll', { elementInfo: 'page' }); }, 200);
+  }, true);
+
+  connectWS();
+  setInterval(() => { if (ws && wsReady) try { ws.send(JSON.stringify({ type: 'ping' })); } catch(e) {} }, 25000);
+
+  // فالبک postMessage
   if (isInIframe) {
-    console.log('🌉 Inspector Bridge: Active in iframe');
-
-    const sendToInspector = (action, data) => {
-      try {
-        window.parent.postMessage({
-          type: 'inspector-bridge-event',
-          action,
-          elementInfo: data.elementInfo || '',
-          position: data.position || { xPercent: 50, yPercent: 50 },
-          pageUrl: window.location.href,
-          timestamp: Date.now()
-        }, '*');
-      } catch (e) { console.warn('Bridge send failed:', e); }
-    };
-
-    const getElementInfo = (el) => {
-      if (!el) return '';
-      const text = (el.innerText || el.value || '').trim().slice(0, 30);
-      const tag = el.tagName?.toLowerCase() || '';
-      return text ? `${tag} "${text}"` : tag;
-    };
-
-    document.addEventListener('click', (e) => {
-      sendToInspector('click', { elementInfo: getElementInfo(e.target) });
-    }, true);
-
-    document.addEventListener('input', (e) => {
-      if (e.target?.tagName === 'INPUT' || e.target?.tagName === 'TEXTAREA') {
-        sendToInspector('input', { elementInfo: getElementInfo(e.target) });
-      }
-    }, true);
-
-    let scrollTimeout;
-    document.addEventListener('scroll', () => {
-      clearTimeout(scrollTimeout);
-      scrollTimeout = setTimeout(() => {
-        sendToInspector('scroll', { elementInfo: 'صفحه' });
-      }, 200);
-    }, true);
-
-    window.parent.postMessage({ type: 'inspector-bridge-ready', pageUrl: window.location.href }, '*');
+    try { window.parent.postMessage({ type: 'inspector-bridge-ready', pageUrl: window.location.href }, '*'); } catch(e) {}
   }
 }
 // 🌉 End of Inspector Bridge Script
 '''
 
-# 🆕 Next.js App Router - Client Component برای Bridge Script
+# 🆕 Next.js App Router - Client Component برای Bridge Script (WebSocket)
 INSPECTOR_BRIDGE_CLIENT_COMPONENT = '''"use client";
 // 🌉 Inspector Bridge Script - Client Component for Next.js App Router
+// ارتباط با Inspector از طریق WebSocket (حل مشکل cross-origin)
 import { useEffect } from "react";
 
 export default function InspectorBridge() {
@@ -4415,23 +4568,62 @@ export default function InspectorBridge() {
     window.__inspectorBridgeLoaded = true;
 
     const isInIframe = window !== window.parent;
-    if (!isInIframe) return;
+    const WS_URL = "__BRIDGE_WS_URL__";
+    let ws = null;
+    let wsReady = false;
+    let messageQueue = [];
 
-    console.log("🌉 Inspector Bridge: Active in iframe");
+    console.log("🌉 Inspector Bridge: Active (WebSocket mode)");
+
+    // 🌐 اتصال WebSocket
+    const connectWS = () => {
+      if (!WS_URL || WS_URL === "__BRIDGE_WS_URL__") return;
+      try {
+        ws = new WebSocket(WS_URL);
+        ws.onopen = () => { ws.send(JSON.stringify({ type: "register", role: "bridge" })); };
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === "registered") {
+              wsReady = true;
+              console.log("🌉 Inspector Bridge: WebSocket connected");
+              messageQueue.forEach(m => ws.send(JSON.stringify(m)));
+              messageQueue = [];
+              ws.send(JSON.stringify({ type: "inspector-bridge-ready", pageUrl: window.location.href, isInIframe, timestamp: Date.now() }));
+            } else if (msg.type === "command") {
+              handleCommand(msg);
+            }
+          } catch (e) {}
+        };
+        ws.onclose = () => { wsReady = false; setTimeout(connectWS, 3000); };
+        ws.onerror = () => {};
+      } catch (e) {}
+    };
+
+    const handleCommand = (msg) => {
+      if (msg.command === "click") {
+        const el = document.querySelector(msg.selector);
+        if (el) el.click();
+      } else if (msg.command === "navigate") {
+        window.location.href = msg.url;
+      } else if (msg.command === "get-elements") {
+        const elements = [];
+        document.querySelectorAll("a, button, input, textarea, select, [role=button]").forEach((el, i) => {
+          elements.push({ index: i, tag: el.tagName.toLowerCase(), text: (el.innerText || el.value || "").trim().slice(0, 50), id: el.id, href: el.href || "" });
+        });
+        sendToInspector("elements-list", { elements });
+      }
+    };
 
     const sendToInspector = (action, data) => {
-      try {
-        window.parent.postMessage({
-          type: "inspector-bridge-event",
-          action,
-          elementInfo: data.elementInfo || "",
-          position: data.position || { xPercent: 50, yPercent: 50 },
-          pageUrl: window.location.href,
-          timestamp: Date.now()
-        }, "*");
-      } catch (e) {
-        console.warn("Bridge send failed:", e);
-      }
+      const message = {
+        type: "inspector-bridge-event", action,
+        elementInfo: data.elementInfo || "", position: data.position || { xPercent: 50, yPercent: 50 },
+        pageUrl: window.location.href, timestamp: Date.now()
+      };
+      if (ws && wsReady) ws.send(JSON.stringify(message));
+      else if (ws) messageQueue.push(message);
+      if (isInIframe) { try { window.parent.postMessage(message, "*"); } catch(e) {} }
     };
 
     const getElementInfo = (el) => {
@@ -4441,40 +4633,40 @@ export default function InspectorBridge() {
       return text ? `${tag} "${text}"` : tag;
     };
 
-    const handleClick = (e) => {
-      sendToInspector("click", { elementInfo: getElementInfo(e.target) });
-    };
-
+    const handleClick = (e) => { sendToInspector("click", { elementInfo: getElementInfo(e.target) }); };
     const handleInput = (e) => {
       if (e.target?.tagName === "INPUT" || e.target?.tagName === "TEXTAREA") {
         sendToInspector("input", { elementInfo: getElementInfo(e.target) });
       }
     };
-
     let scrollTimeout;
     const handleScroll = () => {
       clearTimeout(scrollTimeout);
-      scrollTimeout = setTimeout(() => {
-        sendToInspector("scroll", { elementInfo: "صفحه" });
-      }, 200);
+      scrollTimeout = setTimeout(() => { sendToInspector("scroll", { elementInfo: "page" }); }, 200);
     };
 
     document.addEventListener("click", handleClick, true);
     document.addEventListener("input", handleInput, true);
     document.addEventListener("scroll", handleScroll, true);
 
-    // اعلام آماده بودن
-    window.parent.postMessage({ type: "inspector-bridge-ready", pageUrl: window.location.href }, "*");
-    console.log("🌉 Inspector Bridge: Ready signal sent");
+    connectWS();
+    const heartbeat = setInterval(() => { if (ws && wsReady) try { ws.send(JSON.stringify({ type: "ping" })); } catch(e) {} }, 25000);
+
+    // فالبک postMessage
+    if (isInIframe) {
+      try { window.parent.postMessage({ type: "inspector-bridge-ready", pageUrl: window.location.href }, "*"); } catch(e) {}
+    }
 
     return () => {
       document.removeEventListener("click", handleClick, true);
       document.removeEventListener("input", handleInput, true);
       document.removeEventListener("scroll", handleScroll, true);
+      clearInterval(heartbeat);
+      if (ws) { try { ws.close(); } catch(e) {} }
     };
   }, []);
 
-  return null; // این کامپوننت چیزی رندر نمی‌کند
+  return null;
 }
 // 🌉 End of Inspector Bridge Script
 '''
@@ -5218,6 +5410,29 @@ async def inject_bridge_script(
                 if has_bridge:
                     return {"success": True, "message": "اسکریپت از قبل تزریق شده است", "already_injected": True}
 
+                # 🌐 ساخت WebSocket URL برای Bridge Script
+                import os as _os
+                backend_url = _os.environ.get("BACKEND_URL", "").rstrip("/")
+                if not backend_url:
+                    # Render خودکار این متغیر رو ست میکنه
+                    backend_url = _os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+                if not backend_url:
+                    render_app_name = _os.environ.get("RENDER_SERVICE_NAME", "")
+                    if render_app_name:
+                        backend_url = f"https://{render_app_name}.onrender.com"
+                if not backend_url:
+                    backend_url = "http://localhost:8000"
+
+                # تبدیل http/https به ws/wss
+                ws_base = backend_url.replace("https://", "wss://").replace("http://", "ws://")
+                bridge_ws_url = f"{ws_base}/api/render/ws/bridge/{request.project_id}"
+
+                slog.info(f"🌐 Bridge WS URL: {bridge_ws_url}")
+
+                # جایگزینی placeholder در تمپلیت‌ها
+                def replace_bridge_placeholders(script_content: str) -> str:
+                    return script_content.replace("__BRIDGE_WS_URL__", bridge_ws_url).replace("__BRIDGE_PROJECT_ID__", str(request.project_id))
+
                 # 🆕 تشخیص Next.js App Router - نیاز به Client Component
                 is_nextjs_app_router = ('/app/layout.tsx' in index_path or '/src/app/layout.tsx' in index_path or
                                         '/app/layout.js' in index_path or '/src/app/layout.js' in index_path)
@@ -5236,7 +5451,7 @@ async def inject_bridge_script(
                         headers=headers,
                         json={
                             "message": "🌉 Add Inspector Bridge Client Component",
-                            "content": base64.b64encode(INSPECTOR_BRIDGE_CLIENT_COMPONENT.encode('utf-8')).decode('utf-8'),
+                            "content": base64.b64encode(replace_bridge_placeholders(INSPECTOR_BRIDGE_CLIENT_COMPONENT).encode('utf-8')).decode('utf-8'),
                             "branch": "main"
                         },
                         timeout=15.0
@@ -5256,7 +5471,7 @@ async def inject_bridge_script(
                                 headers=headers,
                                 json={
                                     "message": "🌉 Update Inspector Bridge Client Component",
-                                    "content": base64.b64encode(INSPECTOR_BRIDGE_CLIENT_COMPONENT.encode('utf-8')).decode('utf-8'),
+                                    "content": base64.b64encode(replace_bridge_placeholders(INSPECTOR_BRIDGE_CLIENT_COMPONENT).encode('utf-8')).decode('utf-8'),
                                     "sha": existing_sha,
                                     "branch": "main"
                                 },
@@ -5300,16 +5515,17 @@ async def inject_bridge_script(
                 elif is_js_file:
                     # تزریق نسخه JS/TS - در ابتدای فایل (برای پروژه‌های غیر App Router)
                     slog.info(f"Injecting JS version into {index_path}")
-                    new_content = INSPECTOR_BRIDGE_SCRIPT_JS + "\n" + index_content
+                    new_content = replace_bridge_placeholders(INSPECTOR_BRIDGE_SCRIPT_JS) + "\n" + index_content
                     commit_message = "🌉 Add Inspector Bridge Script (JS version)"
                 else:
                     # تزریق نسخه HTML - قبل از </head> یا </body>
+                    bridge_html = replace_bridge_placeholders(INSPECTOR_BRIDGE_SCRIPT)
                     if "</head>" in index_content:
-                        new_content = index_content.replace("</head>", INSPECTOR_BRIDGE_SCRIPT + "\n</head>")
+                        new_content = index_content.replace("</head>", bridge_html + "\n</head>")
                     elif "</body>" in index_content:
-                        new_content = index_content.replace("</body>", INSPECTOR_BRIDGE_SCRIPT + "\n</body>")
+                        new_content = index_content.replace("</body>", bridge_html + "\n</body>")
                     else:
-                        new_content = index_content + "\n" + INSPECTOR_BRIDGE_SCRIPT
+                        new_content = index_content + "\n" + bridge_html
                     commit_message = "🌉 Add Inspector Bridge Script for live tracking"
 
             # آپدیت فایل در GitHub
@@ -5333,10 +5549,11 @@ async def inject_bridge_script(
 
                 return {
                     "success": True,
-                    "message": "اسکریپت با موفقیت حذف شد" if request.remove else "اسکریپت با موفقیت تزریق شد",
+                    "message": "اسکریپت با موفقیت حذف شد" if request.remove else "اسکریپت با موفقیت تزریق شد (با WebSocket)",
                     "file_path": index_path,
                     "commit_url": update_res.json().get("commit", {}).get("html_url"),
-                    "note": "پس از deploy مجدد، تغییرات اعمال می‌شود"
+                    "ws_url": bridge_ws_url if not request.remove else None,
+                    "note": "پس از deploy مجدد، Bridge از طریق WebSocket به Inspector متصل خواهد شد"
                 }
             else:
                 error_msg = update_res.json().get("message", "خطای ناشناخته")
@@ -5648,3 +5865,164 @@ async def debug_bridge_injection(
     except Exception as e:
         slog.error("Debug bridge failed", exception=e)
         return {"success": False, "error": str(e)}
+
+
+# =====================================
+# 🌐 WebSocket Bridge Hub
+# ارتباط بین Bridge Script داخل پروژه کاربر و Inspector Frontend
+# این روش مشکل cross-origin postMessage را حل می‌کند
+# =====================================
+
+import asyncio
+from collections import defaultdict
+from typing import Set
+
+# نگهداری اتصالات WebSocket به تفکیک project_id و نقش
+_bridge_connections: dict = defaultdict(lambda: {"bridges": set(), "inspectors": set()})
+_bridge_lock = asyncio.Lock()
+
+
+@router.websocket("/ws/bridge/{project_id}")
+async def websocket_bridge_hub(websocket: WebSocket, project_id: str):
+    """
+    🌐 WebSocket Bridge Hub
+
+    این endpoint واسط ارتباطی بین Bridge Script (داخل پروژه deploy شده)
+    و Inspector Frontend است.
+
+    Protocol:
+    1. Client (bridge یا inspector) متصل می‌شود
+    2. اولین پیام باید نقش را مشخص کند: {"type": "register", "role": "bridge"} یا {"type": "register", "role": "inspector"}
+    3. پیام‌ها از bridge به همه inspector ها relay می‌شود
+    4. پیام‌ها از inspector به همه bridge ها relay می‌شود (برای ارسال دستورات)
+    5. هر طرف می‌تواند ping ارسال کند: {"type": "ping"}
+    """
+    await websocket.accept()
+    client_id = str(uuid.uuid4())
+    role = None
+
+    slog.info("Bridge WS: New connection", project_id=project_id, client_id=client_id)
+
+    try:
+        # منتظر پیام register
+        try:
+            first_msg = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
+        except asyncio.TimeoutError:
+            await websocket.send_json({"type": "error", "message": "Timeout: register message required"})
+            await websocket.close()
+            return
+
+        if first_msg.get("type") != "register" or first_msg.get("role") not in ("bridge", "inspector"):
+            await websocket.send_json({"type": "error", "message": "First message must be: {type: 'register', role: 'bridge'|'inspector'}"})
+            await websocket.close()
+            return
+
+        role = first_msg["role"]
+
+        async with _bridge_lock:
+            _bridge_connections[project_id][f"{role}s"].add(websocket)
+
+        slog.info(f"Bridge WS: {role} registered",
+            project_id=project_id,
+            client_id=client_id,
+            bridges=len(_bridge_connections[project_id]["bridges"]),
+            inspectors=len(_bridge_connections[project_id]["inspectors"])
+        )
+
+        # اعلام اتصال موفق
+        await websocket.send_json({
+            "type": "registered",
+            "role": role,
+            "project_id": project_id,
+            "client_id": client_id
+        })
+
+        # اطلاع‌رسانی به طرف مقابل
+        other_role = "inspectors" if role == "bridge" else "bridges"
+        notify_msg = {
+            "type": "peer_connected",
+            "peer_role": role,
+            "project_id": project_id,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        async with _bridge_lock:
+            for ws in list(_bridge_connections[project_id][other_role]):
+                try:
+                    await ws.send_json(notify_msg)
+                except Exception:
+                    _bridge_connections[project_id][other_role].discard(ws)
+
+        # حلقه اصلی دریافت و relay پیام‌ها
+        while True:
+            try:
+                data = await websocket.receive_json()
+                msg_type = data.get("type", "")
+
+                if msg_type == "ping":
+                    await websocket.send_json({"type": "pong"})
+                    continue
+
+                # relay پیام به طرف مقابل
+                target_set_name = "inspectors" if role == "bridge" else "bridges"
+                data["_from"] = role
+                data["_project_id"] = project_id
+                data["_timestamp"] = datetime.utcnow().isoformat()
+
+                async with _bridge_lock:
+                    dead_connections = set()
+                    for ws in list(_bridge_connections[project_id][target_set_name]):
+                        try:
+                            await ws.send_json(data)
+                        except Exception:
+                            dead_connections.add(ws)
+                    # حذف اتصالات مرده
+                    _bridge_connections[project_id][target_set_name] -= dead_connections
+
+            except WebSocketDisconnect:
+                break
+            except Exception as e:
+                slog.warning("Bridge WS: message error", client_id=client_id, exception=e)
+                break
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        slog.error("Bridge WS: connection error", client_id=client_id, exception=e)
+    finally:
+        # حذف اتصال
+        if role:
+            async with _bridge_lock:
+                _bridge_connections[project_id][f"{role}s"].discard(websocket)
+                # اطلاع‌رسانی قطع اتصال به طرف مقابل
+                other_role = "inspectors" if role == "bridge" else "bridges"
+                disconnect_msg = {
+                    "type": "peer_disconnected",
+                    "peer_role": role,
+                    "project_id": project_id,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                for ws in list(_bridge_connections[project_id][other_role]):
+                    try:
+                        await ws.send_json(disconnect_msg)
+                    except Exception:
+                        _bridge_connections[project_id][other_role].discard(ws)
+
+                # پاکسازی اگر هیچ اتصالی نمانده
+                if not _bridge_connections[project_id]["bridges"] and not _bridge_connections[project_id]["inspectors"]:
+                    del _bridge_connections[project_id]
+
+        slog.info(f"Bridge WS: {role or 'unknown'} disconnected",
+            project_id=project_id, client_id=client_id)
+
+
+@router.get("/inspector/bridge-connections/{project_id}")
+async def get_bridge_connections(project_id: str):
+    """وضعیت اتصالات WebSocket Bridge برای یک پروژه"""
+    conns = _bridge_connections.get(project_id, {"bridges": set(), "inspectors": set()})
+    return {
+        "success": True,
+        "project_id": project_id,
+        "bridges_connected": len(conns["bridges"]),
+        "inspectors_connected": len(conns["inspectors"]),
+        "is_active": len(conns["bridges"]) > 0 and len(conns["inspectors"]) > 0
+    }
