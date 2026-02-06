@@ -6341,12 +6341,15 @@ ERROR: [توضیح مختصر خطا]"""
             else:
                 msg.backend_verified = True
                 msg.backend_log_summary = "سالم - بدون خطا"
+            msg.verified_by_model = "rule-based"
             db.commit()
             return {
                 "success": True,
                 "message_id": message_id,
                 "verified": msg.backend_verified,
-                "summary": msg.backend_log_summary
+                "summary": msg.backend_log_summary,
+                "model_used": "rule-based",
+                "logs_checked": len(recent_logs)
             }
 
         response = await ai_manager.generate(
@@ -6373,6 +6376,7 @@ ERROR: [توضیح مختصر خطا]"""
                 msg.backend_verified = True
                 msg.backend_log_summary = ai_result or "سالم"
 
+        msg.verified_by_model = fast_model
         db.commit()
 
         return {
@@ -6380,7 +6384,9 @@ ERROR: [توضیح مختصر خطا]"""
             "message_id": message_id,
             "verified": msg.backend_verified,
             "summary": msg.backend_log_summary,
-            "model_used": fast_model
+            "model_used": fast_model,
+            "logs_checked": len(recent_logs),
+            "error_logs_count": len(error_logs)
         }
 
     except Exception as e:

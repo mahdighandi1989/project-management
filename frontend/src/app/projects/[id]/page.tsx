@@ -301,7 +301,7 @@ export default function ProjectDetailPage() {
   const [inspectorSelectedModels, setInspectorSelectedModels] = useState<string[]>([]);
   const [inspectorChatMessages, setInspectorChatMessages] = useState<Array<{
     id: string;
-    db_id?: number;  // آیدی دیتابیس برای verification
+    db_id?: number;
     role: 'user' | 'assistant' | 'system' | 'action';
     content: string;
     model_id?: string;
@@ -310,9 +310,13 @@ export default function ProjectDetailPage() {
     action_type?: 'click' | 'type' | 'navigate' | 'edit' | 'read' | 'log' | 'scroll' | 'focus' | 'hover';
     backend_verified?: boolean | null;  // null=pending, true=ok, false=error
     backend_log_summary?: string;
+    verified_by_model?: string;
+    logs_checked?: number;
+    error_logs_count?: number;
   }>>([]);
   const [inspectorSessionId, setInspectorSessionId] = useState<number | null>(null);
   const inspectorSessionIdRef = useRef<number | null>(null);
+  const [inspectorMsgInfoId, setInspectorMsgInfoId] = useState<string | null>(null);  // ID پیام انتخاب شده برای نمایش info
   const [inspectorArchivedSessions, setInspectorArchivedSessions] = useState<Array<{
     id: number;
     title: string;
@@ -848,6 +852,9 @@ export default function ProjectDetailPage() {
                           ...m,
                           backend_verified: verifyData.verified,
                           backend_log_summary: verifyData.summary,
+                          verified_by_model: verifyData.model_used,
+                          logs_checked: verifyData.logs_checked,
+                          error_logs_count: verifyData.error_logs_count,
                         } : m)
                       );
                     }
@@ -1267,6 +1274,7 @@ export default function ProjectDetailPage() {
             timestamp: new Date(m.timestamp),
             backend_verified: m.backend_verified,
             backend_log_summary: m.backend_log_summary,
+            verified_by_model: m.verified_by_model,
           }));
           setInspectorChatMessages(loadedMessages);
         }
@@ -9143,13 +9151,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                          msg.role === 'action' ? '👆' :
                          '🤖'}
                       </div>
-                      <div className={`rounded-lg p-2.5 shadow-sm max-w-[85%] ${
-                        msg.role === 'user'
-                          ? 'bg-blue-500 text-white rounded-tr-none'
-                          : msg.role === 'action'
-                            ? 'bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-tl-none'
-                            : 'bg-white dark:bg-gray-800 rounded-tl-none'
-                      }`}>
+                      <div
+                        className={`rounded-lg p-2.5 shadow-sm max-w-[85%] cursor-pointer transition-all ${
+                          msg.role === 'user'
+                            ? 'bg-blue-500 text-white rounded-tr-none'
+                            : msg.role === 'action'
+                              ? 'bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-tl-none hover:border-emerald-400'
+                              : 'bg-white dark:bg-gray-800 rounded-tl-none hover:bg-gray-50 dark:hover:bg-gray-750'
+                        } ${inspectorMsgInfoId === msg.id ? 'ring-2 ring-blue-300' : ''}`}
+                        onClick={() => setInspectorMsgInfoId(inspectorMsgInfoId === msg.id ? null : msg.id)}
+                      >
                         {msg.model_id && msg.role === 'assistant' && (
                           <p className="text-xs text-gray-400 mb-1">{msg.model_id}</p>
                         )}
@@ -9171,30 +9182,116 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           {msg.tokens_used && (
                             <span className="text-xs text-gray-400">({msg.tokens_used} توکن)</span>
                           )}
-                          {/* تیک تأیید بک‌اند (مثل پیام‌رسان‌ها) */}
+                          {/* تیک تأیید بک‌اند */}
                           {msg.role === 'action' && (
-                            <span
-                              className={`text-xs font-bold ${
-                                msg.backend_verified === true ? 'text-blue-500' :
-                                msg.backend_verified === false ? 'text-red-500' :
-                                'text-gray-300'
-                              }`}
-                              title={
-                                msg.backend_verified === true ? `تأیید شد: ${msg.backend_log_summary || 'سالم'}` :
-                                msg.backend_verified === false ? `خطا: ${msg.backend_log_summary || 'مشکلی در لاگ'}` :
-                                'در حال بررسی لاگ بک‌اند...'
-                              }
-                            >
+                            <span className={`text-xs font-bold ${
+                              msg.backend_verified === true ? 'text-blue-500' :
+                              msg.backend_verified === false ? 'text-red-500' :
+                              'text-gray-300 animate-pulse'
+                            }`}>
                               {msg.backend_verified === true ? '✓✓' :
                                msg.backend_verified === false ? '✕' :
                                '○'}
                             </span>
                           )}
+                          {/* دکمه info */}
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setInspectorMsgInfoId(inspectorMsgInfoId === msg.id ? null : msg.id); }}
+                            className={`text-[10px] opacity-0 group-hover:opacity-100 transition-opacity ${
+                              msg.role === 'user' ? 'text-white/60 hover:text-white' : 'text-gray-400 hover:text-gray-600'
+                            }`}
+                            style={{ opacity: inspectorMsgInfoId === msg.id ? 1 : undefined }}
+                          >
+                            i
+                          </button>
                         </div>
-                        {/* نمایش خلاصه خطای بک‌اند */}
-                        {msg.role === 'action' && msg.backend_verified === false && msg.backend_log_summary && (
-                          <div className="mt-1 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 rounded px-2 py-1">
-                            {msg.backend_log_summary}
+
+                        {/* پنل جزئیات (مثل info در پیام‌رسان‌ها) */}
+                        {inspectorMsgInfoId === msg.id && (
+                          <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700 text-xs space-y-1.5" dir="rtl">
+                            {/* نوع پیام */}
+                            <div className="flex items-center justify-between">
+                              <span className="text-gray-500">نوع:</span>
+                              <span className={`font-medium ${
+                                msg.role === 'action' ? 'text-emerald-600' :
+                                msg.role === 'assistant' ? 'text-red-500' :
+                                msg.role === 'user' ? 'text-blue-500' : 'text-gray-600'
+                              }`}>
+                                {msg.role === 'action' ? `اکشن (${msg.action_type || 'نامشخص'})` :
+                                 msg.role === 'assistant' ? 'پاسخ AI' :
+                                 msg.role === 'user' ? 'پیام کاربر' : 'سیستم'}
+                              </span>
+                            </div>
+
+                            {/* مدل AI (برای پاسخ‌های assistant) */}
+                            {msg.model_id && (
+                              <div className="flex items-center justify-between">
+                                <span className="text-gray-500">مدل پاسخ‌دهنده:</span>
+                                <span className="font-mono text-[11px] bg-gray-100 dark:bg-gray-700 px-1.5 py-0.5 rounded">{msg.model_id}</span>
+                              </div>
+                            )}
+
+                            {/* اطلاعات تأیید بک‌اند (برای action) */}
+                            {msg.role === 'action' && (
+                              <>
+                                <div className="flex items-center justify-between">
+                                  <span className="text-gray-500">وضعیت بک‌اند:</span>
+                                  <span className={`font-medium ${
+                                    msg.backend_verified === true ? 'text-green-600' :
+                                    msg.backend_verified === false ? 'text-red-600' :
+                                    'text-yellow-500'
+                                  }`}>
+                                    {msg.backend_verified === true ? 'سالم' :
+                                     msg.backend_verified === false ? 'خطا' :
+                                     'در حال بررسی...'}
+                                  </span>
+                                </div>
+
+                                {msg.verified_by_model && (
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-gray-500">بررسی توسط:</span>
+                                    <span className="font-mono text-[11px] bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 px-1.5 py-0.5 rounded">
+                                      {msg.verified_by_model}
+                                    </span>
+                                  </div>
+                                )}
+
+                                {msg.logs_checked !== undefined && (
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-gray-500">لاگ‌های بررسی شده:</span>
+                                    <span className="text-gray-600 dark:text-gray-400">
+                                      {msg.logs_checked} لاگ {msg.error_logs_count ? `(${msg.error_logs_count} خطا)` : ''}
+                                    </span>
+                                  </div>
+                                )}
+
+                                {msg.backend_log_summary && (
+                                  <div className={`mt-1 p-1.5 rounded text-[11px] ${
+                                    msg.backend_verified === false
+                                      ? 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300'
+                                      : 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300'
+                                  }`}>
+                                    {msg.backend_log_summary}
+                                  </div>
+                                )}
+                              </>
+                            )}
+
+                            {/* توکن مصرفی */}
+                            {msg.tokens_used && (
+                              <div className="flex items-center justify-between">
+                                <span className="text-gray-500">توکن مصرفی:</span>
+                                <span className="text-gray-600 dark:text-gray-400">{msg.tokens_used}</span>
+                              </div>
+                            )}
+
+                            {/* زمان دقیق */}
+                            <div className="flex items-center justify-between">
+                              <span className="text-gray-500">زمان:</span>
+                              <span className="text-gray-600 dark:text-gray-400 font-mono text-[11px]">
+                                {msg.timestamp.toLocaleString('fa-IR')}
+                              </span>
+                            </div>
                           </div>
                         )}
                       </div>
