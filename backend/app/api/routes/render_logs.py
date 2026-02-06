@@ -4553,6 +4553,7 @@ async def inject_bridge_script(
             html_files = []  # همه فایل‌های HTML پیدا شده
             pattern_match_files = []  # فایل‌های پیدا شده با pattern search
             frontend_files = []  # فایل‌های داخل پوشه frontend
+            pattern_search_reason = None  # دلیل عدم استفاده از pattern match
 
             if not index_path:
                 try:
@@ -4918,6 +4919,7 @@ async def inject_bridge_script(
 
                             slog.info(f"  📂 Found {len(matching_files)} matching files: {matching_files[:10]}")
                             pattern_match_files = matching_files.copy()  # ذخیره برای debug
+                            pattern_search_reason = None  # دلیل عدم استفاده
 
                             # اولویت با فایل‌های در پوشه frontend
                             matching_files.sort(key=lambda x: (
@@ -4934,18 +4936,29 @@ async def inject_bridge_script(
                                         headers=headers,
                                         timeout=10.0
                                     )
+                                    slog.info(f"  📥 Status: {content_res.status_code}")
                                     if content_res.status_code == 200:
                                         data = content_res.json()
                                         if data.get("encoding") == "base64":
                                             content = base64.b64decode(data["content"]).decode('utf-8')
-                                            if 'Inspector Bridge Script' not in content:
+                                            has_bridge = 'Inspector Bridge Script' in content
+                                            slog.info(f"  📝 Has bridge: {has_bridge}, Content length: {len(content)}")
+                                            if not has_bridge:
                                                 index_content = content
                                                 index_sha = data["sha"]
                                                 index_path = match_file
                                                 is_js_file = True
                                                 slog.info(f"✅ Found by pattern search: {match_file}")
                                                 break
+                                            else:
+                                                pattern_search_reason = f"File {match_file} already has bridge script"
+                                                slog.info(f"  ⏭️ Skipped (already has bridge): {match_file}")
+                                    else:
+                                        pattern_search_reason = f"Failed to fetch {match_file}: HTTP {content_res.status_code}"
+                                        slog.warn(f"  ❌ Fetch failed: HTTP {content_res.status_code}")
+                                        continue  # 🔧 مهم: برو سراغ فایل بعدی
                                 except Exception as e:
+                                    pattern_search_reason = f"Error fetching {match_file}: {str(e)}"
                                     slog.warn(f"  ❌ Error: {e}")
                                     continue
 
@@ -5044,6 +5057,7 @@ async def inject_bridge_script(
                         "entry_candidates": entry_candidates,
                         "frontend_files": frontend_files[:30],  # 🆕 فایل‌های frontend
                         "pattern_match_files": pattern_match_files[:20],  # 🆕 فایل‌های یافته شده با pattern
+                        "pattern_search_reason": pattern_search_reason,  # 🆕 دلیل عدم استفاده از pattern match
                         "files_sample": all_files[:30] if all_files else [],  # نمایش ۳۰ فایل
                         "package_json_found": package_json_found,
                         "package_json_status": package_json_status,
