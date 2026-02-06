@@ -914,23 +914,23 @@ class ProjectLockManager:
 
 ---
 
-**تاریخ به‌روزرسانی:** 2026-02-05
-**نسخه گزارش:** 2.5 (اضافه شدن بخش بازرس ویژه - متوقف شده)
+**تاریخ به‌روزرسانی:** 2026-02-06
+**نسخه گزارش:** 2.6 (به‌روزرسانی جامع بخش بازرس ویژه - رویکرد جدید Bridge Script)
 **شاخه:** `claude/review-inspection-tab-VJGlq`
 
 ---
 
-## 9. بازرس ویژه (Inspector Tab) - ⏸️ متوقف شده
+## 9. بازرس ویژه (Inspector Tab) - 🔄 در حال توسعه
 
-### وضعیت کلی
+### وضعیت کلی (به‌روزرسانی 2026-02-06)
 
 | معیار | وضعیت |
 |-------|--------|
-| وضعیت | ⏸️ **متوقف شده** - نیاز به بازنگری اساسی |
-| درصد پیشرفت | ~40% |
-| مشکل اصلی | کلیک روی المان صحیح در صفحه هدف |
+| وضعیت | 🔄 **در حال توسعه** - رویکرد جدید Bridge Script |
+| درصد پیشرفت | ~60% |
+| مشکل اصلی فعلی | تشخیص فریم‌ورک و تزریق اسکریپت در پروژه‌های مختلف |
 | تاریخ شروع | 2026-02-04 |
-| تاریخ توقف | 2026-02-05 |
+| آخرین به‌روزرسانی | 2026-02-06 |
 
 ### شرح قابلیت
 
@@ -1085,10 +1085,171 @@ await element.click()  # به جای mouse.click(x, y)
 | backend/app/services/browser_automation.py | بهبود text extraction |
 | frontend/src/app/projects/[id]/page.tsx | UI اسکن بصری و نشانگر |
 
-### نتیجه‌گیری
+### نتیجه‌گیری فاز 1 (Playwright - منسوخ)
 
-این قابلیت نیاز به **بازنگری معماری اساسی** دارد. راه‌حل‌های فعلی (iframe + headless browser) محدودیت‌های ذاتی دارند که بدون تغییر رویکرد قابل حل نیستند.
+رویکرد اولیه با Playwright **ناموفق** بود. راه‌حل‌های امتحان شده (iframe + headless browser) محدودیت‌های ذاتی داشتند.
 
-**پیشنهاد:** استفاده از Browser Extension یا CDP Protocol برای دسترسی مستقیم به مرورگر کاربر.
+---
+
+### 🟢 فاز 2: رویکرد جدید Bridge Script (فعلی)
+
+#### ایده اصلی
+
+به جای استفاده از Playwright برای تعامل با صفحه، یک **اسکریپت پل (Bridge Script)** در خود پروژه کاربر تزریق می‌شود که:
+
+1. **در صفحه deploy شده اجرا می‌شود**
+2. **رویدادهای کاربر را ثبت می‌کند** (کلیک، ناوبری، خطا)
+3. **به frontend پیام می‌فرستد** از طریق postMessage
+
+#### معماری جدید
+
+```
+┌─────────────────────────────────────────────────┐
+│                    Frontend                      │
+│  ┌─────────────────┐    ┌──────────────────┐    │
+│  │     iframe      │    │   Chat Panel     │    │
+│  │  (instance A)   │    │                  │    │
+│  │                 │◄──►│ Message Listener │    │
+│  │  صفحه وب       │    │                  │    │
+│  │  + Bridge Script│    │                  │    │
+│  └─────────────────┘    └──────────────────┘    │
+│           │                      │              │
+│           └──── postMessage ─────┘              │
+└─────────────────────────────────────────────────┘
+```
+
+**مزیت:** اسکریپت **در همان صفحه** اجرا می‌شود، پس اقدامات واقعی کاربر را می‌بیند.
+
+---
+
+### 🔧 پیاده‌سازی Bridge Script
+
+#### فاز 2.1: تشخیص نوع پروژه ✅
+```python
+# تشخیص فریم‌ورک از package.json
+framework_patterns = {
+    'next': ['next', '@next/'],
+    'react': ['react', 'react-dom'],
+    'vue': ['vue', '@vue/'],
+    'angular': ['@angular/'],
+    'python': ['requirements.txt', 'setup.py']
+}
+```
+
+#### فاز 2.2: یافتن فایل ورودی ✅
+```python
+# الگوهای جستجو برای فایل‌های ورودی
+entry_patterns = {
+    'next': [
+        'src/app/layout.tsx',    # App Router
+        'pages/_app.tsx',        # Pages Router
+        'src/pages/_app.tsx'
+    ],
+    'react': [
+        'src/index.tsx',
+        'src/main.tsx',
+        'src/App.tsx'
+    ]
+}
+```
+
+#### فاز 2.3: تزریق اسکریپت 🔄
+```javascript
+// Bridge Script - تزریق در فایل HTML یا JS ورودی
+window.addEventListener('click', (e) => {
+  parent.postMessage({
+    type: 'BRIDGE_CLICK',
+    target: e.target.tagName,
+    text: e.target.innerText?.slice(0, 100),
+    path: location.pathname
+  }, '*');
+});
+
+window.addEventListener('error', (e) => {
+  parent.postMessage({
+    type: 'BRIDGE_ERROR',
+    message: e.message,
+    stack: e.error?.stack
+  }, '*');
+});
+```
+
+---
+
+### 🔴 مشکلات فعلی Bridge Script
+
+#### چالش‌های حل شده:
+
+| چالش | وضعیت | توضیح |
+|------|-------|--------|
+| تشخیص Next.js App Router | ✅ حل شده | بررسی src/app/layout.tsx |
+| تشخیص Next.js Pages Router | ✅ حل شده | بررسی pages/_app.tsx |
+| تشخیص React ساده | ✅ حل شده | بررسی src/index.tsx یا src/main.tsx |
+| پروژه‌های فقط Backend | ✅ حل شده | هشدار مناسب نمایش می‌دهد |
+| پروژه‌های Python | ✅ حل شده | پشتیبانی اضافه شد |
+| پروژه‌های بدون package.json در root | ✅ حل شده | جستجوی بازگشتی |
+| نیاز به Client Component در Next.js App Router | ✅ حل شده | کامپوننت `'use client'` ساخته می‌شود |
+
+#### مشکلات باقیمانده:
+
+| مشکل | علت | وضعیت |
+|------|-----|--------|
+| اسکریپت تزریق می‌شود ولی پیام نمی‌رسد | Cross-origin policy | 🔄 در حال بررسی |
+| در بعضی پروژه‌ها فایل ورودی پیدا نمی‌شود | ساختار غیراستاندارد | ✅ امکان انتخاب دستی اضافه شد |
+| بعد از deploy جدید، اسکریپت باید دوباره تزریق شود | فایل‌ها overwrite می‌شوند | ⏳ نیاز به hook |
+
+---
+
+### 📊 کامیت‌های فاز 2 (Bridge Script)
+
+| Commit | توضیح |
+|--------|--------|
+| 25678bf | Fix: Use client component for Next.js App Router bridge script |
+| be8448e | Fix: Return success when bridge script is already installed |
+| a45c04d | Add pattern_search_reason debug and fix non-200 fetch handling |
+| a2fa4cf | Add frontend_files and pattern_match_files to debug output |
+| 832d4a3 | Add pattern-based file search for Next.js/React entry points |
+| 1dcadf3 | Fix smart search: check nested packages when framework not detected |
+| 6c753f6 | Search ALL folders for nested package.json files |
+| 32a2e33 | Improve error handling for backend-only projects |
+| 48816e7 | Add Python project support and improve template detection |
+| fbc9008 | Add default branch auto-detection for GitHub tree API |
+| 86a15ee | Add comprehensive debug logging for Bridge Script injection |
+| 8dcb2a6 | Implement super-smart package.json-based framework detection |
+| 15662cd | Add smart JS/TS entry point detection and injection |
+| 241c610 | Add comprehensive debug logging for HTML file search |
+| 1f20cc3 | Always return found_html_files and framework_detected in API response |
+| 22a4a2d | Improve HTML file detection with framework detection and file listing |
+| 2c438aa | Improve Bridge Script debugging and deployed site verification |
+| 40e3373 | Add debug endpoint for Bridge Script inspection |
+| 8618f8f | Add debugging for Bridge Script message listener |
+| 4e9e07b | Smart HTML file detection and auto-fix github_path |
+| e9a517f | Add custom HTML path option for Bridge Script injection |
+| f68d62f | Add GitHub path setup dialog for projects not connected to GitHub |
+| 3657d22 | Fix: Use github_path instead of github_url for project GitHub connection |
+| 7862048 | Implement Bridge Script injection for cross-origin iframe tracking |
+| 6501dad | Simplify action tracking: remove Playwright, add log monitoring toggle |
+
+---
+
+### 🎯 مراحل بعدی
+
+| اولویت | کار | وضعیت |
+|--------|-----|--------|
+| 1 | حل مشکل cross-origin برای postMessage | 🔄 در حال بررسی |
+| 2 | امکان انتخاب دستی فایل ورودی توسط کاربر | ✅ پیاده‌سازی شده |
+| 3 | Re-injection خودکار بعد از deploy | ⏳ در انتظار |
+| 4 | UI بهتر برای نمایش اقدامات ردیابی شده | ⏳ در انتظار |
+
+---
+
+### نتیجه‌گیری نهایی
+
+رویکرد Bridge Script **بهتر از Playwright** است چون:
+- ✅ در همان context صفحه اجرا می‌شود
+- ✅ رویدادهای واقعی کاربر را می‌بیند
+- ✅ نیازی به مرورگر headless ندارد
+- ⚠️ نیاز به تزریق کد در پروژه دارد
+- ⚠️ چالش cross-origin هنوز باقی است
 
 ---
