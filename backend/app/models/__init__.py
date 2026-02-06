@@ -7,6 +7,7 @@ from .debate import Debate, DebateMessage
 from .setting import Setting
 from .ai_log import AILog
 from .system_prompt import SystemPrompt, PromptExecution
+from .inspector_session import InspectorSession, InspectorMessage
 
 __all__ = [
     "Project",
@@ -17,4 +18,6 @@ __all__ = [
     "AILog",
     "SystemPrompt",
     "PromptExecution",
+    "InspectorSession",
+    "InspectorMessage",
 ]
