@@ -4866,6 +4866,7 @@ async def inject_bridge_script(
                         if not index_path and entry_candidates:
                             slog.info(f"No good HTML found, trying framework entry points: {entry_candidates}")
                             for candidate in entry_candidates:
+                                slog.info(f"  🔎 Checking: {candidate} - exists: {candidate in all_files}")
                                 if candidate in all_files:
                                     try:
                                         content_res = await client.get(
@@ -4887,6 +4888,59 @@ async def inject_bridge_script(
                                     except Exception as e:
                                         slog.warn(f"Failed to fetch {candidate}: {e}")
                                         continue
+
+                        # 🔍 مرحله ۴.۵: جستجوی هوشمند برای فایل‌های Next.js/React
+                        # اگر entry candidates دقیق پیدا نشد، دنبال pattern بگرد
+                        if not index_path and detected_framework:
+                            slog.info(f"Entry candidates not found exactly, searching by pattern in {len(all_files)} files...")
+
+                            # الگوهای فایل بر اساس فریم‌ورک
+                            if detected_framework == 'nextjs':
+                                patterns = ['_app.tsx', '_app.jsx', '_app.js', 'layout.tsx', 'layout.jsx', 'layout.js']
+                            elif detected_framework in ['react', 'vue', 'svelte']:
+                                patterns = ['main.tsx', 'main.jsx', 'main.js', 'App.tsx', 'App.jsx', 'App.js', 'index.tsx', 'index.jsx']
+                            else:
+                                patterns = ['index.tsx', 'index.jsx', 'index.js', 'main.tsx', 'main.jsx', 'main.js']
+
+                            # پیدا کردن فایل‌هایی که با pattern مطابقت دارند
+                            matching_files = []
+                            for f in all_files:
+                                for pattern in patterns:
+                                    if f.endswith(pattern) and 'node_modules' not in f:
+                                        matching_files.append(f)
+                                        break
+
+                            slog.info(f"  📂 Found {len(matching_files)} matching files: {matching_files[:10]}")
+
+                            # اولویت با فایل‌های در پوشه frontend
+                            matching_files.sort(key=lambda x: (
+                                0 if 'frontend/' in x or 'client/' in x else 1,
+                                0 if '/src/' in x or '/app/' in x or '/pages/' in x else 1,
+                                len(x)
+                            ))
+
+                            for match_file in matching_files:
+                                try:
+                                    slog.info(f"  🔎 Trying: {match_file}")
+                                    content_res = await client.get(
+                                        f"https://api.github.com/repos/{owner}/{repo}/contents/{match_file}",
+                                        headers=headers,
+                                        timeout=10.0
+                                    )
+                                    if content_res.status_code == 200:
+                                        data = content_res.json()
+                                        if data.get("encoding") == "base64":
+                                            content = base64.b64decode(data["content"]).decode('utf-8')
+                                            if 'Inspector Bridge Script' not in content:
+                                                index_content = content
+                                                index_sha = data["sha"]
+                                                index_path = match_file
+                                                is_js_file = True
+                                                slog.info(f"✅ Found by pattern search: {match_file}")
+                                                break
+                                except Exception as e:
+                                    slog.warn(f"  ❌ Error: {e}")
+                                    continue
 
                         # 🔎 مرحله ۵: اگر هنوز پیدا نشد، جستجوی عمومی
                         if not index_path:
