@@ -313,10 +313,12 @@ export default function ProjectDetailPage() {
     verified_by_model?: string;
     logs_checked?: number;
     error_logs_count?: number;
+    checked_logs?: Array<{ level: string; message: string; timestamp: string | null; service_id?: string }>;
   }>>([]);
   const [inspectorSessionId, setInspectorSessionId] = useState<number | null>(null);
   const inspectorSessionIdRef = useRef<number | null>(null);
-  const [inspectorMsgInfoId, setInspectorMsgInfoId] = useState<string | null>(null);  // ID پیام انتخاب شده برای نمایش info
+  const [inspectorMsgInfoId, setInspectorMsgInfoId] = useState<string | null>(null);
+  const [inspectorMsgLogsId, setInspectorMsgLogsId] = useState<string | null>(null);  // ID پیام برای نمایش لاگ‌ها
   const [inspectorArchivedSessions, setInspectorArchivedSessions] = useState<Array<{
     id: number;
     title: string;
@@ -855,6 +857,7 @@ export default function ProjectDetailPage() {
                           verified_by_model: verifyData.model_used,
                           logs_checked: verifyData.logs_checked,
                           error_logs_count: verifyData.error_logs_count,
+                          checked_logs: verifyData.checked_logs,
                         } : m)
                       );
                     }
@@ -9259,9 +9262,44 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                 {msg.logs_checked !== undefined && (
                                   <div className="flex items-center justify-between">
                                     <span className="text-gray-500">لاگ‌های بررسی شده:</span>
-                                    <span className="text-gray-600 dark:text-gray-400">
-                                      {msg.logs_checked} لاگ {msg.error_logs_count ? `(${msg.error_logs_count} خطا)` : ''}
-                                    </span>
+                                    {msg.checked_logs && msg.checked_logs.length > 0 ? (
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); setInspectorMsgLogsId(inspectorMsgLogsId === msg.id ? null : msg.id); }}
+                                        className="font-medium text-blue-500 hover:text-blue-700 underline underline-offset-2"
+                                      >
+                                        {msg.logs_checked} لاگ {msg.error_logs_count ? `(${msg.error_logs_count} خطا)` : ''}
+                                      </button>
+                                    ) : (
+                                      <span className="text-gray-400 italic">
+                                        {msg.logs_checked === 0 ? 'بدون لاگ' : `${msg.logs_checked} لاگ`}
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+
+                                {/* لاگ‌های واقعی بررسی شده (باز/بسته با کلیک) */}
+                                {inspectorMsgLogsId === msg.id && msg.checked_logs && msg.checked_logs.length > 0 && (
+                                  <div className="mt-1.5 bg-gray-900 rounded overflow-hidden">
+                                    <div className="flex items-center justify-between px-2 py-1 bg-gray-800 text-gray-300">
+                                      <span className="text-[10px] font-bold">لاگ‌های بررسی شده ({msg.checked_logs.length})</span>
+                                      <button onClick={(e) => { e.stopPropagation(); setInspectorMsgLogsId(null); }} className="text-gray-500 hover:text-white text-[10px]">✕</button>
+                                    </div>
+                                    <div className="max-h-32 overflow-auto p-1.5 space-y-0.5">
+                                      {msg.checked_logs.map((log, i) => (
+                                        <div key={i} className={`text-[10px] font-mono px-1 py-0.5 rounded ${
+                                          log.level?.toUpperCase() === 'ERROR' || log.level?.toUpperCase() === 'CRITICAL'
+                                            ? 'bg-red-900/50 text-red-300'
+                                            : log.level?.toUpperCase() === 'WARN' || log.level?.toUpperCase() === 'WARNING'
+                                              ? 'bg-yellow-900/30 text-yellow-300'
+                                              : 'text-gray-400'
+                                        }`}>
+                                          <span className={`font-bold ${
+                                            log.level?.toUpperCase() === 'ERROR' ? 'text-red-400' :
+                                            log.level?.toUpperCase() === 'WARN' ? 'text-yellow-400' : 'text-green-400'
+                                          }`}>[{log.level}]</span> {log.message}
+                                        </div>
+                                      ))}
+                                    </div>
                                   </div>
                                 )}
 

@@ -6280,19 +6280,43 @@ async def verify_inspector_message(
         }
 
     try:
-        # دریافت لاگ‌های اخیر بک‌اند (15 ثانیه اخیر)
-        cutoff = datetime.utcnow() - timedelta(seconds=15)
+        # دریافت لاگ‌های اخیر بک‌اند (60 ثانیه اخیر - بازه بیشتر برای اطمینان)
+        cutoff = datetime.utcnow() - timedelta(seconds=60)
         recent_logs = db.query(RenderLog).filter(
             RenderLog.timestamp >= cutoff
-        ).order_by(desc(RenderLog.timestamp)).limit(20).all()
+        ).order_by(desc(RenderLog.timestamp)).limit(30).all()
 
         logs_text = ""
         error_logs = []
+        checked_logs_list = []
         for log in recent_logs:
             log_line = f"[{log.level}] {log.message}"
             logs_text += log_line + "\n"
+            checked_logs_list.append({
+                "level": log.level or "info",
+                "message": (log.message or "")[:200],
+                "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+                "service_id": log.service_id,
+            })
             if log.level and log.level.upper() in ("ERROR", "CRITICAL", "FATAL"):
                 error_logs.append(log_line)
+
+        # اگر لاگی نبود، تأیید بزن ولی وضعیت رو واضح بگو
+        if len(recent_logs) == 0:
+            msg.backend_verified = True
+            msg.backend_log_summary = "بدون لاگ در ۶۰ ثانیه اخیر"
+            msg.verified_by_model = "no-logs"
+            db.commit()
+            return {
+                "success": True,
+                "message_id": message_id,
+                "verified": True,
+                "summary": "بدون لاگ در ۶۰ ثانیه اخیر",
+                "model_used": "no-logs",
+                "logs_checked": 0,
+                "error_logs_count": 0,
+                "checked_logs": []
+            }
 
         # استفاده از AI برای بررسی لاگ‌ها
         from ...services.ai_manager import get_ai_manager
@@ -6304,8 +6328,8 @@ async def verify_inspector_message(
 
 اکشن کاربر: {msg.content}
 
-لاگ‌های اخیر بک‌اند (15 ثانیه اخیر):
-{logs_text if logs_text.strip() else "(لاگ جدیدی ثبت نشده)"}
+لاگ‌های اخیر بک‌اند ({len(recent_logs)} لاگ در ۶۰ ثانیه اخیر):
+{logs_text}
 
 وظیفه شما:
 1. آیا خطایی مرتبط با این اکشن وجود دارد؟
@@ -6325,7 +6349,6 @@ ERROR: [توضیح مختصر خطا]"""
         # استفاده از سریع‌ترین مدل موجود
         available = ai_manager.get_available_models()
         available_ids = [m.id for m in available]
-        # اولویت: gemini-flash > gpt-4o-mini > هر مدل دیگه
         fast_model = None
         for preferred in ["gemini-2.0-flash", "gemini-1.5-flash", "gpt-4o-mini", "claude-3-haiku"]:
             if preferred in available_ids:
@@ -6341,7 +6364,7 @@ ERROR: [توضیح مختصر خطا]"""
                 msg.backend_log_summary = f"خطا در لاگ: {error_logs[0][:100]}"
             else:
                 msg.backend_verified = True
-                msg.backend_log_summary = "سالم - بدون خطا"
+                msg.backend_log_summary = f"سالم ({len(recent_logs)} لاگ بررسی شد)"
             msg.verified_by_model = "rule-based"
             db.commit()
             return {
@@ -6350,7 +6373,9 @@ ERROR: [توضیح مختصر خطا]"""
                 "verified": msg.backend_verified,
                 "summary": msg.backend_log_summary,
                 "model_used": "rule-based",
-                "logs_checked": len(recent_logs)
+                "logs_checked": len(recent_logs),
+                "error_logs_count": len(error_logs),
+                "checked_logs": checked_logs_list
             }
 
         response = await ai_manager.generate(
@@ -6387,7 +6412,8 @@ ERROR: [توضیح مختصر خطا]"""
             "summary": msg.backend_log_summary,
             "model_used": fast_model,
             "logs_checked": len(recent_logs),
-            "error_logs_count": len(error_logs)
+            "error_logs_count": len(error_logs),
+            "checked_logs": checked_logs_list
         }
 
     except Exception as e:
