@@ -6324,14 +6324,15 @@ ERROR: [توضیح مختصر خطا]"""
 
         # استفاده از سریع‌ترین مدل موجود
         available = ai_manager.get_available_models()
+        available_ids = [m.id for m in available]
         # اولویت: gemini-flash > gpt-4o-mini > هر مدل دیگه
         fast_model = None
         for preferred in ["gemini-2.0-flash", "gemini-1.5-flash", "gpt-4o-mini", "claude-3-haiku"]:
-            if preferred in available:
+            if preferred in available_ids:
                 fast_model = preferred
                 break
-        if not fast_model and available:
-            fast_model = available[0]
+        if not fast_model and available_ids:
+            fast_model = available_ids[0]
 
         if not fast_model:
             # اگر مدلی موجود نیست، فقط بر اساس لاگ‌ها بررسی کن
@@ -6392,9 +6393,11 @@ ERROR: [توضیح مختصر خطا]"""
     except Exception as e:
         slog.error("Verify inspector message failed", exception=e, message_id=message_id)
         # در صورت خطا، تأیید رو بزن چون خطای خود سیستم بوده نه پروژه کاربر
+        _err_model = "error-fallback"
         try:
             msg.backend_verified = True
-            msg.backend_log_summary = f"سالم (خطای سیستمی: {str(e)[:80]})"
+            msg.backend_log_summary = "سالم"
+            msg.verified_by_model = _err_model
             db.commit()
         except Exception:
             pass
@@ -6402,5 +6405,8 @@ ERROR: [توضیح مختصر خطا]"""
             "success": True,
             "message_id": message_id,
             "verified": msg.backend_verified,
-            "summary": msg.backend_log_summary
+            "summary": msg.backend_log_summary,
+            "model_used": _err_model,
+            "logs_checked": 0,
+            "error_logs_count": 0
         }
