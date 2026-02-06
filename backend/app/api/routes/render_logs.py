@@ -4404,6 +4404,81 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
 // 🌉 End of Inspector Bridge Script
 '''
 
+# 🆕 Next.js App Router - Client Component برای Bridge Script
+INSPECTOR_BRIDGE_CLIENT_COMPONENT = '''"use client";
+// 🌉 Inspector Bridge Script - Client Component for Next.js App Router
+import { useEffect } from "react";
+
+export default function InspectorBridge() {
+  useEffect(() => {
+    if (typeof window === "undefined" || window.__inspectorBridgeLoaded) return;
+    window.__inspectorBridgeLoaded = true;
+
+    const isInIframe = window !== window.parent;
+    if (!isInIframe) return;
+
+    console.log("🌉 Inspector Bridge: Active in iframe");
+
+    const sendToInspector = (action, data) => {
+      try {
+        window.parent.postMessage({
+          type: "inspector-bridge-event",
+          action,
+          elementInfo: data.elementInfo || "",
+          position: data.position || { xPercent: 50, yPercent: 50 },
+          pageUrl: window.location.href,
+          timestamp: Date.now()
+        }, "*");
+      } catch (e) {
+        console.warn("Bridge send failed:", e);
+      }
+    };
+
+    const getElementInfo = (el) => {
+      if (!el) return "";
+      const text = (el.innerText || el.value || "").trim().slice(0, 30);
+      const tag = el.tagName?.toLowerCase() || "";
+      return text ? `${tag} "${text}"` : tag;
+    };
+
+    const handleClick = (e) => {
+      sendToInspector("click", { elementInfo: getElementInfo(e.target) });
+    };
+
+    const handleInput = (e) => {
+      if (e.target?.tagName === "INPUT" || e.target?.tagName === "TEXTAREA") {
+        sendToInspector("input", { elementInfo: getElementInfo(e.target) });
+      }
+    };
+
+    let scrollTimeout;
+    const handleScroll = () => {
+      clearTimeout(scrollTimeout);
+      scrollTimeout = setTimeout(() => {
+        sendToInspector("scroll", { elementInfo: "صفحه" });
+      }, 200);
+    };
+
+    document.addEventListener("click", handleClick, true);
+    document.addEventListener("input", handleInput, true);
+    document.addEventListener("scroll", handleScroll, true);
+
+    // اعلام آماده بودن
+    window.parent.postMessage({ type: "inspector-bridge-ready", pageUrl: window.location.href }, "*");
+    console.log("🌉 Inspector Bridge: Ready signal sent");
+
+    return () => {
+      document.removeEventListener("click", handleClick, true);
+      document.removeEventListener("input", handleInput, true);
+      document.removeEventListener("scroll", handleScroll, true);
+    };
+  }, []);
+
+  return null; // این کامپوننت چیزی رندر نمی‌کند
+}
+// 🌉 End of Inspector Bridge Script
+'''
+
 
 @router.post("/inspector/inject-bridge")
 async def inject_bridge_script(
@@ -4943,7 +5018,8 @@ async def inject_bridge_script(
                                         data = content_res.json()
                                         if data.get("encoding") == "base64":
                                             content = base64.b64decode(data["content"]).decode('utf-8')
-                                            has_bridge = 'Inspector Bridge Script' in content
+                                            # بررسی هر دو روش: inline script یا InspectorBridge import
+                                            has_bridge = 'Inspector Bridge Script' in content or 'InspectorBridge' in content
                                             slog.info(f"  📝 Has bridge: {has_bridge}, Content length: {len(content)}")
                                             if not has_bridge:
                                                 index_content = content
@@ -5142,8 +5218,87 @@ async def inject_bridge_script(
                 if has_bridge:
                     return {"success": True, "message": "اسکریپت از قبل تزریق شده است", "already_injected": True}
 
-                if is_js_file:
-                    # 🆕 تزریق نسخه JS/TS - در ابتدای فایل
+                # 🆕 تشخیص Next.js App Router - نیاز به Client Component
+                is_nextjs_app_router = ('/app/layout.tsx' in index_path or '/src/app/layout.tsx' in index_path or
+                                        '/app/layout.js' in index_path or '/src/app/layout.js' in index_path)
+
+                if is_nextjs_app_router:
+                    # 🆕 Next.js App Router: باید فایل جداگانه Client Component بسازیم
+                    slog.info(f"Detected Next.js App Router, creating client component")
+
+                    # تعیین مسیر فایل جدید
+                    layout_dir = '/'.join(index_path.split('/')[:-1])  # مسیر پوشه layout
+                    bridge_file_path = f"{layout_dir}/InspectorBridge.tsx"
+
+                    # 1️⃣ ابتدا فایل InspectorBridge.tsx را بساز
+                    create_res = await client.put(
+                        f"https://api.github.com/repos/{owner}/{repo}/contents/{bridge_file_path}",
+                        headers=headers,
+                        json={
+                            "message": "🌉 Add Inspector Bridge Client Component",
+                            "content": base64.b64encode(INSPECTOR_BRIDGE_CLIENT_COMPONENT.encode('utf-8')).decode('utf-8'),
+                            "branch": "main"
+                        },
+                        timeout=15.0
+                    )
+
+                    if create_res.status_code not in [200, 201]:
+                        # شاید فایل از قبل وجود داره - سعی کن update کنی
+                        get_res = await client.get(
+                            f"https://api.github.com/repos/{owner}/{repo}/contents/{bridge_file_path}",
+                            headers=headers,
+                            timeout=10.0
+                        )
+                        if get_res.status_code == 200:
+                            existing_sha = get_res.json().get("sha")
+                            create_res = await client.put(
+                                f"https://api.github.com/repos/{owner}/{repo}/contents/{bridge_file_path}",
+                                headers=headers,
+                                json={
+                                    "message": "🌉 Update Inspector Bridge Client Component",
+                                    "content": base64.b64encode(INSPECTOR_BRIDGE_CLIENT_COMPONENT.encode('utf-8')).decode('utf-8'),
+                                    "sha": existing_sha,
+                                    "branch": "main"
+                                },
+                                timeout=15.0
+                            )
+
+                    slog.info(f"Bridge component created: {create_res.status_code}")
+
+                    # 2️⃣ اضافه کردن import به layout.tsx
+                    import_line = 'import InspectorBridge from "./InspectorBridge";\n'
+                    component_jsx = "<InspectorBridge />"
+
+                    # اضافه کردن import اگر وجود نداره
+                    if 'InspectorBridge' not in index_content:
+                        # پیدا کردن آخرین import
+                        import re as regex_module
+                        last_import_match = list(regex_module.finditer(r'^import\s+.+?["\'];?\s*$', index_content, regex_module.MULTILINE))
+
+                        if last_import_match:
+                            last_import_end = last_import_match[-1].end()
+                            new_content = index_content[:last_import_end] + '\n' + import_line + index_content[last_import_end:]
+                        else:
+                            # اگر import نداره، در ابتدا اضافه کن
+                            new_content = import_line + index_content
+
+                        # اضافه کردن کامپوننت در body
+                        # در Next.js App Router، باید داخل {children} قرار بگیره
+                        if '{children}' in new_content:
+                            new_content = new_content.replace('{children}', f'{{{component_jsx}}}\n        {{children}}')
+                        elif '<body' in new_content:
+                            # بعد از تگ body اضافه کن
+                            body_match = regex_module.search(r'<body[^>]*>', new_content)
+                            if body_match:
+                                insert_pos = body_match.end()
+                                new_content = new_content[:insert_pos] + f'\n        {component_jsx}' + new_content[insert_pos:]
+                    else:
+                        new_content = index_content  # تغییری نمیخواد
+
+                    commit_message = "🌉 Add Inspector Bridge Script (Next.js App Router)"
+
+                elif is_js_file:
+                    # تزریق نسخه JS/TS - در ابتدای فایل (برای پروژه‌های غیر App Router)
                     slog.info(f"Injecting JS version into {index_path}")
                     new_content = INSPECTOR_BRIDGE_SCRIPT_JS + "\n" + index_content
                     commit_message = "🌉 Add Inspector Bridge Script (JS version)"
