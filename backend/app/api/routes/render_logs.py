@@ -4438,6 +4438,51 @@ INSPECTOR_BRIDGE_SCRIPT = '''
     }
   }, true);
 
+  // 🔴 گیرنده خطاهای جاوااسکریپت فرانت‌اند
+  var errorCount = 0;
+  var MAX_ERRORS = 20; // حداکثر خطا در هر صفحه
+
+  window.onerror = function(message, source, lineno, colno, error) {
+    if (errorCount >= MAX_ERRORS) return;
+    errorCount++;
+    var errorInfo = (message || 'Unknown error').toString().slice(0, 150);
+    if (source) errorInfo += ' (at ' + source.split('/').pop() + ':' + lineno + ')';
+    sendToInspector('error', {
+      target: 'window',
+      elementInfo: errorInfo,
+      position: { xPercent: 50, yPercent: 10 }
+    });
+  };
+
+  window.addEventListener('unhandledrejection', function(e) {
+    if (errorCount >= MAX_ERRORS) return;
+    errorCount++;
+    var reason = (e.reason && (e.reason.message || e.reason.toString())) || 'Promise rejected';
+    sendToInspector('error', {
+      target: 'promise',
+      elementInfo: reason.toString().slice(0, 150),
+      position: { xPercent: 50, yPercent: 10 }
+    });
+  });
+
+  // رهگیری console.error
+  var origConsoleError = console.error;
+  console.error = function() {
+    origConsoleError.apply(console, arguments);
+    if (errorCount >= MAX_ERRORS) return;
+    errorCount++;
+    var msg = Array.prototype.slice.call(arguments).map(function(a) {
+      return typeof a === 'object' ? JSON.stringify(a).slice(0, 80) : String(a).slice(0, 80);
+    }).join(' ').slice(0, 150);
+    // فیلتر: لاگ‌های خود bridge رو ارسال نکن
+    if (msg.indexOf('Inspector Bridge') !== -1) return;
+    sendToInspector('console-error', {
+      target: 'console',
+      elementInfo: msg,
+      position: { xPercent: 50, yPercent: 10 }
+    });
+  };
+
   // اعلام آماده بودن
   try {
     window.parent.postMessage({
@@ -4546,6 +4591,35 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
     scrollTimeout = setTimeout(() => { sendToInspector('scroll', { elementInfo: 'page' }); }, 200);
   }, true);
 
+  // 🔴 گیرنده خطاهای جاوااسکریپت فرانت‌اند
+  let errorCount = 0;
+  const MAX_ERRORS = 20;
+
+  window.onerror = (message, source, lineno) => {
+    if (errorCount >= MAX_ERRORS) return;
+    errorCount++;
+    let errorInfo = String(message || 'Unknown error').slice(0, 150);
+    if (source) errorInfo += ` (at ${source.split('/').pop()}:${lineno})`;
+    sendToInspector('error', { elementInfo: errorInfo });
+  };
+
+  window.addEventListener('unhandledrejection', (e) => {
+    if (errorCount >= MAX_ERRORS) return;
+    errorCount++;
+    const reason = (e.reason?.message || e.reason?.toString()) || 'Promise rejected';
+    sendToInspector('error', { elementInfo: String(reason).slice(0, 150) });
+  });
+
+  const origConsoleError = console.error;
+  console.error = (...args) => {
+    origConsoleError.apply(console, args);
+    if (errorCount >= MAX_ERRORS) return;
+    errorCount++;
+    const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a).slice(0, 80) : String(a).slice(0, 80)).join(' ').slice(0, 150);
+    if (msg.includes('Inspector Bridge')) return;
+    sendToInspector('console-error', { elementInfo: msg });
+  };
+
   connectWS();
   setInterval(() => { if (ws && wsReady) try { ws.send(JSON.stringify({ type: 'ping' })); } catch(e) {} }, 25000);
 
@@ -4650,6 +4724,38 @@ export default function InspectorBridge() {
     document.addEventListener("input", handleInput, true);
     document.addEventListener("scroll", handleScroll, true);
 
+    // 🔴 گیرنده خطاهای جاوااسکریپت فرانت‌اند
+    let errorCount = 0;
+    const MAX_ERRORS = 20;
+
+    const handleError = (event) => {
+      if (errorCount >= MAX_ERRORS) return;
+      errorCount++;
+      let errorInfo = String(event.message || "Unknown error").slice(0, 150);
+      if (event.filename) errorInfo += ` (at ${event.filename.split("/").pop()}:${event.lineno})`;
+      sendToInspector("error", { elementInfo: errorInfo });
+    };
+
+    const handleRejection = (event) => {
+      if (errorCount >= MAX_ERRORS) return;
+      errorCount++;
+      const reason = (event.reason?.message || event.reason?.toString()) || "Promise rejected";
+      sendToInspector("error", { elementInfo: String(reason).slice(0, 150) });
+    };
+
+    const origConsoleError = console.error;
+    console.error = (...args) => {
+      origConsoleError.apply(console, args);
+      if (errorCount >= MAX_ERRORS) return;
+      errorCount++;
+      const msg = args.map(a => typeof a === "object" ? JSON.stringify(a).slice(0, 80) : String(a).slice(0, 80)).join(" ").slice(0, 150);
+      if (msg.includes("Inspector Bridge")) return;
+      sendToInspector("console-error", { elementInfo: msg });
+    };
+
+    window.addEventListener("error", handleError);
+    window.addEventListener("unhandledrejection", handleRejection);
+
     connectWS();
     const heartbeat = setInterval(() => { if (ws && wsReady) try { ws.send(JSON.stringify({ type: "ping" })); } catch(e) {} }, 25000);
 
@@ -4662,6 +4768,9 @@ export default function InspectorBridge() {
       document.removeEventListener("click", handleClick, true);
       document.removeEventListener("input", handleInput, true);
       document.removeEventListener("scroll", handleScroll, true);
+      window.removeEventListener("error", handleError);
+      window.removeEventListener("unhandledrejection", handleRejection);
+      console.error = origConsoleError;
       clearInterval(heartbeat);
       if (ws) { try { ws.close(); } catch(e) {} }
     };
@@ -6287,11 +6396,29 @@ async def verify_inspector_message(
         service_ids = [s.id for s in project_services]
 
         # دریافت لاگ‌های اخیر بک‌اند (120 ثانیه اخیر)
+        # فقط لاگ‌های سرویس‌های این پروژه - اگر سرویسی نیست، لاگ هم نیست
+        if not service_ids:
+            _no_svc_summary = "سرویسی برای این پروژه یافت نشد"
+            msg.backend_verified = True
+            msg.backend_log_summary = _no_svc_summary
+            msg.verified_by_model = "no-services"
+            db.commit()
+            return {
+                "success": True,
+                "message_id": message_id,
+                "verified": True,
+                "summary": _no_svc_summary,
+                "model_used": "no-services",
+                "logs_checked": 0,
+                "error_logs_count": 0,
+                "checked_logs": []
+            }
+
         cutoff = datetime.utcnow() - timedelta(seconds=120)
-        log_query = db.query(RenderLog).filter(RenderLog.timestamp >= cutoff)
-        if service_ids:
-            log_query = log_query.filter(RenderLog.service_id.in_(service_ids))
-        recent_logs = log_query.order_by(desc(RenderLog.timestamp)).limit(30).all()
+        recent_logs = db.query(RenderLog).filter(
+            RenderLog.timestamp >= cutoff,
+            RenderLog.service_id.in_(service_ids)
+        ).order_by(desc(RenderLog.timestamp)).limit(30).all()
 
         logs_text = ""
         error_logs = []

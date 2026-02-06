@@ -307,7 +307,7 @@ export default function ProjectDetailPage() {
     model_id?: string;
     timestamp: Date;
     tokens_used?: number;
-    action_type?: 'click' | 'type' | 'navigate' | 'edit' | 'read' | 'log' | 'scroll' | 'focus' | 'hover';
+    action_type?: 'click' | 'type' | 'navigate' | 'edit' | 'read' | 'log' | 'scroll' | 'focus' | 'hover' | 'error' | 'console-error';
     backend_verified?: boolean | null;  // null=pending, true=ok, false=error
     backend_log_summary?: string;
     verified_by_model?: string;
@@ -801,7 +801,9 @@ export default function ProjectDetailPage() {
           'scroll': 'اسکرول کردی',
           'input': 'تایپ کردی',
           'focus': 'فوکوس کردی',
-          'hover': 'موس بردی روی'
+          'hover': 'موس بردی روی',
+          'error': '🔴 خطای JS',
+          'console-error': '🔴 console.error'
         };
 
         const actionLabel = actionLabels[action] || action;
@@ -984,7 +986,9 @@ export default function ProjectDetailPage() {
                 'scroll': 'اسکرول کردی',
                 'input': 'تایپ کردی',
                 'focus': 'فوکوس کردی',
-                'hover': 'موس بردی روی'
+                'hover': 'موس بردی روی',
+                'error': '🔴 خطای JS',
+                'console-error': '🔴 console.error'
               };
 
               const actionLabel = actionLabels[action] || action;
@@ -9161,10 +9165,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     <div key={msg.id} className={`flex gap-2 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
                       <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-sm flex-shrink-0 ${
                         msg.role === 'user' ? 'bg-blue-500' :
+                        msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') ? 'bg-red-500' :
                         msg.role === 'action' ? 'bg-emerald-500' :
                         'bg-red-500'
                       }`}>
                         {msg.role === 'user' ? '👤' :
+                         msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') ? '⚠️' :
                          msg.role === 'action' ? '👆' :
                          '🤖'}
                       </div>
@@ -9172,6 +9178,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         className={`rounded-lg p-2.5 shadow-sm max-w-[85%] cursor-pointer transition-all ${
                           msg.role === 'user'
                             ? 'bg-blue-500 text-white rounded-tr-none'
+                            : msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error')
+                              ? 'bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-tl-none hover:border-red-400'
                             : msg.role === 'action'
                               ? 'bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-tl-none hover:border-emerald-400'
                               : 'bg-white dark:bg-gray-800 rounded-tl-none hover:bg-gray-50 dark:hover:bg-gray-750'
@@ -9183,6 +9191,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         )}
                         <p className={`text-sm whitespace-pre-wrap ${
                           msg.role === 'user' ? '' :
+                          msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') ? 'text-red-800 dark:text-red-200' :
                           msg.role === 'action' ? 'text-emerald-800 dark:text-emerald-200' :
                           'text-gray-700 dark:text-gray-300'
                         }`}>
