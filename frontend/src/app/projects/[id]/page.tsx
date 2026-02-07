@@ -1737,6 +1737,17 @@ export default function ProjectDetailPage() {
       return;
     }
 
+    // لایه ۲ فرانت‌اند: هشدار اگر فایل‌ها خوانده نشده بودن
+    if (msg.files_were_read === false) {
+      setInspectorChatMessages(prev => [...prev, {
+        id: `apply_warn_${Date.now()}`,
+        role: 'system' as const,
+        content: '🚫 اعمال لغو شد: فایل‌های پروژه خوانده نشده بودند — محتوای ارائه‌شده ممکنه حدسی/ساختگی باشه. لطفاً ابتدا GitHub Token را تنظیم کنید و مجدداً درخواست بدهید.',
+        timestamp: new Date(),
+      }]);
+      return;
+    }
+
     // 🔒 قفل
     setInspectorOpLock(true);
     setInspectorOpType('fix');
@@ -2698,6 +2709,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     tokens_used: data.tokens_used,
                     action_type: data.has_action ? 'smart_action' as any : undefined,
                     action_plan: data.action_plan,
+                    files_were_read: data.files_were_read ?? false,
                     original_message: userMessage,
                   } as any]);
 
@@ -9670,6 +9682,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             >
                               {inspectorOpLock ? '⏳ ...' : '✅ اعمال تغییرات'}
                             </button>
+                          )}
+                          {(msg as any).action_type === 'smart_action' && (msg as any).action_plan?.files?.length > 0 && (msg as any).files_were_read === false && (
+                            <span className="text-[9px] text-red-500 dark:text-red-400 px-1">
+                              🚫 فایل‌ها خوانده نشدند - ممکنه محتوا حدسی باشه
+                            </span>
                           )}
                           {/* نشانگر has_action بدون action_plan معتبر (نیاز به درخواست مجدد) */}
                           {(msg as any).action_type === 'smart_action' && (!(msg as any).action_plan || !(msg as any).action_plan?.files?.length) && (
