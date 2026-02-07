@@ -7498,6 +7498,15 @@ async def fix_error(request: FixRequest, db: Session = Depends(get_db)):
 # 🧠 چت هوشمند - Smart Chat (پس از بررسی/اصلاح)
 # ============================================
 
+class SmartChatReplyContext(BaseModel):
+    """context پیام ریپلای‌شده"""
+    message_id: str
+    content: str
+    role: str
+    model_id: Optional[str] = None
+    context_messages: Optional[List[dict]] = None  # پیام‌های اطراف (بدون محدودیت 50 تایی)
+
+
 class SmartChatRequest(BaseModel):
     """درخواست چت هوشمند با context کامل جلسه"""
     project_id: str
@@ -7506,6 +7515,7 @@ class SmartChatRequest(BaseModel):
     chat_history: Optional[List[InspectorChatMessage]] = None
     backend_logs: Optional[List[dict]] = None
     frontend_url: Optional[str] = None
+    reply_to: Optional[SmartChatReplyContext] = None  # ریپلای به پیام خاص
 
 
 class ApplyActionRequest(BaseModel):
@@ -7575,6 +7585,22 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 role_label = "کاربر" if msg.role == "user" else "AI" if msg.role == "assistant" else "سیستم"
                 history_text += f"[{role_label}]: {msg.content}\n"
 
+        # ساخت context ریپلای (بدون محدودیت 50 پیامی)
+        reply_context_text = ""
+        if request.reply_to:
+            reply_role = "کاربر" if request.reply_to.role == "user" else "AI" if request.reply_to.role == "assistant" else "سیستم"
+            reply_context_text = f"\n## ⬆️ پیام ریپلای‌شده (کاربر دارد به این پیام پاسخ می‌دهد):\n"
+            reply_context_text += f"[{reply_role}]: {request.reply_to.content}\n"
+            if request.reply_to.model_id:
+                reply_context_text += f"(مدل: {request.reply_to.model_id})\n"
+
+            # پیام‌های اطراف برای context بیشتر
+            if request.reply_to.context_messages:
+                reply_context_text += "\n### پیام‌های اطراف (context):\n"
+                for ctx_msg in request.reply_to.context_messages:
+                    ctx_role = "کاربر" if ctx_msg.get("role") == "user" else "AI" if ctx_msg.get("role") == "assistant" else "سیستم"
+                    reply_context_text += f"[{ctx_role}]: {ctx_msg.get('content', '')[:500]}\n"
+
         # ساخت context لاگ‌ها
         logs_text = ""
         if request.backend_logs:
@@ -7587,7 +7613,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
 ## تاریخچه مکالمه:
 {history_text[-3000:]}
-
+{reply_context_text if reply_context_text else ''}
 ## پیام جدید کاربر:
 {request.message}
 
@@ -7595,6 +7621,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - اگر فقط سؤال است و نیاز به تغییر کد ندارد: بنویس QUESTION
 - اگر نیاز به تغییر/اصلاح/ارتقای کد دارد: بنویس ACTION
 - اگر لاگ خطای دیپلوی یا خطای runtime است: بنویس ERROR_LOG
+- اگر کاربر به یک لاگ خطا ریپلای زده: بنویس ERROR_LOG
+- اگر کاربر به یک پاسخ AI ریپلای زده و درخواست اصلاح دارد: بنویس ACTION
 - فقط یک کلمه بنویس: QUESTION یا ACTION یا ERROR_LOG"""
 
         try:
@@ -7631,7 +7659,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
 ## تاریخچه کامل مکالمه:
 {history_text[-4000:]}
-
+{reply_context_text if reply_context_text else ''}
 ## لاگ‌های اخیر:
 {logs_text[-1500:] if logs_text else 'لاگی موجود نیست'}
 
@@ -7644,7 +7672,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - بر اساس تمام اطلاعات موجود (تاریخچه + لاگ‌ها + گزارش‌های قبلی) پاسخ بده
 - اگر پیام مربوط به خطای قبلی است، به گزارش بررسی قبلی ارجاع بده
 - اگر لاگ خطایی paste شده، آن را دقیق تحلیل کن و ارتباطش با مکالمات قبلی را بگو
-- پاسخ دقیق، عملی و به فارسی بده"""
+{('- ⬆️ کاربر به پیام خاصی ریپلای زده - حتماً در ارتباط با آن پیام پاسخ بده' + chr(10)) if request.reply_to else ''}- پاسخ دقیق، عملی و به فارسی بده"""
 
             try:
                 response = await ai_manager.generate(
@@ -7752,7 +7780,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
 ## تاریخچه کامل مکالمه:
 {history_text[-4000:]}
-
+{reply_context_text if reply_context_text else ''}
 ## پیام جدید کاربر (حاوی لاگ خطا):
 {request.message}
 
@@ -7944,7 +7972,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
 ## تاریخچه کامل مکالمه:
 {history_text[-4000:]}
-
+{reply_context_text if reply_context_text else ''}
 ## درخواست جدید کاربر:
 {request.message}
 
