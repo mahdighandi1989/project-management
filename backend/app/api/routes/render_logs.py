@@ -9227,7 +9227,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - بگو برای ارائه کد اصلاحی به دسترسی GitHub نیاز داری"""
 
             action_prompt = f"""شما بازرس ارشد و توسعه‌دهنده پروژه {owner}/{repo} هستید.
-
+{prompt_fields_text}
 ## ⚠️ اصل اول: فهم عمیق منظور کاربر
 قبل از هر کاری، منظور واقعی کاربر را بفهم:
 - کاربران اغلب دقیق و فنی صحبت نمی‌کنند — "این دکمه کار نمیکنه" یعنی باید onClick handler و API call مربوطه بررسی شود
