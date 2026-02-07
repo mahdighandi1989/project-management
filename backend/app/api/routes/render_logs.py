@@ -7845,15 +7845,21 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 {('- ⬆️ کاربر به پیام خاصی ریپلای زده - حتماً در ارتباط با آن پیام پاسخ بده' + chr(10)) if request.reply_to else ''}- پاسخ دقیق، عملی و به فارسی بده"""
 
             try:
-                response = await ai_manager.generate(
+                # 🆕 اجرای AI با heartbeat برای جلوگیری از قطع اتصال (QUIC timeout)
+                gen_task = asyncio.create_task(ai_manager.generate(
                     model_id=primary_model,
                     messages=[
                         Message(role="system", content="بازرس هوشمند هستی. با اشراف کامل پاسخ بده."),
                         Message(role="user", content=answer_prompt)
                     ],
-                    max_tokens=4096,
+                    max_tokens=min(model_max_output, 4096),
                     temperature=0.7
-                )
+                ))
+                while not gen_task.done():
+                    done_set, _ = await asyncio.wait({gen_task}, timeout=8.0)
+                    if not done_set:
+                        yield sse("heartbeat", {"message": "⏳ مدل در حال پردازش..."})
+                response = gen_task.result()
 
                 yield sse("response", {
                     "type": "answer",
@@ -8001,7 +8007,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 ⚠️ اگر نمی‌توانی محتوای کامل فایل اصلاح‌شده را ارائه دهی، action_plan را خالی بگذار."""
 
             try:
-                response = await ai_manager.generate(
+                # 🆕 اجرای AI با heartbeat
+                gen_task = asyncio.create_task(ai_manager.generate(
                     model_id=primary_model,
                     messages=[
                         Message(role="system", content="بازرس ارشد هستی. لاگ خطا را با context قبلی تحلیل کن."),
@@ -8009,7 +8016,12 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     ],
                     max_tokens=min(model_max_output, 6144),
                     temperature=0.5
-                )
+                ))
+                while not gen_task.done():
+                    done_set, _ = await asyncio.wait({gen_task}, timeout=8.0)
+                    if not done_set:
+                        yield sse("heartbeat", {"message": "⏳ مدل در حال تحلیل خطا..."})
+                response = gen_task.result()
 
                 # استخراج action_plan
                 import re
@@ -8204,9 +8216,9 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - صادقانه بگو کدام فایل‌ها را نداری"""
 
             try:
-                # 🆕 استفاده از حداکثر توکن خروجی واقعی مدل (نه مقدار ثابت)
+                # 🆕 اجرای AI با heartbeat برای جلوگیری از QUIC timeout
                 safe_max_tokens = min(model_max_output, 8192)
-                response = await ai_manager.generate(
+                gen_task = asyncio.create_task(ai_manager.generate(
                     model_id=primary_model,
                     messages=[
                         Message(role="system", content="توسعه‌دهنده ارشد. تغییرات دقیق و action_plan معتبر ارائه بده."),
@@ -8214,7 +8226,12 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     ],
                     max_tokens=safe_max_tokens,
                     temperature=0.4
-                )
+                ))
+                while not gen_task.done():
+                    done_set, _ = await asyncio.wait({gen_task}, timeout=8.0)
+                    if not done_set:
+                        yield sse("heartbeat", {"message": "⏳ مدل در حال آماده‌سازی تغییرات..."})
+                response = gen_task.result()
 
                 # استخراج action_plan از پاسخ
                 import re
