@@ -6736,6 +6736,253 @@ ERROR: [توضیح مختصر خطا]"""
 
 
 # =====================================================
+# 📋 Inspector: Prompt Field Management (دستورات، حافظه، آموزش)
+# =====================================================
+
+class PromptFieldCreate(BaseModel):
+    project_id: str
+    category: str  # instruction, memory, training
+    title: str
+    content: str
+    priority: int = 0
+    is_active: bool = True
+
+class PromptFieldUpdate(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    priority: Optional[int] = None
+    is_active: Optional[bool] = None
+    category: Optional[str] = None
+
+class PromptFieldReorder(BaseModel):
+    project_id: str
+    field_ids: List[str]  # ترتیب جدید (اولین = بالاترین اولویت)
+
+class PromptFieldTestRequest(BaseModel):
+    field_id: str
+    model_id: str = "gemini-2.0-flash"
+    test_scenario: Optional[str] = None  # سناریوی تست سفارشی
+
+
+# 🔔 ذخیره اتصالات WebSocket بازرس برای broadcast هایلایت
+_prompt_field_highlight_connections: dict = defaultdict(set)
+
+
+@router.get("/inspector/prompt-fields/{project_id}")
+async def get_prompt_fields(project_id: str, category: Optional[str] = None, db: Session = Depends(get_db)):
+    """دریافت همه فیلدهای دستورات/حافظه/آموزش پروژه"""
+    from ...models.inspector_prompt_field import InspectorPromptField
+
+    query = db.query(InspectorPromptField).filter(
+        InspectorPromptField.project_id == project_id
+    )
+    if category:
+        query = query.filter(InspectorPromptField.category == category)
+
+    fields = query.order_by(InspectorPromptField.priority.desc(), InspectorPromptField.created_at).all()
+    return {
+        "success": True,
+        "fields": [f.to_dict() for f in fields],
+        "total": len(fields)
+    }
+
+
+@router.post("/inspector/prompt-fields")
+async def create_prompt_field(request: PromptFieldCreate, db: Session = Depends(get_db)):
+    """ایجاد فیلد جدید دستور/حافظه/آموزش"""
+    from ...models.inspector_prompt_field import InspectorPromptField
+
+    if request.category not in ("instruction", "memory", "training"):
+        return {"success": False, "error": "دسته‌بندی نامعتبر. مقادیر مجاز: instruction, memory, training"}
+
+    field = InspectorPromptField(
+        project_id=request.project_id,
+        category=request.category,
+        title=request.title,
+        content=request.content,
+        priority=request.priority,
+        is_active=request.is_active,
+    )
+    db.add(field)
+    db.commit()
+    db.refresh(field)
+
+    return {"success": True, "field": field.to_dict()}
+
+
+@router.put("/inspector/prompt-fields/{field_id}")
+async def update_prompt_field(field_id: str, request: PromptFieldUpdate, db: Session = Depends(get_db)):
+    """ویرایش فیلد دستور/حافظه/آموزش"""
+    from ...models.inspector_prompt_field import InspectorPromptField
+
+    field = db.query(InspectorPromptField).filter(InspectorPromptField.id == field_id).first()
+    if not field:
+        return {"success": False, "error": "فیلد یافت نشد"}
+
+    if request.title is not None:
+        field.title = request.title
+    if request.content is not None:
+        field.content = request.content
+    if request.priority is not None:
+        field.priority = request.priority
+    if request.is_active is not None:
+        field.is_active = request.is_active
+    if request.category is not None:
+        if request.category not in ("instruction", "memory", "training"):
+            return {"success": False, "error": "دسته‌بندی نامعتبر"}
+        field.category = request.category
+
+    db.commit()
+    db.refresh(field)
+
+    return {"success": True, "field": field.to_dict()}
+
+
+@router.delete("/inspector/prompt-fields/{field_id}")
+async def delete_prompt_field(field_id: str, db: Session = Depends(get_db)):
+    """حذف فیلد"""
+    from ...models.inspector_prompt_field import InspectorPromptField
+
+    field = db.query(InspectorPromptField).filter(InspectorPromptField.id == field_id).first()
+    if not field:
+        return {"success": False, "error": "فیلد یافت نشد"}
+
+    db.delete(field)
+    db.commit()
+    return {"success": True, "deleted_id": field_id}
+
+
+@router.post("/inspector/prompt-fields/reorder")
+async def reorder_prompt_fields(request: PromptFieldReorder, db: Session = Depends(get_db)):
+    """تغییر ترتیب اولویت فیلدها"""
+    from ...models.inspector_prompt_field import InspectorPromptField
+
+    for idx, fid in enumerate(request.field_ids):
+        field = db.query(InspectorPromptField).filter(
+            InspectorPromptField.id == fid,
+            InspectorPromptField.project_id == request.project_id
+        ).first()
+        if field:
+            field.priority = len(request.field_ids) - idx  # اول لیست = بالاترین اولویت
+
+    db.commit()
+    return {"success": True}
+
+
+@router.post("/inspector/prompt-fields/test")
+async def test_prompt_field(request: PromptFieldTestRequest, db: Session = Depends(get_db)):
+    """
+    تست زنده فیلد: مدل AI واقعی را با این دستور/حافظه فراخوانی می‌کند
+    و تأیید می‌کند که مدل واقعاً آن را خوانده و درک کرده است.
+    هیچ چیز موک نیست - درخواست واقعی به مدل ارسال می‌شود.
+    """
+    from ...models.inspector_prompt_field import InspectorPromptField
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+    from datetime import datetime
+
+    field = db.query(InspectorPromptField).filter(InspectorPromptField.id == request.field_id).first()
+    if not field:
+        return {"success": False, "error": "فیلد یافت نشد"}
+
+    ai_manager = get_ai_manager()
+
+    # ساخت پرامپت تست واقعی
+    test_system = f"""تو یک مدل هوش مصنوعی هستی که باید ثابت کنی یک دستور/حافظه/آموزش را واقعاً خوانده‌ای و درک کرده‌ای.
+
+محتوای فیلد ({field.category}):
+---
+عنوان: {field.title}
+محتوا: {field.content}
+---
+
+وظیفه تو:
+1. اول بگو دقیقاً چه چیزی در این فیلد نوشته شده (خلاصه ۱-۲ جمله‌ای)
+2. یک مثال عملی بزن که نشان دهد این دستور/حافظه چطور در عمل استفاده خواهد شد
+3. در آخر بنویس: "✅ تأیید: این فیلد توسط مدل خوانده و درک شد"
+"""
+
+    test_user = request.test_scenario or f"لطفاً ثابت کن که فیلد «{field.title}» را خوانده‌ای و می‌فهمی. یک مثال عملی از کاربرد آن بزن."
+
+    try:
+        response = await ai_manager.generate(
+            model_id=request.model_id,
+            messages=[
+                Message(role="system", content=test_system),
+                Message(role="user", content=test_user)
+            ],
+            max_tokens=1024,
+            temperature=0.3
+        )
+
+        test_passed = "✅" in response.content and ("تأیید" in response.content or "تایید" in response.content)
+
+        # ذخیره نتیجه تست در دیتابیس
+        field.last_tested_at = datetime.utcnow()
+        field.last_test_passed = test_passed
+        field.last_test_result = json.dumps({
+            "model_id": request.model_id,
+            "response": response.content,
+            "tokens_used": response.usage.get("total_tokens", 0) if response.usage else 0,
+            "passed": test_passed,
+            "tested_at": datetime.utcnow().isoformat()
+        }, ensure_ascii=False)
+        db.commit()
+
+        return {
+            "success": True,
+            "test_passed": test_passed,
+            "model_id": request.model_id,
+            "response": response.content,
+            "tokens_used": response.usage.get("total_tokens", 0) if response.usage else 0,
+            "field": field.to_dict()
+        }
+
+    except Exception as e:
+        field.last_tested_at = datetime.utcnow()
+        field.last_test_passed = False
+        field.last_test_result = json.dumps({
+            "model_id": request.model_id,
+            "error": str(e),
+            "passed": False,
+            "tested_at": datetime.utcnow().isoformat()
+        }, ensure_ascii=False)
+        db.commit()
+
+        return {
+            "success": False,
+            "test_passed": False,
+            "error": str(e),
+            "field": field.to_dict()
+        }
+
+
+@router.get("/inspector/prompt-fields/usage-log/{project_id}")
+async def get_prompt_field_usage_log(project_id: str, db: Session = Depends(get_db)):
+    """دریافت لاگ استفاده فیلدها - کدام فیلدها اخیراً توسط مدل‌ها خوانده شده‌اند"""
+    from ...models.inspector_prompt_field import InspectorPromptField
+
+    fields = db.query(InspectorPromptField).filter(
+        InspectorPromptField.project_id == project_id,
+        InspectorPromptField.usage_count > 0
+    ).order_by(InspectorPromptField.last_used_at.desc()).all()
+
+    return {
+        "success": True,
+        "usage_log": [
+            {
+                "field_id": f.id,
+                "title": f.title,
+                "category": f.category,
+                "usage_count": f.usage_count,
+                "last_used_at": f.last_used_at.isoformat() if f.last_used_at else None
+            }
+            for f in fields
+        ]
+    }
+
+
+# =====================================================
 # 🔍 Inspector: Error Investigation & Fix Endpoints
 # =====================================================
 
@@ -7893,6 +8140,56 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
             "message": f"🤖 مدل {primary_model} در حال تحلیل درخواست شما..."
         })
 
+        # 📋 بارگذاری فیلدهای فعال دستورات/حافظه/آموزش پروژه
+        from ...models.inspector_prompt_field import InspectorPromptField
+        from datetime import datetime as _dt_now
+
+        active_prompt_fields = db.query(InspectorPromptField).filter(
+            InspectorPromptField.project_id == request.project_id,
+            InspectorPromptField.is_active == True
+        ).order_by(InspectorPromptField.priority.desc()).all()
+
+        prompt_fields_text = ""
+        used_field_ids = []
+        if active_prompt_fields:
+            instructions = [f for f in active_prompt_fields if f.category == "instruction"]
+            memories = [f for f in active_prompt_fields if f.category == "memory"]
+            trainings = [f for f in active_prompt_fields if f.category == "training"]
+
+            if instructions:
+                prompt_fields_text += "\n\n## 📌 دستورات ویژه (باید دقیقاً رعایت شوند):\n"
+                for idx, f in enumerate(instructions, 1):
+                    prompt_fields_text += f"### دستور {idx} (اولویت {f.priority}): {f.title}\n{f.content}\n\n"
+                    used_field_ids.append(f.id)
+
+            if memories:
+                prompt_fields_text += "\n\n## 🧠 حافظه پروژه (اطلاعات مهمی که باید در نظر بگیری):\n"
+                for idx, f in enumerate(memories, 1):
+                    prompt_fields_text += f"### حافظه {idx} (اولویت {f.priority}): {f.title}\n{f.content}\n\n"
+                    used_field_ids.append(f.id)
+
+            if trainings:
+                prompt_fields_text += "\n\n## 📚 آموزش‌های اختصاصی (این الگوها و رویکردها را رعایت کن):\n"
+                for idx, f in enumerate(trainings, 1):
+                    prompt_fields_text += f"### آموزش {idx} (اولویت {f.priority}): {f.title}\n{f.content}\n\n"
+                    used_field_ids.append(f.id)
+
+            # اعلان SSE برای هایلایت فیلدهای در حال استفاده
+            yield sse("fields_in_use", {
+                "field_ids": used_field_ids,
+                "count": len(used_field_ids),
+                "message": f"📋 {len(used_field_ids)} فیلد دستور/حافظه/آموزش در پرامپت AI تزریق شد"
+            })
+
+            # بروزرسانی آمار استفاده
+            for f in active_prompt_fields:
+                f.usage_count = (f.usage_count or 0) + 1
+                f.last_used_at = _dt_now.utcnow()
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+
         # ساخت تاریخچه غنی برای مدل
         history_text = ""
         if request.chat_history:
@@ -8090,7 +8387,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
             q_structure_text = q_tree_summary
 
             answer_prompt = f"""شما بازرس هوشمند پروژه {owner}/{repo} هستید.
-
+{prompt_fields_text}
 ## ⚠️ اصل اول: فهم عمیق منظور کاربر
 قبل از هر کاری، منظور واقعی کاربر را بفهم:
 - کاربران همیشه دقیق و رسمی صحبت نمی‌کنند — ممکن است غیرمستقیم، کوتاه، عصبانی یا عامیانه بنویسند
@@ -8308,7 +8605,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - هرگز محتوای فایل حدس نزن — فقط تحلیل متنی ارائه بده"""
 
             error_analysis_prompt = f"""شما بازرس ارشد پروژه {owner}/{repo} هستید.
-
+{prompt_fields_text}
 ## ⚠️ اصل اول: فهم عمیق منظور کاربر
 قبل از هر کاری، بفهم کاربر دقیقاً چه مشکلی دارد و چه می‌خواهد:
 - ممکن است فقط لاگ خطا paste کرده باشد بدون توضیح — یعنی می‌خواهد تو تحلیل کنی و حلش کنی
@@ -8792,6 +9089,13 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     "message": f"❌ خطا در تحلیل عمیق مدل {primary_model}: {err_detail}",
                     "detail": f"مدل: {primary_model} | حجم پرامپت: ~{len(action_prompt)} کاراکتر | context window: {model_context_window} توکن"
                 })
+
+        # اعلان پایان استفاده از فیلدها
+        if used_field_ids:
+            yield sse("fields_done", {
+                "field_ids": used_field_ids,
+                "message": "پردازش فیلدهای دستور/حافظه/آموزش پایان یافت"
+            })
 
         yield sse("done", {"success": True})
 

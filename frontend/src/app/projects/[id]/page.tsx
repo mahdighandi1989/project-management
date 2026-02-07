@@ -473,6 +473,34 @@ export default function ProjectDetailPage() {
     };
   }>({ loading: false });
 
+  // 📋 مدیریت فیلدهای دستورات، حافظه و آموزش مدل‌ها
+  const [promptFields, setPromptFields] = useState<Array<{
+    id: string;
+    project_id: string;
+    category: 'instruction' | 'memory' | 'training';
+    title: string;
+    content: string;
+    priority: number;
+    is_active: boolean;
+    usage_count: number;
+    last_used_at: string | null;
+    last_tested_at: string | null;
+    last_test_passed: boolean | null;
+    last_test_result: any;
+    created_at: string;
+    updated_at: string;
+  }>>([]);
+  const [promptFieldsLoading, setPromptFieldsLoading] = useState(false);
+  const [promptFieldsOpen, setPromptFieldsOpen] = useState(false);
+  const [promptFieldEditing, setPromptFieldEditing] = useState<string | null>(null);
+  const [promptFieldEditData, setPromptFieldEditData] = useState<{title: string; content: string; category: string; priority: number}>({title: '', content: '', category: 'instruction', priority: 0});
+  const [promptFieldAdding, setPromptFieldAdding] = useState(false);
+  const [promptFieldNewData, setPromptFieldNewData] = useState<{title: string; content: string; category: string; priority: number}>({title: '', content: '', category: 'instruction', priority: 0});
+  const [promptFieldTesting, setPromptFieldTesting] = useState<string | null>(null);
+  const [promptFieldTestResult, setPromptFieldTestResult] = useState<{field_id: string; passed: boolean; response: string; model_id: string} | null>(null);
+  const [promptFieldsHighlighted, setPromptFieldsHighlighted] = useState<string[]>([]);
+  const [promptFieldActiveCategory, setPromptFieldActiveCategory] = useState<'all' | 'instruction' | 'memory' | 'training'>('all');
+
   const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
   const [selectedLog, setSelectedLog] = useState<ActivityLog | null>(null);
   const [reports, setReports] = useState<ProjectReport[]>([]);
@@ -1177,6 +1205,13 @@ export default function ProjectDetailPage() {
     }
   }, [inspectorPowerOn, projectId, activeTab]);
 
+  // 📋 بارگذاری فیلدهای دستور/حافظه/آموزش وقتی Inspector فعال می‌شود
+  useEffect(() => {
+    if (projectId && activeTab === 'inspector') {
+      loadPromptFields();
+    }
+  }, [projectId, activeTab]);
+
   // 🌐 ارسال دستور به Bridge از طریق WebSocket
   const sendBridgeCommand = (command: string, data: Record<string, any> = {}) => {
     if (bridgeWsRef.current?.readyState === WebSocket.OPEN) {
@@ -1198,6 +1233,131 @@ export default function ProjectDetailPage() {
   const showSuccess = (msg: string) => {
     setSuccess(msg);
     setTimeout(() => setSuccess(''), 5000);
+  };
+
+  // 📋 Prompt Field Functions - مدیریت فیلدهای دستورات، حافظه و آموزش
+  const loadPromptFields = async () => {
+    if (!projectId) return;
+    setPromptFieldsLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/prompt-fields/${projectId}`);
+      const data = await res.json();
+      if (data.success) {
+        setPromptFields(data.fields);
+      }
+    } catch (e) {
+      console.error('Error loading prompt fields:', e);
+    } finally {
+      setPromptFieldsLoading(false);
+    }
+  };
+
+  const createPromptField = async () => {
+    if (!projectId || !promptFieldNewData.title.trim() || !promptFieldNewData.content.trim()) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/prompt-fields`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: projectId,
+          category: promptFieldNewData.category,
+          title: promptFieldNewData.title,
+          content: promptFieldNewData.content,
+          priority: promptFieldNewData.priority,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setPromptFields(prev => [data.field, ...prev]);
+        setPromptFieldAdding(false);
+        setPromptFieldNewData({title: '', content: '', category: 'instruction', priority: 0});
+      }
+    } catch (e) {
+      console.error('Error creating prompt field:', e);
+    }
+  };
+
+  const updatePromptField = async (fieldId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/prompt-fields/${fieldId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(promptFieldEditData),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setPromptFields(prev => prev.map(f => f.id === fieldId ? data.field : f));
+        setPromptFieldEditing(null);
+      }
+    } catch (e) {
+      console.error('Error updating prompt field:', e);
+    }
+  };
+
+  const deletePromptField = async (fieldId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/prompt-fields/${fieldId}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (data.success) {
+        setPromptFields(prev => prev.filter(f => f.id !== fieldId));
+      }
+    } catch (e) {
+      console.error('Error deleting prompt field:', e);
+    }
+  };
+
+  const togglePromptFieldActive = async (fieldId: string, currentActive: boolean) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/prompt-fields/${fieldId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_active: !currentActive }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setPromptFields(prev => prev.map(f => f.id === fieldId ? data.field : f));
+      }
+    } catch (e) {
+      console.error('Error toggling prompt field:', e);
+    }
+  };
+
+  const testPromptField = async (fieldId: string) => {
+    setPromptFieldTesting(fieldId);
+    setPromptFieldTestResult(null);
+    try {
+      const modelId = inspectorSelectedModels[0] || 'gemini-2.0-flash';
+      const res = await fetch(`${API_BASE}/api/render/inspector/prompt-fields/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ field_id: fieldId, model_id: modelId }),
+      });
+      const data = await res.json();
+      if (data.success || data.test_passed !== undefined) {
+        setPromptFieldTestResult({
+          field_id: fieldId,
+          passed: data.test_passed,
+          response: data.response || data.error || '',
+          model_id: data.model_id || modelId,
+        });
+        // بروزرسانی فیلد در لیست
+        if (data.field) {
+          setPromptFields(prev => prev.map(f => f.id === fieldId ? data.field : f));
+        }
+      }
+    } catch (e) {
+      console.error('Error testing prompt field:', e);
+      setPromptFieldTestResult({
+        field_id: fieldId,
+        passed: false,
+        response: 'خطا در ارتباط با سرور',
+        model_id: '',
+      });
+    } finally {
+      setPromptFieldTesting(null);
+    }
   };
 
   // 🔍 Inspector Functions - بازرس ویژه
@@ -2724,6 +2884,18 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     content: data.message || `⏱️ مدل نیاز به زمان بیشتری دارد... مهلت تمدید شد.`,
                     timestamp: new Date(),
                   }]);
+                } else if (eventType === 'fields_in_use') {
+                  // هایلایت فیلدهای در حال استفاده
+                  setPromptFieldsHighlighted(data.field_ids || []);
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: `fields_use_${Date.now()}`,
+                    role: 'system' as const,
+                    content: data.message || `📋 ${data.count} فیلد دستور/حافظه/آموزش در حال استفاده`,
+                    timestamp: new Date(),
+                  }]);
+                } else if (eventType === 'fields_done') {
+                  // پایان هایلایت فیلدها (بعد از ۳ ثانیه)
+                  setTimeout(() => setPromptFieldsHighlighted([]), 3000);
                 } else if (eventType === 'heartbeat') {
                   // 🆕 heartbeat برای جلوگیری از قطع اتصال - فقط مصرف میشه
                   // اختیاری: آخرین پیام progress رو آپدیت کن
@@ -10141,6 +10313,362 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   )}
                 </div>
               </div>
+            </div>
+
+            {/* 📋 پنل مدیریت فیلدهای دستورات، حافظه و آموزش */}
+            <div className="mt-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden" dir="rtl">
+              {/* هدر پنل - کلیک برای باز/بسته شدن */}
+              <button
+                onClick={() => { setPromptFieldsOpen(!promptFieldsOpen); if (!promptFieldsOpen && promptFields.length === 0) loadPromptFields(); }}
+                className="w-full flex items-center justify-between px-4 py-3 bg-gradient-to-r from-purple-50 to-indigo-50 dark:from-purple-900/20 dark:to-indigo-900/20 hover:from-purple-100 hover:to-indigo-100 dark:hover:from-purple-900/30 dark:hover:to-indigo-900/30 transition-colors"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="text-2xl">📋</span>
+                  <div className="text-right">
+                    <h3 className="font-bold text-sm text-purple-800 dark:text-purple-200">مدیریت دستورات، حافظه و آموزش مدل‌ها</h3>
+                    <p className="text-xs text-purple-600 dark:text-purple-400">
+                      {promptFields.length > 0 ? `${promptFields.filter(f => f.is_active).length} فیلد فعال از ${promptFields.length}` : 'هنوز فیلدی اضافه نشده'}
+                      {promptFieldsHighlighted.length > 0 && <span className="mr-2 text-green-600 font-bold animate-pulse">| {promptFieldsHighlighted.length} فیلد در حال استفاده</span>}
+                    </p>
+                  </div>
+                </div>
+                <span className={`text-lg transition-transform ${promptFieldsOpen ? 'rotate-180' : ''}`}>▼</span>
+              </button>
+
+              {/* محتوای پنل */}
+              {promptFieldsOpen && (
+                <div className="p-4">
+                  {/* تب‌های دسته‌بندی + دکمه اضافه */}
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex gap-1">
+                      {[
+                        { key: 'all', label: 'همه', icon: '📋' },
+                        { key: 'instruction', label: 'دستورات', icon: '📌' },
+                        { key: 'memory', label: 'حافظه', icon: '🧠' },
+                        { key: 'training', label: 'آموزش', icon: '📚' },
+                      ].map(tab => (
+                        <button
+                          key={tab.key}
+                          onClick={() => setPromptFieldActiveCategory(tab.key as any)}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                            promptFieldActiveCategory === tab.key
+                              ? 'bg-purple-500 text-white shadow-sm'
+                              : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
+                          }`}
+                        >
+                          {tab.icon} {tab.label}
+                          <span className="mr-1 opacity-70">
+                            ({tab.key === 'all' ? promptFields.length : promptFields.filter(f => f.category === tab.key).length})
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      onClick={() => { setPromptFieldAdding(true); setPromptFieldNewData({title: '', content: '', category: promptFieldActiveCategory === 'all' ? 'instruction' : promptFieldActiveCategory, priority: promptFields.length}); }}
+                      className="px-3 py-1.5 bg-green-500 text-white rounded-lg text-xs font-medium hover:bg-green-600 transition-colors"
+                    >
+                      + افزودن فیلد جدید
+                    </button>
+                  </div>
+
+                  {/* فرم اضافه کردن فیلد جدید */}
+                  {promptFieldAdding && (
+                    <div className="mb-4 p-4 bg-green-50 dark:bg-green-900/20 rounded-xl border border-green-200 dark:border-green-800">
+                      <h4 className="text-sm font-bold text-green-800 dark:text-green-200 mb-3">فیلد جدید</h4>
+                      <div className="space-y-3">
+                        <div className="flex gap-3">
+                          <div className="flex-1">
+                            <label className="text-xs text-gray-500 mb-1 block">عنوان</label>
+                            <input
+                              type="text"
+                              value={promptFieldNewData.title}
+                              onChange={e => setPromptFieldNewData(p => ({...p, title: e.target.value}))}
+                              placeholder="عنوان فیلد..."
+                              className="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:outline-none"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-xs text-gray-500 mb-1 block">دسته‌بندی</label>
+                            <select
+                              value={promptFieldNewData.category}
+                              onChange={e => setPromptFieldNewData(p => ({...p, category: e.target.value}))}
+                              className="px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:outline-none"
+                            >
+                              <option value="instruction">📌 دستور</option>
+                              <option value="memory">🧠 حافظه</option>
+                              <option value="training">📚 آموزش</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="text-xs text-gray-500 mb-1 block">اولویت</label>
+                            <input
+                              type="number"
+                              value={promptFieldNewData.priority}
+                              onChange={e => setPromptFieldNewData(p => ({...p, priority: parseInt(e.target.value) || 0}))}
+                              min={0}
+                              max={100}
+                              className="w-20 px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:outline-none"
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="text-xs text-gray-500 mb-1 block">محتوا</label>
+                          <textarea
+                            value={promptFieldNewData.content}
+                            onChange={e => setPromptFieldNewData(p => ({...p, content: e.target.value}))}
+                            placeholder="محتوای دستور / حافظه / آموزش..."
+                            rows={4}
+                            className="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:outline-none resize-y"
+                          />
+                        </div>
+                        <div className="flex items-center gap-2 justify-end">
+                          <button onClick={() => setPromptFieldAdding(false)} className="px-4 py-2 text-gray-500 hover:text-gray-700 text-sm">انصراف</button>
+                          <button
+                            onClick={createPromptField}
+                            disabled={!promptFieldNewData.title.trim() || !promptFieldNewData.content.trim()}
+                            className="px-4 py-2 bg-green-500 text-white rounded-lg text-sm hover:bg-green-600 disabled:opacity-40 transition-colors"
+                          >
+                            ذخیره
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* لیست فیلدها */}
+                  {promptFieldsLoading ? (
+                    <div className="text-center py-8 text-gray-400 text-sm">در حال بارگذاری...</div>
+                  ) : promptFields.length === 0 ? (
+                    <div className="text-center py-8">
+                      <span className="text-4xl block mb-2">📋</span>
+                      <p className="text-gray-500 text-sm">هنوز هیچ فیلدی اضافه نشده</p>
+                      <p className="text-gray-400 text-xs mt-1">با دکمه «افزودن فیلد جدید» شروع کنید</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {promptFields
+                        .filter(f => promptFieldActiveCategory === 'all' || f.category === promptFieldActiveCategory)
+                        .map((field, idx) => {
+                          const isHighlighted = promptFieldsHighlighted.includes(field.id);
+                          const isEditing = promptFieldEditing === field.id;
+                          const isTesting = promptFieldTesting === field.id;
+                          const testResult = promptFieldTestResult?.field_id === field.id ? promptFieldTestResult : null;
+                          const categoryIcon = field.category === 'instruction' ? '📌' : field.category === 'memory' ? '🧠' : '📚';
+                          const categoryLabel = field.category === 'instruction' ? 'دستور' : field.category === 'memory' ? 'حافظه' : 'آموزش';
+                          const categoryColor = field.category === 'instruction' ? 'red' : field.category === 'memory' ? 'blue' : 'amber';
+
+                          return (
+                            <div
+                              key={field.id}
+                              className={`rounded-xl border-2 transition-all duration-500 ${
+                                isHighlighted
+                                  ? 'border-green-400 bg-green-50 dark:bg-green-900/30 shadow-lg shadow-green-500/20 ring-2 ring-green-400/50 animate-pulse'
+                                  : field.is_active
+                                    ? 'border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-750'
+                                    : 'border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 opacity-60'
+                              }`}
+                            >
+                              {/* هدر فیلد */}
+                              <div className="flex items-center justify-between px-4 py-3">
+                                <div className="flex items-center gap-3 flex-1 min-w-0">
+                                  {/* شماره اولویت */}
+                                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${
+                                    isHighlighted ? 'bg-green-500 text-white' : `bg-${categoryColor}-100 dark:bg-${categoryColor}-900/30 text-${categoryColor}-700 dark:text-${categoryColor}-300`
+                                  }`}>
+                                    {field.priority}
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-sm">{categoryIcon}</span>
+                                      <span className="text-xs font-medium text-gray-400">{categoryLabel}</span>
+                                      {isHighlighted && <span className="text-xs font-bold text-green-600 animate-pulse">در حال استفاده توسط مدل</span>}
+                                    </div>
+                                    <h4 className="text-sm font-bold text-gray-800 dark:text-gray-200 truncate">{field.title}</h4>
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  {/* آمار استفاده */}
+                                  {field.usage_count > 0 && (
+                                    <span className="text-[10px] bg-purple-100 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 px-2 py-0.5 rounded-full">
+                                      {field.usage_count}x استفاده
+                                    </span>
+                                  )}
+                                  {/* نتیجه آخرین تست */}
+                                  {field.last_test_passed !== null && (
+                                    <span className={`text-[10px] px-2 py-0.5 rounded-full ${
+                                      field.last_test_passed ? 'bg-green-100 dark:bg-green-900/30 text-green-600' : 'bg-red-100 dark:bg-red-900/30 text-red-600'
+                                    }`}>
+                                      {field.last_test_passed ? '✅ تست موفق' : '❌ تست ناموفق'}
+                                    </span>
+                                  )}
+                                  {/* سوییچ فعال/غیرفعال */}
+                                  <button
+                                    onClick={() => togglePromptFieldActive(field.id, field.is_active)}
+                                    className={`relative w-10 h-5 rounded-full transition-colors ${
+                                      field.is_active ? 'bg-green-500' : 'bg-gray-300 dark:bg-gray-600'
+                                    }`}
+                                  >
+                                    <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${
+                                      field.is_active ? 'right-0.5' : 'right-5'
+                                    }`} />
+                                  </button>
+                                  {/* دکمه تست زنده */}
+                                  <button
+                                    onClick={() => testPromptField(field.id)}
+                                    disabled={isTesting}
+                                    className="p-1.5 text-yellow-600 hover:bg-yellow-50 dark:hover:bg-yellow-900/20 rounded-lg transition-colors disabled:opacity-50"
+                                    title="تست زنده - بررسی اینکه مدل واقعاً این فیلد را می‌خواند"
+                                  >
+                                    {isTesting ? <span className="animate-spin text-sm">⏳</span> : <span className="text-sm">🧪</span>}
+                                  </button>
+                                  {/* دکمه ویرایش */}
+                                  <button
+                                    onClick={() => {
+                                      if (isEditing) {
+                                        setPromptFieldEditing(null);
+                                      } else {
+                                        setPromptFieldEditing(field.id);
+                                        setPromptFieldEditData({title: field.title, content: field.content, category: field.category, priority: field.priority});
+                                      }
+                                    }}
+                                    className="p-1.5 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-lg transition-colors"
+                                    title="ویرایش"
+                                  >
+                                    <span className="text-sm">{isEditing ? '✕' : '✏️'}</span>
+                                  </button>
+                                  {/* دکمه حذف */}
+                                  <button
+                                    onClick={() => { if (confirm(`آیا از حذف فیلد «${field.title}» مطمئنید؟`)) deletePromptField(field.id); }}
+                                    className="p-1.5 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors"
+                                    title="حذف"
+                                  >
+                                    <span className="text-sm">🗑️</span>
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* محتوای فیلد */}
+                              {!isEditing && (
+                                <div className="px-4 pb-3">
+                                  <pre className="text-xs text-gray-600 dark:text-gray-400 whitespace-pre-wrap font-sans leading-relaxed bg-gray-50 dark:bg-gray-900/30 rounded-lg p-3 max-h-32 overflow-y-auto">
+                                    {field.content}
+                                  </pre>
+                                  {field.last_used_at && (
+                                    <p className="text-[10px] text-gray-400 mt-2">
+                                      آخرین استفاده: {new Date(field.last_used_at).toLocaleDateString('fa-IR')} {new Date(field.last_used_at).toLocaleTimeString('fa-IR')}
+                                    </p>
+                                  )}
+                                </div>
+                              )}
+
+                              {/* فرم ویرایش */}
+                              {isEditing && (
+                                <div className="px-4 pb-4 space-y-3 border-t border-gray-100 dark:border-gray-700 pt-3">
+                                  <div className="flex gap-3">
+                                    <div className="flex-1">
+                                      <label className="text-xs text-gray-500 mb-1 block">عنوان</label>
+                                      <input
+                                        type="text"
+                                        value={promptFieldEditData.title}
+                                        onChange={e => setPromptFieldEditData(p => ({...p, title: e.target.value}))}
+                                        className="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="text-xs text-gray-500 mb-1 block">دسته‌بندی</label>
+                                      <select
+                                        value={promptFieldEditData.category}
+                                        onChange={e => setPromptFieldEditData(p => ({...p, category: e.target.value}))}
+                                        className="px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                                      >
+                                        <option value="instruction">📌 دستور</option>
+                                        <option value="memory">🧠 حافظه</option>
+                                        <option value="training">📚 آموزش</option>
+                                      </select>
+                                    </div>
+                                    <div>
+                                      <label className="text-xs text-gray-500 mb-1 block">اولویت</label>
+                                      <input
+                                        type="number"
+                                        value={promptFieldEditData.priority}
+                                        onChange={e => setPromptFieldEditData(p => ({...p, priority: parseInt(e.target.value) || 0}))}
+                                        min={0} max={100}
+                                        className="w-20 px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                                      />
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <label className="text-xs text-gray-500 mb-1 block">محتوا</label>
+                                    <textarea
+                                      value={promptFieldEditData.content}
+                                      onChange={e => setPromptFieldEditData(p => ({...p, content: e.target.value}))}
+                                      rows={5}
+                                      className="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none resize-y"
+                                    />
+                                  </div>
+                                  <div className="flex items-center gap-2 justify-end">
+                                    <button onClick={() => setPromptFieldEditing(null)} className="px-4 py-2 text-gray-500 hover:text-gray-700 text-sm">انصراف</button>
+                                    <button
+                                      onClick={() => updatePromptField(field.id)}
+                                      className="px-4 py-2 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600 transition-colors"
+                                    >
+                                      ذخیره تغییرات
+                                    </button>
+                                    <button
+                                      onClick={() => { updatePromptField(field.id); setTimeout(() => testPromptField(field.id), 500); }}
+                                      className="px-4 py-2 bg-yellow-500 text-white rounded-lg text-sm hover:bg-yellow-600 transition-colors"
+                                    >
+                                      ذخیره + تست زنده
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* نتیجه تست زنده */}
+                              {testResult && (
+                                <div className={`mx-4 mb-3 p-3 rounded-lg border ${
+                                  testResult.passed
+                                    ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800'
+                                    : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800'
+                                }`}>
+                                  <div className="flex items-center gap-2 mb-2">
+                                    <span className="text-sm">{testResult.passed ? '✅' : '❌'}</span>
+                                    <span className={`text-xs font-bold ${testResult.passed ? 'text-green-700 dark:text-green-300' : 'text-red-700 dark:text-red-300'}`}>
+                                      {testResult.passed ? 'مدل این فیلد را خواند و درک کرد' : 'مدل نتوانست فیلد را تأیید کند'}
+                                    </span>
+                                    <span className="text-[10px] text-gray-400 mr-auto">مدل: {testResult.model_id}</span>
+                                  </div>
+                                  <pre className="text-xs text-gray-600 dark:text-gray-400 whitespace-pre-wrap font-sans leading-relaxed bg-white dark:bg-gray-800 rounded p-2 max-h-40 overflow-y-auto">
+                                    {testResult.response}
+                                  </pre>
+                                  <button
+                                    onClick={() => setPromptFieldTestResult(null)}
+                                    className="mt-2 text-[10px] text-gray-400 hover:text-gray-600"
+                                  >
+                                    بستن نتیجه تست
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                    </div>
+                  )}
+
+                  {/* راهنما */}
+                  <div className="mt-4 p-3 bg-gray-50 dark:bg-gray-900/30 rounded-lg text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
+                    <p className="font-bold text-gray-600 dark:text-gray-300 mb-1">راهنما:</p>
+                    <ul className="space-y-1 list-disc pr-4">
+                      <li><strong>📌 دستورات:</strong> قوانین و رفتارهایی که مدل باید دقیقاً رعایت کند</li>
+                      <li><strong>🧠 حافظه:</strong> اطلاعات مهم پروژه مثل معماری، تصمیمات فنی، باگ‌های شناخته‌شده</li>
+                      <li><strong>📚 آموزش:</strong> الگوها و رویکردهای اختصاصی پروژه برای مدل</li>
+                      <li><strong>🧪 تست زنده:</strong> مدل AI واقعاً فراخوانی شده و تأیید می‌کند فیلد را خوانده</li>
+                      <li><strong>🟢 هایلایت سبز:</strong> وقتی مدل در حال استفاده از یک فیلد است، آن فیلد سبز رنگ می‌شود</li>
+                      <li><strong>اولویت:</strong> عدد بزرگتر = اولویت بالاتر (اول تزریق می‌شود به پرامپت)</li>
+                    </ul>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
