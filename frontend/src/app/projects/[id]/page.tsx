@@ -331,6 +331,12 @@ export default function ProjectDetailPage() {
   const [inspectorChatInput, setInspectorChatInput] = useState('');
   const [inspectorChatLoading, setInspectorChatLoading] = useState(false);
   const [inspectorShowModelSelector, setInspectorShowModelSelector] = useState(false);
+  const [inspectorReplyTo, setInspectorReplyTo] = useState<{
+    id: string;
+    content: string;
+    role: string;
+    model_id?: string;
+  } | null>(null);
 
   // 🔍 بررسی و اصلاح خطا
   const [investigateModalMsgId, setInvestigateModalMsgId] = useState<string | null>(null);  // شناسه پیام خطا
@@ -2444,14 +2450,15 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     setInspectorChatInput('');
     setInspectorChatLoading(true);
 
-    // اضافه کردن پیام کاربر به چت
+    // اضافه کردن پیام کاربر به چت (با ریپلای اگر هست)
     const userMsgId = `user_${Date.now()}`;
     setInspectorChatMessages(prev => [...prev, {
       id: userMsgId,
       role: 'user',
       content: userMessage,
-      timestamp: new Date()
-    }]);
+      timestamp: new Date(),
+      ...(inspectorReplyTo ? { reply_to_id: inspectorReplyTo.id, reply_to_content: inspectorReplyTo.content?.slice(0, 100) } : {}),
+    } as any]);
 
     // ذخیره پیام کاربر در دیتابیس
     if (inspectorSessionIdRef.current) {
@@ -2469,123 +2476,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         content: '' // محتوا بعداً می‌تواند از فایل‌های باز شده خوانده شود
       }));
 
-      // 🧠 وقتی مدل‌ها دستی انتخاب شدن (مثلاً بعد از بررسی خطا)، مستقیم از smart-chat استفاده کن
-      // تشخیص ویژوال فقط در حالت auto-select اعمال میشه
-      // همچنین پیام‌های بلند (بیش از 200 کاراکتر) احتمالاً لاگ خطا هستن نه دستور ویژوال
+      // 🧠 تشخیص نوع پیام: ویژوال فقط برای پیام‌های کوتاه auto-select
+      // هر چیز دیگه‌ای → smart-chat SSE
       const isLongMessage = userMessage.length > 200;
       const shouldUseVision = inspectorAutoSelect && !isLongMessage && isVisualTask(userMessage) && inspectorFrontendUrl;
 
-      if (!inspectorAutoSelect) {
-        // 🧠 حالت چت هوشمند - SSE streaming با تاریخچه کامل
-        // وقتی مدل‌ها دستی انتخاب شدن (مثلاً بعد از بررسی خطا)
-        const chatHistory = inspectorChatMessages
-          .filter(m => {
-            if (m.role === 'system' && m.content?.startsWith('🔍 شروع')) return true;
-            if (m.role === 'system' && m.content?.startsWith('🔧 شروع')) return true;
-            if (m.role === 'system' && m.content?.startsWith('⏹')) return true;
-            if (m.role === 'system' && m.content?.startsWith('❌')) return true;
-            if ((m as any).action_type === 'investigate_report') return true;
-            if ((m as any).action_type === 'error' || (m as any).action_type === 'console-error') return true;
-            if (m.role === 'user') return true;
-            if (m.role === 'assistant' && !(m.content?.startsWith('🔍 در حال'))) return true;
-            if (m.role === 'action' && (m as any).backend_verified === false) return true;
-            return false;
-          })
-          .slice(-50)
-          .map(m => ({
-            role: m.role === 'action' ? 'system' : m.role,
-            content: (m as any).action_type === 'investigate_report'
-              ? `[گزارش بررسی از ${m.model_id || 'AI'}]:\n${m.content}`
-              : (m as any).action_type === 'error' || (m as any).action_type === 'console-error'
-                ? `[خطای فرانت‌اند]: ${m.content}`
-                : m.role === 'action'
-                  ? `[اکشن کاربر - ${(m as any).action_type}]: ${m.content}${(m as any).backend_verified === false ? ' (تأیید نشده ✕)' : ''}`
-                  : m.content
-          }));
-
-        // 🔒 قفل کردن صفحه هنگام تحلیل
-        setInspectorOpLock(true);
-        setInspectorOpType('investigate');
-        inspectorOpAbortRef.current = new AbortController();
-
-        // استفاده از smart-chat SSE endpoint
-        const res = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            project_id: projectId,
-            model_ids: inspectorSelectedModels,
-            message: userMessage,
-            chat_history: chatHistory,
-            backend_logs: inspectorBackendLogs,
-            frontend_url: inspectorFrontendUrl,
-          }),
-          signal: inspectorOpAbortRef.current?.signal,
-        });
-
-        const reader = res.body?.getReader();
-        const decoder = new TextDecoder();
-        let sseBuffer = '';
-
-        if (!reader) throw new Error('No reader');
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          sseBuffer += decoder.decode(value, { stream: true });
-          const lines = sseBuffer.split('\n');
-          sseBuffer = lines.pop() || '';
-
-          let eventType = '';
-          for (const line of lines) {
-            if (line.startsWith('event: ')) {
-              eventType = line.slice(7).trim();
-            } else if (line.startsWith('data: ') && eventType) {
-              try {
-                const data = JSON.parse(line.slice(6));
-
-                if (eventType === 'progress') {
-                  setInspectorChatMessages(prev => [...prev, {
-                    id: `smart_p_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-                    role: 'system' as const,
-                    content: data.message,
-                    timestamp: new Date(),
-                  }]);
-                } else if (eventType === 'error') {
-                  setInspectorChatMessages(prev => [...prev, {
-                    id: `smart_err_${Date.now()}`,
-                    role: 'system' as const,
-                    content: `❌ ${data.message}`,
-                    timestamp: new Date(),
-                  }]);
-                } else if (eventType === 'response') {
-                  const responseId = `smart_response_${Date.now()}`;
-                  setInspectorChatMessages(prev => [...prev, {
-                    id: responseId,
-                    role: 'assistant' as const,
-                    content: data.content,
-                    model_id: data.model_used,
-                    timestamp: new Date(),
-                    tokens_used: data.tokens_used,
-                    action_type: data.has_action ? 'smart_action' as any : undefined,
-                    action_plan: data.action_plan,
-                    original_message: userMessage,
-                  } as any]);
-
-                  // 🔓 آزاد کردن قفل بعد از دریافت پاسخ
-                  setInspectorOpLock(false);
-                  setInspectorOpType(null);
-                }
-              } catch (e) {
-                // ignore parse errors
-              }
-              eventType = '';
-            }
-          }
-        }
-
-      } else if (shouldUseVision) {
+      if (shouldUseVision) {
         // 🔍 تشخیص ویژوال: Ctrl+F + AI interact (فقط auto-select + پیام کوتاه)
         const targetText = extractTargetText(userMessage);
         setInspectorChatMessages(prev => [...prev, {
@@ -2662,100 +2558,147 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           }]);
         }
 
-      // 🆕 حالت auto-select بدون ویژوال: smart-task
+      // 🧠 حالت چت هوشمند - smart-chat SSE برای تمام پیام‌های غیر ویژوال
       } else {
-        setInspectorChatMessages(prev => [...prev, {
-          id: `system_${Date.now()}`, role: 'assistant',
-          content: '🔍 در حال تحلیل درخواست و انتخاب مدل‌های مناسب...',
-          timestamp: new Date()
-        }]);
+        // ساخت تاریخچه غنی (50 پیام آخر)
+        const chatHistory = inspectorChatMessages
+          .filter(m => {
+            if (m.role === 'system' && m.content?.startsWith('🔍 شروع')) return true;
+            if (m.role === 'system' && m.content?.startsWith('🔧 شروع')) return true;
+            if (m.role === 'system' && m.content?.startsWith('⏹')) return true;
+            if (m.role === 'system' && m.content?.startsWith('❌')) return true;
+            if ((m as any).action_type === 'investigate_report') return true;
+            if ((m as any).action_type === 'error' || (m as any).action_type === 'console-error') return true;
+            if (m.role === 'user') return true;
+            if (m.role === 'assistant' && !(m.content?.startsWith('🔍 در حال'))) return true;
+            if (m.role === 'action' && (m as any).backend_verified === false) return true;
+            return false;
+          })
+          .slice(-50)
+          .map(m => ({
+            role: m.role === 'action' ? 'system' : m.role,
+            content: (m as any).action_type === 'investigate_report'
+              ? `[گزارش بررسی از ${m.model_id || 'AI'}]:\n${m.content}`
+              : (m as any).action_type === 'error' || (m as any).action_type === 'console-error'
+                ? `[خطای فرانت‌اند]: ${m.content}`
+                : m.role === 'action'
+                  ? `[اکشن کاربر - ${(m as any).action_type}]: ${m.content}${(m as any).backend_verified === false ? ' (تأیید نشده ✕)' : ''}`
+                  : m.content
+          }));
 
-        const res = await fetch(`${API_BASE}/api/render/inspector/smart-task`, {
+        // ساخت context ریپلای (بدون محدودیت 50 تایی - از کل پیام‌ها)
+        let replyToPayload: any = undefined;
+        if (inspectorReplyTo) {
+          const replyMsgIdx = inspectorChatMessages.findIndex(m => m.id === inspectorReplyTo.id);
+          const contextMessages: Array<{role: string; content: string}> = [];
+          if (replyMsgIdx >= 0) {
+            // 5 پیام قبل و 5 پیام بعد
+            const start = Math.max(0, replyMsgIdx - 5);
+            const end = Math.min(inspectorChatMessages.length, replyMsgIdx + 6);
+            for (let i = start; i < end; i++) {
+              if (i === replyMsgIdx) continue; // خود پیام ریپلای شده جدا ارسال میشه
+              const cm = inspectorChatMessages[i];
+              contextMessages.push({
+                role: cm.role === 'action' ? 'system' : cm.role,
+                content: cm.content,
+              });
+            }
+          }
+          replyToPayload = {
+            message_id: inspectorReplyTo.id,
+            content: inspectorReplyTo.content,
+            role: inspectorReplyTo.role,
+            model_id: inspectorReplyTo.model_id,
+            context_messages: contextMessages,
+          };
+        }
+
+        // مدل‌ها: دستی یا خودکار
+        const modelIds = inspectorAutoSelect ? [] : inspectorSelectedModels;
+
+        // 🔒 قفل
+        setInspectorOpLock(true);
+        setInspectorOpType('investigate');
+        inspectorOpAbortRef.current = new AbortController();
+
+        const res = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            task: userMessage,
             project_id: projectId,
-            auto_select: true,
-            collaborative: inspectorCollaborativeMode,
-            visual_mode: true, // برای نشانگر مجازی
+            model_ids: modelIds,
+            message: userMessage,
+            chat_history: chatHistory,
             backend_logs: inspectorBackendLogs,
             frontend_url: inspectorFrontendUrl,
-            project_files: projectFiles,
-            github_repo: project?.metadata?.repo ? `${project.metadata.owner}/${project.metadata.repo}` : null
-          })
+            reply_to: replyToPayload,
+          }),
+          signal: inspectorOpAbortRef.current?.signal,
         });
 
-        const data = await res.json();
+        const reader = res.body?.getReader();
+        const decoder = new TextDecoder();
+        let sseBuffer = '';
+        if (!reader) throw new Error('No reader');
 
-        if (data.success) {
-          // ذخیره task برای نمایش پیشرفت
-          if (data.task_id) {
-            setInspectorActiveTask({
-              id: data.task_id,
-              description: userMessage,
-              models: data.selected_models || [],
-              status: 'running',
-              actions: data.actions || []
-            });
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          sseBuffer += decoder.decode(value, { stream: true });
+          const lines = sseBuffer.split('\n');
+          sseBuffer = lines.pop() || '';
+
+          let eventType = '';
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              eventType = line.slice(7).trim();
+            } else if (line.startsWith('data: ') && eventType) {
+              try {
+                const data = JSON.parse(line.slice(6));
+
+                if (eventType === 'progress') {
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: `smart_p_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                    role: 'system' as const,
+                    content: data.message,
+                    timestamp: new Date(),
+                  }]);
+                } else if (eventType === 'error') {
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: `smart_err_${Date.now()}`,
+                    role: 'system' as const,
+                    content: `❌ ${data.message}`,
+                    timestamp: new Date(),
+                  }]);
+                } else if (eventType === 'response') {
+                  const responseId = `smart_response_${Date.now()}`;
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: responseId,
+                    role: 'assistant' as const,
+                    content: data.content,
+                    model_id: data.model_used,
+                    timestamp: new Date(),
+                    tokens_used: data.tokens_used,
+                    action_type: data.has_action ? 'smart_action' as any : undefined,
+                    action_plan: data.action_plan,
+                    original_message: userMessage,
+                  } as any]);
+
+                  // 🔓 آزاد کردن قفل
+                  setInspectorOpLock(false);
+                  setInspectorOpType(null);
+                }
+              } catch (e) {
+                // ignore parse errors
+              }
+              eventType = '';
+            }
           }
-
-          // حذف پیام "در حال تحلیل" و اضافه کردن نتیجه
-          setInspectorChatMessages(prev => {
-            const filtered = prev.filter(m => !m.id.startsWith('system_'));
-            return [...filtered, {
-              id: `assistant_${Date.now()}`,
-              role: 'assistant',
-              content: data.content || `✅ کار با موفقیت اجرا شد\n\n📊 مدل‌های انتخاب شده: ${(data.selected_models || []).join(', ')}\n\n${data.analysis || ''}`,
-              model_id: data.selected_models?.join(', '),
-              timestamp: new Date(),
-              tokens_used: data.tokens_used
-            }];
-          });
-
-          // نمایش اکشن‌های انجام شده
-          if (data.actions && data.actions.length > 0) {
-            const actionsText = data.actions.map((a: any) =>
-              `${a.status === 'done' ? '✅' : a.status === 'running' ? '⏳' : '⏸️'} [${a.model_id || 'AI'}] ${a.description || a.action}`
-            ).join('\n');
-
-            setInspectorChatMessages(prev => [...prev, {
-              id: `actions_${Date.now()}`,
-              role: 'assistant',
-              content: `📋 اقدامات انجام شده:\n${actionsText}`,
-              timestamp: new Date()
-            }]);
-          }
-
-          // اگر cursor position داریم، نشانگر مجازی را حرکت بده
-          if (data.cursor_position) {
-            setInspectorVirtualCursor({
-              x: data.cursor_position.x,
-              y: data.cursor_position.y,
-              visible: true,
-              model_id: data.selected_models?.[0]
-            });
-            // بعد از 3 ثانیه نشانگر را پنهان کن
-            setTimeout(() => {
-              setInspectorVirtualCursor(prev => ({ ...prev, visible: false }));
-            }, 3000);
-          }
-
-          // بررسی اتصال GitHub
-          if (data.github_connected) {
-            setInspectorGithubConnected(true);
-          }
-        } else {
-          setInspectorChatMessages(prev => {
-            const filtered = prev.filter(m => !m.id.startsWith('system_'));
-            return [...filtered, {
-              id: `error_${Date.now()}`,
-              role: 'assistant',
-              content: `❌ خطا: ${data.error || 'خطای ناشناخته'}`,
-              timestamp: new Date()
-            }];
-          });
         }
+
+        // پاک کردن ریپلای بعد از ارسال
+        if (inspectorReplyTo) setInspectorReplyTo(null);
       }
     } catch (err: any) {
       console.error('Error sending inspector chat:', err);
@@ -9541,7 +9484,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
                   {/* پیام‌های چت */}
                   {inspectorChatMessages.map(msg => (
-                    <div key={msg.id} className={`flex gap-2 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
+                    <div key={msg.id} className={`group flex gap-2 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
                       <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-sm flex-shrink-0 ${
                         msg.role === 'user' ? 'bg-blue-500' :
                         msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') ? 'bg-red-500' :
@@ -9565,6 +9508,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         } ${inspectorMsgInfoId === msg.id ? 'ring-2 ring-blue-300' : ''}`}
                         onClick={() => setInspectorMsgInfoId(inspectorMsgInfoId === msg.id ? null : msg.id)}
                       >
+                        {/* نمایش پیام ریپلای‌شده */}
+                        {(msg as any).reply_to_content && (
+                          <div className={`text-[10px] mb-1 px-2 py-1 rounded border-r-2 ${
+                            msg.role === 'user'
+                              ? 'bg-blue-400/30 border-white/50 text-white/80'
+                              : 'bg-gray-100 dark:bg-gray-700/50 border-gray-400 text-gray-500 dark:text-gray-400'
+                          }`}>
+                            ↩️ {(msg as any).reply_to_content}...
+                          </div>
+                        )}
                         {msg.model_id && msg.role === 'assistant' && (
                           <p className="text-xs text-gray-400 mb-1">{msg.model_id}</p>
                         )}
@@ -9638,6 +9591,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               ⚠️ کد کامل در دسترس نیست - دوباره درخواست بدهید
                             </span>
                           )}
+                          {/* دکمه ریپلای */}
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setInspectorReplyTo({ id: msg.id, content: msg.content, role: msg.role, model_id: msg.model_id }); }}
+                            className={`text-[10px] opacity-0 group-hover:opacity-100 transition-opacity ${
+                              msg.role === 'user' ? 'text-white/60 hover:text-white' : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'
+                            }`}
+                            title="ریپلای"
+                          >
+                            ↩️
+                          </button>
                           {/* دکمه info */}
                           <button
                             onClick={(e) => { e.stopPropagation(); setInspectorMsgInfoId(inspectorMsgInfoId === msg.id ? null : msg.id); }}
@@ -9977,6 +9940,27 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                       <div className="mt-1 text-blue-500/80 text-[10px]">
                         مدل‌ها: {inspectorActiveTask.models.join(', ')}
                       </div>
+                    </div>
+                  )}
+
+                  {/* نوار ریپلای */}
+                  {inspectorReplyTo && (
+                    <div className="flex items-center gap-2 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg px-3 py-1.5 mb-1" dir="rtl">
+                      <span className="text-blue-500 text-sm">↩️</span>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[10px] text-blue-600 dark:text-blue-400 font-medium">
+                          پاسخ به {inspectorReplyTo.role === 'user' ? 'پیام شما' : inspectorReplyTo.model_id || 'AI'}
+                        </p>
+                        <p className="text-xs text-gray-600 dark:text-gray-400 truncate">
+                          {inspectorReplyTo.content?.slice(0, 80)}...
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => setInspectorReplyTo(null)}
+                        className="text-gray-400 hover:text-red-500 transition-colors text-sm flex-shrink-0"
+                      >
+                        ✕
+                      </button>
                     </div>
                   )}
 
