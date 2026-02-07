@@ -6821,6 +6821,64 @@ class PromptFieldTestRequest(BaseModel):
 _prompt_field_highlight_connections: dict = defaultdict(set)
 
 
+@router.get("/inspector/general-instructions/{project_id}")
+async def get_general_instructions(project_id: str, db: Session = Depends(get_db)):
+    """دستورات عمومی سیستم که همیشه در پرامپت مدل‌ها فعال هستند"""
+    from ...models.project import Project
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        return {"success": False, "error": "پروژه یافت نشد"}
+
+    extra_data = {}
+    if project.extra_data:
+        try:
+            extra_data = json.loads(project.extra_data) if isinstance(project.extra_data, str) else project.extra_data
+        except Exception:
+            extra_data = {}
+
+    owner = extra_data.get("owner", "")
+    repo = extra_data.get("repo", "")
+    github_path = project.github_path or ""
+    if not owner and "/" in github_path:
+        owner, repo = github_path.split("/", 1)
+
+    instructions = [
+        {
+            "id": "sys_language",
+            "title": "زبان پاسخ‌دهی",
+            "content": "به فارسی پاسخ بده. کدها و اصطلاحات فنی می‌توانند انگلیسی باشند.",
+            "icon": "🗣️",
+        },
+        {
+            "id": "sys_project",
+            "title": "شناخت پروژه",
+            "content": f"نام پروژه: {project.name or 'نامشخص'}\nتکنولوژی‌ها: {project.technologies or 'نامشخص'}\nGitHub: {owner}/{repo}" if owner else f"نام پروژه: {project.name or 'نامشخص'}\nتکنولوژی‌ها: {project.technologies or 'نامشخص'}",
+            "icon": "📂",
+        },
+        {
+            "id": "sys_analysis",
+            "title": "روش تحلیل",
+            "content": "مستقیماً تحلیل کن و راه‌حل عملی ارائه بده. هرگز از کاربر نخواه کار دستی انجام دهد. اگر مشکلی گزارش شده، مستقیماً در کد بررسی کن.",
+            "icon": "🔍",
+        },
+        {
+            "id": "sys_intent",
+            "title": "درک منظور کاربر",
+            "content": "کاربران ممکن است غیرمستقیم، کوتاه یا عامیانه بنویسند. همیشه منظور واقعی را از context مکالمه بفهم.",
+            "icon": "🧠",
+        },
+        {
+            "id": "sys_compat",
+            "title": "سازگاری با پروژه",
+            "content": "از سبک کدنویسی موجود پیروی کن. تغییرات باید با ساختار فعلی سازگار باشد. وابستگی‌ها را بررسی کن.",
+            "icon": "⚙️",
+        },
+    ]
+
+    return {"success": True, "instructions": instructions}
+
+
 @router.get("/inspector/prompt-fields/{project_id}")
 async def get_prompt_fields(project_id: str, category: Optional[str] = None, db: Session = Depends(get_db)):
     """دریافت همه فیلدهای دستورات/حافظه/آموزش پروژه"""
@@ -8452,83 +8510,39 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
             "message": f"🤖 مدل {primary_model} در حال تحلیل درخواست شما..."
         })
 
-        # 📋 بارگذاری فیلدهای فعال دستورات/حافظه/آموزش پروژه
-        from ...models.inspector_prompt_field import InspectorPromptField
-        from datetime import datetime as _dt_now
+        # 📋 دستورات عمومی سیستم (همیشه فعال - جایگزین تزریق خودکار فیلدهای دیتابیس)
+        # فیلدهای دیتابیس دیگر اینجا تزریق نمی‌شوند - کاربر می‌تواند هر فیلد را
+        # با دکمه «ارسال به چت» به صورت دستی به عنوان پیام چت ارسال کند
+        _proj_name = project.name or "نامشخص"
+        _proj_tech = project.technologies or "نامشخص"
+        _proj_github = f"{owner}/{repo}" if owner and repo else "نامشخص"
 
-        active_prompt_fields = db.query(InspectorPromptField).filter(
-            InspectorPromptField.project_id == request.project_id,
-            InspectorPromptField.is_active == True
-        ).order_by(InspectorPromptField.priority.desc()).all()
+        general_instructions_text = f"""
+## 📌 دستورات عمومی سیستم (همیشه فعال):
 
-        prompt_fields_text = ""
-        used_field_ids = []       # فیلدهایی که واقعاً در پرامپت تزریق شدن
-        relevant_field_ids = []   # فیلدهایی که به درخواست فعلی مرتبط هستن (فقط اینها هایلایت میشن)
-        if active_prompt_fields:
-            instructions = [f for f in active_prompt_fields if f.category == "instruction"]
-            memories = [f for f in active_prompt_fields if f.category == "memory"]
-            trainings = [f for f in active_prompt_fields if f.category == "training"]
+### ۱. زبان پاسخ‌دهی
+به فارسی پاسخ بده. کدها و اصطلاحات فنی می‌توانند انگلیسی باشند.
 
-            # تشخیص فیلدهای مرتبط: بررسی overlap کلمات پیام با عنوان/محتوای فیلد
-            _user_msg_lower = (request.message or "").lower()
-            _user_words = set(w for w in _user_msg_lower.split() if len(w) > 2)
+### ۲. شناخت پروژه
+نام پروژه: {_proj_name}
+تکنولوژی‌ها: {_proj_tech}
+GitHub: {_proj_github}
 
-            def _is_field_relevant(field) -> bool:
-                """بررسی اینکه آیا فیلد به پیام کاربر مرتبط است"""
-                field_text = f"{field.title or ''} {field.content or ''}".lower()
-                field_words = set(w for w in field_text.split() if len(w) > 2)
-                # حداقل 2 کلمه مشترک یا عنوان فیلد در پیام
-                common = _user_words & field_words
-                if len(common) >= 2:
-                    return True
-                # عنوان فیلد در پیام هست
-                if field.title and field.title.lower() in _user_msg_lower:
-                    return True
-                # فیلدهای با اولویت بالا (>= 8) همیشه مرتبطن
-                if (field.priority or 0) >= 8:
-                    return True
-                return False
+### ۳. روش تحلیل
+- مستقیماً تحلیل کن و راه‌حل عملی ارائه بده
+- هرگز از کاربر نخواه کار دستی انجام دهد (مثل grep، بررسی فایل، اجرای دستور)
+- اگر مشکلی گزارش شده، مستقیماً در کد بررسی کن و راه‌حل ارائه بده
 
-            if instructions:
-                prompt_fields_text += "\n\n## 📌 دستورات ویژه (باید دقیقاً رعایت شوند):\n"
-                for idx, f in enumerate(instructions, 1):
-                    prompt_fields_text += f"### دستور {idx} (اولویت {f.priority}): {f.title}\n{f.content}\n\n"
-                    used_field_ids.append(f.id)
-                    if _is_field_relevant(f):
-                        relevant_field_ids.append(f.id)
+### ۴. درک منظور کاربر
+- کاربران ممکن است غیرمستقیم، کوتاه یا عامیانه بنویسند
+- همیشه منظور واقعی کاربر را از context مکالمه بفهم
+- اگر پیام مبهم است (مثل "آره"، "همونه")، تاریخچه مکالمه را بخوان
 
-            if memories:
-                prompt_fields_text += "\n\n## 🧠 حافظه پروژه (اطلاعات مهمی که باید در نظر بگیری):\n"
-                for idx, f in enumerate(memories, 1):
-                    prompt_fields_text += f"### حافظه {idx} (اولویت {f.priority}): {f.title}\n{f.content}\n\n"
-                    used_field_ids.append(f.id)
-                    if _is_field_relevant(f):
-                        relevant_field_ids.append(f.id)
-
-            if trainings:
-                prompt_fields_text += "\n\n## 📚 آموزش‌های اختصاصی (این الگوها و رویکردها را رعایت کن):\n"
-                for idx, f in enumerate(trainings, 1):
-                    prompt_fields_text += f"### آموزش {idx} (اولویت {f.priority}): {f.title}\n{f.content}\n\n"
-                    used_field_ids.append(f.id)
-                    if _is_field_relevant(f):
-                        relevant_field_ids.append(f.id)
-
-            # اعلان SSE: فقط فیلدهای مرتبط با درخواست فعلی هایلایت میشن
-            yield sse("fields_in_use", {
-                "field_ids": relevant_field_ids,
-                "count": len(used_field_ids),
-                "relevant_count": len(relevant_field_ids),
-                "message": f"📋 {len(used_field_ids)} فیلد تزریق شد{f' ({len(relevant_field_ids)} فیلد مرتبط)' if relevant_field_ids else ''}"
-            })
-
-            # بروزرسانی آمار استفاده
-            for f in active_prompt_fields:
-                f.usage_count = (f.usage_count or 0) + 1
-                f.last_used_at = _dt_now.utcnow()
-            try:
-                db.commit()
-            except Exception:
-                db.rollback()
+### ۵. سازگاری با پروژه
+- از سبک کدنویسی موجود در پروژه پیروی کن
+- تغییرات باید با ساختار فعلی پروژه سازگار باشد
+- تمام وابستگی‌ها (imports, types, configs) را بررسی کن
+"""
 
         # ساخت تاریخچه غنی برای مدل
         history_text = ""
@@ -8727,7 +8741,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
             q_structure_text = q_tree_summary
 
             answer_prompt = f"""شما بازرس هوشمند پروژه {owner}/{repo} هستید.
-{prompt_fields_text}
+{general_instructions_text}
 ## ⚠️ اصل اول: فهم عمیق منظور کاربر
 قبل از هر کاری، منظور واقعی کاربر را بفهم:
 - کاربران همیشه دقیق و رسمی صحبت نمی‌کنند — ممکن است غیرمستقیم، کوتاه، عصبانی یا عامیانه بنویسند
@@ -8945,7 +8959,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - هرگز محتوای فایل حدس نزن — فقط تحلیل متنی ارائه بده"""
 
             error_analysis_prompt = f"""شما بازرس ارشد پروژه {owner}/{repo} هستید.
-{prompt_fields_text}
+{general_instructions_text}
 ## ⚠️ اصل اول: فهم عمیق منظور کاربر
 قبل از هر کاری، بفهم کاربر دقیقاً چه مشکلی دارد و چه می‌خواهد:
 - ممکن است فقط لاگ خطا paste کرده باشد بدون توضیح — یعنی می‌خواهد تو تحلیل کنی و حلش کنی
@@ -9267,7 +9281,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - بگو برای ارائه کد اصلاحی به دسترسی GitHub نیاز داری"""
 
             action_prompt = f"""شما بازرس ارشد و توسعه‌دهنده پروژه {owner}/{repo} هستید.
-{prompt_fields_text}
+{general_instructions_text}
 ## ⚠️ اصل اول: فهم عمیق منظور کاربر
 قبل از هر کاری، منظور واقعی کاربر را بفهم:
 - کاربران اغلب دقیق و فنی صحبت نمی‌کنند — "این دکمه کار نمیکنه" یعنی باید onClick handler و API call مربوطه بررسی شود

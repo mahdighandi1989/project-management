@@ -500,6 +500,8 @@ export default function ProjectDetailPage() {
   const [promptFieldTestResult, setPromptFieldTestResult] = useState<{field_id: string; passed: boolean; response: string; model_id: string} | null>(null);
   const [promptFieldsHighlighted, setPromptFieldsHighlighted] = useState<string[]>([]);
   const [promptFieldActiveCategory, setPromptFieldActiveCategory] = useState<'all' | 'instruction' | 'memory' | 'training'>('all');
+  const [generalInstructions, setGeneralInstructions] = useState<Array<{id: string; title: string; content: string; icon: string}>>([]);
+  const [generalInstructionsOpen, setGeneralInstructionsOpen] = useState(false);
 
   const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
   const [selectedLog, setSelectedLog] = useState<ActivityLog | null>(null);
@@ -1239,6 +1241,22 @@ export default function ProjectDetailPage() {
   const showSuccess = (msg: string) => {
     setSuccess(msg);
     setTimeout(() => setSuccess(''), 5000);
+  };
+
+  // 📋 دستورات عمومی سیستم (همیشه فعال در پرامپت مدل‌ها)
+  const loadGeneralInstructions = async () => {
+    if (!projectId) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/general-instructions/${projectId}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.instructions) {
+          setGeneralInstructions(data.instructions);
+        }
+      }
+    } catch (e) {
+      console.error('Error loading general instructions:', e);
+    }
   };
 
   // 📋 Prompt Field Functions - مدیریت فیلدهای دستورات، حافظه و آموزش
@@ -2683,13 +2701,13 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   // ============================================
 
   // 🆕 ارسال پیام به AI
-  const sendInspectorChat = async () => {
+  const sendInspectorChat = async (overrideMessage?: string) => {
     // در حالت انتخاب خودکار، نیازی به انتخاب دستی مدل نیست
-    if (!inspectorChatInput.trim()) return;
+    const userMessage = (overrideMessage || inspectorChatInput).trim();
+    if (!userMessage) return;
     if (!inspectorAutoSelect && inspectorSelectedModels.length === 0) return;
 
-    const userMessage = inspectorChatInput.trim();
-    setInspectorChatInput('');
+    if (!overrideMessage) setInspectorChatInput('');
     setInspectorChatLoading(true);
 
     // اضافه کردن پیام کاربر به چت (با ریپلای اگر هست)
@@ -10351,7 +10369,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                       className={`flex-1 bg-gray-100 dark:bg-gray-700 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50 ${inspectorOpLock ? 'cursor-not-allowed' : ''}`}
                     />
                     <button
-                      onClick={sendInspectorChat}
+                      onClick={() => sendInspectorChat()}
                       disabled={!inspectorChatInput.trim() || (!inspectorAutoSelect && inspectorSelectedModels.length === 0) || inspectorChatLoading || inspectorOpLock}
                       className="bg-gradient-to-r from-red-500 to-orange-500 text-white rounded-full w-10 h-10 flex items-center justify-center hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
                     >
@@ -10375,16 +10393,15 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             <div className="mt-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden" dir="rtl">
               {/* هدر پنل - کلیک برای باز/بسته شدن */}
               <button
-                onClick={() => { setPromptFieldsOpen(!promptFieldsOpen); if (!promptFieldsOpen && promptFields.length === 0) loadPromptFields(); }}
+                onClick={() => { setPromptFieldsOpen(!promptFieldsOpen); if (!promptFieldsOpen) { if (promptFields.length === 0) loadPromptFields(); if (generalInstructions.length === 0) loadGeneralInstructions(); } }}
                 className="w-full flex items-center justify-between px-4 py-3 bg-gradient-to-r from-purple-50 to-indigo-50 dark:from-purple-900/20 dark:to-indigo-900/20 hover:from-purple-100 hover:to-indigo-100 dark:hover:from-purple-900/30 dark:hover:to-indigo-900/30 transition-colors"
               >
                 <div className="flex items-center gap-3">
                   <span className="text-2xl">📋</span>
                   <div className="text-right">
-                    <h3 className="font-bold text-sm text-purple-800 dark:text-purple-200">مدیریت دستورات، حافظه و آموزش مدل‌ها</h3>
+                    <h3 className="font-bold text-sm text-purple-800 dark:text-purple-200">دستورات سیستم و فیلدهای قابل ارسال</h3>
                     <p className="text-xs text-purple-600 dark:text-purple-400">
-                      {promptFields.length > 0 ? `${promptFields.filter(f => f.is_active).length} فیلد فعال از ${promptFields.length}` : 'هنوز فیلدی اضافه نشده'}
-                      {promptFieldsHighlighted.length > 0 && <span className="mr-2 text-green-600 font-bold animate-pulse">| {promptFieldsHighlighted.length} فیلد در حال استفاده</span>}
+                      دستورات عمومی همیشه فعال | {promptFields.length > 0 ? `${promptFields.length} فیلد قابل ارسال به چت` : 'هنوز فیلدی اضافه نشده'}
                     </p>
                   </div>
                 </div>
@@ -10394,6 +10411,37 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
               {/* محتوای پنل */}
               {promptFieldsOpen && (
                 <div className="p-4">
+                  {/* 📌 دستورات عمومی سیستم - همیشه فعال */}
+                  <div className="mb-4 rounded-xl border-2 border-green-300 dark:border-green-700 bg-green-50/50 dark:bg-green-900/10 overflow-hidden">
+                    <button
+                      onClick={() => setGeneralInstructionsOpen(!generalInstructionsOpen)}
+                      className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-green-50 dark:hover:bg-green-900/20 transition-colors"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-lg">🔒</span>
+                        <div className="text-right">
+                          <span className="text-sm font-bold text-green-800 dark:text-green-200">دستورات عمومی سیستم</span>
+                          <span className="text-xs text-green-600 dark:text-green-400 mr-2">(همیشه فعال در پرامپت مدل‌ها)</span>
+                        </div>
+                      </div>
+                      <span className={`text-xs transition-transform ${generalInstructionsOpen ? 'rotate-180' : ''}`}>▼</span>
+                    </button>
+                    {generalInstructionsOpen && generalInstructions.length > 0 && (
+                      <div className="px-4 pb-3 space-y-2">
+                        {generalInstructions.map(inst => (
+                          <div key={inst.id} className="flex items-start gap-2 p-2 bg-white/60 dark:bg-gray-800/40 rounded-lg">
+                            <span className="text-sm mt-0.5">{inst.icon}</span>
+                            <div className="flex-1 min-w-0">
+                              <span className="text-xs font-bold text-green-800 dark:text-green-200">{inst.title}</span>
+                              <p className="text-[11px] text-gray-600 dark:text-gray-400 whitespace-pre-wrap leading-relaxed">{inst.content}</p>
+                            </div>
+                            <span className="text-[10px] bg-green-200 dark:bg-green-800 text-green-700 dark:text-green-300 px-1.5 py-0.5 rounded-full whitespace-nowrap">همیشه فعال</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
                   {/* تب‌های دسته‌بندی + دکمه اضافه */}
                   <div className="flex items-center justify-between mb-4">
                     <div className="flex gap-1">
@@ -10497,8 +10545,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   ) : promptFields.length === 0 ? (
                     <div className="text-center py-8">
                       <span className="text-4xl block mb-2">📋</span>
-                      <p className="text-gray-500 text-sm">هنوز هیچ فیلدی اضافه نشده</p>
-                      <p className="text-gray-400 text-xs mt-1">با دکمه «افزودن فیلد جدید» شروع کنید</p>
+                      <p className="text-gray-500 text-sm">هنوز فیلد سفارشی اضافه نشده</p>
+                      <p className="text-gray-400 text-xs mt-1">فیلدها را اضافه کنید و با دکمه 📨 به عنوان درخواست به چت ارسال کنید</p>
                     </div>
                   ) : (
                     <div className="space-y-3">
@@ -10567,6 +10615,18 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                     <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${
                                       field.is_active ? 'right-0.5' : 'right-5'
                                     }`} />
+                                  </button>
+                                  {/* دکمه ارسال به چت - فیلد را به عنوان پیام چت ارسال می‌کند */}
+                                  <button
+                                    onClick={() => {
+                                      const fieldMsg = `📌 [${field.title}]: ${field.content}`;
+                                      sendInspectorChat(fieldMsg);
+                                    }}
+                                    disabled={inspectorChatLoading || inspectorOpLock}
+                                    className="p-1.5 text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 rounded-lg transition-colors disabled:opacity-50"
+                                    title="ارسال به چت - این فیلد را به عنوان درخواست در چت اجرا کن"
+                                  >
+                                    <span className="text-sm">📨</span>
                                   </button>
                                   {/* دکمه تست زنده */}
                                   <button
