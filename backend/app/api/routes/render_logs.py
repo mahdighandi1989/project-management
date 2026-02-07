@@ -7835,6 +7835,11 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         if msg_type == "QUESTION":
             # سؤال: پاسخ با context کامل + خواندن فایل‌های مرتبط
             question_code_context = ""
+            if not owner or not repo:
+                yield sse("progress", {
+                    "step": "no_github_info",
+                    "message": "⚠️ اطلاعات ریپوی GitHub ناقص — پاسخ بدون دسترسی به فایل‌ها..."
+                })
             if owner and repo:
                 try:
                     yield sse("progress", {
@@ -7896,11 +7901,13 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 except Exception:
                     pass
 
+            has_q_code = bool(question_code_context and question_code_context.strip())
+
             answer_prompt = f"""شما بازرس هوشمند پروژه {owner}/{repo} هستید.
 
-⚠️ مهم: تو به تمام فایل‌های پروژه از طریق GitHub دسترسی داری. تو می‌توانی کد را ببینی، تحلیل کنی و تغییرات پیشنهاد بدهی.
-هرگز از کاربر نخواه که خودش فایل‌ها را بررسی کند یا دستوراتی را اجرا کند - تو خودت باید این کار را انجام بدهی.
-اگر کاربر مشکلی گزارش کرده، باید خودت بررسی کنی و راه‌حل مشخص با کد ارائه بدهی.
+⚠️ مهم: {'تو به فایل‌های پروژه دسترسی داری و کد مرتبط در پایین آمده.' if has_q_code else 'فایل‌های پروژه در این لحظه در دسترس نیست — اما بر اساس تاریخچه مکالمه و لاگ‌ها پاسخ بده.'}
+هرگز از کاربر نخواه که خودش فایل‌ها را بررسی کند یا دستوراتی را اجرا کند.
+{'اگر کاربر مشکلی گزارش کرده، مستقیماً در کد بررسی کن و راه‌حل مشخص ارائه بده.' if has_q_code else 'حتی بدون دسترسی به فایل‌ها، بر اساس اطلاعات موجود بهترین تحلیل ممکن را ارائه بده — هرگز نگو "نمی‌توانم کمک کنم".'}
 
 ## تاریخچه کامل مکالمه:
 {history_text[-4000:]}
@@ -7910,17 +7917,17 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
 ## URL فرانت‌اند: {request.frontend_url or 'نامشخص'}
 
-{f'## کد فایل‌های مرتبط:{question_code_context}' if question_code_context else ''}
+{f'## کد فایل‌های مرتبط:{question_code_context}' if has_q_code else ''}
 
 ## پیام جدید کاربر:
 {request.message}
 
 ## دستورالعمل:
-- بر اساس تمام اطلاعات موجود (تاریخچه + لاگ‌ها + کد فایل‌ها + گزارش‌های قبلی) پاسخ بده
+- بر اساس تمام اطلاعات موجود (تاریخچه + لاگ‌ها{' + کد فایل‌ها' if has_q_code else ''} + گزارش‌های قبلی) پاسخ بده
 - اگر پیام مربوط به خطای قبلی است، به گزارش بررسی قبلی ارجاع بده
 - اگر لاگ خطایی paste شده، آن را دقیق تحلیل کن و ارتباطش با مکالمات قبلی را بگو
-- هرگز کاربر را به انجام کار دستی راهنمایی نکن - تو خودت فایل‌ها را می‌بینی و می‌توانی اصلاح کنی
-- اگر نیاز به تغییر کد هست، action_plan با محتوای فایل‌های اصلاح‌شده ارائه بده
+- هرگز کاربر را به انجام کار دستی راهنمایی نکن
+- اگر نیاز به تغییر کد هست، action_plan با محتوای کامل فایل‌های اصلاح‌شده ارائه بده (files خالی ممنوع)
 {('- ⬆️ کاربر به پیام خاصی ریپلای زده - حتماً در ارتباط با آن پیام پاسخ بده' + chr(10)) if request.reply_to else ''}- پاسخ دقیق، عملی و به فارسی بده"""
 
             try:
@@ -7948,7 +7955,10 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     if json_match:
                         parsed = json.loads(json_match.group(1))
                         if parsed.get("files") and len(parsed["files"]) > 0:
-                            q_action_plan = parsed
+                            valid_files = [f for f in parsed["files"] if f.get("path") and f.get("content")]
+                            if valid_files:
+                                parsed["files"] = valid_files
+                                q_action_plan = parsed
                 except Exception:
                     pass
 
@@ -7974,6 +7984,11 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
             # خواندن فایل‌های مرتبط از GitHub اگر دسترسی داریم
             code_context = ""
+            if not owner or not repo:
+                yield sse("progress", {
+                    "step": "no_github_info",
+                    "message": "⚠️ اطلاعات ریپوی GitHub ناقص — تحلیل بدون دسترسی به فایل‌ها..."
+                })
             if owner and repo:
                 try:
                     tree_result = await github_svc.get_repo_tree(owner, repo, token=token)
@@ -8047,13 +8062,22 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         "message": f"⚠️ دسترسی به GitHub محدود: {str(e)[:60]}"
                     })
 
+            has_err_code_files = bool(code_context and code_context.strip())
+
+            if has_err_code_files:
+                err_code_section = f"## کد فایل‌های مرتبط (از GitHub خوانده شده):{code_context}"
+                err_code_note = "- تو به فایل‌های پروژه دسترسی داری و کد آنها در بالا آمده — مستقیماً کد مشکل‌دار را پیدا کن"
+            else:
+                err_code_section = "## ⚠️ فایل‌های پروژه قابل خواندن نبودند — بر اساس لاگ خطا و تاریخچه مکالمه تحلیل کن"
+                err_code_note = "- فایل‌ها در دسترس نیست — اما بر اساس لاگ خطا و تاریخچه تحلیل کن و بهترین راه‌حل ممکن را ارائه بده"
+
             error_analysis_prompt = f"""شما بازرس ارشد پروژه {owner}/{repo} هستید.
 
 ⚠️ قوانین حیاتی:
-- تو به تمام فایل‌های پروژه از طریق GitHub دسترسی داری و کد فایل‌های مرتبط در پایین آمده
+{err_code_note}
 - هرگز از کاربر نخواه کاری دستی انجام دهد (مثل grep، بررسی فایل، اجرای دستور)
-- تو خودت فایل‌ها را می‌بینی - مستقیماً کد مشکل‌دار را پیدا کن و اصلاحش را ارائه بده
 - حتماً action_plan با محتوای کامل فایل اصلاح‌شده ارائه بده تا کاربر بتواند با یک کلیک اعمال کند
+- هرگز نگو "نمی‌توانم کمک کنم" — همیشه بهترین تحلیل ممکن را ارائه بده
 
 ## ⚠️ مهم: این پیام کاربر حاوی لاگ خطا یا گزارش مشکل دیپلوی است.
 آن را در ارتباط با تمام مکالمات قبلی این جلسه تحلیل کنید.
@@ -8067,11 +8091,11 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 ## لاگ‌های بک‌اند:
 {logs_text[-1500:] if logs_text else 'موجود نیست'}
 
-{f'## کد فایل‌های مرتبط:{code_context}' if code_context else ''}
+{err_code_section}
 
 ## وظیفه:
 1. لاگ خطا را دقیق بخوان
-2. در کد فایل‌های مرتبط (بالا) خط مشکل‌دار را پیدا کن
+2. {'در کد فایل‌های مرتبط (بالا) خط مشکل‌دار را پیدا کن' if has_err_code_files else 'بر اساس خطا و تجربه، محل احتمالی مشکل را تشخیص بده'}
 3. ارتباط آن را با بررسی/اصلاح قبلی در این جلسه شناسایی کن
 4. علت دقیق خطا را بگو
 5. کد اصلاح‌شده را در action_plan ارائه بده (نه فقط توصیه)
@@ -8103,7 +8127,10 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
   "commit_message": "پیام کامیت مناسب"
 }}
 ```
-⚠️ اگر نمی‌توانی محتوای کامل فایل اصلاح‌شده را ارائه دهی، action_plan را خالی بگذار."""
+⚠️ قوانین action_plan:
+- هر فایل باید path و content (محتوای کامل) داشته باشد
+- اگر نمی‌توانی محتوای کامل فایل را ارائه دهی، آن فایل را نذار
+- files خالی (`"files": []`) ممنوع است — یا فایل با محتوا بذار، یا action_plan نذار"""
 
             try:
                 # 🆕 اجرای AI با heartbeat + timeout کلی
@@ -8151,7 +8178,10 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         if json_match:
                             parsed = json.loads(json_match.group(1))
                             if parsed.get("files") and len(parsed["files"]) > 0:
-                                action_plan = parsed
+                                valid_files = [f for f in parsed["files"] if f.get("path") and f.get("content")]
+                                if valid_files:
+                                    parsed["files"] = valid_files
+                                    action_plan = parsed
                     except Exception:
                         pass
 
@@ -8284,20 +8314,43 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     })
 
             # --- تحلیل عمیق و تولید پاسخ + اکشن ---
+            has_code_files = bool(code_context and code_context.strip())
+
+            if not has_code_files:
+                yield sse("progress", {
+                    "step": "no_files_warning",
+                    "message": f"⚠️ فایل‌های پروژه خوانده نشد (GitHub Token یا اطلاعات ریپو ناقص) — تحلیل بر اساس اطلاعات موجود..."
+                })
+
             yield sse("progress", {
                 "step": "deep_analysis",
                 "message": f"🧠 مدل {primary_model} در حال تحلیل عمیق و آماده‌سازی تغییرات..."
             })
 
+            # ساخت بخش کد فایل‌ها بر اساس دسترسی
+            if has_code_files:
+                code_section = f"""## کد فایل‌های مرتبط (از GitHub خوانده شده):
+{code_context}"""
+                code_instructions = """- تو به فایل‌های پروژه دسترسی داری و کد آنها در بالا آمده
+- مستقیماً کد مشکل‌دار را پیدا کن و اصلاحش را ارائه بده
+- حتماً action_plan کامل با محتوای کامل فایل اصلاح‌شده ارائه بده
+- هیچ حدس و گمانی در کار نباشد - فقط بر اساس کد واقعی"""
+            else:
+                code_section = f"""## ⚠️ دسترسی به فایل‌های پروژه:
+فایل‌های پروژه قابل خواندن نبودند (احتمالاً GitHub Token تنظیم نشده یا اطلاعات ریپو ناقص).
+اما تو باید بر اساس اطلاعات موجود (تاریخچه مکالمه، لاگ‌ها، و دانش خودت) تحلیل کنی."""
+                code_instructions = """- ⚠️ فایل‌های پروژه در دسترس نیست - اما تو باید همچنان بر اساس تاریخچه مکالمه، لاگ‌ها و خطاهای گزارش‌شده تحلیل کنی
+- از اطلاعات موجود در تاریخچه و لاگ‌ها برای تشخیص مشکل استفاده کن
+- اگر فایل‌ها را نمی‌بینی، بر اساس خطا و تجربه خودت راه‌حل مشخص ارائه بده
+- هرگز نگو "نمی‌توانم فایل ببینم پس نمی‌توانم کمک کنم" — همیشه بهترین تحلیل ممکن را ارائه بده
+- action_plan فقط وقتی ارائه بده که مطمئنی محتوای کامل و صحیح فایل را می‌توانی بنویسی"""
+
             action_prompt = f"""شما بازرس ارشد و توسعه‌دهنده پروژه {owner}/{repo} هستید.
 
 ## ⚠️ قوانین حیاتی (حتماً رعایت کن):
-- تو به تمام فایل‌های پروژه از طریق GitHub دسترسی کامل داری و کد فایل‌های مرتبط در پایین آمده
+{code_instructions}
 - هرگز از کاربر نخواه کاری دستی انجام دهد (مثل grep زدن، بررسی فایل، اجرای دستور در ترمینال)
-- تو خودت فایل‌ها را می‌بینی و می‌خوانی - مستقیماً کد مشکل‌دار را پیدا کن و اصلاحش را ارائه بده
 - وقتی کاربر مشکلی گزارش می‌دهد، یعنی می‌خواهد تو آن را پیدا و اصلاح کنی - نیازی نیست بپرسی "آیا می‌خواهید اصلاح کنم؟"
-- حتماً action_plan کامل با محتوای کامل فایل اصلاح‌شده ارائه بده تا کاربر با یک کلیک بتواند اعمال کند
-- هیچ حدس و گمانی در کار نباشد - فقط بر اساس کد واقعی که در پایین آمده
 - تمام وابستگی‌ها (imports, types, configs) را بررسی کن
 - تغییرات باید با ساختار فعلی پروژه سازگار باشد
 - اگر فایلی لازم است که ندیده‌ای، صادقانه بگو ولی برای فایل‌هایی که داری، راه‌حل کامل ارائه بده
@@ -8311,8 +8364,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 ## لاگ‌های اخیر:
 {logs_text[-1000:] if logs_text else 'موجود نیست'}
 
-## کد فایل‌های مرتبط:
-{code_context if code_context else 'دسترسی به GitHub محدود است'}
+{code_section}
 
 ## فرمت پاسخ (حتماً JSON معتبر در بلوک action_plan):
 
@@ -8340,9 +8392,11 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 }}
 ```
 
-⚠️ اگر نمی‌توانی محتوای کامل فایل را ارائه دهی (مثلاً فایل را نخوانده‌ای):
-- در action_plan آن فایل را نذار
-- صادقانه بگو کدام فایل‌ها را نداری"""
+⚠️ قوانین action_plan:
+- هر فایل باید path و content داشته باشد (content باید محتوای کامل فایل باشد)
+- اگر نمی‌توانی محتوای کامل فایل را ارائه دهی، آن فایل را در action_plan نذار
+- اگر هیچ فایلی نداری که بتوانی محتوای کاملش را بنویسی، بخش action_plan را حذف کن
+- files خالی (`"files": []`) ممنوع است — یا فایل با محتوای کامل بذار، یا action_plan نذار"""
 
             try:
                 # 🆕 اجرای AI با heartbeat برای جلوگیری از QUIC timeout
@@ -8394,7 +8448,14 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         # پیدا کردن JSON در بلوک action_plan
                         json_match = re.search(r'```json\s*\n(.*?)\n```', content, re.DOTALL)
                         if json_match:
-                            action_plan = json.loads(json_match.group(1))
+                            parsed = json.loads(json_match.group(1))
+                            # ✅ اعتبارسنجی: فقط وقتی action_plan معتبره که files غیرخالی داشته باشه
+                            if parsed.get("files") and len(parsed["files"]) > 0:
+                                # بررسی اینکه هر فایل حداقل path و content داشته باشه
+                                valid_files = [f for f in parsed["files"] if f.get("path") and f.get("content")]
+                                if valid_files:
+                                    parsed["files"] = valid_files
+                                    action_plan = parsed
                     except Exception:
                         pass
 
