@@ -7885,6 +7885,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                 break
                         max_q_code = int(max_input_chars * 0.4)
                         per_file_q_limit = min(8000, max(3000, max_q_code // max(len(q_selected), 1)))
+                        q_read_failures = 0
                         for fp in q_selected:
                             if len(question_code_context) >= max_q_code:
                                 break
@@ -7895,11 +7896,30 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                     if len(content) > per_file_q_limit:
                                         content = content[:per_file_q_limit] + "\n... [truncated]"
                                     question_code_context += f"\n\n=== {fp} ===\n{content}"
-                            except Exception:
-                                pass
+                                else:
+                                    q_read_failures += 1
+                                    slog.warning(f"[smart-chat QUESTION] Failed to read file {fp}: {result.get('error', 'unknown')}")
+                            except Exception as e:
+                                q_read_failures += 1
+                                slog.warning(f"[smart-chat QUESTION] Exception reading file {fp}: {e}")
                             await asyncio.sleep(0.2)
-                except Exception:
-                    pass
+                        if q_read_failures > 0 and q_read_failures == len(q_selected):
+                            yield sse("progress", {
+                                "step": "file_read_warning",
+                                "message": f"⚠️ خواندن فایل‌ها ناموفق بود — پاسخ بدون دسترسی به کد..."
+                            })
+                    else:
+                        yield sse("progress", {
+                            "step": "tree_failed",
+                            "message": f"⚠️ دسترسی به ساختار پروژه ناموفق — پاسخ بدون فایل‌ها..."
+                        })
+                        slog.warning(f"[smart-chat QUESTION] get_repo_tree failed: {tree_result.get('error', 'unknown')}")
+                except Exception as e:
+                    yield sse("progress", {
+                        "step": "github_error",
+                        "message": f"⚠️ خطا در دسترسی GitHub: {str(e)[:60]}"
+                    })
+                    slog.warning(f"[smart-chat QUESTION] GitHub access exception: {e}")
 
             has_q_code = bool(question_code_context and question_code_context.strip())
 
@@ -8038,6 +8058,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         # 🆕 محدود کردن حجم کد بر اساس ظرفیت مدل
                         max_err_code_chars = int(max_input_chars * 0.5)
                         per_file_err_limit = min(10000, max(3000, max_err_code_chars // max(len(selected), 1)))
+                        err_read_failures = 0
                         for file_path in selected:
                             if len(code_context) >= max_err_code_chars:
                                 break
@@ -8052,9 +8073,24 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                     if len(content) > per_file_err_limit:
                                         content = content[:per_file_err_limit] + "\n... [truncated]"
                                     code_context += f"\n\n=== {file_path} ===\n{content}"
-                            except Exception:
-                                pass
+                                else:
+                                    err_read_failures += 1
+                                    slog.warning(f"[smart-chat ERROR_LOG] Failed to read file {file_path}: {result.get('error', 'unknown')}")
+                            except Exception as e:
+                                err_read_failures += 1
+                                slog.warning(f"[smart-chat ERROR_LOG] Exception reading file {file_path}: {e}")
                             await asyncio.sleep(0.2)
+                        if err_read_failures > 0 and err_read_failures == len(selected):
+                            yield sse("progress", {
+                                "step": "file_read_warning",
+                                "message": f"⚠️ خواندن فایل‌ها ناموفق بود — تحلیل بدون دسترسی به کد..."
+                            })
+                    else:
+                        yield sse("progress", {
+                            "step": "tree_failed",
+                            "message": f"⚠️ دسترسی به ساختار پروژه ناموفق — تحلیل بدون فایل‌ها..."
+                        })
+                        slog.warning(f"[smart-chat ERROR_LOG] get_repo_tree failed: {tree_result.get('error', 'unknown')}")
 
                 except Exception as e:
                     yield sse("progress", {
@@ -8285,6 +8321,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         # حداکثر ~60% از ظرفیت ورودی مدل برای کد فایل‌ها
                         max_code_chars = int(max_input_chars * 0.6)
                         per_file_limit = min(12000, max(3000, max_code_chars // max(len(selected), 1)))
+                        act_read_failures = 0
                         for i, file_path in enumerate(selected):
                             if len(code_context) >= max_code_chars:
                                 yield sse("progress", {
@@ -8303,9 +8340,24 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                     if len(content) > per_file_limit:
                                         content = content[:per_file_limit] + "\n... [truncated]"
                                     code_context += f"\n\n=== {file_path} ===\n{content}"
-                            except Exception:
-                                pass
+                                else:
+                                    act_read_failures += 1
+                                    slog.warning(f"[smart-chat ACTION] Failed to read file {file_path}: {result.get('error', 'unknown')}")
+                            except Exception as e:
+                                act_read_failures += 1
+                                slog.warning(f"[smart-chat ACTION] Exception reading file {file_path}: {e}")
                             await asyncio.sleep(0.2)
+                        if act_read_failures > 0 and act_read_failures == len(selected):
+                            yield sse("progress", {
+                                "step": "file_read_warning",
+                                "message": f"⚠️ خواندن فایل‌ها ناموفق بود — تحلیل بدون دسترسی به کد..."
+                            })
+                    else:
+                        yield sse("progress", {
+                            "step": "tree_failed",
+                            "message": f"⚠️ دسترسی به ساختار پروژه ناموفق — تحلیل بدون فایل‌ها..."
+                        })
+                        slog.warning(f"[smart-chat ACTION] get_repo_tree failed: {tree_result.get('error', 'unknown')}")
 
                 except Exception as e:
                     yield sse("progress", {
