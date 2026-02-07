@@ -7663,7 +7663,11 @@ def _fallback_file_selection(code_files: list, context_text: str, max_files: int
             return selected
     # استراتژی ۲: فایل‌های اصلی پروژه
     if not selected:
-        priority_patterns = ["app.", "index.", "main.", "page.", "layout.", "error.", "_app.", "routes."]
+        priority_patterns = [
+            "app.", "index.", "main.", "page.", "layout.", "error.", "_app.", "routes.",
+            "server.", "api.", "config.", "store.", "hooks.", "utils.", "components.",
+            "middleware.", "schema.", "models.", "service.", "context."
+        ]
         for cf in code_files:
             name = cf.split("/")[-1].lower()
             if any(p in name for p in priority_patterns):
@@ -7673,7 +7677,7 @@ def _fallback_file_selection(code_files: list, context_text: str, max_files: int
     return selected
 
 
-def _build_project_tree_summary(code_files: list, max_chars: int = 3000) -> str:
+def _build_project_tree_summary(code_files: list, max_chars: int = 4000) -> str:
     """
     ساخت خلاصه ساختار پروژه از لیست فایل‌ها.
     نشون میده چه دایرکتوری‌هایی وجود دارن و چند فایل دارن.
@@ -7736,7 +7740,11 @@ def _ensure_balanced_selection(selected: list, code_files: list, max_files: int)
         return selected
 
     # فایل‌های مهم از دایرکتوری‌های نادیده‌گرفته‌شده
-    priority_names = ["routes.", "main.", "app.", "index.", "server.", "api.", "config.", "models.", "schema."]
+    priority_names = [
+        "routes.", "main.", "app.", "index.", "server.", "api.", "config.",
+        "models.", "schema.", "page.", "layout.", "store.", "hooks.", "utils.",
+        "service.", "middleware.", "context.", "components."
+    ]
     for missing_dir in sorted(missing_dirs):
         if len(selected) >= max_files:
             break
@@ -7916,30 +7924,41 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 logs_text += f"[{log.get('level', 'info').upper()}] {log.get('message', '')[:200]}\n"
 
         # --- مرحله ۲: طبقه‌بندی پیام (سؤال vs اقدام) ---
-        classify_prompt = f"""پیام کاربر را طبقه‌بندی کن:
+        classify_prompt = f"""## وظیفه: منظور واقعی کاربر را بفهم و طبقه‌بندی کن.
 
 ## تاریخچه مکالمه:
-{history_text[-3000:]}
+{history_text[-4000:]}
 {reply_context_text if reply_context_text else ''}
 ## پیام جدید کاربر:
 {request.message}
 
-## دستورالعمل:
-- اگر فقط سؤال نظری است (مثلاً "چرا؟"، "توضیح بده"): بنویس QUESTION
-- اگر کاربر خطا/مشکل گزارش کرده و خواسته بررسی یا اصلاح شود: بنویس ACTION
-- اگر کلمات "اصلاح"، "فیکس"، "درست کن"، "حلش کن"، "تغییر بده"، "اضافه کن" در پیام هست: بنویس ACTION
-- اگر کاربر مشکلی را توضیح داده (حتی بدون گفتن "اصلاح کن"): بنویس ACTION
-- اگر لاگ خطا، stack trace، TypeError، Error در پیام هست: بنویس ERROR_LOG
-- اگر کاربر به لاگ خطا ریپلای زده: بنویس ERROR_LOG
-- اگر کاربر به پاسخ AI ریپلای زده و مشکل جدیدی مطرح کرده: بنویس ACTION
-- ⚠️ در شک باشی ACTION بنویس - بهتر است فایل‌ها بررسی شوند تا نشوند
+## اصل کلیدی: به معنا و نیت پیام توجه کن، نه فقط کلمات ظاهری.
+کاربران اغلب منظورشان را غیرمستقیم بیان می‌کنند. باید لابلای حرفشان را بخوانی:
+- "کار نمیکنه" = می‌خواهد اصلاح شود → ACTION
+- "چرا اینجوری شد؟" + اشاره به مشکل = می‌خواهد علت مشکل پیدا و حل شود → ACTION
+- "باز هم همون مشکل" = مشکل قبلی حل نشده، باید دوباره بررسی شود → ACTION
+- "چرا اینجوری شد؟" بدون اشاره به مشکل خاص = سؤال نظری → QUESTION
+- "این چیه؟"، "توضیح بده"، "فرقشون چیه؟" = سؤال دانشی → QUESTION
+- لحن عصبانی/ناراحت (مثل "دوباره خراب شد!") = مشکل دارد → ACTION
+- پیام کوتاه بعد از گزارش خطا ("آره"، "همونه"، "درستش کن") = ادامه بحث قبلی → ACTION
+- لاگ خطا، stack trace، TypeError، console error = گزارش خطا → ERROR_LOG
+- ریپلای به لاگ خطا = گزارش خطا → ERROR_LOG
+
+## توجه به تاریخچه:
+- اگر پیام کوتاه و مبهم است (مثل "آره"، "نه هنوز"، "همونه") حتماً تاریخچه را بخوان تا بفهمی در ادامه چه بحثی است
+- اگر آخرین پیام AI راجع به خطا/اصلاح بوده و کاربر ادامه داده → همان نوع قبلی
+- اگر کاربر به پاسخ AI ریپلای زده و مشکل جدیدی مطرح کرده → ACTION
+
+## نتیجه‌گیری:
+- ⚠️ اگر بین QUESTION و ACTION شک داری و پیام به مشکل/خطا/عدم کارکرد اشاره دارد → ACTION
+- ⚠️ اگر واقعاً فقط سؤال دانشی/نظری است و هیچ اشاره‌ای به مشکل ندارد → QUESTION
 - فقط یک کلمه بنویس: QUESTION یا ACTION یا ERROR_LOG"""
 
         try:
             classify_response = await ai_manager.generate(
                 model_id=primary_model,
                 messages=[
-                    Message(role="system", content="طبقه‌بند پیام. فقط یک کلمه بنویس: QUESTION یا ACTION یا ERROR_LOG"),
+                    Message(role="system", content="تو یک طبقه‌بند باهوش پیام هستی. وظیفه‌ات فهمیدن منظور واقعی کاربر است — نه فقط جستجوی کلمات کلیدی. لابلای حرف کاربر را بخوان، لحن و context مکالمه را در نظر بگیر. فقط یک کلمه بنویس: QUESTION یا ACTION یا ERROR_LOG"),
                     Message(role="user", content=classify_prompt)
                 ],
                 max_tokens=20,
@@ -8003,19 +8022,23 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
 سؤال: {request.message}
 
-تاریخچه: {history_text[-1000:]}
+تاریخچه: {history_text[-1500:]}
 
 {q_tree_summary}
 
 فایل‌ها:
 {chr(10).join(q_code_files[:500])}
 
-⚠️ اگر پروژه هم frontend و هم backend دارد، حتماً از هر دو بخش فایل انتخاب کن.
+## راهنمای انتخاب:
+- اول منظور واقعی سؤال کاربر را بفهم — شاید کلمات دقیق استفاده نکرده باشد
+- اگر کاربر از یک فیچر/صفحه/کامپوننت صحبت کرده، فایل‌های مرتبط با آن را انتخاب کن
+- اگر پروژه هم frontend و هم backend دارد، از هر دو بخش فایل مرتبط انتخاب کن
+- تاریخچه مکالمه را بخوان — شاید سؤال در ادامه بحث قبلی باشد
 حداکثر ۵ فایل. فقط مسیرها، هر کدام در یک خط."""
                         q_sel_resp = await ai_manager.generate(
                             model_id=primary_model,
                             messages=[
-                                Message(role="system", content="فقط مسیر فایل‌ها. از هر بخش پروژه (frontend/backend) فایل انتخاب کن."),
+                                Message(role="system", content="انتخاب‌گر فایل هوشمند. اول منظور سؤال کاربر را بفهم، سپس فایل‌های مرتبط را انتخاب کن. از هر بخش پروژه (frontend/backend) فایل انتخاب کن. فقط مسیرها."),
                                 Message(role="user", content=q_select_prompt)
                             ],
                             max_tokens=300,
@@ -8068,14 +8091,23 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
             answer_prompt = f"""شما بازرس هوشمند پروژه {owner}/{repo} هستید.
 
-⚠️ مهم: {'تو به فایل‌های پروژه دسترسی داری و کد مرتبط در پایین آمده.' if has_q_code else 'فایل‌های پروژه در این لحظه در دسترس نیست — اما بر اساس تاریخچه مکالمه و لاگ‌ها پاسخ بده.'}
+## ⚠️ اصل اول: فهم عمیق منظور کاربر
+قبل از هر کاری، منظور واقعی کاربر را بفهم:
+- کاربران همیشه دقیق و رسمی صحبت نمی‌کنند — ممکن است غیرمستقیم، کوتاه، عصبانی یا عامیانه بنویسند
+- "کار نمیکنه" یعنی مشکلی هست که باید پیدا و حل شود
+- "باز همون مشکل" یعنی راه‌حل قبلی جواب نداده — تاریخچه را بخوان و رویکرد متفاوتی پیشنهاد بده
+- اگر پیام کوتاه یا مبهم است (مثل "آره"، "نه"، "همونه")، حتماً تاریخچه مکالمه را بخوان تا بفهمی در ادامه چه بحثی است
+- اگر کاربر ناراحت یا عصبانی به نظر می‌رسد، با درک و همدلی پاسخ بده — نه رسمی و خشک
+
+## دسترسی به فایل‌ها:
+{'تو به فایل‌های پروژه دسترسی داری و کد مرتبط در پایین آمده.' if has_q_code else 'فایل‌های پروژه در این لحظه در دسترس نیست — اما بر اساس تاریخچه مکالمه و لاگ‌ها پاسخ بده.'}
 هرگز از کاربر نخواه که خودش فایل‌ها را بررسی کند یا دستوراتی را اجرا کند.
 {'اگر کاربر مشکلی گزارش کرده، مستقیماً در کد بررسی کن و راه‌حل مشخص ارائه بده.' if has_q_code else 'حتی بدون دسترسی به فایل‌ها، بر اساس اطلاعات موجود بهترین تحلیل ممکن را ارائه بده — هرگز نگو "نمی‌توانم کمک کنم".'}
 
 {f'## ساختار کلی پروژه (تو به همه این بخش‌ها دسترسی داری):{chr(10)}{q_structure_text}' if q_structure_text else ''}
 
 ## تاریخچه کامل مکالمه:
-{history_text[-4000:]}
+{history_text[-5000:]}
 {reply_context_text if reply_context_text else ''}
 ## لاگ‌های اخیر:
 {logs_text[-1500:] if logs_text else 'لاگی موجود نیست'}
@@ -8087,24 +8119,25 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 ## پیام جدید کاربر:
 {request.message}
 
-## دستورالعمل:
-- بر اساس تمام اطلاعات موجود (تاریخچه + لاگ‌ها{' + کد فایل‌ها' if has_q_code else ''} + گزارش‌های قبلی) پاسخ بده
+## دستورالعمل پاسخ‌دهی:
+- اول منظور واقعی کاربر را بفهم — سپس بر اساس تمام اطلاعات موجود (تاریخچه + لاگ‌ها{' + کد فایل‌ها' if has_q_code else ''} + گزارش‌های قبلی) پاسخ بده
+- اگر پیام در ادامه مکالمه قبلی است، حتماً context قبلی را در نظر بگیر
 - اگر پیام مربوط به خطای قبلی است، به گزارش بررسی قبلی ارجاع بده
 - اگر لاگ خطایی paste شده، آن را دقیق تحلیل کن و ارتباطش با مکالمات قبلی را بگو
-- هرگز کاربر را به انجام کار دستی راهنمایی نکن
+- هرگز کاربر را به انجام کار دستی راهنمایی نکن — تو باید تحلیل کنی و راه‌حل ارائه بدی
 - اگر نیاز به تغییر کد هست، action_plan با محتوای کامل فایل‌های اصلاح‌شده ارائه بده (files خالی ممنوع)
-{('- ⬆️ کاربر به پیام خاصی ریپلای زده - حتماً در ارتباط با آن پیام پاسخ بده' + chr(10)) if request.reply_to else ''}- پاسخ دقیق، عملی و به فارسی بده"""
+{('- ⬆️ کاربر به پیام خاصی ریپلای زده - حتماً در ارتباط با آن پیام پاسخ بده' + chr(10)) if request.reply_to else ''}- پاسخ دقیق، عملی و به فارسی بده — با لحنی صمیمی و حرفه‌ای (نه خشک و رسمی)"""
 
             try:
                 # 🆕 اجرای AI با heartbeat برای جلوگیری از قطع اتصال (QUIC timeout)
                 gen_task = asyncio.create_task(ai_manager.generate(
                     model_id=primary_model,
                     messages=[
-                        Message(role="system", content="بازرس هوشمند با دسترسی کامل به فایل‌های پروژه هستی. مستقیماً تحلیل کن و راه‌حل عملی ارائه بده. هرگز از کاربر نخواه کار دستی انجام دهد."),
+                        Message(role="system", content="تو بازرس هوشمند پروژه هستی. مهم‌ترین وظیفه‌ات فهمیدن منظور واقعی کاربر است — حتی وقتی مبهم، کوتاه یا غیرمستقیم صحبت می‌کند. تاریخچه مکالمه را بخوان تا context را بفهمی. مستقیماً تحلیل کن و راه‌حل عملی ارائه بده. هرگز از کاربر نخواه کار دستی انجام دهد. با لحن صمیمی و حرفه‌ای پاسخ بده."),
                         Message(role="user", content=answer_prompt)
                     ],
                     max_tokens=min(model_max_output, 4096),
-                    temperature=0.7
+                    temperature=0.5
                 ))
                 while not gen_task.done():
                     done_set, _ = await asyncio.wait({gen_task}, timeout=8.0)
@@ -8179,31 +8212,32 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         err_tree_summary = _build_project_tree_summary(code_files)
 
                         # AI انتخاب فایل بر اساس لاگ خطا
-                        select_prompt = f"""بر اساس این خطا، فایل‌های مرتبط را انتخاب کن:
+                        select_prompt = f"""بر اساس خطا و context مکالمه، فایل‌های مرتبط را انتخاب کن:
 
 خطا/لاگ:
 {request.message[:2000]}
 
 تاریخچه (خلاصه):
-{history_text[-1000:]}
+{history_text[-1500:]}
 
 {err_tree_summary}
 
 فایل‌های پروژه:
 {chr(10).join(code_files[:500])}
 
-⚠️ مهم:
-- اگر خطا مربوط به API/backend/database/server است، حتماً فایل‌های backend را هم انتخاب کن
-- اگر خطا مربوط به frontend/UI/render است، حتماً فایل‌های frontend را هم انتخاب کن
-- همیشه هم frontend و هم backend مرتبط را بررسی کن — خطای فرانت ممکن است ریشه در بک‌اند داشته باشد
-- فایل‌های types، config و API routes را هم شامل کن
+## راهنمای انتخاب:
+- اول خطا را بخوان و بفهم ریشه مشکل کجاست — سپس فایل‌های مرتبط را انتخاب کن
+- تاریخچه مکالمه را هم بخوان — شاید کاربر قبلاً توضیح داده کدام بخش مشکل دارد
+- خطای frontend ممکن است ریشه در backend داشته باشد — هم frontend و هم backend مرتبط را انتخاب کن
+- فایل‌های types، config و API routes مرتبط را هم شامل کن
+- اگر stack trace مسیر فایلی را نشان می‌دهد، آن فایل حتماً انتخاب شود
 
 حداکثر ۱۰ فایل مرتبط. فقط مسیرها، هر کدام در یک خط."""
 
                         select_response = await ai_manager.generate(
                             model_id=primary_model,
                             messages=[
-                                Message(role="system", content="فقط مسیر فایل‌ها را بنویس. از هر بخش پروژه (frontend/backend) فایل مرتبط انتخاب کن."),
+                                Message(role="system", content="انتخاب‌گر فایل هوشمند. اول ریشه خطا را تشخیص بده، سپس فایل‌های مرتبط را انتخاب کن. از هر بخش پروژه (frontend/backend) فایل مرتبط انتخاب کن. فقط مسیرها."),
                                 Message(role="user", content=select_prompt)
                             ],
                             max_tokens=500,
@@ -8275,17 +8309,24 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
             error_analysis_prompt = f"""شما بازرس ارشد پروژه {owner}/{repo} هستید.
 
-⚠️ قوانین حیاتی:
+## ⚠️ اصل اول: فهم عمیق منظور کاربر
+قبل از هر کاری، بفهم کاربر دقیقاً چه مشکلی دارد و چه می‌خواهد:
+- ممکن است فقط لاگ خطا paste کرده باشد بدون توضیح — یعنی می‌خواهد تو تحلیل کنی و حلش کنی
+- ممکن است بگوید "باز همون مشکل" — تاریخچه را بخوان و بفهم کدام مشکل
+- ممکن است عصبانی باشد ("دوباره خراب شد!") — با درک پاسخ بده و سریع‌تر به راه‌حل برس
+- اگر قبلاً راه‌حلی پیشنهاد شده و کاربر دوباره خطا فرستاده، یعنی راه‌حل قبلی جواب نداده — رویکرد متفاوتی بگیر
+
+## قوانین حیاتی:
 {err_code_note}
 - هرگز از کاربر نخواه کاری دستی انجام دهد (مثل grep، بررسی فایل، اجرای دستور)
 - {'حتماً action_plan با محتوای کامل فایل اصلاح‌شده ارائه بده تا کاربر بتواند با یک کلیک اعمال کند' if has_err_code_files else 'فقط تحلیل متنی ارائه بده — action_plan ممنوع است چون فایل‌ها خوانده نشدند'}
 - هرگز نگو "نمی‌توانم کمک کنم" — همیشه بهترین تحلیل ممکن را ارائه بده
 
-## ⚠️ مهم: این پیام کاربر حاوی لاگ خطا یا گزارش مشکل دیپلوی است.
+## ⚠️ این پیام کاربر حاوی لاگ خطا یا گزارش مشکل است.
 آن را در ارتباط با تمام مکالمات قبلی این جلسه تحلیل کنید.
 
 ## تاریخچه کامل مکالمه:
-{history_text[-4000:]}
+{history_text[-5000:]}
 {reply_context_text if reply_context_text else ''}
 ## پیام جدید کاربر (حاوی لاگ خطا):
 {request.message}
@@ -8296,11 +8337,12 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 {err_code_section}
 
 ## وظیفه:
-1. لاگ خطا را دقیق بخوان
-2. {'در کد فایل‌های مرتبط (بالا) خط مشکل‌دار را پیدا کن' if has_err_code_files else 'بر اساس خطا و تجربه، محل احتمالی مشکل را تشخیص بده'}
-3. ارتباط آن را با بررسی/اصلاح قبلی در این جلسه شناسایی کن
-4. علت دقیق خطا را بگو
-5. کد اصلاح‌شده را در action_plan ارائه بده (نه فقط توصیه)
+1. اول تاریخچه مکالمه را بخوان و بفهم context چیست
+2. لاگ خطا را دقیق بخوان
+3. {'در کد فایل‌های مرتبط (بالا) خط مشکل‌دار را پیدا کن' if has_err_code_files else 'بر اساس خطا و تجربه، محل احتمالی مشکل را تشخیص بده'}
+4. ارتباط آن را با بررسی/اصلاح قبلی در این جلسه شناسایی کن — اگر قبلاً اصلاحی پیشنهاد شده و جواب نداده، رویکرد متفاوت بگیر
+5. علت دقیق خطا را بگو
+6. کد اصلاح‌شده را در action_plan ارائه بده (نه فقط توصیه)
 
 ## فرمت:
 ### 🔗 ارتباط با مکالمات قبلی
@@ -8340,11 +8382,11 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 gen_task = asyncio.create_task(ai_manager.generate(
                     model_id=primary_model,
                     messages=[
-                        Message(role="system", content=f"{'بازرس ارشد با دسترسی به فایل‌های پروژه. مستقیماً کد مشکل‌دار را پیدا کن، اصلاحش را بنویس و action_plan ارائه بده.' if has_err_code_files else 'تحلیلگر ارشد. فایل‌های پروژه خوانده نشدند — فقط تحلیل خطا و تشخیص علت ارائه بده. هرگز action_plan با محتوای حدسی تولید نکن.'} هرگز کاربر را به کار دستی ارجاع نده."),
+                        Message(role="system", content=f"تو بازرس ارشد پروژه هستی. مهم‌ترین کارت فهمیدن منظور واقعی کاربر و ارتباط آن با تاریخچه مکالمه است. {'مستقیماً کد مشکل‌دار را پیدا کن، اصلاحش را بنویس و action_plan ارائه بده.' if has_err_code_files else 'فایل‌ها خوانده نشدند — فقط تحلیل خطا و تشخیص علت ارائه بده. هرگز action_plan با محتوای حدسی تولید نکن.'} اگر قبلاً راه‌حلی پیشنهاد شده و جواب نداده، رویکرد متفاوتی بگیر. هرگز کاربر را به کار دستی ارجاع نده. با لحن صمیمی و حرفه‌ای پاسخ بده."),
                         Message(role="user", content=error_analysis_prompt)
                     ],
                     max_tokens=min(model_max_output, 6144),
-                    temperature=0.5
+                    temperature=0.4
                 ))
                 total_wait_err = 0
                 initial_wait_err = 150  # هشدار اولیه در 2.5 دقیقه
@@ -8461,24 +8503,24 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             "message": f"🤖 مدل {primary_model} در حال شناسایی فایل‌های مرتبط..."
                         })
 
-                        select_prompt = f"""بر اساس درخواست و تاریخچه، فایل‌های مرتبط را انتخاب کن:
+                        select_prompt = f"""بر اساس درخواست کاربر و تاریخچه مکالمه، فایل‌های مرتبط را انتخاب کن:
 
 درخواست کاربر:
 {request.message}
 
 تاریخچه (خلاصه):
-{history_text[-2000:]}
+{history_text[-2500:]}
 
 {act_tree_summary}
 
 فایل‌های پروژه:
 {chr(10).join(code_files[:500])}
 
-⚠️ قوانین حیاتی انتخاب فایل:
-- اگر پروژه هم frontend و هم backend دارد، حتماً از هر دو بخش فایل انتخاب کن
-- فایل‌هایی که مستقیماً باید تغییر کنند
-- وابستگی‌ها (imports, types, configs, API routes, database models)
-- هرگز فقط از یک بخش پروژه فایل انتخاب نکن — مشکل ممکنه در بخش دیگه باشه
+## راهنمای انتخاب:
+- اول منظور واقعی کاربر را بفهم — ممکن است مستقیم نگفته باشد کدام فایل‌ها باید تغییر کنند
+- تاریخچه مکالمه را بخوان — شاید درخواست در ادامه بحث قبلی باشد و فایل‌های مرتبط قبلاً ذکر شده باشند
+- فایل‌هایی که مستقیماً باید تغییر کنند + وابستگی‌هایشان (imports, types, configs, API routes, database models)
+- اگر پروژه هم frontend و هم backend دارد، از هر دو بخش فایل مرتبط انتخاب کن
 - فایل‌های config (package.json, requirements.txt, .env.example) و types هم مهمن
 
 حداکثر ۱۵ فایل. فقط مسیرها، هر کدام در یک خط."""
@@ -8486,7 +8528,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         select_response = await ai_manager.generate(
                             model_id=primary_model,
                             messages=[
-                                Message(role="system", content="فقط مسیر فایل‌ها. از همه بخش‌های پروژه (frontend/backend/shared) فایل مرتبط انتخاب کن."),
+                                Message(role="system", content="انتخاب‌گر فایل هوشمند. اول منظور واقعی درخواست کاربر و تاریخچه مکالمه را بفهم، سپس فایل‌های مرتبط را انتخاب کن. از همه بخش‌های پروژه (frontend/backend/shared) فایل مرتبط انتخاب کن. فقط مسیرها."),
                                 Message(role="user", content=select_prompt)
                             ],
                             max_tokens=700,
@@ -8589,16 +8631,24 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
             action_prompt = f"""شما بازرس ارشد و توسعه‌دهنده پروژه {owner}/{repo} هستید.
 
-## ⚠️ قوانین حیاتی (حتماً رعایت کن):
+## ⚠️ اصل اول: فهم عمیق منظور کاربر
+قبل از هر کاری، منظور واقعی کاربر را بفهم:
+- کاربران اغلب دقیق و فنی صحبت نمی‌کنند — "این دکمه کار نمیکنه" یعنی باید onClick handler و API call مربوطه بررسی شود
+- "مثل قبلی درستش کن" یعنی تاریخچه مکالمه را بخوان و بفهم الگوی اصلاح قبلی چه بوده
+- "باز هم مشکل داره" یعنی راه‌حل قبلی جواب نداده — رویکرد متفاوتی بگیر
+- اگر پیام کوتاه و مبهم است، حتماً تاریخچه مکالمه را بخوان تا context کامل را بفهمی
+- وقتی کاربر ناراحت یا عصبانی است، سریع‌تر به راه‌حل عملی برس — توضیحات طولانی نده
+- هرگز نپرس "آیا می‌خواهید اصلاح کنم؟" — اگر کاربر مشکلی گزارش کرده، یعنی می‌خواهد حل شود
+
+## قوانین حیاتی:
 {code_instructions}
 - هرگز از کاربر نخواه کاری دستی انجام دهد (مثل grep زدن، بررسی فایل، اجرای دستور در ترمینال)
-- وقتی کاربر مشکلی گزارش می‌دهد، یعنی می‌خواهد تو آن را پیدا و اصلاح کنی - نیازی نیست بپرسی "آیا می‌خواهید اصلاح کنم؟"
 - تمام وابستگی‌ها (imports, types, configs) را بررسی کن
 - تغییرات باید با ساختار فعلی پروژه سازگار باشد
 - اگر فایلی لازم است که ندیده‌ای، صادقانه بگو ولی برای فایل‌هایی که داری، راه‌حل کامل ارائه بده
 
 ## تاریخچه کامل مکالمه:
-{history_text[-4000:]}
+{history_text[-5000:]}
 {reply_context_text if reply_context_text else ''}
 ## درخواست جدید کاربر:
 {request.message}
@@ -8647,11 +8697,11 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 gen_task = asyncio.create_task(ai_manager.generate(
                     model_id=primary_model,
                     messages=[
-                        Message(role="system", content=f"{'توسعه‌دهنده ارشد با دسترسی به فایل‌های پروژه. مستقیماً مشکل را پیدا کن، کد اصلاح‌شده کامل بنویس و action_plan معتبر JSON ارائه بده.' if has_code_files else 'تحلیلگر ارشد. فایل‌های پروژه خوانده نشدند — فقط تحلیل و تشخیص ارائه بده. هرگز action_plan با محتوای حدسی تولید نکن.'} هرگز از کاربر نخواه کار دستی انجام دهد."),
+                        Message(role="system", content=f"تو توسعه‌دهنده ارشد پروژه هستی. مهم‌ترین کارت فهمیدن دقیق منظور کاربر است — حتی وقتی مبهم، کوتاه یا غیرمستقیم صحبت می‌کند. تاریخچه مکالمه را بخوان تا context کامل را بفهمی. {'مستقیماً مشکل را پیدا کن، کد اصلاح‌شده کامل بنویس و action_plan معتبر JSON ارائه بده.' if has_code_files else 'فایل‌ها خوانده نشدند — فقط تحلیل و تشخیص ارائه بده. هرگز action_plan با محتوای حدسی تولید نکن.'} اگر قبلاً راه‌حلی پیشنهاد شده و جواب نداده، رویکرد متفاوتی بگیر. هرگز از کاربر نخواه کار دستی انجام دهد. با لحن صمیمی و حرفه‌ای پاسخ بده."),
                         Message(role="user", content=action_prompt)
                     ],
                     max_tokens=safe_max_tokens,
-                    temperature=0.4
+                    temperature=0.35
                 ))
                 # heartbeat هر 5 ثانیه + timeout با مهلت اضافی برای مدل‌های کند
                 total_wait = 0
