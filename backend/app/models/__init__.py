@@ -8,6 +8,7 @@ from .setting import Setting
 from .ai_log import AILog
 from .system_prompt import SystemPrompt, PromptExecution
 from .inspector_session import InspectorSession, InspectorMessage
+from .inspector_prompt_field import InspectorPromptField
 
 __all__ = [
     "Project",
@@ -20,4 +21,5 @@ __all__ = [
     "PromptExecution",
     "InspectorSession",
     "InspectorMessage",
+    "InspectorPromptField",
 ]
