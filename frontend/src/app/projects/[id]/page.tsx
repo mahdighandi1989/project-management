@@ -9495,14 +9495,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     <div key={msg.id} className={`group flex gap-2 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
                       <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-sm flex-shrink-0 ${
                         msg.role === 'user' ? 'bg-blue-500' :
-                        msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified !== true ? 'bg-red-500' :
-                        msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified === true ? 'bg-amber-500' :
+                        msg.role === 'action' && msg.verified_by_model === 'console-error' ? 'bg-orange-500' :
+                        msg.role === 'action' && msg.backend_verified === false ? 'bg-red-500' :
+                        msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified === null ? 'bg-red-500' :
                         msg.role === 'action' ? 'bg-emerald-500' :
                         'bg-red-500'
                       }`}>
                         {msg.role === 'user' ? '👤' :
-                         msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified !== true ? '⚠️' :
-                         msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified === true ? '⚡' :
+                         msg.role === 'action' && msg.verified_by_model === 'console-error' ? '🖥️' :
+                         msg.role === 'action' && msg.backend_verified === false ? '⚠️' :
+                         msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified === null ? '⚠️' :
                          msg.role === 'action' ? '👆' :
                          '🤖'}
                       </div>
@@ -9510,10 +9512,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         className={`rounded-lg p-2.5 shadow-sm max-w-[85%] cursor-pointer transition-all ${
                           msg.role === 'user'
                             ? 'bg-blue-500 text-white rounded-tr-none'
-                            : msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified !== true
+                            : msg.role === 'action' && msg.verified_by_model === 'console-error'
+                              ? 'bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 rounded-tl-none hover:border-orange-400'
+                            : msg.role === 'action' && msg.backend_verified === false
                               ? 'bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-tl-none hover:border-red-400'
-                            : msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified === true
-                              ? 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-tl-none hover:border-amber-400'
+                            : msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified === null
+                              ? 'bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-tl-none hover:border-red-400'
                             : msg.role === 'action'
                               ? 'bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-tl-none hover:border-emerald-400'
                               : 'bg-white dark:bg-gray-800 rounded-tl-none hover:bg-gray-50 dark:hover:bg-gray-750'
@@ -9535,8 +9539,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         )}
                         <p className={`text-sm whitespace-pre-wrap ${
                           msg.role === 'user' ? '' :
-                          msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified !== true ? 'text-red-800 dark:text-red-200' :
-                          msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified === true ? 'text-amber-800 dark:text-amber-200' :
+                          msg.role === 'action' && msg.verified_by_model === 'console-error' ? 'text-orange-800 dark:text-orange-200' :
+                          msg.role === 'action' && msg.backend_verified === false ? 'text-red-800 dark:text-red-200' :
+                          msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified === null ? 'text-red-800 dark:text-red-200' :
                           msg.role === 'action' ? 'text-emerald-800 dark:text-emerald-200' :
                           'text-gray-700 dark:text-gray-300'
                         }`}>
@@ -9573,16 +9578,17 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             </span>
                           )}
                           {/* دکمه بررسی خطا - فقط روی پیام‌هایی که واقعاً خطا دارند */}
-                          {msg.role === 'action' && (
-                            msg.backend_verified === false ||
-                            ((msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified !== true)
-                          ) && (
+                          {msg.role === 'action' && msg.backend_verified === false && (
                             <button
                               onClick={(e) => { e.stopPropagation(); openInvestigateModal(msg.id); }}
-                              className="text-[10px] bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 px-1.5 py-0.5 rounded hover:bg-red-200 dark:hover:bg-red-800/40 transition-colors"
+                              className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
+                                msg.verified_by_model === 'console-error'
+                                  ? 'bg-orange-100 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400 hover:bg-orange-200 dark:hover:bg-orange-800/40'
+                                  : 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-800/40'
+                              }`}
                               disabled={investigateLoading}
                             >
-                              {investigateLoading ? '...' : '🔍 بررسی'}
+                              {investigateLoading ? '...' : msg.verified_by_model === 'console-error' ? '🖥️ بررسی' : '🔍 بررسی'}
                             </button>
                           )}
                           {/* دکمه اصلاح روی گزارش بررسی */}
@@ -9661,22 +9667,33 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             {/* اطلاعات تأیید بک‌اند (برای action) */}
                             {msg.role === 'action' && (
                               <>
+                                {/* منبع خطا */}
+                                {(msg.action_type === 'error' || msg.action_type === 'console-error') && (
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-gray-500">منبع خطا:</span>
+                                    <span className="font-medium text-orange-600 dark:text-orange-400">
+                                      {msg.action_type === 'console-error' ? '🖥️ کنسول مرورگر' : '🖥️ خطای JavaScript'}
+                                    </span>
+                                  </div>
+                                )}
+
                                 <div className="flex items-center justify-between">
                                   <span className="text-gray-500">وضعیت بک‌اند:</span>
                                   <span className={`font-medium ${
                                     msg.backend_verified === true ? 'text-green-600' :
+                                    msg.backend_verified === false && msg.verified_by_model === 'console-error' ? 'text-orange-600' :
                                     msg.backend_verified === false ? 'text-red-600' :
                                     'text-yellow-500'
                                   }`}>
-                                    {msg.backend_verified === true && (msg.action_type === 'error' || msg.action_type === 'console-error')
-                                      ? 'سالم (خطای عمومی - نه مختص این اکشن)'
+                                    {msg.backend_verified === false && msg.verified_by_model === 'console-error'
+                                      ? 'خطای سمت مرورگر (نه بک‌اند)'
                                       : msg.backend_verified === true ? 'سالم'
-                                      : msg.backend_verified === false ? 'خطا'
+                                      : msg.backend_verified === false ? 'خطای بک‌اند'
                                       : 'در حال بررسی...'}
                                   </span>
                                 </div>
 
-                                {msg.verified_by_model && (
+                                {msg.verified_by_model && msg.verified_by_model !== 'console-error' && (
                                   <div className="flex items-center justify-between">
                                     <span className="text-gray-500">بررسی توسط:</span>
                                     <span className="font-mono text-[11px] bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 px-1.5 py-0.5 rounded">

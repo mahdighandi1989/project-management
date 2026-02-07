@@ -6427,12 +6427,13 @@ async def verify_inspector_message(
 ):
     """
     بررسی لاگ‌های بک‌اند برای یک اکشن و زدن تیک تأیید
-    مدل AI لاگ‌های اخیر رو بررسی میکنه و اعلام میکنه آیا خطایی رخ داده یا نه
+    - لاگ‌ها بر اساس پنجره زمانی دقیق هر اکشن فیلتر می‌شوند
+    - خطاهای کنسول مرورگر از خطاهای واقعی بک‌اند تفکیک می‌شوند
     """
     from ...models.inspector_session import InspectorMessage
     from ...models.render_log import RenderLog
     from datetime import datetime, timedelta
-    from sqlalchemy import desc
+    from sqlalchemy import desc, asc
 
     msg = db.query(InspectorMessage).filter(InspectorMessage.id == message_id).first()
     if not msg:
@@ -6453,43 +6454,73 @@ async def verify_inspector_message(
         }
 
     try:
+        # -------------------------------------------------------
+        # 🔴 تشخیص نوع خطا: کنسول مرورگر vs بک‌اند
+        # -------------------------------------------------------
+        is_console_error = msg.action_type in ("error", "console-error")
+
+        # اگر خطای کنسول مرورگر هست، خود محتوای پیام حاوی خطاست
+        # لاگ بک‌اند لزوماً مرتبط نیست - ولی بررسی می‌کنیم
+        # -------------------------------------------------------
+
         # پیدا کردن سرویس‌های مرتبط با این پروژه
         project_services = db.query(RenderService).filter(
             RenderService.project_id == project_id
         ).all()
         service_ids = [s.id for s in project_services]
 
-        # دریافت لاگ‌های اخیر بک‌اند (120 ثانیه اخیر)
-        # فقط لاگ‌های سرویس‌های این پروژه - اگر سرویسی نیست، لاگ هم نیست
         if not service_ids:
-            _no_svc_summary = "سرویسی برای این پروژه یافت نشد"
-            msg.backend_verified = True
-            msg.backend_log_summary = _no_svc_summary
-            msg.verified_by_model = "no-services"
+            _summary = "خطای کنسول مرورگر (سرویس بک‌اندی متصل نیست)" if is_console_error else "سرویسی برای این پروژه یافت نشد"
+            msg.backend_verified = not is_console_error  # خطای کنسول = False، بدون سرویس = True
+            msg.backend_log_summary = _summary
+            msg.verified_by_model = "console-error" if is_console_error else "no-services"
             msg.logs_checked = 0
-            msg.error_logs_count = 0
+            msg.error_logs_count = 1 if is_console_error else 0
             db.commit()
             return {
                 "success": True,
                 "message_id": message_id,
-                "verified": True,
-                "summary": _no_svc_summary,
-                "model_used": "no-services",
+                "verified": msg.backend_verified,
+                "summary": _summary,
+                "model_used": msg.verified_by_model,
                 "logs_checked": 0,
-                "error_logs_count": 0,
+                "error_logs_count": 1 if is_console_error else 0,
                 "checked_logs": []
             }
 
-        cutoff = datetime.utcnow() - timedelta(seconds=120)
-        recent_logs = db.query(RenderLog).filter(
-            RenderLog.timestamp >= cutoff,
+        # -------------------------------------------------------
+        # 📐 پنجره زمانی دقیق: از زمان این اکشن تا اکشن بعدی
+        # -------------------------------------------------------
+        msg_time = msg.timestamp
+        if not msg_time:
+            msg_time = datetime.utcnow() - timedelta(seconds=10)
+
+        # پیام بعدی در همین سشن (برای مشخص کردن انتهای پنجره)
+        next_msg = db.query(InspectorMessage).filter(
+            InspectorMessage.session_id == msg.session_id,
+            InspectorMessage.id > msg.id,
+            InspectorMessage.role == 'action'
+        ).order_by(asc(InspectorMessage.id)).first()
+
+        # شروع پنجره: 2 ثانیه قبل از اکشن (بافر برای تاخیر شبکه)
+        window_start = msg_time - timedelta(seconds=2)
+        # پایان پنجره: تا اکشن بعدی، یا حداکثر 15 ثانیه بعد از اکشن
+        if next_msg and next_msg.timestamp:
+            window_end = next_msg.timestamp
+        else:
+            window_end = msg_time + timedelta(seconds=15)
+
+        # لاگ‌های این پنجره زمانی دقیق
+        action_logs = db.query(RenderLog).filter(
+            RenderLog.timestamp >= window_start,
+            RenderLog.timestamp <= window_end,
             RenderLog.service_id.in_(service_ids)
-        ).order_by(desc(RenderLog.timestamp)).limit(30).all()
+        ).order_by(asc(RenderLog.timestamp)).limit(50).all()
 
         logs_text = ""
         error_logs = []
         checked_logs_list = []
-        for log in recent_logs:
+        for log in action_logs:
             log_line = f"[{log.level}] {log.message}"
             logs_text += log_line + "\n"
             checked_logs_list.append({
@@ -6501,9 +6532,41 @@ async def verify_inspector_message(
             if log.level and log.level.upper() in ("ERROR", "CRITICAL", "FATAL"):
                 error_logs.append(log_line)
 
-        # اگر لاگی نبود، تأیید بزن ولی وضعیت رو واضح بگو
-        if len(recent_logs) == 0:
-            _no_log_summary = f"بدون لاگ ({len(service_ids)} سرویس بررسی شد)" if service_ids else "سرویسی یافت نشد"
+        # -------------------------------------------------------
+        # 🔴 پیام‌های console-error: خطا قطعی هست (از مرورگر اومده)
+        # لاگ بک‌اند رو هم نشون میدیم ولی وضعیت خطا از خود console-error میاد
+        # -------------------------------------------------------
+        if is_console_error:
+            _ce_summary = f"خطای کنسول مرورگر: {msg.content}"
+            if error_logs:
+                _ce_summary += f" + {len(error_logs)} خطای بک‌اند"
+            elif action_logs:
+                _ce_summary += f" (بک‌اند سالم - {len(action_logs)} لاگ)"
+            else:
+                _ce_summary += " (بدون لاگ بک‌اند)"
+
+            msg.backend_verified = False  # خطای کنسول همیشه خطاست
+            msg.backend_log_summary = _ce_summary
+            msg.verified_by_model = "console-error"
+            msg.logs_checked = len(action_logs)
+            msg.error_logs_count = len(error_logs) + 1  # +1 برای خود خطای کنسول
+            db.commit()
+            return {
+                "success": True,
+                "message_id": message_id,
+                "verified": False,
+                "summary": _ce_summary,
+                "model_used": "console-error",
+                "logs_checked": len(action_logs),
+                "error_logs_count": len(error_logs) + 1,
+                "checked_logs": checked_logs_list
+            }
+
+        # -------------------------------------------------------
+        # ✅ اکشن عادی (کلیک، اسکرول، ...): فقط لاگ بک‌اند مهمه
+        # -------------------------------------------------------
+        if len(action_logs) == 0:
+            _no_log_summary = f"بدون لاگ بک‌اند ({len(service_ids)} سرویس بررسی شد)"
             msg.backend_verified = True
             msg.backend_log_summary = _no_log_summary
             msg.verified_by_model = "no-logs"
@@ -6521,23 +6584,46 @@ async def verify_inspector_message(
                 "checked_logs": []
             }
 
-        # استفاده از AI برای بررسی لاگ‌ها
+        # اگر خطایی در لاگ‌ها نبود، مستقیم تأیید کن (بدون AI)
+        if not error_logs:
+            _ok_summary = f"سالم - {len(action_logs)} لاگ بررسی شد"
+            msg.backend_verified = True
+            msg.backend_log_summary = _ok_summary
+            msg.verified_by_model = "rule-based"
+            msg.logs_checked = len(action_logs)
+            msg.error_logs_count = 0
+            db.commit()
+            return {
+                "success": True,
+                "message_id": message_id,
+                "verified": True,
+                "summary": _ok_summary,
+                "model_used": "rule-based",
+                "logs_checked": len(action_logs),
+                "error_logs_count": 0,
+                "checked_logs": checked_logs_list
+            }
+
+        # -------------------------------------------------------
+        # 🤖 فقط وقتی خطایی در لاگ‌ها هست، AI بررسی کنه
+        # -------------------------------------------------------
         from ...services.ai_manager import get_ai_manager
         from ...services.ai_base import Message
 
         ai_manager = get_ai_manager()
 
-        verify_prompt = f"""شما بازرس لاگ هستید. لاگ‌های اخیر بک‌اند را بررسی کنید.
+        verify_prompt = f"""شما بازرس لاگ هستید. لاگ‌های بک‌اند مربوط به یک اکشن خاص را بررسی کنید.
 
 اکشن کاربر: {msg.content}
+زمان اکشن: {msg_time.isoformat()}
 
-لاگ‌های اخیر بک‌اند ({len(recent_logs)} لاگ در ۱۲۰ ثانیه اخیر، {len(service_ids)} سرویس):
+لاگ‌های بک‌اند مرتبط ({len(action_logs)} لاگ، {len(error_logs)} خطا):
 {logs_text}
 
 وظیفه شما:
-1. آیا خطایی مرتبط با این اکشن وجود دارد؟
-2. اگر خطا هست، مختصر توضیح دهید.
-3. اگر خطا نیست، بنویسید "سالم"
+1. آیا خطاهای موجود واقعاً مربوط به این اکشن هستند؟
+2. اگر خطا مرتبط است، مختصر توضیح دهید.
+3. اگر خطا مرتبط نیست (مثلاً خطای عمومی یا تکراری)، بنویسید "سالم"
 
 پاسخ خود را دقیقاً در یکی از این فرمت‌ها بدهید:
 OK: سالم
@@ -6562,23 +6648,19 @@ ERROR: [توضیح مختصر خطا]"""
 
         if not fast_model:
             # اگر مدلی موجود نیست، فقط بر اساس لاگ‌ها بررسی کن
-            if error_logs:
-                msg.backend_verified = False
-                msg.backend_log_summary = f"خطا در لاگ: {error_logs[0][:100]}"
-            else:
-                msg.backend_verified = True
-                msg.backend_log_summary = f"سالم - {len(recent_logs)} لاگ بررسی شد"
+            msg.backend_verified = False
+            msg.backend_log_summary = f"خطا در لاگ بک‌اند: {error_logs[0][:100]}"
             msg.verified_by_model = "rule-based"
-            msg.logs_checked = len(recent_logs)
+            msg.logs_checked = len(action_logs)
             msg.error_logs_count = len(error_logs)
             db.commit()
             return {
                 "success": True,
                 "message_id": message_id,
-                "verified": msg.backend_verified,
+                "verified": False,
                 "summary": msg.backend_log_summary,
                 "model_used": "rule-based",
-                "logs_checked": len(recent_logs),
+                "logs_checked": len(action_logs),
                 "error_logs_count": len(error_logs),
                 "checked_logs": checked_logs_list
             }
@@ -6599,16 +6681,12 @@ ERROR: [توضیح مختصر خطا]"""
             msg.backend_verified = False
             msg.backend_log_summary = ai_result.replace("ERROR:", "").strip()
         else:
-            # اگر فرمت نامشخص بود، بر اساس وجود خطا در لاگ‌ها تصمیم بگیر
-            if error_logs:
-                msg.backend_verified = False
-                msg.backend_log_summary = ai_result or f"خطا: {error_logs[0][:100]}"
-            else:
-                msg.backend_verified = True
-                msg.backend_log_summary = ai_result or "سالم"
+            # اگر فرمت نامشخص بود، خطا فرض کن (چون error_logs وجود داره)
+            msg.backend_verified = False
+            msg.backend_log_summary = ai_result or f"خطا: {error_logs[0][:100]}"
 
         msg.verified_by_model = fast_model
-        msg.logs_checked = len(recent_logs)
+        msg.logs_checked = len(action_logs)
         msg.error_logs_count = len(error_logs)
         db.commit()
 
@@ -6618,14 +6696,13 @@ ERROR: [توضیح مختصر خطا]"""
             "verified": msg.backend_verified,
             "summary": msg.backend_log_summary,
             "model_used": fast_model,
-            "logs_checked": len(recent_logs),
+            "logs_checked": len(action_logs),
             "error_logs_count": len(error_logs),
             "checked_logs": checked_logs_list
         }
 
     except Exception as e:
         slog.error("Verify inspector message failed", exception=e, message_id=message_id)
-        # در صورت خطا، تأیید رو بزن چون خطای خود سیستم بوده نه پروژه کاربر
         _err_model = "error-fallback"
         try:
             msg.backend_verified = True
