@@ -2426,6 +2426,16 @@ async def get_available_models_for_inspector(db: Session = Depends(get_db)):
         }
 
 
+@router.get("/inspector/smart-select-model/{project_id}")
+async def smart_select_model_endpoint(project_id: str, db: Session = Depends(get_db)):
+    """انتخاب هوشمند مدل بر اساس آرشیو چت‌ها و مدل‌های فعال"""
+    try:
+        selected = await _smart_select_model(db, project_id)
+        return {"success": True, "model_id": selected}
+    except Exception as e:
+        return {"success": False, "model_id": "gemini-2.0-flash", "error": str(e)}
+
+
 # =====================================
 # 🆕 انتخاب هوشمند و همکاری مدل‌ها
 # =====================================
@@ -6475,6 +6485,37 @@ async def verify_inspector_message(
         ).all()
         service_ids = [s.id for s in project_services]
 
+        # ─── تشخیص خودکار سرویس اگر نگاشت مستقیم نبود ───
+        if not service_ids:
+            from ...models.project import Project as _VerifyProject
+            _proj = db.query(_VerifyProject).filter(_VerifyProject.id == project_id).first()
+            if _proj:
+                # استخراج نام ریپو از github_path
+                _repo_name = ""
+                _gpath = _proj.github_path or ""
+                if "/" in _gpath:
+                    _repo_name = _gpath.split("/", 1)[1].lower().strip()
+                _proj_name = (_proj.name or "").lower().strip()
+
+                # جستجو در همه سرویس‌ها
+                if _repo_name or _proj_name:
+                    all_services = db.query(RenderService).all()
+                    for svc in all_services:
+                        svc_name = (svc.name or "").lower()
+                        # تطبیق نام: ریپو یا پروژه در نام سرویس موجود باشه
+                        if (_repo_name and _repo_name in svc_name) or \
+                           (_proj_name and _proj_name in svc_name) or \
+                           (_repo_name and svc_name in _repo_name):
+                            service_ids.append(svc.id)
+                            # نگاشت خودکار برای دفعات بعد
+                            svc.project_id = project_id
+                    if service_ids:
+                        try:
+                            db.commit()
+                            slog.info(f"[verify] نگاشت خودکار {len(service_ids)} سرویس به پروژه {project_id}")
+                        except Exception:
+                            db.rollback()
+
         if not service_ids:
             _summary = "خطای کنسول مرورگر (سرویس بک‌اندی متصل نیست)" if is_console_error else "سرویسی برای این پروژه یافت نشد"
             msg.backend_verified = not is_console_error  # خطای کنسول = False، بدون سرویس = True
@@ -6982,6 +7023,120 @@ async def get_prompt_field_usage_log(project_id: str, db: Session = Depends(get_
     }
 
 
+@router.post("/inspector/prompt-fields/init-defaults/{project_id}")
+async def init_default_prompt_fields(project_id: str, db: Session = Depends(get_db)):
+    """
+    مقداردهی اولیه فیلدهای دستور/حافظه/آموزش از اطلاعات موجود پروژه.
+    اگر فیلدی وجود نداشته باشد، فیلدهای پیش‌فرض ایجاد می‌شود.
+    همچنین memory_instructions و dynamic_fields پروژه را وارد می‌کند.
+    """
+    from ...models.inspector_prompt_field import InspectorPromptField
+    from ...models.project import Project
+
+    # بررسی وجود فیلدها
+    existing = db.query(InspectorPromptField).filter(
+        InspectorPromptField.project_id == project_id
+    ).count()
+
+    if existing > 0:
+        fields = db.query(InspectorPromptField).filter(
+            InspectorPromptField.project_id == project_id
+        ).order_by(InspectorPromptField.priority.desc(), InspectorPromptField.created_at).all()
+        return {"success": True, "fields": [f.to_dict() for f in fields], "already_initialized": True}
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        return {"success": False, "error": "پروژه یافت نشد"}
+
+    created_fields = []
+
+    # ─── واردسازی memory_instructions از پروژه ───
+    if project.memory_instructions:
+        try:
+            mem_data = json.loads(project.memory_instructions) if isinstance(project.memory_instructions, str) else project.memory_instructions
+            mem_content = mem_data.get("content", "") if isinstance(mem_data, dict) else str(mem_data)
+            if mem_content and mem_content.strip():
+                f = InspectorPromptField(
+                    project_id=project_id,
+                    category="memory",
+                    title="حافظه اصلی پروژه (وارد شده)",
+                    content=mem_content.strip(),
+                    priority=10,
+                    is_active=True,
+                )
+                db.add(f)
+                created_fields.append(f)
+        except Exception:
+            pass
+
+    # ─── واردسازی dynamic_fields از پروژه ───
+    if project.dynamic_fields:
+        try:
+            dfields = json.loads(project.dynamic_fields) if isinstance(project.dynamic_fields, str) else project.dynamic_fields
+            if isinstance(dfields, list):
+                for idx, df in enumerate(dfields):
+                    df_name = df.get("name", df.get("title", f"فیلد {idx+1}"))
+                    df_value = df.get("value", df.get("content", ""))
+                    if df_value and str(df_value).strip():
+                        f = InspectorPromptField(
+                            project_id=project_id,
+                            category="instruction",
+                            title=df_name,
+                            content=str(df_value).strip(),
+                            priority=8 - idx,
+                            is_active=True,
+                        )
+                        db.add(f)
+                        created_fields.append(f)
+        except Exception:
+            pass
+
+    # ─── فیلدهای پیش‌فرض اگر هیچ فیلدی وارد نشد ───
+    if not created_fields:
+        defaults = [
+            {
+                "category": "instruction",
+                "title": "زبان پاسخ‌دهی",
+                "content": "همیشه به فارسی پاسخ بده. کدها و اصطلاحات فنی می‌توانند انگلیسی باشند.",
+                "priority": 10,
+            },
+            {
+                "category": "memory",
+                "title": "معماری پروژه",
+                "content": f"نام پروژه: {project.name}\nتکنولوژی‌ها: {project.technologies or 'نامشخص'}\nGitHub: {project.github_path or 'نامشخص'}",
+                "priority": 9,
+            },
+            {
+                "category": "training",
+                "title": "سبک کدنویسی",
+                "content": "از سبک کدنویسی موجود در پروژه پیروی کن. کامنت‌ها به فارسی باشند.",
+                "priority": 5,
+            },
+        ]
+        for d in defaults:
+            f = InspectorPromptField(
+                project_id=project_id,
+                category=d["category"],
+                title=d["title"],
+                content=d["content"],
+                priority=d["priority"],
+                is_active=True,
+            )
+            db.add(f)
+            created_fields.append(f)
+
+    db.commit()
+    for f in created_fields:
+        db.refresh(f)
+
+    return {
+        "success": True,
+        "fields": [f.to_dict() for f in created_fields],
+        "created_count": len(created_fields),
+        "already_initialized": False
+    }
+
+
 # =====================================================
 # 🔍 Inspector: Error Investigation & Fix Endpoints
 # =====================================================
@@ -7144,6 +7299,9 @@ async def investigate_error(request: InvestigateRequest, db: Session = Depends(g
         return {"success": False, "error": "اطلاعات GitHub پروژه یافت نشد. لطفاً پروژه را از GitHub ایمپورت کنید."}
 
     token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        from ...models.setting import Setting as _InvSetting
+        token = _InvSetting.get_value(db, "api_key_github") or ""
     model_ids = request.model_ids
 
     # ساخت context کامل خطا
@@ -7577,6 +7735,9 @@ async def fix_error(request: FixRequest, db: Session = Depends(get_db)):
         return {"success": False, "error": "اطلاعات GitHub پروژه یافت نشد"}
 
     token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        from ...models.setting import Setting as _FixSetting
+        token = _FixSetting.get_value(db, "api_key_github") or ""
     model_ids = request.model_ids
     primary_model = model_ids[0] if model_ids else "gemini-2.0-flash"
 
@@ -8012,6 +8173,136 @@ def _ensure_balanced_selection(selected: list, code_files: list, max_files: int)
     return selected
 
 
+# ─── انتخاب هوشمند مدل بر اساس آرشیو چت‌ها ───
+async def _smart_select_model(db, project_id: str) -> str:
+    """
+    انتخاب هوشمند مدل بر اساس:
+    1. بیشترین استفاده موفق در آرشیو چت‌های پروژه
+    2. فقط مدل‌های فعال و با provider در دسترس
+    3. اگر همه غیرفعال بودن → بهترین مدل فعال فعلی
+    """
+    from ...models.inspector_session import InspectorMessage, InspectorSession
+    from ...models.ai_profile import ModelSettings
+    from ...core.models_registry import MODEL_REGISTRY
+    from ...services.ai_manager import get_ai_manager
+    from sqlalchemy import func as sqlfunc, desc
+
+    FALLBACK_MODEL = "gemini-2.0-flash"
+
+    try:
+        ai_manager = get_ai_manager()
+
+        # ─── مرحله ۱: بررسی مدل‌های فعال ───
+        db_settings = db.query(ModelSettings).all()
+        db_map = {s.model_id: s for s in db_settings}
+
+        def _is_model_available(model_id: str) -> bool:
+            """بررسی فعال بودن و در دسترس بودن provider"""
+            reg = MODEL_REGISTRY.get(model_id)
+            if not reg:
+                return False
+            if reg.is_image_generator:
+                return False
+            # بررسی enabled
+            setting = db_map.get(model_id)
+            is_enabled = bool(setting.enabled) if setting else reg.enabled
+            if not is_enabled:
+                return False
+            # بررسی provider
+            try:
+                if reg.provider in ai_manager._services:
+                    svc = ai_manager._services[reg.provider]
+                    return bool(svc.api_key) and not svc.is_in_error_state()
+            except Exception:
+                pass
+            return False
+
+        # ─── مرحله ۲: آمار استفاده از مدل‌ها در آرشیو پروژه ───
+        # سشن‌های آرشیو شده
+        archived_sessions = db.query(InspectorSession.id).filter(
+            InspectorSession.project_id == project_id,
+            InspectorSession.status == "archived"
+        ).subquery()
+
+        # آمار مدل‌ها: تعداد استفاده + تعداد verified=True
+        from sqlalchemy import case as sql_case
+        model_stats = db.query(
+            InspectorMessage.model_id,
+            sqlfunc.count(InspectorMessage.id).label("total_uses"),
+            sqlfunc.sum(
+                sql_case((InspectorMessage.backend_verified == True, 1), else_=0)
+            ).label("success_count")
+        ).filter(
+            InspectorMessage.session_id.in_(archived_sessions),
+            InspectorMessage.role == "assistant",
+            InspectorMessage.model_id.isnot(None)
+        ).group_by(InspectorMessage.model_id).order_by(
+            desc("total_uses")
+        ).all()
+
+        # از آرشیو: مدل‌هایی که زیاد استفاده شدن و موفق بودن
+        for stat in model_stats:
+            mid = stat[0]  # model_id
+            if mid and _is_model_available(mid):
+                slog.info(f"[smart-select] از آرشیو: انتخاب {mid} (استفاده: {stat[1]}, موفق: {stat[2]})")
+                return mid
+
+        # ─── مرحله ۳: سشن فعال فعلی ───
+        active_sessions = db.query(InspectorSession.id).filter(
+            InspectorSession.project_id == project_id,
+            InspectorSession.status == "active"
+        ).subquery()
+
+        active_model_stats = db.query(
+            InspectorMessage.model_id,
+            sqlfunc.count(InspectorMessage.id).label("total_uses")
+        ).filter(
+            InspectorMessage.session_id.in_(active_sessions),
+            InspectorMessage.role == "assistant",
+            InspectorMessage.model_id.isnot(None)
+        ).group_by(InspectorMessage.model_id).order_by(
+            desc("total_uses")
+        ).all()
+
+        for stat in active_model_stats:
+            mid = stat[0]
+            if mid and _is_model_available(mid):
+                slog.info(f"[smart-select] از سشن فعال: انتخاب {mid} (استفاده: {stat[1]})")
+                return mid
+
+        # ─── مرحله ۴: بهترین مدل فعال با بالاترین اولویت ───
+        # مدل‌های دارای قابلیت CODE ترجیح دارند
+        from ...core.models_registry import ModelCapability
+
+        best_available = None
+        best_score = -1
+        for model_id, model in MODEL_REGISTRY.items():
+            if not _is_model_available(model_id):
+                continue
+            score = 0
+            caps = model.capabilities
+            if ModelCapability.CODE in caps:
+                score += 10
+            if ModelCapability.REASONING in caps:
+                score += 5
+            setting = db_map.get(model_id)
+            if setting and setting.priority:
+                score += max(0, 10 - setting.priority)  # اولویت ۱ = بالاترین
+            if score > best_score:
+                best_score = score
+                best_available = model_id
+
+        if best_available:
+            slog.info(f"[smart-select] بهترین مدل فعال: {best_available} (امتیاز: {best_score})")
+            return best_available
+
+    except Exception as e:
+        slog.warning(f"[smart-select] خطا: {e}")
+
+    slog.info(f"[smart-select] فالبک به {FALLBACK_MODEL}")
+    return FALLBACK_MODEL
+
+
 @router.post("/inspector/smart-chat")
 async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
     """
@@ -8046,8 +8337,17 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         owner, repo = github_path.split("/", 1)
 
     token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        from ...models.setting import Setting as _ChatSetting
+        token = _ChatSetting.get_value(db, "api_key_github") or ""
+
     model_ids = request.model_ids
-    primary_model = model_ids[0] if model_ids else "gemini-2.0-flash"
+
+    # ─── انتخاب هوشمند مدل بر اساس آرشیو چت‌ها ───
+    if not model_ids:
+        primary_model = await _smart_select_model(db, request.project_id)
+    else:
+        primary_model = model_ids[0]
 
     # 🆕 اگر ریپلای به پیام مدل خاصی زده شده، از همون مدل استفاده کن
     reply_model_used = False
@@ -9157,6 +9457,11 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
         return {"success": False, "error": "اطلاعات GitHub پروژه یافت نشد"}
 
     token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        from ...models.setting import Setting
+        token = Setting.get_value(db, "api_key_github") or ""
+    if not token:
+        return {"success": False, "error": "توکن GitHub تنظیم نشده است. لطفاً در تنظیمات وارد کنید."}
 
     async def event_stream():
         pr_svc = get_github_pr_service()

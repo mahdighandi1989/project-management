@@ -1241,9 +1241,27 @@ export default function ProjectDetailPage() {
     setPromptFieldsLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/render/inspector/prompt-fields/${projectId}`);
+      if (!res.ok) {
+        console.error('Error loading prompt fields: HTTP', res.status);
+        setPromptFieldsLoading(false);
+        return;
+      }
       const data = await res.json();
       if (data.success) {
-        setPromptFields(data.fields);
+        if (data.fields && data.fields.length > 0) {
+          setPromptFields(data.fields);
+        } else {
+          // فیلدها خالی — مقداردهی اولیه از اطلاعات پروژه
+          try {
+            const initRes = await fetch(`${API_BASE}/api/render/inspector/prompt-fields/init-defaults/${projectId}`, { method: 'POST' });
+            const initData = await initRes.json();
+            if (initData.success && initData.fields) {
+              setPromptFields(initData.fields);
+            }
+          } catch (initErr) {
+            console.error('Error initializing default prompt fields:', initErr);
+          }
+        }
       }
     } catch (e) {
       console.error('Error loading prompt fields:', e);
@@ -1614,10 +1632,28 @@ export default function ProjectDetailPage() {
           setInspectorGithubConnected(data.github_connected);
         }
 
-        // انتخاب اولین مدل فعال به صورت پیش‌فرض
-        const firstEnabled = allModels.find(m => m.enabled);
-        if (firstEnabled && inspectorSelectedModels.length === 0) {
-          setInspectorSelectedModels([firstEnabled.id]);
+        // انتخاب هوشمند مدل بر اساس آرشیو چت‌ها
+        if (inspectorSelectedModels.length === 0 && projectId) {
+          try {
+            const smartRes = await fetch(`${API_BASE}/api/render/inspector/smart-select-model/${projectId}`);
+            const smartData = await smartRes.json();
+            if (smartData.success && smartData.model_id) {
+              const smartModel = allModels.find(m => m.id === smartData.model_id && m.enabled);
+              if (smartModel) {
+                setInspectorSelectedModels([smartModel.id]);
+              } else {
+                // اگر مدل پیشنهادی غیرفعال بود، اولین فعال
+                const firstEnabled = allModels.find(m => m.enabled);
+                if (firstEnabled) setInspectorSelectedModels([firstEnabled.id]);
+              }
+            } else {
+              const firstEnabled = allModels.find(m => m.enabled);
+              if (firstEnabled) setInspectorSelectedModels([firstEnabled.id]);
+            }
+          } catch {
+            const firstEnabled = allModels.find(m => m.enabled);
+            if (firstEnabled) setInspectorSelectedModels([firstEnabled.id]);
+          }
         }
       }
     } catch (err) {
