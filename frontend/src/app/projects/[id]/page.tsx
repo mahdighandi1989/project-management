@@ -899,10 +899,11 @@ export default function ProjectDetailPage() {
                 setInspectorChatMessages(prev =>
                   prev.map(m => m.id === msgId ? { ...m, db_id: dbId } : m)
                 );
-                setTimeout(async () => {
+                // تابع verify با قابلیت retry
+                const doVerify = async (attempt: number = 1) => {
                   try {
                     const verifyRes = await fetch(
-                      `${API_BASE}/api/render/inspector/message/${dbId}/verify?project_id=${projectId}`,
+                      `${API_BASE}/api/render/inspector/message/${dbId}/verify?project_id=${projectId}&force=${attempt > 1 ? 'true' : 'false'}`,
                       { method: 'POST' }
                     );
                     const verifyData = await verifyRes.json();
@@ -918,9 +919,14 @@ export default function ProjectDetailPage() {
                           checked_logs: verifyData.checked_logs,
                         } : m)
                       );
+                      // اگر بار اول لاگی نبود، ۸ ثانیه بعد دوباره بررسی کن
+                      if (attempt === 1 && verifyData.logs_checked === 0 && verifyData.model_used === 'no-logs') {
+                        setTimeout(() => doVerify(2), 8000);
+                      }
                     }
                   } catch (err) { console.error('Verify failed:', err); }
-                }, 3000);
+                };
+                setTimeout(() => doVerify(1), 5000);
               }
             } catch (err) { console.error('Save message failed:', err); }
           })();
@@ -2036,33 +2042,50 @@ export default function ProjectDetailPage() {
   };
 
   // 🆕 تشخیص اینکه آیا این یک task ویژوال است
+  // ⚠️ باید مطمئن بشیم که درخواست‌های مربوط به خطا/مشکل/تحلیل، ویژوال نباشن
   const isVisualTask = (message: string): boolean => {
+    const lowerMessage = message.toLowerCase();
+
+    // ❌ اگر پیام حاوی کلمات مرتبط با خطا/مشکل/تحلیل باشه → ویژوال نیست
+    const errorExcludeKeywords = [
+      // خطا و مشکل - فارسی
+      'خطا', 'ارور', 'مشکل', 'باگ', 'درست کن', 'درستش کن', 'فیکس', 'حل کن',
+      'کار نمیکنه', 'کار نمی‌کنه', 'نمیشه', 'نمی‌شه', 'خراب', 'اشکال',
+      'علت', 'علتش', 'چرا', 'دلیل', 'بررسی کن', 'چک کن', 'تحلیل',
+      'ظاهر میشه', 'ظاهر می‌شه', 'نشون میده', 'نشان می‌دهد',
+      // خطا و مشکل - انگلیسی
+      'error', 'exception', 'bug', 'fix', 'issue', 'problem', 'broken',
+      'failed', 'failure', 'crash', 'debug', 'stack trace', 'traceback',
+      'typeerror', 'syntaxerror', 'referenceerror', 'undefined',
+      'cannot read', 'is not defined', 'is not a function',
+      'application error', 'client-side exception', 'server error',
+      '500', '404', '403', 'cors', 'timeout',
+    ];
+    if (errorExcludeKeywords.some(keyword => lowerMessage.includes(keyword))) {
+      return false;
+    }
+
+    // ✅ فقط اگر هیچ نشانه‌ای از خطا/تحلیل نباشه، بررسی کلمات ویژوال
     const visualKeywords = [
       // ناوبری - فارسی
-      'برو', 'وارد', 'بازکن', 'باز کن', 'نمایش', 'نشان بده', 'برو به', 'وارد شو',
-      'نمایش بده', 'ببین', 'مشاهده', 'رفتن به', 'بروید', 'واردشو',
+      'برو به', 'وارد شو', 'بازکن', 'باز کن', 'نمایش بده', 'نشان بده',
+      'واردشو', 'رفتن به', 'بروید',
       // ناوبری - انگلیسی
-      'navigate', 'go to', 'open', 'show', 'visit', 'enter', 'access',
+      'navigate', 'go to', 'open', 'visit',
       // لاگین
-      'لاگین', 'login', 'ورود', 'sign in', 'ثبت نام', 'register', 'logout', 'خروج',
+      'لاگین', 'login', 'sign in', 'ثبت نام', 'register',
       // کلیک
-      'کلیک', 'click', 'بزن', 'فشار بده', 'روی', 'انتخاب', 'tap', 'press',
+      'کلیک کن', 'click', 'بزن روی', 'فشار بده',
       // تایپ
-      'تایپ', 'type', 'بنویس', 'وارد کن', 'پر کن', 'fill',
+      'تایپ کن', 'type', 'بنویس', 'وارد کن', 'پر کن', 'fill',
       // اسکرول
-      'اسکرول', 'scroll', 'پایین برو', 'بالا برو', 'scroll down', 'scroll up',
+      'اسکرول', 'scroll', 'پایین برو', 'بالا برو',
       // جستجو
-      'پیدا کن', 'find', 'جستجو', 'search', 'بگرد',
-      // انتخاب
-      'انتخاب کن', 'select', 'choose', 'گزینه',
-      // عناصر صفحه
-      'صفحه', 'page', 'فرم', 'form', 'دکمه', 'button', 'لینک', 'link', 'منو', 'menu',
-      'لیست', 'list', 'جدول', 'table', 'تب', 'tab', 'پنل', 'panel',
+      'پیدا کن', 'find', 'جستجو کن', 'search',
       // اقدامات خاص
-      'ببند', 'close', 'حذف', 'delete', 'ویرایش', 'edit', 'ذخیره', 'save',
-      'ارسال', 'submit', 'تایید', 'confirm', 'لغو', 'cancel'
+      'ببند', 'حذف کن', 'ویرایش کن', 'ذخیره کن',
+      'ارسال کن', 'تایید کن', 'لغو کن'
     ];
-    const lowerMessage = message.toLowerCase();
     return visualKeywords.some(keyword => lowerMessage.includes(keyword));
   };
 
@@ -2733,13 +2756,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             return;
           }
           if (searchData.found_count === 0) {
-            setInspectorChatMessages(prev => [...prev, {
-              id: `assistant_${Date.now()}`, role: 'assistant',
-              content: `❌ "${targetText}" پیدا نشد.\n\n💡 متن دقیق‌تری بنویسید.`,
-              timestamp: new Date()
-            }]);
-            setInspectorChatLoading(false);
-            return;
+            // بجای نمایش "پیدا نشد" و متوقف شدن، به smart-chat ادامه بده
+            console.log('Visual search found nothing, falling through to smart-chat...');
+            setInspectorChatMessages(prev => prev.filter(m => !m.id.startsWith('system_')));
+            // ادامه به smart-chat SSE (پایین‌تر)
           }
         } catch (searchError) {
           console.log('Ctrl+F failed, falling back to AI...', searchError);

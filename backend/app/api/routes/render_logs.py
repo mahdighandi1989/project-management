@@ -6433,12 +6433,14 @@ async def archive_inspector_session(
 async def verify_inspector_message(
     message_id: int,
     project_id: str,
+    force: bool = False,
     db: Session = Depends(get_db)
 ):
     """
     بررسی لاگ‌های بک‌اند برای یک اکشن و زدن تیک تأیید
     - لاگ‌ها بر اساس پنجره زمانی دقیق هر اکشن فیلتر می‌شوند
     - خطاهای کنسول مرورگر از خطاهای واقعی بک‌اند تفکیک می‌شوند
+    - force=true: بررسی مجدد حتی اگر قبلاً بررسی شده (مثلاً وقتی بار اول لاگی نبوده)
     """
     from ...models.inspector_session import InspectorMessage
     from ...models.render_log import RenderLog
@@ -6448,6 +6450,16 @@ async def verify_inspector_message(
     msg = db.query(InspectorMessage).filter(InspectorMessage.id == message_id).first()
     if not msg:
         return {"success": False, "error": "پیام یافت نشد"}
+
+    # اگر force=true و قبلاً "no-logs" بوده، مجدد بررسی کن
+    if force and msg.backend_verified is not None and msg.verified_by_model == "no-logs":
+        msg.backend_verified = None
+        msg.backend_log_summary = None
+        msg.verified_by_model = None
+        msg.logs_checked = None
+        msg.error_logs_count = None
+        msg.checked_logs_data = None
+        db.commit()
 
     # اگر قبلاً بررسی شده، نتیجه رو برگردون (با لاگ‌های ذخیره‌شده)
     if msg.backend_verified is not None:
@@ -8450,35 +8462,63 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         ).order_by(InspectorPromptField.priority.desc()).all()
 
         prompt_fields_text = ""
-        used_field_ids = []
+        used_field_ids = []       # فیلدهایی که واقعاً در پرامپت تزریق شدن
+        relevant_field_ids = []   # فیلدهایی که به درخواست فعلی مرتبط هستن (فقط اینها هایلایت میشن)
         if active_prompt_fields:
             instructions = [f for f in active_prompt_fields if f.category == "instruction"]
             memories = [f for f in active_prompt_fields if f.category == "memory"]
             trainings = [f for f in active_prompt_fields if f.category == "training"]
+
+            # تشخیص فیلدهای مرتبط: بررسی overlap کلمات پیام با عنوان/محتوای فیلد
+            _user_msg_lower = (request.message or "").lower()
+            _user_words = set(w for w in _user_msg_lower.split() if len(w) > 2)
+
+            def _is_field_relevant(field) -> bool:
+                """بررسی اینکه آیا فیلد به پیام کاربر مرتبط است"""
+                field_text = f"{field.title or ''} {field.content or ''}".lower()
+                field_words = set(w for w in field_text.split() if len(w) > 2)
+                # حداقل 2 کلمه مشترک یا عنوان فیلد در پیام
+                common = _user_words & field_words
+                if len(common) >= 2:
+                    return True
+                # عنوان فیلد در پیام هست
+                if field.title and field.title.lower() in _user_msg_lower:
+                    return True
+                # فیلدهای با اولویت بالا (>= 8) همیشه مرتبطن
+                if (field.priority or 0) >= 8:
+                    return True
+                return False
 
             if instructions:
                 prompt_fields_text += "\n\n## 📌 دستورات ویژه (باید دقیقاً رعایت شوند):\n"
                 for idx, f in enumerate(instructions, 1):
                     prompt_fields_text += f"### دستور {idx} (اولویت {f.priority}): {f.title}\n{f.content}\n\n"
                     used_field_ids.append(f.id)
+                    if _is_field_relevant(f):
+                        relevant_field_ids.append(f.id)
 
             if memories:
                 prompt_fields_text += "\n\n## 🧠 حافظه پروژه (اطلاعات مهمی که باید در نظر بگیری):\n"
                 for idx, f in enumerate(memories, 1):
                     prompt_fields_text += f"### حافظه {idx} (اولویت {f.priority}): {f.title}\n{f.content}\n\n"
                     used_field_ids.append(f.id)
+                    if _is_field_relevant(f):
+                        relevant_field_ids.append(f.id)
 
             if trainings:
                 prompt_fields_text += "\n\n## 📚 آموزش‌های اختصاصی (این الگوها و رویکردها را رعایت کن):\n"
                 for idx, f in enumerate(trainings, 1):
                     prompt_fields_text += f"### آموزش {idx} (اولویت {f.priority}): {f.title}\n{f.content}\n\n"
                     used_field_ids.append(f.id)
+                    if _is_field_relevant(f):
+                        relevant_field_ids.append(f.id)
 
-            # اعلان SSE برای هایلایت فیلدهای در حال استفاده
+            # اعلان SSE: فقط فیلدهای مرتبط با درخواست فعلی هایلایت میشن
             yield sse("fields_in_use", {
-                "field_ids": used_field_ids,
+                "field_ids": relevant_field_ids,
                 "count": len(used_field_ids),
-                "message": f"📋 {len(used_field_ids)} فیلد دستور/حافظه/آموزش در پرامپت AI تزریق شد"
+                "relevant_count": len(relevant_field_ids),
+                "message": f"📋 {len(used_field_ids)} فیلد تزریق شد{f' ({len(relevant_field_ids)} فیلد مرتبط)' if relevant_field_ids else ''}"
             })
 
             # بروزرسانی آمار استفاده
@@ -9528,8 +9568,8 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
             return
 
         # بررسی وجود فایل‌ها در ریپو (جلوگیری از ساخت فایل‌های ساختگی)
-        from ...services.github_service import get_github_service
-        github_svc = get_github_service()
+        from ...services.github_import import get_github_import_service
+        github_svc = get_github_import_service()
         yield sse("progress", {
             "step": "validating_files",
             "message": f"🔍 بررسی وجود {len(validated_files)} فایل در ریپو..."
