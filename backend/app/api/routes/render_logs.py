@@ -7673,6 +7673,90 @@ def _fallback_file_selection(code_files: list, context_text: str, max_files: int
     return selected
 
 
+def _build_project_tree_summary(code_files: list, max_chars: int = 3000) -> str:
+    """
+    ساخت خلاصه ساختار پروژه از لیست فایل‌ها.
+    نشون میده چه دایرکتوری‌هایی وجود دارن و چند فایل دارن.
+    مدل با این میفهمه کل پروژه چه شکلیه (حتی فایل‌هایی که نخونده).
+    """
+    if not code_files:
+        return ""
+    # گروه‌بندی بر اساس دایرکتوری سطح اول و دوم
+    from collections import defaultdict
+    dir_counts = defaultdict(int)
+    dir_examples = defaultdict(list)
+    for f in code_files:
+        parts = f.split("/")
+        if len(parts) >= 2:
+            top = parts[0] + "/" + parts[1]
+        else:
+            top = parts[0]
+        dir_counts[top] += 1
+        if len(dir_examples[top]) < 3:
+            dir_examples[top].append(f)
+
+    lines = ["ساختار کامل پروژه (همه دایرکتوری‌ها):"]
+    for dir_path in sorted(dir_counts.keys()):
+        count = dir_counts[dir_path]
+        examples = dir_examples[dir_path]
+        lines.append(f"  📁 {dir_path}/ ({count} فایل) — مثال: {', '.join(examples[:2])}")
+
+    summary = "\n".join(lines)
+    if len(summary) > max_chars:
+        summary = summary[:max_chars] + "\n... [truncated]"
+    return summary
+
+
+def _ensure_balanced_selection(selected: list, code_files: list, max_files: int) -> list:
+    """
+    اگر همه فایل‌های انتخاب‌شده از یک دایرکتوری سطح اولن،
+    فایل‌هایی از دایرکتوری‌های دیگه هم اضافه کن.
+    مثلاً اگر فقط frontend/ انتخاب شده، backend/ هم اضافه شه.
+    """
+    if not selected or len(selected) >= max_files:
+        return selected
+
+    # تشخیص دایرکتوری‌های سطح اول
+    selected_top_dirs = set()
+    for f in selected:
+        parts = f.split("/")
+        if parts:
+            selected_top_dirs.add(parts[0])
+
+    all_top_dirs = set()
+    for f in code_files:
+        parts = f.split("/")
+        if parts:
+            all_top_dirs.add(parts[0])
+
+    # دایرکتوری‌هایی که اصلاً فایلی ازشون انتخاب نشده
+    missing_dirs = all_top_dirs - selected_top_dirs
+
+    if not missing_dirs:
+        return selected
+
+    # فایل‌های مهم از دایرکتوری‌های نادیده‌گرفته‌شده
+    priority_names = ["routes.", "main.", "app.", "index.", "server.", "api.", "config.", "models.", "schema."]
+    for missing_dir in sorted(missing_dirs):
+        if len(selected) >= max_files:
+            break
+        dir_files = [f for f in code_files if f.startswith(missing_dir + "/")]
+        # اول فایل‌های مهم
+        for df in dir_files:
+            if len(selected) >= max_files:
+                break
+            name = df.split("/")[-1].lower()
+            if any(p in name for p in priority_names):
+                selected.append(df)
+        # اگه هنوز جا هست، اولین فایل کد
+        if not any(f.startswith(missing_dir + "/") for f in selected):
+            for df in dir_files[:1]:
+                if len(selected) < max_files:
+                    selected.append(df)
+
+    return selected
+
+
 @router.post("/inspector/smart-chat")
 async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
     """
@@ -7888,6 +7972,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         if msg_type == "QUESTION":
             # سؤال: پاسخ با context کامل + خواندن فایل‌های مرتبط
             question_code_context = ""
+            q_tree_summary = ""
             if not owner or not repo:
                 yield sse("progress", {
                     "step": "no_github_info",
@@ -7910,28 +7995,36 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                             "yarn.lock", ".png", ".jpg", ".svg", ".ico", ".woff",
                                             "InspectorBridge", "inspector-bridge"
                                         ])]
-                        # AI انتخاب ۳ فایل مرتبط
+                        # ساخت خلاصه ساختار پروژه
+                        q_tree_summary = _build_project_tree_summary(q_code_files)
+
+                        # AI انتخاب ۵ فایل مرتبط
                         q_select_prompt = f"""بر اساس سؤال کاربر، فایل‌های مرتبط را انتخاب کن:
 
 سؤال: {request.message}
 
 تاریخچه: {history_text[-1000:]}
 
-فایل‌ها: {chr(10).join(q_code_files[:300])}
+{q_tree_summary}
 
-حداکثر ۳ فایل. فقط مسیرها."""
+فایل‌ها:
+{chr(10).join(q_code_files[:500])}
+
+⚠️ اگر پروژه هم frontend و هم backend دارد، حتماً از هر دو بخش فایل انتخاب کن.
+حداکثر ۵ فایل. فقط مسیرها، هر کدام در یک خط."""
                         q_sel_resp = await ai_manager.generate(
                             model_id=primary_model,
                             messages=[
-                                Message(role="system", content="فقط مسیر فایل‌ها."),
+                                Message(role="system", content="فقط مسیر فایل‌ها. از هر بخش پروژه (frontend/backend) فایل انتخاب کن."),
                                 Message(role="user", content=q_select_prompt)
                             ],
-                            max_tokens=200,
+                            max_tokens=300,
                             temperature=0.2
                         )
-                        q_selected = _parse_ai_selected_files(q_sel_resp.content, q_code_files, max_files=3)
+                        q_selected = _parse_ai_selected_files(q_sel_resp.content, q_code_files, max_files=5)
                         if not q_selected:
-                            q_selected = _fallback_file_selection(q_code_files, request.message, max_files=3)
+                            q_selected = _fallback_file_selection(q_code_files, request.message, max_files=5)
+                        q_selected = _ensure_balanced_selection(q_selected, q_code_files, max_files=5)
                         max_q_code = int(max_input_chars * 0.4)
                         per_file_q_limit = min(8000, max(3000, max_q_code // max(len(q_selected), 1)))
                         q_read_failures = 0
@@ -7971,12 +8064,15 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     slog.warning(f"[smart-chat QUESTION] GitHub access exception: {e}")
 
             has_q_code = bool(question_code_context and question_code_context.strip())
+            q_structure_text = q_tree_summary
 
             answer_prompt = f"""شما بازرس هوشمند پروژه {owner}/{repo} هستید.
 
 ⚠️ مهم: {'تو به فایل‌های پروژه دسترسی داری و کد مرتبط در پایین آمده.' if has_q_code else 'فایل‌های پروژه در این لحظه در دسترس نیست — اما بر اساس تاریخچه مکالمه و لاگ‌ها پاسخ بده.'}
 هرگز از کاربر نخواه که خودش فایل‌ها را بررسی کند یا دستوراتی را اجرا کند.
 {'اگر کاربر مشکلی گزارش کرده، مستقیماً در کد بررسی کن و راه‌حل مشخص ارائه بده.' if has_q_code else 'حتی بدون دسترسی به فایل‌ها، بر اساس اطلاعات موجود بهترین تحلیل ممکن را ارائه بده — هرگز نگو "نمی‌توانم کمک کنم".'}
+
+{f'## ساختار کلی پروژه (تو به همه این بخش‌ها دسترسی داری):{chr(10)}{q_structure_text}' if q_structure_text else ''}
 
 ## تاریخچه کامل مکالمه:
 {history_text[-4000:]}
@@ -8059,6 +8155,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
             # خواندن فایل‌های مرتبط از GitHub اگر دسترسی داریم
             code_context = ""
+            err_tree_summary = ""
             if not owner or not repo:
                 yield sse("progress", {
                     "step": "no_github_info",
@@ -8078,6 +8175,9 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                           "InspectorBridge", "inspector-bridge"
                                       ])]
 
+                        # ساخت خلاصه ساختار پروژه
+                        err_tree_summary = _build_project_tree_summary(code_files)
+
                         # AI انتخاب فایل بر اساس لاگ خطا
                         select_prompt = f"""بر اساس این خطا، فایل‌های مرتبط را انتخاب کن:
 
@@ -8087,28 +8187,37 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 تاریخچه (خلاصه):
 {history_text[-1000:]}
 
-فایل‌های پروژه:
-{chr(10).join(code_files[:300])}
+{err_tree_summary}
 
-حداکثر ۵ فایل مرتبط. فقط مسیرها، هر کدام در یک خط."""
+فایل‌های پروژه:
+{chr(10).join(code_files[:500])}
+
+⚠️ مهم:
+- اگر خطا مربوط به API/backend/database/server است، حتماً فایل‌های backend را هم انتخاب کن
+- اگر خطا مربوط به frontend/UI/render است، حتماً فایل‌های frontend را هم انتخاب کن
+- همیشه هم frontend و هم backend مرتبط را بررسی کن — خطای فرانت ممکن است ریشه در بک‌اند داشته باشد
+- فایل‌های types، config و API routes را هم شامل کن
+
+حداکثر ۱۰ فایل مرتبط. فقط مسیرها، هر کدام در یک خط."""
 
                         select_response = await ai_manager.generate(
                             model_id=primary_model,
                             messages=[
-                                Message(role="system", content="فقط مسیر فایل‌ها را بنویس."),
+                                Message(role="system", content="فقط مسیر فایل‌ها را بنویس. از هر بخش پروژه (frontend/backend) فایل مرتبط انتخاب کن."),
                                 Message(role="user", content=select_prompt)
                             ],
-                            max_tokens=300,
+                            max_tokens=500,
                             temperature=0.2
                         )
 
-                        selected = _parse_ai_selected_files(select_response.content, code_files, max_files=5)
+                        selected = _parse_ai_selected_files(select_response.content, code_files, max_files=10)
                         if not selected:
-                            selected = _fallback_file_selection(code_files, request.message, max_files=5)
+                            selected = _fallback_file_selection(code_files, request.message, max_files=10)
+                        selected = _ensure_balanced_selection(selected, code_files, max_files=10)
 
-                        # 🆕 محدود کردن حجم کد بر اساس ظرفیت مدل
-                        max_err_code_chars = int(max_input_chars * 0.5)
-                        per_file_err_limit = min(10000, max(3000, max_err_code_chars // max(len(selected), 1)))
+                        # محدود کردن حجم کد بر اساس ظرفیت مدل
+                        max_err_code_chars = int(max_input_chars * 0.6)
+                        per_file_err_limit = min(12000, max(3000, max_err_code_chars // max(len(selected), 1)))
                         err_read_failures = 0
                         for file_path in selected:
                             if len(code_context) >= max_err_code_chars:
@@ -8153,14 +8262,16 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
             if has_err_code_files:
                 err_code_section = f"## کد فایل‌های مرتبط (از GitHub خوانده شده):{code_context}"
+                if err_tree_summary:
+                    err_code_section += f"\n\n## ساختار کلی پروژه (تو به همه این بخش‌ها دسترسی داری — فایل‌های بالا فقط بخشی از پروژه‌اند):\n{err_tree_summary}"
                 err_code_note = "- تو به فایل‌های پروژه دسترسی داری و کد آنها در بالا آمده — مستقیماً کد مشکل‌دار را پیدا کن"
             else:
                 err_code_section = "## ⚠️ فایل‌های پروژه قابل خواندن نبودند"
-                err_code_note = """- 🚫 ممنوعیت مطلق: چون فایل‌های پروژه خوانده نشدند، تو اجازه نداری action_plan با محتوای فایل تولید کنی
-- 🚫 هرگز محتوای فایل حدس نزن یا از تجربه‌ات نساز — حتی اگر فکر می‌کنی مطمئنی
-- 🚫 هرگز مسیر فایل حدس نزن — ساختار پروژه ممکنه هر چیزی باشه
-- ✅ فقط تحلیل خطا و تشخیص علت ارائه بده
-- ✅ بگو برای ارائه کد اصلاحی به دسترسی GitHub نیاز داری"""
+                if err_tree_summary:
+                    err_code_section += f"\n\nاما ساختار پروژه شناخته شده:\n{err_tree_summary}"
+                err_code_note = """- فایل‌های پروژه خوانده نشدند — تحلیل خطا و تشخیص علت را بر اساس اطلاعات موجود ارائه بده
+- اگر بتوانی مسیر دقیق فایل مشکل‌دار را تشخیص بدهی (از ساختار پروژه بالا)، بگو کدام فایل باید بررسی شود
+- هرگز محتوای فایل حدس نزن — فقط تحلیل متنی ارائه بده"""
 
             error_analysis_prompt = f"""شما بازرس ارشد پروژه {owner}/{repo} هستید.
 
@@ -8222,7 +8333,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - هر فایل باید path و content (محتوای کامل) داشته باشد
 - اگر نمی‌توانی محتوای کامل فایل را ارائه دهی، آن فایل را نذار
 - files خالی (`"files": []`) ممنوع است — یا فایل با محتوا بذار، یا action_plan نذار
-{'- 🚫🚫🚫 ممنوعیت مطلق: چون فایل‌ها خوانده نشدند، action_plan تولید نکن. فقط تحلیل متنی ارائه بده.' if not has_err_code_files else ''}"""
+{'- اگر فایل‌ها خوانده نشدند، action_plan با محتوای حدسی تولید نکن — فقط تحلیل متنی ارائه بده.' if not has_err_code_files else ''}"""
 
             try:
                 # 🆕 اجرای AI با heartbeat + timeout کلی
@@ -8321,6 +8432,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
             code_context = ""
             code_files = []
+            act_tree_summary = ""
             if owner and repo:
                 try:
                     tree_result = await github_svc.get_repo_tree(owner, repo, token=token)
@@ -8340,6 +8452,9 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             "message": f"✅ ساختار پروژه خوانده شد ({len(code_files)} فایل)"
                         })
 
+                        # ساخت خلاصه ساختار پروژه
+                        act_tree_summary = _build_project_tree_summary(code_files)
+
                         # AI انتخاب فایل‌های مرتبط
                         yield sse("progress", {
                             "step": "selecting_files",
@@ -8354,29 +8469,34 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 تاریخچه (خلاصه):
 {history_text[-2000:]}
 
+{act_tree_summary}
+
 فایل‌های پروژه:
 {chr(10).join(code_files[:500])}
 
-⚠️ فایل‌هایی را انتخاب کن که:
-- مستقیماً باید تغییر کنند
-- وابستگی‌های مرتبط هستند (imports, types, configs)
-- برای فهم ساختار لازمند
+⚠️ قوانین حیاتی انتخاب فایل:
+- اگر پروژه هم frontend و هم backend دارد، حتماً از هر دو بخش فایل انتخاب کن
+- فایل‌هایی که مستقیماً باید تغییر کنند
+- وابستگی‌ها (imports, types, configs, API routes, database models)
+- هرگز فقط از یک بخش پروژه فایل انتخاب نکن — مشکل ممکنه در بخش دیگه باشه
+- فایل‌های config (package.json, requirements.txt, .env.example) و types هم مهمن
 
-حداکثر ۱۰ فایل. فقط مسیرها، هر کدام در یک خط."""
+حداکثر ۱۵ فایل. فقط مسیرها، هر کدام در یک خط."""
 
                         select_response = await ai_manager.generate(
                             model_id=primary_model,
                             messages=[
-                                Message(role="system", content="فقط مسیر فایل‌ها."),
+                                Message(role="system", content="فقط مسیر فایل‌ها. از همه بخش‌های پروژه (frontend/backend/shared) فایل مرتبط انتخاب کن."),
                                 Message(role="user", content=select_prompt)
                             ],
-                            max_tokens=500,
+                            max_tokens=700,
                             temperature=0.2
                         )
 
-                        selected = _parse_ai_selected_files(select_response.content, code_files, max_files=10)
+                        selected = _parse_ai_selected_files(select_response.content, code_files, max_files=15)
                         if not selected:
-                            selected = _fallback_file_selection(code_files, request.message, max_files=5)
+                            selected = _fallback_file_selection(code_files, request.message, max_files=10)
+                        selected = _ensure_balanced_selection(selected, code_files, max_files=15)
 
                         yield sse("progress", {
                             "step": "files_selected",
@@ -8386,8 +8506,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         # خواندن فایل‌ها (با رعایت حد context window مدل)
                         # 🆕 محدود کردن حجم کل کد بر اساس ظرفیت مدل
                         # حداکثر ~60% از ظرفیت ورودی مدل برای کد فایل‌ها
-                        max_code_chars = int(max_input_chars * 0.6)
-                        per_file_limit = min(12000, max(3000, max_code_chars // max(len(selected), 1)))
+                        max_code_chars = int(max_input_chars * 0.65)
+                        per_file_limit = min(15000, max(3000, max_code_chars // max(len(selected), 1)))
                         act_read_failures = 0
                         for i, file_path in enumerate(selected):
                             if len(code_context) >= max_code_chars:
@@ -8450,19 +8570,22 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
             if has_code_files:
                 code_section = f"""## کد فایل‌های مرتبط (از GitHub خوانده شده):
 {code_context}"""
+                if act_tree_summary:
+                    code_section += f"\n\n## ساختار کلی پروژه (تو به همه این بخش‌ها دسترسی داری — فایل‌های بالا فقط بخشی از پروژه‌اند):\n{act_tree_summary}"
                 code_instructions = """- تو به فایل‌های پروژه دسترسی داری و کد آنها در بالا آمده
 - مستقیماً کد مشکل‌دار را پیدا کن و اصلاحش را ارائه بده
 - حتماً action_plan کامل با محتوای کامل فایل اصلاح‌شده ارائه بده
-- هیچ حدس و گمانی در کار نباشد - فقط بر اساس کد واقعی"""
+- هیچ حدس و گمانی در کار نباشد - فقط بر اساس کد واقعی
+- اگر فایلی لازم است که در لیست بالا نیست اما در ساختار پروژه می‌بینی، صادقانه بگو"""
             else:
                 code_section = """## ⚠️ دسترسی به فایل‌های پروژه:
 فایل‌های پروژه قابل خواندن نبودند (احتمالاً GitHub Token تنظیم نشده یا اطلاعات ریپو ناقص)."""
-                code_instructions = """- 🚫 ممنوعیت مطلق: چون فایل‌های پروژه خوانده نشدند، تو اجازه نداری action_plan تولید کنی
-- 🚫 هرگز محتوای فایل حدس نزن، فبریکه نکن، یا از تجربه‌ات نساز — حتی اگر مطمئنی
-- 🚫 هرگز مسیر فایلی را حدس نزن (مثلاً pages/_app.js یا src/App.tsx) — ممکنه ساختار پروژه کاملاً متفاوت باشه
-- ✅ فقط تحلیل و تشخیص مشکل بر اساس تاریخچه مکالمه و لاگ‌ها ارائه بده
-- ✅ بگو "برای ارائه کد اصلاحی، نیاز به دسترسی به فایل‌های پروژه دارم — لطفاً GitHub Token را تنظیم کنید"
-- ✅ می‌توانی توضیح بدهی چه فایل‌هایی باید تغییر کنند و چگونه، اما بدون نوشتن محتوای واقعی فایل"""
+                if act_tree_summary:
+                    code_section += f"\n\nاما ساختار پروژه شناخته شده:\n{act_tree_summary}"
+                code_instructions = """- فایل‌های پروژه خوانده نشدند — تحلیل و تشخیص مشکل بر اساس تاریخچه مکالمه و لاگ‌ها ارائه بده
+- اگر بتوانی مسیر دقیق فایل مشکل‌دار را تشخیص بدهی (از ساختار پروژه)، بگو کدام فایل باید بررسی شود
+- هرگز محتوای فایل حدس نزن — فقط تحلیل متنی ارائه بده
+- بگو برای ارائه کد اصلاحی به دسترسی GitHub نیاز داری"""
 
             action_prompt = f"""شما بازرس ارشد و توسعه‌دهنده پروژه {owner}/{repo} هستید.
 
@@ -8516,7 +8639,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - اگر نمی‌توانی محتوای کامل فایل را ارائه دهی، آن فایل را در action_plan نذار
 - اگر هیچ فایلی نداری که بتوانی محتوای کاملش را بنویسی، بخش action_plan را حذف کن
 - files خالی (`"files": []`) ممنوع است — یا فایل با محتوا بذار، یا action_plan نذار
-{'- 🚫🚫🚫 ممنوعیت مطلق: چون فایل‌ها خوانده نشدند، action_plan تولید نکن. فقط تحلیل متنی ارائه بده.' if not has_code_files else ''}"""
+{'- اگر فایل‌ها خوانده نشدند، action_plan با محتوای حدسی تولید نکن — فقط تحلیل متنی ارائه بده.' if not has_code_files else ''}"""
 
             try:
                 # 🆕 اجرای AI با heartbeat برای جلوگیری از QUIC timeout
