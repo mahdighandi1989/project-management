@@ -2707,7 +2707,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     model_id: data.model_used,
                     timestamp: new Date(),
                     tokens_used: data.tokens_used,
-                    action_type: data.has_action ? 'smart_action' as any : undefined,
+                    action_type: (data.type === 'action' || data.has_action) ? 'smart_action' as any : undefined,
                     action_plan: data.action_plan,
                     files_were_read: data.files_were_read ?? false,
                     original_message: userMessage,
@@ -2716,6 +2716,14 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   // 🔓 آزاد کردن قفل
                   setInspectorOpLock(false);
                   setInspectorOpType(null);
+                } else if (eventType === 'timeout_warning') {
+                  // هشدار تمدید مهلت مدل
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: `smart_tw_${Date.now()}`,
+                    role: 'system' as const,
+                    content: data.message || `⏱️ مدل نیاز به زمان بیشتری دارد... مهلت تمدید شد.`,
+                    timestamp: new Date(),
+                  }]);
                 } else if (eventType === 'heartbeat') {
                   // 🆕 heartbeat برای جلوگیری از قطع اتصال - فقط مصرف میشه
                   // اختیاری: آخرین پیام progress رو آپدیت کن
@@ -9688,11 +9696,22 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               🚫 فایل‌ها خوانده نشدند - ممکنه محتوا حدسی باشه
                             </span>
                           )}
-                          {/* نشانگر has_action بدون action_plan معتبر (نیاز به درخواست مجدد) */}
+                          {/* نشانگر has_action بدون action_plan معتبر - دکمه درخواست مجدد اصلاح */}
                           {(msg as any).action_type === 'smart_action' && (!(msg as any).action_plan || !(msg as any).action_plan?.files?.length) && (
-                            <span className="text-[9px] text-amber-500 dark:text-amber-400 px-1.5 py-0.5">
-                              ⚠️ کد کامل در دسترس نیست - دوباره درخواست بدهید
-                            </span>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const retryMsg = (msg as any).original_message
+                                  ? `لطفاً دوباره بررسی کن و حتماً action_plan با کد کامل فایل‌ها ارائه بده: ${(msg as any).original_message}`
+                                  : 'لطفاً مشکل قبلی را دوباره بررسی کن و حتماً action_plan با کد کامل فایل‌ها ارائه بده';
+                                setInspectorReplyTo({ id: msg.id, content: msg.content, role: msg.role, model_id: msg.model_id });
+                                setInspectorChatInput(retryMsg);
+                              }}
+                              className="text-[10px] bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-1.5 py-0.5 rounded hover:bg-amber-200 dark:hover:bg-amber-800/40 transition-colors"
+                              disabled={inspectorOpLock}
+                            >
+                              🔄 درخواست مجدد اصلاح
+                            </button>
                           )}
                           {/* دکمه ریپلای */}
                           <button

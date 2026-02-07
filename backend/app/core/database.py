@@ -450,6 +450,10 @@ def migrate_db():
                 cursor.execute("ALTER TABLE inspector_messages ADD COLUMN error_logs_count INTEGER")
                 logger.info("Added 'error_logs_count' column to inspector_messages table")
 
+            if "checked_logs_data" not in existing_cols:
+                cursor.execute("ALTER TABLE inspector_messages ADD COLUMN checked_logs_data TEXT")
+                logger.info("Added 'checked_logs_data' column to inspector_messages table")
+
         conn.commit()
         logger.info("Database migration completed")
 
