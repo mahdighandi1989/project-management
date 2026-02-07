@@ -1724,10 +1724,14 @@ export default function ProjectDetailPage() {
   const applySmartAction = async (msgId: string) => {
     const msg = inspectorChatMessages.find(m => m.id === msgId) as any;
     if (!msg?.action_plan?.files || msg.action_plan.files.length === 0) {
+      // بررسی فایل‌های بدون محتوا
+      const hasEmptyContent = msg?.action_plan?.files?.some((f: any) => !f.content);
       setInspectorChatMessages(prev => [...prev, {
         id: `apply_err_${Date.now()}`,
         role: 'system' as const,
-        content: '⚠️ اطلاعات تغییرات پیدا نشد. لطفاً مجدد درخواست بدهید.',
+        content: hasEmptyContent
+          ? '⚠️ فایل‌های تغییر بدون محتوا هستند. لطفاً از مدل بخواهید محتوای کامل فایل‌ها را ارائه دهد.'
+          : '⚠️ اطلاعات تغییرات پیدا نشد. مدل AI نتوانست فایل‌های اصلاح‌شده ارائه دهد — لطفاً مجدد درخواست بدهید یا مدل دیگری انتخاب کنید.',
         timestamp: new Date(),
       }]);
       return;
@@ -9658,7 +9662,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             </button>
                           )}
                           {/* 🧠 دکمه اعمال تغییرات روی پاسخ‌های smart-chat */}
-                          {(msg as any).action_type === 'smart_action' && (msg as any).action_plan && (
+                          {(msg as any).action_type === 'smart_action' && (msg as any).action_plan?.files?.length > 0 && (
                             <button
                               onClick={(e) => { e.stopPropagation(); applySmartAction(msg.id); }}
                               className="text-[10px] bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 px-2 py-0.5 rounded hover:bg-green-200 dark:hover:bg-green-800/40 transition-colors font-medium"
@@ -9667,8 +9671,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               {inspectorOpLock ? '⏳ ...' : '✅ اعمال تغییرات'}
                             </button>
                           )}
-                          {/* نشانگر has_action بدون action_plan (نیاز به درخواست مجدد) */}
-                          {(msg as any).action_type === 'smart_action' && !(msg as any).action_plan && (
+                          {/* نشانگر has_action بدون action_plan معتبر (نیاز به درخواست مجدد) */}
+                          {(msg as any).action_type === 'smart_action' && (!(msg as any).action_plan || !(msg as any).action_plan?.files?.length) && (
                             <span className="text-[9px] text-amber-500 dark:text-amber-400 px-1.5 py-0.5">
                               ⚠️ کد کامل در دسترس نیست - دوباره درخواست بدهید
                             </span>
