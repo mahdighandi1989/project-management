@@ -7714,7 +7714,18 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         def sse(event: str, data: dict) -> str:
             return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
-        # --- مرحله ۱: ساخت context کامل از تاریخچه ---
+        # 🆕 محاسبه ظرفیت مدل برای محدود کردن حجم پرامپت
+        from ...core.models_registry import get_model as get_reg_model
+        reg_model = get_reg_model(primary_model)
+        model_context_window = 32000  # پیش‌فرض
+        model_max_output = 4096  # پیش‌فرض
+        if reg_model:
+            model_context_window = getattr(reg_model, 'context_window', 32000)
+            model_max_output = getattr(reg_model, 'max_tokens', 4096)
+
+        # حداکثر کاراکتر ورودی ≈ (context_window - max_output) × 3 (تقریب توکن به کاراکتر)
+        max_input_chars = max(8000, (model_context_window - model_max_output) * 3)
+
         # 🆕 اطلاع‌رسانی درباره انتخاب مدل ریپلای
         if reply_model_used:
             yield sse("progress", {
@@ -7853,7 +7864,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 })
 
             except Exception as e:
-                yield sse("error", {"message": f"خطا در پاسخ‌دهی: {str(e)[:100]}"})
+                yield sse("error", {"message": f"❌ خطا در پاسخ‌دهی مدل {primary_model}: {str(e)[:150]}"})
 
         elif msg_type == "ERROR_LOG":
             # لاگ خطا: تحلیل و ارتباط با مکالمات قبلی
@@ -7910,7 +7921,12 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             if len(selected) >= 5:
                                 break
 
+                        # 🆕 محدود کردن حجم کد بر اساس ظرفیت مدل
+                        max_err_code_chars = int(max_input_chars * 0.5)
+                        per_file_err_limit = min(10000, max(3000, max_err_code_chars // max(len(selected), 1)))
                         for file_path in selected:
+                            if len(code_context) >= max_err_code_chars:
+                                break
                             yield sse("progress", {
                                 "step": "reading_file",
                                 "message": f"📖 در حال خواندن {file_path}..."
@@ -7919,8 +7935,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                 result = await github_svc.get_file_content(owner, repo, file_path, token=token)
                                 if result.get("success"):
                                     content = result.get("content", "")
-                                    if len(content) > 10000:
-                                        content = content[:10000] + "\n... [truncated]"
+                                    if len(content) > per_file_err_limit:
+                                        content = content[:per_file_err_limit] + "\n... [truncated]"
                                     code_context += f"\n\n=== {file_path} ===\n{content}"
                             except Exception:
                                 pass
@@ -7991,7 +8007,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         Message(role="system", content="بازرس ارشد هستی. لاگ خطا را با context قبلی تحلیل کن."),
                         Message(role="user", content=error_analysis_prompt)
                     ],
-                    max_tokens=6144,
+                    max_tokens=min(model_max_output, 6144),
                     temperature=0.5
                 )
 
@@ -8021,7 +8037,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 })
 
             except Exception as e:
-                yield sse("error", {"message": f"خطا: {str(e)[:100]}"})
+                yield sse("error", {"message": f"❌ خطا در تحلیل خطا توسط مدل {primary_model}: {str(e)[:150]}"})
 
         else:  # ACTION
             # درخواست اقدام: تحلیل عمیق + آماده‌سازی تغییرات
@@ -8098,8 +8114,18 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             "message": f"📋 {len(selected)} فایل مرتبط شناسایی شد"
                         })
 
-                        # خواندن فایل‌ها
+                        # خواندن فایل‌ها (با رعایت حد context window مدل)
+                        # 🆕 محدود کردن حجم کل کد بر اساس ظرفیت مدل
+                        # حداکثر ~60% از ظرفیت ورودی مدل برای کد فایل‌ها
+                        max_code_chars = int(max_input_chars * 0.6)
+                        per_file_limit = min(12000, max(3000, max_code_chars // max(len(selected), 1)))
                         for i, file_path in enumerate(selected):
+                            if len(code_context) >= max_code_chars:
+                                yield sse("progress", {
+                                    "step": "context_limit",
+                                    "message": f"⚠️ به حد ظرفیت مدل رسیدیم — {len(selected) - i} فایل باقیمانده خوانده نشد"
+                                })
+                                break
                             yield sse("progress", {
                                 "step": "reading_file",
                                 "message": f"📖 خواندن {file_path} ({i+1}/{len(selected)})..."
@@ -8108,8 +8134,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                 result = await github_svc.get_file_content(owner, repo, file_path, token=token)
                                 if result.get("success"):
                                     content = result.get("content", "")
-                                    if len(content) > 12000:
-                                        content = content[:12000] + "\n... [truncated]"
+                                    if len(content) > per_file_limit:
+                                        content = content[:per_file_limit] + "\n... [truncated]"
                                     code_context += f"\n\n=== {file_path} ===\n{content}"
                             except Exception:
                                 pass
@@ -8178,13 +8204,15 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - صادقانه بگو کدام فایل‌ها را نداری"""
 
             try:
+                # 🆕 استفاده از حداکثر توکن خروجی واقعی مدل (نه مقدار ثابت)
+                safe_max_tokens = min(model_max_output, 8192)
                 response = await ai_manager.generate(
                     model_id=primary_model,
                     messages=[
                         Message(role="system", content="توسعه‌دهنده ارشد. تغییرات دقیق و action_plan معتبر ارائه بده."),
                         Message(role="user", content=action_prompt)
                     ],
-                    max_tokens=8192,
+                    max_tokens=safe_max_tokens,
                     temperature=0.4
                 )
 
@@ -8210,12 +8238,27 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 })
 
             except Exception as e:
-                yield sse("error", {"message": f"خطا: {str(e)[:100]}"})
+                import traceback
+                err_detail = str(e)[:200]
+                yield sse("error", {
+                    "message": f"❌ خطا در تحلیل عمیق مدل {primary_model}: {err_detail}",
+                    "detail": f"مدل: {primary_model} | حجم پرامپت: ~{len(action_prompt)} کاراکتر | context window: {model_context_window} توکن"
+                })
 
         yield sse("done", {"success": True})
 
+    # 🆕 wrapper برای گرفتن خطاهای ناشناخته generator
+    async def safe_event_stream():
+        try:
+            async for chunk in event_stream():
+                yield chunk
+        except Exception as e:
+            import traceback
+            yield f"event: error\ndata: {json.dumps({'message': f'❌ خطای غیرمنتظره: {str(e)[:150]}'}, ensure_ascii=False)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'success': False})}\n\n"
+
     return StreamingResponse(
-        event_stream(),
+        safe_event_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
