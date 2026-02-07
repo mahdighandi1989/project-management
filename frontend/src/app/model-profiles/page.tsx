@@ -650,27 +650,27 @@ export default function ModelProfilesPage() {
                         <div className="text-sm text-white/80">نمره کل</div>
                       </div>
                       <div className="text-center p-4 bg-gray-100 dark:bg-gray-700 rounded-xl">
-                        <div className="text-2xl font-bold text-green-500">{selectedProfile.scores.accuracy}</div>
+                        <div className="text-2xl font-bold text-green-500">{selectedProfile.scores?.accuracy ?? 0}</div>
                         <div className="text-xs text-gray-500">دقت</div>
                       </div>
                       <div className="text-center p-4 bg-gray-100 dark:bg-gray-700 rounded-xl">
-                        <div className="text-2xl font-bold text-purple-500">{selectedProfile.scores.completeness}</div>
+                        <div className="text-2xl font-bold text-purple-500">{selectedProfile.scores?.completeness ?? 0}</div>
                         <div className="text-xs text-gray-500">کامل‌بودن</div>
                       </div>
                       <div className="text-center p-4 bg-gray-100 dark:bg-gray-700 rounded-xl">
-                        <div className="text-2xl font-bold text-orange-500">{selectedProfile.scores.speed}</div>
+                        <div className="text-2xl font-bold text-orange-500">{selectedProfile.scores?.speed ?? 0}</div>
                         <div className="text-xs text-gray-500">سرعت</div>
                       </div>
                       <div className="text-center p-4 bg-gray-100 dark:bg-gray-700 rounded-xl">
-                        <div className="text-2xl font-bold text-cyan-500">{selectedProfile.scores.reliability}</div>
+                        <div className="text-2xl font-bold text-cyan-500">{selectedProfile.scores?.reliability ?? 0}</div>
                         <div className="text-xs text-gray-500">قابلیت اطمینان</div>
                       </div>
                       <div className="text-center p-4 bg-gray-100 dark:bg-gray-700 rounded-xl">
-                        <div className="text-2xl font-bold text-pink-500">{selectedProfile.scores.code_quality}</div>
+                        <div className="text-2xl font-bold text-pink-500">{selectedProfile.scores?.code_quality ?? 0}</div>
                         <div className="text-xs text-gray-500">کیفیت کد</div>
                       </div>
                       <div className="text-center p-4 bg-gray-100 dark:bg-gray-700 rounded-xl">
-                        <div className="text-2xl font-bold text-indigo-500">{selectedProfile.scores.reasoning}</div>
+                        <div className="text-2xl font-bold text-indigo-500">{selectedProfile.scores?.reasoning ?? 0}</div>
                         <div className="text-xs text-gray-500">استدلال</div>
                       </div>
                     </div>
@@ -695,15 +695,15 @@ export default function ModelProfilesPage() {
                     </div>
                     <div className="grid grid-cols-3 gap-4 mt-4">
                       <div className="p-3 bg-gray-100 dark:bg-gray-700 rounded-lg text-center">
-                        <div className="font-bold">{selectedProfile.stats.total_analyses}</div>
+                        <div className="font-bold">{selectedProfile.stats?.total_analyses ?? 0}</div>
                         <div className="text-xs text-gray-500">تحلیل‌ها</div>
                       </div>
                       <div className="p-3 bg-gray-100 dark:bg-gray-700 rounded-lg text-center">
-                        <div className="font-bold">{selectedProfile.stats.total_tasks}</div>
+                        <div className="font-bold">{selectedProfile.stats?.total_tasks ?? 0}</div>
                         <div className="text-xs text-gray-500">وظایف</div>
                       </div>
                       <div className="p-3 bg-gray-100 dark:bg-gray-700 rounded-lg text-center">
-                        <div className="font-bold">{selectedProfile.stats.total_debates}</div>
+                        <div className="font-bold">{selectedProfile.stats?.total_debates ?? 0}</div>
                         <div className="text-xs text-gray-500">مناظرات</div>
                       </div>
                     </div>
@@ -714,15 +714,15 @@ export default function ModelProfilesPage() {
                     </h3>
                     <div className="grid grid-cols-3 gap-4">
                       <div className="p-3 bg-gray-100 dark:bg-gray-700 rounded-lg text-center">
-                        <div className="font-bold">{selectedProfile.performance.avg_response_time}ms</div>
+                        <div className="font-bold">{selectedProfile.performance?.avg_response_time ?? 0}ms</div>
                         <div className="text-xs text-gray-500">میانگین زمان پاسخ</div>
                       </div>
                       <div className="p-3 bg-gray-100 dark:bg-gray-700 rounded-lg text-center">
-                        <div className="font-bold">{selectedProfile.performance.total_tokens_used.toLocaleString()}</div>
+                        <div className="font-bold">{(selectedProfile.performance?.total_tokens_used ?? 0).toLocaleString()}</div>
                         <div className="text-xs text-gray-500">توکن مصرفی</div>
                       </div>
                       <div className="p-3 bg-gray-100 dark:bg-gray-700 rounded-lg text-center">
-                        <div className="font-bold">${selectedProfile.performance.total_cost.toFixed(4)}</div>
+                        <div className="font-bold">${(selectedProfile.performance?.total_cost ?? 0).toFixed(4)}</div>
                         <div className="text-xs text-gray-500">هزینه کل</div>
                       </div>
                     </div>

@@ -7435,8 +7435,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             </p>
                           )}
                           <div className="flex gap-3 text-xs text-gray-500">
-                            <span>{report.total_activities} فعالیت</span>
-                            <span>{report.total_tokens.toLocaleString()} توکن</span>
+                            <span>{report.total_activities ?? 0} فعالیت</span>
+                            <span>{(report.total_tokens ?? 0).toLocaleString()} توکن</span>
                           </div>
                         </div>
                       ))}
@@ -8185,7 +8185,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         <div className="text-xs text-gray-500">فعالیت</div>
                       </div>
                       <div className="text-center p-3 bg-gray-100 dark:bg-gray-700 rounded">
-                        <div className="text-2xl font-bold text-green-500">{selectedReport.total_tokens.toLocaleString()}</div>
+                        <div className="text-2xl font-bold text-green-500">{(selectedReport.total_tokens ?? 0).toLocaleString()}</div>
                         <div className="text-xs text-gray-500">توکن</div>
                       </div>
                       <div className="text-center p-3 bg-gray-100 dark:bg-gray-700 rounded">

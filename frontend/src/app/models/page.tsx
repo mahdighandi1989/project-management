@@ -855,24 +855,26 @@ export default function ModelsPage() {
             <div className="p-6">
               {(() => {
                 const result = capabilityResults[selectedModel];
+                if (!result) return <div className="text-gray-400 text-center py-8">نتیجه‌ای یافت نشد</div>;
+                const score = result.overall_score ?? 0;
                 return (
                   <>
                     {/* Header with badges */}
                     <div className="flex items-start gap-4 mb-6">
                       <div className={`w-20 h-20 rounded-xl flex flex-col items-center justify-center text-white ${
-                        result.overall_score >= 80 ? 'bg-gradient-to-br from-purple-500 to-purple-700' :
-                        result.overall_score >= 60 ? 'bg-gradient-to-br from-blue-500 to-blue-700' :
+                        score >= 80 ? 'bg-gradient-to-br from-purple-500 to-purple-700' :
+                        score >= 60 ? 'bg-gradient-to-br from-blue-500 to-blue-700' :
                         'bg-gradient-to-br from-gray-500 to-gray-700'
                       }`}>
-                        <div className="text-2xl font-bold">{result.overall_score.toFixed(0)}</div>
+                        <div className="text-2xl font-bold">{score.toFixed(0)}</div>
                         <div className="text-xs opacity-75">امتیاز کلی</div>
                       </div>
                       <div className="flex-1">
                         <p className="text-gray-500 text-sm">
-                          تست شده: {new Date(result.tested_at).toLocaleString('fa-IR')}
+                          تست شده: {result.tested_at ? new Date(result.tested_at).toLocaleString('fa-IR') : '-'}
                         </p>
                         <div className="flex flex-wrap gap-2 mt-2">
-                          {result.badges.map((badge, idx) => (
+                          {(result.badges || []).map((badge, idx) => (
                             <span
                               key={idx}
                               className={`px-3 py-1 rounded-full text-sm font-medium ${getBadgeColor(badge.color)}`}
