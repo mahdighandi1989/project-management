@@ -462,25 +462,25 @@ export default function ModelProfilesPage() {
                           <div className="grid grid-cols-4 gap-4 text-center">
                             <div>
                               <div className="text-xs text-gray-500 mb-1">دقت</div>
-                              <div className="font-bold text-green-500">{profile.accuracy_score}</div>
+                              <div className="font-bold text-green-500">{profile.accuracy_score ?? 0}</div>
                             </div>
                             <div>
                               <div className="text-xs text-gray-500 mb-1">سرعت</div>
-                              <div className="font-bold text-blue-500">{profile.speed_score}</div>
+                              <div className="font-bold text-blue-500">{profile.speed_score ?? 0}</div>
                             </div>
                             <div>
                               <div className="text-xs text-gray-500 mb-1">کامل‌بودن</div>
-                              <div className="font-bold text-purple-500">{profile.completeness_score}</div>
+                              <div className="font-bold text-purple-500">{profile.completeness_score ?? 0}</div>
                             </div>
                             <div>
                               <div className="text-xs text-gray-500 mb-1">اطمینان</div>
-                              <div className="font-bold text-orange-500">{profile.reliability_score}</div>
+                              <div className="font-bold text-orange-500">{profile.reliability_score ?? 0}</div>
                             </div>
                           </div>
                           <div className="border-r pr-6 dark:border-gray-600">
                             <div className="text-xs text-gray-500 mb-1">نمره کل</div>
                             <div className="text-3xl font-bold bg-gradient-to-r from-blue-500 to-purple-500 bg-clip-text text-transparent">
-                              {profile.overall_score}
+                              {profile.overall_score ?? 0}
                             </div>
                           </div>
                         </div>
@@ -561,28 +561,28 @@ export default function ModelProfilesPage() {
                         <div>
                           <div className="flex justify-between text-xs text-gray-500 mb-1">
                             <span>دقت</span>
-                            <span>{profile.accuracy_score}%</span>
+                            <span>{profile.accuracy_score ?? 0}%</span>
                           </div>
                           <div className="w-full bg-gray-200 dark:bg-gray-600 rounded-full h-2">
-                            <div className="bg-green-500 h-2 rounded-full transition-all" style={{ width: `${profile.accuracy_score}%` }} />
+                            <div className="bg-green-500 h-2 rounded-full transition-all" style={{ width: `${profile.accuracy_score ?? 0}%` }} />
                           </div>
                         </div>
                         <div>
                           <div className="flex justify-between text-xs text-gray-500 mb-1">
                             <span>سرعت</span>
-                            <span>{profile.speed_score}%</span>
+                            <span>{profile.speed_score ?? 0}%</span>
                           </div>
                           <div className="w-full bg-gray-200 dark:bg-gray-600 rounded-full h-2">
-                            <div className="bg-blue-500 h-2 rounded-full transition-all" style={{ width: `${profile.speed_score}%` }} />
+                            <div className="bg-blue-500 h-2 rounded-full transition-all" style={{ width: `${profile.speed_score ?? 0}%` }} />
                           </div>
                         </div>
                         <div>
                           <div className="flex justify-between text-xs text-gray-500 mb-1">
                             <span>کامل‌بودن</span>
-                            <span>{profile.completeness_score}%</span>
+                            <span>{profile.completeness_score ?? 0}%</span>
                           </div>
                           <div className="w-full bg-gray-200 dark:bg-gray-600 rounded-full h-2">
-                            <div className="bg-purple-500 h-2 rounded-full transition-all" style={{ width: `${profile.completeness_score}%` }} />
+                            <div className="bg-purple-500 h-2 rounded-full transition-all" style={{ width: `${profile.completeness_score ?? 0}%` }} />
                           </div>
                         </div>
                       </div>
@@ -733,8 +733,8 @@ export default function ModelProfilesPage() {
                         <span>💪</span> نقاط قوت
                       </h3>
                       <ul className="space-y-2">
-                        {selectedProfile.capabilities.strengths.length > 0 ? (
-                          selectedProfile.capabilities.strengths.map((s, i) => (
+                        {(selectedProfile.capabilities?.strengths ?? []).length > 0 ? (
+                          (selectedProfile.capabilities?.strengths ?? []).map((s, i) => (
                             <li key={i} className="flex items-center gap-2 text-sm">
                               <span className="text-green-500">✓</span>
                               <span>{s}</span>
@@ -750,8 +750,8 @@ export default function ModelProfilesPage() {
                         <span>⚠️</span> نقاط ضعف
                       </h3>
                       <ul className="space-y-2">
-                        {selectedProfile.capabilities.weaknesses.length > 0 ? (
-                          selectedProfile.capabilities.weaknesses.map((w, i) => (
+                        {(selectedProfile.capabilities?.weaknesses ?? []).length > 0 ? (
+                          (selectedProfile.capabilities?.weaknesses ?? []).map((w, i) => (
                             <li key={i} className="flex items-center gap-2 text-sm">
                               <span className="text-red-500">✗</span>
                               <span>{w}</span>
@@ -781,7 +781,7 @@ export default function ModelProfilesPage() {
                             </tr>
                           </thead>
                           <tbody className="divide-y dark:divide-gray-700">
-                            {selectedProfile.validation_history.map((v: any, idx: number) => (
+                            {(selectedProfile.validation_history ?? []).map((v: any, idx: number) => (
                               <tr key={idx} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
                                 <td className="p-2">{v.task_type}</td>
                                 <td className="p-2 text-center font-medium text-green-500">{v.precision}%</td>
