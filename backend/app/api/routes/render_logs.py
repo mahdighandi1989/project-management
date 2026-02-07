@@ -7870,6 +7870,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 })
 
             except Exception as e:
+                print(f"[SMART-CHAT ERROR] QUESTION model={primary_model} error={str(e)[:200]}")
                 yield sse("error", {"message": f"❌ خطا در پاسخ‌دهی مدل {primary_model}: {str(e)[:150]}"})
 
         elif msg_type == "ERROR_LOG":
@@ -8049,6 +8050,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 })
 
             except Exception as e:
+                print(f"[SMART-CHAT ERROR] ERROR_LOG model={primary_model} error={str(e)[:200]}")
                 yield sse("error", {"message": f"❌ خطا در تحلیل خطا توسط مدل {primary_model}: {str(e)[:150]}"})
 
         else:  # ACTION
@@ -8257,6 +8259,9 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
             except Exception as e:
                 import traceback
                 err_detail = str(e)[:200]
+                tb_str = traceback.format_exc()[-500:]
+                print(f"[SMART-CHAT ERROR] model={primary_model} prompt_len={len(action_prompt)} error={err_detail}")
+                print(f"[SMART-CHAT TRACEBACK] {tb_str}")
                 yield sse("error", {
                     "message": f"❌ خطا در تحلیل عمیق مدل {primary_model}: {err_detail}",
                     "detail": f"مدل: {primary_model} | حجم پرامپت: ~{len(action_prompt)} کاراکتر | context window: {model_context_window} توکن"
@@ -8269,10 +8274,15 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         try:
             async for chunk in event_stream():
                 yield chunk
-        except Exception as e:
+        except BaseException as e:
             import traceback
-            yield f"event: error\ndata: {json.dumps({'message': f'❌ خطای غیرمنتظره: {str(e)[:150]}'}, ensure_ascii=False)}\n\n"
-            yield f"event: done\ndata: {json.dumps({'success': False})}\n\n"
+            print(f"[SMART-CHAT FATAL] Unhandled error in event_stream: {type(e).__name__}: {str(e)[:300]}")
+            print(f"[SMART-CHAT FATAL TRACEBACK] {traceback.format_exc()[-500:]}")
+            try:
+                yield f"event: error\ndata: {json.dumps({'message': f'❌ خطای غیرمنتظره ({type(e).__name__}): {str(e)[:150]}'}, ensure_ascii=False)}\n\n"
+                yield f"event: done\ndata: {json.dumps({'success': False})}\n\n"
+            except GeneratorExit:
+                pass
 
     return StreamingResponse(
         safe_event_stream(),
