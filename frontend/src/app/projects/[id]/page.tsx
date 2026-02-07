@@ -2648,6 +2648,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         const decoder = new TextDecoder();
         let sseBuffer = '';
         let responseReceived = false; // 🆕 ردیابی دریافت پاسخ
+        let lastErrorMessage = ''; // 🆕 ذخیره آخرین خطا برای نمایش در done
         if (!reader) throw new Error('No reader');
 
         while (true) {
@@ -2674,10 +2675,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     timestamp: new Date(),
                   }]);
                 } else if (eventType === 'error') {
+                  lastErrorMessage = data.message || 'خطای ناشناخته';
                   setInspectorChatMessages(prev => [...prev, {
                     id: `smart_err_${Date.now()}`,
-                    role: 'system' as const,
-                    content: `❌ ${data.message}`,
+                    role: 'assistant' as const,
+                    content: `❌ ${data.message}${data.detail ? '\n\n📊 ' + data.detail : ''}`,
                     timestamp: new Date(),
                   }]);
                 } else if (eventType === 'response') {
@@ -2715,7 +2717,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   });
                 } else if (eventType === 'done') {
                   // 🆕 اگر استریم تمام شد ولی پاسخی دریافت نشد → خطای تحلیل
-                  if (!responseReceived) {
+                  if (!responseReceived && !lastErrorMessage) {
+                    // هیچ خطایی هم نیامد = مشکل ناشناخته
                     setInspectorChatMessages(prev => [...prev, {
                       id: `smart_fail_${Date.now()}`,
                       role: 'assistant' as const,
