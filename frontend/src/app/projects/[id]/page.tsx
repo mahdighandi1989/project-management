@@ -1473,7 +1473,7 @@ export default function ProjectDetailPage() {
     try {
       const res = await fetch(`${API_BASE}/api/render/inspector/models/for-investigation/${projectId}`);
       const data = await res.json();
-      if (data.success) {
+      if (data.success && Array.isArray(data.models)) {
         setInvestigateModels(data.models);
         // انتخاب مدل‌های پیشنهادی
         const recommended = data.models.filter((m: any) => m.recommended).map((m: any) => m.id);
@@ -3193,6 +3193,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
   // تبدیل داده‌ها به فرمت React Flow با رنگ‌بندی سلامت
   const convertToReactFlow = (structure: ProjectStructure, healthMap?: Record<string, any>) => {
+    if (!structure?.nodes || !structure?.edges) return;
     const currentHealthMap = healthMap || fileHealthMap;
 
     const flowNodes: Node[] = structure.nodes.map((node) => {
@@ -6938,19 +6939,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             {journalStats && (
               <div className="grid grid-cols-4 gap-4">
                 <div className="bg-white dark:bg-gray-800 rounded-xl p-4 text-center shadow">
-                  <div className="text-3xl font-bold text-blue-500">{journalStats.total_activities}</div>
+                  <div className="text-3xl font-bold text-blue-500">{journalStats.total_activities ?? 0}</div>
                   <div className="text-sm text-gray-500">فعالیت (۳۰ روز)</div>
                 </div>
                 <div className="bg-white dark:bg-gray-800 rounded-xl p-4 text-center shadow">
-                  <div className="text-3xl font-bold text-green-500">{journalStats.total_tokens.toLocaleString()}</div>
+                  <div className="text-3xl font-bold text-green-500">{(journalStats.total_tokens ?? 0).toLocaleString()}</div>
                   <div className="text-sm text-gray-500">توکن مصرفی</div>
                 </div>
                 <div className="bg-white dark:bg-gray-800 rounded-xl p-4 text-center shadow">
-                  <div className="text-3xl font-bold text-purple-500">{journalStats.avg_latency_ms}ms</div>
+                  <div className="text-3xl font-bold text-purple-500">{journalStats.avg_latency_ms ?? 0}ms</div>
                   <div className="text-sm text-gray-500">میانگین تأخیر</div>
                 </div>
                 <div className="bg-white dark:bg-gray-800 rounded-xl p-4 text-center shadow">
-                  <div className="text-3xl font-bold text-emerald-500">{journalStats.success_rate}%</div>
+                  <div className="text-3xl font-bold text-emerald-500">{journalStats.success_rate ?? 0}%</div>
                   <div className="text-sm text-gray-500">نرخ موفقیت</div>
                 </div>
               </div>
@@ -7507,7 +7508,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               {profile.tier}
                             </span>
                           </div>
-                          <span className="text-2xl font-bold text-blue-500">{profile.overall_score}</span>
+                          <span className="text-2xl font-bold text-blue-500">{profile.overall_score ?? 0}</span>
                         </div>
                         <div className="text-xs text-gray-500 mb-2">
                           {profile.total_analyses} تحلیل | {profile.total_tasks} وظیفه
@@ -7615,19 +7616,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             <div className="flex items-center gap-6">
                               <div className="text-center">
                                 <div className="text-xs text-gray-500">دقت</div>
-                                <div className="font-medium text-green-500">{profile.accuracy_score}</div>
+                                <div className="font-medium text-green-500">{profile.accuracy_score ?? 0}</div>
                               </div>
                               <div className="text-center">
                                 <div className="text-xs text-gray-500">سرعت</div>
-                                <div className="font-medium text-blue-500">{profile.speed_score}</div>
+                                <div className="font-medium text-blue-500">{profile.speed_score ?? 0}</div>
                               </div>
                               <div className="text-center">
                                 <div className="text-xs text-gray-500">کامل‌بودن</div>
-                                <div className="font-medium text-purple-500">{profile.completeness_score}</div>
+                                <div className="font-medium text-purple-500">{profile.completeness_score ?? 0}</div>
                               </div>
                               <div className="text-center border-r pr-4 dark:border-gray-600">
                                 <div className="text-xs text-gray-500">نمره کل</div>
-                                <div className="text-2xl font-bold text-blue-600">{profile.overall_score}</div>
+                                <div className="text-2xl font-bold text-blue-600">{profile.overall_score ?? 0}</div>
                               </div>
                             </div>
                           </div>

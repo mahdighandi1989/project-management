@@ -45,7 +45,7 @@ export default function GlobalAnalysisProgress() {
               const data = await progressRes.json();
               const progress = data.progress;
 
-              if (progress.status === 'running' || progress.status === 'paused') {
+              if (progress && (progress.status === 'running' || progress.status === 'paused')) {
                 activeList.push({
                   project_id: project.id,
                   project_name: project.name,

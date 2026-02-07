@@ -307,7 +307,7 @@ export default function RenderLogsPanel() {
         const data = await res.json();
         if (data.settings) {
           setSettings(data.settings);
-          setSelectedLevels(data.settings.default_log_levels.split(','));
+          setSelectedLevels((data.settings.default_log_levels || 'error,warn,info').split(','));
         }
       }
     } catch (e) {

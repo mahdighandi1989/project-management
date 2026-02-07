@@ -466,7 +466,7 @@ export default function AnalysisPage() {
                         {/* نمره کلی */}
                         <div className="flex items-center gap-4 mb-6">
                           <div className={`w-20 h-20 rounded-xl flex items-center justify-center text-2xl font-bold text-white ${getScoreColor(selectedReport.overall_score)}`}>
-                            {selectedReport.overall_score.toFixed(0)}
+                            {(selectedReport.overall_score ?? 0).toFixed(0)}
                           </div>
                           <div className="flex-1">
                             <h2 className="text-xl font-bold">{selectedReport.project_id}</h2>
@@ -501,11 +501,11 @@ export default function AnalysisPage() {
                         {/* نمرات جزئی */}
                         <div className="grid grid-cols-5 gap-4 mb-6">
                           {[
-                            { label: 'کیفیت کد', score: selectedReport.code_quality_score },
-                            { label: 'مستندات', score: selectedReport.documentation_score },
-                            { label: 'امنیت', score: selectedReport.security_score },
-                            { label: 'ساختار', score: selectedReport.structure_score },
-                            { label: 'نقشه راه', score: selectedReport.roadmap_compliance_score },
+                            { label: 'کیفیت کد', score: selectedReport.code_quality_score ?? 0 },
+                            { label: 'مستندات', score: selectedReport.documentation_score ?? 0 },
+                            { label: 'امنیت', score: selectedReport.security_score ?? 0 },
+                            { label: 'ساختار', score: selectedReport.structure_score ?? 0 },
+                            { label: 'نقشه راه', score: selectedReport.roadmap_compliance_score ?? 0 },
                           ].map((item) => (
                             <div key={item.label} className="text-center">
                               <div className="text-sm text-gray-500 mb-1">{item.label}</div>
@@ -539,7 +539,7 @@ export default function AnalysisPage() {
                                   <div className="flex items-center justify-between">
                                     <span className="font-mono text-sm">{fa.file_path}</span>
                                     <span className={`px-2 py-1 rounded text-xs ${getScoreBgColor(fa.score)}`}>
-                                      {fa.score.toFixed(0)}%
+                                      {(fa.score ?? 0).toFixed(0)}%
                                     </span>
                                   </div>
 
@@ -547,10 +547,10 @@ export default function AnalysisPage() {
                                   <div className="hidden group-hover:block absolute top-full left-0 right-0 z-10 bg-white dark:bg-gray-800 shadow-lg rounded-lg p-4 mt-1">
                                     <div className="text-sm">
                                       <div className="grid grid-cols-2 gap-2 mb-2">
-                                        <div>کیفیت کد: {fa.code_quality.toFixed(0)}%</div>
-                                        <div>مستندات: {fa.documentation.toFixed(0)}%</div>
-                                        <div>امنیت: {fa.security.toFixed(0)}%</div>
-                                        <div>بهترین روش‌ها: {fa.best_practices.toFixed(0)}%</div>
+                                        <div>کیفیت کد: {(fa.code_quality ?? 0).toFixed(0)}%</div>
+                                        <div>مستندات: {(fa.documentation ?? 0).toFixed(0)}%</div>
+                                        <div>امنیت: {(fa.security ?? 0).toFixed(0)}%</div>
+                                        <div>بهترین روش‌ها: {(fa.best_practices ?? 0).toFixed(0)}%</div>
                                       </div>
                                       {fa.issues && fa.issues.length > 0 && (
                                         <div className="text-red-500 text-xs">
@@ -690,12 +690,12 @@ export default function AnalysisPage() {
                                 profile.overall_score >= 85 ? 'text-green-500' :
                                 profile.overall_score >= 70 ? 'text-yellow-500' : 'text-red-500'
                               }`}>
-                                {profile.overall_score.toFixed(1)}
+                                {(profile.overall_score ?? 0).toFixed(1)}
                               </span>
                             </td>
-                            <td className="p-3">{profile.accuracy_score.toFixed(1)}</td>
-                            <td className="p-3">{profile.completeness_score.toFixed(1)}</td>
-                            <td className="p-3">{profile.speed_score.toFixed(1)}</td>
+                            <td className="p-3">{(profile.accuracy_score ?? 0).toFixed(1)}</td>
+                            <td className="p-3">{(profile.completeness_score ?? 0).toFixed(1)}</td>
+                            <td className="p-3">{(profile.speed_score ?? 0).toFixed(1)}</td>
                             <td className="p-3">{profile.total_analyses}</td>
                           </tr>
                         ))}
@@ -787,7 +787,7 @@ export default function AnalysisPage() {
                               {progressData.phase === 'preparing' && 'آماده‌سازی'}
                             </span>
                           </div>
-                          <span className="font-mono text-lg">{progressData.progress_percentage.toFixed(0)}%</span>
+                          <span className="font-mono text-lg">{(progressData.progress_percentage ?? 0).toFixed(0)}%</span>
                         </div>
 
                         <div className="text-sm opacity-90">

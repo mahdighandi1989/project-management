@@ -130,7 +130,7 @@ export default function FileViewer({ projectId, filePath, onClose }: Props) {
   // رندر خطوط با هایلایت
   const renderLines = useMemo(() => {
     const content = showAnnotated ? annotatedContent : originalContent;
-    const lines = content.split('\n');
+    const lines = (content || '').split('\n');
 
     // ساخت مپ خطوط دارای ایراد
     const issueLines = new Map<number, FileIssue[]>();
