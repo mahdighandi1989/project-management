@@ -7802,21 +7802,27 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
             classify_response = await ai_manager.generate(
                 model_id=primary_model,
                 messages=[
-                    Message(role="system", content="طبقه‌بند پیام. فقط یک کلمه بنویس."),
+                    Message(role="system", content="طبقه‌بند پیام. فقط یک کلمه بنویس: QUESTION یا ACTION یا ERROR_LOG"),
                     Message(role="user", content=classify_prompt)
                 ],
                 max_tokens=20,
                 temperature=0.1
             )
-            msg_type = classify_response.content.strip().upper()
-            if "ACTION" in msg_type:
+            raw_type = classify_response.content.strip().upper()
+            # بررسی کلمات کلیدی انگلیسی و فارسی
+            if "ACTION" in raw_type or "FIX" in raw_type or "MODIFY" in raw_type:
                 msg_type = "ACTION"
-            elif "ERROR" in msg_type:
+            elif "ERROR" in raw_type or "LOG" in raw_type:
                 msg_type = "ERROR_LOG"
-            else:
+            elif "QUESTION" in raw_type or "QUEST" in raw_type:
+                # فقط اگر صراحتاً QUESTION گفته، سؤال بدان
                 msg_type = "QUESTION"
+            else:
+                # اگر مدل چیز عجیبی برگردوند → ACTION (بهتره فایل بخونه تا نخونه)
+                msg_type = "ACTION"
         except Exception:
-            msg_type = "QUESTION"
+            # خطا در طبقه‌بندی → فرض ACTION (بهتره تحلیل عمیق انجام بشه)
+            msg_type = "ACTION"
 
         yield sse("progress", {
             "step": "classified",
@@ -7827,7 +7833,69 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         # --- مرحله ۳: پاسخ بر اساس نوع پیام ---
 
         if msg_type == "QUESTION":
-            # سؤال ساده: پاسخ با context کامل
+            # سؤال: پاسخ با context کامل + خواندن فایل‌های مرتبط
+            question_code_context = ""
+            if owner and repo:
+                try:
+                    yield sse("progress", {
+                        "step": "reading_project_question",
+                        "message": f"📂 در حال خواندن فایل‌های مرتبط برای پاسخ دقیق‌تر..."
+                    })
+                    tree_result = await github_svc.get_repo_tree(owner, repo, token=token)
+                    if tree_result.get("success"):
+                        all_files = [f for f in tree_result.get("tree", []) if f.get("type") == "blob"]
+                        q_code_files = [f["path"] for f in all_files
+                                        if f.get("size", 0) < 200000
+                                        and not any(skip in f["path"] for skip in [
+                                            "node_modules/", ".git/", "dist/", "build/", ".next/",
+                                            "__pycache__/", ".cache/", "vendor/", "package-lock.json",
+                                            "yarn.lock", ".png", ".jpg", ".svg", ".ico", ".woff",
+                                            "InspectorBridge", "inspector-bridge"
+                                        ])]
+                        # AI انتخاب ۳ فایل مرتبط
+                        q_select_prompt = f"""بر اساس سؤال کاربر، فایل‌های مرتبط را انتخاب کن:
+
+سؤال: {request.message}
+
+تاریخچه: {history_text[-1000:]}
+
+فایل‌ها: {chr(10).join(q_code_files[:300])}
+
+حداکثر ۳ فایل. فقط مسیرها."""
+                        q_sel_resp = await ai_manager.generate(
+                            model_id=primary_model,
+                            messages=[
+                                Message(role="system", content="فقط مسیر فایل‌ها."),
+                                Message(role="user", content=q_select_prompt)
+                            ],
+                            max_tokens=200,
+                            temperature=0.2
+                        )
+                        q_selected = []
+                        for line in q_sel_resp.content.strip().split("\n"):
+                            line = line.strip().strip("`").strip("- ")
+                            if line in q_code_files:
+                                q_selected.append(line)
+                            if len(q_selected) >= 3:
+                                break
+                        max_q_code = int(max_input_chars * 0.4)
+                        per_file_q_limit = min(8000, max(3000, max_q_code // max(len(q_selected), 1)))
+                        for fp in q_selected:
+                            if len(question_code_context) >= max_q_code:
+                                break
+                            try:
+                                result = await github_svc.get_file_content(owner, repo, fp, token=token)
+                                if result.get("success"):
+                                    content = result.get("content", "")
+                                    if len(content) > per_file_q_limit:
+                                        content = content[:per_file_q_limit] + "\n... [truncated]"
+                                    question_code_context += f"\n\n=== {fp} ===\n{content}"
+                            except Exception:
+                                pass
+                            await asyncio.sleep(0.2)
+                except Exception:
+                    pass
+
             answer_prompt = f"""شما بازرس هوشمند پروژه {owner}/{repo} هستید.
 
 ⚠️ مهم: تو به تمام فایل‌های پروژه از طریق GitHub دسترسی داری. تو می‌توانی کد را ببینی، تحلیل کنی و تغییرات پیشنهاد بدهی.
@@ -7842,11 +7910,13 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
 ## URL فرانت‌اند: {request.frontend_url or 'نامشخص'}
 
+{f'## کد فایل‌های مرتبط:{question_code_context}' if question_code_context else ''}
+
 ## پیام جدید کاربر:
 {request.message}
 
 ## دستورالعمل:
-- بر اساس تمام اطلاعات موجود (تاریخچه + لاگ‌ها + گزارش‌های قبلی) پاسخ بده
+- بر اساس تمام اطلاعات موجود (تاریخچه + لاگ‌ها + کد فایل‌ها + گزارش‌های قبلی) پاسخ بده
 - اگر پیام مربوط به خطای قبلی است، به گزارش بررسی قبلی ارجاع بده
 - اگر لاگ خطایی paste شده، آن را دقیق تحلیل کن و ارتباطش با مکالمات قبلی را بگو
 - هرگز کاربر را به انجام کار دستی راهنمایی نکن - تو خودت فایل‌ها را می‌بینی و می‌توانی اصلاح کنی
@@ -7870,12 +7940,25 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         yield sse("heartbeat", {"message": "⏳ مدل در حال پردازش..."})
                 response = gen_task.result()
 
+                # بررسی وجود action_plan در پاسخ سؤال هم
+                import re as re_q
+                q_action_plan = None
+                try:
+                    json_match = re_q.search(r'```json\s*\n(.*?)\n```', response.content, re_q.DOTALL)
+                    if json_match:
+                        parsed = json.loads(json_match.group(1))
+                        if parsed.get("files") and len(parsed["files"]) > 0:
+                            q_action_plan = parsed
+                except Exception:
+                    pass
+
                 yield sse("response", {
                     "type": "answer",
                     "content": response.content,
                     "model_used": response.model_id,
                     "tokens_used": response.tokens_used,
-                    "has_action": False,
+                    "has_action": q_action_plan is not None,
+                    "action_plan": q_action_plan,
                 })
 
             except Exception as e:
@@ -8023,7 +8106,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 ⚠️ اگر نمی‌توانی محتوای کامل فایل اصلاح‌شده را ارائه دهی، action_plan را خالی بگذار."""
 
             try:
-                # 🆕 اجرای AI با heartbeat
+                # 🆕 اجرای AI با heartbeat + timeout کلی
                 gen_task = asyncio.create_task(ai_manager.generate(
                     model_id=primary_model,
                     messages=[
@@ -8033,36 +8116,55 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     max_tokens=min(model_max_output, 6144),
                     temperature=0.5
                 ))
+                total_wait_err = 0
+                max_wait_err = 150  # حداکثر 2.5 دقیقه
                 while not gen_task.done():
-                    done_set, _ = await asyncio.wait({gen_task}, timeout=8.0)
+                    done_set, _ = await asyncio.wait({gen_task}, timeout=5.0)
                     if not done_set:
-                        yield sse("heartbeat", {"message": "⏳ مدل در حال تحلیل خطا..."})
+                        total_wait_err += 5
+                        if total_wait_err >= max_wait_err:
+                            gen_task.cancel()
+                            yield sse("error", {
+                                "message": f"⏱️ مدل {primary_model} بعد از {max_wait_err} ثانیه پاسخ نداد. لطفاً مدل سریع‌تری انتخاب کنید."
+                            })
+                            break
+                        yield sse("heartbeat", {"message": f"⏳ مدل در حال تحلیل خطا... ({total_wait_err}s)"})
+                if gen_task.cancelled():
+                    yield sse("done", {"success": False})
+                    return
                 response = gen_task.result()
 
-                # استخراج action_plan
-                import re
-                action_plan = None
-                try:
-                    json_match = re.search(r'```json\s*\n(.*?)\n```', response.content, re.DOTALL)
-                    if json_match:
-                        parsed = json.loads(json_match.group(1))
-                        if parsed.get("files") and len(parsed["files"]) > 0:
-                            action_plan = parsed
-                except Exception:
-                    pass
+                # بررسی پاسخ خالی
+                if not response.content or not response.content.strip():
+                    print(f"[SMART-CHAT WARNING] Empty ERROR_LOG response from model={primary_model}")
+                    yield sse("error", {
+                        "message": f"⚠️ مدل {primary_model} پاسخ خالی برگرداند. لطفاً دوباره تلاش کنید یا مدل دیگری استفاده نمایید."
+                    })
+                else:
+                    # استخراج action_plan
+                    import re
+                    action_plan = None
+                    try:
+                        json_match = re.search(r'```json\s*\n(.*?)\n```', response.content, re.DOTALL)
+                        if json_match:
+                            parsed = json.loads(json_match.group(1))
+                            if parsed.get("files") and len(parsed["files"]) > 0:
+                                action_plan = parsed
+                    except Exception:
+                        pass
 
-                has_code_action = action_plan is not None or any(marker in response.content for marker in [
-                    "```", "فایل‌هایی که باید تغییر", "اصلاح کنید"
-                ])
+                    has_code_action = action_plan is not None or any(marker in response.content for marker in [
+                        "```", "فایل‌هایی که باید تغییر", "اصلاح کنید"
+                    ])
 
-                yield sse("response", {
-                    "type": "error_analysis",
-                    "content": response.content,
-                    "model_used": response.model_id,
-                    "tokens_used": response.tokens_used,
-                    "has_action": has_code_action,
-                    "action_plan": action_plan,
-                })
+                    yield sse("response", {
+                        "type": "error_analysis",
+                        "content": response.content,
+                        "model_used": response.model_id,
+                        "tokens_used": response.tokens_used,
+                        "has_action": has_code_action,
+                        "action_plan": action_plan,
+                    })
 
             except Exception as e:
                 print(f"[SMART-CHAT ERROR] ERROR_LOG model={primary_model} error={str(e)[:200]}")
@@ -8249,32 +8351,54 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     max_tokens=safe_max_tokens,
                     temperature=0.4
                 ))
+                # heartbeat هر 5 ثانیه + timeout کلی 180 ثانیه برای مدل‌های کند
+                total_wait = 0
+                max_wait = 180  # حداکثر 3 دقیقه
                 while not gen_task.done():
-                    done_set, _ = await asyncio.wait({gen_task}, timeout=8.0)
+                    done_set, _ = await asyncio.wait({gen_task}, timeout=5.0)
                     if not done_set:
-                        yield sse("heartbeat", {"message": "⏳ مدل در حال آماده‌سازی تغییرات..."})
+                        total_wait += 5
+                        if total_wait >= max_wait:
+                            gen_task.cancel()
+                            yield sse("error", {
+                                "message": f"⏱️ مدل {primary_model} بعد از {max_wait} ثانیه پاسخ نداد. لطفاً مدل سریع‌تری انتخاب کنید.",
+                                "detail": f"مدل: {primary_model} | timeout: {max_wait}s"
+                            })
+                            break
+                        yield sse("heartbeat", {"message": f"⏳ مدل در حال آماده‌سازی تغییرات... ({total_wait}s)"})
+                if gen_task.cancelled():
+                    yield sse("done", {"success": False})
+                    return
                 response = gen_task.result()
 
-                # استخراج action_plan از پاسخ
-                import re
-                action_plan = None
+                # بررسی پاسخ خالی
                 content = response.content
-                try:
-                    # پیدا کردن JSON در بلوک action_plan
-                    json_match = re.search(r'```json\s*\n(.*?)\n```', content, re.DOTALL)
-                    if json_match:
-                        action_plan = json.loads(json_match.group(1))
-                except Exception:
-                    pass
+                if not content or not content.strip():
+                    print(f"[SMART-CHAT WARNING] Empty response from model={primary_model}")
+                    yield sse("error", {
+                        "message": f"⚠️ مدل {primary_model} پاسخ خالی برگرداند. لطفاً دوباره تلاش کنید یا مدل دیگری استفاده نمایید.",
+                        "detail": f"مدل: {primary_model} | حجم پرامپت: ~{len(action_prompt)} کاراکتر"
+                    })
+                else:
+                    # استخراج action_plan از پاسخ
+                    import re
+                    action_plan = None
+                    try:
+                        # پیدا کردن JSON در بلوک action_plan
+                        json_match = re.search(r'```json\s*\n(.*?)\n```', content, re.DOTALL)
+                        if json_match:
+                            action_plan = json.loads(json_match.group(1))
+                    except Exception:
+                        pass
 
-                yield sse("response", {
-                    "type": "action",
-                    "content": content,
-                    "model_used": response.model_id,
-                    "tokens_used": response.tokens_used,
-                    "has_action": action_plan is not None,
-                    "action_plan": action_plan,
-                })
+                    yield sse("response", {
+                        "type": "action",
+                        "content": content,
+                        "model_used": response.model_id,
+                        "tokens_used": response.tokens_used,
+                        "has_action": action_plan is not None,
+                        "action_plan": action_plan,
+                    })
 
             except Exception as e:
                 import traceback
