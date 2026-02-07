@@ -3,6 +3,7 @@
 مدل دیتابیس برای ذخیره سشن‌ها و پیام‌های بازرس هوشمند
 """
 
+import json
 from sqlalchemy import Column, String, Text, DateTime, Integer, Boolean, ForeignKey
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -51,6 +52,7 @@ class InspectorMessage(Base):
     verified_by_model = Column(String(100), nullable=True)  # مدلی که تأیید رو انجام داده
     logs_checked = Column(Integer, nullable=True)  # تعداد لاگ‌های بررسی شده
     error_logs_count = Column(Integer, nullable=True)  # تعداد لاگ‌های خطا
+    checked_logs_data = Column(Text, nullable=True)  # JSON array of checked log entries
     timestamp = Column(DateTime, server_default=func.now())
 
     session = relationship("InspectorSession", back_populates="messages")
@@ -69,5 +71,6 @@ class InspectorMessage(Base):
             "verified_by_model": self.verified_by_model,
             "logs_checked": self.logs_checked,
             "error_logs_count": self.error_logs_count,
+            "checked_logs": json.loads(self.checked_logs_data) if self.checked_logs_data else [],
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
         }

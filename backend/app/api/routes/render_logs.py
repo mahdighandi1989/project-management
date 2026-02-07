@@ -6439,8 +6439,14 @@ async def verify_inspector_message(
     if not msg:
         return {"success": False, "error": "پیام یافت نشد"}
 
-    # اگر قبلاً بررسی شده، نتیجه رو برگردون
+    # اگر قبلاً بررسی شده، نتیجه رو برگردون (با لاگ‌های ذخیره‌شده)
     if msg.backend_verified is not None:
+        stored_logs = []
+        if msg.checked_logs_data:
+            try:
+                stored_logs = json.loads(msg.checked_logs_data)
+            except Exception:
+                stored_logs = []
         return {
             "success": True,
             "message_id": message_id,
@@ -6449,7 +6455,7 @@ async def verify_inspector_message(
             "model_used": msg.verified_by_model,
             "logs_checked": msg.logs_checked or 0,
             "error_logs_count": msg.error_logs_count or 0,
-            "checked_logs": [],
+            "checked_logs": stored_logs,
             "already_checked": True
         }
 
@@ -6550,6 +6556,7 @@ async def verify_inspector_message(
             msg.verified_by_model = "console-error"
             msg.logs_checked = len(action_logs)
             msg.error_logs_count = len(error_logs) + 1  # +1 برای خود خطای کنسول
+            msg.checked_logs_data = json.dumps(checked_logs_list, ensure_ascii=False) if checked_logs_list else None
             db.commit()
             return {
                 "success": True,
@@ -6592,6 +6599,7 @@ async def verify_inspector_message(
             msg.verified_by_model = "rule-based"
             msg.logs_checked = len(action_logs)
             msg.error_logs_count = 0
+            msg.checked_logs_data = json.dumps(checked_logs_list, ensure_ascii=False) if checked_logs_list else None
             db.commit()
             return {
                 "success": True,
@@ -6653,6 +6661,7 @@ ERROR: [توضیح مختصر خطا]"""
             msg.verified_by_model = "rule-based"
             msg.logs_checked = len(action_logs)
             msg.error_logs_count = len(error_logs)
+            msg.checked_logs_data = json.dumps(checked_logs_list, ensure_ascii=False) if checked_logs_list else None
             db.commit()
             return {
                 "success": True,
@@ -6688,6 +6697,7 @@ ERROR: [توضیح مختصر خطا]"""
         msg.verified_by_model = fast_model
         msg.logs_checked = len(action_logs)
         msg.error_logs_count = len(error_logs)
+        msg.checked_logs_data = json.dumps(checked_logs_list, ensure_ascii=False) if checked_logs_list else None
         db.commit()
 
         return {
@@ -8226,7 +8236,9 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     temperature=0.5
                 ))
                 total_wait_err = 0
-                max_wait_err = 150  # حداکثر 2.5 دقیقه
+                initial_wait_err = 150  # هشدار اولیه در 2.5 دقیقه
+                max_wait_err = 300  # حداکثر مطلق 5 دقیقه
+                warned_err = False
                 timed_out_err = False
                 while not gen_task.done():
                     done_set, _ = await asyncio.wait({gen_task}, timeout=5.0)
@@ -8239,6 +8251,13 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             })
                             timed_out_err = True
                             break
+                        if total_wait_err >= initial_wait_err and not warned_err:
+                            warned_err = True
+                            yield sse("timeout_warning", {
+                                "message": f"⏱️ مدل {primary_model} نیاز به زمان بیشتری دارد... مهلت تا {max_wait_err} ثانیه تمدید شد.",
+                                "elapsed": total_wait_err,
+                                "max_wait": max_wait_err
+                            })
                         yield sse("heartbeat", {"message": f"⏳ مدل در حال تحلیل خطا... ({total_wait_err}s)"})
                 if timed_out_err:
                     yield sse("done", {"success": False})
@@ -8511,9 +8530,11 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     max_tokens=safe_max_tokens,
                     temperature=0.4
                 ))
-                # heartbeat هر 5 ثانیه + timeout کلی 180 ثانیه برای مدل‌های کند
+                # heartbeat هر 5 ثانیه + timeout با مهلت اضافی برای مدل‌های کند
                 total_wait = 0
-                max_wait = 180  # حداکثر 3 دقیقه
+                initial_wait = 180  # هشدار اولیه در 3 دقیقه
+                max_wait = 360  # حداکثر مطلق 6 دقیقه
+                warned = False
                 timed_out = False
                 while not gen_task.done():
                     done_set, _ = await asyncio.wait({gen_task}, timeout=5.0)
@@ -8527,6 +8548,13 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             })
                             timed_out = True
                             break
+                        if total_wait >= initial_wait and not warned:
+                            warned = True
+                            yield sse("timeout_warning", {
+                                "message": f"⏱️ مدل {primary_model} نیاز به زمان بیشتری دارد... مهلت تا {max_wait} ثانیه تمدید شد.",
+                                "elapsed": total_wait,
+                                "max_wait": max_wait
+                            })
                         yield sse("heartbeat", {"message": f"⏳ مدل در حال آماده‌سازی تغییرات... ({total_wait}s)"})
                 if timed_out:
                     yield sse("done", {"success": False})
