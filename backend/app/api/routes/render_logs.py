@@ -7657,6 +7657,56 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
     model_ids = request.model_ids
     primary_model = model_ids[0] if model_ids else "gemini-2.0-flash"
 
+    # 🆕 اگر ریپلای به پیام مدل خاصی زده شده، از همون مدل استفاده کن
+    reply_model_used = False
+    reply_model_status = None  # None | "used" | "not_found" | "no_credit"
+    if request.reply_to and request.reply_to.model_id:
+        reply_model_id = request.reply_to.model_id
+        try:
+            from ...core.models_registry import get_model as get_registry_model
+            from ...services.ai_manager import get_ai_manager as get_aim
+            aim = get_aim()
+            registry_model = get_registry_model(reply_model_id)
+
+            if registry_model is None:
+                # الف: مدل از رجیستری حذف شده
+                reply_model_status = "not_found"
+            else:
+                # بررسی اینکه provider در دسترسه (کلید API معتبر)
+                from ...core.models_registry import ModelProvider
+                provider = registry_model.provider
+                if isinstance(provider, str):
+                    try:
+                        provider = ModelProvider(provider)
+                    except ValueError:
+                        provider = None
+
+                if provider and provider not in aim._services:
+                    # ب: provider (کلید API) در دسترس نیست
+                    reply_model_status = "no_credit"
+                else:
+                    # مدل وجود داره و provider فعاله
+                    # بررسی فعال بودن مدل
+                    is_enabled = aim.get_enabled_status(reply_model_id)
+                    if not is_enabled:
+                        # مدل غیرفعاله → فعالش کن (temporary)
+                        from ...models.ai_profile import ModelSettings
+                        setting = db.query(ModelSettings).filter(
+                            ModelSettings.model_id == reply_model_id
+                        ).first()
+                        if setting:
+                            setting.enabled = 1
+                        else:
+                            setting = ModelSettings(model_id=reply_model_id, enabled=1)
+                            db.add(setting)
+                        db.commit()
+
+                    primary_model = reply_model_id
+                    reply_model_used = True
+                    reply_model_status = "used"
+        except Exception:
+            pass  # خطا در بررسی → از مدل پیش‌فرض استفاده میشه
+
     async def event_stream():
         github_svc = get_github_import_service()
         ai_manager = get_ai_manager()
@@ -7665,6 +7715,23 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
             return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
         # --- مرحله ۱: ساخت context کامل از تاریخچه ---
+        # 🆕 اطلاع‌رسانی درباره انتخاب مدل ریپلای
+        if reply_model_used:
+            yield sse("progress", {
+                "step": "reply_model",
+                "message": f"↩️ ریپلای به پیام مدل {primary_model} — از همان مدل استفاده می‌شود"
+            })
+        elif reply_model_status == "not_found":
+            yield sse("progress", {
+                "step": "reply_model_fallback",
+                "message": f"⚠️ مدل {request.reply_to.model_id} دیگر در دسترس نیست — از مدل {primary_model} استفاده می‌شود"
+            })
+        elif reply_model_status == "no_credit":
+            yield sse("progress", {
+                "step": "reply_model_fallback",
+                "message": f"⚠️ اعتبار مدل {request.reply_to.model_id} به پایان رسیده — از مدل {primary_model} استفاده می‌شود"
+            })
+
         yield sse("progress", {
             "step": "analyzing",
             "message": f"🤖 مدل {primary_model} در حال تحلیل درخواست شما..."
