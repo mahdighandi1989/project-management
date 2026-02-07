@@ -6975,33 +6975,12 @@ async def investigate_error(request: InvestigateRequest, db: Session = Depends(g
                 temperature=0.3
             )
 
-            # استخراج مسیر فایل‌ها از پاسخ
-            selected_files = []
-            for line in select_response.content.strip().split("\n"):
-                line = line.strip().strip("`").strip("- ").strip()
-                if line and line in code_files:
-                    selected_files.append(line)
+            # استخراج مسیر فایل‌ها از پاسخ (با پارسر قوی)
+            selected_files = _parse_ai_selected_files(select_response.content, code_files, max_files=8)
 
-            # اگر AI نتونست فایلی پیدا کنه، فایل‌های مشکوک رو بگیر
+            # فالبک: اگر AI نتونست فایلی match کنه
             if not selected_files:
-                # حدس بر اساس کلمات خطا
-                error_words = error_content.lower().split()
-                for cf in code_files[:200]:
-                    cf_lower = cf.lower()
-                    if any(w in cf_lower for w in error_words if len(w) > 3):
-                        selected_files.append(cf)
-                    if len(selected_files) >= 5:
-                        break
-
-            if not selected_files:
-                # فالبک: فایل‌های اصلی پروژه
-                priority_patterns = ["app.", "index.", "main.", "page.", "layout.", "error."]
-                for cf in code_files:
-                    name = cf.split("/")[-1].lower()
-                    if any(p in name for p in priority_patterns):
-                        selected_files.append(cf)
-                    if len(selected_files) >= 5:
-                        break
+                selected_files = _fallback_file_selection(code_files, error_content, max_files=5)
 
         except Exception as e:
             yield sse("progress", {
@@ -7620,6 +7599,70 @@ class ApplyActionRequest(BaseModel):
     original_message: str  # پیام اصلی کاربر
 
 
+def _parse_ai_selected_files(ai_response: str, valid_files: list, max_files: int = 10) -> list:
+    """
+    پارس پاسخ AI برای استخراج مسیر فایل‌ها با پشتیبانی از فرمت‌های مختلف:
+    - لیست شماره‌دار: 1. src/app/page.tsx
+    - بولت: - src/app/page.tsx / * src/app/page.tsx
+    - بولد: **src/app/page.tsx**
+    - بکتیک: `src/app/page.tsx`
+    - کوتیشن: "src/app/page.tsx"
+    - با توضیح: src/app/page.tsx (main page)
+    """
+    import re
+    selected = []
+    for line in ai_response.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        # حذف شماره‌گذاری: "1. path" یا "1) path"
+        line = re.sub(r'^\d+[\.\)]\s*', '', line)
+        # حذف بولت‌ها: - * • ▸ →
+        line = line.lstrip('-*•▸▹◆◇→').strip()
+        # حذف backtick، کوتیشن، بولد/ایتالیک
+        line = line.strip('`"\'*_ \t')
+        # اگر بعد از مسیر توضیح اضافه باشه، حذفش کن
+        for sep in [' - ', ' — ', ' :', '\t']:
+            if sep in line:
+                line = line.split(sep)[0].strip()
+        if '(' in line and line.index('(') > 3:
+            line = line.split('(')[0].strip()
+        # پاکسازی نهایی
+        line = line.strip('`"\'*_ \t')
+        if line in valid_files:
+            selected.append(line)
+            if len(selected) >= max_files:
+                break
+    return selected
+
+
+def _fallback_file_selection(code_files: list, context_text: str, max_files: int = 5) -> list:
+    """
+    فالبک انتخاب فایل وقتی AI نتونسته فایلی match کنه.
+    ۱) keyword matching از متن درخواست/خطا
+    ۲) فایل‌های اصلی پروژه (app, index, main, page, layout)
+    """
+    selected = []
+    # استراتژی ۱: تطبیق کلمات کلیدی با نام فایل
+    words = set(w.lower() for w in context_text.split() if len(w) > 3)
+    for cf in code_files[:300]:
+        cf_name = cf.split("/")[-1].lower()
+        if any(w in cf_name for w in words):
+            selected.append(cf)
+        if len(selected) >= max_files:
+            return selected
+    # استراتژی ۲: فایل‌های اصلی پروژه
+    if not selected:
+        priority_patterns = ["app.", "index.", "main.", "page.", "layout.", "error.", "_app.", "routes."]
+        for cf in code_files:
+            name = cf.split("/")[-1].lower()
+            if any(p in name for p in priority_patterns):
+                selected.append(cf)
+            if len(selected) >= max_files:
+                break
+    return selected
+
+
 @router.post("/inspector/smart-chat")
 async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
     """
@@ -7876,13 +7919,9 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             max_tokens=200,
                             temperature=0.2
                         )
-                        q_selected = []
-                        for line in q_sel_resp.content.strip().split("\n"):
-                            line = line.strip().strip("`").strip("- ")
-                            if line in q_code_files:
-                                q_selected.append(line)
-                            if len(q_selected) >= 3:
-                                break
+                        q_selected = _parse_ai_selected_files(q_sel_resp.content, q_code_files, max_files=3)
+                        if not q_selected:
+                            q_selected = _fallback_file_selection(q_code_files, request.message, max_files=3)
                         max_q_code = int(max_input_chars * 0.4)
                         per_file_q_limit = min(8000, max(3000, max_q_code // max(len(q_selected), 1)))
                         q_read_failures = 0
@@ -8053,13 +8092,9 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             temperature=0.2
                         )
 
-                        selected = []
-                        for line in select_response.content.strip().split("\n"):
-                            line = line.strip().strip("`").strip("- ")
-                            if line in code_files:
-                                selected.append(line)
-                            if len(selected) >= 5:
-                                break
+                        selected = _parse_ai_selected_files(select_response.content, code_files, max_files=5)
+                        if not selected:
+                            selected = _fallback_file_selection(code_files, request.message, max_files=5)
 
                         # 🆕 محدود کردن حجم کد بر اساس ظرفیت مدل
                         max_err_code_chars = int(max_input_chars * 0.5)
@@ -8320,13 +8355,9 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             temperature=0.2
                         )
 
-                        selected = []
-                        for line in select_response.content.strip().split("\n"):
-                            line = line.strip().strip("`").strip("- ")
-                            if line in code_files:
-                                selected.append(line)
-                            if len(selected) >= 10:
-                                break
+                        selected = _parse_ai_selected_files(select_response.content, code_files, max_files=10)
+                        if not selected:
+                            selected = _fallback_file_selection(code_files, request.message, max_files=5)
 
                         yield sse("progress", {
                             "step": "files_selected",
