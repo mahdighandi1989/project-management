@@ -2647,6 +2647,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         const reader = res.body?.getReader();
         const decoder = new TextDecoder();
         let sseBuffer = '';
+        let responseReceived = false; // 🆕 ردیابی دریافت پاسخ
         if (!reader) throw new Error('No reader');
 
         while (true) {
@@ -2680,6 +2681,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     timestamp: new Date(),
                   }]);
                 } else if (eventType === 'response') {
+                  responseReceived = true;
                   const responseId = `smart_response_${Date.now()}`;
                   setInspectorChatMessages(prev => [...prev, {
                     id: responseId,
@@ -2696,6 +2698,18 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   // 🔓 آزاد کردن قفل
                   setInspectorOpLock(false);
                   setInspectorOpType(null);
+                } else if (eventType === 'done') {
+                  // 🆕 اگر استریم تمام شد ولی پاسخی دریافت نشد → خطای تحلیل
+                  if (!responseReceived) {
+                    setInspectorChatMessages(prev => [...prev, {
+                      id: `smart_fail_${Date.now()}`,
+                      role: 'assistant' as const,
+                      content: '⚠️ تحلیل بدون نتیجه پایان یافت. ممکن است مدل AI دچار خطا شده باشد. لطفاً دوباره تلاش کنید یا مدل دیگری انتخاب نمایید.',
+                      timestamp: new Date(),
+                    }]);
+                    setInspectorOpLock(false);
+                    setInspectorOpType(null);
+                  }
                 }
               } catch (e) {
                 // ignore parse errors
@@ -2703,6 +2717,23 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
               eventType = '';
             }
           }
+        }
+
+        // 🆕 اگر استریم تمام شد ولی هنوز پاسخی نیامده (بدون done event)
+        if (!responseReceived) {
+          setInspectorChatMessages(prev => {
+            // بررسی اینکه آیا قبلاً پیام خطا اضافه شده
+            const hasFailMsg = prev.some(m => m.id.startsWith('smart_fail_'));
+            if (!hasFailMsg) {
+              return [...prev, {
+                id: `smart_fail_${Date.now()}`,
+                role: 'assistant' as const,
+                content: '⚠️ ارتباط با سرور قطع شد و گزارشی دریافت نشد. لطفاً دوباره تلاش کنید.',
+                timestamp: new Date(),
+              }];
+            }
+            return prev;
+          });
         }
 
         // پاک کردن ریپلای بعد از ارسال
@@ -2723,11 +2754,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       }
     } finally {
       setInspectorChatLoading(false);
-      // آزاد کردن قفل اگر هنوز فعاله (در صورت خطا یا لغو)
-      if (inspectorOpLock) {
-        setInspectorOpLock(false);
-        setInspectorOpType(null);
-      }
+      // 🔧 همیشه قفل رو آزاد کن (رفع باگ stale closure)
+      setInspectorOpLock(false);
+      setInspectorOpType(null);
     }
   };
 
@@ -9989,6 +10018,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                       <div className="flex-1 min-w-0">
                         <p className="text-[10px] text-blue-600 dark:text-blue-400 font-medium">
                           پاسخ به {inspectorReplyTo.role === 'user' ? 'پیام شما' : inspectorReplyTo.model_id || 'AI'}
+                          {inspectorReplyTo.role === 'assistant' && inspectorReplyTo.model_id && (
+                            <span className="text-green-600 dark:text-green-400 mr-1">
+                              — از همان مدل پاسخ داده می‌شود
+                            </span>
+                          )}
                         </p>
                         <p className="text-xs text-gray-600 dark:text-gray-400 truncate">
                           {inspectorReplyTo.content?.slice(0, 80)}...
