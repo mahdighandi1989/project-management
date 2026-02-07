@@ -2901,7 +2901,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       const res = await fetch(`${API_BASE}/api/projects/${projectId}/quick-approval/pending`);
       if (res.ok) {
         const data = await res.json();
-        setPendingApprovals(data);
+        if (data && !data.error && typeof data.total === 'number') {
+          setPendingApprovals(data);
+        } else {
+          setPendingApprovals({ auto_pending: [], pending: [], total: 0 });
+        }
       }
     } catch (e) {
       console.error('Error loading pending approvals:', e);
@@ -5580,7 +5584,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   <span className="text-2xl">📝</span>
                   <h2 className="font-bold text-lg">فیلدهای پویا</h2>
                   {/* 🆕 نشانگر تعداد در انتظار تایید */}
-                  {pendingApprovals.total > 0 && (
+                  {(pendingApprovals?.total ?? 0) > 0 && (
                     <span className="px-2 py-0.5 bg-amber-100 dark:bg-amber-900 text-amber-700 dark:text-amber-300 text-xs rounded-full">
                       {pendingApprovals.total} در انتظار
                     </span>
@@ -5764,14 +5768,14 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     <div className="text-center py-4 text-gray-500">
                       <span className="animate-spin inline-block">⏳</span> در حال بارگذاری...
                     </div>
-                  ) : pendingApprovals.total === 0 ? (
+                  ) : (pendingApprovals?.total ?? 0) === 0 ? (
                     <div className="text-center py-4 text-gray-500">
                       ✅ هیچ فیلدی در انتظار تایید نیست
                     </div>
                   ) : (
                     <div className="space-y-2 max-h-64 overflow-y-auto">
                       {/* فیلدهای auto_pending - قابل تایید سریع */}
-                      {pendingApprovals.auto_pending.map((field) => (
+                      {(pendingApprovals?.auto_pending ?? []).map((field) => (
                         <div
                           key={field.id}
                           className="p-3 bg-white dark:bg-gray-700 rounded border border-amber-200 dark:border-amber-700"
@@ -5837,7 +5841,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                       ))}
 
                       {/* فیلدهای pending - نیاز به Engineering Report */}
-                      {pendingApprovals.pending.map((field) => (
+                      {(pendingApprovals?.pending ?? []).map((field) => (
                         <div
                           key={field.id}
                           className="p-3 bg-white dark:bg-gray-700 rounded border border-gray-200 dark:border-gray-600 opacity-75"
