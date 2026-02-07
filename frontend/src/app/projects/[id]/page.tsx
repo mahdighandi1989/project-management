@@ -2698,6 +2698,21 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   // 🔓 آزاد کردن قفل
                   setInspectorOpLock(false);
                   setInspectorOpType(null);
+                } else if (eventType === 'heartbeat') {
+                  // 🆕 heartbeat برای جلوگیری از قطع اتصال - فقط مصرف میشه
+                  // اختیاری: آخرین پیام progress رو آپدیت کن
+                  setInspectorChatMessages(prev => {
+                    const lastProgressIdx = prev.findLastIndex(m => m.id.startsWith('smart_p_'));
+                    if (lastProgressIdx >= 0) {
+                      const updated = [...prev];
+                      updated[lastProgressIdx] = {
+                        ...updated[lastProgressIdx],
+                        content: updated[lastProgressIdx].content.replace(/⏳.*$/, '').trimEnd() + ' ⏳',
+                      };
+                      return updated;
+                    }
+                    return prev;
+                  });
                 } else if (eventType === 'done') {
                   // 🆕 اگر استریم تمام شد ولی پاسخی دریافت نشد → خطای تحلیل
                   if (!responseReceived) {
@@ -2742,12 +2757,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     } catch (err: any) {
       console.error('Error sending inspector chat:', err);
       if (err.name !== 'AbortError') {
+        // 🆕 تشخیص نوع خطا و پیام مناسب
+        const isNetworkError = err.message?.includes('network') || err.message?.includes('ERR_QUIC') || err.message?.includes('Failed to fetch');
         setInspectorChatMessages(prev => {
           const filtered = prev.filter(m => !m.id.startsWith('system_'));
           return [...filtered, {
             id: `error_${Date.now()}`,
             role: 'assistant',
-            content: '❌ خطا در اتصال به سرور',
+            content: isNetworkError
+              ? '❌ ارتباط با سرور قطع شد (احتمالاً timeout). لطفاً چند لحظه صبر کنید و دوباره تلاش کنید.'
+              : `❌ خطا در اتصال به سرور: ${err.message?.slice(0, 100) || 'ناشناخته'}`,
             timestamp: new Date()
           }];
         });
@@ -3416,7 +3435,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         const data = await res.json();
         if (data.success) {
           setJournalLogs(data.journal);
-          setJournalTotal(data.pagination.total);
+          setJournalTotal(data.pagination?.total ?? 0);
         }
       }
     } catch (e) {
