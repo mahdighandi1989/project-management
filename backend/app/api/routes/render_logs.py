@@ -7982,6 +7982,11 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 except Exception:
                     pass
 
+                # لایه ۲: اگر فایل‌ها خوانده نشدن، action_plan حذف شود
+                if not has_q_code and q_action_plan is not None:
+                    slog.warning(f"[smart-chat QUESTION] AI generated action_plan without reading files — stripped")
+                    q_action_plan = None
+
                 yield sse("response", {
                     "type": "answer",
                     "content": response.content,
@@ -7989,6 +7994,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     "tokens_used": response.tokens_used,
                     "has_action": q_action_plan is not None,
                     "action_plan": q_action_plan,
+                    "files_were_read": has_q_code,
                 })
 
             except Exception as e:
@@ -8104,15 +8110,19 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 err_code_section = f"## کد فایل‌های مرتبط (از GitHub خوانده شده):{code_context}"
                 err_code_note = "- تو به فایل‌های پروژه دسترسی داری و کد آنها در بالا آمده — مستقیماً کد مشکل‌دار را پیدا کن"
             else:
-                err_code_section = "## ⚠️ فایل‌های پروژه قابل خواندن نبودند — بر اساس لاگ خطا و تاریخچه مکالمه تحلیل کن"
-                err_code_note = "- فایل‌ها در دسترس نیست — اما بر اساس لاگ خطا و تاریخچه تحلیل کن و بهترین راه‌حل ممکن را ارائه بده"
+                err_code_section = "## ⚠️ فایل‌های پروژه قابل خواندن نبودند"
+                err_code_note = """- 🚫 ممنوعیت مطلق: چون فایل‌های پروژه خوانده نشدند، تو اجازه نداری action_plan با محتوای فایل تولید کنی
+- 🚫 هرگز محتوای فایل حدس نزن یا از تجربه‌ات نساز — حتی اگر فکر می‌کنی مطمئنی
+- 🚫 هرگز مسیر فایل حدس نزن — ساختار پروژه ممکنه هر چیزی باشه
+- ✅ فقط تحلیل خطا و تشخیص علت ارائه بده
+- ✅ بگو برای ارائه کد اصلاحی به دسترسی GitHub نیاز داری"""
 
             error_analysis_prompt = f"""شما بازرس ارشد پروژه {owner}/{repo} هستید.
 
 ⚠️ قوانین حیاتی:
 {err_code_note}
 - هرگز از کاربر نخواه کاری دستی انجام دهد (مثل grep، بررسی فایل، اجرای دستور)
-- حتماً action_plan با محتوای کامل فایل اصلاح‌شده ارائه بده تا کاربر بتواند با یک کلیک اعمال کند
+- {'حتماً action_plan با محتوای کامل فایل اصلاح‌شده ارائه بده تا کاربر بتواند با یک کلیک اعمال کند' if has_err_code_files else 'فقط تحلیل متنی ارائه بده — action_plan ممنوع است چون فایل‌ها خوانده نشدند'}
 - هرگز نگو "نمی‌توانم کمک کنم" — همیشه بهترین تحلیل ممکن را ارائه بده
 
 ## ⚠️ مهم: این پیام کاربر حاوی لاگ خطا یا گزارش مشکل دیپلوی است.
@@ -8166,14 +8176,15 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 ⚠️ قوانین action_plan:
 - هر فایل باید path و content (محتوای کامل) داشته باشد
 - اگر نمی‌توانی محتوای کامل فایل را ارائه دهی، آن فایل را نذار
-- files خالی (`"files": []`) ممنوع است — یا فایل با محتوا بذار، یا action_plan نذار"""
+- files خالی (`"files": []`) ممنوع است — یا فایل با محتوا بذار، یا action_plan نذار
+{'- 🚫🚫🚫 ممنوعیت مطلق: چون فایل‌ها خوانده نشدند، action_plan تولید نکن. فقط تحلیل متنی ارائه بده.' if not has_err_code_files else ''}"""
 
             try:
                 # 🆕 اجرای AI با heartbeat + timeout کلی
                 gen_task = asyncio.create_task(ai_manager.generate(
                     model_id=primary_model,
                     messages=[
-                        Message(role="system", content="بازرس ارشد با دسترسی کامل به فایل‌های پروژه هستی. مستقیماً کد مشکل‌دار را پیدا کن، اصلاحش را بنویس و action_plan ارائه بده. هرگز کاربر را به کار دستی ارجاع نده."),
+                        Message(role="system", content=f"{'بازرس ارشد با دسترسی به فایل‌های پروژه. مستقیماً کد مشکل‌دار را پیدا کن، اصلاحش را بنویس و action_plan ارائه بده.' if has_err_code_files else 'تحلیلگر ارشد. فایل‌های پروژه خوانده نشدند — فقط تحلیل خطا و تشخیص علت ارائه بده. هرگز action_plan با محتوای حدسی تولید نکن.'} هرگز کاربر را به کار دستی ارجاع نده."),
                         Message(role="user", content=error_analysis_prompt)
                     ],
                     max_tokens=min(model_max_output, 6144),
@@ -8221,6 +8232,11 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     except Exception:
                         pass
 
+                    # لایه ۲: اگر فایل‌ها خوانده نشدن، action_plan حذف شود
+                    if not has_err_code_files and action_plan is not None:
+                        slog.warning(f"[smart-chat ERROR_LOG] AI generated action_plan without reading files — stripped")
+                        action_plan = None
+
                     has_code_action = action_plan is not None or any(marker in response.content for marker in [
                         "```", "فایل‌هایی که باید تغییر", "اصلاح کنید"
                     ])
@@ -8232,6 +8248,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         "tokens_used": response.tokens_used,
                         "has_action": has_code_action,
                         "action_plan": action_plan,
+                        "files_were_read": has_err_code_files,
                     })
 
             except asyncio.CancelledError:
@@ -8388,14 +8405,14 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - حتماً action_plan کامل با محتوای کامل فایل اصلاح‌شده ارائه بده
 - هیچ حدس و گمانی در کار نباشد - فقط بر اساس کد واقعی"""
             else:
-                code_section = f"""## ⚠️ دسترسی به فایل‌های پروژه:
-فایل‌های پروژه قابل خواندن نبودند (احتمالاً GitHub Token تنظیم نشده یا اطلاعات ریپو ناقص).
-اما تو باید بر اساس اطلاعات موجود (تاریخچه مکالمه، لاگ‌ها، و دانش خودت) تحلیل کنی."""
-                code_instructions = """- ⚠️ فایل‌های پروژه در دسترس نیست - اما تو باید همچنان بر اساس تاریخچه مکالمه، لاگ‌ها و خطاهای گزارش‌شده تحلیل کنی
-- از اطلاعات موجود در تاریخچه و لاگ‌ها برای تشخیص مشکل استفاده کن
-- اگر فایل‌ها را نمی‌بینی، بر اساس خطا و تجربه خودت راه‌حل مشخص ارائه بده
-- هرگز نگو "نمی‌توانم فایل ببینم پس نمی‌توانم کمک کنم" — همیشه بهترین تحلیل ممکن را ارائه بده
-- action_plan فقط وقتی ارائه بده که مطمئنی محتوای کامل و صحیح فایل را می‌توانی بنویسی"""
+                code_section = """## ⚠️ دسترسی به فایل‌های پروژه:
+فایل‌های پروژه قابل خواندن نبودند (احتمالاً GitHub Token تنظیم نشده یا اطلاعات ریپو ناقص)."""
+                code_instructions = """- 🚫 ممنوعیت مطلق: چون فایل‌های پروژه خوانده نشدند، تو اجازه نداری action_plan تولید کنی
+- 🚫 هرگز محتوای فایل حدس نزن، فبریکه نکن، یا از تجربه‌ات نساز — حتی اگر مطمئنی
+- 🚫 هرگز مسیر فایلی را حدس نزن (مثلاً pages/_app.js یا src/App.tsx) — ممکنه ساختار پروژه کاملاً متفاوت باشه
+- ✅ فقط تحلیل و تشخیص مشکل بر اساس تاریخچه مکالمه و لاگ‌ها ارائه بده
+- ✅ بگو "برای ارائه کد اصلاحی، نیاز به دسترسی به فایل‌های پروژه دارم — لطفاً GitHub Token را تنظیم کنید"
+- ✅ می‌توانی توضیح بدهی چه فایل‌هایی باید تغییر کنند و چگونه، اما بدون نوشتن محتوای واقعی فایل"""
 
             action_prompt = f"""شما بازرس ارشد و توسعه‌دهنده پروژه {owner}/{repo} هستید.
 
@@ -8448,7 +8465,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - هر فایل باید path و content داشته باشد (content باید محتوای کامل فایل باشد)
 - اگر نمی‌توانی محتوای کامل فایل را ارائه دهی، آن فایل را در action_plan نذار
 - اگر هیچ فایلی نداری که بتوانی محتوای کاملش را بنویسی، بخش action_plan را حذف کن
-- files خالی (`"files": []`) ممنوع است — یا فایل با محتوای کامل بذار، یا action_plan نذار"""
+- files خالی (`"files": []`) ممنوع است — یا فایل با محتوا بذار، یا action_plan نذار
+{'- 🚫🚫🚫 ممنوعیت مطلق: چون فایل‌ها خوانده نشدند، action_plan تولید نکن. فقط تحلیل متنی ارائه بده.' if not has_code_files else ''}"""
 
             try:
                 # 🆕 اجرای AI با heartbeat برای جلوگیری از QUIC timeout
@@ -8456,7 +8474,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 gen_task = asyncio.create_task(ai_manager.generate(
                     model_id=primary_model,
                     messages=[
-                        Message(role="system", content="توسعه‌دهنده ارشد با دسترسی کامل به فایل‌های پروژه. مستقیماً مشکل را پیدا کن، کد اصلاح‌شده کامل بنویس و action_plan معتبر JSON ارائه بده. هرگز از کاربر نخواه کار دستی انجام دهد."),
+                        Message(role="system", content=f"{'توسعه‌دهنده ارشد با دسترسی به فایل‌های پروژه. مستقیماً مشکل را پیدا کن، کد اصلاح‌شده کامل بنویس و action_plan معتبر JSON ارائه بده.' if has_code_files else 'تحلیلگر ارشد. فایل‌های پروژه خوانده نشدند — فقط تحلیل و تشخیص ارائه بده. هرگز action_plan با محتوای حدسی تولید نکن.'} هرگز از کاربر نخواه کار دستی انجام دهد."),
                         Message(role="user", content=action_prompt)
                     ],
                     max_tokens=safe_max_tokens,
@@ -8511,6 +8529,11 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     except Exception:
                         pass
 
+                    # لایه ۲: اگر فایل‌ها خوانده نشدن، action_plan حذف شود (جلوگیری از محتوای ساختگی)
+                    if not has_code_files and action_plan is not None:
+                        slog.warning(f"[smart-chat ACTION] AI generated action_plan without reading files — stripped. Files in plan: {[f.get('path') for f in (action_plan.get('files') or [])]}")
+                        action_plan = None
+
                     yield sse("response", {
                         "type": "action",
                         "content": content,
@@ -8518,6 +8541,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         "tokens_used": response.tokens_used,
                         "has_action": action_plan is not None,
                         "action_plan": action_plan,
+                        "files_were_read": has_code_files,
                     })
 
             except asyncio.CancelledError:
@@ -8632,10 +8656,75 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
             yield sse("done", {"success": False})
             return
 
+        # --- اعتبارسنجی فایل‌ها قبل از commit ---
+        import re as _re
+        validated_files = []
+        for f in request.action_files:
+            file_path = f.get("path", "").strip()
+            file_content = f.get("content", "")
+            if not file_path or not file_content:
+                continue
+            # بررسی path traversal و مسیرهای خطرناک
+            if ".." in file_path or file_path.startswith("/") or file_path.startswith("\\"):
+                yield sse("progress", {
+                    "step": "validation_error",
+                    "message": f"🚫 مسیر نامعتبر رد شد: {file_path}"
+                })
+                continue
+            # بررسی مسیرهای حساس
+            dangerous_paths = [".github/workflows/", ".github/actions/", ".env", "secrets", ".ssh/"]
+            if any(d in file_path.lower() for d in dangerous_paths):
+                yield sse("progress", {
+                    "step": "validation_error",
+                    "message": f"🚫 مسیر حساس رد شد: {file_path}"
+                })
+                continue
+            validated_files.append(f)
+
+        if not validated_files:
+            yield sse("error", {"message": "هیچ فایل معتبری برای commit وجود ندارد"})
+            yield sse("done", {"success": False})
+            return
+
+        # بررسی وجود فایل‌ها در ریپو (جلوگیری از ساخت فایل‌های ساختگی)
+        from ...services.github_service import get_github_service
+        github_svc = get_github_service()
+        yield sse("progress", {
+            "step": "validating_files",
+            "message": f"🔍 بررسی وجود {len(validated_files)} فایل در ریپو..."
+        })
+        final_files = []
+        for f in validated_files:
+            file_path = f.get("path", "").strip()
+            operation = f.get("operation", "modify")
+            if operation == "create":
+                # فایل‌های جدید مجازند
+                final_files.append(f)
+                continue
+            try:
+                existing = await github_svc.get_file_content(owner, repo, file_path, token=token)
+                if existing.get("success"):
+                    final_files.append(f)
+                else:
+                    yield sse("progress", {
+                        "step": "file_not_found",
+                        "message": f"🚫 فایل {file_path} در ریپو وجود ندارد — رد شد (احتمالاً محتوای ساختگی)"
+                    })
+            except Exception:
+                yield sse("progress", {
+                    "step": "file_check_error",
+                    "message": f"⚠️ بررسی وجود {file_path} ناموفق — رد شد برای ایمنی"
+                })
+
+        if not final_files:
+            yield sse("error", {"message": "🚫 هیچ‌یک از فایل‌ها در ریپو وجود ندارند — احتمالاً محتوای ساختگی AI. اعمال لغو شد."})
+            yield sse("done", {"success": False})
+            return
+
         # --- Commit فایل‌ها ---
         committed_files = []
-        for i, f in enumerate(request.action_files):
-            file_path = f.get("path", "")
+        for i, f in enumerate(final_files):
+            file_path = f.get("path", "").strip()
             file_content = f.get("content", "")
             operation = f.get("operation", "modify")
 
@@ -8644,7 +8733,7 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
 
             yield sse("progress", {
                 "step": "committing_file",
-                "message": f"📝 Commit {file_path} ({i+1}/{len(request.action_files)})...",
+                "message": f"📝 Commit {file_path} ({i+1}/{len(final_files)})...",
                 "file": file_path
             })
 
