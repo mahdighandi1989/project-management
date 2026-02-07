@@ -6445,6 +6445,10 @@ async def verify_inspector_message(
             "message_id": message_id,
             "verified": msg.backend_verified,
             "summary": msg.backend_log_summary,
+            "model_used": msg.verified_by_model,
+            "logs_checked": msg.logs_checked or 0,
+            "error_logs_count": msg.error_logs_count or 0,
+            "checked_logs": [],
             "already_checked": True
         }
 
@@ -6462,6 +6466,8 @@ async def verify_inspector_message(
             msg.backend_verified = True
             msg.backend_log_summary = _no_svc_summary
             msg.verified_by_model = "no-services"
+            msg.logs_checked = 0
+            msg.error_logs_count = 0
             db.commit()
             return {
                 "success": True,
@@ -6501,6 +6507,8 @@ async def verify_inspector_message(
             msg.backend_verified = True
             msg.backend_log_summary = _no_log_summary
             msg.verified_by_model = "no-logs"
+            msg.logs_checked = 0
+            msg.error_logs_count = 0
             db.commit()
             return {
                 "success": True,
@@ -6561,6 +6569,8 @@ ERROR: [توضیح مختصر خطا]"""
                 msg.backend_verified = True
                 msg.backend_log_summary = f"سالم - {len(recent_logs)} لاگ بررسی شد"
             msg.verified_by_model = "rule-based"
+            msg.logs_checked = len(recent_logs)
+            msg.error_logs_count = len(error_logs)
             db.commit()
             return {
                 "success": True,
@@ -6598,6 +6608,8 @@ ERROR: [توضیح مختصر خطا]"""
                 msg.backend_log_summary = ai_result or "سالم"
 
         msg.verified_by_model = fast_model
+        msg.logs_checked = len(recent_logs)
+        msg.error_logs_count = len(error_logs)
         db.commit()
 
         return {
@@ -6617,8 +6629,10 @@ ERROR: [توضیح مختصر خطا]"""
         _err_model = "error-fallback"
         try:
             msg.backend_verified = True
-            msg.backend_log_summary = "سالم"
+            msg.backend_log_summary = "سالم (خطای سیستم بررسی)"
             msg.verified_by_model = _err_model
+            msg.logs_checked = 0
+            msg.error_logs_count = 0
             db.commit()
         except Exception:
             pass
@@ -6629,7 +6643,8 @@ ERROR: [توضیح مختصر خطا]"""
             "summary": msg.backend_log_summary,
             "model_used": _err_model,
             "logs_checked": 0,
-            "error_logs_count": 0
+            "error_logs_count": 0,
+            "checked_logs": []
         }
 
 
