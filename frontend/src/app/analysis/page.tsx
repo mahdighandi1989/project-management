@@ -439,12 +439,12 @@ export default function AnalysisPage() {
                           >
                             <div className="flex items-center justify-between">
                               <span className="font-mono text-sm">{report.project_id}</span>
-                              <span className={`px-2 py-1 rounded text-xs ${getScoreBgColor(report.overall_score)}`}>
-                                {report.overall_score.toFixed(0)}%
+                              <span className={`px-2 py-1 rounded text-xs ${getScoreBgColor(report.overall_score ?? 0)}`}>
+                                {(report.overall_score ?? 0).toFixed(0)}%
                               </span>
                             </div>
                             <div className="text-xs text-gray-400 mt-1">
-                              {new Date(report.created_at).toLocaleString('fa-IR')}
+                              {report.created_at ? new Date(report.created_at).toLocaleString('fa-IR') : '-'}
                             </div>
                           </div>
                         ))}
@@ -942,27 +942,29 @@ export default function AnalysisPage() {
                       <div>
                         {(() => {
                           const result = capabilityResults[selectedCapabilityModel];
+                          if (!result) return <div className="text-gray-400 text-center py-8">نتیجه‌ای یافت نشد</div>;
+                          const score = result.overall_score ?? 0;
                           return (
                             <>
                               {/* هدر با badge ها */}
                               <div className="flex items-start gap-4 mb-6">
                                 <div className={`w-24 h-24 rounded-xl flex flex-col items-center justify-center text-white ${
-                                  result.overall_score >= 80 ? 'bg-gradient-to-br from-purple-500 to-purple-700' :
-                                  result.overall_score >= 60 ? 'bg-gradient-to-br from-blue-500 to-blue-700' :
+                                  score >= 80 ? 'bg-gradient-to-br from-purple-500 to-purple-700' :
+                                  score >= 60 ? 'bg-gradient-to-br from-blue-500 to-blue-700' :
                                   'bg-gradient-to-br from-gray-500 to-gray-700'
                                 }`}>
-                                  <div className="text-3xl font-bold">{result.overall_score.toFixed(0)}</div>
+                                  <div className="text-3xl font-bold">{score.toFixed(0)}</div>
                                   <div className="text-xs opacity-75">امتیاز کلی</div>
                                 </div>
                                 <div className="flex-1">
                                   <h2 className="text-xl font-bold">{selectedCapabilityModel}</h2>
                                   <p className="text-gray-500 text-sm">
-                                    تست شده در {new Date(result.tested_at).toLocaleString('fa-IR')}
+                                    تست شده در {result.tested_at ? new Date(result.tested_at).toLocaleString('fa-IR') : '-'}
                                   </p>
 
                                   {/* Badge ها */}
                                   <div className="flex flex-wrap gap-2 mt-3">
-                                    {result.badges.map((badge, idx) => (
+                                    {(result.badges || []).map((badge, idx) => (
                                       <span
                                         key={idx}
                                         className={`px-3 py-1 rounded-full text-sm font-medium ${getBadgeColor(badge.color)}`}
