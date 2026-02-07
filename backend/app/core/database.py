@@ -442,6 +442,14 @@ def migrate_db():
                 cursor.execute("ALTER TABLE inspector_messages ADD COLUMN verified_by_model VARCHAR(100)")
                 logger.info("Added 'verified_by_model' column to inspector_messages table")
 
+            if "logs_checked" not in existing_cols:
+                cursor.execute("ALTER TABLE inspector_messages ADD COLUMN logs_checked INTEGER")
+                logger.info("Added 'logs_checked' column to inspector_messages table")
+
+            if "error_logs_count" not in existing_cols:
+                cursor.execute("ALTER TABLE inspector_messages ADD COLUMN error_logs_count INTEGER")
+                logger.info("Added 'error_logs_count' column to inspector_messages table")
+
         conn.commit()
         logger.info("Database migration completed")
 

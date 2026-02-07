@@ -1080,6 +1080,10 @@ export default function ProjectDetailPage() {
                               ...m,
                               backend_verified: verifyData.verified,
                               backend_log_summary: verifyData.summary,
+                              verified_by_model: verifyData.model_used,
+                              logs_checked: verifyData.logs_checked,
+                              error_logs_count: verifyData.error_logs_count,
+                              checked_logs: verifyData.checked_logs,
                             } : m)
                           );
                         }
@@ -1323,6 +1327,8 @@ export default function ProjectDetailPage() {
             backend_verified: m.backend_verified,
             backend_log_summary: m.backend_log_summary,
             verified_by_model: m.verified_by_model,
+            logs_checked: m.logs_checked,
+            error_logs_count: m.error_logs_count,
           }));
           setInspectorChatMessages(loadedMessages);
         }
@@ -1388,6 +1394,8 @@ export default function ProjectDetailPage() {
           backend_verified: m.backend_verified,
           backend_log_summary: m.backend_log_summary,
           verified_by_model: m.verified_by_model,
+          logs_checked: m.logs_checked,
+          error_logs_count: m.error_logs_count,
         }));
         setInspectorChatMessages(loadedMessages);
       }
@@ -9487,12 +9495,14 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     <div key={msg.id} className={`group flex gap-2 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
                       <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-sm flex-shrink-0 ${
                         msg.role === 'user' ? 'bg-blue-500' :
-                        msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') ? 'bg-red-500' :
+                        msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified !== true ? 'bg-red-500' :
+                        msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified === true ? 'bg-amber-500' :
                         msg.role === 'action' ? 'bg-emerald-500' :
                         'bg-red-500'
                       }`}>
                         {msg.role === 'user' ? '👤' :
-                         msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') ? '⚠️' :
+                         msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified !== true ? '⚠️' :
+                         msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified === true ? '⚡' :
                          msg.role === 'action' ? '👆' :
                          '🤖'}
                       </div>
@@ -9500,8 +9510,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         className={`rounded-lg p-2.5 shadow-sm max-w-[85%] cursor-pointer transition-all ${
                           msg.role === 'user'
                             ? 'bg-blue-500 text-white rounded-tr-none'
-                            : msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error')
+                            : msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified !== true
                               ? 'bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-tl-none hover:border-red-400'
+                            : msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified === true
+                              ? 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-tl-none hover:border-amber-400'
                             : msg.role === 'action'
                               ? 'bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-tl-none hover:border-emerald-400'
                               : 'bg-white dark:bg-gray-800 rounded-tl-none hover:bg-gray-50 dark:hover:bg-gray-750'
@@ -9523,7 +9535,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         )}
                         <p className={`text-sm whitespace-pre-wrap ${
                           msg.role === 'user' ? '' :
-                          msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') ? 'text-red-800 dark:text-red-200' :
+                          msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified !== true ? 'text-red-800 dark:text-red-200' :
+                          msg.role === 'action' && (msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified === true ? 'text-amber-800 dark:text-amber-200' :
                           msg.role === 'action' ? 'text-emerald-800 dark:text-emerald-200' :
                           'text-gray-700 dark:text-gray-300'
                         }`}>
@@ -9543,19 +9556,26 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           {/* تیک تأیید بک‌اند */}
                           {msg.role === 'action' && (
                             <span className={`text-xs font-bold ${
-                              msg.backend_verified === true ? 'text-blue-500' :
+                              msg.backend_verified === true && msg.logs_checked && msg.logs_checked > 0 ? 'text-blue-500' :
+                              msg.backend_verified === true ? 'text-gray-400' :
                               msg.backend_verified === false ? 'text-red-500' :
                               'text-gray-300 animate-pulse'
-                            }`}>
-                              {msg.backend_verified === true ? '✓✓' :
+                            }`} title={
+                              msg.backend_verified === true && (!msg.logs_checked || msg.logs_checked === 0) ? 'تأیید شده - بدون لاگ' :
+                              msg.backend_verified === true ? `تأیید شده - ${msg.logs_checked} لاگ بررسی شد` :
+                              msg.backend_verified === false ? 'خطا در لاگ‌ها' :
+                              'در حال بررسی...'
+                            }>
+                              {msg.backend_verified === true && msg.logs_checked && msg.logs_checked > 0 ? '✓✓' :
+                               msg.backend_verified === true ? '✓' :
                                msg.backend_verified === false ? '✕' :
                                '○'}
                             </span>
                           )}
-                          {/* دکمه بررسی خطا */}
-                          {/* دکمه بررسی خطا - روی پیام‌های خطا یا پیام‌هایی با ✕ */}
+                          {/* دکمه بررسی خطا - فقط روی پیام‌هایی که واقعاً خطا دارند */}
                           {msg.role === 'action' && (
-                            msg.action_type === 'error' || msg.action_type === 'console-error' || msg.backend_verified === false
+                            msg.backend_verified === false ||
+                            ((msg.action_type === 'error' || msg.action_type === 'console-error') && msg.backend_verified !== true)
                           ) && (
                             <button
                               onClick={(e) => { e.stopPropagation(); openInvestigateModal(msg.id); }}
@@ -9648,9 +9668,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                     msg.backend_verified === false ? 'text-red-600' :
                                     'text-yellow-500'
                                   }`}>
-                                    {msg.backend_verified === true ? 'سالم' :
-                                     msg.backend_verified === false ? 'خطا' :
-                                     'در حال بررسی...'}
+                                    {msg.backend_verified === true && (msg.action_type === 'error' || msg.action_type === 'console-error')
+                                      ? 'سالم (خطای عمومی - نه مختص این اکشن)'
+                                      : msg.backend_verified === true ? 'سالم'
+                                      : msg.backend_verified === false ? 'خطا'
+                                      : 'در حال بررسی...'}
                                   </span>
                                 </div>
 
