@@ -1543,6 +1543,7 @@ export default function ProjectDetailPage() {
 
       if (!reader) throw new Error('No reader');
 
+      let eventType = '';
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -1551,7 +1552,6 @@ export default function ProjectDetailPage() {
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
-        let eventType = '';
         for (const line of lines) {
           if (line.startsWith('event: ')) {
             eventType = line.slice(7).trim();
@@ -1652,6 +1652,7 @@ export default function ProjectDetailPage() {
 
       if (!reader) throw new Error('No reader');
 
+      let eventType = '';
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -1660,7 +1661,6 @@ export default function ProjectDetailPage() {
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
-        let eventType = '';
         for (const line of lines) {
           if (line.startsWith('event: ')) {
             eventType = line.slice(7).trim();
@@ -1766,6 +1766,7 @@ export default function ProjectDetailPage() {
 
       if (!reader) throw new Error('No reader');
 
+      let eventType = '';
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -1774,7 +1775,6 @@ export default function ProjectDetailPage() {
         const lines = sseBuffer.split('\n');
         sseBuffer = lines.pop() || '';
 
-        let eventType = '';
         for (const line of lines) {
           if (line.startsWith('event: ')) {
             eventType = line.slice(7).trim();
@@ -2651,6 +2651,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         let lastErrorMessage = ''; // 🆕 ذخیره آخرین خطا برای نمایش در done
         if (!reader) throw new Error('No reader');
 
+        let eventType = '';  // 🔴 باید بیرون while باشه تا بین chunk ها حفظ بشه
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -2659,7 +2660,6 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           const lines = sseBuffer.split('\n');
           sseBuffer = lines.pop() || '';
 
-          let eventType = '';
           for (const line of lines) {
             if (line.startsWith('event: ')) {
               eventType = line.slice(7).trim();

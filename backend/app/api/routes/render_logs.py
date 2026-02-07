@@ -8118,6 +8118,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 ))
                 total_wait_err = 0
                 max_wait_err = 150  # حداکثر 2.5 دقیقه
+                timed_out_err = False
                 while not gen_task.done():
                     done_set, _ = await asyncio.wait({gen_task}, timeout=5.0)
                     if not done_set:
@@ -8127,9 +8128,10 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             yield sse("error", {
                                 "message": f"⏱️ مدل {primary_model} بعد از {max_wait_err} ثانیه پاسخ نداد. لطفاً مدل سریع‌تری انتخاب کنید."
                             })
+                            timed_out_err = True
                             break
                         yield sse("heartbeat", {"message": f"⏳ مدل در حال تحلیل خطا... ({total_wait_err}s)"})
-                if gen_task.cancelled():
+                if timed_out_err:
                     yield sse("done", {"success": False})
                     return
                 response = gen_task.result()
@@ -8166,6 +8168,9 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         "action_plan": action_plan,
                     })
 
+            except asyncio.CancelledError:
+                print(f"[SMART-CHAT ERROR] CancelledError ERROR_LOG model={primary_model}")
+                yield sse("error", {"message": f"❌ عملیات مدل {primary_model} لغو شد. لطفاً دوباره تلاش کنید."})
             except Exception as e:
                 print(f"[SMART-CHAT ERROR] ERROR_LOG model={primary_model} error={str(e)[:200]}")
                 yield sse("error", {"message": f"❌ خطا در تحلیل خطا توسط مدل {primary_model}: {str(e)[:150]}"})
@@ -8354,6 +8359,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 # heartbeat هر 5 ثانیه + timeout کلی 180 ثانیه برای مدل‌های کند
                 total_wait = 0
                 max_wait = 180  # حداکثر 3 دقیقه
+                timed_out = False
                 while not gen_task.done():
                     done_set, _ = await asyncio.wait({gen_task}, timeout=5.0)
                     if not done_set:
@@ -8364,9 +8370,10 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                 "message": f"⏱️ مدل {primary_model} بعد از {max_wait} ثانیه پاسخ نداد. لطفاً مدل سریع‌تری انتخاب کنید.",
                                 "detail": f"مدل: {primary_model} | timeout: {max_wait}s"
                             })
+                            timed_out = True
                             break
                         yield sse("heartbeat", {"message": f"⏳ مدل در حال آماده‌سازی تغییرات... ({total_wait}s)"})
-                if gen_task.cancelled():
+                if timed_out:
                     yield sse("done", {"success": False})
                     return
                 response = gen_task.result()
@@ -8400,6 +8407,12 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         "action_plan": action_plan,
                     })
 
+            except asyncio.CancelledError:
+                print(f"[SMART-CHAT ERROR] CancelledError model={primary_model}")
+                yield sse("error", {
+                    "message": f"❌ عملیات مدل {primary_model} لغو شد. لطفاً دوباره تلاش کنید.",
+                    "detail": f"مدل: {primary_model} | CancelledError"
+                })
             except Exception as e:
                 import traceback
                 err_detail = str(e)[:200]
