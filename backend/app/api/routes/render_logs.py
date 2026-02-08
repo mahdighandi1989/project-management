@@ -4733,7 +4733,10 @@ INSPECTOR_BRIDGE_SCRIPT = '''
 INSPECTOR_BRIDGE_SCRIPT_JS = '''
 // 🌉 Inspector Bridge Script - Auto-injected
 // ارتباط با Inspector از طریق WebSocket (حل مشکل cross-origin)
+/* eslint-disable */
+// @ts-ignore
 if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
+  // @ts-ignore
   window.__inspectorBridgeLoaded = true;
 
   const isInIframe = window !== window.parent;
@@ -4966,6 +4969,12 @@ INSPECTOR_BRIDGE_CLIENT_COMPONENT = '''"use client";
 // 🌉 Inspector Bridge Script - Client Component for Next.js App Router
 // ارتباط با Inspector از طریق WebSocket (حل مشکل cross-origin)
 import { useEffect } from "react";
+
+declare global {
+  interface Window {
+    __inspectorBridgeLoaded?: boolean;
+  }
+}
 
 export default function InspectorBridge() {
   useEffect(() => {
