@@ -4144,7 +4144,7 @@ async def analyze_error_from_source(
                                 file_contents[file_path] = content[:5000]  # محدودیت سایز
                                 source_files.append({"path": file_path, "issue": "در حال بررسی..."})
                     except Exception as e:
-                        slog.warn(f"Failed to fetch {file_path}: {e}")
+                        slog.warning(f"Failed to fetch {file_path}: {e}")
 
         # تحلیل با AI
         from ...services.ai_base import Message
@@ -5200,7 +5200,7 @@ async def inject_bridge_script(
                         db.commit()
                         slog.info(f"Auto-set github_path from extra_data: {github_path}")
                 except Exception as e:
-                    slog.warn(f"Failed to parse extra_data: {e}")
+                    slog.warning(f"Failed to parse extra_data: {e}")
 
         if not github_path:
             # برگرداندن اطلاعات تشخیصی
@@ -5399,7 +5399,7 @@ async def inject_bridge_script(
                             default_branch = repo_info.json().get('default_branch', 'main')
                             slog.info(f"🌿 Default branch: {default_branch}")
                     except Exception as e:
-                        slog.warn(f"Failed to get repo info: {e}")
+                        slog.warning(f"Failed to get repo info: {e}")
 
                     tree_res = await client.get(
                         f"https://api.github.com/repos/{owner}/{repo}/git/trees/{default_branch}?recursive=1",
@@ -5512,7 +5512,7 @@ async def inject_bridge_script(
                                                 deps_found = list(deps2.keys())[:20]
                                                 break
                                 except Exception as e:
-                                    slog.warn(f"Failed to check {pkg_path}: {e}")
+                                    slog.warning(f"Failed to check {pkg_path}: {e}")
                                     continue
 
                         # 🎯 مرحله ۳: پیدا کردن بهترین فایل برای تزریق
@@ -5593,7 +5593,7 @@ async def inject_bridge_script(
                                             elif has_bridge:
                                                 slog.info(f"  ⏭️ Skipped (already has bridge): {html_path}")
                                 except Exception as e:
-                                    slog.warn(f"  ❌ Error checking {html_path}: {e}")
+                                    slog.warning(f"  ❌ Error checking {html_path}: {e}")
                                     continue
 
                         # 🔍 مرحله ۴: اگر HTML پیدا نشد، از entry candidates استفاده کن
@@ -5620,7 +5620,7 @@ async def inject_bridge_script(
                                                     slog.info(f"✅ Found entry point: {candidate}")
                                                     break
                                     except Exception as e:
-                                        slog.warn(f"Failed to fetch {candidate}: {e}")
+                                        slog.warning(f"Failed to fetch {candidate}: {e}")
                                         continue
 
                         # 🔍 مرحله ۴.۵: جستجوی هوشمند برای فایل‌های Next.js/React
@@ -5686,11 +5686,11 @@ async def inject_bridge_script(
                                                 break  # نیازی به ادامه نیست
                                     else:
                                         pattern_search_reason = f"Failed to fetch {match_file}: HTTP {content_res.status_code}"
-                                        slog.warn(f"  ❌ Fetch failed: HTTP {content_res.status_code}")
+                                        slog.warning(f"  ❌ Fetch failed: HTTP {content_res.status_code}")
                                         continue  # 🔧 مهم: برو سراغ فایل بعدی
                                 except Exception as e:
                                     pattern_search_reason = f"Error fetching {match_file}: {str(e)}"
-                                    slog.warn(f"  ❌ Error: {e}")
+                                    slog.warning(f"  ❌ Error: {e}")
                                     continue
 
                         # 🔎 مرحله ۵: اگر هنوز پیدا نشد، جستجوی عمومی
@@ -5744,7 +5744,7 @@ async def inject_bridge_script(
                             is_gatsby = detected_framework == 'gatsby'
 
                 except Exception as e:
-                    slog.warn(f"Smart HTML search failed: {e}")
+                    slog.warning(f"Smart HTML search failed: {e}")
                     found_html_files = []
                     is_framework_without_html = False
                     search_error = str(e)
@@ -5769,7 +5769,7 @@ async def inject_bridge_script(
                                 is_js_file = not bridge_already_installed_in.endswith('.html')
                                 slog.info(f"✅ Loaded bridge file for modification: {bridge_already_installed_in}")
                     except Exception as e:
-                        slog.warn(f"Failed to load bridge file: {e}")
+                        slog.warning(f"Failed to load bridge file: {e}")
 
                 # اگر هنوز index_path ست نشده (یعنی درخواست inject عادی بود)
                 if not index_path:
@@ -6418,6 +6418,37 @@ from typing import Set
 # نگهداری اتصالات WebSocket به تفکیک project_id و نقش
 _bridge_connections: dict = defaultdict(lambda: {"bridges": set(), "inspectors": set()})
 _bridge_lock = asyncio.Lock()
+# زمان آخرین فعالیت هر پروژه - برای پاکسازی اتصالات بیکار
+_bridge_last_activity: dict = {}
+_BRIDGE_IDLE_TIMEOUT = 3600  # 1 ساعت بیکاری → پاکسازی
+
+
+async def _cleanup_idle_bridge_connections():
+    """پاکسازی اتصالات WebSocket بیکار برای جلوگیری از memory leak"""
+    now = datetime.utcnow()
+    async with _bridge_lock:
+        idle_projects = []
+        for project_id, last_time in list(_bridge_last_activity.items()):
+            if (now - last_time).total_seconds() > _BRIDGE_IDLE_TIMEOUT:
+                idle_projects.append(project_id)
+
+        for project_id in idle_projects:
+            conns = _bridge_connections.get(project_id)
+            if conns:
+                # بستن اتصالات باقیمانده
+                for ws in list(conns.get("bridges", set())):
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+                for ws in list(conns.get("inspectors", set())):
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+                del _bridge_connections[project_id]
+            _bridge_last_activity.pop(project_id, None)
+            slog.info(f"Bridge WS: Cleaned up idle connections for project {project_id}")
 
 
 @router.websocket("/ws/bridge/{project_id}")
@@ -6459,6 +6490,7 @@ async def websocket_bridge_hub(websocket: WebSocket, project_id: str):
 
         async with _bridge_lock:
             _bridge_connections[project_id][f"{role}s"].add(websocket)
+            _bridge_last_activity[project_id] = datetime.utcnow()
 
         slog.info(f"Bridge WS: {role} registered",
             project_id=project_id,
@@ -6505,6 +6537,7 @@ async def websocket_bridge_hub(websocket: WebSocket, project_id: str):
                 data["_from"] = role
                 data["_project_id"] = project_id
                 data["_timestamp"] = datetime.utcnow().isoformat()
+                _bridge_last_activity[project_id] = datetime.utcnow()
 
                 async with _bridge_lock:
                     dead_connections = set()
@@ -6557,6 +6590,9 @@ async def websocket_bridge_hub(websocket: WebSocket, project_id: str):
 async def get_bridge_connections(project_id: str):
     """وضعیت اتصالات WebSocket Bridge برای یک پروژه"""
     conns = _bridge_connections.get(project_id, {"bridges": set(), "inspectors": set()})
+    # پاکسازی اتصالات بیکار در هر فراخوانی
+    await _cleanup_idle_bridge_connections()
+
     return {
         "success": True,
         "project_id": project_id,
@@ -7313,7 +7349,7 @@ async def test_prompt_field(request: PromptFieldTestRequest, db: Session = Depen
         field.last_test_result = json.dumps({
             "model_id": request.model_id,
             "response": response.content,
-            "tokens_used": response.usage.get("total_tokens", 0) if response.usage else 0,
+            "tokens_used": getattr(response, 'tokens_used', 0) or 0,
             "passed": test_passed,
             "tested_at": datetime.utcnow().isoformat()
         }, ensure_ascii=False)
@@ -7324,7 +7360,7 @@ async def test_prompt_field(request: PromptFieldTestRequest, db: Session = Depen
             "test_passed": test_passed,
             "model_id": request.model_id,
             "response": response.content,
-            "tokens_used": response.usage.get("total_tokens", 0) if response.usage else 0,
+            "tokens_used": getattr(response, 'tokens_used', 0) or 0,
             "field": field.to_dict()
         }
 
@@ -9143,7 +9179,7 @@ GitHub: {_proj_github}
                 })
 
             except Exception as e:
-                print(f"[SMART-CHAT ERROR] QUESTION model={primary_model} error={str(e)[:200]}")
+                slog.error(f"[smart-chat] QUESTION model={primary_model} error={str(e)[:200]}")
                 yield sse("error", {"message": f"❌ خطا در پاسخ‌دهی مدل {primary_model}: {str(e)[:150]}"})
 
         elif msg_type == "ERROR_LOG":
@@ -9389,7 +9425,7 @@ GitHub: {_proj_github}
 
                 # بررسی پاسخ خالی
                 if not response.content or not response.content.strip():
-                    print(f"[SMART-CHAT WARNING] Empty ERROR_LOG response from model={primary_model}")
+                    slog.warning(f"[smart-chat] Empty ERROR_LOG response from model={primary_model}")
                     yield sse("error", {
                         "message": f"⚠️ مدل {primary_model} پاسخ خالی برگرداند. لطفاً دوباره تلاش کنید یا مدل دیگری استفاده نمایید."
                     })
@@ -9430,10 +9466,10 @@ GitHub: {_proj_github}
                     })
 
             except asyncio.CancelledError:
-                print(f"[SMART-CHAT ERROR] CancelledError ERROR_LOG model={primary_model}")
+                slog.error(f"[smart-chat] CancelledError ERROR_LOG model={primary_model}")
                 yield sse("error", {"message": f"❌ عملیات مدل {primary_model} لغو شد. لطفاً دوباره تلاش کنید."})
             except Exception as e:
-                print(f"[SMART-CHAT ERROR] ERROR_LOG model={primary_model} error={str(e)[:200]}")
+                slog.error(f"[smart-chat] ERROR_LOG model={primary_model} error={str(e)[:200]}")
                 yield sse("error", {"message": f"❌ خطا در تحلیل خطا توسط مدل {primary_model}: {str(e)[:150]}"})
 
         else:  # ACTION
@@ -9712,7 +9748,7 @@ GitHub: {_proj_github}
                 # بررسی پاسخ خالی
                 content = response.content
                 if not content or not content.strip():
-                    print(f"[SMART-CHAT WARNING] Empty response from model={primary_model}")
+                    slog.warning(f"[smart-chat] Empty response from model={primary_model}")
                     yield sse("error", {
                         "message": f"⚠️ مدل {primary_model} پاسخ خالی برگرداند. لطفاً دوباره تلاش کنید یا مدل دیگری استفاده نمایید.",
                         "detail": f"مدل: {primary_model} | حجم پرامپت: ~{len(action_prompt)} کاراکتر"
@@ -9753,7 +9789,7 @@ GitHub: {_proj_github}
                     })
 
             except asyncio.CancelledError:
-                print(f"[SMART-CHAT ERROR] CancelledError model={primary_model}")
+                slog.error(f"[smart-chat] CancelledError model={primary_model}")
                 yield sse("error", {
                     "message": f"❌ عملیات مدل {primary_model} لغو شد. لطفاً دوباره تلاش کنید.",
                     "detail": f"مدل: {primary_model} | CancelledError"
@@ -9762,19 +9798,14 @@ GitHub: {_proj_github}
                 import traceback
                 err_detail = str(e)[:200]
                 tb_str = traceback.format_exc()[-500:]
-                print(f"[SMART-CHAT ERROR] model={primary_model} prompt_len={len(action_prompt)} error={err_detail}")
-                print(f"[SMART-CHAT TRACEBACK] {tb_str}")
+                slog.error(f"[smart-chat] model={primary_model} prompt_len={len(action_prompt)} error={err_detail}")
+                slog.error(f"[smart-chat] traceback: {tb_str}")
                 yield sse("error", {
                     "message": f"❌ خطا در تحلیل عمیق مدل {primary_model}: {err_detail}",
                     "detail": f"مدل: {primary_model} | حجم پرامپت: ~{len(action_prompt)} کاراکتر | context window: {model_context_window} توکن"
                 })
 
-        # اعلان پایان استفاده از فیلدها
-        if used_field_ids:
-            yield sse("fields_done", {
-                "field_ids": used_field_ids,
-                "message": "پردازش فیلدهای دستور/حافظه/آموزش پایان یافت"
-            })
+        # اعلان پایان استفاده از فیلدها (فیلدهای prompt از طریق دکمه «ارسال به چت» ارسال می‌شوند)
 
         yield sse("done", {"success": True})
 
@@ -9785,8 +9816,8 @@ GitHub: {_proj_github}
                 yield chunk
         except BaseException as e:
             import traceback
-            print(f"[SMART-CHAT FATAL] Unhandled error in event_stream: {type(e).__name__}: {str(e)[:300]}")
-            print(f"[SMART-CHAT FATAL TRACEBACK] {traceback.format_exc()[-500:]}")
+            slog.error(f"[smart-chat] FATAL error in event_stream: {type(e).__name__}: {str(e)[:300]}")
+            slog.error(f"[smart-chat] FATAL traceback: {traceback.format_exc()[-500:]}")
             try:
                 yield f"event: error\ndata: {json.dumps({'message': f'❌ خطای غیرمنتظره ({type(e).__name__}): {str(e)[:150]}'}, ensure_ascii=False)}\n\n"
                 yield f"event: done\ndata: {json.dumps({'success': False})}\n\n"
@@ -10286,16 +10317,37 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
             action_plan = None
             if "```" in response.content:
                 import re
-                code_blocks = re.findall(r'```[\w]*\n(.*?)```', response.content, re.DOTALL)
-                if code_blocks:
-                    action_plan = {"files": [], "commit_message": f"fix: دیباگ بصری - {(request.user_description or 'اصلاح')[:50]}"}
-                    fpm = re.findall(r'(?:فایل|file|path|مسیر)[:\s]*[`"]?([a-zA-Z0-9_./\-]+\.[a-zA-Z]+)[`"]?', response.content)
-                    for i, block in enumerate(code_blocks[:5]):
-                        action_plan["files"].append({"path": fpm[i] if i < len(fpm) else f"file_{i+1}", "content": block.strip(), "operation": "modify"})
+                # استخراج بلوک‌های JSON action_plan (روش اول - مشابه smart-chat)
+                json_match = re.search(r'```json\s*\n(.*?)\n```', response.content, re.DOTALL)
+                if json_match:
+                    try:
+                        parsed = json.loads(json_match.group(1))
+                        if parsed.get("files") and len(parsed["files"]) > 0:
+                            valid_files = [f for f in parsed["files"] if f.get("path") and f.get("content")]
+                            if valid_files:
+                                parsed["files"] = valid_files
+                                action_plan = parsed
+                    except (json.JSONDecodeError, Exception):
+                        pass
+
+                # روش دوم (فالبک): استخراج از بلوک‌های کد + نام فایل
+                if action_plan is None:
+                    code_blocks = re.findall(r'```[\w]*\n(.*?)```', response.content, re.DOTALL)
+                    if code_blocks:
+                        action_plan = {"files": [], "commit_message": f"fix: دیباگ بصری - {(request.user_description or 'اصلاح')[:50]}"}
+                        # regex بهبود یافته برای استخراج مسیر فایل‌ها
+                        fpm = re.findall(r'(?:فایل|file|path|مسیر|`)[:\s]*[`"]?([a-zA-Z0-9_./\-]+(?:\.[a-zA-Z]{1,10}))[`"]?', response.content)
+                        # حذف مسیرهای نامعتبر
+                        fpm = [p for p in fpm if '/' in p or '.' in p.split('/')[-1]]
+                        for i, block in enumerate(code_blocks[:5]):
+                            action_plan["files"].append({"path": fpm[i] if i < len(fpm) else f"file_{i+1}", "content": block.strip(), "operation": "modify"})
+                        # اگر هیچ فایلی اسم معتبر نداشت، action_plan رو حذف کن
+                        if all(f["path"].startswith("file_") for f in action_plan["files"]):
+                            action_plan = None
 
             yield sse("response", {
                 "content": response.content, "model_used": primary_model,
-                "tokens_used": getattr(response, 'usage', {}).get('total_tokens', 0) if hasattr(response, 'usage') else 0,
+                "tokens_used": getattr(response, 'tokens_used', 0) or 0,
                 "type": "visual_debug", "screenshots_count": len(request.screenshots),
                 "action_plan": action_plan, "has_action": action_plan is not None,
             })

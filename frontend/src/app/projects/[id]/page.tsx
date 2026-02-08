@@ -881,156 +881,147 @@ export default function ProjectDetailPage() {
     }
   }, [activeWorkflow]);
 
-  // 🆕 Message Listener برای دریافت event ها از Bridge Script داخل iframe
+  // 🌉 تابع مشترک برای پردازش event های Bridge (postMessage و WebSocket)
+  const actionLabelsRef = useRef<Record<string, string>>({
+    'click': 'کلیک کردی',
+    'scroll': 'اسکرول کردی',
+    'input': 'تایپ کردی',
+    'focus': 'فوکوس کردی',
+    'hover': 'موس بردی روی',
+    'error': '🔴 خطای JS',
+    'console-error': '🔴 console.error',
+    'error-overlay': '🔴 لایه خطا شناسایی شد'
+  });
+
+  const handleBridgeEvent = useCallback((data: any, sourceLabel: string) => {
+    const { action, target, elementInfo, level, source } = data;
+
+    // 📋 ذخیره لاگ‌های کنسول (تفکیک شده)
+    if (action === 'console-log' || action === 'console-error') {
+      setImportedProjectConsoleLogs(prev => {
+        const newLog = {
+          id: `clog_${sourceLabel}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+          level: level || (action === 'console-error' ? 'error' : 'log'),
+          message: elementInfo || '',
+          timestamp: data.timestamp || Date.now(),
+          source: source || 'imported-project',
+        };
+        return [...prev, newLog].slice(-500);
+      });
+      if (action === 'console-log') return;
+    }
+
+    // 🔍 لایه خطا (Error Overlay) شناسایی شده
+    if (action === 'error-overlay') {
+      setImportedProjectConsoleLogs(prev => [...prev, {
+        id: `overlay_${sourceLabel}_${Date.now()}`,
+        level: 'error',
+        message: `[Error Overlay] ${elementInfo || ''}`,
+        timestamp: data.timestamp || Date.now(),
+        source: 'imported-project',
+      }]);
+    }
+
+    const actionLabel = actionLabelsRef.current[action] || action;
+    const targetInfo = elementInfo || target || 'عنصر ناشناخته';
+
+    // اضافه کردن به پیام‌های دائمی چت
+    const msgId = `action_${sourceLabel}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    setInspectorChatMessages(prev => [...prev, {
+      id: msgId,
+      role: 'action' as const,
+      content: `${actionLabel} روی ${targetInfo}`,
+      timestamp: new Date(),
+      action_type: action as any,
+      backend_verified: null,
+    }]);
+
+    // ذخیره در DB و verify (از ref استفاده میکنیم چون closure ممکنه قدیمی باشه)
+    const currentSessionId = inspectorSessionIdRef.current;
+    if (currentSessionId) {
+      (async () => {
+        try {
+          const saveRes = await fetch(`${API_BASE}/api/render/inspector/session/message`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              session_id: currentSessionId,
+              role: 'action',
+              content: `${actionLabel} روی ${targetInfo}`,
+              action_type: action,
+            })
+          });
+          const saveData = await saveRes.json();
+          if (saveData.success && saveData.message?.id) {
+            const dbId = saveData.message.id;
+            setInspectorChatMessages(prev =>
+              prev.map(m => m.id === msgId ? { ...m, db_id: dbId } : m)
+            );
+            // تابع verify با قابلیت retry
+            const doVerify = async (attempt: number = 1) => {
+              try {
+                const pId = params?.id as string;
+                const verifyRes = await fetch(
+                  `${API_BASE}/api/render/inspector/message/${dbId}/verify?project_id=${pId}&force=${attempt > 1 ? 'true' : 'false'}`,
+                  { method: 'POST' }
+                );
+                const verifyData = await verifyRes.json();
+                if (verifyData.success) {
+                  setInspectorChatMessages(prev =>
+                    prev.map(m => m.id === msgId ? {
+                      ...m,
+                      backend_verified: verifyData.verified,
+                      backend_log_summary: verifyData.summary,
+                      verified_by_model: verifyData.model_used,
+                      logs_checked: verifyData.logs_checked,
+                      error_logs_count: verifyData.error_logs_count,
+                      checked_logs: verifyData.checked_logs,
+                    } : m)
+                  );
+                  // اگر بار اول لاگی نبود، ۸ ثانیه بعد دوباره بررسی کن
+                  if (attempt === 1 && verifyData.logs_checked === 0 && verifyData.model_used === 'no-logs') {
+                    setTimeout(() => doVerify(2), 8000);
+                  }
+                }
+              } catch (err) { /* verify failed - non-critical */ }
+            };
+            setTimeout(() => doVerify(1), 5000);
+          }
+        } catch (err) { /* save message failed - non-critical */ }
+      })();
+    }
+  }, [params]);
+
+  // پیام موقتی Bridge (اتصال/قطع) با auto-remove
+  const showBridgeTransient = useCallback((content: string, sourceLabel: string) => {
+    const id = `bridge_${sourceLabel}_${Date.now()}`;
+    setInspectorTransientMessages(prev => [...prev, {
+      id,
+      content,
+      type: 'info' as const,
+      source: sourceLabel,
+      timestamp: new Date(),
+      fadeOut: false
+    }]);
+    setTimeout(() => {
+      setInspectorTransientMessages(prev => prev.filter(m => m.id !== id));
+    }, 4000);
+  }, []);
+
+  // 🆕 Message Listener برای دریافت event ها از Bridge Script داخل iframe (postMessage fallback)
   useEffect(() => {
     const handleBridgeMessage = (event: MessageEvent) => {
-      // 🔍 Debug: لاگ همه پیام‌ها
-      if (event.data?.type?.startsWith('inspector-bridge')) {
-        console.log('🌉 Bridge message received:', event.data);
-      }
-
-      // بررسی پیام از bridge script (postMessage fallback)
       if (event.data?.type === 'inspector-bridge-event') {
-        const { action, target, position, elementInfo, pageUrl, level, source } = event.data;
-
-        // 📋 ذخیره لاگ‌های کنسول (تفکیک شده) - postMessage fallback
-        if (action === 'console-log' || action === 'console-error') {
-          setImportedProjectConsoleLogs(prev => {
-            const newLog = {
-              id: `clog_pm_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-              level: level || (action === 'console-error' ? 'error' : 'log'),
-              message: elementInfo || '',
-              timestamp: event.data.timestamp || Date.now(),
-              source: source || 'imported-project',
-            };
-            return [...prev, newLog].slice(-500);
-          });
-          if (action === 'console-log') return;
-        }
-
-        if (action === 'error-overlay') {
-          setImportedProjectConsoleLogs(prev => [...prev, {
-            id: `overlay_pm_${Date.now()}`,
-            level: 'error',
-            message: `[Error Overlay] ${elementInfo || ''}`,
-            timestamp: event.data.timestamp || Date.now(),
-            source: 'imported-project',
-          }]);
-        }
-
-        const actionLabels: Record<string, string> = {
-          'click': 'کلیک کردی',
-          'scroll': 'اسکرول کردی',
-          'input': 'تایپ کردی',
-          'focus': 'فوکوس کردی',
-          'hover': 'موس بردی روی',
-          'error': '🔴 خطای JS',
-          'console-error': '🔴 console.error',
-          'error-overlay': '🔴 لایه خطا شناسایی شد'
-        };
-
-        const actionLabel = actionLabels[action] || action;
-        const targetInfo = elementInfo || target || 'عنصر ناشناخته';
-
-        console.log('🎯 Action (postMessage):', actionLabel, targetInfo);
-
-        // اضافه کردن به پیام‌های دائمی چت
-        const msgId = `action_pm_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        setInspectorChatMessages(prev => [...prev, {
-          id: msgId,
-          role: 'action' as const,
-          content: `${actionLabel} روی ${targetInfo}`,
-          timestamp: new Date(),
-          action_type: action as any,
-          backend_verified: null,
-        }]);
-
-        // ذخیره در DB و verify (از ref استفاده میکنیم چون closure ممکنه قدیمی باشه)
-        const currentSessionId = inspectorSessionIdRef.current;
-        if (currentSessionId) {
-          (async () => {
-            try {
-              const saveRes = await fetch(`${API_BASE}/api/render/inspector/session/message`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  session_id: currentSessionId,
-                  role: 'action',
-                  content: `${actionLabel} روی ${targetInfo}`,
-                  action_type: action,
-                })
-              });
-              const saveData = await saveRes.json();
-              if (saveData.success && saveData.message?.id) {
-                const dbId = saveData.message.id;
-                setInspectorChatMessages(prev =>
-                  prev.map(m => m.id === msgId ? { ...m, db_id: dbId } : m)
-                );
-                // تابع verify با قابلیت retry
-                const doVerify = async (attempt: number = 1) => {
-                  try {
-                    const verifyRes = await fetch(
-                      `${API_BASE}/api/render/inspector/message/${dbId}/verify?project_id=${projectId}&force=${attempt > 1 ? 'true' : 'false'}`,
-                      { method: 'POST' }
-                    );
-                    const verifyData = await verifyRes.json();
-                    if (verifyData.success) {
-                      setInspectorChatMessages(prev =>
-                        prev.map(m => m.id === msgId ? {
-                          ...m,
-                          backend_verified: verifyData.verified,
-                          backend_log_summary: verifyData.summary,
-                          verified_by_model: verifyData.model_used,
-                          logs_checked: verifyData.logs_checked,
-                          error_logs_count: verifyData.error_logs_count,
-                          checked_logs: verifyData.checked_logs,
-                        } : m)
-                      );
-                      // اگر بار اول لاگی نبود، ۸ ثانیه بعد دوباره بررسی کن
-                      if (attempt === 1 && verifyData.logs_checked === 0 && verifyData.model_used === 'no-logs') {
-                        setTimeout(() => doVerify(2), 8000);
-                      }
-                    }
-                  } catch (err) { console.error('Verify failed:', err); }
-                };
-                setTimeout(() => doVerify(1), 5000);
-              }
-            } catch (err) { console.error('Save message failed:', err); }
-          })();
-        }
+        handleBridgeEvent(event.data, 'pm');
       }
-
-      // پیام اتصال موفق bridge
       if (event.data?.type === 'inspector-bridge-ready') {
-        console.log('✅ Bridge connected!', event.data.pageUrl);
-        const id = `ready_${Date.now()}`;
-        setInspectorTransientMessages(prev => [...prev, {
-          id,
-          content: '🔗 اتصال به پروژه برقرار شد',
-          type: 'info' as const,
-          source: 'Bridge',
-          timestamp: new Date(),
-          fadeOut: false
-        }]);
-        setTimeout(() => {
-          setInspectorTransientMessages(prev => prev.filter(m => m.id !== id));
-        }, 4000);
-      }
-
-      // پیام خطا از bridge
-      if (event.data?.type === 'inspector-bridge-error') {
-        console.error('❌ Bridge error:', event.data.message);
+        showBridgeTransient('🔗 اتصال postMessage به پروژه برقرار شد', 'Bridge');
       }
     };
 
     window.addEventListener('message', handleBridgeMessage);
-    console.log('👂 Bridge message listener added');
-
-    return () => {
-      window.removeEventListener('message', handleBridgeMessage);
-      console.log('🔇 Bridge message listener removed');
-    };
-  }, []); // بدون dependency تا همیشه فعال باشه
+    return () => window.removeEventListener('message', handleBridgeMessage);
+  }, [handleBridgeEvent, showBridgeTransient]);
 
   // 🌐 WebSocket Bridge Connection - ارتباط مستقیم با Bridge Script
   useEffect(() => {
@@ -1106,149 +1097,19 @@ export default function ProjectDetailPage() {
               return;
             }
 
-            // پردازش event های Bridge (relay شده از طریق backend)
+            // پردازش event های Bridge (relay شده از طریق backend) - استفاده از handler مشترک
             if (data.type === 'inspector-bridge-event') {
-              const { action, target, position, elementInfo, pageUrl, level, source } = data;
-
-              // 📋 ذخیره لاگ‌های کنسول پروژه ایمپورت شده (تفکیک شده)
-              if (action === 'console-log' || action === 'console-error') {
-                setImportedProjectConsoleLogs(prev => {
-                  const newLog = {
-                    id: `clog_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-                    level: level || (action === 'console-error' ? 'error' : 'log'),
-                    message: elementInfo || '',
-                    timestamp: data.timestamp || Date.now(),
-                    source: source || 'imported-project',
-                  };
-                  const updated = [...prev, newLog];
-                  return updated.slice(-500); // نگه داری حداکثر 500 لاگ
-                });
-                // console-log (غیر از error) فقط ذخیره میشه، به چت اضافه نمیشه
-                if (action === 'console-log') return;
+              if (data.action === 'elements-list') {
+                // لیست المان‌ها - پردازش جداگانه
+                return;
               }
-
-              // 🔍 لایه خطا (Error Overlay) شناسایی شده
-              if (action === 'error-overlay') {
-                setImportedProjectConsoleLogs(prev => [...prev, {
-                  id: `overlay_${Date.now()}`,
-                  level: 'error',
-                  message: `[Error Overlay] ${elementInfo || ''}`,
-                  timestamp: data.timestamp || Date.now(),
-                  source: 'imported-project',
-                }]);
-              }
-
-              const actionLabels: Record<string, string> = {
-                'click': 'کلیک کردی',
-                'scroll': 'اسکرول کردی',
-                'input': 'تایپ کردی',
-                'focus': 'فوکوس کردی',
-                'hover': 'موس بردی روی',
-                'error': '🔴 خطای JS',
-                'console-error': '🔴 console.error',
-                'error-overlay': '🔴 لایه خطا شناسایی شد'
-              };
-
-              const actionLabel = actionLabels[action] || action;
-              const targetInfo = elementInfo || target || 'عنصر ناشناخته';
-
-              console.log('🌐 Bridge WS Event:', actionLabel, targetInfo);
-
-              // اضافه کردن به پیام‌های دائمی چت (نه موقتی)
-              const msgId = `action_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-              const chatMsg = {
-                id: msgId,
-                role: 'action' as const,
-                content: `${actionLabel} روی ${targetInfo}`,
-                timestamp: new Date(),
-                action_type: action as any,
-                backend_verified: null as boolean | null,  // pending - منتظر تأیید
-              };
-
-              setInspectorChatMessages(prev => [...prev, chatMsg]);
-
-              // ذخیره در دیتابیس و درخواست تأیید لاگ بک‌اند
-              (async () => {
-                const currentSessionId = inspectorSessionIdRef.current;
-                if (!currentSessionId) {
-                  console.warn('⚠️ No active session, skipping save');
-                  return;
-                }
-                try {
-                  // ذخیره پیام
-                  const saveRes = await fetch(`${API_BASE}/api/render/inspector/session/message`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                      session_id: currentSessionId,
-                      role: 'action',
-                      content: chatMsg.content,
-                      action_type: action,
-                    })
-                  });
-                  const saveData = await saveRes.json();
-
-                  if (saveData.success && saveData.message?.id) {
-                    const dbId = saveData.message.id;
-                    // آپدیت db_id در state
-                    setInspectorChatMessages(prev =>
-                      prev.map(m => m.id === msgId ? { ...m, db_id: dbId } : m)
-                    );
-
-                    // بررسی لاگ بک‌اند بعد از 3 ثانیه (تا لاگ‌ها ثبت بشن)
-                    setTimeout(async () => {
-                      try {
-                        const verifyRes = await fetch(
-                          `${API_BASE}/api/render/inspector/message/${dbId}/verify?project_id=${projectId}`,
-                          { method: 'POST' }
-                        );
-                        const verifyData = await verifyRes.json();
-
-                        if (verifyData.success) {
-                          setInspectorChatMessages(prev =>
-                            prev.map(m => m.id === msgId ? {
-                              ...m,
-                              backend_verified: verifyData.verified,
-                              backend_log_summary: verifyData.summary,
-                              verified_by_model: verifyData.model_used,
-                              logs_checked: verifyData.logs_checked,
-                              error_logs_count: verifyData.error_logs_count,
-                              checked_logs: verifyData.checked_logs,
-                            } : m)
-                          );
-                        }
-                      } catch (err) {
-                        console.error('❌ Verify failed:', err);
-                      }
-                    }, 3000);
-                  }
-                } catch (err) {
-                  console.error('❌ Save message failed:', err);
-                }
-              })();
+              handleBridgeEvent(data, 'ws');
             }
 
             // پیام آماده بودن bridge
             if (data.type === 'inspector-bridge-ready') {
               setBridgePeerConnected(true);
-              console.log('🌐 Bridge WS: Bridge ready!', data.pageUrl);
-              const id = `ws_bridge_ready_${Date.now()}`;
-              setInspectorTransientMessages(prev => [...prev, {
-                id,
-                content: '🌐 Bridge Script از طریق WebSocket متصل شد',
-                type: 'info' as const,
-                source: 'WebSocket Bridge',
-                timestamp: new Date(),
-                fadeOut: false
-              }]);
-              setTimeout(() => {
-                setInspectorTransientMessages(prev => prev.filter(m => m.id !== id));
-              }, 4000);
-            }
-
-            // لیست المان‌ها از bridge
-            if (data.type === 'inspector-bridge-event' && data.action === 'elements-list') {
-              console.log('🌐 Bridge WS: Received elements list', data.elementInfo);
+              showBridgeTransient('🌐 Bridge Script از طریق WebSocket متصل شد', 'WebSocket Bridge');
             }
 
           } catch (e) {
@@ -1298,7 +1159,7 @@ export default function ProjectDetailPage() {
       setBridgeWsConnected(false);
       setBridgePeerConnected(false);
     };
-  }, [inspectorPowerOn, projectId, activeTab]);
+  }, [inspectorPowerOn, projectId, activeTab, handleBridgeEvent, showBridgeTransient]);
 
   // 🌉 بررسی وضعیت Bridge وقتی Inspector روشن می‌شود
   useEffect(() => {
