@@ -6917,13 +6917,152 @@ async def fix_all_bridges(
 # 🆕 ایجاد هوشمند سرویس Render
 # =====================================
 
+async def _read_github_file(owner: str, repo: str, path: str, branch: str = "main") -> Optional[str]:
+    """خواندن محتوای فایل از GitHub API (بدون نیاز به token برای ریپوهای public)"""
+    import aiohttp
+    url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    return await resp.text()
+    except:
+        pass
+    return None
+
+
+async def _analyze_github_project(owner: str, repo: str, root_dir: str, branch: str = "main") -> dict:
+    """
+    تحلیل واقعی ساختار پروژه با خواندن فایل‌های کلیدی از GitHub
+    Returns: { framework, has_start_script, start_command, build_command,
+               service_type, publish_path, python_version, entry_point }
+    """
+    prefix = f"{root_dir}/" if root_dir and root_dir != "." else ""
+    result = {
+        "framework": "unknown",
+        "has_start_script": False,
+        "service_type": "web_service",
+        "build_command": None,
+        "start_command": None,
+        "publish_path": None,
+        "env_vars": {},
+    }
+
+    # ── بررسی package.json (Node.js projects) ──
+    pkg_content = await _read_github_file(owner, repo, f"{prefix}package.json", branch)
+    if pkg_content:
+        try:
+            pkg = json.loads(pkg_content)
+            scripts = pkg.get("scripts", {})
+            deps = pkg.get("dependencies", {})
+            dev_deps = pkg.get("devDependencies", {})
+            all_deps = {**deps, **dev_deps}
+
+            result["has_start_script"] = "start" in scripts
+
+            # تشخیص فریمورک
+            if "next" in all_deps:
+                result["framework"] = "nextjs"
+                result["service_type"] = "web_service"
+                result["build_command"] = "npm install && npm run build"
+                result["start_command"] = scripts.get("start", "npm start")
+            elif "vite" in all_deps:
+                result["framework"] = "vite"
+                # Vite بیلد static میده → static_site
+                result["service_type"] = "static_site"
+                result["build_command"] = "npm install && npm run build"
+                result["publish_path"] = "dist"
+            elif "react-scripts" in all_deps:
+                result["framework"] = "cra"  # Create React App
+                result["service_type"] = "static_site"
+                result["build_command"] = "npm install && npm run build"
+                result["publish_path"] = "build"
+            elif "nuxt" in all_deps or "nuxt3" in all_deps:
+                result["framework"] = "nuxt"
+                result["service_type"] = "web_service"
+                result["build_command"] = "npm install && npm run build"
+                result["start_command"] = "node .output/server/index.mjs"
+            elif "express" in all_deps:
+                result["framework"] = "express"
+                result["service_type"] = "web_service"
+                result["build_command"] = "npm install"
+                result["start_command"] = scripts.get("start", "node index.js")
+            elif "fastify" in all_deps:
+                result["framework"] = "fastify"
+                result["service_type"] = "web_service"
+                result["build_command"] = "npm install"
+                result["start_command"] = scripts.get("start", "node index.js")
+            else:
+                # Generic Node.js
+                result["framework"] = "nodejs"
+                if result["has_start_script"]:
+                    result["service_type"] = "web_service"
+                    result["build_command"] = "npm install"
+                    result["start_command"] = "npm start"
+                elif "build" in scripts:
+                    result["service_type"] = "static_site"
+                    result["build_command"] = "npm install && npm run build"
+                    result["publish_path"] = "dist"
+                else:
+                    result["service_type"] = "web_service"
+                    result["build_command"] = "npm install"
+                    result["start_command"] = "node index.js"
+
+        except json.JSONDecodeError:
+            pass
+
+        return result
+
+    # ── بررسی requirements.txt (Python projects) ──
+    req_content = await _read_github_file(owner, repo, f"{prefix}requirements.txt", branch)
+    if req_content:
+        req_lower = req_content.lower()
+        result["build_command"] = "pip install --upgrade pip setuptools && pip install -r requirements.txt"
+
+        if "fastapi" in req_lower or "uvicorn" in req_lower:
+            result["framework"] = "fastapi"
+            # تلاش برای تشخیص entry point
+            main_candidates = ["app.main:app", "main:app", "app:app", "server:app"]
+            for candidate in main_candidates:
+                module_path = candidate.split(":")[0].replace(".", "/") + ".py"
+                check = await _read_github_file(owner, repo, f"{prefix}{module_path}", branch)
+                if check:
+                    result["start_command"] = f"uvicorn {candidate} --host 0.0.0.0 --port $PORT"
+                    break
+            if not result["start_command"]:
+                result["start_command"] = "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+        elif "flask" in req_lower:
+            result["framework"] = "flask"
+            result["start_command"] = "gunicorn app:app --bind 0.0.0.0:$PORT"
+        elif "django" in req_lower:
+            result["framework"] = "django"
+            result["start_command"] = "gunicorn config.wsgi:application --bind 0.0.0.0:$PORT"
+        else:
+            result["framework"] = "python"
+            result["start_command"] = "python main.py"
+
+        result["service_type"] = "web_service"
+        # نسخه Python - Render default 3.11 معمولاً بهتر کار میکنه
+        result["env_vars"]["PYTHON_VERSION"] = "3.11.11"
+        return result
+
+    # ── بررسی Dockerfile ──
+    dockerfile = await _read_github_file(owner, repo, f"{prefix}Dockerfile", branch)
+    if dockerfile:
+        result["framework"] = "docker"
+        result["service_type"] = "web_service"
+        return result
+
+    return result
+
+
 @router.post("/inspector/create-render-service")
 async def create_render_service(request: Request, db: Session = Depends(get_db)):
     """
-    ایجاد هوشمند سرویس‌های Render بر اساس تحلیل ساختار پروژه
-    - تشخیص خودکار monorepo (frontend/ + backend/)
-    - اتصال دقیق به GitHub repo پروژه
-    - ایجاد سرویس‌های بکند و فرانت بصورت جداگانه یا یکپارچه
+    ایجاد هوشمند سرویس‌های Render بر اساس تحلیل واقعی ساختار پروژه
+    - خواندن package.json / requirements.txt از GitHub
+    - تشخیص Vite/CRA → static_site | Next.js/Express/FastAPI → web_service
+    - تنظیم صحیح build/start command بر اساس فریمورک واقعی
     """
     try:
         data = await request.json()
@@ -6958,17 +7097,20 @@ async def create_render_service(request: Request, db: Session = Depends(get_db))
                 owner, repo = parts[0], parts[1]
                 github_url = f"https://github.com/{owner}/{repo}"
 
-        if not github_url:
-            return {"success": False, "error": "آدرس GitHub پروژه یافت نشد. پروژه باید از GitHub ایمپورت شده باشد."}
+        if not owner or not repo:
+            # تلاش استخراج از URL
+            if github_url:
+                cleaned = github_url.replace("https://github.com/", "").replace(".git", "").strip("/")
+                parts = cleaned.split("/")
+                if len(parts) >= 2:
+                    owner, repo = parts[0], parts[1]
 
-        # ── 3. تحلیل ساختار پروژه ──
-        technologies = []
-        if project.technologies:
-            try:
-                technologies = json.loads(project.technologies) if isinstance(project.technologies, str) else project.technologies
-            except:
-                technologies = []
+        if not github_url or not owner or not repo:
+            return {"success": False, "error": "آدرس GitHub پروژه یافت نشد."}
 
+        branch = extra.get("branch", "main") or "main"
+
+        # ── 3. تحلیل ساختار واقعی از GitHub ──
         file_tree = []
         if project.structure:
             try:
@@ -6977,7 +7119,6 @@ async def create_render_service(request: Request, db: Session = Depends(get_db))
             except:
                 file_tree = []
 
-        # تشخیص ساختار: monorepo یا unified
         has_frontend_dir = any(
             (f.get("path", "") if isinstance(f, dict) else str(f)).startswith("frontend/")
             for f in file_tree
@@ -6987,95 +7128,66 @@ async def create_render_service(request: Request, db: Session = Depends(get_db))
             for f in file_tree
         ) if file_tree else False
 
-        # تشخیص تکنولوژی‌ها
-        tech_lower = [t.lower() for t in technologies]
-        primary_lang = extra.get("primary_language", "").lower()
-
-        is_nextjs = any(t in tech_lower for t in ["next.js", "nextjs", "next"]) or \
-                    any("next" in (f.get("path", "") if isinstance(f, dict) else str(f)).lower() for f in file_tree[:50])
-        is_react = any(t in tech_lower for t in ["react", "react.js"])
-        is_python = "python" in tech_lower or primary_lang == "python"
-        is_fastapi = any(t in tech_lower for t in ["fastapi", "fast-api"])
-        is_node = any(t in tech_lower for t in ["node", "nodejs", "node.js", "javascript", "typescript"])
-
-        # ── 4. ساخت لیست سرویس‌هایی که باید ایجاد شوند ──
+        # ── 4. تحلیل فریمورک از فایل‌های واقعی GitHub ──
         services_to_create = []
         safe_name = (project.name or repo or "app").lower().replace(" ", "-").replace("_", "-")
-        # حذف کاراکترهای غیرمجاز
         safe_name = re.sub(r'[^a-z0-9-]', '', safe_name)[:40]
 
         if has_frontend_dir and has_backend_dir:
-            # Monorepo: دو سرویس جدا
-            fe_type = "nextjs" if is_nextjs else "react" if is_react else "nodejs"
-            be_type = "fastapi" if (is_fastapi or is_python) else "nodejs"
+            # Monorepo
+            fe_analysis = await _analyze_github_project(owner, repo, "frontend", branch)
+            be_analysis = await _analyze_github_project(owner, repo, "backend", branch)
 
             services_to_create.append({
                 "name": f"{safe_name}-frontend",
                 "role": "frontend",
                 "root_dir": "frontend",
-                "project_type": fe_type,
-                "build_command": "npm install && npm run build" if fe_type in ["nextjs", "react", "nodejs"] else None,
-                "start_command": "npm start" if fe_type in ["nextjs", "nodejs"] else "npx serve -s build" if fe_type == "react" else None,
+                "project_type": fe_analysis["framework"],
+                "service_type": fe_analysis["service_type"],
+                "build_command": fe_analysis["build_command"],
+                "start_command": fe_analysis["start_command"],
+                "publish_path": fe_analysis["publish_path"],
+                "env_vars": fe_analysis["env_vars"],
             })
             services_to_create.append({
                 "name": f"{safe_name}-backend",
                 "role": "backend",
                 "root_dir": "backend",
-                "project_type": be_type,
-                "build_command": "pip install -r requirements.txt" if be_type in ["fastapi", "python"] else "npm install",
-                "start_command": "uvicorn app.main:app --host 0.0.0.0 --port $PORT" if be_type in ["fastapi", "python"] else "npm start",
+                "project_type": be_analysis["framework"],
+                "service_type": be_analysis["service_type"],
+                "build_command": be_analysis["build_command"],
+                "start_command": be_analysis["start_command"],
+                "publish_path": be_analysis["publish_path"],
+                "env_vars": be_analysis["env_vars"],
             })
         elif has_frontend_dir:
-            # فقط frontend/ وجود داره
-            fe_type = "nextjs" if is_nextjs else "react" if is_react else "nodejs"
+            analysis = await _analyze_github_project(owner, repo, "frontend", branch)
             services_to_create.append({
                 "name": safe_name,
                 "role": "frontend",
                 "root_dir": "frontend",
-                "project_type": fe_type,
-                "build_command": "npm install && npm run build",
-                "start_command": "npm start",
+                **{k: analysis[k] for k in ["project_type", "service_type", "build_command", "start_command", "publish_path", "env_vars"]},
+                "project_type": analysis["framework"],
             })
         elif has_backend_dir:
-            # فقط backend/ وجود داره
-            be_type = "fastapi" if (is_fastapi or is_python) else "nodejs"
+            analysis = await _analyze_github_project(owner, repo, "backend", branch)
             services_to_create.append({
                 "name": safe_name,
                 "role": "backend",
                 "root_dir": "backend",
-                "project_type": be_type,
-                "build_command": "pip install -r requirements.txt" if be_type in ["fastapi", "python"] else "npm install",
-                "start_command": "uvicorn app.main:app --host 0.0.0.0 --port $PORT" if be_type in ["fastapi", "python"] else "npm start",
+                **{k: analysis[k] for k in ["project_type", "service_type", "build_command", "start_command", "publish_path", "env_vars"]},
+                "project_type": analysis["framework"],
             })
         else:
-            # Unified: یک سرویس واحد
-            if is_nextjs or is_react or is_node:
-                services_to_create.append({
-                    "name": safe_name,
-                    "role": "unified",
-                    "root_dir": ".",
-                    "project_type": "nextjs" if is_nextjs else "react" if is_react else "nodejs",
-                    "build_command": "npm install && npm run build",
-                    "start_command": "npm start",
-                })
-            elif is_python or is_fastapi:
-                services_to_create.append({
-                    "name": safe_name,
-                    "role": "unified",
-                    "root_dir": ".",
-                    "project_type": "fastapi" if is_fastapi else "python",
-                    "build_command": "pip install -r requirements.txt",
-                    "start_command": "uvicorn app.main:app --host 0.0.0.0 --port $PORT",
-                })
-            else:
-                services_to_create.append({
-                    "name": safe_name,
-                    "role": "unified",
-                    "root_dir": ".",
-                    "project_type": "nodejs",
-                    "build_command": "npm install && npm run build",
-                    "start_command": "npm start",
-                })
+            # Unified
+            analysis = await _analyze_github_project(owner, repo, ".", branch)
+            services_to_create.append({
+                "name": safe_name,
+                "role": "unified",
+                "root_dir": ".",
+                **{k: analysis[k] for k in ["project_type", "service_type", "build_command", "start_command", "publish_path", "env_vars"]},
+                "project_type": analysis["framework"],
+            })
 
         if not services_to_create:
             return {"success": False, "error": "ساختار پروژه قابل تشخیص نبود"}
@@ -7096,22 +7208,25 @@ async def create_render_service(request: Request, db: Session = Depends(get_db))
         errors = []
         try:
             for svc_plan in services_to_create:
+                svc_env_vars = svc_plan.get("env_vars", {})
                 result = await deploy_svc.create_service(
                     name=svc_plan["name"],
                     project_type=svc_plan["project_type"],
                     github_repo_url=github_url,
-                    github_branch=extra.get("branch", "main") if extra.get("branch") else "main",
+                    github_branch=branch,
                     root_dir=svc_plan["root_dir"],
                     build_command=svc_plan.get("build_command"),
                     start_command=svc_plan.get("start_command"),
+                    service_type=svc_plan.get("service_type", "web_service"),
+                    publish_path=svc_plan.get("publish_path"),
+                    env_vars=svc_env_vars if svc_env_vars else None,
                 )
                 if result.get("success"):
-                    # ذخیره در DB با project_id
                     try:
                         new_svc = RenderService(
                             id=result["service_id"],
                             name=result.get("name", svc_plan["name"]),
-                            type="web_service",
+                            type=svc_plan.get("service_type", "web_service"),
                             status="deploying",
                             project_id=project_id,
                             service_url=result.get("url", ""),
@@ -7125,10 +7240,12 @@ async def create_render_service(request: Request, db: Session = Depends(get_db))
                         "name": result.get("name"),
                         "service_id": result.get("service_id"),
                         "role": svc_plan["role"],
+                        "framework": svc_plan["project_type"],
+                        "service_type": svc_plan["service_type"],
                         "dashboard_url": result.get("dashboard_url"),
                         "url": result.get("url"),
                     })
-                    slog.info(f"✅ Created {svc_plan['role']}: {result.get('name')}")
+                    slog.info(f"✅ Created {svc_plan['role']} ({svc_plan['project_type']}/{svc_plan['service_type']}): {result.get('name')}")
                 else:
                     errors.append({
                         "name": svc_plan["name"],
