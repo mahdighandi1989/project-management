@@ -5391,10 +5391,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       });
       const data = await res.json();
       if (data.success) {
-        const names = (data.created || []).map((s: any) => s.name).join(' + ');
-        showSuccess(`✅ ${data.message} (${names})`);
+        const details = (data.created || []).map((s: any) => `${s.name} (${s.framework}/${s.service_type})`).join(' + ');
+        showSuccess(`✅ ${data.message}: ${details}`);
+        // هشدار درباره env vars خالی
+        const emptyEnvVars = (data.created || []).flatMap((s: any) =>
+          Object.entries(s.env_vars || {}).filter(([, v]) => !v).map(([k]) => k)
+        );
+        if (emptyEnvVars.length > 0) {
+          setTimeout(() => showError(`⚠️ متغیرهای محیطی زیر مقدار ندارند (در داشبورد Render تنظیم کنید): ${emptyEnvVars.join(', ')}`), 1500);
+        }
         setShowCreateRenderService(false);
-        // رفرش سرویس‌ها
         loadInspectorServices(true);
       } else {
         showError(data.error || 'خطا در ایجاد سرویس');
