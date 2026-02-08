@@ -8075,6 +8075,7 @@ class SmartChatRequest(BaseModel):
     backend_logs: Optional[List[dict]] = None
     frontend_url: Optional[str] = None
     reply_to: Optional[SmartChatReplyContext] = None  # ریپلای به پیام خاص
+    previously_read_files: Optional[List[str]] = None  # فایل‌هایی که قبلاً در مکالمه خوانده شدن
 
 
 class ApplyActionRequest(BaseModel):
@@ -8544,12 +8545,20 @@ GitHub: {_proj_github}
 - تمام وابستگی‌ها (imports, types, configs) را بررسی کن
 """
 
-        # ساخت تاریخچه غنی برای مدل
+        # ساخت تاریخچه غنی برای مدل (تا ۲۰۰ پیام آخر)
         history_text = ""
         if request.chat_history:
-            for msg in request.chat_history[-50:]:
+            for msg in request.chat_history[-200:]:
                 role_label = "کاربر" if msg.role == "user" else "AI" if msg.role == "assistant" else "سیستم"
                 history_text += f"[{role_label}]: {msg.content}\n"
+
+        # ساخت لیست فایل‌های قبلاً خوانده‌شده برای هدایت AI به فایل‌های جدید
+        prev_read_files = request.previously_read_files or []
+        prev_files_hint = ""
+        if prev_read_files:
+            prev_files_hint = "\n## ⚠️ فایل‌های قبلاً بررسی‌شده (تکرار نکن مگر واقعاً لازم باشد):\n"
+            prev_files_hint += "\n".join(f"  ✓ {f}" for f in prev_read_files[-60:])
+            prev_files_hint += f"\n(مجموعاً {len(prev_read_files)} فایل قبلاً خوانده شده — اولویت با فایل‌های جدید و بررسی‌نشده باشد)\n"
 
         # ساخت context ریپلای (بدون محدودیت 50 پیامی)
         reply_context_text = ""
@@ -8668,39 +8677,44 @@ GitHub: {_proj_github}
                         # ساخت خلاصه ساختار پروژه
                         q_tree_summary = _build_project_tree_summary(q_code_files)
 
-                        # AI انتخاب ۵ فایل مرتبط
+                        # AI انتخاب ۱۲ فایل مرتبط
                         q_select_prompt = f"""بر اساس سؤال کاربر، فایل‌های مرتبط را انتخاب کن:
 
 سؤال: {request.message}
 
-تاریخچه: {history_text[-1500:]}
+تاریخچه مکالمه (تا ۳۰۰۰ کاراکتر آخر):
+{history_text[-3000:]}
 
 {q_tree_summary}
+{prev_files_hint}
 
-فایل‌ها:
+فایل‌های پروژه:
 {chr(10).join(q_code_files[:500])}
 
-## راهنمای انتخاب:
+## راهنمای انتخاب هوشمند:
 - اول منظور واقعی سؤال کاربر را بفهم — شاید کلمات دقیق استفاده نکرده باشد
-- اگر کاربر از یک فیچر/صفحه/کامپوننت صحبت کرده، فایل‌های مرتبط با آن را انتخاب کن
+- نام فایل‌ها، مسیرها و کلمات کلیدی در سؤال را تحلیل کن — مثلاً اگر از "احراز هویت" صحبت کرده، فایل‌های auth/login/register/middleware را پیدا کن
+- اگر کاربر از یک فیچر/صفحه/کامپوننت صحبت کرده، فایل‌های مرتبط با آن + وابستگی‌هایشان (imports, types, configs) را انتخاب کن
 - اگر پروژه هم frontend و هم backend دارد، از هر دو بخش فایل مرتبط انتخاب کن
 - تاریخچه مکالمه را بخوان — شاید سؤال در ادامه بحث قبلی باشد
-حداکثر ۵ فایل. فقط مسیرها، هر کدام در یک خط."""
+- اگر فایل‌هایی قبلاً بررسی شده‌اند (لیست بالا)، فایل‌های جدید و بررسی‌نشده را اولویت بده — مگر اینکه سؤال واقعاً به همان فایل‌ها مربوط باشد
+- فایل‌های entry point (main, app, index, page, layout)، API routes و config را در نظر بگیر
+حداکثر ۱۲ فایل. فقط مسیرها، هر کدام در یک خط."""
                         q_sel_resp = await ai_manager.generate(
                             model_id=primary_model,
                             messages=[
-                                Message(role="system", content="انتخاب‌گر فایل هوشمند. اول منظور سؤال کاربر را بفهم، سپس فایل‌های مرتبط را انتخاب کن. از هر بخش پروژه (frontend/backend) فایل انتخاب کن. فقط مسیرها."),
+                                Message(role="system", content="انتخاب‌گر فایل هوشمند و حرفه‌ای. اول منظور سؤال کاربر را عمیقاً بفهم، سپس با تحلیل نام فایل‌ها، ساختار پروژه و تاریخچه مکالمه، بهترین فایل‌های مرتبط را انتخاب کن. فایل‌های جدید و بررسی‌نشده اولویت دارند. از هر بخش پروژه (frontend/backend) فایل انتخاب کن. فقط مسیرها."),
                                 Message(role="user", content=q_select_prompt)
                             ],
-                            max_tokens=300,
+                            max_tokens=600,
                             temperature=0.2
                         )
-                        q_selected = _parse_ai_selected_files(q_sel_resp.content, q_code_files, max_files=5)
+                        q_selected = _parse_ai_selected_files(q_sel_resp.content, q_code_files, max_files=12)
                         if not q_selected:
-                            q_selected = _fallback_file_selection(q_code_files, request.message, max_files=5)
-                        q_selected = _ensure_balanced_selection(q_selected, q_code_files, max_files=5)
-                        max_q_code = int(max_input_chars * 0.4)
-                        per_file_q_limit = min(8000, max(3000, max_q_code // max(len(q_selected), 1)))
+                            q_selected = _fallback_file_selection(q_code_files, request.message, max_files=12)
+                        q_selected = _ensure_balanced_selection(q_selected, q_code_files, max_files=12)
+                        max_q_code = int(max_input_chars * 0.55)
+                        per_file_q_limit = min(10000, max(3000, max_q_code // max(len(q_selected), 1)))
                         q_read_failures = 0
                         for fp in q_selected:
                             if len(question_code_context) >= max_q_code:
@@ -8824,6 +8838,7 @@ GitHub: {_proj_github}
                     "has_action": q_action_plan is not None,
                     "action_plan": q_action_plan,
                     "files_were_read": has_q_code,
+                    "selected_file_paths": q_selected if has_q_code else [],
                 })
 
             except Exception as e:
@@ -8862,46 +8877,49 @@ GitHub: {_proj_github}
                         # ساخت خلاصه ساختار پروژه
                         err_tree_summary = _build_project_tree_summary(code_files)
 
-                        # AI انتخاب فایل بر اساس لاگ خطا
+                        # AI انتخاب فایل بر اساس لاگ خطا (تا ۲۰ فایل)
                         select_prompt = f"""بر اساس خطا و context مکالمه، فایل‌های مرتبط را انتخاب کن:
 
 خطا/لاگ:
-{request.message[:2000]}
+{request.message[:3000]}
 
-تاریخچه (خلاصه):
-{history_text[-1500:]}
+تاریخچه مکالمه (تا ۴۰۰۰ کاراکتر آخر):
+{history_text[-4000:]}
 
 {err_tree_summary}
+{prev_files_hint}
 
 فایل‌های پروژه:
 {chr(10).join(code_files[:500])}
 
-## راهنمای انتخاب:
+## راهنمای انتخاب هوشمند:
 - اول خطا را بخوان و بفهم ریشه مشکل کجاست — سپس فایل‌های مرتبط را انتخاب کن
+- stack trace را دقیق تحلیل کن — هر مسیر فایلی که در خطا ذکر شده حتماً انتخاب شود
 - تاریخچه مکالمه را هم بخوان — شاید کاربر قبلاً توضیح داده کدام بخش مشکل دارد
 - خطای frontend ممکن است ریشه در backend داشته باشد — هم frontend و هم backend مرتبط را انتخاب کن
 - فایل‌های types، config و API routes مرتبط را هم شامل کن
-- اگر stack trace مسیر فایلی را نشان می‌دهد، آن فایل حتماً انتخاب شود
+- فایل‌های import/dependency chain مرتبط با فایل خطادار را هم بررسی کن
+- اگر فایل‌هایی قبلاً بررسی شده‌اند (لیست بالا)، فایل‌های جدید و بررسی‌نشده را اولویت بده — مگر اینکه خطا واقعاً به همان فایل‌ها مربوط باشد
 
-حداکثر ۱۰ فایل مرتبط. فقط مسیرها، هر کدام در یک خط."""
+حداکثر ۲۰ فایل مرتبط. فقط مسیرها، هر کدام در یک خط."""
 
                         select_response = await ai_manager.generate(
                             model_id=primary_model,
                             messages=[
-                                Message(role="system", content="انتخاب‌گر فایل هوشمند. اول ریشه خطا را تشخیص بده، سپس فایل‌های مرتبط را انتخاب کن. از هر بخش پروژه (frontend/backend) فایل مرتبط انتخاب کن. فقط مسیرها."),
+                                Message(role="system", content="انتخاب‌گر فایل هوشمند و حرفه‌ای. اول ریشه خطا را با تحلیل stack trace و context تشخیص بده، سپس فایل‌های مرتبط + زنجیره وابستگی‌ها را انتخاب کن. فایل‌های جدید و بررسی‌نشده اولویت دارند. از هر بخش پروژه (frontend/backend) فایل مرتبط انتخاب کن. فقط مسیرها."),
                                 Message(role="user", content=select_prompt)
                             ],
-                            max_tokens=500,
+                            max_tokens=800,
                             temperature=0.2
                         )
 
-                        selected = _parse_ai_selected_files(select_response.content, code_files, max_files=10)
+                        selected = _parse_ai_selected_files(select_response.content, code_files, max_files=20)
                         if not selected:
-                            selected = _fallback_file_selection(code_files, request.message, max_files=10)
-                        selected = _ensure_balanced_selection(selected, code_files, max_files=10)
+                            selected = _fallback_file_selection(code_files, request.message, max_files=20)
+                        selected = _ensure_balanced_selection(selected, code_files, max_files=20)
 
                         # محدود کردن حجم کد بر اساس ظرفیت مدل
-                        max_err_code_chars = int(max_input_chars * 0.6)
+                        max_err_code_chars = int(max_input_chars * 0.65)
                         per_file_err_limit = min(12000, max(3000, max_err_code_chars // max(len(selected), 1)))
                         err_read_failures = 0
                         for file_path in selected:
@@ -9107,6 +9125,7 @@ GitHub: {_proj_github}
                         "has_action": has_code_action,
                         "action_plan": action_plan,
                         "files_were_read": has_err_code_files,
+                        "selected_file_paths": selected if has_err_code_files else [],
                     })
 
             except asyncio.CancelledError:
@@ -9159,37 +9178,41 @@ GitHub: {_proj_github}
 درخواست کاربر:
 {request.message}
 
-تاریخچه (خلاصه):
-{history_text[-2500:]}
+تاریخچه مکالمه (تا ۵۰۰۰ کاراکتر آخر):
+{history_text[-5000:]}
 
 {act_tree_summary}
+{prev_files_hint}
 
 فایل‌های پروژه:
 {chr(10).join(code_files[:500])}
 
-## راهنمای انتخاب:
+## راهنمای انتخاب هوشمند:
 - اول منظور واقعی کاربر را بفهم — ممکن است مستقیم نگفته باشد کدام فایل‌ها باید تغییر کنند
 - تاریخچه مکالمه را بخوان — شاید درخواست در ادامه بحث قبلی باشد و فایل‌های مرتبط قبلاً ذکر شده باشند
 - فایل‌هایی که مستقیماً باید تغییر کنند + وابستگی‌هایشان (imports, types, configs, API routes, database models)
 - اگر پروژه هم frontend و هم backend دارد، از هر دو بخش فایل مرتبط انتخاب کن
 - فایل‌های config (package.json, requirements.txt, .env.example) و types هم مهمن
+- اگر فایل‌هایی قبلاً بررسی شده‌اند (لیست بالا)، فایل‌های جدید و بررسی‌نشده را اولویت بده — مگر اینکه تغییرات واقعاً به همان فایل‌ها مربوط باشد
+- فایل‌های تست مرتبط با فایل‌های تغییردهنده را هم شامل کن
+- اگر تغییر API endpoint باشد، هم route و هم فرانت‌اند caller و هم types مرتبط را انتخاب کن
 
-حداکثر ۱۵ فایل. فقط مسیرها، هر کدام در یک خط."""
+حداکثر ۲۵ فایل. فقط مسیرها، هر کدام در یک خط."""
 
                         select_response = await ai_manager.generate(
                             model_id=primary_model,
                             messages=[
-                                Message(role="system", content="انتخاب‌گر فایل هوشمند. اول منظور واقعی درخواست کاربر و تاریخچه مکالمه را بفهم، سپس فایل‌های مرتبط را انتخاب کن. از همه بخش‌های پروژه (frontend/backend/shared) فایل مرتبط انتخاب کن. فقط مسیرها."),
+                                Message(role="system", content="انتخاب‌گر فایل هوشمند و حرفه‌ای. اول منظور واقعی درخواست کاربر و تاریخچه مکالمه را عمیقاً بفهم، سپس فایل‌های مرتبط + زنجیره وابستگی‌ها + فایل‌های تست را انتخاب کن. فایل‌های جدید و بررسی‌نشده اولویت دارند. از همه بخش‌های پروژه (frontend/backend/shared) فایل مرتبط انتخاب کن. فقط مسیرها."),
                                 Message(role="user", content=select_prompt)
                             ],
-                            max_tokens=700,
+                            max_tokens=1000,
                             temperature=0.2
                         )
 
-                        selected = _parse_ai_selected_files(select_response.content, code_files, max_files=15)
+                        selected = _parse_ai_selected_files(select_response.content, code_files, max_files=25)
                         if not selected:
-                            selected = _fallback_file_selection(code_files, request.message, max_files=10)
-                        selected = _ensure_balanced_selection(selected, code_files, max_files=15)
+                            selected = _fallback_file_selection(code_files, request.message, max_files=20)
+                        selected = _ensure_balanced_selection(selected, code_files, max_files=25)
 
                         yield sse("progress", {
                             "step": "files_selected",
@@ -9197,9 +9220,9 @@ GitHub: {_proj_github}
                         })
 
                         # خواندن فایل‌ها (با رعایت حد context window مدل)
-                        # 🆕 محدود کردن حجم کل کد بر اساس ظرفیت مدل
-                        # حداکثر ~60% از ظرفیت ورودی مدل برای کد فایل‌ها
-                        max_code_chars = int(max_input_chars * 0.65)
+                        # محدود کردن حجم کل کد بر اساس ظرفیت مدل
+                        # حداکثر ~70% از ظرفیت ورودی مدل برای کد فایل‌ها
+                        max_code_chars = int(max_input_chars * 0.70)
                         per_file_limit = min(15000, max(3000, max_code_chars // max(len(selected), 1)))
                         act_read_failures = 0
                         for i, file_path in enumerate(selected):
@@ -9425,6 +9448,7 @@ GitHub: {_proj_github}
                         "has_action": action_plan is not None,
                         "action_plan": action_plan,
                         "files_were_read": has_code_files,
+                        "selected_file_paths": selected if has_code_files else [],
                     })
 
             except asyncio.CancelledError:
