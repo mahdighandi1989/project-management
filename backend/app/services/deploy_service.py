@@ -225,13 +225,37 @@ class RenderDeployService:
                     data = json.loads(response_text)
                     service = data.get("service", data)
 
+                    svc_type = service.get("type", "web_service")
+                    svc_id = service.get("id")
+                    dash_prefix = "static" if svc_type == "static_site" else "web"
+
+                    # برای static_site: اضافه کردن SPA rewrite rule از طریق API
+                    if svc_type == "static_site" and svc_id:
+                        try:
+                            rewrite_data = {
+                                "source": "/*",
+                                "destination": "/index.html",
+                                "action": "rewrite",
+                            }
+                            async with session.post(
+                                f"{self.API_BASE}/services/{svc_id}/routes",
+                                json=rewrite_data
+                            ) as rw_resp:
+                                if rw_resp.status in [200, 201]:
+                                    logger.info(f"SPA rewrite rule added for {svc_id}")
+                                else:
+                                    logger.warning(f"Failed to add rewrite rule: {await rw_resp.text()}")
+                        except Exception as rw_err:
+                            logger.warning(f"Rewrite rule error: {rw_err}")
+
                     return {
                         "success": True,
-                        "service_id": service.get("id"),
+                        "service_id": svc_id,
                         "name": service.get("name"),
                         "url": service.get("serviceDetails", {}).get("url"),
                         "status": service.get("suspended"),
-                        "dashboard_url": f"https://dashboard.render.com/web/{service.get('id')}"
+                        "dashboard_url": f"https://dashboard.render.com/{dash_prefix}/{svc_id}",
+                        "service_type": svc_type,
                     }
                 else:
                     return {
