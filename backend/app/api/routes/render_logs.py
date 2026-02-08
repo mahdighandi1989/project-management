@@ -12,7 +12,10 @@
 """
 
 import json
+import os
+import re
 import uuid
+import traceback
 from datetime import datetime, timedelta
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks, WebSocket, WebSocketDisconnect
@@ -28,6 +31,41 @@ from ...models.render_log import RenderLog, RenderService, RenderLogSettings, Re
 slog = StructuredLogger(__name__, "RENDER-API")
 
 router = APIRouter(prefix="/api/render", tags=["Render Logs"])
+
+# ── Constants ────────────────────────────────────────────────────────
+# فیلتر مسیرهای غیرکد (استفاده مشترک در همه endpoint های Inspector)
+IGNORED_PATH_PREFIXES = (
+    "node_modules/", ".git/", "dist/", "build/", ".next/",
+    "__pycache__/", ".venv/", "venv/", ".cache/", ".idea/", ".vscode/",
+)
+CODE_EXTENSIONS = (
+    ".js", ".ts", ".tsx", ".jsx", ".py", ".java", ".go", ".rs",
+    ".vue", ".svelte", ".html", ".css", ".scss", ".json", ".yaml", ".yml",
+    ".toml", ".env", ".md", ".sql", ".sh", ".rb", ".php", ".cs",
+)
+
+
+IGNORED_FILENAMES = (
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "InspectorBridge", "inspector-bridge", "inspectorBridge",
+)
+IGNORED_EXTENSIONS = (
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2",
+    ".ttf", ".eot", ".mp4", ".mp3", ".zip", ".tar", ".gz",
+)
+
+
+def _is_code_file(path: str, max_size: int = 200000, file_size: int = 0) -> bool:
+    """بررسی اینکه فایل یک فایل کد قابل بررسی هست"""
+    if file_size > max_size:
+        return False
+    if any(path.startswith(p) or f"/{p}" in path for p in IGNORED_PATH_PREFIXES):
+        return False
+    if any(ig in path for ig in IGNORED_FILENAMES):
+        return False
+    if any(path.endswith(ext) for ext in IGNORED_EXTENSIONS):
+        return False
+    return True
 
 
 # =====================================
@@ -1798,7 +1836,6 @@ async def force_transfer_all_errors(
         }
 
     except Exception as e:
-        import traceback
         return {
             "success": False,
             "error": str(e),
@@ -2383,7 +2420,6 @@ async def get_available_models_for_inspector(db: Session = Depends(get_db)):
 
         # بررسی اتصال GitHub - همان روش deploy-keys/status
         from ...models.setting import Setting
-        import os
 
         # روش 1: از environment
         github_key = os.environ.get("GITHUB_TOKEN", "")
@@ -2710,7 +2746,6 @@ async def execute_smart_task(
 
         # 7. بررسی اتصال GitHub
         from ...models.setting import Setting
-        import os
         github_key = os.environ.get("GITHUB_TOKEN", "")
         if not github_key:
             github_key = Setting.get_value(db, "api_key_github") or ""
@@ -3864,7 +3899,6 @@ async def synchronized_inspection(
 
         # بررسی اتصال GitHub
         from ...models.setting import Setting
-        import os
         github_key = os.environ.get("GITHUB_TOKEN", "")
         if not github_key:
             github_key = Setting.get_value(db, "api_key_github") or ""
@@ -4022,7 +4056,6 @@ async def analyze_error_from_source(
     from ...services.ai_manager import get_ai_manager
     from ...models.project import Project
     from ...models.setting import Setting
-    import os
     import httpx
 
     slog.api_request("POST", "/inspector/analyze-error",
@@ -4144,7 +4177,7 @@ async def analyze_error_from_source(
                                 file_contents[file_path] = content[:5000]  # محدودیت سایز
                                 source_files.append({"path": file_path, "issue": "در حال بررسی..."})
                     except Exception as e:
-                        slog.warn(f"Failed to fetch {file_path}: {e}")
+                        slog.warning(f"Failed to fetch {file_path}: {e}")
 
         # تحلیل با AI
         from ...services.ai_base import Message
@@ -5148,7 +5181,6 @@ async def inject_bridge_script(
     """
     from ...models.project import Project
     from ...models.setting import Setting
-    import os
     import httpx
     import base64
 
@@ -5200,7 +5232,7 @@ async def inject_bridge_script(
                         db.commit()
                         slog.info(f"Auto-set github_path from extra_data: {github_path}")
                 except Exception as e:
-                    slog.warn(f"Failed to parse extra_data: {e}")
+                    slog.warning(f"Failed to parse extra_data: {e}")
 
         if not github_path:
             # برگرداندن اطلاعات تشخیصی
@@ -5399,7 +5431,7 @@ async def inject_bridge_script(
                             default_branch = repo_info.json().get('default_branch', 'main')
                             slog.info(f"🌿 Default branch: {default_branch}")
                     except Exception as e:
-                        slog.warn(f"Failed to get repo info: {e}")
+                        slog.warning(f"Failed to get repo info: {e}")
 
                     tree_res = await client.get(
                         f"https://api.github.com/repos/{owner}/{repo}/git/trees/{default_branch}?recursive=1",
@@ -5512,7 +5544,7 @@ async def inject_bridge_script(
                                                 deps_found = list(deps2.keys())[:20]
                                                 break
                                 except Exception as e:
-                                    slog.warn(f"Failed to check {pkg_path}: {e}")
+                                    slog.warning(f"Failed to check {pkg_path}: {e}")
                                     continue
 
                         # 🎯 مرحله ۳: پیدا کردن بهترین فایل برای تزریق
@@ -5593,7 +5625,7 @@ async def inject_bridge_script(
                                             elif has_bridge:
                                                 slog.info(f"  ⏭️ Skipped (already has bridge): {html_path}")
                                 except Exception as e:
-                                    slog.warn(f"  ❌ Error checking {html_path}: {e}")
+                                    slog.warning(f"  ❌ Error checking {html_path}: {e}")
                                     continue
 
                         # 🔍 مرحله ۴: اگر HTML پیدا نشد، از entry candidates استفاده کن
@@ -5620,7 +5652,7 @@ async def inject_bridge_script(
                                                     slog.info(f"✅ Found entry point: {candidate}")
                                                     break
                                     except Exception as e:
-                                        slog.warn(f"Failed to fetch {candidate}: {e}")
+                                        slog.warning(f"Failed to fetch {candidate}: {e}")
                                         continue
 
                         # 🔍 مرحله ۴.۵: جستجوی هوشمند برای فایل‌های Next.js/React
@@ -5686,11 +5718,11 @@ async def inject_bridge_script(
                                                 break  # نیازی به ادامه نیست
                                     else:
                                         pattern_search_reason = f"Failed to fetch {match_file}: HTTP {content_res.status_code}"
-                                        slog.warn(f"  ❌ Fetch failed: HTTP {content_res.status_code}")
+                                        slog.warning(f"  ❌ Fetch failed: HTTP {content_res.status_code}")
                                         continue  # 🔧 مهم: برو سراغ فایل بعدی
                                 except Exception as e:
                                     pattern_search_reason = f"Error fetching {match_file}: {str(e)}"
-                                    slog.warn(f"  ❌ Error: {e}")
+                                    slog.warning(f"  ❌ Error: {e}")
                                     continue
 
                         # 🔎 مرحله ۵: اگر هنوز پیدا نشد، جستجوی عمومی
@@ -5744,7 +5776,7 @@ async def inject_bridge_script(
                             is_gatsby = detected_framework == 'gatsby'
 
                 except Exception as e:
-                    slog.warn(f"Smart HTML search failed: {e}")
+                    slog.warning(f"Smart HTML search failed: {e}")
                     found_html_files = []
                     is_framework_without_html = False
                     search_error = str(e)
@@ -5769,7 +5801,7 @@ async def inject_bridge_script(
                                 is_js_file = not bridge_already_installed_in.endswith('.html')
                                 slog.info(f"✅ Loaded bridge file for modification: {bridge_already_installed_in}")
                     except Exception as e:
-                        slog.warn(f"Failed to load bridge file: {e}")
+                        slog.warning(f"Failed to load bridge file: {e}")
 
                 # اگر هنوز index_path ست نشده (یعنی درخواست inject عادی بود)
                 if not index_path:
@@ -5868,7 +5900,6 @@ async def inject_bridge_script(
                     return {"success": True, "message": "اسکریپت از قبل حذف شده است"}
 
                 # حذف اسکریپت با regex
-                import re
                 if is_js_file:
                     # حذف نسخه JS
                     new_content = re.sub(
@@ -5894,23 +5925,22 @@ async def inject_bridge_script(
                 # 🔄 force_update: حذف نسخه قدیمی قبل از تزریق نسخه جدید
                 if has_bridge and request.force_update:
                     slog.info(f"Force updating bridge in {index_path}")
-                    import re as _re
                     if is_js_file:
-                        index_content = _re.sub(
+                        index_content = re.sub(
                             r'// 🌉 Inspector Bridge Script - Auto-injected.*?// 🌉 End of Inspector Bridge Script\n?',
                             '',
                             index_content,
-                            flags=_re.DOTALL
+                            flags=re.DOTALL
                         )
                     else:
-                        index_content = _re.sub(
+                        index_content = re.sub(
                             r'<!-- Inspector Bridge Script - Auto-injected -->.*?</script>',
                             '',
                             index_content,
-                            flags=_re.DOTALL
+                            flags=re.DOTALL
                         )
                     # حذف import InspectorBridge اگر هست
-                    index_content = _re.sub(
+                    index_content = re.sub(
                         r'import\s+InspectorBridge\s+from\s+["\']\.\/InspectorBridge["\'];?\s*\n?',
                         '',
                         index_content
@@ -6005,8 +6035,7 @@ async def inject_bridge_script(
                     # اضافه کردن import اگر وجود نداره
                     if 'InspectorBridge' not in index_content:
                         # پیدا کردن آخرین import
-                        import re as regex_module
-                        last_import_match = list(regex_module.finditer(r'^import\s+.+?["\'];?\s*$', index_content, regex_module.MULTILINE))
+                        last_import_match = list(re.finditer(r'^import\s+.+?["\'];?\s*$', index_content, re.MULTILINE))
 
                         if last_import_match:
                             last_import_end = last_import_match[-1].end()
@@ -6021,7 +6050,7 @@ async def inject_bridge_script(
                             new_content = new_content.replace('{children}', f'{{{component_jsx}}}\n        {{children}}')
                         elif '<body' in new_content:
                             # بعد از تگ body اضافه کن
-                            body_match = regex_module.search(r'<body[^>]*>', new_content)
+                            body_match = re.search(r'<body[^>]*>', new_content)
                             if body_match:
                                 insert_pos = body_match.end()
                                 new_content = new_content[:insert_pos] + f'\n        {component_jsx}' + new_content[insert_pos:]
@@ -6098,7 +6127,6 @@ async def check_bridge_status(
     """
     from ...models.project import Project
     from ...models.setting import Setting
-    import os
     import httpx
     import base64
 
@@ -6254,7 +6282,6 @@ async def debug_bridge_injection(
     """
     from ...models.project import Project
     from ...models.setting import Setting
-    import os
     import httpx
     import base64
 
@@ -6418,6 +6445,37 @@ from typing import Set
 # نگهداری اتصالات WebSocket به تفکیک project_id و نقش
 _bridge_connections: dict = defaultdict(lambda: {"bridges": set(), "inspectors": set()})
 _bridge_lock = asyncio.Lock()
+# زمان آخرین فعالیت هر پروژه - برای پاکسازی اتصالات بیکار
+_bridge_last_activity: dict = {}
+_BRIDGE_IDLE_TIMEOUT = 3600  # 1 ساعت بیکاری → پاکسازی
+
+
+async def _cleanup_idle_bridge_connections():
+    """پاکسازی اتصالات WebSocket بیکار برای جلوگیری از memory leak"""
+    now = datetime.utcnow()
+    async with _bridge_lock:
+        idle_projects = []
+        for project_id, last_time in list(_bridge_last_activity.items()):
+            if (now - last_time).total_seconds() > _BRIDGE_IDLE_TIMEOUT:
+                idle_projects.append(project_id)
+
+        for project_id in idle_projects:
+            conns = _bridge_connections.get(project_id)
+            if conns:
+                # بستن اتصالات باقیمانده
+                for ws in list(conns.get("bridges", set())):
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+                for ws in list(conns.get("inspectors", set())):
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+                del _bridge_connections[project_id]
+            _bridge_last_activity.pop(project_id, None)
+            slog.info(f"Bridge WS: Cleaned up idle connections for project {project_id}")
 
 
 @router.websocket("/ws/bridge/{project_id}")
@@ -6459,6 +6517,7 @@ async def websocket_bridge_hub(websocket: WebSocket, project_id: str):
 
         async with _bridge_lock:
             _bridge_connections[project_id][f"{role}s"].add(websocket)
+            _bridge_last_activity[project_id] = datetime.utcnow()
 
         slog.info(f"Bridge WS: {role} registered",
             project_id=project_id,
@@ -6505,6 +6564,7 @@ async def websocket_bridge_hub(websocket: WebSocket, project_id: str):
                 data["_from"] = role
                 data["_project_id"] = project_id
                 data["_timestamp"] = datetime.utcnow().isoformat()
+                _bridge_last_activity[project_id] = datetime.utcnow()
 
                 async with _bridge_lock:
                     dead_connections = set()
@@ -6557,6 +6617,9 @@ async def websocket_bridge_hub(websocket: WebSocket, project_id: str):
 async def get_bridge_connections(project_id: str):
     """وضعیت اتصالات WebSocket Bridge برای یک پروژه"""
     conns = _bridge_connections.get(project_id, {"bridges": set(), "inspectors": set()})
+    # پاکسازی اتصالات بیکار در هر فراخوانی
+    await _cleanup_idle_bridge_connections()
+
     return {
         "success": True,
         "project_id": project_id,
@@ -7313,7 +7376,7 @@ async def test_prompt_field(request: PromptFieldTestRequest, db: Session = Depen
         field.last_test_result = json.dumps({
             "model_id": request.model_id,
             "response": response.content,
-            "tokens_used": response.usage.get("total_tokens", 0) if response.usage else 0,
+            "tokens_used": getattr(response, 'tokens_used', 0) or 0,
             "passed": test_passed,
             "tested_at": datetime.utcnow().isoformat()
         }, ensure_ascii=False)
@@ -7324,7 +7387,7 @@ async def test_prompt_field(request: PromptFieldTestRequest, db: Session = Depen
             "test_passed": test_passed,
             "model_id": request.model_id,
             "response": response.content,
-            "tokens_used": response.usage.get("total_tokens", 0) if response.usage else 0,
+            "tokens_used": getattr(response, 'tokens_used', 0) or 0,
             "field": field.to_dict()
         }
 
@@ -7592,7 +7655,6 @@ async def investigate_error(request: InvestigateRequest, db: Session = Depends(g
     بررسی ریشه‌ای خطا با AI - خواندن کد از GitHub و تحلیل
     پاسخ به صورت SSE (Server-Sent Events) استریم میشه
     """
-    import os
     from fastapi.responses import StreamingResponse
     from ...models.inspector_session import InspectorMessage
     from ...models.project import Project
@@ -7693,15 +7755,8 @@ async def investigate_error(request: InvestigateRequest, db: Session = Depends(g
         primary_model = model_ids[0] if model_ids else "gemini-2.0-flash"
 
         # فهرست فایل‌های مرتبط (فیلتر شده)
-        # ⚠️ InspectorBridge فایل inject شده ماست - نباید بررسی بشه
         code_files = [f["path"] for f in all_files
-                      if f.get("size", 0) < 200000
-                      and not any(skip in f["path"] for skip in [
-                          "node_modules/", ".git/", "dist/", "build/", ".next/",
-                          "__pycache__/", ".cache/", "vendor/", "package-lock.json",
-                          "yarn.lock", ".png", ".jpg", ".svg", ".ico", ".woff",
-                          "InspectorBridge", "inspector-bridge", "inspectorBridge"
-                      ])]
+                      if _is_code_file(f["path"], file_size=f.get("size", 0))]
 
         file_list_text = "\n".join(code_files[:500])
 
@@ -8056,7 +8111,6 @@ async def fix_error(request: FixRequest, db: Session = Depends(get_db)):
     اصلاح خطا بر اساس گزارش بررسی - ایجاد branch و commit در GitHub
     """
     from fastapi.responses import StreamingResponse
-    import os
     from ...models.project import Project
     from ...services.github_import import get_github_import_service
     from ...services.github_pr_service import get_github_pr_service
@@ -8399,7 +8453,6 @@ def _parse_ai_selected_files(ai_response: str, valid_files: list, max_files: int
     - کوتیشن: "src/app/page.tsx"
     - با توضیح: src/app/page.tsx (main page)
     """
-    import re
     selected = []
     for line in ai_response.strip().split("\n"):
         line = line.strip()
@@ -8683,7 +8736,6 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
     2. اگر درخواست اقدام باشه: تحلیل + پیشنهاد اصلاح + دکمه اعمال
     SSE streaming برای گزارش لحظه‌ای
     """
-    import os
     from fastapi.responses import StreamingResponse
     from ...models.project import Project
     from ...services.github_import import get_github_import_service
@@ -8968,13 +9020,7 @@ GitHub: {_proj_github}
                     if tree_result.get("success"):
                         all_files = [f for f in tree_result.get("tree", []) if f.get("type") == "blob"]
                         q_code_files = [f["path"] for f in all_files
-                                        if f.get("size", 0) < 200000
-                                        and not any(skip in f["path"] for skip in [
-                                            "node_modules/", ".git/", "dist/", "build/", ".next/",
-                                            "__pycache__/", ".cache/", "vendor/", "package-lock.json",
-                                            "yarn.lock", ".png", ".jpg", ".svg", ".ico", ".woff",
-                                            "InspectorBridge", "inspector-bridge"
-                                        ])]
+                                        if _is_code_file(f["path"], file_size=f.get("size", 0))]
                         # ساخت خلاصه ساختار پروژه
                         q_tree_summary = _build_project_tree_summary(q_code_files)
 
@@ -9112,10 +9158,9 @@ GitHub: {_proj_github}
                 response = gen_task.result()
 
                 # بررسی وجود action_plan در پاسخ سؤال هم
-                import re as re_q
                 q_action_plan = None
                 try:
-                    json_match = re_q.search(r'```json\s*\n(.*?)\n```', response.content, re_q.DOTALL)
+                    json_match = re.search(r'```json\s*\n(.*?)\n```', response.content, re.DOTALL)
                     if json_match:
                         parsed = json.loads(json_match.group(1))
                         if parsed.get("files") and len(parsed["files"]) > 0:
@@ -9143,7 +9188,7 @@ GitHub: {_proj_github}
                 })
 
             except Exception as e:
-                print(f"[SMART-CHAT ERROR] QUESTION model={primary_model} error={str(e)[:200]}")
+                slog.error(f"[smart-chat] QUESTION model={primary_model} error={str(e)[:200]}")
                 yield sse("error", {"message": f"❌ خطا در پاسخ‌دهی مدل {primary_model}: {str(e)[:150]}"})
 
         elif msg_type == "ERROR_LOG":
@@ -9167,13 +9212,7 @@ GitHub: {_proj_github}
                     if tree_result.get("success"):
                         all_files = [f for f in tree_result.get("tree", []) if f.get("type") == "blob"]
                         code_files = [f["path"] for f in all_files
-                                      if f.get("size", 0) < 200000
-                                      and not any(skip in f["path"] for skip in [
-                                          "node_modules/", ".git/", "dist/", "build/", ".next/",
-                                          "__pycache__/", ".cache/", "vendor/", "package-lock.json",
-                                          "yarn.lock", ".png", ".jpg", ".svg", ".ico", ".woff",
-                                          "InspectorBridge", "inspector-bridge"
-                                      ])]
+                                      if _is_code_file(f["path"], file_size=f.get("size", 0))]
 
                         # ساخت خلاصه ساختار پروژه
                         err_tree_summary = _build_project_tree_summary(code_files)
@@ -9389,13 +9428,12 @@ GitHub: {_proj_github}
 
                 # بررسی پاسخ خالی
                 if not response.content or not response.content.strip():
-                    print(f"[SMART-CHAT WARNING] Empty ERROR_LOG response from model={primary_model}")
+                    slog.warning(f"[smart-chat] Empty ERROR_LOG response from model={primary_model}")
                     yield sse("error", {
                         "message": f"⚠️ مدل {primary_model} پاسخ خالی برگرداند. لطفاً دوباره تلاش کنید یا مدل دیگری استفاده نمایید."
                     })
                 else:
                     # استخراج action_plan
-                    import re
                     action_plan = None
                     try:
                         json_match = re.search(r'```json\s*\n(.*?)\n```', response.content, re.DOTALL)
@@ -9430,10 +9468,10 @@ GitHub: {_proj_github}
                     })
 
             except asyncio.CancelledError:
-                print(f"[SMART-CHAT ERROR] CancelledError ERROR_LOG model={primary_model}")
+                slog.error(f"[smart-chat] CancelledError ERROR_LOG model={primary_model}")
                 yield sse("error", {"message": f"❌ عملیات مدل {primary_model} لغو شد. لطفاً دوباره تلاش کنید."})
             except Exception as e:
-                print(f"[SMART-CHAT ERROR] ERROR_LOG model={primary_model} error={str(e)[:200]}")
+                slog.error(f"[smart-chat] ERROR_LOG model={primary_model} error={str(e)[:200]}")
                 yield sse("error", {"message": f"❌ خطا در تحلیل خطا توسط مدل {primary_model}: {str(e)[:150]}"})
 
         else:  # ACTION
@@ -9452,13 +9490,7 @@ GitHub: {_proj_github}
                     if tree_result.get("success"):
                         all_files = [f for f in tree_result.get("tree", []) if f.get("type") == "blob"]
                         code_files = [f["path"] for f in all_files
-                                      if f.get("size", 0) < 200000
-                                      and not any(skip in f["path"] for skip in [
-                                          "node_modules/", ".git/", "dist/", "build/", ".next/",
-                                          "__pycache__/", ".cache/", "vendor/", "package-lock.json",
-                                          "yarn.lock", ".png", ".jpg", ".svg", ".ico", ".woff",
-                                          "InspectorBridge", "inspector-bridge"
-                                      ])]
+                                      if _is_code_file(f["path"], file_size=f.get("size", 0))]
 
                         yield sse("progress", {
                             "step": "tree_loaded",
@@ -9712,14 +9744,13 @@ GitHub: {_proj_github}
                 # بررسی پاسخ خالی
                 content = response.content
                 if not content or not content.strip():
-                    print(f"[SMART-CHAT WARNING] Empty response from model={primary_model}")
+                    slog.warning(f"[smart-chat] Empty response from model={primary_model}")
                     yield sse("error", {
                         "message": f"⚠️ مدل {primary_model} پاسخ خالی برگرداند. لطفاً دوباره تلاش کنید یا مدل دیگری استفاده نمایید.",
                         "detail": f"مدل: {primary_model} | حجم پرامپت: ~{len(action_prompt)} کاراکتر"
                     })
                 else:
                     # استخراج action_plan از پاسخ
-                    import re
                     action_plan = None
                     try:
                         # پیدا کردن JSON در بلوک action_plan
@@ -9753,28 +9784,22 @@ GitHub: {_proj_github}
                     })
 
             except asyncio.CancelledError:
-                print(f"[SMART-CHAT ERROR] CancelledError model={primary_model}")
+                slog.error(f"[smart-chat] CancelledError model={primary_model}")
                 yield sse("error", {
                     "message": f"❌ عملیات مدل {primary_model} لغو شد. لطفاً دوباره تلاش کنید.",
                     "detail": f"مدل: {primary_model} | CancelledError"
                 })
             except Exception as e:
-                import traceback
                 err_detail = str(e)[:200]
                 tb_str = traceback.format_exc()[-500:]
-                print(f"[SMART-CHAT ERROR] model={primary_model} prompt_len={len(action_prompt)} error={err_detail}")
-                print(f"[SMART-CHAT TRACEBACK] {tb_str}")
+                slog.error(f"[smart-chat] model={primary_model} prompt_len={len(action_prompt)} error={err_detail}")
+                slog.error(f"[smart-chat] traceback: {tb_str}")
                 yield sse("error", {
                     "message": f"❌ خطا در تحلیل عمیق مدل {primary_model}: {err_detail}",
                     "detail": f"مدل: {primary_model} | حجم پرامپت: ~{len(action_prompt)} کاراکتر | context window: {model_context_window} توکن"
                 })
 
-        # اعلان پایان استفاده از فیلدها
-        if used_field_ids:
-            yield sse("fields_done", {
-                "field_ids": used_field_ids,
-                "message": "پردازش فیلدهای دستور/حافظه/آموزش پایان یافت"
-            })
+        # اعلان پایان استفاده از فیلدها (فیلدهای prompt از طریق دکمه «ارسال به چت» ارسال می‌شوند)
 
         yield sse("done", {"success": True})
 
@@ -9784,9 +9809,8 @@ GitHub: {_proj_github}
             async for chunk in event_stream():
                 yield chunk
         except BaseException as e:
-            import traceback
-            print(f"[SMART-CHAT FATAL] Unhandled error in event_stream: {type(e).__name__}: {str(e)[:300]}")
-            print(f"[SMART-CHAT FATAL TRACEBACK] {traceback.format_exc()[-500:]}")
+            slog.error(f"[smart-chat] FATAL error in event_stream: {type(e).__name__}: {str(e)[:300]}")
+            slog.error(f"[smart-chat] FATAL traceback: {traceback.format_exc()[-500:]}")
             try:
                 yield f"event: error\ndata: {json.dumps({'message': f'❌ خطای غیرمنتظره ({type(e).__name__}): {str(e)[:150]}'}, ensure_ascii=False)}\n\n"
                 yield f"event: done\ndata: {json.dumps({'success': False})}\n\n"
@@ -9810,7 +9834,6 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
     اعمال تغییرات پیشنهادی: ساخت branch، commit و PR
     SSE streaming برای گزارش لحظه‌ای
     """
-    import os
     from fastapi.responses import StreamingResponse
     from ...models.project import Project
     from ...services.github_pr_service import get_github_pr_service
@@ -9877,7 +9900,6 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
             return
 
         # --- اعتبارسنجی فایل‌ها قبل از commit ---
-        import re as _re
         validated_files = []
         for f in request.action_files:
             file_path = f.get("path", "").strip()
@@ -10147,7 +10169,6 @@ VISUAL_DEBUG_SYSTEM_PROMPT = """## 🔍 دیباگ بصری پروژه
 @router.post("/inspector/visual-debug")
 async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depends(get_db)):
     """دیباگ بصری: ترکیب عکس‌ها + لاگ‌ها + توضیح کاربر و ارسال به مدل Vision. SSE streaming"""
-    import os
     from fastapi.responses import StreamingResponse
     from ...models.project import Project
     from ...services.github_import import get_github_import_service
@@ -10238,17 +10259,17 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                 if tree_result.get("success"):
                     all_files = [f for f in tree_result.get("tree", []) if f.get("type") == "blob"]
                     code_files = [f["path"] for f in all_files
-                                  if f.get("size", 0) < 200000
-                                  and not any(skip in f["path"] for skip in [
-                                      "node_modules/", ".git/", "dist/", "build/", ".next/",
-                                      "__pycache__/", ".cache/", "vendor/", "package-lock.json",
-                                      "yarn.lock", ".png", ".jpg", ".svg", ".ico", ".woff",
-                                      "InspectorBridge", "inspector-bridge"
-                                  ])]
+                                  if _is_code_file(f["path"], file_size=f.get("size", 0))]
                     project_tree_summary = _build_project_tree_summary(code_files)
                     context_text = (request.user_description or "") + " " + user_text[:2000]
                     selected_files = _fallback_file_selection(code_files, context_text, max_files=8)
                     selected_files = _ensure_balanced_selection(selected_files, code_files, 12)
+                    # اولویت فایل‌های جدید بررسی‌نشده
+                    prev_files = set(request.previously_read_files or [])
+                    if prev_files:
+                        new_files = [f for f in selected_files if f not in prev_files]
+                        old_files = [f for f in selected_files if f in prev_files]
+                        selected_files = (new_files + old_files)[:12]
                     if selected_files:
                         yield sse("progress", {"step": "reading_files", "message": f"📖 خواندن {len(selected_files)} فایل..."})
                         for fp in selected_files:
@@ -10285,17 +10306,37 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
 
             action_plan = None
             if "```" in response.content:
-                import re
-                code_blocks = re.findall(r'```[\w]*\n(.*?)```', response.content, re.DOTALL)
-                if code_blocks:
-                    action_plan = {"files": [], "commit_message": f"fix: دیباگ بصری - {(request.user_description or 'اصلاح')[:50]}"}
-                    fpm = re.findall(r'(?:فایل|file|path|مسیر)[:\s]*[`"]?([a-zA-Z0-9_./\-]+\.[a-zA-Z]+)[`"]?', response.content)
-                    for i, block in enumerate(code_blocks[:5]):
-                        action_plan["files"].append({"path": fpm[i] if i < len(fpm) else f"file_{i+1}", "content": block.strip(), "operation": "modify"})
+                # استخراج بلوک‌های JSON action_plan (روش اول - مشابه smart-chat)
+                json_match = re.search(r'```json\s*\n(.*?)\n```', response.content, re.DOTALL)
+                if json_match:
+                    try:
+                        parsed = json.loads(json_match.group(1))
+                        if parsed.get("files") and len(parsed["files"]) > 0:
+                            valid_files = [f for f in parsed["files"] if f.get("path") and f.get("content")]
+                            if valid_files:
+                                parsed["files"] = valid_files
+                                action_plan = parsed
+                    except (json.JSONDecodeError, Exception):
+                        pass
+
+                # روش دوم (فالبک): استخراج از بلوک‌های کد + نام فایل
+                if action_plan is None:
+                    code_blocks = re.findall(r'```[\w]*\n(.*?)```', response.content, re.DOTALL)
+                    if code_blocks:
+                        action_plan = {"files": [], "commit_message": f"fix: دیباگ بصری - {(request.user_description or 'اصلاح')[:50]}"}
+                        # regex بهبود یافته برای استخراج مسیر فایل‌ها
+                        fpm = re.findall(r'(?:فایل|file|path|مسیر|`)[:\s]*[`"]?([a-zA-Z0-9_./\-]+(?:\.[a-zA-Z]{1,10}))[`"]?', response.content)
+                        # حذف مسیرهای نامعتبر
+                        fpm = [p for p in fpm if '/' in p or '.' in p.split('/')[-1]]
+                        for i, block in enumerate(code_blocks[:5]):
+                            action_plan["files"].append({"path": fpm[i] if i < len(fpm) else f"file_{i+1}", "content": block.strip(), "operation": "modify"})
+                        # اگر هیچ فایلی اسم معتبر نداشت، action_plan رو حذف کن
+                        if all(f["path"].startswith("file_") for f in action_plan["files"]):
+                            action_plan = None
 
             yield sse("response", {
                 "content": response.content, "model_used": primary_model,
-                "tokens_used": getattr(response, 'usage', {}).get('total_tokens', 0) if hasattr(response, 'usage') else 0,
+                "tokens_used": getattr(response, 'tokens_used', 0) or 0,
                 "type": "visual_debug", "screenshots_count": len(request.screenshots),
                 "action_plan": action_plan, "has_action": action_plan is not None,
             })
