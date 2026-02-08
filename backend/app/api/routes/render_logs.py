@@ -4459,7 +4459,8 @@ INSPECTOR_BRIDGE_SCRIPT = '''
     return true;
   }
 
-  // Event Listeners - استفاده از window به جای document برای بالاترین اولویت capture
+  // Event Listeners - window capture phase (بالاترین اولویت ممکن)
+  // mousedown + pointerdown به عنوان فالبک برای زمانی که overlay ها click رو مصرف می‌کنند
 
   // کلیک - بالاترین لایه capture
   window.addEventListener('click', function(e) {
@@ -4469,6 +4470,22 @@ INSPECTOR_BRIDGE_SCRIPT = '''
       elementInfo: getElementInfo(e.target),
       position: getPositionPercent(e)
     });
+  }, true);
+
+  // 🆕 فالبک: mousedown و pointerdown (برای overlay هایی که click رو stop می‌کنند)
+  var lastPointerDownTime = 0;
+  window.addEventListener('pointerdown', function(e) {
+    lastPointerDownTime = Date.now();
+    // اگر 200ms بعد click نیومد، pointerdown رو ارسال کن
+    setTimeout(function() {
+      if (Date.now() - lastEventTime > 180) {
+        sendToInspector('click', {
+          target: e.target?.tagName,
+          elementInfo: getElementInfo(e.target) + ' (pointerdown)',
+          position: getPositionPercent(e)
+        });
+      }
+    }, 200);
   }, true);
 
   // اسکرول
@@ -4576,41 +4593,64 @@ INSPECTOR_BRIDGE_SCRIPT = '''
   console.debug = interceptConsole('debug', origConsoleDebug);
 
   // 🔍 MutationObserver - تشخیص لایه‌های خطا (Error Overlays)
-  // وقتی فریمورک‌ها (مثل Next.js) لایه خطا ایجاد می‌کنند، آنها را شناسایی و رصد می‌کنیم
+  var __attachedOverlays = new WeakSet();
+  function attachOverlayListeners(node) {
+    if (__attachedOverlays.has(node)) return;
+    __attachedOverlays.add(node);
+    var overlayText = (node.textContent || '').slice(0, 500);
+    sendToInspector('error-overlay', {
+      target: node.tagName,
+      elementInfo: 'لایه خطا شناسایی شد: ' + overlayText.slice(0, 200),
+      position: { xPercent: 50, yPercent: 50 },
+      level: 'error'
+    });
+    // اتصال listener ها به لایه خطا (click + pointerdown)
+    node.addEventListener('click', function(e) {
+      sendToInspector('click', {
+        target: e.target?.tagName,
+        elementInfo: getElementInfo(e.target) + ' (error overlay)',
+        position: getPositionPercent(e)
+      });
+    }, true);
+    node.addEventListener('pointerdown', function(e) {
+      sendToInspector('click', {
+        target: e.target?.tagName,
+        elementInfo: getElementInfo(e.target) + ' (overlay pointerdown)',
+        position: getPositionPercent(e)
+      });
+    }, true);
+    // اگر Shadow DOM داره، listener داخلش هم بذار
+    if (node.shadowRoot) {
+      node.shadowRoot.addEventListener('click', function(e) {
+        sendToInspector('click', {
+          target: e.target?.tagName,
+          elementInfo: getElementInfo(e.target) + ' (shadow DOM)',
+          position: { xPercent: 50, yPercent: 50 }
+        });
+      }, true);
+    }
+  }
+
+  function isOverlayElement(node) {
+    try {
+      var style = window.getComputedStyle(node);
+      var zIndex = parseInt(style.zIndex) || 0;
+      var isFixed = style.position === 'fixed' || style.position === 'absolute';
+      var isFullScreen = node.offsetWidth > window.innerWidth * 0.8 && node.offsetHeight > window.innerHeight * 0.5;
+      return isFixed && (zIndex > 1000 || isFullScreen);
+    } catch(e) { return false; }
+  }
+
   try {
     var overlayObserver = new MutationObserver(function(mutations) {
       mutations.forEach(function(mutation) {
         for (var i = 0; i < mutation.addedNodes.length; i++) {
           var node = mutation.addedNodes[i];
           if (node.nodeType !== 1) continue;
-          try {
-            var style = window.getComputedStyle(node);
-            var zIndex = parseInt(style.zIndex) || 0;
-            var isFixed = style.position === 'fixed' || style.position === 'absolute';
-            var isFullScreen = node.offsetWidth > window.innerWidth * 0.8 && node.offsetHeight > window.innerHeight * 0.5;
-            // تشخیص لایه خطا: fixed/absolute + z-index بالا + سایز بزرگ
-            if (isFixed && (zIndex > 1000 || isFullScreen)) {
-              var overlayText = (node.textContent || '').slice(0, 500);
-              sendToInspector('error-overlay', {
-                target: node.tagName,
-                elementInfo: 'لایه خطا شناسایی شد: ' + overlayText.slice(0, 200),
-                position: { xPercent: 50, yPercent: 50 },
-                level: 'error'
-              });
-              // اتصال listener کلیک به لایه خطا
-              node.addEventListener('click', function(e) {
-                sendToInspector('click', {
-                  target: e.target?.tagName,
-                  elementInfo: getElementInfo(e.target) + ' (error overlay)',
-                  position: getPositionPercent(e)
-                });
-              }, true);
-            }
-          } catch(styleErr) {}
+          if (isOverlayElement(node)) attachOverlayListeners(node);
         }
       });
     });
-    // مشاهده تغییرات DOM
     if (document.body) {
       overlayObserver.observe(document.body, { childList: true, subtree: true });
     } else {
@@ -4618,9 +4658,24 @@ INSPECTOR_BRIDGE_SCRIPT = '''
         overlayObserver.observe(document.body, { childList: true, subtree: true });
       });
     }
-  } catch(obsErr) {
-    // MutationObserver در دسترس نیست
-  }
+  } catch(obsErr) {}
+
+  // 🔁 اسکن دوره‌ای DOM برای overlay هایی که MutationObserver ممکنه از دست بده
+  setInterval(function() {
+    try {
+      var allFixed = document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]');
+      for (var i = 0; i < allFixed.length; i++) {
+        if (isOverlayElement(allFixed[i])) attachOverlayListeners(allFixed[i]);
+      }
+      // بررسی nextjs-portal و shadow roots
+      var portals = document.querySelectorAll('nextjs-portal, [id*="overlay"], [id*="error"], [class*="overlay"], [class*="error-boundary"]');
+      for (var j = 0; j < portals.length; j++) {
+        if (portals[j].shadowRoot && !__attachedOverlays.has(portals[j])) {
+          attachOverlayListeners(portals[j]);
+        }
+      }
+    } catch(e) {}
+  }, 2000);
 
   // اعلام آماده بودن
   try {
@@ -4725,6 +4780,17 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
     sendToInspector('click', { elementInfo: getElementInfo(e.target), position: getPositionPercent(e) });
   }, true);
 
+  // 🆕 فالبک pointerdown برای overlay هایی که click رو مصرف می‌کنند
+  let lastPDTime = 0;
+  window.addEventListener('pointerdown', (e) => {
+    lastPDTime = Date.now();
+    setTimeout(() => {
+      if (Date.now() - lastEventTime > 180) {
+        sendToInspector('click', { elementInfo: getElementInfo(e.target) + ' (pointerdown)', position: getPositionPercent(e) });
+      }
+    }, 200);
+  }, true);
+
   window.addEventListener('input', (e) => {
     if (e.target?.tagName === 'INPUT' || e.target?.tagName === 'TEXTAREA') {
       sendToInspector('input', { elementInfo: getElementInfo(e.target) });
@@ -4776,26 +4842,52 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
     sendToInspector('error', { elementInfo: String(reason).slice(0, 150), level: 'error' });
   });
 
-  // 🔍 MutationObserver - تشخیص لایه‌های خطا
+  // 🔍 MutationObserver + اسکن دوره‌ای - تشخیص لایه‌های خطا
+  const __attachedOverlays = new WeakSet();
+  const isOverlay = (node) => {
+    try {
+      const s = window.getComputedStyle(node);
+      const z = parseInt(s.zIndex) || 0;
+      return (s.position === 'fixed' || s.position === 'absolute') && (z > 1000 || (node.offsetWidth > window.innerWidth*0.8 && node.offsetHeight > window.innerHeight*0.5));
+    } catch(e) { return false; }
+  };
+  const attachOverlay = (node) => {
+    if (__attachedOverlays.has(node)) return;
+    __attachedOverlays.add(node);
+    sendToInspector('error-overlay', { elementInfo: 'لایه خطا: ' + (node.textContent||'').slice(0,200), level: 'error' });
+    node.addEventListener('click', (e) => {
+      sendToInspector('click', { elementInfo: getElementInfo(e.target) + ' (overlay)', position: getPositionPercent(e) });
+    }, true);
+    node.addEventListener('pointerdown', (e) => {
+      sendToInspector('click', { elementInfo: getElementInfo(e.target) + ' (overlay pointerdown)', position: getPositionPercent(e) });
+    }, true);
+    if (node.shadowRoot) {
+      node.shadowRoot.addEventListener('click', (e) => {
+        sendToInspector('click', { elementInfo: getElementInfo(e.target) + ' (shadow)', position: { xPercent: 50, yPercent: 50 } });
+      }, true);
+    }
+  };
+
   try {
     const overlayObs = new MutationObserver((mutations) => {
       mutations.forEach(m => m.addedNodes.forEach(node => {
         if (node.nodeType !== 1) return;
-        try {
-          const s = window.getComputedStyle(node);
-          const z = parseInt(s.zIndex) || 0;
-          if ((s.position === 'fixed' || s.position === 'absolute') && (z > 1000 || (node.offsetWidth > window.innerWidth*0.8 && node.offsetHeight > window.innerHeight*0.5))) {
-            sendToInspector('error-overlay', { elementInfo: 'لایه خطا: ' + (node.textContent||'').slice(0,200), level: 'error' });
-            node.addEventListener('click', (e) => {
-              sendToInspector('click', { elementInfo: getElementInfo(e.target) + ' (overlay)', position: getPositionPercent(e) });
-            }, true);
-          }
-        } catch(err) {}
+        if (isOverlay(node)) attachOverlay(node);
       }));
     });
     if (document.body) overlayObs.observe(document.body, { childList: true, subtree: true });
     else document.addEventListener('DOMContentLoaded', () => overlayObs.observe(document.body, { childList: true, subtree: true }));
   } catch(e) {}
+
+  // 🔁 اسکن دوره‌ای برای overlay های از دست رفته
+  setInterval(() => {
+    try {
+      document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"], nextjs-portal, [id*="overlay"], [id*="error"], [class*="overlay"]').forEach(el => {
+        if (isOverlay(el)) attachOverlay(el);
+        if (el.shadowRoot && !__attachedOverlays.has(el)) attachOverlay(el);
+      });
+    } catch(e) {}
+  }, 2000);
 
   connectWS();
   setInterval(() => { if (ws && wsReady) try { ws.send(JSON.stringify({ type: 'ping' })); } catch(e) {} }, 25000);
@@ -4908,6 +5000,18 @@ export default function InspectorBridge() {
     window.addEventListener("input", handleInput, true);
     window.addEventListener("scroll", handleScroll, true);
 
+    // 🆕 فالبک pointerdown
+    let lastPDTime = 0;
+    const handlePointerDown = (e) => {
+      lastPDTime = Date.now();
+      setTimeout(() => {
+        if (Date.now() - lastEventTime > 180) {
+          sendToInspector("click", { elementInfo: getElementInfo(e.target) + " (pointerdown)", position: getPositionPercent(e) });
+        }
+      }, 200);
+    };
+    window.addEventListener("pointerdown", handlePointerDown, true);
+
     // 🔵 رهگیری تمام متدهای کنسول
     let consoleLogCount = 0;
     const MAX_CONSOLE_LOGS = 200;
@@ -4950,27 +5054,53 @@ export default function InspectorBridge() {
     window.addEventListener("error", handleError);
     window.addEventListener("unhandledrejection", handleRejection);
 
-    // 🔍 MutationObserver - تشخیص لایه‌های خطا
+    // 🔍 MutationObserver + اسکن دوره‌ای - تشخیص لایه‌های خطا
+    const __attachedOverlays = new WeakSet();
+    const isOverlay = (node) => {
+      try {
+        const s = window.getComputedStyle(node);
+        const z = parseInt(s.zIndex) || 0;
+        return (s.position === "fixed" || s.position === "absolute") && (z > 1000 || (node.offsetWidth > window.innerWidth*0.8 && node.offsetHeight > window.innerHeight*0.5));
+      } catch(e) { return false; }
+    };
+    const attachOverlay = (node) => {
+      if (__attachedOverlays.has(node)) return;
+      __attachedOverlays.add(node);
+      sendToInspector("error-overlay", { elementInfo: "لایه خطا: " + (node.textContent||"").slice(0,200), level: "error" });
+      node.addEventListener("click", (e) => {
+        sendToInspector("click", { elementInfo: getElementInfo(e.target) + " (overlay)", position: getPositionPercent(e) });
+      }, true);
+      node.addEventListener("pointerdown", (e) => {
+        sendToInspector("click", { elementInfo: getElementInfo(e.target) + " (overlay pointerdown)", position: getPositionPercent(e) });
+      }, true);
+      if (node.shadowRoot) {
+        node.shadowRoot.addEventListener("click", (e) => {
+          sendToInspector("click", { elementInfo: getElementInfo(e.target) + " (shadow)", position: { xPercent: 50, yPercent: 50 } });
+        }, true);
+      }
+    };
+
     let overlayObs;
     try {
       overlayObs = new MutationObserver((mutations) => {
         mutations.forEach(m => m.addedNodes.forEach(node => {
           if (node.nodeType !== 1) return;
-          try {
-            const s = window.getComputedStyle(node);
-            const z = parseInt(s.zIndex) || 0;
-            if ((s.position === "fixed" || s.position === "absolute") && (z > 1000 || (node.offsetWidth > window.innerWidth*0.8 && node.offsetHeight > window.innerHeight*0.5))) {
-              sendToInspector("error-overlay", { elementInfo: "لایه خطا: " + (node.textContent||"").slice(0,200), level: "error" });
-              node.addEventListener("click", (e) => {
-                sendToInspector("click", { elementInfo: getElementInfo(e.target) + " (overlay)", position: getPositionPercent(e) });
-              }, true);
-            }
-          } catch(err) {}
+          if (isOverlay(node)) attachOverlay(node);
         }));
       });
       if (document.body) overlayObs.observe(document.body, { childList: true, subtree: true });
       else document.addEventListener("DOMContentLoaded", () => overlayObs.observe(document.body, { childList: true, subtree: true }));
     } catch(e) {}
+
+    // 🔁 اسکن دوره‌ای
+    const overlayScan = setInterval(() => {
+      try {
+        document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"], nextjs-portal, [id*="overlay"], [id*="error"], [class*="overlay"]').forEach(el => {
+          if (isOverlay(el)) attachOverlay(el);
+          if (el.shadowRoot && !__attachedOverlays.has(el)) attachOverlay(el);
+        });
+      } catch(e) {}
+    }, 2000);
 
     connectWS();
     const heartbeat = setInterval(() => { if (ws && wsReady) try { ws.send(JSON.stringify({ type: "ping" })); } catch(e) {} }, 25000);
@@ -4982,6 +5112,7 @@ export default function InspectorBridge() {
 
     return () => {
       window.removeEventListener("click", handleClick, true);
+      window.removeEventListener("pointerdown", handlePointerDown, true);
       window.removeEventListener("input", handleInput, true);
       window.removeEventListener("scroll", handleScroll, true);
       window.removeEventListener("error", handleError);
@@ -4989,6 +5120,7 @@ export default function InspectorBridge() {
       console.log = origLog; console.warn = origWarn; console.error = origError; console.info = origInfo; console.debug = origDebug;
       if (overlayObs) overlayObs.disconnect();
       clearInterval(heartbeat);
+      clearInterval(overlayScan);
       if (ws) { try { ws.close(); } catch(e) {} }
     };
   }, []);

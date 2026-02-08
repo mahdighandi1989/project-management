@@ -487,6 +487,7 @@ export default function ProjectDetailPage() {
   }>>([]);
   const [visualDebugSelectedModels, setVisualDebugSelectedModels] = useState<string[]>([]);
   const [visualDebugLoading, setVisualDebugLoading] = useState(false);
+  const [visualDebugPromptOpen, setVisualDebugPromptOpen] = useState(false);
 
   // 📋 لاگ‌های کنسول پروژه ایمپورت شده (تفکیک شده از پروژه اصلی)
   const [importedProjectConsoleLogs, setImportedProjectConsoleLogs] = useState<Array<{
@@ -10660,6 +10661,74 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   </div>
                 )}
 
+                {/* 📸 مودال انتخاب مدل برای دیباگ بصری */}
+                {visualDebugModelSelection && (
+                  <div className="absolute inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+                    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-md max-h-[80%] overflow-hidden" dir="rtl">
+                      <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+                        <h3 className="font-bold text-sm">📸 انتخاب مدل Vision برای دیباگ بصری</h3>
+                        <button onClick={() => setVisualDebugModelSelection(false)} className="text-gray-400 hover:text-gray-600 text-lg">&times;</button>
+                      </div>
+                      <div className="p-3 text-xs text-gray-500 bg-purple-50 dark:bg-purple-900/10 border-b border-gray-200 dark:border-gray-700">
+                        📸 {visualDebugScreenshots.length} عکس + 📋 {importedProjectConsoleLogs.length} لاگ کنسول + 🖥️ {inspectorBackendLogs.length} لاگ بکند
+                        {visualDebugDescription && <span className="block mt-1">💬 {visualDebugDescription.slice(0, 60)}...</span>}
+                      </div>
+                      <div className="p-3 max-h-[50vh] overflow-y-auto space-y-1.5">
+                        {visualDebugVisionModels.length === 0 ? (
+                          <div className="text-center py-4 text-gray-400 text-sm">در حال بارگذاری مدل‌ها...</div>
+                        ) : visualDebugVisionModels.map(model => (
+                          <label
+                            key={model.id}
+                            className={`flex items-center gap-2 p-2 rounded-lg transition-colors ${
+                              !model.enabled ? 'opacity-40 cursor-not-allowed' :
+                              visualDebugSelectedModels.includes(model.id)
+                                ? 'bg-purple-50 dark:bg-purple-900/20 border border-purple-300 dark:border-purple-700 cursor-pointer'
+                                : 'hover:bg-gray-50 dark:hover:bg-gray-750 border border-transparent cursor-pointer'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={visualDebugSelectedModels.includes(model.id)}
+                              disabled={!model.enabled}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setVisualDebugSelectedModels(prev => [...prev, model.id]);
+                                } else {
+                                  setVisualDebugSelectedModels(prev => prev.filter(id => id !== model.id));
+                                }
+                              }}
+                              className="rounded"
+                            />
+                            <div className="flex-1 min-w-0">
+                              <span className="text-xs font-medium">{model.name}</span>
+                              <span className="text-[10px] text-gray-400 mr-1">({model.provider})</span>
+                              {model.recommended && (
+                                <span className="text-[9px] bg-green-100 text-green-600 px-1 rounded mr-1">پیشنهادی</span>
+                              )}
+                              {model.supports_images && (
+                                <span className="text-[9px] bg-purple-100 text-purple-600 px-1 rounded">Vision</span>
+                              )}
+                            </div>
+                            {!model.enabled && (
+                              <span className="text-[10px] text-red-400 flex-shrink-0">غیرفعال</span>
+                            )}
+                          </label>
+                        ))}
+                      </div>
+                      <div className="p-3 border-t border-gray-200 dark:border-gray-700 flex items-center justify-between">
+                        <span className="text-[11px] text-gray-400">{visualDebugSelectedModels.length} مدل انتخاب شده</span>
+                        <button
+                          onClick={sendVisualDebug}
+                          disabled={visualDebugSelectedModels.length === 0}
+                          className="px-4 py-2 bg-purple-500 text-white text-sm rounded-lg hover:bg-purple-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        >
+                          📸 شروع دیباگ بصری
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* ورودی پیام */}
                 <div className="p-3 border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
                   {/* 🔒 نمایش وضعیت قفل عملیات */}
@@ -10707,6 +10776,84 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                       </div>
                       <div className="mt-1 text-blue-500/80 text-[10px]">
                         مدل‌ها: {inspectorActiveTask.models.join(', ')}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 📸 پنل دیباگ بصری - گالری عکس‌ها + توضیح */}
+                  {visualDebugMode && visualDebugScreenshots.length > 0 && !inspectorOpLock && (
+                    <div className="mb-2 p-2 bg-purple-50 dark:bg-purple-900/20 rounded-xl border border-purple-200 dark:border-purple-800" dir="rtl">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm">📸</span>
+                          <span className="text-xs font-bold text-purple-700 dark:text-purple-300">دیباگ بصری</span>
+                          <span className="text-[10px] text-purple-500 bg-purple-100 dark:bg-purple-900/40 px-1.5 rounded-full">{visualDebugScreenshots.length} عکس</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={takeVisualDebugScreenshot}
+                            disabled={visualDebugTakingScreenshot}
+                            className="text-[10px] text-purple-600 hover:text-purple-800 dark:text-purple-400 px-1.5 py-0.5 rounded hover:bg-purple-100 dark:hover:bg-purple-800/30 transition-colors disabled:opacity-50"
+                          >
+                            {visualDebugTakingScreenshot ? '⏳' : '📸'} عکس جدید
+                          </button>
+                          <button
+                            onClick={() => { setVisualDebugScreenshots([]); setVisualDebugMode(false); setVisualDebugDescription(''); }}
+                            className="text-[10px] text-red-500 hover:text-red-700 px-1.5 py-0.5 rounded hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                          >
+                            پاک‌سازی
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* گالری عکس‌ها */}
+                      <div className="flex gap-2 overflow-x-auto pb-2 mb-2">
+                        {visualDebugScreenshots.map((ss, idx) => (
+                          <div key={ss.id} className="relative flex-shrink-0 group">
+                            <img
+                              src={`data:image/png;base64,${ss.base64}`}
+                              alt={`عکس ${idx + 1}`}
+                              className="h-16 w-auto rounded-lg border border-purple-300 dark:border-purple-700 shadow-sm cursor-pointer hover:ring-2 hover:ring-purple-400 transition-all"
+                              onClick={() => {
+                                const win = window.open();
+                                if (win) { win.document.write(`<img src="data:image/png;base64,${ss.base64}" style="max-width:100%">`); }
+                              }}
+                            />
+                            <button
+                              onClick={() => setVisualDebugScreenshots(prev => prev.filter(s => s.id !== ss.id))}
+                              className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white rounded-full text-[8px] flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow"
+                            >
+                              ✕
+                            </button>
+                            <span className="absolute bottom-0.5 left-0.5 text-[8px] bg-black/60 text-white px-1 rounded">
+                              {idx + 1}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* ورودی توضیح */}
+                      <div className="flex gap-2 items-end">
+                        <textarea
+                          value={visualDebugDescription}
+                          onChange={(e) => setVisualDebugDescription(e.target.value)}
+                          placeholder="توضیح اختیاری درباره مشکل... (مثلاً: دکمه لاگین کار نمیکنه)"
+                          className="flex-1 text-xs bg-white dark:bg-gray-700 border border-purple-200 dark:border-purple-700 rounded-lg px-3 py-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-purple-400"
+                          rows={2}
+                        />
+                        <button
+                          onClick={startVisualDebugModelSelection}
+                          className="px-3 py-2 bg-purple-600 hover:bg-purple-700 text-white text-xs rounded-lg shadow-md transition-colors flex items-center gap-1 flex-shrink-0"
+                        >
+                          📸 ارسال برای تحلیل
+                        </button>
+                      </div>
+
+                      {/* اطلاعات جمع‌آوری شده */}
+                      <div className="flex flex-wrap gap-2 mt-2 text-[9px] text-purple-500 dark:text-purple-400">
+                        <span>📋 {importedProjectConsoleLogs.length} لاگ کنسول</span>
+                        <span>🖥️ {inspectorBackendLogs.length} لاگ بکند</span>
+                        {inspectorFrontendUrl && <span className="truncate max-w-[150px]">🔗 {inspectorFrontendUrl}</span>}
                       </div>
                     </div>
                   )}
@@ -10825,6 +10972,47 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             <span className="text-[10px] bg-green-200 dark:bg-green-800 text-green-700 dark:text-green-300 px-1.5 py-0.5 rounded-full whitespace-nowrap">همیشه فعال</span>
                           </div>
                         ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 📸 پرامپت ثابت دیباگ بصری - فقط خواندنی */}
+                  <div className={`mb-4 rounded-xl border-2 overflow-hidden transition-all duration-500 ${
+                    promptFieldsHighlighted.includes('visual_debug_prompt')
+                      ? 'border-purple-400 bg-purple-50 dark:bg-purple-900/30 shadow-lg shadow-purple-500/20 ring-2 ring-purple-400/50 animate-pulse'
+                      : 'border-purple-200 dark:border-purple-800 bg-purple-50/30 dark:bg-purple-900/5'
+                  }`}>
+                    <button
+                      onClick={() => setVisualDebugPromptOpen(!visualDebugPromptOpen)}
+                      className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-purple-50 dark:hover:bg-purple-900/20 transition-colors"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-lg">📸</span>
+                        <div className="text-right">
+                          <span className="text-sm font-bold text-purple-800 dark:text-purple-200">پرامپت دیباگ بصری</span>
+                          <span className="text-xs text-purple-600 dark:text-purple-400 mr-2">(هنگام استفاده از دیباگ بصری فعال می‌شود)</span>
+                          {promptFieldsHighlighted.includes('visual_debug_prompt') && (
+                            <span className="text-xs font-bold text-purple-600 animate-pulse mr-2">در حال استفاده</span>
+                          )}
+                        </div>
+                      </div>
+                      <span className={`text-xs transition-transform ${visualDebugPromptOpen ? 'rotate-180' : ''}`}>▼</span>
+                    </button>
+                    {visualDebugPromptOpen && (
+                      <div className="px-4 pb-3">
+                        <div className="p-3 bg-white/60 dark:bg-gray-800/40 rounded-lg text-[11px] text-gray-700 dark:text-gray-300 whitespace-pre-wrap leading-relaxed font-mono max-h-[200px] overflow-auto">
+{`## دیباگ بصری پروژه
+
+شما یک متخصص دیباگ بصری هستید. اطلاعات زیر در اختیار شما قرار گرفته:
+1. عکس‌های صفحه: اسکرین‌شات‌هایی از صفحه فرانت‌اند پروژه
+2. لاگ‌های کنسول: لاگ‌های کنسول مرورگر مربوط به پروژه ایمپورت شده
+3. لاگ‌های بک‌اند: لاگ‌های سرور/بک‌اند پروژه
+4. آدرس‌های مرتبط: URL صفحات و endpoint های مرتبط
+5. توضیح کاربر: (اختیاری) توضیح کاربر درباره مشکل
+
+وظیفه: بررسی عکس‌ها، تحلیل لاگ‌ها، یافتن ارتباط خطاها، شناسایی فایل/خط مشکل‌دار، ارائه راه‌حل عملی`}
+                        </div>
+                        <p className="text-[10px] text-purple-400 mt-2">این پرامپت به صورت خودکار هنگام دیباگ بصری به مدل ارسال می‌شود و قابل ویرایش نیست.</p>
                       </div>
                     )}
                   </div>
