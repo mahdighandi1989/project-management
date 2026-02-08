@@ -4744,6 +4744,17 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
 
   console.log('🌉 Inspector Bridge: Active (WebSocket mode)');
 
+  // Debounce
+  const DEBOUNCE_MS = 100;
+  let lastEventTime = 0;
+  let messagesSent = 0;
+  const shouldSend = () => {
+    const now = Date.now();
+    if (now - lastEventTime < DEBOUNCE_MS) return false;
+    lastEventTime = now;
+    return true;
+  };
+
   // اتصال WebSocket
   const connectWS = () => {
     if (!WS_URL || WS_URL === '__BRIDGE_WS_URL__') return;
@@ -4798,9 +4809,19 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
 
   const getElementInfo = (el) => {
     if (!el) return '';
-    const text = (el.innerText || el.value || '').trim().slice(0, 30);
+    const text = (el.innerText || el.value || '').trim().slice(0, 50);
     const tag = el.tagName?.toLowerCase() || '';
-    return text ? `${tag} "${text}"` : tag;
+    const id = el.id ? '#' + el.id : '';
+    const cls = el.className && typeof el.className === 'string' ? '.' + el.className.split(' ')[0] : '';
+    const tagLabels = {
+      'button': 'دکمه', 'a': 'لینک', 'input': 'فیلد ورودی', 'textarea': 'فیلد متن',
+      'select': 'منوی انتخاب', 'img': 'تصویر', 'form': 'فرم', 'div': 'بخش', 'span': 'متن',
+      'p': 'پاراگراف', 'h1': 'عنوان اصلی', 'h2': 'عنوان', 'h3': 'عنوان', 'nav': 'منوی ناوبری',
+      'header': 'سربرگ', 'footer': 'پاورقی', 'li': 'آیتم لیست', 'table': 'جدول', 'video': 'ویدیو'
+    };
+    const typeLabel = tagLabels[tag] || tag;
+    if (text) return typeLabel + ' "' + text + '"';
+    return typeLabel + (id || cls || '');
   };
 
   const getPositionPercent = (e) => ({
@@ -4810,13 +4831,12 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
 
   // Event Listeners - window capture phase (بالاترین اولویت)
   window.addEventListener('click', (e) => {
+    if (!shouldSend()) return;
     sendToInspector('click', { elementInfo: getElementInfo(e.target), position: getPositionPercent(e) });
   }, true);
 
   // 🆕 فالبک pointerdown برای overlay هایی که click رو مصرف می‌کنند
-  let lastPDTime = 0;
   window.addEventListener('pointerdown', (e) => {
-    lastPDTime = Date.now();
     setTimeout(() => {
       if (Date.now() - lastEventTime > 180) {
         sendToInspector('click', { elementInfo: getElementInfo(e.target) + ' (pointerdown)', position: getPositionPercent(e) });
@@ -4825,15 +4845,23 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
   }, true);
 
   window.addEventListener('input', (e) => {
+    if (!shouldSend()) return;
     if (e.target?.tagName === 'INPUT' || e.target?.tagName === 'TEXTAREA') {
       sendToInspector('input', { elementInfo: getElementInfo(e.target) });
+    }
+  }, true);
+
+  window.addEventListener('focus', (e) => {
+    if (!shouldSend()) return;
+    if (e.target && e.target !== document && e.target !== document.body) {
+      sendToInspector('focus', { elementInfo: getElementInfo(e.target) });
     }
   }, true);
 
   let scrollTimeout;
   window.addEventListener('scroll', () => {
     clearTimeout(scrollTimeout);
-    scrollTimeout = setTimeout(() => { sendToInspector('scroll', { elementInfo: 'page' }); }, 200);
+    scrollTimeout = setTimeout(() => { sendToInspector('scroll', { elementInfo: 'صفحه' }); }, 200);
   }, true);
 
   // 🔵 رهگیری تمام متدهای کنسول
@@ -4952,6 +4980,17 @@ export default function InspectorBridge() {
 
     console.log("🌉 Inspector Bridge: Active (WebSocket mode)");
 
+    // Debounce
+    const DEBOUNCE_MS = 100;
+    let lastEventTime = 0;
+    let messagesSent = 0;
+    const shouldSend = () => {
+      const now = Date.now();
+      if (now - lastEventTime < DEBOUNCE_MS) return false;
+      lastEventTime = now;
+      return true;
+    };
+
     // 🌐 اتصال WebSocket
     const connectWS = () => {
       if (!WS_URL || WS_URL === "__BRIDGE_WS_URL__") return;
@@ -5006,9 +5045,19 @@ export default function InspectorBridge() {
 
     const getElementInfo = (el) => {
       if (!el) return "";
-      const text = (el.innerText || el.value || "").trim().slice(0, 30);
+      const text = (el.innerText || el.value || "").trim().slice(0, 50);
       const tag = el.tagName?.toLowerCase() || "";
-      return text ? `${tag} "${text}"` : tag;
+      const id = el.id ? "#" + el.id : "";
+      const cls = el.className && typeof el.className === "string" ? "." + el.className.split(" ")[0] : "";
+      const tagLabels = {
+        "button": "دکمه", "a": "لینک", "input": "فیلد ورودی", "textarea": "فیلد متن",
+        "select": "منوی انتخاب", "img": "تصویر", "form": "فرم", "div": "بخش", "span": "متن",
+        "p": "پاراگراف", "h1": "عنوان اصلی", "h2": "عنوان", "h3": "عنوان", "nav": "منوی ناوبری",
+        "header": "سربرگ", "footer": "پاورقی", "li": "آیتم لیست", "table": "جدول", "video": "ویدیو"
+      };
+      const typeLabel = tagLabels[tag] || tag;
+      if (text) return typeLabel + " \"" + text + "\"";
+      return typeLabel + (id || cls || "");
     };
 
     const getPositionPercent = (e) => ({
@@ -5017,26 +5066,35 @@ export default function InspectorBridge() {
     });
 
     // window capture phase (بالاترین اولویت)
-    const handleClick = (e) => { sendToInspector("click", { elementInfo: getElementInfo(e.target), position: getPositionPercent(e) }); };
+    const handleClick = (e) => {
+      if (!shouldSend()) return;
+      sendToInspector("click", { elementInfo: getElementInfo(e.target), position: getPositionPercent(e) });
+    };
     const handleInput = (e) => {
+      if (!shouldSend()) return;
       if (e.target?.tagName === "INPUT" || e.target?.tagName === "TEXTAREA") {
         sendToInspector("input", { elementInfo: getElementInfo(e.target) });
+      }
+    };
+    const handleFocus = (e) => {
+      if (!shouldSend()) return;
+      if (e.target && e.target !== document && e.target !== document.body) {
+        sendToInspector("focus", { elementInfo: getElementInfo(e.target) });
       }
     };
     let scrollTimeout;
     const handleScroll = () => {
       clearTimeout(scrollTimeout);
-      scrollTimeout = setTimeout(() => { sendToInspector("scroll", { elementInfo: "page" }); }, 200);
+      scrollTimeout = setTimeout(() => { sendToInspector("scroll", { elementInfo: "صفحه" }); }, 200);
     };
 
     window.addEventListener("click", handleClick, true);
     window.addEventListener("input", handleInput, true);
     window.addEventListener("scroll", handleScroll, true);
+    window.addEventListener("focus", handleFocus, true);
 
     // 🆕 فالبک pointerdown
-    let lastPDTime = 0;
     const handlePointerDown = (e) => {
-      lastPDTime = Date.now();
       setTimeout(() => {
         if (Date.now() - lastEventTime > 180) {
           sendToInspector("click", { elementInfo: getElementInfo(e.target) + " (pointerdown)", position: getPositionPercent(e) });
@@ -5148,6 +5206,7 @@ export default function InspectorBridge() {
       window.removeEventListener("pointerdown", handlePointerDown, true);
       window.removeEventListener("input", handleInput, true);
       window.removeEventListener("scroll", handleScroll, true);
+      window.removeEventListener("focus", handleFocus, true);
       window.removeEventListener("error", handleError);
       window.removeEventListener("unhandledrejection", handleRejection);
       console.log = origLog; console.warn = origWarn; console.error = origError; console.info = origInfo; console.debug = origDebug;
@@ -5343,9 +5402,15 @@ async def inject_bridge_script(
                             if 'next' in deps:
                                 detected_framework = 'nextjs'
                                 entry_candidates = [
-                                    'pages/_app.tsx', 'pages/_app.js', 'pages/_app.jsx',
-                                    'src/pages/_app.tsx', 'src/pages/_app.js',
-                                    'app/layout.tsx', 'app/layout.js', 'src/app/layout.tsx', 'src/app/layout.js'
+                                    # App Router (layout.tsx is the root layout)
+                                    'app/layout.tsx', 'app/layout.jsx', 'app/layout.js',
+                                    'src/app/layout.tsx', 'src/app/layout.jsx', 'src/app/layout.js',
+                                    # Pages Router (_app is the root wrapper)
+                                    'pages/_app.tsx', 'pages/_app.jsx', 'pages/_app.js',
+                                    'src/pages/_app.tsx', 'src/pages/_app.jsx', 'src/pages/_app.js',
+                                    # _document for HTML-level injection
+                                    'pages/_document.tsx', 'pages/_document.jsx', 'pages/_document.js',
+                                    'src/pages/_document.tsx', 'src/pages/_document.js',
                                 ]
                             elif 'nuxt' in deps:
                                 detected_framework = 'nuxt'
@@ -5509,8 +5574,10 @@ async def inject_bridge_script(
                                             if 'next' in deps2:
                                                 detected_framework = 'nextjs'
                                                 entry_candidates = [
-                                                    f'{pkg_folder}pages/_app.tsx', f'{pkg_folder}pages/_app.js',
-                                                    f'{pkg_folder}app/layout.tsx', f'{pkg_folder}src/app/layout.tsx'
+                                                    f'{pkg_folder}app/layout.tsx', f'{pkg_folder}app/layout.jsx', f'{pkg_folder}app/layout.js',
+                                                    f'{pkg_folder}src/app/layout.tsx', f'{pkg_folder}src/app/layout.jsx',
+                                                    f'{pkg_folder}pages/_app.tsx', f'{pkg_folder}pages/_app.jsx', f'{pkg_folder}pages/_app.js',
+                                                    f'{pkg_folder}src/pages/_app.tsx', f'{pkg_folder}src/pages/_app.js',
                                                 ]
                                             elif 'react' in deps2 or 'react-dom' in deps2:
                                                 detected_framework = 'react'
@@ -5662,7 +5729,7 @@ async def inject_bridge_script(
 
                             # الگوهای فایل بر اساس فریم‌ورک
                             if detected_framework == 'nextjs':
-                                patterns = ['_app.tsx', '_app.jsx', '_app.js', 'layout.tsx', 'layout.jsx', 'layout.js']
+                                patterns = ['layout.tsx', 'layout.jsx', 'layout.js', '_app.tsx', '_app.jsx', '_app.js', '_document.tsx', '_document.jsx', '_document.js', 'page.tsx', 'page.jsx', 'page.js']
                             elif detected_framework in ['react', 'vue', 'svelte']:
                                 patterns = ['main.tsx', 'main.jsx', 'main.js', 'App.tsx', 'App.jsx', 'App.js', 'index.tsx', 'index.jsx']
                             else:
@@ -8435,6 +8502,7 @@ class VisualDebugRequest(BaseModel):
     project_id: str
     model_ids: List[str]  # مدل‌های انتخاب شده (باید vision داشته باشند)
     screenshots: List[str]  # base64 تصاویر
+    screenshot_packs: Optional[List[dict]] = None  # 📦 [{index, pageUrl, timestamp, console_logs, backend_logs, related_urls}]
     console_logs: Optional[List[dict]] = None  # [{level, message, timestamp, source}]
     backend_logs: Optional[List[dict]] = None  # [{level, message, timestamp, service_id}]
     related_urls: Optional[List[str]] = None  # آدرس‌های مرتبط
@@ -10143,22 +10211,24 @@ VISUAL_DEBUG_SYSTEM_PROMPT = """## 🔍 دیباگ بصری پروژه
 
 شما یک متخصص دیباگ بصری هستید. اطلاعات زیر در اختیار شما قرار گرفته:
 1. **عکس‌های صفحه**: اسکرین‌شات‌هایی از صفحه فرانت‌اند پروژه
-2. **لاگ‌های کنسول**: لاگ‌های کنسول مرورگر مربوط به پروژه ایمپورت شده (تفکیک شده از پروژه اصلی)
-3. **لاگ‌های بک‌اند**: لاگ‌های سرور/بک‌اند پروژه
-4. **آدرس‌های مرتبط**: URL صفحات و endpoint های مرتبط
-5. **توضیح کاربر**: (اختیاری) توضیح کاربر درباره مشکل
+2. **لاگ‌ها و آدرس‌ها به صورت پک مجزا**: هر عکس یک **پک (Pack)** دارد شامل لاگ‌های کنسول، لاگ‌های بک‌اند، و آدرس‌های مرتبط که دقیقاً در لحظه گرفتن آن عکس ثبت شده‌اند. این تفکیک مهم است.
+3. **توضیح کاربر**: (اختیاری) توضیح کاربر درباره مشکل
+
+## ساختار اطلاعات:
+- هر عکس زیرمجموعه‌ای از لاگ‌ها و آدرس‌های مرتبط با **همان لحظه** را دارد
+- لاگ‌هایی که زیر «عکس 1» نوشته شده‌اند فقط مربوط به عکس 1 هستند (نه عکس 2)
+- آدرس‌های هر عکس نشان‌دهنده endpoint ها و صفحات مرتبط در آن لحظه هستند
 
 ## وظیفه شما:
-- محتوای عکس‌ها را با دقت بررسی کنید (خطاهای نمایشی، layout شکسته، المان‌های غایب، پیام‌های خطا)
-- لاگ‌های کنسول و بک‌اند را تحلیل کنید
-- ارتباط بین خطاهای بصری و لاگ‌ها را پیدا کنید
+- محتوای هر عکس را جداگانه بررسی کنید و لاگ‌های مربوط به همان عکس را تحلیل کنید
+- ارتباط بین خطاهای بصری هر عکس و لاگ‌های مربوط به آن را پیدا کنید
 - دقیقاً مشخص کنید مشکل در کدام فایل و خط کدام کد است
 - راه‌حل عملی و کد اصلاح‌شده ارائه دهید
 
 ## قالب پاسخ:
 1. **خلاصه مشکل**: توضیح کوتاه مشکل شناسایی شده
-2. **تحلیل بصری**: چه چیزی در عکس‌ها اشتباه دیده می‌شود
-3. **تحلیل لاگ‌ها**: ارتباط خطاها با مشکل بصری
+2. **تحلیل بصری**: چه چیزی در هر عکس اشتباه دیده می‌شود (با ذکر شماره عکس)
+3. **تحلیل لاگ‌ها**: ارتباط خطاها با مشکل بصری (با ذکر شماره عکس مرتبط)
 4. **فایل‌های مشکل‌دار**: لیست فایل‌هایی که باید اصلاح شوند
 5. **راه‌حل**: کد اصلاح‌شده برای هر فایل
 
@@ -10222,23 +10292,58 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
         yield sse("progress", {"step": "starting", "message": f"📸 شروع دیباگ بصری با {len(request.screenshots)} عکس..."})
         yield sse("fields_in_use", {"field_ids": ["visual_debug_prompt"], "count": 1, "message": "📋 پرامپت دیباگ بصری در حال استفاده"})
 
-        # ساخت پرامپت
+        # ساخت پرامپت - اگر screenshot_packs موجود است، هر عکس را با لاگ‌های مربوطه ارسال کن
         user_parts = [f"## 📸 عکس‌های صفحه ({len(request.screenshots)} عکس)"]
-        for i in range(len(request.screenshots)):
-            user_parts.append(f"### عکس {i+1}: [تصویر ضمیمه شده]")
 
-        if request.console_logs:
-            user_parts.append(f"\n## 📋 لاگ‌های کنسول ({len(request.console_logs)} لاگ)")
-            for log in request.console_logs[-50:]:
-                user_parts.append(f"[{log.get('level','log').upper()}] {log.get('message','')[:300]}")
+        if request.screenshot_packs and len(request.screenshot_packs) == len(request.screenshots):
+            # 📦 حالت Pack: هر عکس با لاگ‌ها و آدرس‌های مربوط به خودش
+            for i, pack in enumerate(request.screenshot_packs):
+                user_parts.append(f"\n### 📸 عکس {i+1} [تصویر ضمیمه شده]")
+                pack_url = pack.get('pageUrl', '')
+                if pack_url:
+                    user_parts.append(f"🔗 آدرس صفحه: {pack_url}")
+                pack_ts = pack.get('timestamp', '')
+                if pack_ts:
+                    user_parts.append(f"⏰ زمان عکس‌برداری: {pack_ts}")
 
-        if request.backend_logs:
-            user_parts.append(f"\n## 🖥️ لاگ‌های بک‌اند ({len(request.backend_logs)} لاگ)")
-            for log in request.backend_logs[-30:]:
-                user_parts.append(f"[{log.get('level','info').upper()}] {log.get('message','')[:300]}")
+                # لاگ‌های کنسول مربوط به این عکس
+                pack_console = pack.get('console_logs', [])
+                if pack_console:
+                    user_parts.append(f"\n📋 لاگ‌های کنسول مرتبط با عکس {i+1} ({len(pack_console)} لاگ):")
+                    for log in pack_console[-30:]:
+                        user_parts.append(f"  [{log.get('level','log').upper()}] {log.get('message','')[:300]}")
+
+                # لاگ‌های بک‌اند مربوط به این عکس
+                pack_backend = pack.get('backend_logs', [])
+                if pack_backend:
+                    user_parts.append(f"\n🖥️ لاگ‌های بک‌اند مرتبط با عکس {i+1} ({len(pack_backend)} لاگ):")
+                    for log in pack_backend[-20:]:
+                        user_parts.append(f"  [{log.get('level','info').upper()}] {log.get('message','')[:300]}")
+
+                # آدرس‌های مرتبط با این عکس
+                pack_urls = pack.get('related_urls', [])
+                if pack_urls:
+                    user_parts.append(f"\n🔗 آدرس‌های مرتبط با عکس {i+1}:")
+                    for url in pack_urls:
+                        user_parts.append(f"  - {url}")
+
+        else:
+            # حالت قدیمی (بدون pack): عکس‌ها و لاگ‌ها جدا
+            for i in range(len(request.screenshots)):
+                user_parts.append(f"### عکس {i+1}: [تصویر ضمیمه شده]")
+
+            if request.console_logs:
+                user_parts.append(f"\n## 📋 لاگ‌های کنسول ({len(request.console_logs)} لاگ)")
+                for log in request.console_logs[-50:]:
+                    user_parts.append(f"[{log.get('level','log').upper()}] {log.get('message','')[:300]}")
+
+            if request.backend_logs:
+                user_parts.append(f"\n## 🖥️ لاگ‌های بک‌اند ({len(request.backend_logs)} لاگ)")
+                for log in request.backend_logs[-30:]:
+                    user_parts.append(f"[{log.get('level','info').upper()}] {log.get('message','')[:300]}")
 
         if request.related_urls:
-            user_parts.append(f"\n## 🔗 آدرس‌های مرتبط")
+            user_parts.append(f"\n## 🔗 آدرس‌های مرتبط (همه عکس‌ها)")
             for url in request.related_urls:
                 user_parts.append(f"- {url}")
 
