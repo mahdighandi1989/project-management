@@ -4,6 +4,8 @@ import Layout from '@/components/Layout';
 import { HelpProvider, HelpSystem } from '@/components/help';
 import '@/styles/globals.css';
 
+import InspectorBridge from "./InspectorBridge";
+
 export const metadata: Metadata = {
   title: 'سیستم مناظره و همکاری AI',
   description: 'سیستم مناظره و همکاری هوش مصنوعی + مدیریت پروژه',
@@ -33,7 +35,8 @@ export default function RootLayout({
       </head>
       <body>
         <HelpProvider>
-          <Layout>{children}</Layout>
+          <Layout>{<InspectorBridge />}
+        {children}</Layout>
           <HelpSystem />
         </HelpProvider>
       </body>
