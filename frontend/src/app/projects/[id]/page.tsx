@@ -10979,7 +10979,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   <div className="absolute inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
                     <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-md max-h-[80%] overflow-hidden" dir="rtl">
                       <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
-                        <h3 className="font-bold text-sm">📸 انتخاب مدل Vision برای دیباگ بصری</h3>
+                        <h3 className="font-bold text-sm">🔍 انتخاب مدل Vision — بازرس بصری هوشمند</h3>
                         <button onClick={() => setVisualDebugModelSelection(false)} className="text-gray-400 hover:text-gray-600 text-lg">&times;</button>
                       </div>
                       <div className="p-3 text-xs text-gray-500 bg-purple-50 dark:bg-purple-900/10 border-b border-gray-200 dark:border-gray-700">
@@ -11042,7 +11042,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           disabled={visualDebugSelectedModels.length === 0}
                           className="px-4 py-2 bg-purple-500 text-white text-sm rounded-lg hover:bg-purple-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                         >
-                          📸 شروع دیباگ بصری
+                          🔍 شروع تحلیل هوشمند
                         </button>
                       </div>
                     </div>
@@ -11320,8 +11320,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                       <div className="flex items-center gap-2">
                         <span className="text-lg">📸</span>
                         <div className="text-right">
-                          <span className="text-sm font-bold text-purple-800 dark:text-purple-200">پرامپت دیباگ بصری</span>
-                          <span className="text-xs text-purple-600 dark:text-purple-400 mr-2">(هنگام استفاده از دیباگ بصری فعال می‌شود)</span>
+                          <span className="text-sm font-bold text-purple-800 dark:text-purple-200">پرامپت بازرس بصری هوشمند</span>
+                          <span className="text-xs text-purple-600 dark:text-purple-400 mr-2">(رفع باگ + ایجاد قابلیت + تغییر ظاهر — با تحلیل عکس و کد)</span>
                           {promptFieldsHighlighted.includes('visual_debug_prompt') && (
                             <span className="text-xs font-bold text-purple-600 animate-pulse mr-2">در حال استفاده</span>
                           )}
@@ -11332,18 +11332,24 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     {visualDebugPromptOpen && (
                       <div className="px-4 pb-3">
                         <div className="p-3 bg-white/60 dark:bg-gray-800/40 rounded-lg text-[11px] text-gray-700 dark:text-gray-300 whitespace-pre-wrap leading-relaxed font-mono max-h-[200px] overflow-auto">
-{`## دیباگ بصری پروژه
+{`## 🔍 بازرس بصری هوشمند پروژه
 
-شما یک متخصص دیباگ بصری هستید. اطلاعات زیر در اختیار شما قرار گرفته:
-1. عکس‌های صفحه: اسکرین‌شات‌هایی از صفحه فرانت‌اند پروژه
-2. لاگ‌های کنسول: لاگ‌های کنسول مرورگر مربوط به پروژه ایمپورت شده
-3. لاگ‌های بک‌اند: لاگ‌های سرور/بک‌اند پروژه
-4. آدرس‌های مرتبط: URL صفحات و endpoint های مرتبط
-5. توضیح کاربر: (اختیاری) توضیح کاربر درباره مشکل
+مهندس ارشد نرم‌افزار با تسلط بر فرانت‌اند و بکند. اطلاعات دریافتی:
 
-وظیفه: بررسی عکس‌ها، تحلیل لاگ‌ها، یافتن ارتباط خطاها، شناسایی فایل/خط مشکل‌دار، ارائه راه‌حل عملی`}
+📸 عکس‌های صفحه — ساختار UI، المان‌ها، وضعیت فعلی
+📦 پک لاگ هر عکس — کنسول، بکند، URL، مسیرهای API
+📂 کد فایل‌ها — فرانت و بکند مرتبط
+🗂️ ساختار پروژه — درخت فایل‌ها
+
+🎯 انواع درخواست:
+  🐛 رفع باگ → ردیابی ریشه‌ای خطا از لاگ‌ها و API paths
+  ✨ قابلیت جدید → تحلیل ساختار فعلی + پیاده‌سازی کامل
+  🎨 تغییر ظاهری → بررسی عکس + اصلاح CSS/JSX
+  🔧 بهبود/ریفکتور → حفظ عملکرد + کد بهتر
+
+💡 روش: ابتدا عکس‌ها و لاگ‌ها → سپس کد فعلی → تحلیل درخواست → پیاده‌سازی کامل با action_plan`}
                         </div>
-                        <p className="text-[10px] text-purple-400 mt-2">این پرامپت به صورت خودکار هنگام دیباگ بصری به مدل ارسال می‌شود و قابل ویرایش نیست.</p>
+                        <p className="text-[10px] text-purple-400 mt-2">این پرامپت هنگام ارسال عکس به مدل Vision فعال می‌شود — پشتیبانی از رفع باگ، ایجاد قابلیت جدید، تغییر ظاهر و تحلیل</p>
                       </div>
                     )}
                   </div>
