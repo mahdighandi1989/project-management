@@ -368,16 +368,18 @@ export const projectDetailHelp: PageHelp = {
     {
       id: 'tab-inspector',
       title: 'تب بازرس ویژه',
-      description: 'ابزار پیشرفته برای بازرسی و تحلیل عمیق پروژه. شامل اسکرین پیش‌نمایش بزرگ (840px)، چت هوشمند با انتخاب خودکار مدل، دسترسی به GitHub و ردیابی اقدامات کاربر با Bridge Script.',
+      description: 'ابزار پیشرفته برای بازرسی و تحلیل عمیق پروژه. شامل پیش‌نمایش زنده در iframe، چت هوشمند (Smart-Chat) با طبقه‌بندی خودکار پیام، عکس‌برداری بصری (Visual Debug)، تشخیص overlay، مدیریت فیلدهای پرامپت، و سیستم تایید پیام.',
       type: 'tab',
       tips: [
-        '🔄 رویکرد جدید: Bridge Script برای ردیابی اقدامات کاربر',
-        '✅ تشخیص خودکار فریم‌ورک: Next.js (App/Pages Router)، React، Vue، Angular',
-        '✅ تزریق اسکریپت در فایل ورودی پروژه',
-        '⚠️ مشکل فعلی: Cross-origin policy برای postMessage',
-        '🆕 انتخاب خودکار مدل: مدل‌ها بر اساس نوع کار انتخاب می‌شوند',
-        '🆕 همکاری چند مدل: مدل‌ها از کار همدیگر آگاه هستند',
-        '🆕 دسترسی به GitHub برای خواندن و ویرایش فایل‌ها',
+        '✅ WebSocket Bridge Hub: اتصال بدون محدودیت cross-origin',
+        '✅ Smart-Chat: طبقه‌بندی خودکار پیام (QUESTION/ERROR_LOG/ACTION)',
+        '✅ Visual Debug: عکس‌برداری + تحلیل بصری با مدل‌های Vision',
+        '✅ تشخیص overlay: MutationObserver + pointerdown fallback',
+        '✅ Console Interception: ثبت کامل log/warn/error/info/debug',
+        '✅ مدیریت فیلدهای پرامپت: دستورات، حافظه، آموزش',
+        '✅ Session Persistence: ذخیره و بارگذاری تاریخچه چت',
+        '✅ AI Investigation: بررسی خطا + اصلاح خودکار + Apply Fix',
+        '✅ Reply-to: پاسخ به پیام خاص با مدل اصلی',
         'URL واقعی سرویس از Render API دریافت می‌شود',
         'برای پروژه‌های بدون فرانت‌اند هشدار مناسب نمایش می‌دهد'
       ],
@@ -385,28 +387,35 @@ export const projectDetailHelp: PageHelp = {
     {
       id: 'inspector-screen',
       title: 'اسکرین پیش‌نمایش',
-      description: 'نمایشگر افقی بزرگ (840px عرض) با نسبت 1.82:1 برای پیش‌نمایش زنده پروژه.',
+      description: 'نمایشگر افقی بزرگ (840px عرض) با نسبت 1.82:1 برای پیش‌نمایش زنده پروژه. Bridge Script در پروژه تزریق شده و از طریق WebSocket رویدادها را گزارش می‌دهد.',
       type: 'panel',
       tips: [
         'فرانت‌اند در iframe لود می‌شود',
         'لاگ‌های بک‌اند با 30% شفافیت در پس‌زمینه',
-        '🔄 Bridge Script برای ردیابی کلیک‌ها و ناوبری کاربر',
+        '✅ Bridge Script از طریق WebSocket اطلاعات را ارسال می‌کند',
+        '✅ تشخیص خودکار overlay و خطاهای بصری',
+        '✅ Console Interception: تمام لاگ‌های console ثبت می‌شود',
+        '✅ pointerdown fallback: کلیک حتی اگر overlay مانع شود',
         'URL واقعی از Render API دریافت می‌شود'
       ],
     },
     {
       id: 'inspector-chat',
-      title: 'چت دستیار بازرس هوشمند',
-      description: 'پنل چت هوشمند با انتخاب خودکار مدل، همکاری چند AI، دسترسی به GitHub و اجرای کارهای پیچیده.',
+      title: 'چت دستیار بازرس هوشمند (Smart-Chat)',
+      description: 'پنل چت هوشمند با طبقه‌بندی خودکار پیام (سوال/خطا/اقدام)، انتخاب خودکار فایل‌ها از GitHub، تایید خودکار با لاگ بک‌اند، و قابلیت Reply-to.',
       type: 'panel',
       tips: [
-        '🆕 انتخاب خودکار مدل بر اساس نوع درخواست',
-        '🆕 همکاری چند مدل: مدل‌ها از کار همدیگر آگاه هستند',
-        '🆕 دسترسی به GitHub برای خواندن و ویرایش فایل‌ها',
-        '🆕 نمایش لحظه‌ای اقدامات در حال انجام',
-        'مدل‌ها به لاگ‌های بک‌اند دسترسی دارند',
-        'مدل‌ها به URL فرانت‌اند دسترسی دارند',
-        'مدل‌ها به فایل‌های پروژه دسترسی دارند',
+        '✅ Smart-Chat: طبقه‌بندی خودکار پیام (QUESTION=5فایل, ERROR_LOG=10فایل, ACTION=15فایل)',
+        '✅ خلاصه ساختار پروژه در همه پرامپت‌ها (project tree summary)',
+        '✅ انتخاب متوازن فایل از دایرکتوری‌های مختلف',
+        '✅ ردیابی تاریخچه فایل‌های خوانده شده (جلوگیری از تکرار)',
+        '✅ Reply-to: پاسخ به پیام خاص با مدل اصلی',
+        '✅ SSE Streaming: نمایش لحظه‌ای پاسخ‌ها',
+        '✅ Heartbeat: جلوگیری از قطعی اتصال (QUIC timeout)',
+        '✅ تایید خودکار پیام: اسکن لاگ بک‌اند → ✓ یا ✕',
+        '✅ تفکیک لاگ console از لاگ بک‌اند',
+        '✅ AI Investigation: بررسی خطا + اصلاح + Apply Fix',
+        '✅ دکمه‌های سریع: تحلیل خطاها، بررسی امنیت، یافتن باگ',
         'پاسخ‌ها با نام مدل نمایش داده می‌شوند'
       ],
     },
@@ -417,25 +426,27 @@ export const projectDetailHelp: PageHelp = {
       type: 'select',
       tips: [
         'کلیک روی چرخ‌دنده در هدر چت',
-        '🆕 چک‌باکس انتخاب خودکار: مدل‌ها بر اساس نوع کار انتخاب می‌شوند',
-        '🆕 چک‌باکس همکاری چند مدل: مدل‌ها از کار همدیگر آگاه هستند',
-        '🆕 نشانگر وضعیت GitHub: سبز = متصل',
+        '✅ انتخاب خودکار: مدل بر اساس نوع پیام (QUESTION/ERROR/ACTION) انتخاب می‌شود',
+        '✅ همکاری چند مدل: مدل‌ها از کار همدیگر آگاه هستند',
+        '✅ نشانگر وضعیت GitHub: سبز = متصل',
         'در حالت انتخاب دستی: کلیک روی مدل‌ها',
-        'مدل‌های غیرفعال در صورت نیاز خودکار فعال می‌شوند'
+        'مدل‌های غیرفعال در صورت نیاز خودکار فعال می‌شوند',
+        'برای Visual Debug: مدل‌های Vision به صورت خودکار انتخاب می‌شوند'
       ],
     },
     {
       id: 'inspector-ai-context',
       title: 'Context مدل‌های AI',
-      description: 'داده‌های کامل پروژه که به مدل‌های AI ارسال می‌شوند برای تحلیل و اجرای کارها.',
+      description: 'داده‌های کامل پروژه که به مدل‌های AI ارسال می‌شوند. بسته به نوع پیام، تعداد فایل و عمق context متفاوت است.',
       type: 'section',
       tips: [
-        'لاگ‌های بک‌اند (30 آخرین لاگ)',
-        'URL فرانت‌اند',
-        'فایل‌های پروژه (تا 5 فایل)',
-        '🆕 دسترسی به GitHub: خواندن و ویرایش فایل‌ها',
-        '🆕 اقدامات سایر مدل‌ها (در حالت همکاری)',
-        '🆕 بدون محدودیت توکن (طبق تنظیمات)',
+        '✅ QUESTION: تا 5 فایل + خلاصه ساختار پروژه',
+        '✅ ERROR_LOG: تا 10 فایل + لاگ‌های بک‌اند + console errors',
+        '✅ ACTION: تا 15 فایل + لاگ + عکس (در حالت Visual Debug)',
+        '✅ انتخاب متوازن فایل از دایرکتوری‌های مختلف',
+        '✅ ردیابی فایل‌های قبلاً خوانده شده (بدون تکرار)',
+        '✅ محاسبه خودکار max_input_chars بر اساس context window مدل',
+        '✅ فیلدهای پرامپت (دستورات/حافظه/آموزش) در صورت فعال بودن',
         'اطلاعات پروژه از دیتابیس'
       ],
     },
@@ -480,7 +491,7 @@ export const projectDetailHelp: PageHelp = {
     },
     {
       id: 'inspector-auto-select',
-      title: '🆕 انتخاب خودکار مدل',
+      title: 'انتخاب خودکار مدل',
       description: 'با فعال بودن این چک‌باکس، مدل‌های AI بر اساس نوع درخواست شما به صورت خودکار انتخاب می‌شوند.',
       type: 'checkbox',
       tips: [
@@ -488,12 +499,12 @@ export const projectDetailHelp: PageHelp = {
         'تحلیل خودکار متن درخواست برای تشخیص نوع کار',
         'مدل‌های مناسب بر اساس توانایی‌هایشان انتخاب می‌شوند',
         'مدل‌های غیرفعال در صورت نیاز موقتاً فعال می‌شوند',
-        'پس از اتمام کار، تنظیمات به حالت قبل برمی‌گردد'
+        'برای Visual Debug: مدل‌های Vision خودکار انتخاب می‌شوند'
       ],
     },
     {
       id: 'inspector-collaborative-mode',
-      title: '🆕 همکاری چند مدل',
+      title: 'همکاری چند مدل',
       description: 'در این حالت، مدل‌های AI از اقدامات همدیگر آگاه هستند و می‌توانند با هم همکاری کنند.',
       type: 'checkbox',
       tips: [
@@ -504,18 +515,90 @@ export const projectDetailHelp: PageHelp = {
       ],
     },
     {
-      id: 'inspector-visual-navigation',
-      title: '🔄 ردیابی اقدامات (Bridge Script)',
-      description: 'رویکرد جدید برای ردیابی اقدامات کاربر با تزریق Bridge Script در پروژه.',
+      id: 'inspector-prompt-fields',
+      title: 'مدیریت فیلدهای پرامپت',
+      description: 'مدیریت دستورات، حافظه و آموزش‌هایی که به مدل‌های AI ارسال می‌شود. فیلدها به ۵ دسته تقسیم شده‌اند: instruction، function، variable، context، constraint.',
+      type: 'panel',
+      tips: [
+        '✅ دستورات عمومی همیشه فعال',
+        '✅ حافظه: اطلاعات ثابت برای context',
+        '✅ آموزش: نمونه‌ها و الگوها',
+        '✅ دکمه ارسال به چت',
+        '✅ Highlight فیلدهای در حال استفاده',
+        '✅ فیلد "visual_debug_prompt" برای تحلیل بصری'
+      ],
+    },
+    {
+      id: 'inspector-session-management',
+      title: 'مدیریت Session',
+      description: 'ذخیره و بازیابی تاریخچه چت بازرس. هر session شامل تمام پیام‌ها، تایید‌ها و لاگ‌ها است.',
+      type: 'panel',
+      tips: [
+        '✅ ایجاد خودکار session هنگام روشن کردن بازرس',
+        '✅ بارگذاری پیام‌ها از DB هنگام ورود مجدد',
+        '✅ بایگانی session با عنوان خودکار',
+        '✅ مشاهده session‌های قبلی (read-only)',
+        '✅ حفظ نشانگرهای تایید (✓/✕) بین session‌ها'
+      ],
+    },
+    {
+      id: 'inspector-verification',
+      title: 'سیستم تایید پیام',
+      description: 'بعد از هر اقدام AI، لاگ‌های بک‌اند اسکن می‌شوند تا مشخص شود اقدام موفق بوده یا خیر.',
+      type: 'section',
+      tips: [
+        '✅ 🔍 آبی: در حال بررسی (pending)',
+        '✅ ✓ سبز: تایید شده (verified)',
+        '✅ ✕ قرمز: خطا تشخیص داده شده (error)',
+        '✅ Retry خودکار با exponential backoff',
+        '✅ تفکیک خطاهای console از backend',
+        '✅ ذخیره نتیجه تایید در DB'
+      ],
+    },
+    {
+      id: 'inspector-bridge-system',
+      title: 'سیستم Bridge Script + WebSocket Hub',
+      description: 'Bridge Script در پروژه تزریق شده و از طریق WebSocket Bridge Hub (نه postMessage) با Inspector ارتباط برقرار می‌کند. مشکل cross-origin حل شده است.',
       type: 'area',
       tips: [
-        '🔄 رویکرد جدید: تزریق اسکریپت در فایل ورودی پروژه',
-        '✅ تشخیص خودکار فریم‌ورک (Next.js، React، Vue، Angular)',
-        '✅ یافتن خودکار فایل ورودی (layout.tsx، _app.tsx، index.tsx)',
-        '✅ پشتیبانی از پروژه‌های Python',
-        '⚠️ مشکل فعلی: Cross-origin policy برای postMessage',
-        '⏳ در انتظار: Re-injection خودکار بعد از deploy',
-        '📝 جزئیات کامل در SYSTEM_REPORT_2026-02-06.md بخش 9'
+        '✅ سه قالب: HTML، JS/TS، Next.js Client Component',
+        '✅ تشخیص خودکار فریم‌ورک (Next.js، React، Vue، Angular، Python)',
+        '✅ WebSocket Bridge Hub: حل مشکل cross-origin',
+        '✅ ثبت رویدادها: click، pointerdown، scroll، input، focus، error',
+        '✅ Console Interception: log، warn، error، info، debug (حداکثر 200 لاگ)',
+        '✅ تشخیص Overlay: MutationObserver + اسکن دوره‌ای 2000ms',
+        '✅ Error overlay detection: تشخیص خطاهای بصری فریم‌ورک‌ها',
+        '✅ Debounce 100ms: جلوگیری از ارسال بیش از حد',
+        '📝 جزئیات کامل در SYSTEM_REPORT_2026-02-08.md بخش 9'
+      ],
+    },
+    {
+      id: 'inspector-visual-debug',
+      title: 'عکس‌برداری بصری (Visual Debug)',
+      description: 'قابلیت عکس‌برداری از صفحه پروژه و تحلیل بصری توسط مدل‌های Vision (GPT-4o, Gemini Pro Vision). عکس + لاگ بک‌اند + لاگ کنسول + فایل‌های مرتبط به AI ارسال می‌شود.',
+      type: 'area',
+      tips: [
+        '✅ عکس‌برداری از صفحه با ابعاد قابل تنظیم',
+        '✅ تحلیل بصری با مدل‌های Vision',
+        '✅ ادغام عکس + لاگ بک‌اند + لاگ کنسول + فایل‌ها',
+        '✅ پرامپت اختصاصی (VISUAL_DEBUG_SYSTEM_PROMPT)',
+        '✅ SSE Streaming: نمایش لحظه‌ای نتایج',
+        '✅ فیلد "visual_debug_prompt" در لیست پرامپت‌ها قابل مشاهده',
+        '✅ انتخاب خودکار بهترین مدل Vision',
+        '⏳ در حال توسعه: عکس‌برداری چندتایی + تایید کاربر قبل از اجرا'
+      ],
+    },
+    {
+      id: 'inspector-investigation',
+      title: 'بررسی خطا و اصلاح خودکار (AI Investigation)',
+      description: 'سیستم دو مرحله‌ای بررسی خطا: ابتدا تحلیل (investigate) سپس اصلاح (fix). شامل خواندن دو مرحله‌ای فایل‌ها و دفاع در برابر hallucination مدل‌ها.',
+      type: 'area',
+      tips: [
+        '✅ دکمه "بررسی" (🔍) روی پیام‌های با ✕',
+        '✅ خواندن دو مرحله‌ای: فایل‌های خطا + فایل‌های model/DB',
+        '✅ دفاع دو لایه در برابر action_plan ساختگی',
+        '✅ دکمه Apply Fix: اعمال تغییرات پیشنهادی',
+        '✅ قفل iframe/chat حین عملیات'
       ],
     },
     {
@@ -614,22 +697,27 @@ export const projectDetailHelp: PageHelp = {
     end
 
     subgraph InspectorTab["🔍 بازرس ویژه"]
-        Screen["📱 اسکرین پیش‌نمایش<br/>5.8 اینچ"]
+        Screen["📱 اسکرین پیش‌نمایش"]
         PowerBtn["🔘 دکمه پاور"]
-        Chat["💬 چت دستیار"]
-        QuickBtns["⚡ دکمه‌های سریع"]
+        Chat["💬 Smart-Chat"]
+        VisualDbg["📸 Visual Debug"]
+        PromptMgr["📋 فیلدهای پرامپت"]
     end
 
     subgraph ScreenContent["📺 محتوای اسکرین"]
         Frontend["🌐 فرانت‌اند (iframe)"]
-        BackendLogs["📋 لاگ‌های بک‌اند"]
+        BridgeWS["🔗 Bridge Script + WebSocket"]
+        OverlayDet["🎯 تشخیص Overlay"]
+        ConsoleCap["📋 Console Interception"]
     end
 
-    subgraph ChatFeatures["💬 امکانات چت"]
-        CodeAnalysis["تحلیل کد"]
-        SecurityCheck["بررسی امنیت"]
-        BugFinder["یافتن باگ"]
-        ErrorAlerts["⚠️ هشدار خطاها"]
+    subgraph ChatFeatures["💬 امکانات Smart-Chat"]
+        MsgClass["طبقه‌بندی پیام"]
+        FileSelect["انتخاب فایل از GitHub"]
+        Verify["✓/✕ تایید خودکار"]
+        Investigation["🔍 بررسی خطا + Apply Fix"]
+        ReplyTo["↩️ Reply-to"]
+        SessionMgr["💾 ذخیره Session"]
     end
 
     Tabs --> Files
@@ -650,14 +738,20 @@ export const projectDetailHelp: PageHelp = {
     Inspector --> Screen
     Inspector --> PowerBtn
     Inspector --> Chat
+    Inspector --> VisualDbg
+    Inspector --> PromptMgr
     PowerBtn --> ScreenContent
     Screen --> Frontend
-    Screen --> BackendLogs
-    Chat --> QuickBtns
-    Chat --> ErrorAlerts
-    QuickBtns --> CodeAnalysis
-    QuickBtns --> SecurityCheck
-    QuickBtns --> BugFinder`,
+    Frontend --> BridgeWS
+    BridgeWS --> OverlayDet
+    BridgeWS --> ConsoleCap
+    Chat --> ChatFeatures
+    Chat --> MsgClass
+    MsgClass --> FileSelect
+    Chat --> Verify
+    Chat --> Investigation
+    Chat --> ReplyTo
+    Chat --> SessionMgr`,
 };
 
 
