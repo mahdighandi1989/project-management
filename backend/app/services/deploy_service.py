@@ -131,10 +131,13 @@ class RenderDeployService:
         build_command: str = None,
         start_command: str = None,
         env_vars: Dict[str, str] = None,
-        auto_deploy: bool = True
+        auto_deploy: bool = True,
+        service_type: str = "web_service",
+        publish_path: str = None,
     ) -> Dict:
         """
         ایجاد سرویس جدید در Render
+        service_type: "web_service" یا "static_site"
         """
         if not self.is_configured():
             return {"success": False, "error": "Render API key not configured"}
@@ -159,33 +162,44 @@ class RenderDeployService:
         # تنظیمات بر اساس نوع پروژه
         if project_type in ['python', 'fastapi', 'flask', 'django']:
             env = "python"
-            runtime = "python"
-            build_cmd = build_command or "pip install -r requirements.txt"
+            build_cmd = build_command or "pip install --upgrade pip setuptools && pip install -r requirements.txt"
             start_cmd = start_command or "python main.py"
-        elif project_type in ['nodejs', 'express', 'react', 'nextjs']:
+        elif project_type in ['nodejs', 'express', 'react', 'nextjs', 'vite']:
             env = "node"
-            runtime = "node"
-            build_cmd = build_command or "npm install"
+            build_cmd = build_command or "npm install && npm run build"
             start_cmd = start_command or "npm start"
         else:
             env = "docker"
-            runtime = "docker"
             build_cmd = build_command
             start_cmd = start_command
 
-        service_data = {
-            "type": "web_service",
-            "name": name.lower().replace(' ', '-').replace('_', '-'),
-            "ownerId": owner_id,
-            "autoDeploy": "yes" if auto_deploy else "no",
-            "serviceDetails": {
-                "env": env,
-                "envSpecificDetails": {
+        if service_type == "static_site":
+            # Static Site: فقط build و publish path
+            service_data = {
+                "type": "static_site",
+                "name": name.lower().replace(' ', '-').replace('_', '-'),
+                "ownerId": owner_id,
+                "autoDeploy": "yes" if auto_deploy else "no",
+                "serviceDetails": {
                     "buildCommand": build_cmd,
-                    "startCommand": start_cmd
+                    "publishPath": publish_path or "dist",
                 }
             }
-        }
+        else:
+            # Web Service: نیاز به env و startCommand
+            service_data = {
+                "type": "web_service",
+                "name": name.lower().replace(' ', '-').replace('_', '-'),
+                "ownerId": owner_id,
+                "autoDeploy": "yes" if auto_deploy else "no",
+                "serviceDetails": {
+                    "env": env,
+                    "envSpecificDetails": {
+                        "buildCommand": build_cmd,
+                        "startCommand": start_cmd
+                    }
+                }
+            }
 
         # اگر repo داریم
         if github_repo_url:
