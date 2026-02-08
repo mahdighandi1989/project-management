@@ -4364,7 +4364,9 @@ INSPECTOR_BRIDGE_SCRIPT = '''
         elementInfo: data.elementInfo || '',
         position: data.position || { xPercent: 50, yPercent: 50 },
         pageUrl: window.location.href,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        level: data.level || null,
+        source: 'imported-project'
       };
 
       // ارسال از طریق WebSocket
@@ -4457,10 +4459,10 @@ INSPECTOR_BRIDGE_SCRIPT = '''
     return true;
   }
 
-  // Event Listeners
+  // Event Listeners - استفاده از window به جای document برای بالاترین اولویت capture
 
-  // کلیک
-  document.addEventListener('click', function(e) {
+  // کلیک - بالاترین لایه capture
+  window.addEventListener('click', function(e) {
     if (!shouldSend()) return;
     sendToInspector('click', {
       target: e.target?.tagName,
@@ -4471,7 +4473,7 @@ INSPECTOR_BRIDGE_SCRIPT = '''
 
   // اسکرول
   let scrollTimeout;
-  document.addEventListener('scroll', function(e) {
+  window.addEventListener('scroll', function(e) {
     clearTimeout(scrollTimeout);
     scrollTimeout = setTimeout(function() {
       sendToInspector('scroll', {
@@ -4485,7 +4487,7 @@ INSPECTOR_BRIDGE_SCRIPT = '''
   }, true);
 
   // تایپ در فیلدها
-  document.addEventListener('input', function(e) {
+  window.addEventListener('input', function(e) {
     if (!shouldSend()) return;
     if (e.target?.tagName === 'INPUT' || e.target?.tagName === 'TEXTAREA') {
       sendToInspector('input', {
@@ -4497,7 +4499,7 @@ INSPECTOR_BRIDGE_SCRIPT = '''
   }, true);
 
   // فوکوس
-  document.addEventListener('focus', function(e) {
+  window.addEventListener('focus', function(e) {
     if (!shouldSend()) return;
     if (e.target && e.target !== document && e.target !== document.body) {
       sendToInspector('focus', {
@@ -4510,7 +4512,9 @@ INSPECTOR_BRIDGE_SCRIPT = '''
 
   // 🔴 گیرنده خطاهای جاوااسکریپت فرانت‌اند
   var errorCount = 0;
-  var MAX_ERRORS = 20; // حداکثر خطا در هر صفحه
+  var MAX_ERRORS = 50; // حداکثر خطا در هر صفحه
+  var consoleLogCount = 0;
+  var MAX_CONSOLE_LOGS = 200; // حداکثر لاگ کنسول
 
   window.onerror = function(message, source, lineno, colno, error) {
     if (errorCount >= MAX_ERRORS) return;
@@ -4520,7 +4524,8 @@ INSPECTOR_BRIDGE_SCRIPT = '''
     sendToInspector('error', {
       target: 'window',
       elementInfo: errorInfo,
-      position: { xPercent: 50, yPercent: 10 }
+      position: { xPercent: 50, yPercent: 10 },
+      level: 'error'
     });
   };
 
@@ -4531,27 +4536,91 @@ INSPECTOR_BRIDGE_SCRIPT = '''
     sendToInspector('error', {
       target: 'promise',
       elementInfo: reason.toString().slice(0, 150),
-      position: { xPercent: 50, yPercent: 10 }
+      position: { xPercent: 50, yPercent: 10 },
+      level: 'error'
     });
   });
 
-  // رهگیری console.error
+  // 🔵 رهگیری تمام متدهای کنسول - تفکیک لاگ‌های پروژه ایمپورت شده
+  function interceptConsole(level, origFn) {
+    return function() {
+      origFn.apply(console, arguments);
+      if (consoleLogCount >= MAX_CONSOLE_LOGS) return;
+      consoleLogCount++;
+      var msg = Array.prototype.slice.call(arguments).map(function(a) {
+        return typeof a === 'object' ? JSON.stringify(a).slice(0, 200) : String(a).slice(0, 200);
+      }).join(' ').slice(0, 500);
+      // فیلتر: لاگ‌های خود bridge رو ارسال نکن
+      if (msg.indexOf('Inspector Bridge') !== -1) return;
+      if (msg.indexOf('🌉') !== -1) return;
+      // ارسال به inspector با تفکیک سطح
+      sendToInspector(level === 'error' ? 'console-error' : 'console-log', {
+        target: 'console',
+        elementInfo: msg,
+        position: { xPercent: 50, yPercent: 10 },
+        level: level
+      });
+    };
+  }
+
+  var origConsoleLog = console.log;
+  var origConsoleWarn = console.warn;
   var origConsoleError = console.error;
-  console.error = function() {
-    origConsoleError.apply(console, arguments);
-    if (errorCount >= MAX_ERRORS) return;
-    errorCount++;
-    var msg = Array.prototype.slice.call(arguments).map(function(a) {
-      return typeof a === 'object' ? JSON.stringify(a).slice(0, 80) : String(a).slice(0, 80);
-    }).join(' ').slice(0, 150);
-    // فیلتر: لاگ‌های خود bridge رو ارسال نکن
-    if (msg.indexOf('Inspector Bridge') !== -1) return;
-    sendToInspector('console-error', {
-      target: 'console',
-      elementInfo: msg,
-      position: { xPercent: 50, yPercent: 10 }
+  var origConsoleInfo = console.info;
+  var origConsoleDebug = console.debug;
+
+  console.log = interceptConsole('log', origConsoleLog);
+  console.warn = interceptConsole('warn', origConsoleWarn);
+  console.error = interceptConsole('error', origConsoleError);
+  console.info = interceptConsole('info', origConsoleInfo);
+  console.debug = interceptConsole('debug', origConsoleDebug);
+
+  // 🔍 MutationObserver - تشخیص لایه‌های خطا (Error Overlays)
+  // وقتی فریمورک‌ها (مثل Next.js) لایه خطا ایجاد می‌کنند، آنها را شناسایی و رصد می‌کنیم
+  try {
+    var overlayObserver = new MutationObserver(function(mutations) {
+      mutations.forEach(function(mutation) {
+        for (var i = 0; i < mutation.addedNodes.length; i++) {
+          var node = mutation.addedNodes[i];
+          if (node.nodeType !== 1) continue;
+          try {
+            var style = window.getComputedStyle(node);
+            var zIndex = parseInt(style.zIndex) || 0;
+            var isFixed = style.position === 'fixed' || style.position === 'absolute';
+            var isFullScreen = node.offsetWidth > window.innerWidth * 0.8 && node.offsetHeight > window.innerHeight * 0.5;
+            // تشخیص لایه خطا: fixed/absolute + z-index بالا + سایز بزرگ
+            if (isFixed && (zIndex > 1000 || isFullScreen)) {
+              var overlayText = (node.textContent || '').slice(0, 500);
+              sendToInspector('error-overlay', {
+                target: node.tagName,
+                elementInfo: 'لایه خطا شناسایی شد: ' + overlayText.slice(0, 200),
+                position: { xPercent: 50, yPercent: 50 },
+                level: 'error'
+              });
+              // اتصال listener کلیک به لایه خطا
+              node.addEventListener('click', function(e) {
+                sendToInspector('click', {
+                  target: e.target?.tagName,
+                  elementInfo: getElementInfo(e.target) + ' (error overlay)',
+                  position: getPositionPercent(e)
+                });
+              }, true);
+            }
+          } catch(styleErr) {}
+        }
+      });
     });
-  };
+    // مشاهده تغییرات DOM
+    if (document.body) {
+      overlayObserver.observe(document.body, { childList: true, subtree: true });
+    } else {
+      document.addEventListener('DOMContentLoaded', function() {
+        overlayObserver.observe(document.body, { childList: true, subtree: true });
+      });
+    }
+  } catch(obsErr) {
+    // MutationObserver در دسترس نیست
+  }
 
   // اعلام آماده بودن
   try {
@@ -4631,7 +4700,8 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
     const message = {
       type: 'inspector-bridge-event', action,
       elementInfo: data.elementInfo || '', position: data.position || { xPercent: 50, yPercent: 50 },
-      pageUrl: window.location.href, timestamp: Date.now()
+      pageUrl: window.location.href, timestamp: Date.now(),
+      level: data.level || null, source: 'imported-project'
     };
     if (ws && wsReady) ws.send(JSON.stringify(message));
     else if (ws) messageQueue.push(message);
@@ -4645,50 +4715,87 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
     return text ? `${tag} "${text}"` : tag;
   };
 
-  document.addEventListener('click', (e) => {
-    sendToInspector('click', { elementInfo: getElementInfo(e.target) });
+  const getPositionPercent = (e) => ({
+    xPercent: (e.clientX / window.innerWidth) * 100,
+    yPercent: (e.clientY / window.innerHeight) * 100
+  });
+
+  // Event Listeners - window capture phase (بالاترین اولویت)
+  window.addEventListener('click', (e) => {
+    sendToInspector('click', { elementInfo: getElementInfo(e.target), position: getPositionPercent(e) });
   }, true);
 
-  document.addEventListener('input', (e) => {
+  window.addEventListener('input', (e) => {
     if (e.target?.tagName === 'INPUT' || e.target?.tagName === 'TEXTAREA') {
       sendToInspector('input', { elementInfo: getElementInfo(e.target) });
     }
   }, true);
 
   let scrollTimeout;
-  document.addEventListener('scroll', () => {
+  window.addEventListener('scroll', () => {
     clearTimeout(scrollTimeout);
     scrollTimeout = setTimeout(() => { sendToInspector('scroll', { elementInfo: 'page' }); }, 200);
   }, true);
 
-  // 🔴 گیرنده خطاهای جاوااسکریپت فرانت‌اند
+  // 🔵 رهگیری تمام متدهای کنسول
+  let consoleLogCount = 0;
+  const MAX_CONSOLE_LOGS = 200;
+
+  const interceptConsole = (level, origFn) => (...args) => {
+    origFn.apply(console, args);
+    if (consoleLogCount >= MAX_CONSOLE_LOGS) return;
+    consoleLogCount++;
+    const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a).slice(0, 200) : String(a).slice(0, 200)).join(' ').slice(0, 500);
+    if (msg.includes('Inspector Bridge') || msg.includes('🌉')) return;
+    sendToInspector(level === 'error' ? 'console-error' : 'console-log', { elementInfo: msg, level });
+  };
+
+  const origLog = console.log, origWarn = console.warn, origError = console.error, origInfo = console.info, origDebug = console.debug;
+  console.log = interceptConsole('log', origLog);
+  console.warn = interceptConsole('warn', origWarn);
+  console.error = interceptConsole('error', origError);
+  console.info = interceptConsole('info', origInfo);
+  console.debug = interceptConsole('debug', origDebug);
+
+  // 🔴 خطاهای JS
   let errorCount = 0;
-  const MAX_ERRORS = 20;
+  const MAX_ERRORS = 50;
 
   window.onerror = (message, source, lineno) => {
     if (errorCount >= MAX_ERRORS) return;
     errorCount++;
     let errorInfo = String(message || 'Unknown error').slice(0, 150);
     if (source) errorInfo += ` (at ${source.split('/').pop()}:${lineno})`;
-    sendToInspector('error', { elementInfo: errorInfo });
+    sendToInspector('error', { elementInfo: errorInfo, level: 'error' });
   };
 
   window.addEventListener('unhandledrejection', (e) => {
     if (errorCount >= MAX_ERRORS) return;
     errorCount++;
     const reason = (e.reason?.message || e.reason?.toString()) || 'Promise rejected';
-    sendToInspector('error', { elementInfo: String(reason).slice(0, 150) });
+    sendToInspector('error', { elementInfo: String(reason).slice(0, 150), level: 'error' });
   });
 
-  const origConsoleError = console.error;
-  console.error = (...args) => {
-    origConsoleError.apply(console, args);
-    if (errorCount >= MAX_ERRORS) return;
-    errorCount++;
-    const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a).slice(0, 80) : String(a).slice(0, 80)).join(' ').slice(0, 150);
-    if (msg.includes('Inspector Bridge')) return;
-    sendToInspector('console-error', { elementInfo: msg });
-  };
+  // 🔍 MutationObserver - تشخیص لایه‌های خطا
+  try {
+    const overlayObs = new MutationObserver((mutations) => {
+      mutations.forEach(m => m.addedNodes.forEach(node => {
+        if (node.nodeType !== 1) return;
+        try {
+          const s = window.getComputedStyle(node);
+          const z = parseInt(s.zIndex) || 0;
+          if ((s.position === 'fixed' || s.position === 'absolute') && (z > 1000 || (node.offsetWidth > window.innerWidth*0.8 && node.offsetHeight > window.innerHeight*0.5))) {
+            sendToInspector('error-overlay', { elementInfo: 'لایه خطا: ' + (node.textContent||'').slice(0,200), level: 'error' });
+            node.addEventListener('click', (e) => {
+              sendToInspector('click', { elementInfo: getElementInfo(e.target) + ' (overlay)', position: getPositionPercent(e) });
+            }, true);
+          }
+        } catch(err) {}
+      }));
+    });
+    if (document.body) overlayObs.observe(document.body, { childList: true, subtree: true });
+    else document.addEventListener('DOMContentLoaded', () => overlayObs.observe(document.body, { childList: true, subtree: true }));
+  } catch(e) {}
 
   connectWS();
   setInterval(() => { if (ws && wsReady) try { ws.send(JSON.stringify({ type: 'ping' })); } catch(e) {} }, 25000);
@@ -4764,7 +4871,8 @@ export default function InspectorBridge() {
       const message = {
         type: "inspector-bridge-event", action,
         elementInfo: data.elementInfo || "", position: data.position || { xPercent: 50, yPercent: 50 },
-        pageUrl: window.location.href, timestamp: Date.now()
+        pageUrl: window.location.href, timestamp: Date.now(),
+        level: data.level || null, source: "imported-project"
       };
       if (ws && wsReady) ws.send(JSON.stringify(message));
       else if (ws) messageQueue.push(message);
@@ -4778,7 +4886,13 @@ export default function InspectorBridge() {
       return text ? `${tag} "${text}"` : tag;
     };
 
-    const handleClick = (e) => { sendToInspector("click", { elementInfo: getElementInfo(e.target) }); };
+    const getPositionPercent = (e) => ({
+      xPercent: (e.clientX / window.innerWidth) * 100,
+      yPercent: (e.clientY / window.innerHeight) * 100
+    });
+
+    // window capture phase (بالاترین اولویت)
+    const handleClick = (e) => { sendToInspector("click", { elementInfo: getElementInfo(e.target), position: getPositionPercent(e) }); };
     const handleInput = (e) => {
       if (e.target?.tagName === "INPUT" || e.target?.tagName === "TEXTAREA") {
         sendToInspector("input", { elementInfo: getElementInfo(e.target) });
@@ -4790,41 +4904,73 @@ export default function InspectorBridge() {
       scrollTimeout = setTimeout(() => { sendToInspector("scroll", { elementInfo: "page" }); }, 200);
     };
 
-    document.addEventListener("click", handleClick, true);
-    document.addEventListener("input", handleInput, true);
-    document.addEventListener("scroll", handleScroll, true);
+    window.addEventListener("click", handleClick, true);
+    window.addEventListener("input", handleInput, true);
+    window.addEventListener("scroll", handleScroll, true);
 
-    // 🔴 گیرنده خطاهای جاوااسکریپت فرانت‌اند
+    // 🔵 رهگیری تمام متدهای کنسول
+    let consoleLogCount = 0;
+    const MAX_CONSOLE_LOGS = 200;
+
+    const interceptConsole = (level, origFn) => (...args) => {
+      origFn.apply(console, args);
+      if (consoleLogCount >= MAX_CONSOLE_LOGS) return;
+      consoleLogCount++;
+      const msg = args.map(a => typeof a === "object" ? JSON.stringify(a).slice(0, 200) : String(a).slice(0, 200)).join(" ").slice(0, 500);
+      if (msg.includes("Inspector Bridge") || msg.includes("🌉")) return;
+      sendToInspector(level === "error" ? "console-error" : "console-log", { elementInfo: msg, level });
+    };
+
+    const origLog = console.log, origWarn = console.warn, origError = console.error, origInfo = console.info, origDebug = console.debug;
+    console.log = interceptConsole("log", origLog);
+    console.warn = interceptConsole("warn", origWarn);
+    console.error = interceptConsole("error", origError);
+    console.info = interceptConsole("info", origInfo);
+    console.debug = interceptConsole("debug", origDebug);
+
+    // 🔴 خطاهای JS
     let errorCount = 0;
-    const MAX_ERRORS = 20;
+    const MAX_ERRORS = 50;
 
     const handleError = (event) => {
       if (errorCount >= MAX_ERRORS) return;
       errorCount++;
       let errorInfo = String(event.message || "Unknown error").slice(0, 150);
       if (event.filename) errorInfo += ` (at ${event.filename.split("/").pop()}:${event.lineno})`;
-      sendToInspector("error", { elementInfo: errorInfo });
+      sendToInspector("error", { elementInfo: errorInfo, level: "error" });
     };
 
     const handleRejection = (event) => {
       if (errorCount >= MAX_ERRORS) return;
       errorCount++;
       const reason = (event.reason?.message || event.reason?.toString()) || "Promise rejected";
-      sendToInspector("error", { elementInfo: String(reason).slice(0, 150) });
-    };
-
-    const origConsoleError = console.error;
-    console.error = (...args) => {
-      origConsoleError.apply(console, args);
-      if (errorCount >= MAX_ERRORS) return;
-      errorCount++;
-      const msg = args.map(a => typeof a === "object" ? JSON.stringify(a).slice(0, 80) : String(a).slice(0, 80)).join(" ").slice(0, 150);
-      if (msg.includes("Inspector Bridge")) return;
-      sendToInspector("console-error", { elementInfo: msg });
+      sendToInspector("error", { elementInfo: String(reason).slice(0, 150), level: "error" });
     };
 
     window.addEventListener("error", handleError);
     window.addEventListener("unhandledrejection", handleRejection);
+
+    // 🔍 MutationObserver - تشخیص لایه‌های خطا
+    let overlayObs;
+    try {
+      overlayObs = new MutationObserver((mutations) => {
+        mutations.forEach(m => m.addedNodes.forEach(node => {
+          if (node.nodeType !== 1) return;
+          try {
+            const s = window.getComputedStyle(node);
+            const z = parseInt(s.zIndex) || 0;
+            if ((s.position === "fixed" || s.position === "absolute") && (z > 1000 || (node.offsetWidth > window.innerWidth*0.8 && node.offsetHeight > window.innerHeight*0.5))) {
+              sendToInspector("error-overlay", { elementInfo: "لایه خطا: " + (node.textContent||"").slice(0,200), level: "error" });
+              node.addEventListener("click", (e) => {
+                sendToInspector("click", { elementInfo: getElementInfo(e.target) + " (overlay)", position: getPositionPercent(e) });
+              }, true);
+            }
+          } catch(err) {}
+        }));
+      });
+      if (document.body) overlayObs.observe(document.body, { childList: true, subtree: true });
+      else document.addEventListener("DOMContentLoaded", () => overlayObs.observe(document.body, { childList: true, subtree: true }));
+    } catch(e) {}
 
     connectWS();
     const heartbeat = setInterval(() => { if (ws && wsReady) try { ws.send(JSON.stringify({ type: "ping" })); } catch(e) {} }, 25000);
@@ -4835,12 +4981,13 @@ export default function InspectorBridge() {
     }
 
     return () => {
-      document.removeEventListener("click", handleClick, true);
-      document.removeEventListener("input", handleInput, true);
-      document.removeEventListener("scroll", handleScroll, true);
+      window.removeEventListener("click", handleClick, true);
+      window.removeEventListener("input", handleInput, true);
+      window.removeEventListener("scroll", handleScroll, true);
       window.removeEventListener("error", handleError);
       window.removeEventListener("unhandledrejection", handleRejection);
-      console.error = origConsoleError;
+      console.log = origLog; console.warn = origWarn; console.error = origError; console.info = origInfo; console.debug = origDebug;
+      if (overlayObs) overlayObs.disconnect();
       clearInterval(heartbeat);
       if (ws) { try { ws.close(); } catch(e) {} }
     };
@@ -8088,6 +8235,28 @@ class ApplyActionRequest(BaseModel):
     original_message: str  # پیام اصلی کاربر
 
 
+class ScreenshotRequest(BaseModel):
+    """درخواست عکس‌برداری از صفحه پیش‌نمایش"""
+    project_id: str
+    url: str  # آدرس صفحه پیش‌نمایش
+    viewport_width: int = 1280
+    viewport_height: int = 720
+    full_page: bool = False
+
+
+class VisualDebugRequest(BaseModel):
+    """درخواست دیباگ بصری با عکس و لاگ"""
+    project_id: str
+    model_ids: List[str]  # مدل‌های انتخاب شده (باید vision داشته باشند)
+    screenshots: List[str]  # base64 تصاویر
+    console_logs: Optional[List[dict]] = None  # [{level, message, timestamp, source}]
+    backend_logs: Optional[List[dict]] = None  # [{level, message, timestamp, service_id}]
+    related_urls: Optional[List[str]] = None  # آدرس‌های مرتبط
+    user_description: Optional[str] = None  # توضیح اختیاری کاربر
+    chat_history: Optional[List[InspectorChatMessage]] = None
+    previously_read_files: Optional[List[str]] = None
+
+
 def _parse_ai_selected_files(ai_response: str, valid_files: list, max_files: int = 10) -> list:
     """
     پارس پاسخ AI برای استخراج مسیر فایل‌ها با پشتیبانی از فرمت‌های مختلف:
@@ -9755,3 +9924,253 @@ _ساخته شده توسط بازرس ویژه (Inspector)_"""
             "X-Accel-Buffering": "no"
         }
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 📸 Screenshot & Visual Debug - عکس‌برداری و دیباگ بصری
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/inspector/screenshot")
+async def take_screenshot(request: ScreenshotRequest, db: Session = Depends(get_db)):
+    """عکس‌برداری از صفحه پیش‌نمایش پروژه با استفاده از Playwright"""
+    if not request.url:
+        return {"success": False, "error": "آدرس صفحه مشخص نشده"}
+    try:
+        from ...services.browser_automation import BrowserSession, PLAYWRIGHT_AVAILABLE
+        if not PLAYWRIGHT_AVAILABLE:
+            return {"success": False, "error": "Playwright نصب نیست. لطفاً pip install playwright && playwright install chromium اجرا کنید."}
+        session = BrowserSession(
+            session_id=f"screenshot_{request.project_id}_{int(datetime.now().timestamp())}",
+            url=request.url
+        )
+        session.viewport = {"width": request.viewport_width, "height": request.viewport_height}
+        await session.start()
+        await asyncio.sleep(2)
+        screenshot_b64 = await session.take_screenshot()
+        page_info = await session.get_page_info()
+        await session.close()
+        return {
+            "success": True, "screenshot": screenshot_b64,
+            "page_info": page_info, "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {"success": False, "error": f"خطا در عکس‌برداری: {str(e)[:200]}"}
+
+
+@router.get("/inspector/vision-models")
+async def get_vision_models(db: Session = Depends(get_db)):
+    """لیست مدل‌هایی که قابلیت تحلیل تصویر (Vision) دارند"""
+    from ...core.models_registry import MODEL_REGISTRY, ModelCapability
+    from ...services.ai_manager import get_ai_manager
+    ai_manager = get_ai_manager()
+    vision_models = []
+    for model_id, model in MODEL_REGISTRY.items():
+        has_vision = (
+            ModelCapability.VISION in model.capabilities or
+            ModelCapability.IMAGE_ANALYSIS in model.capabilities or
+            model.supports_images
+        )
+        if has_vision:
+            is_enabled = ai_manager.get_enabled_status(model_id)
+            vision_models.append({
+                "id": model.id, "name": model.name,
+                "provider": model.provider.value if hasattr(model.provider, 'value') else str(model.provider),
+                "enabled": is_enabled, "supports_images": model.supports_images,
+                "capabilities": [c.value if hasattr(c, 'value') else str(c) for c in model.capabilities],
+                "context_window": model.context_window,
+                "recommended": ModelCapability.CODE in model.capabilities and has_vision,
+            })
+    vision_models.sort(key=lambda m: (not m['enabled'], not m['recommended'], m['name']))
+    return {"success": True, "models": vision_models}
+
+
+# ─── پرامپت ثابت دیباگ بصری ───
+VISUAL_DEBUG_SYSTEM_PROMPT = """## 🔍 دیباگ بصری پروژه
+
+شما یک متخصص دیباگ بصری هستید. اطلاعات زیر در اختیار شما قرار گرفته:
+1. **عکس‌های صفحه**: اسکرین‌شات‌هایی از صفحه فرانت‌اند پروژه
+2. **لاگ‌های کنسول**: لاگ‌های کنسول مرورگر مربوط به پروژه ایمپورت شده (تفکیک شده از پروژه اصلی)
+3. **لاگ‌های بک‌اند**: لاگ‌های سرور/بک‌اند پروژه
+4. **آدرس‌های مرتبط**: URL صفحات و endpoint های مرتبط
+5. **توضیح کاربر**: (اختیاری) توضیح کاربر درباره مشکل
+
+## وظیفه شما:
+- محتوای عکس‌ها را با دقت بررسی کنید (خطاهای نمایشی، layout شکسته، المان‌های غایب، پیام‌های خطا)
+- لاگ‌های کنسول و بک‌اند را تحلیل کنید
+- ارتباط بین خطاهای بصری و لاگ‌ها را پیدا کنید
+- دقیقاً مشخص کنید مشکل در کدام فایل و خط کدام کد است
+- راه‌حل عملی و کد اصلاح‌شده ارائه دهید
+
+## قالب پاسخ:
+1. **خلاصه مشکل**: توضیح کوتاه مشکل شناسایی شده
+2. **تحلیل بصری**: چه چیزی در عکس‌ها اشتباه دیده می‌شود
+3. **تحلیل لاگ‌ها**: ارتباط خطاها با مشکل بصری
+4. **فایل‌های مشکل‌دار**: لیست فایل‌هایی که باید اصلاح شوند
+5. **راه‌حل**: کد اصلاح‌شده برای هر فایل
+
+به فارسی پاسخ بده. کدها و اصطلاحات فنی می‌توانند انگلیسی باشند.
+"""
+
+
+@router.post("/inspector/visual-debug")
+async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depends(get_db)):
+    """دیباگ بصری: ترکیب عکس‌ها + لاگ‌ها + توضیح کاربر و ارسال به مدل Vision. SSE streaming"""
+    import os
+    from fastapi.responses import StreamingResponse
+    from ...models.project import Project
+    from ...services.github_import import get_github_import_service
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+
+    project = db.query(Project).filter(Project.id == request.project_id).first()
+    if not project:
+        return {"success": False, "error": "پروژه یافت نشد"}
+    if not request.screenshots:
+        return {"success": False, "error": "حداقل یک عکس لازم است"}
+
+    extra_data = {}
+    if project.extra_data:
+        try:
+            extra_data = json.loads(project.extra_data) if isinstance(project.extra_data, str) else project.extra_data
+        except Exception:
+            extra_data = {}
+
+    owner = extra_data.get("owner", "")
+    repo = extra_data.get("repo", "")
+    github_path = project.github_path or ""
+    if not owner and "/" in github_path:
+        owner, repo = github_path.split("/", 1)
+
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        from ...models.setting import Setting as _VDSetting
+        token = _VDSetting.get_value(db, "api_key_github") or ""
+
+    model_ids = request.model_ids
+    if not model_ids:
+        from ...core.models_registry import MODEL_REGISTRY, ModelCapability
+        ai_mgr = get_ai_manager()
+        for mid, m in MODEL_REGISTRY.items():
+            has_vis = ModelCapability.VISION in m.capabilities or ModelCapability.IMAGE_ANALYSIS in m.capabilities or m.supports_images
+            if has_vis and ai_mgr.get_enabled_status(mid):
+                model_ids = [mid]
+                break
+        if not model_ids:
+            model_ids = ["gpt-4o"]
+    primary_model = model_ids[0]
+
+    async def event_stream():
+        ai_manager = get_ai_manager()
+        github_svc = get_github_import_service()
+
+        def sse(event: str, data: dict) -> str:
+            return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        yield sse("progress", {"step": "starting", "message": f"📸 شروع دیباگ بصری با {len(request.screenshots)} عکس..."})
+        yield sse("fields_in_use", {"field_ids": ["visual_debug_prompt"], "count": 1, "message": "📋 پرامپت دیباگ بصری در حال استفاده"})
+
+        # ساخت پرامپت
+        user_parts = [f"## 📸 عکس‌های صفحه ({len(request.screenshots)} عکس)"]
+        for i in range(len(request.screenshots)):
+            user_parts.append(f"### عکس {i+1}: [تصویر ضمیمه شده]")
+
+        if request.console_logs:
+            user_parts.append(f"\n## 📋 لاگ‌های کنسول ({len(request.console_logs)} لاگ)")
+            for log in request.console_logs[-50:]:
+                user_parts.append(f"[{log.get('level','log').upper()}] {log.get('message','')[:300]}")
+
+        if request.backend_logs:
+            user_parts.append(f"\n## 🖥️ لاگ‌های بک‌اند ({len(request.backend_logs)} لاگ)")
+            for log in request.backend_logs[-30:]:
+                user_parts.append(f"[{log.get('level','info').upper()}] {log.get('message','')[:300]}")
+
+        if request.related_urls:
+            user_parts.append(f"\n## 🔗 آدرس‌های مرتبط")
+            for url in request.related_urls:
+                user_parts.append(f"- {url}")
+
+        if request.user_description:
+            user_parts.append(f"\n## 💬 توضیح کاربر:\n{request.user_description}")
+
+        user_text = "\n".join(user_parts)
+
+        yield sse("progress", {"step": "analyzing", "message": f"🤖 مدل {primary_model} در حال تحلیل عکس‌ها و لاگ‌ها..."})
+
+        # خواندن فایل‌های مرتبط
+        project_tree_summary = ""
+        code_context = ""
+        if owner and repo:
+            try:
+                yield sse("progress", {"step": "reading_project", "message": "📂 خواندن ساختار پروژه..."})
+                tree_result = await github_svc.get_repo_tree(owner, repo, token=token)
+                if tree_result.get("success"):
+                    all_files = [f for f in tree_result.get("tree", []) if f.get("type") == "blob"]
+                    code_files = [f["path"] for f in all_files
+                                  if f.get("size", 0) < 200000
+                                  and not any(skip in f["path"] for skip in [
+                                      "node_modules/", ".git/", "dist/", "build/", ".next/",
+                                      "__pycache__/", ".cache/", "vendor/", "package-lock.json",
+                                      "yarn.lock", ".png", ".jpg", ".svg", ".ico", ".woff",
+                                      "InspectorBridge", "inspector-bridge"
+                                  ])]
+                    project_tree_summary = _build_project_tree_summary(code_files)
+                    context_text = (request.user_description or "") + " " + user_text[:2000]
+                    selected_files = _fallback_file_selection(code_files, context_text, max_files=8)
+                    selected_files = _ensure_balanced_selection(selected_files, code_files, 12)
+                    if selected_files:
+                        yield sse("progress", {"step": "reading_files", "message": f"📖 خواندن {len(selected_files)} فایل..."})
+                        for fp in selected_files:
+                            try:
+                                file_result = await github_svc.get_file_content(owner, repo, fp, token=token)
+                                if file_result.get("success"):
+                                    code_context += f"\n--- {fp} ---\n{file_result.get('content', '')[:8000]}\n"
+                            except Exception:
+                                pass
+            except Exception as e:
+                yield sse("progress", {"step": "github_error", "message": f"⚠️ خطا GitHub: {str(e)[:80]}"})
+
+        full_system = VISUAL_DEBUG_SYSTEM_PROMPT
+        if project_tree_summary:
+            full_system += f"\n\n## ساختار پروژه:\n{project_tree_summary}"
+        if code_context:
+            full_system += f"\n\n## کد فایل‌ها:\n{code_context[:30000]}"
+
+        try:
+            yield sse("progress", {"step": "sending_to_model", "message": f"📤 ارسال به {primary_model}..."})
+            import time as _time
+            messages = [
+                Message(role="system", content=full_system),
+                Message(role="user", content=user_text, images=request.screenshots[:10])
+            ]
+            response_task = asyncio.create_task(
+                ai_manager.generate(model_id=primary_model, messages=messages, max_tokens=8000, temperature=0.3, task_type="code_analysis")
+            )
+            while not response_task.done():
+                yield sse("heartbeat", {"ts": int(_time.time())})
+                await asyncio.sleep(8)
+            response = response_task.result()
+            yield sse("fields_done", {"field_ids": ["visual_debug_prompt"]})
+
+            action_plan = None
+            if "```" in response.content:
+                import re
+                code_blocks = re.findall(r'```[\w]*\n(.*?)```', response.content, re.DOTALL)
+                if code_blocks:
+                    action_plan = {"files": [], "commit_message": f"fix: دیباگ بصری - {(request.user_description or 'اصلاح')[:50]}"}
+                    fpm = re.findall(r'(?:فایل|file|path|مسیر)[:\s]*[`"]?([a-zA-Z0-9_./\-]+\.[a-zA-Z]+)[`"]?', response.content)
+                    for i, block in enumerate(code_blocks[:5]):
+                        action_plan["files"].append({"path": fpm[i] if i < len(fpm) else f"file_{i+1}", "content": block.strip(), "operation": "modify"})
+
+            yield sse("response", {
+                "content": response.content, "model_used": primary_model,
+                "tokens_used": getattr(response, 'usage', {}).get('total_tokens', 0) if hasattr(response, 'usage') else 0,
+                "type": "visual_debug", "screenshots_count": len(request.screenshots),
+                "action_plan": action_plan, "has_action": action_plan is not None,
+            })
+        except Exception as e:
+            yield sse("error", {"message": f"خطا: {str(e)[:200]}", "detail": type(e).__name__})
+
+        yield sse("done", {"success": True})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
