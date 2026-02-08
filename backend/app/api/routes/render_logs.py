@@ -10280,6 +10280,12 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                     context_text = (request.user_description or "") + " " + user_text[:2000]
                     selected_files = _fallback_file_selection(code_files, context_text, max_files=8)
                     selected_files = _ensure_balanced_selection(selected_files, code_files, 12)
+                    # اولویت فایل‌های جدید بررسی‌نشده
+                    prev_files = set(request.previously_read_files or [])
+                    if prev_files:
+                        new_files = [f for f in selected_files if f not in prev_files]
+                        old_files = [f for f in selected_files if f in prev_files]
+                        selected_files = (new_files + old_files)[:12]
                     if selected_files:
                         yield sse("progress", {"step": "reading_files", "message": f"📖 خواندن {len(selected_files)} فایل..."})
                         for fp in selected_files:

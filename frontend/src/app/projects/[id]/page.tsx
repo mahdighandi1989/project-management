@@ -3115,16 +3115,21 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       timestamp: new Date(),
     }]);
 
-    // جمع‌آوری آدرس‌های مرتبط
+    // جمع‌آوری آدرس‌های مرتبط (frontend URL + page URLs + URLs from logs)
     const relatedUrls: string[] = [];
     if (inspectorFrontendUrl) relatedUrls.push(inspectorFrontendUrl);
     visualDebugScreenshots.forEach(ss => {
       if (ss.pageUrl && !relatedUrls.includes(ss.pageUrl)) relatedUrls.push(ss.pageUrl);
     });
-    // آدرس‌ها از لاگ‌ها
+    // آدرس‌ها از لاگ‌های کنسول پروژه ایمپورت شده
     importedProjectConsoleLogs.forEach(log => {
       const urlMatch = log.message.match(/https?:\/\/[^\s"'<>]+/g);
-      if (urlMatch) urlMatch.forEach(u => { if (!relatedUrls.includes(u)) relatedUrls.push(u); });
+      if (urlMatch) urlMatch.forEach(u => { if (!relatedUrls.includes(u) && relatedUrls.length < 20) relatedUrls.push(u); });
+    });
+    // آدرس‌ها از لاگ‌های بک‌اند
+    inspectorBackendLogs.forEach(log => {
+      const urlMatch = log.message.match(/https?:\/\/[^\s"'<>]+/g);
+      if (urlMatch) urlMatch.forEach(u => { if (!relatedUrls.includes(u) && relatedUrls.length < 20) relatedUrls.push(u); });
     });
 
     try {
