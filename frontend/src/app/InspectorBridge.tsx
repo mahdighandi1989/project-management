@@ -3,6 +3,12 @@
 // ارتباط با Inspector از طریق WebSocket (حل مشکل cross-origin)
 import { useEffect } from "react";
 
+declare global {
+  interface Window {
+    __inspectorBridgeLoaded?: boolean;
+  }
+}
+
 export default function InspectorBridge() {
   useEffect(() => {
     if (typeof window === "undefined" || window.__inspectorBridgeLoaded) return;
@@ -92,7 +98,7 @@ export default function InspectorBridge() {
         "header": "سربرگ", "footer": "پاورقی", "li": "آیتم لیست", "table": "جدول", "video": "ویدیو"
       };
       const typeLabel = tagLabels[tag] || tag;
-      if (text) return typeLabel + " "" + text + """;
+      if (text) return `${typeLabel} "${text}"`;
       return typeLabel + (id || cls || "");
     };
 
