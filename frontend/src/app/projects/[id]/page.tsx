@@ -474,6 +474,7 @@ export default function ProjectDetailPage() {
     consoleLogs: Array<{ level: string; message: string; timestamp: number; source: string }>;
     backendLogs: Array<{ level: string; message: string; timestamp: string; service_name: string }>;
     relatedUrls: string[];
+    apiPaths: string[];  // Backend API paths detected from logs (e.g., /api/users, /api/products)
   }>>([]);
   const [visualDebugConsoleLogs, setVisualDebugConsoleLogs] = useState<Array<{
     level: string;
@@ -501,6 +502,8 @@ export default function ProjectDetailPage() {
     timestamp: number;
     source: string;
   }>>([]);
+  const importedConsoleLogsRef = useRef(importedProjectConsoleLogs);
+  importedConsoleLogsRef.current = importedProjectConsoleLogs;
   const [showImportedConsoleLogs, setShowImportedConsoleLogs] = useState(false);
 
   // 🔍 Debug Bridge - برای تشخیص مشکلات
@@ -961,13 +964,26 @@ export default function ProjectDetailPage() {
             setInspectorChatMessages(prev =>
               prev.map(m => m.id === msgId ? { ...m, db_id: dbId } : m)
             );
-            // تابع verify با قابلیت retry
+            // تابع verify با قابلیت retry + ارسال لاگ‌های کنسول بریدج
+            const actionTimestamp = Date.now();
             const doVerify = async (attempt: number = 1) => {
               try {
                 const pId = params?.id as string;
+                // 📦 Snapshot console logs around this action's time (±5 seconds)
+                const nearbyConsoleLogs = importedConsoleLogsRef.current
+                  .filter(l => Math.abs(l.timestamp - actionTimestamp) < 5000)
+                  .slice(-20)
+                  .map(l => ({ level: l.level, message: l.message, timestamp: l.timestamp }));
+
                 const verifyRes = await fetch(
                   `${API_BASE}/api/render/inspector/message/${dbId}/verify?project_id=${pId}&force=${attempt > 1 ? 'true' : 'false'}`,
-                  { method: 'POST' }
+                  {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      console_logs: nearbyConsoleLogs,
+                    }),
+                  }
                 );
                 const verifyData = await verifyRes.json();
                 if (verifyData.success) {
@@ -3059,18 +3075,42 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         const captureBackendLogs = [...inspectorBackendLogs].slice(-30).map(l => ({
           level: l.level, message: l.message, timestamp: l.timestamp, service_name: l.service_name
         }));
-        // Collect related URLs from current state
+
+        // 🔗 Extract related URLs AND backend API paths from logs
         const captureUrls: string[] = [];
+        const captureApiPaths: string[] = [];
         if (inspectorFrontendUrl) captureUrls.push(inspectorFrontendUrl);
         if (capturePageUrl && !captureUrls.includes(capturePageUrl)) captureUrls.push(capturePageUrl);
-        importedProjectConsoleLogs.slice(-50).forEach(log => {
-          const urlMatch = log.message.match(/https?:\/\/[^\s"'<>]+/g);
+
+        // Extract URLs and API endpoints from console logs
+        const allLogMessages = [
+          ...importedProjectConsoleLogs.slice(-50).map(l => l.message),
+          ...inspectorBackendLogs.slice(-30).map(l => l.message),
+        ];
+        allLogMessages.forEach(msg => {
+          // Full URLs
+          const urlMatch = msg.match(/https?:\/\/[^\s"'<>)]+/g);
           if (urlMatch) urlMatch.forEach(u => { if (!captureUrls.includes(u) && captureUrls.length < 20) captureUrls.push(u); });
+          // API endpoint paths: /api/..., /v1/..., /graphql, etc.
+          const apiMatch = msg.match(/(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\/[^\s"'<>]+)/gi);
+          if (apiMatch) apiMatch.forEach(m => {
+            const path = m.replace(/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+/i, '').trim();
+            if (!captureApiPaths.includes(path) && captureApiPaths.length < 20) captureApiPaths.push(path);
+          });
+          // Direct path patterns: /api/... or fetch("/api/...")
+          const pathMatch = msg.match(/\/api\/[^\s"'<>)]+/g);
+          if (pathMatch) pathMatch.forEach(p => { if (!captureApiPaths.includes(p) && captureApiPaths.length < 20) captureApiPaths.push(p); });
         });
-        inspectorBackendLogs.slice(-30).forEach(log => {
-          const urlMatch = log.message.match(/https?:\/\/[^\s"'<>]+/g);
-          if (urlMatch) urlMatch.forEach(u => { if (!captureUrls.includes(u) && captureUrls.length < 20) captureUrls.push(u); });
-        });
+
+        // Also extract route-like patterns from the page URL for mapping frontend→backend
+        if (capturePageUrl) {
+          try {
+            const pageRoute = new URL(capturePageUrl).pathname;
+            if (pageRoute && pageRoute !== '/' && !captureApiPaths.includes(pageRoute)) {
+              captureApiPaths.push(pageRoute);
+            }
+          } catch {}
+        }
 
         setVisualDebugScreenshots(prev => [...prev, {
           id: `ss_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
@@ -3080,6 +3120,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           consoleLogs: captureConsoleLogs,
           backendLogs: captureBackendLogs,
           relatedUrls: captureUrls,
+          apiPaths: captureApiPaths,
         }]);
         // فعال کردن حالت دیباگ بصری
         if (!visualDebugMode) setVisualDebugMode(true);
@@ -3134,7 +3175,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     setInspectorOpType('investigate');
     inspectorOpAbortRef.current = new AbortController();
 
-    // 📦 Build screenshot packs - each screenshot with its own logs/URLs
+    // 📦 Build screenshot packs - each screenshot with its own logs/URLs/API paths
     const screenshotPacks = visualDebugScreenshots.map((ss, idx) => ({
       index: idx + 1,
       base64: ss.base64,
@@ -3143,6 +3184,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       consoleLogs: ss.consoleLogs || [],
       backendLogs: ss.backendLogs || [],
       relatedUrls: ss.relatedUrls || [],
+      apiPaths: ss.apiPaths || [],
     }));
 
     // اضافه کردن پیام کاربر به چت - شامل اطلاعات پک‌ها
@@ -3162,6 +3204,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         consoleLogs: p.consoleLogs,
         backendLogs: p.backendLogs,
         relatedUrls: p.relatedUrls,
+        apiPaths: p.apiPaths,
         errorCount: p.consoleLogs.filter(l => l.level === 'error').length + p.backendLogs.filter(l => l.level === 'error').length,
       })),
     } as any]);
@@ -3187,6 +3230,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             console_logs: p.consoleLogs,
             backend_logs: p.backendLogs,
             related_urls: p.relatedUrls,
+            api_paths: p.apiPaths,
           })),
           console_logs: importedProjectConsoleLogs.slice(-50).map(l => ({
             level: l.level, message: l.message, timestamp: l.timestamp, source: l.source,
@@ -10212,11 +10256,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                           🔗 {pack.relatedUrls.length} آدرس
                                         </span>
                                       )}
+                                      {pack.apiPaths && pack.apiPaths.length > 0 && (
+                                        <span className="px-1 py-0.5 rounded bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400">
+                                          🛤️ {pack.apiPaths.length} مسیر API
+                                        </span>
+                                      )}
                                     </div>
                                   </div>
                                 </div>
                                 {/* Expandable details */}
-                                {(pack.consoleLogs?.length > 0 || pack.backendLogs?.length > 0 || pack.relatedUrls?.length > 0) && (
+                                {(pack.consoleLogs?.length > 0 || pack.backendLogs?.length > 0 || pack.relatedUrls?.length > 0 || pack.apiPaths?.length > 0) && (
                                   <details className="text-[10px]">
                                     <summary className="px-2 py-1 cursor-pointer text-purple-600 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/20 border-t border-purple-200 dark:border-purple-800">
                                       جزئیات لاگ‌ها و آدرس‌ها
@@ -10249,6 +10298,14 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                           <div className="font-bold text-gray-600 dark:text-gray-400 mb-0.5">🔗 آدرس‌ها:</div>
                                           {pack.relatedUrls.map((url: string, ui: number) => (
                                             <div key={ui} className="text-blue-500 dark:text-blue-400 truncate">{url}</div>
+                                          ))}
+                                        </div>
+                                      )}
+                                      {pack.apiPaths?.length > 0 && (
+                                        <div>
+                                          <div className="font-bold text-gray-600 dark:text-gray-400 mb-0.5">🛤️ مسیرهای API بکند:</div>
+                                          {pack.apiPaths.map((p: string, pi: number) => (
+                                            <div key={pi} className="text-indigo-500 dark:text-indigo-400 truncate font-mono">{p}</div>
                                           ))}
                                         </div>
                                       )}
