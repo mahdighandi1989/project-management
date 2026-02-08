@@ -6968,14 +6968,14 @@ async def _analyze_github_project(owner: str, repo: str, root_dir: str, branch: 
                 result["start_command"] = scripts.get("start", "npm start")
             elif "vite" in all_deps:
                 result["framework"] = "vite"
-                # Vite بیلد static میده → static_site
+                # Vite بیلد static میده → static_site + SPA rewrite
                 result["service_type"] = "static_site"
-                result["build_command"] = "npm install && npm run build"
+                result["build_command"] = "npm install && npm run build && echo '/*    /index.html   200' > dist/_redirects"
                 result["publish_path"] = "dist"
             elif "react-scripts" in all_deps:
                 result["framework"] = "cra"  # Create React App
                 result["service_type"] = "static_site"
-                result["build_command"] = "npm install && npm run build"
+                result["build_command"] = "npm install && npm run build && echo '/*    /index.html   200' > build/_redirects"
                 result["publish_path"] = "build"
             elif "nuxt" in all_deps or "nuxt3" in all_deps:
                 result["framework"] = "nuxt"
@@ -7001,7 +7001,7 @@ async def _analyze_github_project(owner: str, repo: str, root_dir: str, branch: 
                     result["start_command"] = "npm start"
                 elif "build" in scripts:
                     result["service_type"] = "static_site"
-                    result["build_command"] = "npm install && npm run build"
+                    result["build_command"] = "npm install && npm run build && echo '/*    /index.html   200' > dist/_redirects"
                     result["publish_path"] = "dist"
                 else:
                     result["service_type"] = "web_service"
@@ -7010,6 +7010,26 @@ async def _analyze_github_project(owner: str, repo: str, root_dir: str, branch: 
 
         except json.JSONDecodeError:
             pass
+
+        # تلاش برای خواندن env vars مورد نیاز از .env.example یا .env.production
+        for env_file in [".env.example", ".env.production", ".env"]:
+            env_content = await _read_github_file(owner, repo, f"{prefix}{env_file}", branch)
+            if env_content:
+                for line in env_content.strip().split("\n"):
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        key = line.split("=", 1)[0].strip()
+                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        # فقط VITE_ و REACT_APP_ و NEXT_PUBLIC_ env vars
+                        if key.startswith(("VITE_", "REACT_APP_", "NEXT_PUBLIC_")):
+                            # مقدار placeholder نباشه
+                            if val and not val.startswith("your_") and val != "":
+                                result["env_vars"][key] = val
+                            else:
+                                result["env_vars"][key] = ""  # باید توسط کاربر پر بشه
+                break  # فقط اولین فایل یافت شده
 
         return result
 
