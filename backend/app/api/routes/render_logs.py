@@ -5065,7 +5065,7 @@ export default function InspectorBridge() {
         "header": "سربرگ", "footer": "پاورقی", "li": "آیتم لیست", "table": "جدول", "video": "ویدیو"
       };
       const typeLabel = tagLabels[tag] || tag;
-      if (text) return typeLabel + " \"" + text + "\"";
+      if (text) return `${typeLabel} "${text}"`;
       return typeLabel + (id || cls || "");
     };
 
