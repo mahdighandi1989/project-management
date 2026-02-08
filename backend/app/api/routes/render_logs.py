@@ -6838,18 +6838,25 @@ async def archive_inspector_session(
     return {"success": True, "message": "سشن آرشیو شد", "session": session.to_dict()}
 
 
+class VerifyMessageBody(BaseModel):
+    """بدنه اختیاری درخواست verify - شامل لاگ‌های کنسول بریدج"""
+    console_logs: Optional[List[dict]] = None  # [{level, message, timestamp}]
+
+
 @router.post("/inspector/message/{message_id}/verify")
 async def verify_inspector_message(
     message_id: int,
     project_id: str,
     force: bool = False,
+    body: Optional[VerifyMessageBody] = None,
     db: Session = Depends(get_db)
 ):
     """
     بررسی لاگ‌های بک‌اند برای یک اکشن و زدن تیک تأیید
     - لاگ‌ها بر اساس پنجره زمانی دقیق هر اکشن فیلتر می‌شوند
     - خطاهای کنسول مرورگر از خطاهای واقعی بک‌اند تفکیک می‌شوند
-    - force=true: بررسی مجدد حتی اگر قبلاً بررسی شده (مثلاً وقتی بار اول لاگی نبوده)
+    - force=true: بررسی مجدد حتی اگر قبلاً بررسی شده
+    - console_logs: لاگ‌های کنسول دریافت‌شده از Bridge (برای وقتی که Render logs نیست)
     """
     from ...models.inspector_session import InspectorMessage
     from ...models.render_log import RenderLog
@@ -6938,22 +6945,59 @@ async def verify_inspector_message(
                             db.rollback()
 
         if not service_ids:
-            _summary = "خطای کنسول مرورگر (سرویس بک‌اندی متصل نیست)" if is_console_error else "سرویسی برای این پروژه یافت نشد"
-            msg.backend_verified = not is_console_error  # خطای کنسول = False، بدون سرویس = True
-            msg.backend_log_summary = _summary
-            msg.verified_by_model = "console-error" if is_console_error else "no-services"
-            msg.logs_checked = 0
-            msg.error_logs_count = 1 if is_console_error else 0
+            # 📦 حتی بدون سرویس Render، لاگ‌های بریدج رو بررسی کن
+            bridge_logs = (body.console_logs if body and body.console_logs else []) or []
+            bridge_error_count = sum(1 for bl in bridge_logs if bl.get('level', '').lower() in ('error', 'warn'))
+            bridge_total = len(bridge_logs)
+            bridge_checked = [{
+                "level": bl.get("level", "log"),
+                "message": (bl.get("message", ""))[:200],
+                "timestamp": None,
+                "service_id": "bridge-console",
+            } for bl in bridge_logs[:30]]
+
+            if is_console_error:
+                _summary = f"خطای کنسول مرورگر + {bridge_total} لاگ بریدج" if bridge_total else "خطای کنسول مرورگر (سرویس بک‌اندی متصل نیست)"
+                msg.backend_verified = False
+                msg.backend_log_summary = _summary
+                msg.verified_by_model = "console-error"
+                msg.logs_checked = bridge_total
+                msg.error_logs_count = bridge_error_count + 1
+                if bridge_checked:
+                    msg.checked_logs_data = json.dumps(bridge_checked, ensure_ascii=False)
+            elif bridge_total > 0 and bridge_error_count > 0:
+                _summary = f"⚠️ {bridge_error_count} خطا/هشدار در کنسول مرورگر"
+                msg.backend_verified = False
+                msg.backend_log_summary = _summary
+                msg.verified_by_model = "bridge-console"
+                msg.logs_checked = bridge_total
+                msg.error_logs_count = bridge_error_count
+                msg.checked_logs_data = json.dumps(bridge_checked, ensure_ascii=False)
+            elif bridge_total > 0:
+                _summary = f"سالم - {bridge_total} لاگ کنسول بررسی شد"
+                msg.backend_verified = True
+                msg.backend_log_summary = _summary
+                msg.verified_by_model = "bridge-console"
+                msg.logs_checked = bridge_total
+                msg.error_logs_count = 0
+                msg.checked_logs_data = json.dumps(bridge_checked, ensure_ascii=False)
+            else:
+                _summary = "سرویسی برای این پروژه یافت نشد"
+                msg.backend_verified = True
+                msg.backend_log_summary = _summary
+                msg.verified_by_model = "no-services"
+                msg.logs_checked = 0
+                msg.error_logs_count = 0
+
             db.commit()
             return {
-                "success": True,
-                "message_id": message_id,
+                "success": True, "message_id": message_id,
                 "verified": msg.backend_verified,
-                "summary": _summary,
+                "summary": msg.backend_log_summary,
                 "model_used": msg.verified_by_model,
-                "logs_checked": 0,
-                "error_logs_count": 1 if is_console_error else 0,
-                "checked_logs": []
+                "logs_checked": msg.logs_checked or 0,
+                "error_logs_count": msg.error_logs_count or 0,
+                "checked_logs": bridge_checked
             }
 
         # -------------------------------------------------------
@@ -7035,23 +7079,69 @@ async def verify_inspector_message(
         # ✅ اکشن عادی (کلیک، اسکرول، ...): فقط لاگ بک‌اند مهمه
         # -------------------------------------------------------
         if len(action_logs) == 0:
-            _no_log_summary = f"بدون لاگ بک‌اند ({len(service_ids)} سرویس بررسی شد)"
-            msg.backend_verified = True
-            msg.backend_log_summary = _no_log_summary
-            msg.verified_by_model = "no-logs"
-            msg.logs_checked = 0
-            msg.error_logs_count = 0
-            db.commit()
-            return {
-                "success": True,
-                "message_id": message_id,
-                "verified": True,
-                "summary": _no_log_summary,
-                "model_used": "no-logs",
-                "logs_checked": 0,
-                "error_logs_count": 0,
-                "checked_logs": []
-            }
+            # 📦 اگر لاگ Render نیست، لاگ‌های کنسول Bridge رو بررسی کن
+            bridge_logs = (body.console_logs if body and body.console_logs else []) or []
+            bridge_error_count = sum(1 for bl in bridge_logs if bl.get('level', '').lower() in ('error', 'warn'))
+            bridge_total = len(bridge_logs)
+
+            if bridge_total > 0:
+                # لاگ‌های بریدج رو به checked_logs اضافه کن
+                bridge_checked = [{
+                    "level": bl.get("level", "log"),
+                    "message": (bl.get("message", ""))[:200],
+                    "timestamp": None,
+                    "service_id": "bridge-console",
+                } for bl in bridge_logs[:30]]
+
+                if bridge_error_count > 0:
+                    _summary = f"⚠️ {bridge_error_count} خطا/هشدار در کنسول مرورگر (از {bridge_total} لاگ)"
+                    msg.backend_verified = False
+                    msg.backend_log_summary = _summary
+                    msg.verified_by_model = "bridge-console"
+                    msg.logs_checked = bridge_total
+                    msg.error_logs_count = bridge_error_count
+                    msg.checked_logs_data = json.dumps(bridge_checked, ensure_ascii=False)
+                    db.commit()
+                    return {
+                        "success": True, "message_id": message_id,
+                        "verified": False, "summary": _summary,
+                        "model_used": "bridge-console",
+                        "logs_checked": bridge_total,
+                        "error_logs_count": bridge_error_count,
+                        "checked_logs": bridge_checked
+                    }
+                else:
+                    _summary = f"سالم - {bridge_total} لاگ کنسول بررسی شد (بدون خطا)"
+                    msg.backend_verified = True
+                    msg.backend_log_summary = _summary
+                    msg.verified_by_model = "bridge-console"
+                    msg.logs_checked = bridge_total
+                    msg.error_logs_count = 0
+                    msg.checked_logs_data = json.dumps(bridge_checked, ensure_ascii=False)
+                    db.commit()
+                    return {
+                        "success": True, "message_id": message_id,
+                        "verified": True, "summary": _summary,
+                        "model_used": "bridge-console",
+                        "logs_checked": bridge_total,
+                        "error_logs_count": 0,
+                        "checked_logs": bridge_checked
+                    }
+            else:
+                _no_log_summary = f"بدون لاگ ({len(service_ids)} سرویس بررسی شد)"
+                msg.backend_verified = True
+                msg.backend_log_summary = _no_log_summary
+                msg.verified_by_model = "no-logs"
+                msg.logs_checked = 0
+                msg.error_logs_count = 0
+                db.commit()
+                return {
+                    "success": True, "message_id": message_id,
+                    "verified": True, "summary": _no_log_summary,
+                    "model_used": "no-logs",
+                    "logs_checked": 0, "error_logs_count": 0,
+                    "checked_logs": []
+                }
 
         # اگر خطایی در لاگ‌ها نبود، مستقیم تأیید کن (بدون AI)
         if not error_logs:
@@ -10207,32 +10297,39 @@ async def get_vision_models(db: Session = Depends(get_db)):
 
 
 # ─── پرامپت ثابت دیباگ بصری ───
-VISUAL_DEBUG_SYSTEM_PROMPT = """## 🔍 دیباگ بصری پروژه
+VISUAL_DEBUG_SYSTEM_PROMPT = """## 🔍 بازرس بصری پروژه (Visual Inspector)
 
-شما یک متخصص دیباگ بصری هستید. اطلاعات زیر در اختیار شما قرار گرفته:
-1. **عکس‌های صفحه**: اسکرین‌شات‌هایی از صفحه فرانت‌اند پروژه
-2. **لاگ‌ها و آدرس‌ها به صورت پک مجزا**: هر عکس یک **پک (Pack)** دارد شامل لاگ‌های کنسول، لاگ‌های بک‌اند، و آدرس‌های مرتبط که دقیقاً در لحظه گرفتن آن عکس ثبت شده‌اند. این تفکیک مهم است.
-3. **توضیح کاربر**: (اختیاری) توضیح کاربر درباره مشکل
+شما یک متخصص توسعه نرم‌افزار هستید. بر اساس عکس‌ها، لاگ‌ها و درخواست کاربر، باید **دقیقاً** کار درخواست‌شده را انجام دهید.
 
-## ساختار اطلاعات:
-- هر عکس زیرمجموعه‌ای از لاگ‌ها و آدرس‌های مرتبط با **همان لحظه** را دارد
-- لاگ‌هایی که زیر «عکس 1» نوشته شده‌اند فقط مربوط به عکس 1 هستند (نه عکس 2)
-- آدرس‌های هر عکس نشان‌دهنده endpoint ها و صفحات مرتبط در آن لحظه هستند
+## اطلاعات ارائه‌شده:
+1. **عکس‌های صفحه**: اسکرین‌شات از صفحه فرانت‌اند (هر عکس شماره‌دار)
+2. **لاگ‌ها و آدرس‌ها (پک مجزا)**: هر عکس یک **پک** دارد شامل لاگ‌های کنسول، لاگ‌های بک‌اند، آدرس‌های مرتبط و مسیرهای API بکند. لاگ‌های هر عکس فقط مربوط به همان لحظه هستند.
+3. **مسیرهای API بکند**: endpoint ها و route هایی که هنگام عکس‌برداری فعال بوده‌اند - برای شناسایی فایل‌های بکند مرتبط
+4. **توضیح/درخواست کاربر**: مهم‌ترین بخش - ممکن است رفع باگ باشد، یا **اضافه کردن قابلیت جدید**، یا تغییر ظاهر، یا هر درخواست دیگری
+
+## نوع درخواست:
+- اگر کاربر از **مشکل** یا **باگ** صحبت کرده: رفع باگ و ارائه کد اصلاح‌شده
+- اگر کاربر **قابلیت جدید** خواسته: بررسی عکس‌ها برای درک ساختار فعلی، سپس پیاده‌سازی قابلیت خواسته‌شده با کد کامل
+- اگر کاربر **تغییر ظاهری** خواسته: بررسی CSS/JSX فعلی و ارائه کد اصلاح‌شده
+- اگر کاربر **توضیح** خواسته: تحلیل و توضیح بدون تغییر کد
 
 ## وظیفه شما:
-- محتوای هر عکس را جداگانه بررسی کنید و لاگ‌های مربوط به همان عکس را تحلیل کنید
-- ارتباط بین خطاهای بصری هر عکس و لاگ‌های مربوط به آن را پیدا کنید
-- دقیقاً مشخص کنید مشکل در کدام فایل و خط کدام کد است
-- راه‌حل عملی و کد اصلاح‌شده ارائه دهید
+- محتوای هر عکس را با دقت بررسی کنید تا ساختار UI و وضعیت فعلی را بفهمید
+- لاگ‌ها و مسیرهای API هر عکس را تحلیل کنید تا بکند مرتبط را بشناسید
+- بر اساس درخواست کاربر، دقیقاً مشخص کنید کدام فایل‌ها باید تغییر کنند
+- کد **کامل** و **آماده اجرا** ارائه دهید - نه فقط snippet
 
 ## قالب پاسخ:
-1. **خلاصه مشکل**: توضیح کوتاه مشکل شناسایی شده
-2. **تحلیل بصری**: چه چیزی در هر عکس اشتباه دیده می‌شود (با ذکر شماره عکس)
-3. **تحلیل لاگ‌ها**: ارتباط خطاها با مشکل بصری (با ذکر شماره عکس مرتبط)
-4. **فایل‌های مشکل‌دار**: لیست فایل‌هایی که باید اصلاح شوند
-5. **راه‌حل**: کد اصلاح‌شده برای هر فایل
+1. **درک وضعیت فعلی**: توضیح کوتاه از آنچه در عکس‌ها و لاگ‌ها می‌بینید
+2. **تحلیل درخواست**: درخواست کاربر چیست و کدام بخش‌ها باید تغییر کنند
+3. **فایل‌های مرتبط**: لیست فایل‌هایی که باید تغییر کنند (فرانت + بکند + مسیرهای API)
+4. **تغییرات**: کد کامل اصلاح‌شده یا جدید برای هر فایل
 
-به فارسی پاسخ بده. کدها و اصطلاحات فنی می‌توانند انگلیسی باشند.
+## مهم:
+- وقتی action_plan با فایل‌ها ارائه می‌دهید، **محتوای کامل** فایل را بنویسید (نه فقط تکه کد)
+- اگر فایل جدید لازم است، operation را "create" بگذارید
+- اگر فایل موجود تغییر می‌کند، operation را "modify" بگذارید
+- به فارسی پاسخ بده. کدها و اصطلاحات فنی می‌توانند انگلیسی باشند.
 """
 
 
@@ -10295,6 +10392,9 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
         # ساخت پرامپت - اگر screenshot_packs موجود است، هر عکس را با لاگ‌های مربوطه ارسال کن
         user_parts = [f"## 📸 عکس‌های صفحه ({len(request.screenshots)} عکس)"]
 
+        # Collect all API paths from all packs for file selection
+        all_api_paths = []
+
         if request.screenshot_packs and len(request.screenshot_packs) == len(request.screenshots):
             # 📦 حالت Pack: هر عکس با لاگ‌ها و آدرس‌های مربوط به خودش
             for i, pack in enumerate(request.screenshot_packs):
@@ -10326,6 +10426,14 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                     user_parts.append(f"\n🔗 آدرس‌های مرتبط با عکس {i+1}:")
                     for url in pack_urls:
                         user_parts.append(f"  - {url}")
+
+                # 🛤️ مسیرهای API بکند مرتبط با این عکس
+                pack_api_paths = pack.get('api_paths', [])
+                if pack_api_paths:
+                    user_parts.append(f"\n🛤️ مسیرهای API بکند مرتبط با عکس {i+1}:")
+                    for ap in pack_api_paths:
+                        user_parts.append(f"  - {ap}")
+                    all_api_paths.extend(pack_api_paths)
 
         else:
             # حالت قدیمی (بدون pack): عکس‌ها و لاگ‌ها جدا
@@ -10366,8 +10474,26 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                     code_files = [f["path"] for f in all_files
                                   if _is_code_file(f["path"], file_size=f.get("size", 0))]
                     project_tree_summary = _build_project_tree_summary(code_files)
-                    context_text = (request.user_description or "") + " " + user_text[:2000]
+                    # 🛤️ Use API paths to find related backend files
+                    api_path_context = " ".join(all_api_paths) if all_api_paths else ""
+                    context_text = (request.user_description or "") + " " + user_text[:2000] + " " + api_path_context
                     selected_files = _fallback_file_selection(code_files, context_text, max_files=8)
+                    # 🔑 If API paths found, also search for matching route/controller files
+                    if all_api_paths:
+                        api_keywords = set()
+                        for ap in all_api_paths:
+                            # Extract meaningful parts: /api/users/123 → ["users"]
+                            parts = [p for p in ap.strip('/').split('/') if p and p != 'api' and p != 'v1' and p != 'v2' and not p.isdigit()]
+                            api_keywords.update(parts)
+                        if api_keywords:
+                            for cf in code_files:
+                                if len(selected_files) >= 12:
+                                    break
+                                cf_lower = cf.lower()
+                                # Match route/controller/service files related to API paths
+                                if any(kw.lower() in cf_lower for kw in api_keywords):
+                                    if cf not in selected_files and ('route' in cf_lower or 'api' in cf_lower or 'controller' in cf_lower or 'service' in cf_lower or 'handler' in cf_lower or 'view' in cf_lower):
+                                        selected_files.append(cf)
                     selected_files = _ensure_balanced_selection(selected_files, code_files, 12)
                     # اولویت فایل‌های جدید بررسی‌نشده
                     prev_files = set(request.previously_read_files or [])
