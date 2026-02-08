@@ -4281,7 +4281,7 @@ class InjectBridgeRequest(BaseModel):
 # محتوای Bridge Script که به پروژه‌ها تزریق می‌شود (نسخه HTML)
 INSPECTOR_BRIDGE_SCRIPT = '''
 <!-- Inspector Bridge Script - Auto-injected -->
-<!-- Version: 2.1 -->
+<!-- Version: 2.2 -->
 <script>
 (function() {
   console.log('🌉 Inspector Bridge: Script starting...');
@@ -4733,10 +4733,10 @@ INSPECTOR_BRIDGE_SCRIPT = '''
 # 🆕 محتوای Bridge Script برای پروژه‌های React/Next.js (نسخه JS/TS)
 INSPECTOR_BRIDGE_SCRIPT_JS = '''
 // 🌉 Inspector Bridge Script - Auto-injected
-// Version: 2.1
+// Version: 2.2
 // ارتباط با Inspector از طریق WebSocket (حل مشکل cross-origin)
 /* eslint-disable */
-// @ts-ignore
+// @ts-nocheck
 if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
   // @ts-ignore
   window.__inspectorBridgeLoaded = true;
@@ -4967,11 +4967,12 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
 '''
 
 # 🆕 Next.js App Router - Client Component برای Bridge Script (WebSocket)
-INSPECTOR_BRIDGE_VERSION = "2.1"  # نسخه فعلی bridge template - افزایش بده هر وقت template تغییر کرد
+INSPECTOR_BRIDGE_VERSION = "2.2"  # نسخه فعلی bridge template - افزایش بده هر وقت template تغییر کرد
 
 INSPECTOR_BRIDGE_CLIENT_COMPONENT = '''"use client";
+// @ts-nocheck
 // 🌉 Inspector Bridge Script - Client Component for Next.js App Router
-// Version: 2.1
+// Version: 2.2
 // ارتباط با Inspector از طریق WebSocket (حل مشکل cross-origin)
 import { useEffect } from "react";
 
