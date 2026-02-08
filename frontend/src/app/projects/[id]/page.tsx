@@ -2420,6 +2420,32 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         version: data.version,
         latest_version: data.latest_version
       }));
+
+      // 🔄 Auto-fix: اگر نسخه قدیمی بود، خودکار آپدیت کن
+      if (data.has_bridge && data.needs_update) {
+        console.log(`🔄 Bridge outdated (v${data.version} → v${data.latest_version}), auto-updating...`);
+        addTransientMessage(`🔄 Bridge قدیمی است - آپدیت خودکار به v${data.latest_version}...`, 'info');
+        try {
+          const updateRes = await fetch(`${API_BASE}/api/render/inspector/update-bridge/${projectId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+          });
+          const updateData = await updateRes.json();
+          if (updateData.success) {
+            setInspectorBridgeStatus(prev => ({
+              ...prev,
+              needs_update: false,
+              update_reasons: [],
+              version: updateData.version
+            }));
+            addTransientMessage(`✅ Bridge خودکار به v${updateData.version} آپدیت شد - منتظر deploy باشید`, 'info');
+          } else {
+            console.warn('Auto-update failed:', updateData.error);
+          }
+        } catch (autoFixErr) {
+          console.warn('Auto-fix bridge failed:', autoFixErr);
+        }
+      }
     } catch (err) {
       setInspectorBridgeStatus(prev => ({
         ...prev,
