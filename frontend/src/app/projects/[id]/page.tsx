@@ -5383,6 +5383,17 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   // 🆕 ایجاد هوشمند سرویس Render (تحلیل خودکار ساختار پروژه)
   const createRenderServiceSmart = async () => {
     setCreateRenderLoading(true);
+    setShowCreateRenderService(false);
+
+    // پیام شروع تحلیل در چت
+    const startMsgId = `render-ai-start-${Date.now()}`;
+    setInspectorChatMessages(prev => [...prev, {
+      id: startMsgId,
+      role: 'system' as const,
+      content: '🤖 در حال تحلیل ساختار پروژه توسط هوش مصنوعی برای ایجاد سرویس‌های Render...',
+      timestamp: new Date(),
+    }]);
+
     try {
       const res = await fetch(`${API_BASE}/api/render/inspector/create-render-service`, {
         method: 'POST',
@@ -5390,22 +5401,69 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         body: JSON.stringify({ project_id: projectId }),
       });
       const data = await res.json();
+
       if (data.success) {
-        const details = (data.created || []).map((s: any) => `${s.name} (${s.framework}/${s.service_type})`).join(' + ');
-        showSuccess(`✅ ${data.message}: ${details}`);
-        // هشدار درباره env vars خالی
-        const emptyEnvVars = (data.created || []).flatMap((s: any) =>
-          Object.entries(s.env_vars || {}).filter(([, v]) => !v).map(([k]) => k)
-        );
-        if (emptyEnvVars.length > 0) {
-          setTimeout(() => showError(`⚠️ متغیرهای محیطی زیر مقدار ندارند (در داشبورد Render تنظیم کنید): ${emptyEnvVars.join(', ')}`), 1500);
+        // ساخت پیام نتیجه برای چت
+        let resultContent = `🤖 **تحلیل AI** (مدل: ${data.model_used || 'نامشخص'})\n\n`;
+        if (data.analysis) {
+          resultContent += `📋 ${data.analysis}\n\n`;
         }
-        setShowCreateRenderService(false);
+        resultContent += `✅ **${(data.created || []).length} سرویس با موفقیت ایجاد شد:**\n`;
+        for (const svc of (data.created || [])) {
+          resultContent += `\n🔹 **${svc.name}** (${svc.role}) — نوع: ${svc.service_type}`;
+          if (svc.url) resultContent += `\n   🔗 ${svc.url}`;
+          if (svc.dashboard_url) resultContent += `\n   ⚙️ [داشبورد](${svc.dashboard_url})`;
+          if (svc.notes) resultContent += `\n   📝 ${svc.notes}`;
+        }
+
+        // هشدار env vars خالی
+        const emptyVars = data.empty_env_vars || [];
+        if (emptyVars.length > 0) {
+          resultContent += `\n\n⚠️ **متغیرهای محیطی زیر مقدار ندارند** (در داشبورد Render تنظیم کنید):\n`;
+          for (const ev of emptyVars) {
+            resultContent += `\n  • ${ev}`;
+          }
+        }
+
+        // خطاها
+        if ((data.errors || []).length > 0) {
+          resultContent += `\n\n❌ **خطا در ایجاد:**\n`;
+          for (const err of data.errors) {
+            resultContent += `\n  • ${err.name} (${err.role}): ${err.error}`;
+          }
+        }
+
+        setInspectorChatMessages(prev => [...prev, {
+          id: `render-ai-result-${Date.now()}`,
+          role: 'assistant' as const,
+          content: resultContent,
+          model_id: data.model_used,
+          timestamp: new Date(),
+        }]);
+
+        showSuccess(data.message);
         loadInspectorServices(true);
       } else {
+        // نتیجه ناموفق در چت
+        let errorContent = `❌ **خطا در ایجاد سرویس Render**\n\n${data.error || 'خطای ناشناخته'}`;
+        if (data.analysis) {
+          errorContent += `\n\n📋 تحلیل AI: ${data.analysis}`;
+        }
+        setInspectorChatMessages(prev => [...prev, {
+          id: `render-ai-error-${Date.now()}`,
+          role: 'system' as const,
+          content: errorContent,
+          timestamp: new Date(),
+        }]);
         showError(data.error || 'خطا در ایجاد سرویس');
       }
     } catch {
+      setInspectorChatMessages(prev => [...prev, {
+        id: `render-ai-err-${Date.now()}`,
+        role: 'system' as const,
+        content: '❌ خطا در ارتباط با سرور برای تحلیل AI',
+        timestamp: new Date(),
+      }]);
       showError('خطا در ارتباط با سرور');
     } finally {
       setCreateRenderLoading(false);
@@ -11887,12 +11945,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     <span className="text-2xl">{createRenderLoading ? '⏳' : '💎'}</span>
                     <div className="flex-1">
                       <div className="font-bold text-orange-700 dark:text-orange-400">
-                        ایجاد خودکار (Starter - $7/ماه)
+                        ایجاد خودکار با AI (Starter - $7/ماه)
                       </div>
                       <p className="text-xs text-gray-500 mt-1">
                         {createRenderLoading
-                          ? 'در حال تحلیل ساختار پروژه و ایجاد سرویس...'
-                          : 'ساختار پروژه تحلیل می‌شود و سرویس‌های بکند/فرانت خودکار ایجاد می‌شوند.'}
+                          ? '🤖 AI در حال تحلیل ساختار پروژه و ایجاد سرویس‌ها...'
+                          : 'مدل هوش مصنوعی ساختار پروژه رو بررسی میکنه و سرویس‌ها رو دقیق ایجاد میکنه. نتیجه در چت دستیار نمایش داده میشه.'}
                       </p>
                     </div>
                     {!createRenderLoading && <span className="text-gray-400">⚡</span>}
