@@ -1002,9 +1002,10 @@ export default function ProjectDetailPage() {
                       checked_logs: verifyData.checked_logs,
                     } : m)
                   );
-                  // اگر بار اول لاگی نبود، ۸ ثانیه بعد دوباره بررسی کن
-                  if (attempt === 1 && verifyData.logs_checked === 0 && verifyData.model_used === 'no-logs') {
-                    setTimeout(() => doVerify(2), 8000);
+                  // اگر لاگی نبود یا pending برگشت، دوباره تلاش کن (حداکثر ۳ بار)
+                  if (attempt < 3 && (verifyData.logs_checked === 0 || verifyData.pending)) {
+                    const delays = [6000, 10000, 15000]; // تلاش‌های بعدی با فاصله بیشتر
+                    setTimeout(() => doVerify(attempt + 1), delays[attempt] || 10000);
                   }
                 }
               } catch (err) { /* verify failed - non-critical */ }
@@ -10428,14 +10429,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               msg.backend_verified === false ? 'text-red-500' :
                               'text-gray-300 animate-pulse'
                             }`} title={
-                              msg.backend_verified === true && (!msg.logs_checked || msg.logs_checked === 0) ? 'تأیید شده - بدون لاگ' :
-                              msg.backend_verified === true ? `تأیید شده - ${msg.logs_checked} لاگ بررسی شد` :
+                              msg.backend_verified === true && msg.logs_checked && msg.logs_checked > 0 ? `تأیید شده - ${msg.logs_checked} لاگ بررسی شد` :
+                              msg.backend_verified === true ? 'تأیید شده' :
                               msg.backend_verified === false ? 'خطا در لاگ‌ها' :
+                              msg.logs_checked === 0 && msg.verified_by_model === 'no-logs' ? 'بدون لاگ - بررسی نشد' :
                               'در حال بررسی...'
                             }>
                               {msg.backend_verified === true && msg.logs_checked && msg.logs_checked > 0 ? '✓✓' :
-                               msg.backend_verified === true ? '✓' :
                                msg.backend_verified === false ? '✕' :
+                               msg.backend_verified === null || (msg.logs_checked === 0 && msg.verified_by_model === 'no-logs') ? '⏳' :
+                               msg.backend_verified === true ? '✓' :
                                '○'}
                             </span>
                           )}
