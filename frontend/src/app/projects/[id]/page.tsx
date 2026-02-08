@@ -463,6 +463,41 @@ export default function ProjectDetailPage() {
   const [detectedFramework, setDetectedFramework] = useState<string | null>(null);
   const [isBackendOnly, setIsBackendOnly] = useState(false);
 
+  // 📸 Visual Debug - دیباگ بصری با عکس‌برداری
+  const [visualDebugMode, setVisualDebugMode] = useState(false);
+  const [visualDebugScreenshots, setVisualDebugScreenshots] = useState<Array<{
+    id: string;
+    base64: string;
+    timestamp: Date;
+    pageUrl: string;
+  }>>([]);
+  const [visualDebugConsoleLogs, setVisualDebugConsoleLogs] = useState<Array<{
+    level: string;
+    message: string;
+    timestamp: number;
+    source: string;
+  }>>([]);
+  const [visualDebugDescription, setVisualDebugDescription] = useState('');
+  const [visualDebugTakingScreenshot, setVisualDebugTakingScreenshot] = useState(false);
+  const [visualDebugModelSelection, setVisualDebugModelSelection] = useState(false);
+  const [visualDebugVisionModels, setVisualDebugVisionModels] = useState<Array<{
+    id: string; name: string; provider: string; enabled: boolean;
+    supports_images: boolean; capabilities: string[];
+    context_window: number; recommended: boolean;
+  }>>([]);
+  const [visualDebugSelectedModels, setVisualDebugSelectedModels] = useState<string[]>([]);
+  const [visualDebugLoading, setVisualDebugLoading] = useState(false);
+
+  // 📋 لاگ‌های کنسول پروژه ایمپورت شده (تفکیک شده از پروژه اصلی)
+  const [importedProjectConsoleLogs, setImportedProjectConsoleLogs] = useState<Array<{
+    id: string;
+    level: string;
+    message: string;
+    timestamp: number;
+    source: string;
+  }>>([]);
+  const [showImportedConsoleLogs, setShowImportedConsoleLogs] = useState(false);
+
   // 🔍 Debug Bridge - برای تشخیص مشکلات
   const [bridgeDebugInfo, setBridgeDebugInfo] = useState<{
     loading: boolean;
@@ -855,7 +890,32 @@ export default function ProjectDetailPage() {
 
       // بررسی پیام از bridge script (postMessage fallback)
       if (event.data?.type === 'inspector-bridge-event') {
-        const { action, target, position, elementInfo, pageUrl } = event.data;
+        const { action, target, position, elementInfo, pageUrl, level, source } = event.data;
+
+        // 📋 ذخیره لاگ‌های کنسول (تفکیک شده) - postMessage fallback
+        if (action === 'console-log' || action === 'console-error') {
+          setImportedProjectConsoleLogs(prev => {
+            const newLog = {
+              id: `clog_pm_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+              level: level || (action === 'console-error' ? 'error' : 'log'),
+              message: elementInfo || '',
+              timestamp: event.data.timestamp || Date.now(),
+              source: source || 'imported-project',
+            };
+            return [...prev, newLog].slice(-500);
+          });
+          if (action === 'console-log') return;
+        }
+
+        if (action === 'error-overlay') {
+          setImportedProjectConsoleLogs(prev => [...prev, {
+            id: `overlay_pm_${Date.now()}`,
+            level: 'error',
+            message: `[Error Overlay] ${elementInfo || ''}`,
+            timestamp: event.data.timestamp || Date.now(),
+            source: 'imported-project',
+          }]);
+        }
 
         const actionLabels: Record<string, string> = {
           'click': 'کلیک کردی',
@@ -864,7 +924,8 @@ export default function ProjectDetailPage() {
           'focus': 'فوکوس کردی',
           'hover': 'موس بردی روی',
           'error': '🔴 خطای JS',
-          'console-error': '🔴 console.error'
+          'console-error': '🔴 console.error',
+          'error-overlay': '🔴 لایه خطا شناسایی شد'
         };
 
         const actionLabel = actionLabels[action] || action;
@@ -1046,7 +1107,35 @@ export default function ProjectDetailPage() {
 
             // پردازش event های Bridge (relay شده از طریق backend)
             if (data.type === 'inspector-bridge-event') {
-              const { action, target, position, elementInfo, pageUrl } = data;
+              const { action, target, position, elementInfo, pageUrl, level, source } = data;
+
+              // 📋 ذخیره لاگ‌های کنسول پروژه ایمپورت شده (تفکیک شده)
+              if (action === 'console-log' || action === 'console-error') {
+                setImportedProjectConsoleLogs(prev => {
+                  const newLog = {
+                    id: `clog_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                    level: level || (action === 'console-error' ? 'error' : 'log'),
+                    message: elementInfo || '',
+                    timestamp: data.timestamp || Date.now(),
+                    source: source || 'imported-project',
+                  };
+                  const updated = [...prev, newLog];
+                  return updated.slice(-500); // نگه داری حداکثر 500 لاگ
+                });
+                // console-log (غیر از error) فقط ذخیره میشه، به چت اضافه نمیشه
+                if (action === 'console-log') return;
+              }
+
+              // 🔍 لایه خطا (Error Overlay) شناسایی شده
+              if (action === 'error-overlay') {
+                setImportedProjectConsoleLogs(prev => [...prev, {
+                  id: `overlay_${Date.now()}`,
+                  level: 'error',
+                  message: `[Error Overlay] ${elementInfo || ''}`,
+                  timestamp: data.timestamp || Date.now(),
+                  source: 'imported-project',
+                }]);
+              }
 
               const actionLabels: Record<string, string> = {
                 'click': 'کلیک کردی',
@@ -1055,7 +1144,8 @@ export default function ProjectDetailPage() {
                 'focus': 'فوکوس کردی',
                 'hover': 'موس بردی روی',
                 'error': '🔴 خطای JS',
-                'console-error': '🔴 console.error'
+                'console-error': '🔴 console.error',
+                'error-overlay': '🔴 لایه خطا شناسایی شد'
               };
 
               const actionLabel = actionLabels[action] || action;
@@ -3076,6 +3166,226 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         return [...prev, modelId];
       }
     });
+  };
+
+  // 📸 عکس‌برداری از صفحه پیش‌نمایش
+  const takeVisualDebugScreenshot = async () => {
+    if (!inspectorFrontendUrl) return;
+    setVisualDebugTakingScreenshot(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/screenshot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: projectId,
+          url: inspectorFrontendUrl,
+          viewport_width: 1280,
+          viewport_height: 720,
+        }),
+      });
+      const data = await res.json();
+      if (data.success && data.screenshot) {
+        setVisualDebugScreenshots(prev => [...prev, {
+          id: `ss_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+          base64: data.screenshot,
+          timestamp: new Date(),
+          pageUrl: data.page_info?.url || inspectorFrontendUrl || '',
+        }]);
+        // فعال کردن حالت دیباگ بصری
+        if (!visualDebugMode) setVisualDebugMode(true);
+      } else {
+        alert(data.error || 'خطا در عکس‌برداری');
+      }
+    } catch (err: any) {
+      alert(`خطا: ${err.message || 'ناشناخته'}`);
+    } finally {
+      setVisualDebugTakingScreenshot(false);
+    }
+  };
+
+  // 📸 بارگذاری مدل‌های Vision
+  const loadVisionModels = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/vision-models`);
+      const data = await res.json();
+      if (data.success) {
+        setVisualDebugVisionModels(data.models);
+        // پیش‌انتخاب مدل‌های فعال و پیشنهادی
+        const recommended = data.models.filter((m: any) => m.enabled && m.recommended).map((m: any) => m.id);
+        if (recommended.length > 0) {
+          setVisualDebugSelectedModels(recommended.slice(0, 1));
+        } else {
+          const enabled = data.models.filter((m: any) => m.enabled).map((m: any) => m.id);
+          setVisualDebugSelectedModels(enabled.slice(0, 1));
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load vision models:', err);
+    }
+  };
+
+  // 📸 شروع دیباگ بصری - نمایش انتخاب مدل
+  const startVisualDebugModelSelection = () => {
+    loadVisionModels();
+    setVisualDebugModelSelection(true);
+  };
+
+  // 📸 ارسال درخواست دیباگ بصری
+  const sendVisualDebug = async () => {
+    if (visualDebugScreenshots.length === 0) return;
+    if (visualDebugSelectedModels.length === 0) {
+      alert('لطفاً حداقل یک مدل Vision انتخاب کنید');
+      return;
+    }
+
+    setVisualDebugLoading(true);
+    setVisualDebugModelSelection(false);
+    setInspectorOpLock(true);
+    setInspectorOpType('investigate');
+    inspectorOpAbortRef.current = new AbortController();
+
+    // اضافه کردن پیام کاربر به چت
+    const userMsgId = `vd_user_${Date.now()}`;
+    setInspectorChatMessages(prev => [...prev, {
+      id: userMsgId,
+      role: 'user' as const,
+      content: `📸 دیباگ بصری: ${visualDebugScreenshots.length} عکس${visualDebugDescription ? `\n💬 ${visualDebugDescription}` : ''}`,
+      timestamp: new Date(),
+    }]);
+
+    // جمع‌آوری آدرس‌های مرتبط
+    const relatedUrls: string[] = [];
+    if (inspectorFrontendUrl) relatedUrls.push(inspectorFrontendUrl);
+    visualDebugScreenshots.forEach(ss => {
+      if (ss.pageUrl && !relatedUrls.includes(ss.pageUrl)) relatedUrls.push(ss.pageUrl);
+    });
+    // آدرس‌ها از لاگ‌ها
+    importedProjectConsoleLogs.forEach(log => {
+      const urlMatch = log.message.match(/https?:\/\/[^\s"'<>]+/g);
+      if (urlMatch) urlMatch.forEach(u => { if (!relatedUrls.includes(u)) relatedUrls.push(u); });
+    });
+
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/visual-debug`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: projectId,
+          model_ids: visualDebugSelectedModels,
+          screenshots: visualDebugScreenshots.map(ss => ss.base64),
+          console_logs: importedProjectConsoleLogs.slice(-50).map(l => ({
+            level: l.level, message: l.message, timestamp: l.timestamp, source: l.source,
+          })),
+          backend_logs: inspectorBackendLogs.slice(-30).map(l => ({
+            level: l.level, message: l.message, timestamp: l.timestamp, service_id: l.service_name,
+          })),
+          related_urls: relatedUrls,
+          user_description: visualDebugDescription || undefined,
+          previously_read_files: previouslyReadFiles,
+        }),
+        signal: inspectorOpAbortRef.current?.signal,
+      });
+
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = '';
+      let responseReceived = false;
+      if (!reader) throw new Error('No reader');
+
+      let eventType = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        sseBuffer += decoder.decode(value, { stream: true });
+        const lines = sseBuffer.split('\n');
+        sseBuffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            eventType = line.slice(7).trim();
+          } else if (line.startsWith('data: ') && eventType) {
+            try {
+              const data = JSON.parse(line.slice(6));
+
+              if (eventType === 'progress') {
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `vd_p_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                  role: 'system' as const,
+                  content: data.message,
+                  timestamp: new Date(),
+                }]);
+              } else if (eventType === 'error') {
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `vd_err_${Date.now()}`,
+                  role: 'assistant' as const,
+                  content: `❌ ${data.message}${data.detail ? '\n📊 ' + data.detail : ''}`,
+                  timestamp: new Date(),
+                }]);
+              } else if (eventType === 'response') {
+                responseReceived = true;
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `vd_response_${Date.now()}`,
+                  role: 'assistant' as const,
+                  content: data.content,
+                  model_id: data.model_used,
+                  timestamp: new Date(),
+                  tokens_used: data.tokens_used,
+                  action_type: data.has_action ? 'smart_action' as any : undefined,
+                  action_plan: data.action_plan,
+                } as any]);
+                setInspectorOpLock(false);
+                setInspectorOpType(null);
+              } else if (eventType === 'fields_in_use') {
+                setPromptFieldsHighlighted(data.field_ids || []);
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `vd_fields_${Date.now()}`,
+                  role: 'system' as const,
+                  content: data.message || '📋 پرامپت دیباگ بصری در حال استفاده',
+                  timestamp: new Date(),
+                }]);
+              } else if (eventType === 'fields_done') {
+                setTimeout(() => setPromptFieldsHighlighted([]), 3000);
+              } else if (eventType === 'heartbeat') {
+                // keep-alive
+              } else if (eventType === 'done') {
+                if (!responseReceived) {
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: `vd_fail_${Date.now()}`,
+                    role: 'assistant' as const,
+                    content: '⚠️ تحلیل بصری بدون نتیجه پایان یافت. لطفاً دوباره تلاش کنید.',
+                    timestamp: new Date(),
+                  }]);
+                  setInspectorOpLock(false);
+                  setInspectorOpType(null);
+                }
+              }
+            } catch (e) {}
+            eventType = '';
+          }
+        }
+      }
+
+      // پاکسازی بعد از ارسال موفق
+      if (responseReceived) {
+        setVisualDebugScreenshots([]);
+        setVisualDebugDescription('');
+        setVisualDebugMode(false);
+      }
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        setInspectorChatMessages(prev => [...prev, {
+          id: `vd_error_${Date.now()}`,
+          role: 'assistant' as const,
+          content: `❌ خطا در دیباگ بصری: ${err.message?.slice(0, 100) || 'ناشناخته'}`,
+          timestamp: new Date(),
+        }]);
+      }
+    } finally {
+      setVisualDebugLoading(false);
+      setInspectorOpLock(false);
+      setInspectorOpType(null);
+    }
   };
 
   // بارگذاری لاگ‌ها وقتی سرویس‌ها لود شدن
@@ -9096,6 +9406,68 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                 console.error('❌ iframe failed to load');
                               }}
                             />
+                            {/* 📸 نوار ابزار بالای iframe */}
+                            <div className="absolute top-2 left-2 z-50 flex gap-1 pointer-events-auto">
+                              {/* دکمه عکس‌برداری */}
+                              <button
+                                onClick={takeVisualDebugScreenshot}
+                                disabled={visualDebugTakingScreenshot || inspectorOpLock}
+                                className="px-2 py-1 bg-purple-600/90 hover:bg-purple-700 text-white text-[10px] rounded-md shadow-lg transition-all disabled:opacity-50 flex items-center gap-1"
+                                title="عکس‌برداری از صفحه (دیباگ بصری)"
+                              >
+                                {visualDebugTakingScreenshot ? <span className="animate-spin">⏳</span> : <span>📸</span>}
+                                عکس
+                                {visualDebugScreenshots.length > 0 && (
+                                  <span className="bg-white text-purple-600 text-[9px] rounded-full px-1 font-bold">{visualDebugScreenshots.length}</span>
+                                )}
+                              </button>
+                              {/* دکمه لاگ‌های کنسول پروژه ایمپورت شده */}
+                              <button
+                                onClick={() => setShowImportedConsoleLogs(!showImportedConsoleLogs)}
+                                className={`px-2 py-1 text-[10px] rounded-md shadow-lg transition-all flex items-center gap-1 ${
+                                  showImportedConsoleLogs ? 'bg-blue-600 text-white' : 'bg-gray-700/90 hover:bg-gray-600 text-gray-200'
+                                }`}
+                                title="لاگ‌های کنسول پروژه ایمپورت شده"
+                              >
+                                📋 کنسول
+                                {importedProjectConsoleLogs.length > 0 && (
+                                  <span className={`text-[9px] rounded-full px-1 font-bold ${
+                                    importedProjectConsoleLogs.some(l => l.level === 'error') ? 'bg-red-500 text-white' : 'bg-gray-500 text-white'
+                                  }`}>{importedProjectConsoleLogs.length}</span>
+                                )}
+                              </button>
+                            </div>
+
+                            {/* 📋 پنل لاگ‌های کنسول پروژه ایمپورت شده */}
+                            {showImportedConsoleLogs && importedProjectConsoleLogs.length > 0 && (
+                              <div className="absolute bottom-0 left-0 right-0 z-40 max-h-[40%] bg-gray-900/95 backdrop-blur border-t border-gray-700 overflow-auto" dir="ltr">
+                                <div className="sticky top-0 bg-gray-900 px-3 py-1.5 flex items-center justify-between border-b border-gray-700">
+                                  <span className="text-[10px] text-gray-400 font-mono">📋 Console Logs (پروژه ایمپورت شده) - {importedProjectConsoleLogs.length} لاگ</span>
+                                  <div className="flex gap-2">
+                                    <button onClick={() => setImportedProjectConsoleLogs([])} className="text-[10px] text-red-400 hover:text-red-300">پاک‌سازی</button>
+                                    <button onClick={() => setShowImportedConsoleLogs(false)} className="text-[10px] text-gray-400 hover:text-white">✕</button>
+                                  </div>
+                                </div>
+                                <div className="p-2 font-mono text-[10px] space-y-0.5">
+                                  {importedProjectConsoleLogs.slice(-100).map(log => (
+                                    <div key={log.id} className={`px-2 py-0.5 rounded ${
+                                      log.level === 'error' ? 'text-red-400 bg-red-900/20' :
+                                      log.level === 'warn' ? 'text-yellow-400 bg-yellow-900/20' :
+                                      log.level === 'info' ? 'text-blue-400' :
+                                      log.level === 'debug' ? 'text-gray-500' :
+                                      'text-green-400'
+                                    }`}>
+                                      <span className="text-gray-500">[{new Date(log.timestamp).toLocaleTimeString()}]</span>
+                                      <span className={`ml-1 font-bold ${
+                                        log.level === 'error' ? 'text-red-500' : log.level === 'warn' ? 'text-yellow-500' : 'text-gray-500'
+                                      }`}>{log.level.toUpperCase()}</span>
+                                      <span className="ml-2">{log.message}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
                             {/* 🔒 قفل iframe هنگام عملیات بررسی/اصلاح */}
                             {inspectorOpLock && (
                               <div className="absolute inset-0 z-50 bg-black/20 backdrop-blur-[1px] flex flex-col items-center justify-center cursor-not-allowed"
