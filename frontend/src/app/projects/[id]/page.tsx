@@ -470,6 +470,10 @@ export default function ProjectDetailPage() {
     base64: string;
     timestamp: Date;
     pageUrl: string;
+    // 📦 Pack: snapshot of logs/URLs at capture time
+    consoleLogs: Array<{ level: string; message: string; timestamp: number; source: string }>;
+    backendLogs: Array<{ level: string; message: string; timestamp: string; service_name: string }>;
+    relatedUrls: string[];
   }>>([]);
   const [visualDebugConsoleLogs, setVisualDebugConsoleLogs] = useState<Array<{
     level: string;
@@ -3047,11 +3051,35 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       });
       const data = await res.json();
       if (data.success && data.screenshot) {
+        // 📦 Snapshot current logs and URLs at capture time
+        const capturePageUrl = data.page_info?.url || inspectorFrontendUrl || '';
+        const captureConsoleLogs = [...importedProjectConsoleLogs].slice(-50).map(l => ({
+          level: l.level, message: l.message, timestamp: l.timestamp, source: l.source
+        }));
+        const captureBackendLogs = [...inspectorBackendLogs].slice(-30).map(l => ({
+          level: l.level, message: l.message, timestamp: l.timestamp, service_name: l.service_name
+        }));
+        // Collect related URLs from current state
+        const captureUrls: string[] = [];
+        if (inspectorFrontendUrl) captureUrls.push(inspectorFrontendUrl);
+        if (capturePageUrl && !captureUrls.includes(capturePageUrl)) captureUrls.push(capturePageUrl);
+        importedProjectConsoleLogs.slice(-50).forEach(log => {
+          const urlMatch = log.message.match(/https?:\/\/[^\s"'<>]+/g);
+          if (urlMatch) urlMatch.forEach(u => { if (!captureUrls.includes(u) && captureUrls.length < 20) captureUrls.push(u); });
+        });
+        inspectorBackendLogs.slice(-30).forEach(log => {
+          const urlMatch = log.message.match(/https?:\/\/[^\s"'<>]+/g);
+          if (urlMatch) urlMatch.forEach(u => { if (!captureUrls.includes(u) && captureUrls.length < 20) captureUrls.push(u); });
+        });
+
         setVisualDebugScreenshots(prev => [...prev, {
           id: `ss_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
           base64: data.screenshot,
           timestamp: new Date(),
-          pageUrl: data.page_info?.url || inspectorFrontendUrl || '',
+          pageUrl: capturePageUrl,
+          consoleLogs: captureConsoleLogs,
+          backendLogs: captureBackendLogs,
+          relatedUrls: captureUrls,
         }]);
         // فعال کردن حالت دیباگ بصری
         if (!visualDebugMode) setVisualDebugMode(true);
@@ -3106,30 +3134,42 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     setInspectorOpType('investigate');
     inspectorOpAbortRef.current = new AbortController();
 
-    // اضافه کردن پیام کاربر به چت
+    // 📦 Build screenshot packs - each screenshot with its own logs/URLs
+    const screenshotPacks = visualDebugScreenshots.map((ss, idx) => ({
+      index: idx + 1,
+      base64: ss.base64,
+      pageUrl: ss.pageUrl,
+      timestamp: ss.timestamp.toISOString(),
+      consoleLogs: ss.consoleLogs || [],
+      backendLogs: ss.backendLogs || [],
+      relatedUrls: ss.relatedUrls || [],
+    }));
+
+    // اضافه کردن پیام کاربر به چت - شامل اطلاعات پک‌ها
     const userMsgId = `vd_user_${Date.now()}`;
     setInspectorChatMessages(prev => [...prev, {
       id: userMsgId,
       role: 'user' as const,
       content: `📸 دیباگ بصری: ${visualDebugScreenshots.length} عکس${visualDebugDescription ? `\n💬 ${visualDebugDescription}` : ''}`,
       timestamp: new Date(),
-    }]);
+      visual_debug_packs: screenshotPacks.map(p => ({
+        index: p.index,
+        base64: p.base64,
+        pageUrl: p.pageUrl,
+        timestamp: p.timestamp,
+        consoleLogsCount: p.consoleLogs.length,
+        backendLogsCount: p.backendLogs.length,
+        consoleLogs: p.consoleLogs,
+        backendLogs: p.backendLogs,
+        relatedUrls: p.relatedUrls,
+        errorCount: p.consoleLogs.filter(l => l.level === 'error').length + p.backendLogs.filter(l => l.level === 'error').length,
+      })),
+    } as any]);
 
-    // جمع‌آوری آدرس‌های مرتبط (frontend URL + page URLs + URLs from logs)
-    const relatedUrls: string[] = [];
-    if (inspectorFrontendUrl) relatedUrls.push(inspectorFrontendUrl);
-    visualDebugScreenshots.forEach(ss => {
-      if (ss.pageUrl && !relatedUrls.includes(ss.pageUrl)) relatedUrls.push(ss.pageUrl);
-    });
-    // آدرس‌ها از لاگ‌های کنسول پروژه ایمپورت شده
-    importedProjectConsoleLogs.forEach(log => {
-      const urlMatch = log.message.match(/https?:\/\/[^\s"'<>]+/g);
-      if (urlMatch) urlMatch.forEach(u => { if (!relatedUrls.includes(u) && relatedUrls.length < 20) relatedUrls.push(u); });
-    });
-    // آدرس‌ها از لاگ‌های بک‌اند
-    inspectorBackendLogs.forEach(log => {
-      const urlMatch = log.message.match(/https?:\/\/[^\s"'<>]+/g);
-      if (urlMatch) urlMatch.forEach(u => { if (!relatedUrls.includes(u) && relatedUrls.length < 20) relatedUrls.push(u); });
+    // جمع‌آوری همه آدرس‌های مرتبط (union از همه پک‌ها)
+    const allRelatedUrls: string[] = [];
+    screenshotPacks.forEach(p => {
+      p.relatedUrls.forEach(u => { if (!allRelatedUrls.includes(u) && allRelatedUrls.length < 30) allRelatedUrls.push(u); });
     });
 
     try {
@@ -3139,14 +3179,22 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         body: JSON.stringify({
           project_id: projectId,
           model_ids: visualDebugSelectedModels,
-          screenshots: visualDebugScreenshots.map(ss => ss.base64),
+          screenshots: screenshotPacks.map(p => p.base64),
+          screenshot_packs: screenshotPacks.map(p => ({
+            index: p.index,
+            pageUrl: p.pageUrl,
+            timestamp: p.timestamp,
+            console_logs: p.consoleLogs,
+            backend_logs: p.backendLogs,
+            related_urls: p.relatedUrls,
+          })),
           console_logs: importedProjectConsoleLogs.slice(-50).map(l => ({
             level: l.level, message: l.message, timestamp: l.timestamp, source: l.source,
           })),
           backend_logs: inspectorBackendLogs.slice(-30).map(l => ({
             level: l.level, message: l.message, timestamp: l.timestamp, service_id: l.service_name,
           })),
-          related_urls: relatedUrls,
+          related_urls: allRelatedUrls,
           user_description: visualDebugDescription || undefined,
           previously_read_files: previouslyReadFiles,
         }),
@@ -10127,6 +10175,90 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         }`}>
                           {msg.content}
                         </p>
+                        {/* 📦 نمایش پک‌های دیباگ بصری */}
+                        {(msg as any).visual_debug_packs && (msg as any).visual_debug_packs.length > 0 && (
+                          <div className="mt-2 space-y-2">
+                            {(msg as any).visual_debug_packs.map((pack: any, pIdx: number) => (
+                              <div key={pIdx} className="rounded-lg border border-purple-200 dark:border-purple-800 bg-purple-50/50 dark:bg-purple-900/10 overflow-hidden">
+                                {/* Header + Image */}
+                                <div className="flex items-start gap-2 p-2">
+                                  <img
+                                    src={`data:image/png;base64,${pack.base64}`}
+                                    alt={`عکس ${pack.index}`}
+                                    className="h-20 w-auto rounded border border-purple-300 dark:border-purple-700 cursor-pointer hover:ring-2 hover:ring-purple-400 transition-all flex-shrink-0"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      const win = window.open();
+                                      if (win) { win.document.write(`<img src="data:image/png;base64,${pack.base64}" style="max-width:100%">`); }
+                                    }}
+                                  />
+                                  <div className="flex-1 min-w-0 text-[10px]">
+                                    <div className="font-bold text-purple-700 dark:text-purple-300 mb-1">📸 عکس {pack.index}</div>
+                                    {pack.pageUrl && <div className="text-purple-500 dark:text-purple-400 truncate">🔗 {pack.pageUrl}</div>}
+                                    <div className="flex flex-wrap gap-1.5 mt-1">
+                                      {pack.consoleLogsCount > 0 && (
+                                        <span className={`px-1 py-0.5 rounded ${pack.errorCount > 0 ? 'bg-red-100 dark:bg-red-900/30 text-red-600' : 'bg-gray-100 dark:bg-gray-700 text-gray-500'}`}>
+                                          📋 {pack.consoleLogsCount} لاگ کنسول
+                                          {pack.errorCount > 0 && ` (${pack.errorCount} خطا)`}
+                                        </span>
+                                      )}
+                                      {pack.backendLogsCount > 0 && (
+                                        <span className="px-1 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-500">
+                                          🖥️ {pack.backendLogsCount} لاگ بکند
+                                        </span>
+                                      )}
+                                      {pack.relatedUrls && pack.relatedUrls.length > 0 && (
+                                        <span className="px-1 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-500">
+                                          🔗 {pack.relatedUrls.length} آدرس
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                                {/* Expandable details */}
+                                {(pack.consoleLogs?.length > 0 || pack.backendLogs?.length > 0 || pack.relatedUrls?.length > 0) && (
+                                  <details className="text-[10px]">
+                                    <summary className="px-2 py-1 cursor-pointer text-purple-600 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/20 border-t border-purple-200 dark:border-purple-800">
+                                      جزئیات لاگ‌ها و آدرس‌ها
+                                    </summary>
+                                    <div className="px-2 pb-2 space-y-1.5 max-h-32 overflow-auto">
+                                      {pack.consoleLogs?.length > 0 && (
+                                        <div>
+                                          <div className="font-bold text-gray-600 dark:text-gray-400 mb-0.5">📋 لاگ‌های کنسول:</div>
+                                          {pack.consoleLogs.slice(0, 10).map((log: any, li: number) => (
+                                            <div key={li} className={`truncate ${log.level === 'error' ? 'text-red-600 dark:text-red-400' : log.level === 'warn' ? 'text-yellow-600 dark:text-yellow-400' : 'text-gray-500 dark:text-gray-400'}`}>
+                                              [{log.level?.toUpperCase()}] {log.message?.slice(0, 100)}
+                                            </div>
+                                          ))}
+                                          {pack.consoleLogs.length > 10 && <div className="text-gray-400">... و {pack.consoleLogs.length - 10} لاگ دیگر</div>}
+                                        </div>
+                                      )}
+                                      {pack.backendLogs?.length > 0 && (
+                                        <div>
+                                          <div className="font-bold text-gray-600 dark:text-gray-400 mb-0.5">🖥️ لاگ‌های بکند:</div>
+                                          {pack.backendLogs.slice(0, 10).map((log: any, li: number) => (
+                                            <div key={li} className={`truncate ${log.level === 'error' ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'}`}>
+                                              [{log.level?.toUpperCase()}] {log.message?.slice(0, 100)}
+                                            </div>
+                                          ))}
+                                          {pack.backendLogs.length > 10 && <div className="text-gray-400">... و {pack.backendLogs.length - 10} لاگ دیگر</div>}
+                                        </div>
+                                      )}
+                                      {pack.relatedUrls?.length > 0 && (
+                                        <div>
+                                          <div className="font-bold text-gray-600 dark:text-gray-400 mb-0.5">🔗 آدرس‌ها:</div>
+                                          {pack.relatedUrls.map((url: string, ui: number) => (
+                                            <div key={ui} className="text-blue-500 dark:text-blue-400 truncate">{url}</div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </details>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
                         <div className="flex items-center gap-2 mt-1">
                           <span className={`text-xs ${
                             msg.role === 'user' ? 'opacity-70' :
@@ -10536,7 +10668,14 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         <button onClick={() => setVisualDebugModelSelection(false)} className="text-gray-400 hover:text-gray-600 text-lg">&times;</button>
                       </div>
                       <div className="p-3 text-xs text-gray-500 bg-purple-50 dark:bg-purple-900/10 border-b border-gray-200 dark:border-gray-700">
-                        📸 {visualDebugScreenshots.length} عکس + 📋 {importedProjectConsoleLogs.length} لاگ کنسول + 🖥️ {inspectorBackendLogs.length} لاگ بکند
+                        📸 {visualDebugScreenshots.length} عکس (📦 هر عکس با پک لاگ مجزا)
+                        {visualDebugScreenshots.map((ss, i) => {
+                          const cLogs = ss.consoleLogs?.length || 0;
+                          const bLogs = ss.backendLogs?.length || 0;
+                          return cLogs + bLogs > 0 ? (
+                            <span key={i} className="ml-1 text-[10px] text-purple-400">| عکس {i+1}: {cLogs} کنسول + {bLogs} بکند</span>
+                          ) : null;
+                        })}
                         {visualDebugDescription && <span className="block mt-1">💬 {visualDebugDescription.slice(0, 60)}...</span>}
                       </div>
                       <div className="p-3 max-h-[50vh] overflow-y-auto space-y-1.5">
@@ -10672,9 +10811,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         </div>
                       </div>
 
-                      {/* گالری عکس‌ها */}
+                      {/* گالری عکس‌ها - با نشانگر تعداد لاگ مرتبط */}
                       <div className="flex gap-2 overflow-x-auto pb-2 mb-2">
-                        {visualDebugScreenshots.map((ss, idx) => (
+                        {visualDebugScreenshots.map((ss, idx) => {
+                          const errCount = (ss.consoleLogs?.filter(l => l.level === 'error').length || 0) + (ss.backendLogs?.filter(l => l.level === 'error').length || 0);
+                          const totalLogs = (ss.consoleLogs?.length || 0) + (ss.backendLogs?.length || 0);
+                          return (
                           <div key={ss.id} className="relative flex-shrink-0 group">
                             <img
                               src={`data:image/png;base64,${ss.base64}`}
@@ -10694,8 +10836,15 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             <span className="absolute bottom-0.5 left-0.5 text-[8px] bg-black/60 text-white px-1 rounded">
                               {idx + 1}
                             </span>
+                            {/* نشانگر تعداد لاگ و خطا مرتبط */}
+                            {totalLogs > 0 && (
+                              <span className={`absolute top-0.5 left-0.5 text-[7px] px-1 rounded ${errCount > 0 ? 'bg-red-500 text-white' : 'bg-purple-500 text-white'}`}>
+                                {errCount > 0 ? `${errCount}!` : totalLogs}
+                              </span>
+                            )}
                           </div>
-                        ))}
+                          );
+                        })}
                       </div>
 
                       {/* ورودی توضیح */}
@@ -10715,11 +10864,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         </button>
                       </div>
 
-                      {/* اطلاعات جمع‌آوری شده */}
+                      {/* اطلاعات جمع‌آوری شده - هر عکس با پک مجزا */}
                       <div className="flex flex-wrap gap-2 mt-2 text-[9px] text-purple-500 dark:text-purple-400">
-                        <span>📋 {importedProjectConsoleLogs.length} لاگ کنسول</span>
-                        <span>🖥️ {inspectorBackendLogs.length} لاگ بکند</span>
+                        <span>📋 {importedProjectConsoleLogs.length} لاگ کنسول (زنده)</span>
+                        <span>🖥️ {inspectorBackendLogs.length} لاگ بکند (زنده)</span>
                         {inspectorFrontendUrl && <span className="truncate max-w-[150px]">🔗 {inspectorFrontendUrl}</span>}
+                        <span className="text-purple-400 dark:text-purple-500">| 📦 هر عکس لاگ‌ها و آدرس‌های مربوط به خودش را دارد</span>
                       </div>
                     </div>
                   )}
