@@ -338,6 +338,9 @@ export default function ProjectDetailPage() {
     model_id?: string;
   } | null>(null);
 
+  // ردیابی فایل‌های خوانده‌شده در طول مکالمه (برای هدایت AI به فایل‌های جدید)
+  const [previouslyReadFiles, setPreviouslyReadFiles] = useState<string[]>([]);
+
   // 🔍 بررسی و اصلاح خطا
   const [investigateModalMsgId, setInvestigateModalMsgId] = useState<string | null>(null);  // شناسه پیام خطا
   const [investigateModels, setInvestigateModels] = useState<Array<{
@@ -1565,6 +1568,7 @@ export default function ProjectDetailPage() {
         }
         // پاک کردن چت فعلی
         setInspectorChatMessages([]);
+        setPreviouslyReadFiles([]);
         setInspectorSessionId(null);
         inspectorSessionIdRef.current = null;
 
@@ -2817,7 +2821,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
       // 🧠 حالت چت هوشمند - smart-chat SSE برای تمام پیام‌های غیر ویژوال
       } else {
-        // ساخت تاریخچه غنی (50 پیام آخر)
+        // ساخت تاریخچه غنی (200 پیام آخر)
         const chatHistory = inspectorChatMessages
           .filter(m => {
             if (m.role === 'system' && m.content?.startsWith('🔍 شروع')) return true;
@@ -2831,7 +2835,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             if (m.role === 'action' && (m as any).backend_verified === false) return true;
             return false;
           })
-          .slice(-50)
+          .slice(-200)
           .map(m => ({
             role: m.role === 'action' ? 'system' : m.role,
             content: (m as any).action_type === 'investigate_report'
@@ -2889,6 +2893,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             backend_logs: inspectorBackendLogs,
             frontend_url: inspectorFrontendUrl,
             reply_to: replyToPayload,
+            previously_read_files: previouslyReadFiles,
           }),
           signal: inspectorOpAbortRef.current?.signal,
         });
@@ -2934,6 +2939,15 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 } else if (eventType === 'response') {
                   responseReceived = true;
                   const responseId = `smart_response_${Date.now()}`;
+
+                  // ذخیره فایل‌های خوانده‌شده برای هدایت AI به فایل‌های جدید در پیام‌های بعدی
+                  if (data.selected_file_paths && Array.isArray(data.selected_file_paths) && data.selected_file_paths.length > 0) {
+                    setPreviouslyReadFiles(prev => {
+                      const newFiles = data.selected_file_paths.filter((f: string) => !prev.includes(f));
+                      return [...prev, ...newFiles];
+                    });
+                  }
+
                   setInspectorChatMessages(prev => [...prev, {
                     id: responseId,
                     role: 'assistant' as const,
@@ -2944,6 +2958,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     action_type: (data.type === 'action' || data.has_action) ? 'smart_action' as any : undefined,
                     action_plan: data.action_plan,
                     files_were_read: data.files_were_read ?? false,
+                    selected_file_paths: data.selected_file_paths || [],
                     original_message: userMessage,
                   } as any]);
 
