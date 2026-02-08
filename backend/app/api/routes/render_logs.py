@@ -4281,6 +4281,7 @@ class InjectBridgeRequest(BaseModel):
 # محتوای Bridge Script که به پروژه‌ها تزریق می‌شود (نسخه HTML)
 INSPECTOR_BRIDGE_SCRIPT = '''
 <!-- Inspector Bridge Script - Auto-injected -->
+<!-- Version: 2.1 -->
 <script>
 (function() {
   console.log('🌉 Inspector Bridge: Script starting...');
@@ -4732,6 +4733,7 @@ INSPECTOR_BRIDGE_SCRIPT = '''
 # 🆕 محتوای Bridge Script برای پروژه‌های React/Next.js (نسخه JS/TS)
 INSPECTOR_BRIDGE_SCRIPT_JS = '''
 // 🌉 Inspector Bridge Script - Auto-injected
+// Version: 2.1
 // ارتباط با Inspector از طریق WebSocket (حل مشکل cross-origin)
 /* eslint-disable */
 // @ts-ignore
@@ -4965,8 +4967,11 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
 '''
 
 # 🆕 Next.js App Router - Client Component برای Bridge Script (WebSocket)
+INSPECTOR_BRIDGE_VERSION = "2.1"  # نسخه فعلی bridge template - افزایش بده هر وقت template تغییر کرد
+
 INSPECTOR_BRIDGE_CLIENT_COMPONENT = '''"use client";
 // 🌉 Inspector Bridge Script - Client Component for Next.js App Router
+// Version: 2.1
 // ارتباط با Inspector از طریق WebSocket (حل مشکل cross-origin)
 import { useEffect } from "react";
 
@@ -6267,12 +6272,39 @@ async def check_bridge_status(
                             if has_bridge:
                                 # بررسی اینکه نسخه WebSocket هست یا قدیمی
                                 has_websocket = "__BRIDGE_WS_URL__" not in content and "WebSocket" in content
+                                # 🔍 بررسی نسخه و مشکلات شناخته شده
+                                needs_update = False
+                                update_reasons = []
+                                # چک نسخه
+                                import re as _re
+                                version_match = _re.search(r'// Version:\s*([\d.]+)', content)
+                                current_version = version_match.group(1) if version_match else "1.0"
+                                if current_version != INSPECTOR_BRIDGE_VERSION:
+                                    needs_update = True
+                                    update_reasons.append(f"نسخه قدیمی ({current_version} → {INSPECTOR_BRIDGE_VERSION})")
+                                # چک باگ‌های شناخته شده
+                                if 'shouldSend' not in content:
+                                    needs_update = True
+                                    update_reasons.append("تابع shouldSend موجود نیست")
+                                if 'lastEventTime' not in content:
+                                    needs_update = True
+                                    update_reasons.append("متغیر lastEventTime موجود نیست")
+                                if 'declare global' not in content and path.endswith('.tsx'):
+                                    needs_update = True
+                                    update_reasons.append("declare global برای Window نیست")
+                                # چک مشکل escape quote
+                                if '" \\"" + text + "\\""' in content or '" "" + text + """' in content:
+                                    needs_update = True
+                                    update_reasons.append("مشکل escape quote در getElementInfo")
                                 return {
                                     "success": True,
                                     "has_bridge": True,
                                     "file_path": path,
                                     "has_websocket": has_websocket,
-                                    "version": "websocket" if has_websocket else "postmessage_only"
+                                    "version": current_version,
+                                    "latest_version": INSPECTOR_BRIDGE_VERSION,
+                                    "needs_update": needs_update,
+                                    "update_reasons": update_reasons
                                 }
                 except:
                     continue
@@ -6505,6 +6537,378 @@ async def debug_bridge_injection(
 
     except Exception as e:
         slog.error("Debug bridge failed", exception=e)
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/inspector/update-bridge/{project_id}")
+async def update_bridge_to_latest(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    🔄 به‌روزرسانی Bridge Script به آخرین نسخه
+
+    این endpoint:
+    1. InspectorBridge.tsx را در ریپو پیدا می‌کند
+    2. محتوای آن را با آخرین تمپلیت جایگزین می‌کند
+    3. تغییرات را commit می‌کند
+    4. deploy جدید trigger می‌شود
+    """
+    from ...models.project import Project
+    from ...models.setting import Setting
+    import httpx
+    import base64
+
+    slog.api_request("POST", "/inspector/update-bridge", project_id=project_id)
+
+    try:
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if not project:
+            return {"success": False, "error": "پروژه یافت نشد"}
+
+        github_token = os.environ.get("GITHUB_TOKEN", "")
+        if not github_token:
+            github_token = Setting.get_value(db, "api_key_github") or ""
+        if not github_token:
+            return {"success": False, "error": "توکن GitHub تنظیم نشده"}
+
+        github_path = getattr(project, 'github_path', None)
+        if not github_path:
+            extra_data = getattr(project, 'extra_data', None)
+            if extra_data:
+                try:
+                    extra = json.loads(extra_data) if isinstance(extra_data, str) else extra_data
+                    github_path = extra.get('github_path') or extra.get('github_url') or extra.get('repository_url')
+                    if not github_path and extra.get('owner') and extra.get('repo'):
+                        github_path = f"{extra['owner']}/{extra['repo']}"
+                except:
+                    pass
+        if not github_path:
+            return {"success": False, "error": "پروژه به GitHub متصل نیست"}
+
+        github_path_clean = github_path.replace("https://github.com/", "").replace(".git", "").strip("/")
+        parts = github_path_clean.split("/")
+        if len(parts) < 2:
+            return {"success": False, "error": f"فرمت GitHub path نامعتبر: {github_path}"}
+
+        owner, repo = parts[0], parts[1]
+        headers = {
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+
+        # مسیرهای ممکن برای InspectorBridge.tsx
+        bridge_paths = [
+            "src/app/InspectorBridge.tsx", "app/InspectorBridge.tsx",
+            "frontend/src/app/InspectorBridge.tsx", "frontend/app/InspectorBridge.tsx",
+        ]
+
+        bridge_markers = ["Inspector Bridge Script", "InspectorBridge", "__inspectorBridgeLoaded"]
+
+        # همچنین مسیرهای HTML و JS/TS
+        other_paths = [
+            "index.html", "public/index.html", "src/index.html",
+            "pages/_app.tsx", "pages/_app.js", "src/pages/_app.tsx",
+            "src/main.tsx", "src/main.jsx", "src/index.tsx",
+            "src/app/layout.tsx", "app/layout.tsx",
+        ]
+
+        async with httpx.AsyncClient() as client:
+            # 🔍 اول دنبال InspectorBridge.tsx بگرد
+            for path in bridge_paths:
+                try:
+                    res = await client.get(
+                        f"https://api.github.com/repos/{owner}/{repo}/contents/{path}",
+                        headers=headers, timeout=10.0
+                    )
+                    if res.status_code == 200:
+                        data = res.json()
+                        if data.get("encoding") == "base64":
+                            content = base64.b64decode(data["content"]).decode('utf-8')
+                            if any(marker in content for marker in bridge_markers):
+                                # پیدا شد! آپدیت کن
+                                slog.info(f"Found bridge at {path}, updating to v{INSPECTOR_BRIDGE_VERSION}")
+
+                                # ساخت WebSocket URL
+                                import os as _os
+                                backend_url = _os.environ.get("BACKEND_URL", "").rstrip("/")
+                                if not backend_url:
+                                    backend_url = _os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+                                if not backend_url:
+                                    render_app_name = _os.environ.get("RENDER_SERVICE_NAME", "")
+                                    if render_app_name:
+                                        backend_url = f"https://{render_app_name}.onrender.com"
+                                if not backend_url:
+                                    backend_url = "http://localhost:8000"
+
+                                ws_base = backend_url.replace("https://", "wss://").replace("http://", "ws://")
+                                bridge_ws_url = f"{ws_base}/api/render/ws/bridge/{project_id}"
+
+                                # جایگزینی محتوا با آخرین تمپلیت
+                                new_content = INSPECTOR_BRIDGE_CLIENT_COMPONENT.replace(
+                                    "__BRIDGE_WS_URL__", bridge_ws_url
+                                ).replace(
+                                    "__BRIDGE_PROJECT_ID__", str(project_id)
+                                )
+
+                                update_res = await client.put(
+                                    f"https://api.github.com/repos/{owner}/{repo}/contents/{path}",
+                                    headers=headers,
+                                    json={
+                                        "message": f"🔄 Update Inspector Bridge to v{INSPECTOR_BRIDGE_VERSION}",
+                                        "content": base64.b64encode(new_content.encode('utf-8')).decode('utf-8'),
+                                        "sha": data["sha"],
+                                        "branch": "main"
+                                    },
+                                    timeout=15.0
+                                )
+
+                                # اگر main نبود، master رو امتحان کن
+                                if update_res.status_code == 404 or update_res.status_code == 422:
+                                    update_res = await client.put(
+                                        f"https://api.github.com/repos/{owner}/{repo}/contents/{path}",
+                                        headers=headers,
+                                        json={
+                                            "message": f"🔄 Update Inspector Bridge to v{INSPECTOR_BRIDGE_VERSION}",
+                                            "content": base64.b64encode(new_content.encode('utf-8')).decode('utf-8'),
+                                            "sha": data["sha"],
+                                            "branch": "master"
+                                        },
+                                        timeout=15.0
+                                    )
+
+                                if update_res.status_code in [200, 201]:
+                                    slog.info(f"Bridge updated successfully at {path}")
+                                    return {
+                                        "success": True,
+                                        "message": f"Bridge به نسخه {INSPECTOR_BRIDGE_VERSION} به‌روزرسانی شد",
+                                        "file_path": path,
+                                        "commit_url": update_res.json().get("commit", {}).get("html_url"),
+                                        "version": INSPECTOR_BRIDGE_VERSION
+                                    }
+                                else:
+                                    error_detail = update_res.json().get("message", "خطای ناشناخته")
+                                    return {
+                                        "success": False,
+                                        "error": f"خطا در آپدیت فایل: {error_detail}",
+                                        "file_path": path
+                                    }
+                except Exception as e:
+                    slog.warning(f"Error checking {path}: {e}")
+                    continue
+
+            # 🔍 اگر InspectorBridge.tsx پیدا نشد، فایل‌های دیگر رو چک کن
+            for path in other_paths:
+                try:
+                    res = await client.get(
+                        f"https://api.github.com/repos/{owner}/{repo}/contents/{path}",
+                        headers=headers, timeout=10.0
+                    )
+                    if res.status_code == 200:
+                        data = res.json()
+                        if data.get("encoding") == "base64":
+                            content = base64.b64decode(data["content"]).decode('utf-8')
+                            if any(marker in content for marker in bridge_markers):
+                                # فایل bridge اینجاست - ولی نوع HTML/JS هست
+                                # برای اینها از inject-bridge با force_update استفاده بشه
+                                return {
+                                    "success": False,
+                                    "error": f"Bridge در فایل {path} است (نوع HTML/JS) - از دکمه «به‌روزرسانی» استفاده کنید",
+                                    "file_path": path,
+                                    "bridge_type": "html_or_js",
+                                    "hint": "use_force_update"
+                                }
+                except:
+                    continue
+
+            return {
+                "success": False,
+                "error": "فایل Bridge در ریپو پیدا نشد",
+                "searched_paths": bridge_paths + other_paths
+            }
+
+    except Exception as e:
+        slog.error("Update bridge failed", exception=e)
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/inspector/fix-all-bridges")
+async def fix_all_bridges(
+    db: Session = Depends(get_db)
+):
+    """
+    🔧 اصلاح همه Bridge Script های قدیمی در همه پروژه‌ها
+
+    این endpoint:
+    1. تمام پروژه‌هایی که GitHub متصل دارند را پیدا می‌کند
+    2. InspectorBridge.tsx آنها را بررسی می‌کند
+    3. نسخه‌های قدیمی را به آخرین نسخه به‌روزرسانی می‌کند
+    """
+    from ...models.project import Project
+    from ...models.setting import Setting
+    import httpx
+    import base64
+
+    slog.api_request("POST", "/inspector/fix-all-bridges")
+
+    try:
+        github_token = os.environ.get("GITHUB_TOKEN", "")
+        if not github_token:
+            github_token = Setting.get_value(db, "api_key_github") or ""
+        if not github_token:
+            return {"success": False, "error": "توکن GitHub تنظیم نشده"}
+
+        # دریافت همه پروژه‌ها
+        projects = db.query(Project).all()
+        results = []
+        updated_count = 0
+        skipped_count = 0
+        error_count = 0
+
+        headers = {
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+
+        bridge_paths = [
+            "src/app/InspectorBridge.tsx", "app/InspectorBridge.tsx",
+            "frontend/src/app/InspectorBridge.tsx", "frontend/app/InspectorBridge.tsx",
+        ]
+        bridge_markers = ["Inspector Bridge Script", "InspectorBridge", "__inspectorBridgeLoaded"]
+
+        async with httpx.AsyncClient() as client:
+            for project in projects:
+                github_path = getattr(project, 'github_path', None)
+                if not github_path:
+                    extra_data = getattr(project, 'extra_data', None)
+                    if extra_data:
+                        try:
+                            extra = json.loads(extra_data) if isinstance(extra_data, str) else extra_data
+                            github_path = extra.get('github_path') or extra.get('github_url')
+                            if not github_path and extra.get('owner') and extra.get('repo'):
+                                github_path = f"{extra['owner']}/{extra['repo']}"
+                        except:
+                            pass
+
+                if not github_path:
+                    continue
+
+                github_path_clean = github_path.replace("https://github.com/", "").replace(".git", "").strip("/")
+                parts = github_path_clean.split("/")
+                if len(parts) < 2:
+                    continue
+
+                owner, repo = parts[0], parts[1]
+                project_result = {
+                    "project_id": str(project.id),
+                    "project_name": project.name,
+                    "github": f"{owner}/{repo}"
+                }
+
+                found_bridge = False
+                for path in bridge_paths:
+                    try:
+                        res = await client.get(
+                            f"https://api.github.com/repos/{owner}/{repo}/contents/{path}",
+                            headers=headers, timeout=10.0
+                        )
+                        if res.status_code == 200:
+                            data = res.json()
+                            if data.get("encoding") == "base64":
+                                content = base64.b64decode(data["content"]).decode('utf-8')
+                                if any(marker in content for marker in bridge_markers):
+                                    found_bridge = True
+                                    # چک نسخه
+                                    import re as _re
+                                    version_match = _re.search(r'// Version:\s*([\d.]+)', content)
+                                    current_version = version_match.group(1) if version_match else "1.0"
+
+                                    # چک مشکلات
+                                    has_issues = (
+                                        current_version != INSPECTOR_BRIDGE_VERSION or
+                                        'shouldSend' not in content or
+                                        'lastEventTime' not in content or
+                                        ('declare global' not in content and path.endswith('.tsx')) or
+                                        '" \\"" + text + "\\""' in content or
+                                        '" "" + text + """' in content
+                                    )
+
+                                    if not has_issues:
+                                        project_result["status"] = "up_to_date"
+                                        project_result["version"] = current_version
+                                        skipped_count += 1
+                                    else:
+                                        # آپدیت کن
+                                        slog.info(f"Fixing bridge for {owner}/{repo} at {path} (v{current_version} → v{INSPECTOR_BRIDGE_VERSION})")
+
+                                        import os as _os
+                                        backend_url = _os.environ.get("BACKEND_URL", "").rstrip("/")
+                                        if not backend_url:
+                                            backend_url = _os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+                                        if not backend_url:
+                                            render_app_name = _os.environ.get("RENDER_SERVICE_NAME", "")
+                                            if render_app_name:
+                                                backend_url = f"https://{render_app_name}.onrender.com"
+                                        if not backend_url:
+                                            backend_url = "http://localhost:8000"
+
+                                        ws_base = backend_url.replace("https://", "wss://").replace("http://", "ws://")
+                                        bridge_ws_url = f"{ws_base}/api/render/ws/bridge/{project.id}"
+
+                                        new_content = INSPECTOR_BRIDGE_CLIENT_COMPONENT.replace(
+                                            "__BRIDGE_WS_URL__", bridge_ws_url
+                                        ).replace(
+                                            "__BRIDGE_PROJECT_ID__", str(project.id)
+                                        )
+
+                                        update_res = await client.put(
+                                            f"https://api.github.com/repos/{owner}/{repo}/contents/{path}",
+                                            headers=headers,
+                                            json={
+                                                "message": f"🔄 Update Inspector Bridge to v{INSPECTOR_BRIDGE_VERSION}",
+                                                "content": base64.b64encode(new_content.encode('utf-8')).decode('utf-8'),
+                                                "sha": data["sha"],
+                                                "branch": "main"
+                                            },
+                                            timeout=15.0
+                                        )
+
+                                        if update_res.status_code in [200, 201]:
+                                            project_result["status"] = "updated"
+                                            project_result["old_version"] = current_version
+                                            project_result["new_version"] = INSPECTOR_BRIDGE_VERSION
+                                            project_result["file_path"] = path
+                                            updated_count += 1
+                                            slog.info(f"✅ Bridge fixed for {owner}/{repo}")
+                                        else:
+                                            error_msg = update_res.json().get("message", "unknown")
+                                            project_result["status"] = "error"
+                                            project_result["error"] = error_msg
+                                            error_count += 1
+                                            slog.warning(f"❌ Failed to fix bridge for {owner}/{repo}: {error_msg}")
+                                    break
+                    except Exception as e:
+                        continue
+
+                if not found_bridge:
+                    project_result["status"] = "no_bridge"
+
+                if found_bridge or project_result.get("status") != "no_bridge":
+                    results.append(project_result)
+
+        return {
+            "success": True,
+            "message": f"بررسی تمام شد: {updated_count} آپدیت شد، {skipped_count} به‌روز بود، {error_count} خطا",
+            "updated": updated_count,
+            "skipped": skipped_count,
+            "errors": error_count,
+            "total_with_bridge": updated_count + skipped_count + error_count,
+            "details": results,
+            "latest_version": INSPECTOR_BRIDGE_VERSION
+        }
+
+    except Exception as e:
+        slog.error("Fix all bridges failed", exception=e)
         return {"success": False, "error": str(e)}
 
 

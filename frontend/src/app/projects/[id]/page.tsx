@@ -445,6 +445,10 @@ export default function ProjectDetailPage() {
     has_bridge: boolean;
     file_path?: string;
     error?: string;
+    needs_update?: boolean;
+    update_reasons?: string[];
+    version?: string;
+    latest_version?: string;
   }>({
     checking: false,
     injecting: false,
@@ -2410,7 +2414,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         ...prev,
         checking: false,
         has_bridge: data.has_bridge || false,
-        file_path: data.file_path
+        file_path: data.file_path,
+        needs_update: data.needs_update || false,
+        update_reasons: data.update_reasons || [],
+        version: data.version,
+        latest_version: data.latest_version
       }));
     } catch (err) {
       setInspectorBridgeStatus(prev => ({
@@ -2557,6 +2565,45 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         );
         showSuccess(data.message || 'Bridge به‌روزرسانی شد!');
       } else {
+        setInspectorBridgeStatus(prev => ({ ...prev, injecting: false, error: data.error }));
+        showError(data.error || 'خطا در به‌روزرسانی');
+      }
+    } catch (err) {
+      setInspectorBridgeStatus(prev => ({ ...prev, injecting: false, error: 'خطا در ارتباط با سرور' }));
+    }
+  };
+
+  // 🔄 به‌روزرسانی مستقیم Bridge به آخرین نسخه (بدون نیاز به re-inject)
+  const updateBridgeToLatest = async () => {
+    setInspectorBridgeStatus(prev => ({ ...prev, injecting: true, error: undefined }));
+    addTransientMessage('🔄 به‌روزرسانی Bridge به آخرین نسخه...', 'info');
+
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/update-bridge/${projectId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      const data = await res.json();
+      console.log('🔄 Update bridge result:', data);
+
+      if (data.success) {
+        setInspectorBridgeStatus(prev => ({
+          ...prev,
+          injecting: false,
+          has_bridge: true,
+          needs_update: false,
+          update_reasons: [],
+          version: data.version,
+          file_path: data.file_path
+        }));
+        addTransientMessage(`✅ Bridge به نسخه ${data.version} به‌روزرسانی شد - منتظر deploy باشید`, 'info');
+        showSuccess(data.message || 'Bridge به‌روزرسانی شد!');
+      } else {
+        // اگر bridge نوع HTML/JS بود، از reInjectBridge استفاده کن
+        if (data.hint === 'use_force_update') {
+          await reInjectBridge();
+          return;
+        }
         setInspectorBridgeStatus(prev => ({ ...prev, injecting: false, error: data.error }));
         showError(data.error || 'خطا در به‌روزرسانی');
       }
@@ -9758,15 +9805,35 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         {bridgePeerConnected ? 'WS: متصل' : bridgeWsConnected ? 'WS: منتظر Bridge' : 'WS: در حال اتصال...'}
                       </div>
                     )}
+                    {/* ⚠️ هشدار نسخه قدیمی */}
+                    {inspectorBridgeStatus.has_bridge && inspectorBridgeStatus.needs_update && (
+                      <div className="mt-1 p-1.5 bg-amber-50 border border-amber-200 rounded-lg max-w-[140px]">
+                        <div className="text-[10px] text-amber-700 font-medium text-center">
+                          ⚠️ نسخه قدیمی (v{inspectorBridgeStatus.version})
+                        </div>
+                        {inspectorBridgeStatus.update_reasons && inspectorBridgeStatus.update_reasons.length > 0 && (
+                          <div className="text-[9px] text-amber-600 mt-0.5 text-center">
+                            {inspectorBridgeStatus.update_reasons[0]}
+                          </div>
+                        )}
+                        <button
+                          onClick={updateBridgeToLatest}
+                          disabled={inspectorBridgeStatus.injecting}
+                          className="mt-1 w-full px-2 py-1 text-[10px] bg-amber-500 text-white hover:bg-amber-600 rounded transition-all font-medium"
+                        >
+                          {inspectorBridgeStatus.injecting ? '⏳ در حال آپدیت...' : `🔄 آپدیت به v${inspectorBridgeStatus.latest_version}`}
+                        </button>
+                      </div>
+                    )}
                     {/* دکمه‌های کمکی */}
                     <div className="flex gap-1 mt-1">
                       {/* دکمه به‌روزرسانی Bridge (re-inject با WebSocket) */}
-                      {inspectorBridgeStatus.has_bridge && inspectorPowerOn && (
+                      {inspectorBridgeStatus.has_bridge && inspectorPowerOn && !inspectorBridgeStatus.needs_update && (
                         <button
-                          onClick={reInjectBridge}
+                          onClick={updateBridgeToLatest}
                           disabled={inspectorBridgeStatus.injecting}
                           className="px-2 py-0.5 text-[10px] text-orange-500 hover:text-orange-700 hover:bg-orange-50 rounded transition-all"
-                          title="به‌روزرسانی Bridge با نسخه WebSocket - حل مشکل cross-origin"
+                          title="به‌روزرسانی Bridge به آخرین نسخه"
                         >
                           {inspectorBridgeStatus.injecting ? '⏳' : '🔄 به‌روزرسانی'}
                         </button>
