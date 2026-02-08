@@ -6914,6 +6914,92 @@ async def fix_all_bridges(
 
 
 # =====================================
+# 🆕 ایجاد سرویس Render
+# =====================================
+
+@router.post("/inspector/create-render-service")
+async def create_render_service(request: Request, db: Session = Depends(get_db)):
+    """
+    ایجاد سرویس جدید در Render از طریق API
+    نکته: فقط پلن‌های پولی (Starter $7/ماه به بالا) از طریق API قابل ایجاد هستند
+    """
+    try:
+        data = await request.json()
+        project_id = data.get("project_id")
+        service_name = data.get("name", "")
+        service_type = data.get("service_type", "web_service")
+        github_repo_url = data.get("github_repo_url", "")
+        github_branch = data.get("branch", "main")
+        root_dir = data.get("root_dir", ".")
+        build_command = data.get("build_command")
+        start_command = data.get("start_command")
+        env_vars = data.get("env_vars", {})
+        project_type = data.get("project_type", "nodejs")
+
+        slog.api_request("POST", "/inspector/create-render-service",
+                         project_id=project_id, name=service_name)
+
+        if not service_name:
+            return {"success": False, "error": "نام سرویس الزامی است"}
+        if not github_repo_url:
+            return {"success": False, "error": "آدرس ریپوی GitHub الزامی است"}
+
+        # دریافت API key از تنظیمات
+        from ...models.setting import Setting
+        setting = db.query(Setting).filter(Setting.key == "api_key_render").first()
+        api_key = setting.value if setting else ""
+
+        if not api_key:
+            import os
+            api_key = os.getenv("RENDER_API_KEY", "")
+
+        if not api_key:
+            return {"success": False, "error": "کلید API رندر تنظیم نشده. ابتدا از تنظیمات، API Key را وارد کنید."}
+
+        # ایجاد سرویس
+        from ...services.deploy_service import RenderDeployService
+        deploy_svc = RenderDeployService(api_key)
+        try:
+            result = await deploy_svc.create_service(
+                name=service_name,
+                project_type=project_type,
+                github_repo_url=github_repo_url,
+                github_branch=github_branch,
+                root_dir=root_dir,
+                build_command=build_command,
+                start_command=start_command,
+                env_vars=env_vars,
+            )
+        finally:
+            await deploy_svc.close()
+
+        if result.get("success"):
+            slog.info(f"✅ Render service created: {result.get('name')} ({result.get('service_id')})")
+            # ذخیره سرویس در پروژه
+            if project_id and result.get("service_id"):
+                try:
+                    new_svc = RenderService(
+                        id=result["service_id"],
+                        name=result.get("name", service_name),
+                        type=service_type,
+                        status="deploying",
+                        project_id=project_id,
+                    )
+                    db.merge(new_svc)
+                    db.commit()
+                except Exception as db_err:
+                    slog.warning(f"Failed to save service to DB: {db_err}")
+        else:
+            slog.warning(f"Render service creation failed: {result.get('error')}")
+
+        return result
+
+    except Exception as e:
+        slog.error("Create render service failed", exception=e)
+        return {"success": False, "error": str(e)}
+
+
+# =====================================
 # 🌐 WebSocket Bridge Hub
 # ارتباط بین Bridge Script داخل پروژه کاربر و Inspector Frontend
 # این روش مشکل cross-origin postMessage را حل می‌کند

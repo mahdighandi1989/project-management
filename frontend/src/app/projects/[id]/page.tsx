@@ -331,6 +331,27 @@ export default function ProjectDetailPage() {
   const [inspectorChatInput, setInspectorChatInput] = useState('');
   const [inspectorChatLoading, setInspectorChatLoading] = useState(false);
   const [inspectorShowModelSelector, setInspectorShowModelSelector] = useState(false);
+  // 🔧 فیلتر انواع اکشن‌ها - همه فعال بجز scroll
+  const [inspectorActionFilters, setInspectorActionFilters] = useState<Record<string, boolean>>({
+    'click': true,
+    'scroll': false,
+    'input': true,
+    'focus': true,
+    'hover': true,
+    'error': true,
+    'console-error': true,
+    'error-overlay': true,
+  });
+  const inspectorActionFiltersRef = useRef<Record<string, boolean>>({
+    'click': true,
+    'scroll': false,
+    'input': true,
+    'focus': true,
+    'hover': true,
+    'error': true,
+    'console-error': true,
+    'error-overlay': true,
+  });
   const [inspectorReplyTo, setInspectorReplyTo] = useState<{
     id: string;
     content: string;
@@ -771,6 +792,10 @@ export default function ProjectDetailPage() {
   const [selectedRenderServices, setSelectedRenderServices] = useState<string[]>([]);
   const [savedRenderServices, setSavedRenderServices] = useState<{id: string; name: string}[]>([]);
 
+  // 🆕 ایجاد سرویس Render
+  const [showCreateRenderService, setShowCreateRenderService] = useState(false);
+  const [createRenderLoading, setCreateRenderLoading] = useState(false);
+
   useEffect(() => {
     if (projectId) {
       loadProject();
@@ -892,6 +917,11 @@ export default function ProjectDetailPage() {
     }
   }, [activeWorkflow]);
 
+  // 🔧 همگام‌سازی ref فیلتر اکشن‌ها با state
+  useEffect(() => {
+    inspectorActionFiltersRef.current = inspectorActionFilters;
+  }, [inspectorActionFilters]);
+
   // 🌉 تابع مشترک برای پردازش event های Bridge (postMessage و WebSocket)
   const actionLabelsRef = useRef<Record<string, string>>({
     'click': 'کلیک کردی',
@@ -932,6 +962,9 @@ export default function ProjectDetailPage() {
         source: 'imported-project',
       }]);
     }
+
+    // 🔧 فیلتر اکشن: اگر این نوع غیرفعال باشد، در چت ثبت نشود
+    if (inspectorActionFiltersRef.current[action] === false) return;
 
     const actionLabel = actionLabelsRef.current[action] || action;
     const targetInfo = elementInfo || target || 'عنصر ناشناخته';
@@ -5347,6 +5380,40 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     }
   };
 
+  // 🆕 ایجاد سرویس Render (پلن پولی - خودکار از طریق API)
+  const createRenderServicePaid = async (serviceName: string, serviceType: string) => {
+    setCreateRenderLoading(true);
+    try {
+      const githubUrl = project?.metadata?.source_url || '';
+      const res = await fetch(`${API_BASE}/api/render/inspector/create-render-service`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: projectId,
+          name: serviceName,
+          github_repo_url: githubUrl,
+          branch: 'main',
+          root_dir: serviceType === 'frontend' ? 'frontend' : serviceType === 'backend' ? 'backend' : '.',
+          project_type: serviceType === 'frontend' ? 'nextjs' : 'fastapi',
+          service_type: 'web_service',
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showSuccess(`✅ سرویس "${data.name}" ایجاد شد! Dashboard: ${data.dashboard_url || ''}`);
+        setShowCreateRenderService(false);
+        // رفرش سرویس‌ها
+        loadInspectorServices(true);
+      } else {
+        showError(data.error || 'خطا در ایجاد سرویس');
+      }
+    } catch {
+      showError('خطا در ارتباط با سرور');
+    } finally {
+      setCreateRenderLoading(false);
+    }
+  };
+
   // تغییر انتخاب سرویس
   const toggleServiceSelection = (serviceId: string) => {
     setSelectedRenderServices(prev =>
@@ -9717,6 +9784,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             <div className="text-center text-yellow-500">
                               <div className="text-3xl mb-2">⚠️</div>
                               <p className="text-xs">{inspectorError}</p>
+                              <button
+                                onClick={() => setShowCreateRenderService(true)}
+                                className="mt-3 px-4 py-2 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-lg text-xs font-medium hover:from-orange-600 hover:to-red-600 transition-all shadow-lg"
+                              >
+                                ➕ ایجاد سرویس Render
+                              </button>
                             </div>
                           </div>
                         ) : (
@@ -10134,6 +10207,42 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         </div>
                       </div>
 
+                      {/* 🔧 فیلتر انواع اکشن‌ها */}
+                      <div className="mb-3 pb-2 border-b border-white/20">
+                        <p className="text-xs mb-2 opacity-80 font-medium">🎛️ فیلتر اکشن‌ها در چت:</p>
+                        <div className="grid grid-cols-2 gap-1">
+                          {Object.entries({
+                            'click': 'کلیک',
+                            'scroll': 'اسکرول',
+                            'input': 'تایپ',
+                            'focus': 'فوکوس',
+                            'hover': 'هاور',
+                            'error': 'خطای JS',
+                            'console-error': 'console.error',
+                            'error-overlay': 'لایه خطا',
+                          }).map(([key, label]) => (
+                            <label key={key} className="flex items-center gap-1.5 cursor-pointer hover:bg-white/10 px-1 py-0.5 rounded text-[11px]">
+                              <input
+                                type="checkbox"
+                                checked={inspectorActionFilters[key] !== false}
+                                onChange={(e) => setInspectorActionFilters(prev => ({ ...prev, [key]: e.target.checked }))}
+                                className="w-3.5 h-3.5 rounded accent-white"
+                              />
+                              <span className={inspectorActionFilters[key] !== false ? 'opacity-100' : 'opacity-50'}>{label}</span>
+                            </label>
+                          ))}
+                        </div>
+                        <button
+                          onClick={() => setInspectorActionFilters({
+                            'click': true, 'scroll': false, 'input': true, 'focus': true,
+                            'hover': true, 'error': true, 'console-error': true, 'error-overlay': true,
+                          })}
+                          className="text-[10px] mt-1 opacity-60 hover:opacity-100 underline"
+                        >
+                          بازنشانی پیش‌فرض
+                        </button>
+                      </div>
+
                       {/* انتخاب دستی مدل‌ها */}
                       {!inspectorAutoSelect && (
                         <>
@@ -10425,21 +10534,18 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           {msg.role === 'action' && (
                             <span className={`text-xs font-bold ${
                               msg.backend_verified === true && msg.logs_checked && msg.logs_checked > 0 ? 'text-blue-500' :
-                              msg.backend_verified === true ? 'text-gray-400' :
                               msg.backend_verified === false ? 'text-red-500' :
-                              'text-gray-300 animate-pulse'
+                              'text-gray-400'
                             }`} title={
                               msg.backend_verified === true && msg.logs_checked && msg.logs_checked > 0 ? `تأیید شده - ${msg.logs_checked} لاگ بررسی شد` :
                               msg.backend_verified === true ? 'تأیید شده' :
                               msg.backend_verified === false ? 'خطا در لاگ‌ها' :
-                              msg.logs_checked === 0 && msg.verified_by_model === 'no-logs' ? 'بدون لاگ - بررسی نشد' :
+                              msg.logs_checked === 0 && msg.verified_by_model === 'no-logs' ? 'بدون لاگ - در حال تلاش مجدد' :
                               'در حال بررسی...'
                             }>
                               {msg.backend_verified === true && msg.logs_checked && msg.logs_checked > 0 ? '✓✓' :
                                msg.backend_verified === false ? '✕' :
-                               msg.backend_verified === null || (msg.logs_checked === 0 && msg.verified_by_model === 'no-logs') ? '⏳' :
-                               msg.backend_verified === true ? '✓' :
-                               '○'}
+                               '✓'}
                             </span>
                           )}
                           {/* دکمه بررسی خطا - فقط روی پیام‌هایی که واقعاً خطا دارند */}
@@ -11721,6 +11827,79 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 <p className="text-xs text-gray-400 mt-3">
                   💡 این انتخاب ذخیره میشه و دیگه نیازی به انتخاب مجدد نیست.
                   برای تغییر، از تنظیمات Deploy استفاده کنید.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 🆕 مدال ایجاد سرویس Render */}
+        {showCreateRenderService && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl max-w-md w-full">
+              <div className="p-4 border-b dark:border-gray-700 flex items-center justify-between">
+                <h3 className="font-bold flex items-center gap-2">
+                  <span>🚀</span> ایجاد سرویس Render
+                </h3>
+                <button onClick={() => setShowCreateRenderService(false)} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded">✕</button>
+              </div>
+              <div className="p-4 space-y-4">
+                <p className="text-sm text-gray-600 dark:text-gray-400">
+                  روش ایجاد سرویس را انتخاب کنید:
+                </p>
+
+                {/* گزینه رایگان */}
+                <button
+                  onClick={() => {
+                    const repoUrl = project?.metadata?.source_url || '';
+                    const renderUrl = repoUrl
+                      ? `https://dashboard.render.com/select-repo?type=web&q=${encodeURIComponent(repoUrl.replace('https://github.com/', ''))}`
+                      : 'https://dashboard.render.com/select-repo?type=web';
+                    window.open(renderUrl, '_blank');
+                    setShowCreateRenderService(false);
+                  }}
+                  className="w-full p-4 rounded-xl border-2 border-green-200 dark:border-green-800 hover:border-green-500 dark:hover:border-green-500 hover:bg-green-50 dark:hover:bg-green-900/20 transition-all text-right"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="text-2xl">🆓</span>
+                    <div className="flex-1">
+                      <div className="font-bold text-green-700 dark:text-green-400">پلن رایگان (Free)</div>
+                      <p className="text-xs text-gray-500 mt-1">
+                        به داشبورد Render منتقل می‌شوید و سرویس رایگان ایجاد می‌کنید.
+                        بعد از ایجاد، دکمه پاور را بزنید تا سرویس شناسایی شود.
+                      </p>
+                    </div>
+                    <span className="text-gray-400">↗</span>
+                  </div>
+                </button>
+
+                {/* گزینه پولی */}
+                <button
+                  onClick={() => {
+                    const name = project?.name?.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') || 'my-service';
+                    createRenderServicePaid(name + '-frontend', 'frontend');
+                  }}
+                  disabled={createRenderLoading}
+                  className="w-full p-4 rounded-xl border-2 border-orange-200 dark:border-orange-800 hover:border-orange-500 dark:hover:border-orange-500 hover:bg-orange-50 dark:hover:bg-orange-900/20 transition-all text-right disabled:opacity-50"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="text-2xl">{createRenderLoading ? '⏳' : '💎'}</span>
+                    <div className="flex-1">
+                      <div className="font-bold text-orange-700 dark:text-orange-400">
+                        پلن پولی (Starter - $7/ماه)
+                      </div>
+                      <p className="text-xs text-gray-500 mt-1">
+                        {createRenderLoading
+                          ? 'در حال ایجاد سرویس...'
+                          : 'سرویس خودکار از طریق API ایجاد و Deploy می‌شود. نیاز به Render API Key دارد.'}
+                      </p>
+                    </div>
+                    {!createRenderLoading && <span className="text-gray-400">⚡</span>}
+                  </div>
+                </button>
+
+                <p className="text-[11px] text-gray-400 text-center">
+                  💡 پلن رایگان دارای محدودیت ۱۵ دقیقه عدم فعالیت است. پلن پولی همیشه فعال می‌ماند.
                 </p>
               </div>
             </div>
