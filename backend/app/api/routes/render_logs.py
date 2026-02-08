@@ -6957,158 +6957,183 @@ async def _read_github_file(owner: str, repo: str, path: str, branch: str = "mai
     return None
 
 
-async def _analyze_github_project(owner: str, repo: str, root_dir: str, branch: str = "main", github_token: str = None) -> dict:
+RENDER_SERVICE_AI_PROMPT = """تو یک DevOps Engineer هستی. وظیفه‌ات تحلیل ساختار یک پروژه GitHub و تولید تنظیمات دقیق برای ایجاد سرویس‌ها در Render.com هست.
+
+## فایل‌های پروژه:
+{files_content}
+
+## اطلاعات پروژه:
+- GitHub: {github_url}
+- Branch: {branch}
+- ساختار دایرکتوری: {dir_structure}
+
+## وظیفه:
+تحلیل کن و خروجی JSON بده. دقت کن:
+1. اگر frontend/ و backend/ هر دو وجود دارند → دو سرویس جداگانه ایجاد کن
+2. اگر پروژه Vite/CRA (بدون SSR) هست → نوع سرویس حتماً static_site باشه
+3. اگر Next.js/Nuxt/Express/FastAPI هست → نوع web_service
+4. برای static_site: فقط buildCommand و publishPath لازمه (startCommand نده یا null بذار)
+5. برای static_site حتماً SPA rewrite rule رو به انتهای buildCommand اضافه کن: echo '/*    /index.html   200' > [publishPath]/_redirects
+6. برای Python: حتماً pip install --upgrade pip setuptools && رو قبل از pip install بذار
+7. برای Python: env var PYTHON_VERSION=3.11.11 اضافه کن
+8. env vars مورد نیاز رو از .env/.env.example/.env.sample استخراج کن (فقط VITE_ و REACT_APP_ و NEXT_PUBLIC_ و SERVER-side vars)
+9. اگر فرانت به بکند وصل میشه، VITE_API_URL یا معادلش رو با مقدار خالی اضافه کن (باید بعداً توسط کاربر پر بشه)
+10. rootDir باید نسبت به root ریپو باشه (مثلاً frontend یا backend یا .)
+11. اگر Dockerfile وجود داره، ترجیحاً از Docker استفاده کن (service_type=web_service, runtime=docker)
+12. نام سرویس باید کوتاه و معنادار باشه (فقط حروف کوچک، اعداد و -)
+
+## فرمت خروجی (فقط JSON، بدون هیچ متن اضافه):
+```json
+{{{{
+  "services": [
+    {{{{
+      "name": "project-name-frontend",
+      "role": "frontend",
+      "service_type": "static_site",
+      "root_dir": "frontend",
+      "build_command": "npm install && npm run build && echo '/*    /index.html   200' > dist/_redirects",
+      "start_command": null,
+      "publish_path": "dist",
+      "env_vars": {{{{"VITE_API_URL": ""}}}},
+      "notes": "Vite + React SPA - حتماً VITE_API_URL رو بعد از ایجاد بکند پر کنید"
+    }}}}
+  ],
+  "analysis": "توضیح کوتاه فارسی از ساختار پروژه و تصمیمات گرفته شده"
+}}}}
+```"""
+
+
+# فایل‌های کلیدی که AI باید بررسی کنه
+_KEY_FILES_TO_READ = [
+    "package.json",
+    "frontend/package.json",
+    "backend/package.json",
+    "client/package.json",
+    "server/package.json",
+    "requirements.txt",
+    "backend/requirements.txt",
+    "Pipfile",
+    "pyproject.toml",
+    "Dockerfile",
+    "frontend/Dockerfile",
+    "backend/Dockerfile",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "vite.config.ts",
+    "vite.config.js",
+    "frontend/vite.config.ts",
+    "frontend/vite.config.js",
+    "next.config.js",
+    "next.config.mjs",
+    "nuxt.config.ts",
+    ".env",
+    ".env.example",
+    ".env.sample",
+    "frontend/.env.example",
+    "backend/.env.example",
+    "render.yaml",
+    "Procfile",
+    "tsconfig.json",
+    "frontend/tsconfig.json",
+]
+
+
+async def _ai_analyze_project(owner: str, repo: str, branch: str, github_token: str, github_url: str, project_name: str, db) -> dict:
     """
-    تحلیل واقعی ساختار پروژه با خواندن فایل‌های کلیدی از GitHub
-    Returns: { framework, has_start_script, start_command, build_command,
-               service_type, publish_path, python_version, entry_point }
+    تحلیل پروژه توسط AI — فایل‌های کلیدی رو از GitHub میخونه و به مدل میده
+    Returns: { services: [...], analysis: "..." }
     """
-    prefix = f"{root_dir}/" if root_dir and root_dir != "." else ""
-    result = {
-        "framework": "unknown",
-        "has_start_script": False,
-        "service_type": "web_service",
-        "build_command": None,
-        "start_command": None,
-        "publish_path": None,
-        "env_vars": {},
-    }
+    import aiohttp
 
-    # ── بررسی package.json (Node.js projects) ──
-    pkg_content = await _read_github_file(owner, repo, f"{prefix}package.json", branch, github_token)
-    if pkg_content:
-        try:
-            pkg = json.loads(pkg_content)
-            scripts = pkg.get("scripts", {})
-            deps = pkg.get("dependencies", {})
-            dev_deps = pkg.get("devDependencies", {})
-            all_deps = {**deps, **dev_deps}
+    # ── 1. دریافت ساختار دایرکتوری از GitHub Tree API ──
+    dir_structure = []
+    headers = {}
+    if github_token:
+        headers["Authorization"] = f"token {github_token}"
+        headers["Accept"] = "application/vnd.github.v3+json"
 
-            result["has_start_script"] = "start" in scripts
+    try:
+        tree_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(tree_url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    tree_data = await resp.json()
+                    for item in tree_data.get("tree", [])[:500]:
+                        dir_structure.append(item.get("path", ""))
+    except Exception as e:
+        slog.warning(f"Failed to get tree: {e}")
 
-            # تشخیص فریمورک
-            if "next" in all_deps:
-                result["framework"] = "nextjs"
-                result["service_type"] = "web_service"
-                result["build_command"] = "npm install && npm run build"
-                result["start_command"] = scripts.get("start", "npm start")
-            elif "vite" in all_deps:
-                result["framework"] = "vite"
-                # Vite بیلد static میده → static_site + SPA rewrite
-                result["service_type"] = "static_site"
-                result["build_command"] = "npm install && npm run build && echo '/*    /index.html   200' > dist/_redirects"
-                result["publish_path"] = "dist"
-            elif "react-scripts" in all_deps:
-                result["framework"] = "cra"  # Create React App
-                result["service_type"] = "static_site"
-                result["build_command"] = "npm install && npm run build && echo '/*    /index.html   200' > build/_redirects"
-                result["publish_path"] = "build"
-            elif "nuxt" in all_deps or "nuxt3" in all_deps:
-                result["framework"] = "nuxt"
-                result["service_type"] = "web_service"
-                result["build_command"] = "npm install && npm run build"
-                result["start_command"] = "node .output/server/index.mjs"
-            elif "express" in all_deps:
-                result["framework"] = "express"
-                result["service_type"] = "web_service"
-                result["build_command"] = "npm install"
-                result["start_command"] = scripts.get("start", "node index.js")
-            elif "fastify" in all_deps:
-                result["framework"] = "fastify"
-                result["service_type"] = "web_service"
-                result["build_command"] = "npm install"
-                result["start_command"] = scripts.get("start", "node index.js")
-            else:
-                # Generic Node.js
-                result["framework"] = "nodejs"
-                if result["has_start_script"]:
-                    result["service_type"] = "web_service"
-                    result["build_command"] = "npm install"
-                    result["start_command"] = "npm start"
-                elif "build" in scripts:
-                    result["service_type"] = "static_site"
-                    result["build_command"] = "npm install && npm run build && echo '/*    /index.html   200' > dist/_redirects"
-                    result["publish_path"] = "dist"
-                else:
-                    result["service_type"] = "web_service"
-                    result["build_command"] = "npm install"
-                    result["start_command"] = "node index.js"
+    # ── 2. خواندن فایل‌های کلیدی ──
+    files_content_parts = []
+    for file_path in _KEY_FILES_TO_READ:
+        content = await _read_github_file(owner, repo, file_path, branch, github_token)
+        if content:
+            truncated = content[:3000] if len(content) > 3000 else content
+            files_content_parts.append(f"### 📄 {file_path}\n```\n{truncated}\n```")
 
-        except json.JSONDecodeError:
-            pass
+    if not files_content_parts:
+        return {"services": [], "analysis": "هیچ فایل قابل شناسایی‌ای پیدا نشد. ریپو خالی است یا دسترسی وجود ندارد."}
 
-        # تلاش برای خواندن env vars مورد نیاز از .env.example یا .env.production
-        for env_file in [".env.example", ".env.production", ".env"]:
-            env_content = await _read_github_file(owner, repo, f"{prefix}{env_file}", branch, github_token)
-            if env_content:
-                for line in env_content.strip().split("\n"):
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    if "=" in line:
-                        key = line.split("=", 1)[0].strip()
-                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
-                        # فقط VITE_ و REACT_APP_ و NEXT_PUBLIC_ env vars
-                        if key.startswith(("VITE_", "REACT_APP_", "NEXT_PUBLIC_")):
-                            # مقدار placeholder نباشه
-                            if val and not val.startswith("your_") and val != "":
-                                result["env_vars"][key] = val
-                            else:
-                                result["env_vars"][key] = ""  # باید توسط کاربر پر بشه
-                break  # فقط اولین فایل یافت شده
+    files_content = "\n\n".join(files_content_parts)
+    dir_str = "\n".join(dir_structure[:200]) if dir_structure else "(ساختار دایرکتوری در دسترس نیست)"
 
+    # ── 3. ساخت prompt نهایی ──
+    prompt = RENDER_SERVICE_AI_PROMPT.format(
+        files_content=files_content,
+        github_url=github_url,
+        branch=branch,
+        dir_structure=dir_str,
+    )
+
+    # ── 4. فراخوانی مدل AI ──
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+
+    ai_manager = get_ai_manager()
+    primary_model = await _smart_select_model(db, None)
+
+    messages = [
+        Message(role="system", content="تو یک DevOps Engineer متخصص Render.com هستی. فقط خروجی JSON بده، بدون توضیح اضافه."),
+        Message(role="user", content=prompt),
+    ]
+
+    try:
+        response = await ai_manager.generate(
+            model_id=primary_model,
+            messages=messages,
+            max_tokens=4096,
+            temperature=0.2,
+            allow_fallback=True,
+        )
+        ai_text = response.content
+        model_used = response.model_id
+    except Exception as e:
+        slog.error("AI analysis failed", exception=e)
+        return {"services": [], "analysis": f"خطا در تحلیل AI: {str(e)}"}
+
+    # ── 5. پارس کردن خروجی JSON ──
+    try:
+        json_text = ai_text
+        if "```json" in json_text:
+            json_text = json_text.split("```json")[1].split("```")[0]
+        elif "```" in json_text:
+            json_text = json_text.split("```")[1].split("```")[0]
+
+        result = json.loads(json_text.strip())
+        if "services" not in result:
+            result = {"services": [], "analysis": "خروجی AI فاقد بخش services بود"}
+        result["model_used"] = model_used
         return result
-
-    # ── بررسی requirements.txt (Python projects) ──
-    req_content = await _read_github_file(owner, repo, f"{prefix}requirements.txt", branch, github_token)
-    if req_content:
-        req_lower = req_content.lower()
-        result["build_command"] = "pip install --upgrade pip setuptools && pip install -r requirements.txt"
-
-        if "fastapi" in req_lower or "uvicorn" in req_lower:
-            result["framework"] = "fastapi"
-            # تلاش برای تشخیص entry point
-            main_candidates = ["app.main:app", "main:app", "app:app", "server:app"]
-            for candidate in main_candidates:
-                module_path = candidate.split(":")[0].replace(".", "/") + ".py"
-                check = await _read_github_file(owner, repo, f"{prefix}{module_path}", branch, github_token)
-                if check:
-                    result["start_command"] = f"uvicorn {candidate} --host 0.0.0.0 --port $PORT"
-                    break
-            if not result["start_command"]:
-                result["start_command"] = "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
-        elif "flask" in req_lower:
-            result["framework"] = "flask"
-            result["start_command"] = "gunicorn app:app --bind 0.0.0.0:$PORT"
-        elif "django" in req_lower:
-            result["framework"] = "django"
-            result["start_command"] = "gunicorn config.wsgi:application --bind 0.0.0.0:$PORT"
-        else:
-            result["framework"] = "python"
-            result["start_command"] = "python main.py"
-
-        result["service_type"] = "web_service"
-        # نسخه Python - Render default 3.11 معمولاً بهتر کار میکنه
-        result["env_vars"]["PYTHON_VERSION"] = "3.11.11"
-        return result
-
-    # ── بررسی Dockerfile ──
-    dockerfile = await _read_github_file(owner, repo, f"{prefix}Dockerfile", branch, github_token)
-    if dockerfile:
-        result["framework"] = "docker"
-        result["service_type"] = "web_service"
-        return result
-
-    return result
+    except (json.JSONDecodeError, IndexError) as e:
+        slog.warning(f"Failed to parse AI JSON: {e}", ai_text=ai_text[:500])
+        return {"services": [], "analysis": f"خطا در پارس خروجی AI. خروجی خام:\n{ai_text[:1000]}"}
 
 
 @router.post("/inspector/create-render-service")
 async def create_render_service(request: Request, db: Session = Depends(get_db)):
     """
-    ایجاد هوشمند سرویس‌های Render بر اساس تحلیل واقعی ساختار پروژه
-    - خواندن package.json / requirements.txt از GitHub
-    - تشخیص Vite/CRA → static_site | Next.js/Express/FastAPI → web_service
-    - تنظیم صحیح build/start command بر اساس فریمورک واقعی
+    ایجاد هوشمند سرویس‌های Render با استفاده از تحلیل AI
+    مدل AI ساختار پروژه رو تحلیل میکنه و تنظیمات دقیق سرویس‌ها رو تولید میکنه
     """
     try:
         data = await request.json()
@@ -7144,7 +7169,6 @@ async def create_render_service(request: Request, db: Session = Depends(get_db))
                 github_url = f"https://github.com/{owner}/{repo}"
 
         if not owner or not repo:
-            # تلاش استخراج از URL
             if github_url:
                 cleaned = github_url.replace("https://github.com/", "").replace(".git", "").strip("/")
                 parts = cleaned.split("/")
@@ -7156,7 +7180,7 @@ async def create_render_service(request: Request, db: Session = Depends(get_db))
 
         branch = extra.get("branch", "main") or "main"
 
-        # دریافت GitHub token برای ریپوهای خصوصی
+        # ── 3. دریافت توکن‌ها ──
         github_token = None
         try:
             from ...models.setting import Setting as _S
@@ -7168,89 +7192,30 @@ async def create_render_service(request: Request, db: Session = Depends(get_db))
         if not github_token:
             github_token = os.getenv("GITHUB_TOKEN", "")
 
-        # ── 3. تحلیل ساختار واقعی از GitHub ──
-        file_tree = []
-        if project.structure:
-            try:
-                structure = json.loads(project.structure) if isinstance(project.structure, str) else project.structure
-                file_tree = structure.get("file_tree", [])
-            except:
-                file_tree = []
+        # ── 4. تحلیل پروژه با AI ──
+        ai_result = await _ai_analyze_project(
+            owner=owner,
+            repo=repo,
+            branch=branch,
+            github_token=github_token,
+            github_url=github_url,
+            project_name=project.name or repo,
+            db=db,
+        )
 
-        has_frontend_dir = any(
-            (f.get("path", "") if isinstance(f, dict) else str(f)).startswith("frontend/")
-            for f in file_tree
-        ) if file_tree else False
-        has_backend_dir = any(
-            (f.get("path", "") if isinstance(f, dict) else str(f)).startswith("backend/")
-            for f in file_tree
-        ) if file_tree else False
+        services_plan = ai_result.get("services", [])
+        analysis_text = ai_result.get("analysis", "")
+        model_used = ai_result.get("model_used", "unknown")
 
-        # ── 4. تحلیل فریمورک از فایل‌های واقعی GitHub ──
-        services_to_create = []
-        safe_name = (project.name or repo or "app").lower().replace(" ", "-").replace("_", "-")
-        safe_name = re.sub(r'[^a-z0-9-]', '', safe_name)[:40]
+        if not services_plan:
+            return {
+                "success": False,
+                "error": "AI نتوانست سرویسی برای این پروژه تشخیص دهد.",
+                "analysis": analysis_text,
+                "model_used": model_used,
+            }
 
-        if has_frontend_dir and has_backend_dir:
-            # Monorepo
-            fe_analysis = await _analyze_github_project(owner, repo, "frontend", branch, github_token)
-            be_analysis = await _analyze_github_project(owner, repo, "backend", branch, github_token)
-
-            services_to_create.append({
-                "name": f"{safe_name}-frontend",
-                "role": "frontend",
-                "root_dir": "frontend",
-                "project_type": fe_analysis["framework"],
-                "service_type": fe_analysis["service_type"],
-                "build_command": fe_analysis["build_command"],
-                "start_command": fe_analysis["start_command"],
-                "publish_path": fe_analysis["publish_path"],
-                "env_vars": fe_analysis["env_vars"],
-            })
-            services_to_create.append({
-                "name": f"{safe_name}-backend",
-                "role": "backend",
-                "root_dir": "backend",
-                "project_type": be_analysis["framework"],
-                "service_type": be_analysis["service_type"],
-                "build_command": be_analysis["build_command"],
-                "start_command": be_analysis["start_command"],
-                "publish_path": be_analysis["publish_path"],
-                "env_vars": be_analysis["env_vars"],
-            })
-        elif has_frontend_dir:
-            analysis = await _analyze_github_project(owner, repo, "frontend", branch, github_token)
-            services_to_create.append({
-                "name": safe_name,
-                "role": "frontend",
-                "root_dir": "frontend",
-                **{k: analysis[k] for k in ["project_type", "service_type", "build_command", "start_command", "publish_path", "env_vars"]},
-                "project_type": analysis["framework"],
-            })
-        elif has_backend_dir:
-            analysis = await _analyze_github_project(owner, repo, "backend", branch, github_token)
-            services_to_create.append({
-                "name": safe_name,
-                "role": "backend",
-                "root_dir": "backend",
-                **{k: analysis[k] for k in ["project_type", "service_type", "build_command", "start_command", "publish_path", "env_vars"]},
-                "project_type": analysis["framework"],
-            })
-        else:
-            # Unified
-            analysis = await _analyze_github_project(owner, repo, ".", branch, github_token)
-            services_to_create.append({
-                "name": safe_name,
-                "role": "unified",
-                "root_dir": ".",
-                **{k: analysis[k] for k in ["project_type", "service_type", "build_command", "start_command", "publish_path", "env_vars"]},
-                "project_type": analysis["framework"],
-            })
-
-        if not services_to_create:
-            return {"success": False, "error": "ساختار پروژه قابل تشخیص نبود"}
-
-        # ── 5. دریافت API Key ──
+        # ── 5. دریافت Render API Key ──
         from ...models.setting import Setting
         setting = db.query(Setting).filter(Setting.key == "api_key_render").first()
         api_key = setting.value if setting else ""
@@ -7259,23 +7224,26 @@ async def create_render_service(request: Request, db: Session = Depends(get_db))
         if not api_key:
             return {"success": False, "error": "کلید API رندر تنظیم نشده."}
 
-        # ── 6. ایجاد سرویس‌ها ──
+        # ── 6. ایجاد سرویس‌ها بر اساس تحلیل AI ──
         from ...services.deploy_service import RenderDeployService
         deploy_svc = RenderDeployService(api_key)
         created = []
         errors = []
         try:
-            for svc_plan in services_to_create:
+            for svc_plan in services_plan:
+                svc_name = svc_plan.get("name", "app")
+                svc_type = svc_plan.get("service_type", "web_service")
                 svc_env_vars = svc_plan.get("env_vars", {})
+
                 result = await deploy_svc.create_service(
-                    name=svc_plan["name"],
-                    project_type=svc_plan["project_type"],
+                    name=svc_name,
+                    project_type=svc_plan.get("role", "app"),
                     github_repo_url=github_url,
                     github_branch=branch,
-                    root_dir=svc_plan["root_dir"],
+                    root_dir=svc_plan.get("root_dir", "."),
                     build_command=svc_plan.get("build_command"),
                     start_command=svc_plan.get("start_command"),
-                    service_type=svc_plan.get("service_type", "web_service"),
+                    service_type=svc_type,
                     publish_path=svc_plan.get("publish_path"),
                     env_vars=svc_env_vars if svc_env_vars else None,
                 )
@@ -7283,8 +7251,8 @@ async def create_render_service(request: Request, db: Session = Depends(get_db))
                     try:
                         new_svc = RenderService(
                             id=result["service_id"],
-                            name=result.get("name", svc_plan["name"]),
-                            type=svc_plan.get("service_type", "web_service"),
+                            name=result.get("name", svc_name),
+                            type=svc_type,
                             status="deploying",
                             project_id=project_id,
                             service_url=result.get("url", ""),
@@ -7297,37 +7265,46 @@ async def create_render_service(request: Request, db: Session = Depends(get_db))
                     created.append({
                         "name": result.get("name"),
                         "service_id": result.get("service_id"),
-                        "role": svc_plan["role"],
-                        "framework": svc_plan["project_type"],
-                        "service_type": svc_plan["service_type"],
+                        "role": svc_plan.get("role", "app"),
+                        "service_type": svc_type,
                         "dashboard_url": result.get("dashboard_url"),
                         "url": result.get("url"),
+                        "notes": svc_plan.get("notes", ""),
                     })
-                    slog.info(f"✅ Created {svc_plan['role']} ({svc_plan['project_type']}/{svc_plan['service_type']}): {result.get('name')}")
+                    slog.info(f"✅ AI Created {svc_plan.get('role')} ({svc_type}): {result.get('name')}")
                 else:
                     errors.append({
-                        "name": svc_plan["name"],
-                        "role": svc_plan["role"],
+                        "name": svc_name,
+                        "role": svc_plan.get("role", "app"),
                         "error": result.get("error", "unknown"),
                     })
-                    slog.warning(f"❌ Failed {svc_plan['role']}: {result.get('error')}")
+                    slog.warning(f"❌ AI Failed {svc_plan.get('role')}: {result.get('error')}")
         finally:
             await deploy_svc.close()
+
+        # ── 7. ساخت پیام خلاصه برای Inspector Chat ──
+        empty_env_vars = []
+        for svc in services_plan:
+            for k, v in svc.get("env_vars", {}).items():
+                if v == "" or v is None:
+                    empty_env_vars.append(f"{svc.get('name', '?')}: {k}")
 
         return {
             "success": len(created) > 0,
             "created": created,
             "errors": errors,
+            "analysis": analysis_text,
+            "model_used": model_used,
             "project_name": project.name,
             "github_url": github_url,
-            "structure_type": "monorepo" if (has_frontend_dir and has_backend_dir) else "unified",
-            "github_token_used": bool(github_token),
+            "empty_env_vars": empty_env_vars,
             "message": f"✅ {len(created)} سرویس ایجاد شد" + (f" | {len(errors)} خطا" if errors else ""),
         }
 
     except Exception as e:
-        slog.error("Smart create render service failed", exception=e)
+        slog.error("AI create render service failed", exception=e)
         return {"success": False, "error": str(e)}
+
 
 
 # =====================================
