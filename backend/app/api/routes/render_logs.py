@@ -6917,21 +6917,47 @@ async def fix_all_bridges(
 # 🆕 ایجاد هوشمند سرویس Render
 # =====================================
 
-async def _read_github_file(owner: str, repo: str, path: str, branch: str = "main") -> Optional[str]:
-    """خواندن محتوای فایل از GitHub API (بدون نیاز به token برای ریپوهای public)"""
+async def _read_github_file(owner: str, repo: str, path: str, branch: str = "main", github_token: str = None) -> Optional[str]:
+    """خواندن محتوای فایل از GitHub API (با پشتیبانی ریپوهای خصوصی)"""
     import aiohttp
-    url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+    import base64 as _b64
+
+    headers = {}
+    if github_token:
+        headers["Authorization"] = f"token {github_token}"
+        headers["Accept"] = "application/vnd.github.v3+json"
+
+    # روش ۱: GitHub API (کار میکنه برای private repos)
+    if github_token:
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(api_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("encoding") == "base64" and data.get("content"):
+                            return _b64.b64decode(data["content"]).decode("utf-8")
+                        elif data.get("download_url"):
+                            async with session.get(data["download_url"], headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as dl_resp:
+                                if dl_resp.status == 200:
+                                    return await dl_resp.text()
+        except:
+            pass
+
+    # روش ۲: raw.githubusercontent (فقط public repos)
+    raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(raw_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     return await resp.text()
     except:
         pass
+
     return None
 
 
-async def _analyze_github_project(owner: str, repo: str, root_dir: str, branch: str = "main") -> dict:
+async def _analyze_github_project(owner: str, repo: str, root_dir: str, branch: str = "main", github_token: str = None) -> dict:
     """
     تحلیل واقعی ساختار پروژه با خواندن فایل‌های کلیدی از GitHub
     Returns: { framework, has_start_script, start_command, build_command,
@@ -6949,7 +6975,7 @@ async def _analyze_github_project(owner: str, repo: str, root_dir: str, branch: 
     }
 
     # ── بررسی package.json (Node.js projects) ──
-    pkg_content = await _read_github_file(owner, repo, f"{prefix}package.json", branch)
+    pkg_content = await _read_github_file(owner, repo, f"{prefix}package.json", branch, github_token)
     if pkg_content:
         try:
             pkg = json.loads(pkg_content)
@@ -7013,7 +7039,7 @@ async def _analyze_github_project(owner: str, repo: str, root_dir: str, branch: 
 
         # تلاش برای خواندن env vars مورد نیاز از .env.example یا .env.production
         for env_file in [".env.example", ".env.production", ".env"]:
-            env_content = await _read_github_file(owner, repo, f"{prefix}{env_file}", branch)
+            env_content = await _read_github_file(owner, repo, f"{prefix}{env_file}", branch, github_token)
             if env_content:
                 for line in env_content.strip().split("\n"):
                     line = line.strip()
@@ -7034,7 +7060,7 @@ async def _analyze_github_project(owner: str, repo: str, root_dir: str, branch: 
         return result
 
     # ── بررسی requirements.txt (Python projects) ──
-    req_content = await _read_github_file(owner, repo, f"{prefix}requirements.txt", branch)
+    req_content = await _read_github_file(owner, repo, f"{prefix}requirements.txt", branch, github_token)
     if req_content:
         req_lower = req_content.lower()
         result["build_command"] = "pip install --upgrade pip setuptools && pip install -r requirements.txt"
@@ -7045,7 +7071,7 @@ async def _analyze_github_project(owner: str, repo: str, root_dir: str, branch: 
             main_candidates = ["app.main:app", "main:app", "app:app", "server:app"]
             for candidate in main_candidates:
                 module_path = candidate.split(":")[0].replace(".", "/") + ".py"
-                check = await _read_github_file(owner, repo, f"{prefix}{module_path}", branch)
+                check = await _read_github_file(owner, repo, f"{prefix}{module_path}", branch, github_token)
                 if check:
                     result["start_command"] = f"uvicorn {candidate} --host 0.0.0.0 --port $PORT"
                     break
@@ -7067,7 +7093,7 @@ async def _analyze_github_project(owner: str, repo: str, root_dir: str, branch: 
         return result
 
     # ── بررسی Dockerfile ──
-    dockerfile = await _read_github_file(owner, repo, f"{prefix}Dockerfile", branch)
+    dockerfile = await _read_github_file(owner, repo, f"{prefix}Dockerfile", branch, github_token)
     if dockerfile:
         result["framework"] = "docker"
         result["service_type"] = "web_service"
@@ -7130,6 +7156,18 @@ async def create_render_service(request: Request, db: Session = Depends(get_db))
 
         branch = extra.get("branch", "main") or "main"
 
+        # دریافت GitHub token برای ریپوهای خصوصی
+        github_token = None
+        try:
+            from ...models.setting import Setting as _S
+            gh_setting = db.query(_S).filter(_S.key == "api_key_github").first()
+            if gh_setting and gh_setting.value:
+                github_token = gh_setting.value
+        except:
+            pass
+        if not github_token:
+            github_token = os.getenv("GITHUB_TOKEN", "")
+
         # ── 3. تحلیل ساختار واقعی از GitHub ──
         file_tree = []
         if project.structure:
@@ -7155,8 +7193,8 @@ async def create_render_service(request: Request, db: Session = Depends(get_db))
 
         if has_frontend_dir and has_backend_dir:
             # Monorepo
-            fe_analysis = await _analyze_github_project(owner, repo, "frontend", branch)
-            be_analysis = await _analyze_github_project(owner, repo, "backend", branch)
+            fe_analysis = await _analyze_github_project(owner, repo, "frontend", branch, github_token)
+            be_analysis = await _analyze_github_project(owner, repo, "backend", branch, github_token)
 
             services_to_create.append({
                 "name": f"{safe_name}-frontend",
@@ -7181,7 +7219,7 @@ async def create_render_service(request: Request, db: Session = Depends(get_db))
                 "env_vars": be_analysis["env_vars"],
             })
         elif has_frontend_dir:
-            analysis = await _analyze_github_project(owner, repo, "frontend", branch)
+            analysis = await _analyze_github_project(owner, repo, "frontend", branch, github_token)
             services_to_create.append({
                 "name": safe_name,
                 "role": "frontend",
@@ -7190,7 +7228,7 @@ async def create_render_service(request: Request, db: Session = Depends(get_db))
                 "project_type": analysis["framework"],
             })
         elif has_backend_dir:
-            analysis = await _analyze_github_project(owner, repo, "backend", branch)
+            analysis = await _analyze_github_project(owner, repo, "backend", branch, github_token)
             services_to_create.append({
                 "name": safe_name,
                 "role": "backend",
@@ -7200,7 +7238,7 @@ async def create_render_service(request: Request, db: Session = Depends(get_db))
             })
         else:
             # Unified
-            analysis = await _analyze_github_project(owner, repo, ".", branch)
+            analysis = await _analyze_github_project(owner, repo, ".", branch, github_token)
             services_to_create.append({
                 "name": safe_name,
                 "role": "unified",
@@ -7283,6 +7321,7 @@ async def create_render_service(request: Request, db: Session = Depends(get_db))
             "project_name": project.name,
             "github_url": github_url,
             "structure_type": "monorepo" if (has_frontend_dir and has_backend_dir) else "unified",
+            "github_token_used": bool(github_token),
             "message": f"✅ {len(created)} سرویس ایجاد شد" + (f" | {len(errors)} خطا" if errors else ""),
         }
 
