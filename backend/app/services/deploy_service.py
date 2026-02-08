@@ -141,6 +141,21 @@ class RenderDeployService:
 
         session = await self._get_session()
 
+        # دریافت ownerId از Render API (الزامی برای ایجاد سرویس)
+        owner_id = None
+        try:
+            async with session.get(f"{self.API_BASE}/owners") as owner_resp:
+                if owner_resp.status == 200:
+                    owners = await owner_resp.json()
+                    if owners and len(owners) > 0:
+                        first_owner = owners[0]
+                        owner_id = first_owner.get("owner", {}).get("id") or first_owner.get("id")
+        except Exception:
+            pass
+
+        if not owner_id:
+            return {"success": False, "error": "Owner ID دریافت نشد. لطفاً API Key رندر را بررسی کنید."}
+
         # تنظیمات بر اساس نوع پروژه
         if project_type in ['python', 'fastapi', 'flask', 'django']:
             env = "python"
@@ -161,6 +176,7 @@ class RenderDeployService:
         service_data = {
             "type": "web_service",
             "name": name.lower().replace(' ', '-').replace('_', '-'),
+            "ownerId": owner_id,
             "autoDeploy": "yes" if auto_deploy else "no",
             "serviceDetails": {
                 "env": env,
