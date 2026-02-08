@@ -174,6 +174,15 @@ class RenderDeployService:
             start_cmd = start_command
 
         if service_type == "static_site":
+            # 🔴 Safety: برای Vite static sites، اگر --base=/ نداشت اضافه کن
+            # این مانع از مشکل CORS میشه وقتی base به CDN خارجی تنظیم شده
+            if build_cmd and "vite" in build_cmd.lower() and "--base" not in build_cmd:
+                build_cmd = build_cmd.replace("vite build", "vite build --base=/")
+                build_cmd = build_cmd.replace("npm run build", "npx vite build --base=/")
+            elif build_cmd and "npm run build" in build_cmd and "--base" not in build_cmd:
+                # حتی اگر vite مستقیم صدا زده نشده، ممکنه npm run build از vite استفاده کنه
+                build_cmd = build_cmd.replace("npm run build", "npx vite build --base=/")
+
             # Static Site: فقط build و publish path
             service_data = {
                 "type": "static_site",
