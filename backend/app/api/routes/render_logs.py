@@ -6914,88 +6914,243 @@ async def fix_all_bridges(
 
 
 # =====================================
-# 🆕 ایجاد سرویس Render
+# 🆕 ایجاد هوشمند سرویس Render
 # =====================================
 
 @router.post("/inspector/create-render-service")
 async def create_render_service(request: Request, db: Session = Depends(get_db)):
     """
-    ایجاد سرویس جدید در Render از طریق API
-    نکته: فقط پلن‌های پولی (Starter $7/ماه به بالا) از طریق API قابل ایجاد هستند
+    ایجاد هوشمند سرویس‌های Render بر اساس تحلیل ساختار پروژه
+    - تشخیص خودکار monorepo (frontend/ + backend/)
+    - اتصال دقیق به GitHub repo پروژه
+    - ایجاد سرویس‌های بکند و فرانت بصورت جداگانه یا یکپارچه
     """
     try:
         data = await request.json()
         project_id = data.get("project_id")
-        service_name = data.get("name", "")
-        service_type = data.get("service_type", "web_service")
-        github_repo_url = data.get("github_repo_url", "")
-        github_branch = data.get("branch", "main")
-        root_dir = data.get("root_dir", ".")
-        build_command = data.get("build_command")
-        start_command = data.get("start_command")
-        env_vars = data.get("env_vars", {})
-        project_type = data.get("project_type", "nodejs")
 
-        slog.api_request("POST", "/inspector/create-render-service",
-                         project_id=project_id, name=service_name)
+        slog.api_request("POST", "/inspector/create-render-service", project_id=project_id)
 
-        if not service_name:
-            return {"success": False, "error": "نام سرویس الزامی است"}
-        if not github_repo_url:
-            return {"success": False, "error": "آدرس ریپوی GitHub الزامی است"}
+        if not project_id:
+            return {"success": False, "error": "شناسه پروژه الزامی است"}
 
-        # دریافت API key از تنظیمات
+        # ── 1. خواندن اطلاعات پروژه از DB ──
+        from ...models.project import Project
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if not project:
+            return {"success": False, "error": "پروژه یافت نشد"}
+
+        # ── 2. استخراج GitHub info ──
+        extra = {}
+        if project.extra_data:
+            try:
+                extra = json.loads(project.extra_data) if isinstance(project.extra_data, str) else project.extra_data
+            except:
+                extra = {}
+
+        github_url = extra.get("source_url") or extra.get("clone_url") or ""
+        owner = extra.get("owner", "")
+        repo = extra.get("repo", "")
+
+        if not github_url and project.github_path:
+            parts = project.github_path.strip("/").split("/")
+            if len(parts) >= 2:
+                owner, repo = parts[0], parts[1]
+                github_url = f"https://github.com/{owner}/{repo}"
+
+        if not github_url:
+            return {"success": False, "error": "آدرس GitHub پروژه یافت نشد. پروژه باید از GitHub ایمپورت شده باشد."}
+
+        # ── 3. تحلیل ساختار پروژه ──
+        technologies = []
+        if project.technologies:
+            try:
+                technologies = json.loads(project.technologies) if isinstance(project.technologies, str) else project.technologies
+            except:
+                technologies = []
+
+        file_tree = []
+        if project.structure:
+            try:
+                structure = json.loads(project.structure) if isinstance(project.structure, str) else project.structure
+                file_tree = structure.get("file_tree", [])
+            except:
+                file_tree = []
+
+        # تشخیص ساختار: monorepo یا unified
+        has_frontend_dir = any(
+            (f.get("path", "") if isinstance(f, dict) else str(f)).startswith("frontend/")
+            for f in file_tree
+        ) if file_tree else False
+        has_backend_dir = any(
+            (f.get("path", "") if isinstance(f, dict) else str(f)).startswith("backend/")
+            for f in file_tree
+        ) if file_tree else False
+
+        # تشخیص تکنولوژی‌ها
+        tech_lower = [t.lower() for t in technologies]
+        primary_lang = extra.get("primary_language", "").lower()
+
+        is_nextjs = any(t in tech_lower for t in ["next.js", "nextjs", "next"]) or \
+                    any("next" in (f.get("path", "") if isinstance(f, dict) else str(f)).lower() for f in file_tree[:50])
+        is_react = any(t in tech_lower for t in ["react", "react.js"])
+        is_python = "python" in tech_lower or primary_lang == "python"
+        is_fastapi = any(t in tech_lower for t in ["fastapi", "fast-api"])
+        is_node = any(t in tech_lower for t in ["node", "nodejs", "node.js", "javascript", "typescript"])
+
+        # ── 4. ساخت لیست سرویس‌هایی که باید ایجاد شوند ──
+        services_to_create = []
+        safe_name = (project.name or repo or "app").lower().replace(" ", "-").replace("_", "-")
+        # حذف کاراکترهای غیرمجاز
+        safe_name = re.sub(r'[^a-z0-9-]', '', safe_name)[:40]
+
+        if has_frontend_dir and has_backend_dir:
+            # Monorepo: دو سرویس جدا
+            fe_type = "nextjs" if is_nextjs else "react" if is_react else "nodejs"
+            be_type = "fastapi" if (is_fastapi or is_python) else "nodejs"
+
+            services_to_create.append({
+                "name": f"{safe_name}-frontend",
+                "role": "frontend",
+                "root_dir": "frontend",
+                "project_type": fe_type,
+                "build_command": "npm install && npm run build" if fe_type in ["nextjs", "react", "nodejs"] else None,
+                "start_command": "npm start" if fe_type in ["nextjs", "nodejs"] else "npx serve -s build" if fe_type == "react" else None,
+            })
+            services_to_create.append({
+                "name": f"{safe_name}-backend",
+                "role": "backend",
+                "root_dir": "backend",
+                "project_type": be_type,
+                "build_command": "pip install -r requirements.txt" if be_type in ["fastapi", "python"] else "npm install",
+                "start_command": "uvicorn app.main:app --host 0.0.0.0 --port $PORT" if be_type in ["fastapi", "python"] else "npm start",
+            })
+        elif has_frontend_dir:
+            # فقط frontend/ وجود داره
+            fe_type = "nextjs" if is_nextjs else "react" if is_react else "nodejs"
+            services_to_create.append({
+                "name": safe_name,
+                "role": "frontend",
+                "root_dir": "frontend",
+                "project_type": fe_type,
+                "build_command": "npm install && npm run build",
+                "start_command": "npm start",
+            })
+        elif has_backend_dir:
+            # فقط backend/ وجود داره
+            be_type = "fastapi" if (is_fastapi or is_python) else "nodejs"
+            services_to_create.append({
+                "name": safe_name,
+                "role": "backend",
+                "root_dir": "backend",
+                "project_type": be_type,
+                "build_command": "pip install -r requirements.txt" if be_type in ["fastapi", "python"] else "npm install",
+                "start_command": "uvicorn app.main:app --host 0.0.0.0 --port $PORT" if be_type in ["fastapi", "python"] else "npm start",
+            })
+        else:
+            # Unified: یک سرویس واحد
+            if is_nextjs or is_react or is_node:
+                services_to_create.append({
+                    "name": safe_name,
+                    "role": "unified",
+                    "root_dir": ".",
+                    "project_type": "nextjs" if is_nextjs else "react" if is_react else "nodejs",
+                    "build_command": "npm install && npm run build",
+                    "start_command": "npm start",
+                })
+            elif is_python or is_fastapi:
+                services_to_create.append({
+                    "name": safe_name,
+                    "role": "unified",
+                    "root_dir": ".",
+                    "project_type": "fastapi" if is_fastapi else "python",
+                    "build_command": "pip install -r requirements.txt",
+                    "start_command": "uvicorn app.main:app --host 0.0.0.0 --port $PORT",
+                })
+            else:
+                services_to_create.append({
+                    "name": safe_name,
+                    "role": "unified",
+                    "root_dir": ".",
+                    "project_type": "nodejs",
+                    "build_command": "npm install && npm run build",
+                    "start_command": "npm start",
+                })
+
+        if not services_to_create:
+            return {"success": False, "error": "ساختار پروژه قابل تشخیص نبود"}
+
+        # ── 5. دریافت API Key ──
         from ...models.setting import Setting
         setting = db.query(Setting).filter(Setting.key == "api_key_render").first()
         api_key = setting.value if setting else ""
-
         if not api_key:
-            import os
             api_key = os.getenv("RENDER_API_KEY", "")
-
         if not api_key:
-            return {"success": False, "error": "کلید API رندر تنظیم نشده. ابتدا از تنظیمات، API Key را وارد کنید."}
+            return {"success": False, "error": "کلید API رندر تنظیم نشده."}
 
-        # ایجاد سرویس
+        # ── 6. ایجاد سرویس‌ها ──
         from ...services.deploy_service import RenderDeployService
         deploy_svc = RenderDeployService(api_key)
+        created = []
+        errors = []
         try:
-            result = await deploy_svc.create_service(
-                name=service_name,
-                project_type=project_type,
-                github_repo_url=github_repo_url,
-                github_branch=github_branch,
-                root_dir=root_dir,
-                build_command=build_command,
-                start_command=start_command,
-                env_vars=env_vars,
-            )
+            for svc_plan in services_to_create:
+                result = await deploy_svc.create_service(
+                    name=svc_plan["name"],
+                    project_type=svc_plan["project_type"],
+                    github_repo_url=github_url,
+                    github_branch=extra.get("branch", "main") if extra.get("branch") else "main",
+                    root_dir=svc_plan["root_dir"],
+                    build_command=svc_plan.get("build_command"),
+                    start_command=svc_plan.get("start_command"),
+                )
+                if result.get("success"):
+                    # ذخیره در DB با project_id
+                    try:
+                        new_svc = RenderService(
+                            id=result["service_id"],
+                            name=result.get("name", svc_plan["name"]),
+                            type="web_service",
+                            status="deploying",
+                            project_id=project_id,
+                            service_url=result.get("url", ""),
+                        )
+                        db.merge(new_svc)
+                        db.commit()
+                    except Exception as db_err:
+                        slog.warning(f"DB save failed: {db_err}")
+
+                    created.append({
+                        "name": result.get("name"),
+                        "service_id": result.get("service_id"),
+                        "role": svc_plan["role"],
+                        "dashboard_url": result.get("dashboard_url"),
+                        "url": result.get("url"),
+                    })
+                    slog.info(f"✅ Created {svc_plan['role']}: {result.get('name')}")
+                else:
+                    errors.append({
+                        "name": svc_plan["name"],
+                        "role": svc_plan["role"],
+                        "error": result.get("error", "unknown"),
+                    })
+                    slog.warning(f"❌ Failed {svc_plan['role']}: {result.get('error')}")
         finally:
             await deploy_svc.close()
 
-        if result.get("success"):
-            slog.info(f"✅ Render service created: {result.get('name')} ({result.get('service_id')})")
-            # ذخیره سرویس در پروژه
-            if project_id and result.get("service_id"):
-                try:
-                    new_svc = RenderService(
-                        id=result["service_id"],
-                        name=result.get("name", service_name),
-                        type=service_type,
-                        status="deploying",
-                        project_id=project_id,
-                    )
-                    db.merge(new_svc)
-                    db.commit()
-                except Exception as db_err:
-                    slog.warning(f"Failed to save service to DB: {db_err}")
-        else:
-            slog.warning(f"Render service creation failed: {result.get('error')}")
-
-        return result
+        return {
+            "success": len(created) > 0,
+            "created": created,
+            "errors": errors,
+            "project_name": project.name,
+            "github_url": github_url,
+            "structure_type": "monorepo" if (has_frontend_dir and has_backend_dir) else "unified",
+            "message": f"✅ {len(created)} سرویس ایجاد شد" + (f" | {len(errors)} خطا" if errors else ""),
+        }
 
     except Exception as e:
-        slog.error("Create render service failed", exception=e)
+        slog.error("Smart create render service failed", exception=e)
         return {"success": False, "error": str(e)}
 
 

@@ -5380,27 +5380,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     }
   };
 
-  // 🆕 ایجاد سرویس Render (پلن پولی - خودکار از طریق API)
-  const createRenderServicePaid = async (serviceName: string, serviceType: string) => {
+  // 🆕 ایجاد هوشمند سرویس Render (تحلیل خودکار ساختار پروژه)
+  const createRenderServiceSmart = async () => {
     setCreateRenderLoading(true);
     try {
-      const githubUrl = project?.metadata?.source_url || '';
       const res = await fetch(`${API_BASE}/api/render/inspector/create-render-service`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          project_id: projectId,
-          name: serviceName,
-          github_repo_url: githubUrl,
-          branch: 'main',
-          root_dir: serviceType === 'frontend' ? 'frontend' : serviceType === 'backend' ? 'backend' : '.',
-          project_type: serviceType === 'frontend' ? 'nextjs' : 'fastapi',
-          service_type: 'web_service',
-        }),
+        body: JSON.stringify({ project_id: projectId }),
       });
       const data = await res.json();
       if (data.success) {
-        showSuccess(`✅ سرویس "${data.name}" ایجاد شد! Dashboard: ${data.dashboard_url || ''}`);
+        const names = (data.created || []).map((s: any) => s.name).join(' + ');
+        showSuccess(`✅ ${data.message} (${names})`);
         setShowCreateRenderService(false);
         // رفرش سرویس‌ها
         loadInspectorServices(true);
@@ -11844,6 +11836,13 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 <button onClick={() => setShowCreateRenderService(false)} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded">✕</button>
               </div>
               <div className="p-4 space-y-4">
+                {project?.metadata?.source_url && (
+                  <div className="p-2 bg-gray-50 dark:bg-gray-900 rounded-lg text-xs">
+                    <span className="opacity-60">ریپو: </span>
+                    <span className="font-mono">{project.metadata.source_url.replace('https://github.com/', '')}</span>
+                  </div>
+                )}
+
                 <p className="text-sm text-gray-600 dark:text-gray-400">
                   روش ایجاد سرویس را انتخاب کنید:
                 </p>
@@ -11865,20 +11864,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     <div className="flex-1">
                       <div className="font-bold text-green-700 dark:text-green-400">پلن رایگان (Free)</div>
                       <p className="text-xs text-gray-500 mt-1">
-                        به داشبورد Render منتقل می‌شوید و سرویس رایگان ایجاد می‌کنید.
-                        بعد از ایجاد، دکمه پاور را بزنید تا سرویس شناسایی شود.
+                        به داشبورد Render منتقل می‌شوید. بعد از ایجاد، دکمه پاور را بزنید.
                       </p>
                     </div>
                     <span className="text-gray-400">↗</span>
                   </div>
                 </button>
 
-                {/* گزینه پولی */}
+                {/* گزینه پولی - هوشمند */}
                 <button
-                  onClick={() => {
-                    const name = project?.name?.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') || 'my-service';
-                    createRenderServicePaid(name + '-frontend', 'frontend');
-                  }}
+                  onClick={() => createRenderServiceSmart()}
                   disabled={createRenderLoading}
                   className="w-full p-4 rounded-xl border-2 border-orange-200 dark:border-orange-800 hover:border-orange-500 dark:hover:border-orange-500 hover:bg-orange-50 dark:hover:bg-orange-900/20 transition-all text-right disabled:opacity-50"
                 >
@@ -11886,12 +11881,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     <span className="text-2xl">{createRenderLoading ? '⏳' : '💎'}</span>
                     <div className="flex-1">
                       <div className="font-bold text-orange-700 dark:text-orange-400">
-                        پلن پولی (Starter - $7/ماه)
+                        ایجاد خودکار (Starter - $7/ماه)
                       </div>
                       <p className="text-xs text-gray-500 mt-1">
                         {createRenderLoading
-                          ? 'در حال ایجاد سرویس...'
-                          : 'سرویس خودکار از طریق API ایجاد و Deploy می‌شود. نیاز به Render API Key دارد.'}
+                          ? 'در حال تحلیل ساختار پروژه و ایجاد سرویس...'
+                          : 'ساختار پروژه تحلیل می‌شود و سرویس‌های بکند/فرانت خودکار ایجاد می‌شوند.'}
                       </p>
                     </div>
                     {!createRenderLoading && <span className="text-gray-400">⚡</span>}
@@ -11899,7 +11894,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 </button>
 
                 <p className="text-[11px] text-gray-400 text-center">
-                  💡 پلن رایگان دارای محدودیت ۱۵ دقیقه عدم فعالیت است. پلن پولی همیشه فعال می‌ماند.
+                  💡 ایجاد خودکار: ساختار ریپو بررسی شده، سرویس‌ها با تنظیمات صحیح ایجاد می‌شوند.
                 </p>
               </div>
             </div>
