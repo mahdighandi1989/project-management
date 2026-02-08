@@ -4967,12 +4967,12 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
 '''
 
 # 🆕 Next.js App Router - Client Component برای Bridge Script (WebSocket)
-INSPECTOR_BRIDGE_VERSION = "2.2"  # نسخه فعلی bridge template - افزایش بده هر وقت template تغییر کرد
+INSPECTOR_BRIDGE_VERSION = "2.3"  # نسخه فعلی bridge template - افزایش بده هر وقت template تغییر کرد
 
-INSPECTOR_BRIDGE_CLIENT_COMPONENT = '''"use client";
-// @ts-nocheck
+INSPECTOR_BRIDGE_CLIENT_COMPONENT = '''// @ts-nocheck
+"use client";
 // 🌉 Inspector Bridge Script - Client Component for Next.js App Router
-// Version: 2.2
+// Version: 2.3
 // ارتباط با Inspector از طریق WebSocket (حل مشکل cross-origin)
 import { useEffect } from "react";
 

@@ -1,5 +1,5 @@
-"use client";
 // @ts-nocheck
+"use client";
 // 🌉 Inspector Bridge Script - Client Component for Next.js App Router
 // Version: 2.2
 // ارتباط با Inspector از طریق WebSocket (حل مشکل cross-origin)
