@@ -7542,8 +7542,8 @@ async def verify_inspector_message(
                         "checked_logs": bridge_checked
                     }
             else:
-                _no_log_summary = f"بدون لاگ ({len(service_ids)} سرویس بررسی شد)"
-                msg.backend_verified = True
+                _no_log_summary = f"بدون لاگ - منتظر دریافت ({len(service_ids)} سرویس)"
+                msg.backend_verified = None  # None = pending, نه True
                 msg.backend_log_summary = _no_log_summary
                 msg.verified_by_model = "no-logs"
                 msg.logs_checked = 0
@@ -7551,10 +7551,11 @@ async def verify_inspector_message(
                 db.commit()
                 return {
                     "success": True, "message_id": message_id,
-                    "verified": True, "summary": _no_log_summary,
+                    "verified": None, "summary": _no_log_summary,
                     "model_used": "no-logs",
                     "logs_checked": 0, "error_logs_count": 0,
-                    "checked_logs": []
+                    "checked_logs": [],
+                    "pending": True
                 }
 
         # اگر خطایی در لاگ‌ها نبود، مستقیم تأیید کن (بدون AI)
@@ -10743,7 +10744,11 @@ VISUAL_DEBUG_SYSTEM_PROMPT = """## 🔍 بازرس بصری پروژه (Visual I
 - وقتی action_plan با فایل‌ها ارائه می‌دهید، **محتوای کامل** فایل را بنویسید (نه فقط تکه کد)
 - اگر فایل جدید لازم است، operation را "create" بگذارید
 - اگر فایل موجود تغییر می‌کند، operation را "modify" بگذارید
+- بعد از ارائه تغییرات، دستور **commit و push** به GitHub را هم بدهید تا تغییرات در ریپو اعمال شود
 - به فارسی پاسخ بده. کدها و اصطلاحات فنی می‌توانند انگلیسی باشند.
+
+## فایل‌های بکند مرتبط:
+اگر لیستی از فایل‌های بکند در زیر نشان داده شده، از آنها استفاده کنید تا بفهمید کدام فایل‌ها را باید تغییر دهید. اگر فایل مورد نیاز در لیست نیست، مسیر احتمالی آن را بر اساس الگوهای پروژه حدس بزنید.
 """
 
 
@@ -10928,6 +10933,15 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                 yield sse("progress", {"step": "github_error", "message": f"⚠️ خطا GitHub: {str(e)[:80]}"})
 
         full_system = VISUAL_DEBUG_SYSTEM_PROMPT
+        # لیست ساختاریافته فایل‌های بک‌اند مرتبط
+        if selected_files:
+            full_system += f"\n\n## 📂 فایل‌های بکند شناسایی‌شده ({len(selected_files)} فایل):\n"
+            for sf in selected_files:
+                full_system += f"  - `{sf}`\n"
+        if all_api_paths:
+            full_system += f"\n## 🛤️ مسیرهای API بکند فعال:\n"
+            for ap in all_api_paths:
+                full_system += f"  - `{ap}`\n"
         if project_tree_summary:
             full_system += f"\n\n## ساختار پروژه:\n{project_tree_summary}"
         if code_context:
