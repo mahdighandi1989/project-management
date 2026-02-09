@@ -9655,6 +9655,77 @@ def _get_max_files_for_scope(scope: str, total_code_files: int) -> int:
         return 25
 
 
+# ─── خلاصه‌سازی محتوای فایل برای حالت FULL_PROJECT ───
+def _condense_file_content(content: str, file_path: str, max_chars: int = 600) -> str:
+    """
+    استخراج ساختار فایل (imports, exports, تعریف توابع/کلاس‌ها) بدون بدنه.
+    برای حالت FULL_PROJECT استفاده میشه تا همه فایل‌ها در context جا بشن.
+    """
+    if not content or not content.strip():
+        return "(empty file)"
+
+    lines = content.split("\n")
+    ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+
+    # فایل‌های کانفیگ و JSON — فقط اول فایل
+    if ext in ("json", "yaml", "yml", "toml", "ini", "env", "lock"):
+        snippet = "\n".join(lines[:15])
+        if len(snippet) > max_chars:
+            snippet = snippet[:max_chars]
+        return snippet + ("\n..." if len(lines) > 15 else "")
+
+    # فایل‌های CSS/SCSS — فقط سلکتورها
+    if ext in ("css", "scss", "sass", "less"):
+        structural = []
+        for line in lines[:200]:
+            stripped = line.strip()
+            if stripped and not stripped.startswith(("/*", "*", "//")) and (
+                stripped.endswith("{") or stripped.startswith(("@import", "@media", "@keyframes"))
+            ):
+                structural.append(line)
+        result = "\n".join(structural[:30])
+        return result[:max_chars] if result else "\n".join(lines[:5])[:max_chars]
+
+    # Python / JS / TS / JSX / TSX — استخراج ساختاری
+    structural_lines = []
+    # کلمات کلیدی ساختاری برای زبان‌های مختلف
+    py_keywords = ("import ", "from ", "class ", "def ", "async def ", "@")
+    js_keywords = (
+        "import ", "export ", "require(", "module.exports",
+        "function ", "async function ", "const ", "let ", "var ",
+        "class ", "interface ", "type ", "enum ",
+        "export default", "export const", "export function", "export class",
+        "export interface", "export type", "export enum",
+    )
+
+    is_python = ext in ("py",)
+    keywords = py_keywords if is_python else js_keywords
+
+    # همیشه اول ۳ خط فایل رو نگه‌دار (معمولاً shebang, docstring, pragma)
+    for line in lines[:3]:
+        structural_lines.append(line)
+
+    seen_first_lines = set(range(min(3, len(lines))))
+    for i, line in enumerate(lines):
+        if i in seen_first_lines:
+            continue
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "//", "/*", "*")):
+            continue
+        # خطوط ساختاری
+        if any(stripped.startswith(kw) or stripped.lstrip().startswith(kw) for kw in keywords):
+            structural_lines.append(line)
+
+    result = "\n".join(structural_lines)
+    if len(result) > max_chars:
+        result = result[:max_chars] + "\n..."
+    elif not structural_lines or len(result) < 50:
+        # اگر خط ساختاری پیدا نشد، اول فایل رو بده
+        result = "\n".join(lines[:10])[:max_chars]
+
+    return result
+
+
 # ─── کاهش هوشمند حجم پرامپت برای تلاش مجدد ───
 def _reduce_prompt_for_retry(prompt: str) -> str:
     """کاهش حجم پرامپت با حذف بخشی از تاریخچه، کد و لاگ‌ها"""
@@ -10190,16 +10261,27 @@ GitHub: {_proj_github}
                                 q_selected = _fallback_file_selection(q_code_files, request.message, max_files=q_dynamic_max)
                             q_selected = _ensure_balanced_selection(q_selected, q_code_files, max_files=q_dynamic_max)
                         max_q_code = int(max_input_chars * 0.55)
-                        per_file_q_limit = min(10000, max(3000, max_q_code // max(len(q_selected), 1)))
+                        # 🆕 حالت خلاصه برای FULL_PROJECT
+                        q_use_condensed = (q_scope == "FULL_PROJECT" and len(q_selected) > 30)
+                        if q_use_condensed:
+                            per_file_q_limit = max(200, max_q_code // max(len(q_selected), 1))
+                        else:
+                            per_file_q_limit = min(10000, max(3000, max_q_code // max(len(q_selected), 1)))
                         q_read_failures = 0
-                        for fp in q_selected:
+                        for qi, fp in enumerate(q_selected):
                             if len(question_code_context) >= max_q_code:
+                                if q_use_condensed:
+                                    remaining = q_selected[qi:]
+                                    remaining_list = "\n".join(f"- {rfp}" for rfp in remaining)
+                                    question_code_context += f"\n\n=== فایل‌های باقیمانده ({len(remaining)} فایل) ===\n{remaining_list}"
                                 break
                             try:
                                 result = await github_svc.get_file_content(owner, repo, fp, token=token)
                                 if result.get("success"):
                                     content = result.get("content", "")
-                                    if len(content) > per_file_q_limit:
+                                    if q_use_condensed:
+                                        content = _condense_file_content(content, fp, max_chars=per_file_q_limit)
+                                    elif len(content) > per_file_q_limit:
                                         content = content[:per_file_q_limit] + "\n... [truncated]"
                                     question_code_context += f"\n\n=== {fp} ===\n{content}"
                                 else:
@@ -10208,7 +10290,7 @@ GitHub: {_proj_github}
                             except Exception as e:
                                 q_read_failures += 1
                                 slog.warning(f"[smart-chat QUESTION] Exception reading file {fp}: {e}")
-                            await asyncio.sleep(0.2)
+                            await asyncio.sleep(0.15 if q_use_condensed else 0.2)
                         if q_read_failures > 0 and q_read_failures == len(q_selected):
                             yield sse("progress", {
                                 "step": "file_read_warning",
@@ -10395,20 +10477,32 @@ GitHub: {_proj_github}
 
                         # محدود کردن حجم کد بر اساس ظرفیت مدل
                         max_err_code_chars = int(max_input_chars * 0.65)
-                        per_file_err_limit = min(12000, max(3000, max_err_code_chars // max(len(selected), 1)))
+                        # 🆕 حالت خلاصه برای FULL_PROJECT
+                        err_use_condensed = (err_scope == "FULL_PROJECT" and len(selected) > 30)
+                        if err_use_condensed:
+                            per_file_err_limit = max(200, max_err_code_chars // max(len(selected), 1))
+                        else:
+                            per_file_err_limit = min(12000, max(3000, max_err_code_chars // max(len(selected), 1)))
                         err_read_failures = 0
-                        for file_path in selected:
+                        for ei, file_path in enumerate(selected):
                             if len(code_context) >= max_err_code_chars:
+                                if err_use_condensed:
+                                    remaining = selected[ei:]
+                                    remaining_list = "\n".join(f"- {rfp}" for rfp in remaining)
+                                    code_context += f"\n\n=== فایل‌های باقیمانده ({len(remaining)} فایل) ===\n{remaining_list}"
                                 break
-                            yield sse("progress", {
-                                "step": "reading_file",
-                                "message": f"📖 در حال خواندن {file_path}..."
-                            })
+                            if ei % 20 == 0 or not err_use_condensed:
+                                yield sse("progress", {
+                                    "step": "reading_file",
+                                    "message": f"📖 {'اسکن' if err_use_condensed else 'خواندن'} {file_path}..."
+                                })
                             try:
                                 result = await github_svc.get_file_content(owner, repo, file_path, token=token)
                                 if result.get("success"):
                                     content = result.get("content", "")
-                                    if len(content) > per_file_err_limit:
+                                    if err_use_condensed:
+                                        content = _condense_file_content(content, file_path, max_chars=per_file_err_limit)
+                                    elif len(content) > per_file_err_limit:
                                         content = content[:per_file_err_limit] + "\n... [truncated]"
                                     code_context += f"\n\n=== {file_path} ===\n{content}"
                                 else:
@@ -10417,7 +10511,7 @@ GitHub: {_proj_github}
                             except Exception as e:
                                 err_read_failures += 1
                                 slog.warning(f"[smart-chat ERROR_LOG] Exception reading file {file_path}: {e}")
-                            await asyncio.sleep(0.2)
+                            await asyncio.sleep(0.15 if err_use_condensed else 0.2)
                         if err_read_failures > 0 and err_read_failures == len(selected):
                             yield sse("progress", {
                                 "step": "file_read_warning",
@@ -10800,24 +10894,51 @@ GitHub: {_proj_github}
                         # محدود کردن حجم کل کد بر اساس ظرفیت مدل
                         # حداکثر ~70% از ظرفیت ورودی مدل برای کد فایل‌ها
                         max_code_chars = int(max_input_chars * 0.70)
-                        per_file_limit = min(15000, max(3000, max_code_chars // max(len(selected), 1)))
+
+                        # 🆕 حالت خواندن بر اساس دامنه درخواست
+                        use_condensed = (request_scope == "FULL_PROJECT" and len(selected) > 30)
+                        if use_condensed:
+                            # حالت خلاصه: هر فایل فقط ساختار (imports/exports/signatures)
+                            # بودجه هر فایل = کل بودجه / تعداد فایل‌ها (با کف ۲۰۰ کاراکتر)
+                            per_file_limit = max(200, max_code_chars // max(len(selected), 1))
+                            yield sse("progress", {
+                                "step": "condensed_mode",
+                                "message": f"📦 حالت اسکن کل پروژه: خواندن ساختار {len(selected)} فایل (imports/exports/signatures)..."
+                            })
+                        else:
+                            per_file_limit = min(15000, max(3000, max_code_chars // max(len(selected), 1)))
+
                         act_read_failures = 0
                         for i, file_path in enumerate(selected):
                             if len(code_context) >= max_code_chars:
-                                yield sse("progress", {
-                                    "step": "context_limit",
-                                    "message": f"⚠️ به حد ظرفیت مدل رسیدیم — {len(selected) - i} فایل باقیمانده خوانده نشد"
-                                })
+                                if use_condensed:
+                                    # در حالت خلاصه، حتی اگر به حد رسیدیم فقط نام فایل‌های باقیمانده رو اضافه کن
+                                    remaining = selected[i:]
+                                    remaining_list = "\n".join(f"- {fp}" for fp in remaining)
+                                    code_context += f"\n\n=== فایل‌های باقیمانده (فقط مسیر — {len(remaining)} فایل) ===\n{remaining_list}"
+                                    yield sse("progress", {
+                                        "step": "context_limit",
+                                        "message": f"📋 {len(remaining)} فایل باقیمانده فقط با نام ثبت شد (ظرفیت مدل)"
+                                    })
+                                else:
+                                    yield sse("progress", {
+                                        "step": "context_limit",
+                                        "message": f"⚠️ به حد ظرفیت مدل رسیدیم — {len(selected) - i} فایل باقیمانده خوانده نشد"
+                                    })
                                 break
-                            yield sse("progress", {
-                                "step": "reading_file",
-                                "message": f"📖 خواندن {file_path} ({i+1}/{len(selected)})..."
-                            })
+                            if i % 20 == 0 or not use_condensed:
+                                yield sse("progress", {
+                                    "step": "reading_file",
+                                    "message": f"📖 {'اسکن' if use_condensed else 'خواندن'} {file_path} ({i+1}/{len(selected)})..."
+                                })
                             try:
                                 result = await github_svc.get_file_content(owner, repo, file_path, token=token)
                                 if result.get("success"):
                                     content = result.get("content", "")
-                                    if len(content) > per_file_limit:
+                                    if use_condensed:
+                                        # حالت خلاصه: فقط ساختار فایل
+                                        content = _condense_file_content(content, file_path, max_chars=per_file_limit)
+                                    elif len(content) > per_file_limit:
                                         content = content[:per_file_limit] + "\n... [truncated]"
                                     code_context += f"\n\n=== {file_path} ===\n{content}"
                                 else:
@@ -10826,7 +10947,15 @@ GitHub: {_proj_github}
                             except Exception as e:
                                 act_read_failures += 1
                                 slog.warning(f"[smart-chat ACTION] Exception reading file {file_path}: {e}")
-                            await asyncio.sleep(0.2)
+                            await asyncio.sleep(0.15 if use_condensed else 0.2)
+
+                        if use_condensed:
+                            files_read = len(selected) - act_read_failures
+                            yield sse("progress", {
+                                "step": "condensed_done",
+                                "message": f"✅ اسکن ساختاری {files_read} فایل از {len(selected)} فایل کامل شد"
+                            })
+
                         if act_read_failures > 0 and act_read_failures == len(selected):
                             yield sse("progress", {
                                 "step": "file_read_warning",
@@ -10861,11 +10990,26 @@ GitHub: {_proj_github}
 
             # ساخت بخش کد فایل‌ها بر اساس دسترسی
             if has_code_files:
-                code_section = f"""## کد فایل‌های مرتبط (از GitHub خوانده شده):
+                if use_condensed:
+                    # 🆕 حالت خلاصه — ساختار تمام فایل‌ها (imports/exports/signatures)
+                    code_section = f"""## 📦 اسکن ساختاری کل پروژه ({len(selected)} فایل):
+⚠️ توجه: محتوای زیر خلاصه ساختاری فایل‌هاست (imports, exports, تعاریف توابع/کلاس‌ها) — نه کد کامل.
+این حالت برای تحلیل کلی پروژه (مثلاً پیدا کردن فایل‌های بلااستفاده، بررسی ساختار، وابستگی‌ها) استفاده می‌شود.
 {code_context}"""
-                if act_tree_summary:
-                    code_section += f"\n\n## ساختار کلی پروژه (تو به همه این بخش‌ها دسترسی داری — فایل‌های بالا فقط بخشی از پروژه‌اند):\n{act_tree_summary}"
-                code_instructions = """- تو به فایل‌های پروژه دسترسی داری و کد آنها در بالا آمده
+                    if act_tree_summary:
+                        code_section += f"\n\n## ساختار درختی پروژه:\n{act_tree_summary}"
+                    code_instructions = """- تو به ساختار تمام فایل‌های پروژه دسترسی داری (imports, exports, signatures)
+- بر اساس imports و exports تحلیل کن کدام فایل‌ها به هم وابسته‌اند
+- فایل‌هایی که هیچ‌جا import نشده‌اند یا استفاده نمی‌شوند را شناسایی کن
+- تحلیل جامع و کامل ارائه بده — تو الان کل پروژه را می‌بینی
+- اگر فایلی مشکوک است اما برای تأیید به کد کامل نیاز داری، بگو
+- لیست کاملی از نتایج ارائه بده — هیچ فایلی را نادیده نگیر"""
+                else:
+                    code_section = f"""## کد فایل‌های مرتبط (از GitHub خوانده شده):
+{code_context}"""
+                    if act_tree_summary:
+                        code_section += f"\n\n## ساختار کلی پروژه (تو به همه این بخش‌ها دسترسی داری — فایل‌های بالا فقط بخشی از پروژه‌اند):\n{act_tree_summary}"
+                    code_instructions = """- تو به فایل‌های پروژه دسترسی داری و کد آنها در بالا آمده
 - مستقیماً کد مشکل‌دار را پیدا کن و اصلاحش را ارائه بده
 - حتماً action_plan کامل با محتوای کامل فایل اصلاح‌شده ارائه بده
 - هیچ حدس و گمانی در کار نباشد - فقط بر اساس کد واقعی
