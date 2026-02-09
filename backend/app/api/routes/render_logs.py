@@ -10261,36 +10261,89 @@ GitHub: {_proj_github}
                                 q_selected = _fallback_file_selection(q_code_files, request.message, max_files=q_dynamic_max)
                             q_selected = _ensure_balanced_selection(q_selected, q_code_files, max_files=q_dynamic_max)
                         max_q_code = int(max_input_chars * 0.55)
-                        # 🆕 حالت خلاصه برای FULL_PROJECT
-                        q_use_condensed = (q_scope == "FULL_PROJECT" and len(q_selected) > 30)
-                        if q_use_condensed:
-                            per_file_q_limit = max(200, max_q_code // max(len(q_selected), 1))
+                        # 🆕 پردازش دسته‌ای برای FULL_PROJECT
+                        q_use_batch = (q_scope == "FULL_PROJECT" and len(q_selected) > 30)
+                        if q_use_batch:
+                            q_batch_budget = int(max_input_chars * 0.50)
+                            per_file_q_limit = min(8000, max(2000, q_batch_budget // 25))
+                            q_batch_size = max(10, min(30, q_batch_budget // max(per_file_q_limit, 1)))
+                            q_batches = [q_selected[i:i+q_batch_size] for i in range(0, len(q_selected), q_batch_size)]
+
+                            yield sse("progress", {
+                                "step": "batch_mode",
+                                "message": f"🔄 پردازش دسته‌ای سؤال: {len(q_selected)} فایل در {len(q_batches)} دسته..."
+                            })
+
+                            q_batch_findings = []
+                            q_read_failures = 0
+                            q_total_read = 0
+                            for qbi, qbatch in enumerate(q_batches):
+                                qb_code = ""
+                                qb_ok = 0
+                                for fp in qbatch:
+                                    try:
+                                        result = await github_svc.get_file_content(owner, repo, fp, token=token)
+                                        if result.get("success"):
+                                            content = result.get("content", "")
+                                            if len(content) > per_file_q_limit:
+                                                content = content[:per_file_q_limit] + "\n... [truncated]"
+                                            qb_code += f"\n\n=== {fp} ===\n{content}"
+                                            qb_ok += 1
+                                        else:
+                                            q_read_failures += 1
+                                    except Exception:
+                                        q_read_failures += 1
+                                    await asyncio.sleep(0.1)
+                                q_total_read += qb_ok
+
+                                if not qb_code.strip():
+                                    continue
+
+                                yield sse("progress", {
+                                    "step": "batch_analyzing",
+                                    "message": f"🧠 تحلیل دسته {qbi+1}/{len(q_batches)} ({qb_ok} فایل)..."
+                                })
+
+                                try:
+                                    qb_resp = await ai_manager.generate(
+                                        model_id=primary_model,
+                                        messages=[
+                                            Message(role="system", content=f"تحلیل‌گر دسته‌ای. دسته {qbi+1}/{len(q_batches)}. سؤال: {request.message[:200]}. یافته‌های کلیدی مرتبط."),
+                                            Message(role="user", content=f"سؤال کاربر: {request.message}\n\nفایل‌های دسته {qbi+1}:{qb_code}\n\nساختار پروژه:\n{q_tree_summary[:2000]}\n\nیافته‌های مرتبط با سؤال را استخراج کن. خلاصه و دقیق.")
+                                        ],
+                                        max_tokens=min(model_max_output, 2500),
+                                        temperature=0.2
+                                    )
+                                    if qb_resp.content and qb_resp.content.strip():
+                                        q_batch_findings.append(f"### دسته {qbi+1}:\n{qb_resp.content}")
+                                except Exception as e:
+                                    slog.warning(f"[smart-chat QUESTION] Batch {qbi+1} failed: {e}")
+
+                            question_code_context = "\n\n".join(q_batch_findings)
+                            yield sse("progress", {
+                                "step": "batch_complete",
+                                "message": f"✅ {q_total_read} فایل خوانده و تحلیل شد"
+                            })
                         else:
                             per_file_q_limit = min(10000, max(3000, max_q_code // max(len(q_selected), 1)))
-                        q_read_failures = 0
-                        for qi, fp in enumerate(q_selected):
-                            if len(question_code_context) >= max_q_code:
-                                if q_use_condensed:
-                                    remaining = q_selected[qi:]
-                                    remaining_list = "\n".join(f"- {rfp}" for rfp in remaining)
-                                    question_code_context += f"\n\n=== فایل‌های باقیمانده ({len(remaining)} فایل) ===\n{remaining_list}"
-                                break
-                            try:
-                                result = await github_svc.get_file_content(owner, repo, fp, token=token)
-                                if result.get("success"):
-                                    content = result.get("content", "")
-                                    if q_use_condensed:
-                                        content = _condense_file_content(content, fp, max_chars=per_file_q_limit)
-                                    elif len(content) > per_file_q_limit:
-                                        content = content[:per_file_q_limit] + "\n... [truncated]"
-                                    question_code_context += f"\n\n=== {fp} ===\n{content}"
-                                else:
+                            q_read_failures = 0
+                            for fp in q_selected:
+                                if len(question_code_context) >= max_q_code:
+                                    break
+                                try:
+                                    result = await github_svc.get_file_content(owner, repo, fp, token=token)
+                                    if result.get("success"):
+                                        content = result.get("content", "")
+                                        if len(content) > per_file_q_limit:
+                                            content = content[:per_file_q_limit] + "\n... [truncated]"
+                                        question_code_context += f"\n\n=== {fp} ===\n{content}"
+                                    else:
+                                        q_read_failures += 1
+                                        slog.warning(f"[smart-chat QUESTION] Failed to read file {fp}: {result.get('error', 'unknown')}")
+                                except Exception as e:
                                     q_read_failures += 1
-                                    slog.warning(f"[smart-chat QUESTION] Failed to read file {fp}: {result.get('error', 'unknown')}")
-                            except Exception as e:
-                                q_read_failures += 1
-                                slog.warning(f"[smart-chat QUESTION] Exception reading file {fp}: {e}")
-                            await asyncio.sleep(0.15 if q_use_condensed else 0.2)
+                                    slog.warning(f"[smart-chat QUESTION] Exception reading file {fp}: {e}")
+                                await asyncio.sleep(0.2)
                         if q_read_failures > 0 and q_read_failures == len(q_selected):
                             yield sse("progress", {
                                 "step": "file_read_warning",
@@ -10477,41 +10530,93 @@ GitHub: {_proj_github}
 
                         # محدود کردن حجم کد بر اساس ظرفیت مدل
                         max_err_code_chars = int(max_input_chars * 0.65)
-                        # 🆕 حالت خلاصه برای FULL_PROJECT
-                        err_use_condensed = (err_scope == "FULL_PROJECT" and len(selected) > 30)
-                        if err_use_condensed:
-                            per_file_err_limit = max(200, max_err_code_chars // max(len(selected), 1))
+                        # 🆕 پردازش دسته‌ای برای FULL_PROJECT
+                        err_use_batch = (err_scope == "FULL_PROJECT" and len(selected) > 30)
+                        if err_use_batch:
+                            e_batch_budget = int(max_input_chars * 0.50)
+                            per_file_err_limit = min(8000, max(2000, e_batch_budget // 25))
+                            e_batch_size = max(10, min(30, e_batch_budget // max(per_file_err_limit, 1)))
+                            e_batches = [selected[i:i+e_batch_size] for i in range(0, len(selected), e_batch_size)]
+
+                            yield sse("progress", {
+                                "step": "batch_mode",
+                                "message": f"🔄 پردازش دسته‌ای خطا: {len(selected)} فایل در {len(e_batches)} دسته..."
+                            })
+
+                            e_batch_findings = []
+                            err_read_failures = 0
+                            e_total_read = 0
+                            for ebi, ebatch in enumerate(e_batches):
+                                eb_code = ""
+                                eb_ok = 0
+                                for file_path in ebatch:
+                                    try:
+                                        result = await github_svc.get_file_content(owner, repo, file_path, token=token)
+                                        if result.get("success"):
+                                            content = result.get("content", "")
+                                            if len(content) > per_file_err_limit:
+                                                content = content[:per_file_err_limit] + "\n... [truncated]"
+                                            eb_code += f"\n\n=== {file_path} ===\n{content}"
+                                            eb_ok += 1
+                                        else:
+                                            err_read_failures += 1
+                                    except Exception:
+                                        err_read_failures += 1
+                                    await asyncio.sleep(0.1)
+                                e_total_read += eb_ok
+
+                                if not eb_code.strip():
+                                    continue
+
+                                yield sse("progress", {
+                                    "step": "batch_analyzing",
+                                    "message": f"🧠 تحلیل دسته {ebi+1}/{len(e_batches)} ({eb_ok} فایل)..."
+                                })
+
+                                try:
+                                    eb_resp = await ai_manager.generate(
+                                        model_id=primary_model,
+                                        messages=[
+                                            Message(role="system", content=f"تحلیل‌گر دسته‌ای خطا. دسته {ebi+1}/{len(e_batches)}. خطا: {request.message[:200]}. یافته‌های مرتبط با خطا."),
+                                            Message(role="user", content=f"خطا/لاگ: {request.message[:2000]}\n\nفایل‌های دسته {ebi+1}:{eb_code}\n\nیافته‌های مرتبط با خطا را استخراج کن. خلاصه و دقیق.")
+                                        ],
+                                        max_tokens=min(model_max_output, 2500),
+                                        temperature=0.2
+                                    )
+                                    if eb_resp.content and eb_resp.content.strip():
+                                        e_batch_findings.append(f"### دسته {ebi+1}:\n{eb_resp.content}")
+                                except Exception as e:
+                                    slog.warning(f"[smart-chat ERROR_LOG] Batch {ebi+1} failed: {e}")
+
+                            code_context = "\n\n".join(e_batch_findings)
+                            yield sse("progress", {
+                                "step": "batch_complete",
+                                "message": f"✅ {e_total_read} فایل خوانده و تحلیل شد"
+                            })
                         else:
                             per_file_err_limit = min(12000, max(3000, max_err_code_chars // max(len(selected), 1)))
-                        err_read_failures = 0
-                        for ei, file_path in enumerate(selected):
-                            if len(code_context) >= max_err_code_chars:
-                                if err_use_condensed:
-                                    remaining = selected[ei:]
-                                    remaining_list = "\n".join(f"- {rfp}" for rfp in remaining)
-                                    code_context += f"\n\n=== فایل‌های باقیمانده ({len(remaining)} فایل) ===\n{remaining_list}"
-                                break
-                            if ei % 20 == 0 or not err_use_condensed:
+                            err_read_failures = 0
+                            for file_path in selected:
+                                if len(code_context) >= max_err_code_chars:
+                                    break
                                 yield sse("progress", {
                                     "step": "reading_file",
-                                    "message": f"📖 {'اسکن' if err_use_condensed else 'خواندن'} {file_path}..."
+                                    "message": f"📖 خواندن {file_path}..."
                                 })
-                            try:
-                                result = await github_svc.get_file_content(owner, repo, file_path, token=token)
-                                if result.get("success"):
-                                    content = result.get("content", "")
-                                    if err_use_condensed:
-                                        content = _condense_file_content(content, file_path, max_chars=per_file_err_limit)
-                                    elif len(content) > per_file_err_limit:
-                                        content = content[:per_file_err_limit] + "\n... [truncated]"
-                                    code_context += f"\n\n=== {file_path} ===\n{content}"
-                                else:
+                                try:
+                                    result = await github_svc.get_file_content(owner, repo, file_path, token=token)
+                                    if result.get("success"):
+                                        content = result.get("content", "")
+                                        if len(content) > per_file_err_limit:
+                                            content = content[:per_file_err_limit] + "\n... [truncated]"
+                                        code_context += f"\n\n=== {file_path} ===\n{content}"
+                                    else:
+                                        err_read_failures += 1
+                                        slog.warning(f"[smart-chat ERROR_LOG] Failed to read file {file_path}: {result.get('error', 'unknown')}")
+                                except Exception as e:
                                     err_read_failures += 1
-                                    slog.warning(f"[smart-chat ERROR_LOG] Failed to read file {file_path}: {result.get('error', 'unknown')}")
-                            except Exception as e:
-                                err_read_failures += 1
-                                slog.warning(f"[smart-chat ERROR_LOG] Exception reading file {file_path}: {e}")
-                            await asyncio.sleep(0.15 if err_use_condensed else 0.2)
+                                    slog.warning(f"[smart-chat ERROR_LOG] Exception reading file {file_path}: {e}")
+                                await asyncio.sleep(0.2)
                         if err_read_failures > 0 and err_read_failures == len(selected):
                             yield sse("progress", {
                                 "step": "file_read_warning",
@@ -10762,6 +10867,9 @@ GitHub: {_proj_github}
             code_context = ""
             code_files = []
             act_tree_summary = ""
+            use_batch_processing = False
+            _batch_count = 0
+            _batch_total_read = 0
             if owner and repo:
                 try:
                     tree_result = await github_svc.get_repo_tree(owner, repo, token=token)
@@ -10891,76 +10999,155 @@ GitHub: {_proj_github}
                             })
 
                         # خواندن فایل‌ها (با رعایت حد context window مدل)
-                        # محدود کردن حجم کل کد بر اساس ظرفیت مدل
-                        # حداکثر ~70% از ظرفیت ورودی مدل برای کد فایل‌ها
                         max_code_chars = int(max_input_chars * 0.70)
 
-                        # 🆕 حالت خواندن بر اساس دامنه درخواست
-                        use_condensed = (request_scope == "FULL_PROJECT" and len(selected) > 30)
-                        if use_condensed:
-                            # حالت خلاصه: هر فایل فقط ساختار (imports/exports/signatures)
-                            # بودجه هر فایل = کل بودجه / تعداد فایل‌ها (با کف ۲۰۰ کاراکتر)
-                            per_file_limit = max(200, max_code_chars // max(len(selected), 1))
-                            yield sse("progress", {
-                                "step": "condensed_mode",
-                                "message": f"📦 حالت اسکن کل پروژه: خواندن ساختار {len(selected)} فایل (imports/exports/signatures)..."
-                            })
-                        else:
-                            per_file_limit = min(15000, max(3000, max_code_chars // max(len(selected), 1)))
+                        # 🆕 پردازش دسته‌ای (Batch Processing) — مثل منطق Claude Code
+                        # وقتی فایل‌ها زیادن، به جای خلاصه‌خوانی، فایل‌ها رو دسته‌دسته
+                        # با محتوای کامل میخونیم و هر دسته رو جداگانه تحلیل می‌کنیم
+                        use_batch_processing = (request_scope == "FULL_PROJECT" and len(selected) > 30)
 
-                        act_read_failures = 0
-                        for i, file_path in enumerate(selected):
-                            if len(code_context) >= max_code_chars:
-                                if use_condensed:
-                                    # در حالت خلاصه، حتی اگر به حد رسیدیم فقط نام فایل‌های باقیمانده رو اضافه کن
-                                    remaining = selected[i:]
-                                    remaining_list = "\n".join(f"- {fp}" for fp in remaining)
-                                    code_context += f"\n\n=== فایل‌های باقیمانده (فقط مسیر — {len(remaining)} فایل) ===\n{remaining_list}"
-                                    yield sse("progress", {
-                                        "step": "context_limit",
-                                        "message": f"📋 {len(remaining)} فایل باقیمانده فقط با نام ثبت شد (ظرفیت مدل)"
-                                    })
-                                else:
+                        if use_batch_processing:
+                            # ── Batch Processing Mode ──
+                            # بودجه هر دسته: ~55% ظرفیت مدل برای محتوای فایل
+                            batch_budget = int(max_input_chars * 0.55)
+                            per_file_limit = min(8000, max(2000, batch_budget // 25))
+                            batch_size = max(10, min(30, batch_budget // max(per_file_limit, 1)))
+                            batches = [selected[i:i+batch_size] for i in range(0, len(selected), batch_size)]
+                            _batch_count = len(batches)
+
+                            yield sse("progress", {
+                                "step": "batch_mode",
+                                "message": f"🔄 پردازش دسته‌ای: {len(selected)} فایل در {_batch_count} دسته (هر دسته تا {batch_size} فایل — خوانش کامل)"
+                            })
+
+                            batch_findings = []
+                            act_read_failures = 0
+
+                            for batch_idx, batch_files in enumerate(batches):
+                                batch_code = ""
+                                batch_read_ok = 0
+
+                                yield sse("progress", {
+                                    "step": "batch_reading",
+                                    "message": f"📖 خواندن دسته {batch_idx+1} از {_batch_count} ({len(batch_files)} فایل)..."
+                                })
+
+                                for fp in batch_files:
+                                    try:
+                                        result = await github_svc.get_file_content(owner, repo, fp, token=token)
+                                        if result.get("success"):
+                                            content = result.get("content", "")
+                                            if len(content) > per_file_limit:
+                                                content = content[:per_file_limit] + "\n... [truncated]"
+                                            batch_code += f"\n\n=== {fp} ===\n{content}"
+                                            batch_read_ok += 1
+                                        else:
+                                            act_read_failures += 1
+                                    except Exception:
+                                        act_read_failures += 1
+                                    await asyncio.sleep(0.1)
+
+                                _batch_total_read += batch_read_ok
+
+                                if not batch_code.strip():
+                                    batch_findings.append(f"### دسته {batch_idx+1}: هیچ فایلی خوانده نشد")
+                                    continue
+
+                                yield sse("progress", {
+                                    "step": "batch_analyzing",
+                                    "message": f"🧠 تحلیل دسته {batch_idx+1} از {_batch_count} توسط {primary_model} ({batch_read_ok} فایل)..."
+                                })
+
+                                # AI هر دسته رو مستقل تحلیل میکنه
+                                batch_analysis_prompt = f"""## درخواست کاربر:
+{request.message}
+
+## تاریخچه مکالمه (خلاصه):
+{history_text[-2000:]}
+
+## فایل‌های دسته {batch_idx+1} از {_batch_count} — محتوای کامل:
+{batch_code}
+
+## ساختار کلی پروژه (برای درک وابستگی‌ها):
+{act_tree_summary[:3000]}
+
+## وظیفه تو — تحلیل دسته‌ای:
+بر اساس درخواست کاربر، فایل‌های این دسته را دقیق تحلیل کن:
+- برای هر فایل: imports، exports، عملکرد اصلی، وابستگی‌ها
+- یافته‌های مرتبط با درخواست کاربر (فایل بلااستفاده، باگ، مشکل ساختاری، کد تکراری، ...)
+- ارجاعات بین فایلی: این فایل از کجاها import میکنه و احتمالاً کجاها ازش استفاده میشه
+- اگر مشکل یا نکته مهمی در خطوط پایین فایل هست، حتماً ذکر کن
+⚠️ فقط یافته‌ها و تحلیل دقیق بنویس — جمع‌بندی نهایی در مرحله بعد انجام میشه."""
+
+                                try:
+                                    batch_response = await ai_manager.generate(
+                                        model_id=primary_model,
+                                        messages=[
+                                            Message(role="system", content=f"تحلیل‌گر دسته‌ای پروژه. دسته {batch_idx+1}/{_batch_count}. درخواست: {request.message[:200]}. فقط یافته‌های کلیدی مرتبط با درخواست کاربر. دقیق و کامل."),
+                                            Message(role="user", content=batch_analysis_prompt)
+                                        ],
+                                        max_tokens=min(model_max_output, 3000),
+                                        temperature=0.2
+                                    )
+                                    if batch_response.content and batch_response.content.strip():
+                                        file_names = ", ".join(bf.split("/")[-1] for bf in batch_files[:5])
+                                        if len(batch_files) > 5:
+                                            file_names += f" و {len(batch_files)-5} فایل دیگر"
+                                        batch_findings.append(
+                                            f"### 📦 دسته {batch_idx+1} ({file_names}):\n{batch_response.content}"
+                                        )
+                                except Exception as e:
+                                    slog.warning(f"[smart-chat ACTION] Batch {batch_idx+1} analysis failed: {e}")
+                                    batch_findings.append(f"### دسته {batch_idx+1}: ❌ خطا در تحلیل: {str(e)[:100]}")
+
+                                yield sse("progress", {
+                                    "step": "batch_done",
+                                    "message": f"✅ دسته {batch_idx+1}/{_batch_count} تحلیل شد ({_batch_total_read} فایل تا الان)"
+                                })
+
+                            # یافته‌های تمام دسته‌ها → code_context
+                            code_context = "\n\n".join(batch_findings)
+
+                            yield sse("progress", {
+                                "step": "batch_complete",
+                                "message": f"✅ پردازش دسته‌ای کامل: {_batch_count} دسته، {_batch_total_read} فایل خوانده و تحلیل شد"
+                            })
+
+                        else:
+                            # ── BROAD / TARGETED — خواندن عادی ──
+                            per_file_limit = min(15000, max(3000, max_code_chars // max(len(selected), 1)))
+                            act_read_failures = 0
+                            for i, file_path in enumerate(selected):
+                                if len(code_context) >= max_code_chars:
                                     yield sse("progress", {
                                         "step": "context_limit",
                                         "message": f"⚠️ به حد ظرفیت مدل رسیدیم — {len(selected) - i} فایل باقیمانده خوانده نشد"
                                     })
-                                break
-                            if i % 20 == 0 or not use_condensed:
+                                    break
                                 yield sse("progress", {
                                     "step": "reading_file",
-                                    "message": f"📖 {'اسکن' if use_condensed else 'خواندن'} {file_path} ({i+1}/{len(selected)})..."
+                                    "message": f"📖 خواندن {file_path} ({i+1}/{len(selected)})..."
                                 })
-                            try:
-                                result = await github_svc.get_file_content(owner, repo, file_path, token=token)
-                                if result.get("success"):
-                                    content = result.get("content", "")
-                                    if use_condensed:
-                                        # حالت خلاصه: فقط ساختار فایل
-                                        content = _condense_file_content(content, file_path, max_chars=per_file_limit)
-                                    elif len(content) > per_file_limit:
-                                        content = content[:per_file_limit] + "\n... [truncated]"
-                                    code_context += f"\n\n=== {file_path} ===\n{content}"
-                                else:
+                                try:
+                                    result = await github_svc.get_file_content(owner, repo, file_path, token=token)
+                                    if result.get("success"):
+                                        content = result.get("content", "")
+                                        if len(content) > per_file_limit:
+                                            content = content[:per_file_limit] + "\n... [truncated]"
+                                        code_context += f"\n\n=== {file_path} ===\n{content}"
+                                    else:
+                                        act_read_failures += 1
+                                        slog.warning(f"[smart-chat ACTION] Failed to read file {file_path}: {result.get('error', 'unknown')}")
+                                except Exception as e:
                                     act_read_failures += 1
-                                    slog.warning(f"[smart-chat ACTION] Failed to read file {file_path}: {result.get('error', 'unknown')}")
-                            except Exception as e:
-                                act_read_failures += 1
-                                slog.warning(f"[smart-chat ACTION] Exception reading file {file_path}: {e}")
-                            await asyncio.sleep(0.15 if use_condensed else 0.2)
+                                    slog.warning(f"[smart-chat ACTION] Exception reading file {file_path}: {e}")
+                                await asyncio.sleep(0.2)
 
-                        if use_condensed:
-                            files_read = len(selected) - act_read_failures
-                            yield sse("progress", {
-                                "step": "condensed_done",
-                                "message": f"✅ اسکن ساختاری {files_read} فایل از {len(selected)} فایل کامل شد"
-                            })
-
-                        if act_read_failures > 0 and act_read_failures == len(selected):
-                            yield sse("progress", {
-                                "step": "file_read_warning",
-                                "message": f"⚠️ خواندن فایل‌ها ناموفق بود — تحلیل بدون دسترسی به کد..."
-                            })
+                            if act_read_failures > 0 and act_read_failures == len(selected):
+                                yield sse("progress", {
+                                    "step": "file_read_warning",
+                                    "message": f"⚠️ خواندن فایل‌ها ناموفق بود — تحلیل بدون دسترسی به کد..."
+                                })
                     else:
                         yield sse("progress", {
                             "step": "tree_failed",
@@ -10990,20 +11177,21 @@ GitHub: {_proj_github}
 
             # ساخت بخش کد فایل‌ها بر اساس دسترسی
             if has_code_files:
-                if use_condensed:
-                    # 🆕 حالت خلاصه — ساختار تمام فایل‌ها (imports/exports/signatures)
-                    code_section = f"""## 📦 اسکن ساختاری کل پروژه ({len(selected)} فایل):
-⚠️ توجه: محتوای زیر خلاصه ساختاری فایل‌هاست (imports, exports, تعاریف توابع/کلاس‌ها) — نه کد کامل.
-این حالت برای تحلیل کلی پروژه (مثلاً پیدا کردن فایل‌های بلااستفاده، بررسی ساختار، وابستگی‌ها) استفاده می‌شود.
+                if use_batch_processing:
+                    # 🆕 حالت دسته‌ای — یافته‌های تحلیل AI از هر دسته (فایل‌ها کامل خوانده شدن)
+                    code_section = f"""## 🔄 تحلیل دسته‌ای کل پروژه ({len(selected)} فایل — محتوای کامل خوانده شد):
+فایل‌ها در {_batch_count} دسته با محتوای کامل خوانده و تحلیل شدند.
+یافته‌های هر دسته در زیر آمده — وظیفه تو جمع‌بندی نهایی و پاسخ جامع است.
+
 {code_context}"""
                     if act_tree_summary:
                         code_section += f"\n\n## ساختار درختی پروژه:\n{act_tree_summary}"
-                    code_instructions = """- تو به ساختار تمام فایل‌های پروژه دسترسی داری (imports, exports, signatures)
-- بر اساس imports و exports تحلیل کن کدام فایل‌ها به هم وابسته‌اند
-- فایل‌هایی که هیچ‌جا import نشده‌اند یا استفاده نمی‌شوند را شناسایی کن
-- تحلیل جامع و کامل ارائه بده — تو الان کل پروژه را می‌بینی
-- اگر فایلی مشکوک است اما برای تأیید به کد کامل نیاز داری، بگو
-- لیست کاملی از نتایج ارائه بده — هیچ فایلی را نادیده نگیر"""
+                    code_instructions = f"""- تحلیل‌های بالا از بررسی دسته‌ای {_batch_total_read} فایل پروژه (با محتوای کامل) به دست آمده
+- تمام یافته‌های {_batch_count} دسته را جمع‌بندی و ترکیب کن
+- پاسخ نهایی جامع و کامل ارائه بده — هیچ دسته‌ای را نادیده نگیر
+- اگر یک فایل در دسته‌های مختلف ذکر شده، اطلاعات رو ترکیب کن
+- لیست کامل و مرتب نتایج ارائه بده
+- تحلیل قابل اتکاست چون فایل‌ها کامل خوانده شده‌اند — نیازی به حدس نیست"""
                 else:
                     code_section = f"""## کد فایل‌های مرتبط (از GitHub خوانده شده):
 {code_context}"""
