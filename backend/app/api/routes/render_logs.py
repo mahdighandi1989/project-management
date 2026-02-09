@@ -9584,6 +9584,77 @@ def _ensure_balanced_selection(selected: list, code_files: list, max_files: int)
     return selected
 
 
+# ─── تشخیص دامنه (Scope) درخواست کاربر ───
+# وقتی کاربر میگه "همه فایل‌ها رو بررسی کن" باید همه رو بخونیم، نه 25 تا
+SCOPE_FULL_KEYWORDS = [
+    # فارسی — درخواست بررسی کل پروژه
+    "تمام فایل", "همه فایل", "کل پروژه", "تمام مسیر", "همه مسیر",
+    "همه رو بررسی", "تمام رو بررسی", "سرتاسر", "همه پوشه", "تمام پوشه",
+    "از ریشه تا", "از مسیر اصلی", "هر فایل", "هر پوشه", "یه دور کامل",
+    "کل ساختار", "کل فولدر", "تمام فولدر", "همه فولدر",
+    "فایل‌های اضافه", "فایل‌های اضافی", "فایل زائد", "فایل بلااستفاده",
+    "فایل‌های بلااستفاده", "فایل‌های زائد", "فایلهای اضافی", "فایلهای بلااستفاده",
+    "بلااستفاده", "استفاده نمیش", "استفاده نمی‌ش", "وصل نیست", "کار نمیکنه",
+    "تمیز کردن", "پاکسازی", "حذف اضافه", "بریز تو آرشیو",
+    # انگلیسی — بررسی کل پروژه
+    "all files", "every file", "entire project", "whole project",
+    "full scan", "full project", "clean up", "cleanup",
+    "unused files", "dead code", "remove unused",
+]
+SCOPE_BROAD_KEYWORDS = [
+    # فارسی — بررسی وسیع اما نه لزوماً همه
+    "بررسی کلی", "ریفکتور", "بهینه‌سازی", "ساختار پروژه",
+    "بررسی ساختار", "تحلیل ساختار", "بهبود کلی", "مرور کلی",
+    "نگاهی بنداز", "یه نگاه بنداز",
+    # انگلیسی
+    "refactor", "restructure", "review structure", "overview", "audit",
+    "broad review", "code review",
+]
+
+
+def _detect_request_scope(message: str, chat_history_text: str = "") -> str:
+    """
+    تشخیص دامنه درخواست کاربر:
+    - FULL_PROJECT: کاربر صراحتاً گفته همه فایل‌ها / کل پروژه / پاکسازی
+    - BROAD: بررسی وسیع (ریفکتور، ساختار، مرور کلی)
+    - TARGETED: یک فیچر/فایل/باگ خاص (پیش‌فرض)
+
+    این تابع قبل از انتخاب فایل فراخوانی میشه تا تعداد فایل‌های
+    خوانده‌شده متناسب با درخواست واقعی کاربر باشه.
+    """
+    msg_lower = message.lower()
+    # ترکیب پیام + آخرین بخش تاریخچه برای context بهتر
+    context = msg_lower + " " + chat_history_text[-1000:].lower()
+
+    # بررسی FULL_PROJECT
+    for kw in SCOPE_FULL_KEYWORDS:
+        if kw in context:
+            return "FULL_PROJECT"
+
+    # بررسی BROAD
+    for kw in SCOPE_BROAD_KEYWORDS:
+        if kw in context:
+            return "BROAD"
+
+    return "TARGETED"
+
+
+def _get_max_files_for_scope(scope: str, total_code_files: int) -> int:
+    """
+    تعیین حداکثر فایل‌ها بر اساس دامنه درخواست.
+    وقتی scope=FULL_PROJECT، تمام فایل‌ها (تا سقف context مدل) خوانده میشن.
+    """
+    if scope == "FULL_PROJECT":
+        # تمام فایل‌ها — سقف واقعی توسط context window مدل تعیین میشه
+        return min(total_code_files, 500)
+    elif scope == "BROAD":
+        # نیمی تا 70% فایل‌ها
+        return min(max(40, int(total_code_files * 0.7)), 200)
+    else:
+        # TARGETED — مثل قبل
+        return 25
+
+
 # ─── کاهش هوشمند حجم پرامپت برای تلاش مجدد ───
 def _reduce_prompt_for_retry(prompt: str) -> str:
     """کاهش حجم پرامپت با حذف بخشی از تاریخچه، کد و لاگ‌ها"""
@@ -10070,8 +10141,20 @@ GitHub: {_proj_github}
                         # ساخت خلاصه ساختار پروژه
                         q_tree_summary = _build_project_tree_summary(q_code_files)
 
-                        # AI انتخاب ۱۲ فایل مرتبط
-                        q_select_prompt = f"""بر اساس سؤال کاربر، فایل‌های مرتبط را انتخاب کن:
+                        # 🆕 تشخیص دامنه برای سؤال
+                        q_scope = _detect_request_scope(request.message, history_text)
+                        q_dynamic_max = _get_max_files_for_scope(q_scope, len(q_code_files))
+                        # سؤال‌ها معمولاً نیاز به فایل کمتری دارن — سقف رو تنظیم کن
+                        if q_scope == "TARGETED":
+                            q_dynamic_max = 12  # مثل قبل
+                        elif q_scope == "BROAD":
+                            q_dynamic_max = min(q_dynamic_max, 40)
+
+                        if q_scope == "FULL_PROJECT":
+                            # سؤال درباره کل پروژه — همه فایل‌ها
+                            q_selected = q_code_files[:q_dynamic_max]
+                        else:
+                            q_select_prompt = f"""بر اساس سؤال کاربر، فایل‌های مرتبط را انتخاب کن:
 
 سؤال: {request.message}
 
@@ -10092,20 +10175,20 @@ GitHub: {_proj_github}
 - تاریخچه مکالمه را بخوان — شاید سؤال در ادامه بحث قبلی باشد
 - اگر فایل‌هایی قبلاً بررسی شده‌اند (لیست بالا)، فایل‌های جدید و بررسی‌نشده را اولویت بده — مگر اینکه سؤال واقعاً به همان فایل‌ها مربوط باشد
 - فایل‌های entry point (main, app, index, page, layout)، API routes و config را در نظر بگیر
-حداکثر ۱۲ فایل. فقط مسیرها، هر کدام در یک خط."""
-                        q_sel_resp = await ai_manager.generate(
-                            model_id=primary_model,
-                            messages=[
-                                Message(role="system", content="انتخاب‌گر فایل هوشمند و حرفه‌ای. اول منظور سؤال کاربر را عمیقاً بفهم، سپس با تحلیل نام فایل‌ها، ساختار پروژه و تاریخچه مکالمه، بهترین فایل‌های مرتبط را انتخاب کن. فایل‌های جدید و بررسی‌نشده اولویت دارند. از هر بخش پروژه (frontend/backend) فایل انتخاب کن. فقط مسیرها."),
-                                Message(role="user", content=q_select_prompt)
-                            ],
-                            max_tokens=600,
-                            temperature=0.2
-                        )
-                        q_selected = _parse_ai_selected_files(q_sel_resp.content, q_code_files, max_files=12)
-                        if not q_selected:
-                            q_selected = _fallback_file_selection(q_code_files, request.message, max_files=12)
-                        q_selected = _ensure_balanced_selection(q_selected, q_code_files, max_files=12)
+حداکثر {q_dynamic_max} فایل. فقط مسیرها، هر کدام در یک خط."""
+                            q_sel_resp = await ai_manager.generate(
+                                model_id=primary_model,
+                                messages=[
+                                    Message(role="system", content=f"انتخاب‌گر فایل هوشمند. منظور سؤال کاربر را بفهم و تا {q_dynamic_max} فایل مرتبط انتخاب کن. فقط مسیرها."),
+                                    Message(role="user", content=q_select_prompt)
+                                ],
+                                max_tokens=max(600, q_dynamic_max * 40),
+                                temperature=0.2
+                            )
+                            q_selected = _parse_ai_selected_files(q_sel_resp.content, q_code_files, max_files=q_dynamic_max)
+                            if not q_selected:
+                                q_selected = _fallback_file_selection(q_code_files, request.message, max_files=q_dynamic_max)
+                            q_selected = _ensure_balanced_selection(q_selected, q_code_files, max_files=q_dynamic_max)
                         max_q_code = int(max_input_chars * 0.55)
                         per_file_q_limit = min(10000, max(3000, max_q_code // max(len(q_selected), 1)))
                         q_read_failures = 0
@@ -10263,7 +10346,13 @@ GitHub: {_proj_github}
                         # ساخت خلاصه ساختار پروژه
                         err_tree_summary = _build_project_tree_summary(code_files)
 
-                        # AI انتخاب فایل بر اساس لاگ خطا (تا ۲۰ فایل)
+                        # 🆕 تشخیص دامنه برای خطا
+                        err_scope = _detect_request_scope(request.message, history_text)
+                        err_dynamic_max = _get_max_files_for_scope(err_scope, len(code_files))
+                        # خطاها معمولاً هدفمندن ولی اگر کاربر بررسی کلی خواسته...
+                        if err_scope == "TARGETED":
+                            err_dynamic_max = 20  # مثل قبل
+
                         select_prompt = f"""بر اساس خطا و context مکالمه، فایل‌های مرتبط را انتخاب کن:
 
 خطا/لاگ:
@@ -10287,22 +10376,22 @@ GitHub: {_proj_github}
 - فایل‌های import/dependency chain مرتبط با فایل خطادار را هم بررسی کن
 - اگر فایل‌هایی قبلاً بررسی شده‌اند (لیست بالا)، فایل‌های جدید و بررسی‌نشده را اولویت بده — مگر اینکه خطا واقعاً به همان فایل‌ها مربوط باشد
 
-حداکثر ۲۰ فایل مرتبط. فقط مسیرها، هر کدام در یک خط."""
+حداکثر {err_dynamic_max} فایل مرتبط. فقط مسیرها، هر کدام در یک خط."""
 
                         select_response = await ai_manager.generate(
                             model_id=primary_model,
                             messages=[
-                                Message(role="system", content="انتخاب‌گر فایل هوشمند و حرفه‌ای. اول ریشه خطا را با تحلیل stack trace و context تشخیص بده، سپس فایل‌های مرتبط + زنجیره وابستگی‌ها را انتخاب کن. فایل‌های جدید و بررسی‌نشده اولویت دارند. از هر بخش پروژه (frontend/backend) فایل مرتبط انتخاب کن. فقط مسیرها."),
+                                Message(role="system", content=f"انتخاب‌گر فایل هوشمند. ریشه خطا را با تحلیل stack trace و context تشخیص بده، سپس تا {err_dynamic_max} فایل مرتبط + زنجیره وابستگی‌ها انتخاب کن. فقط مسیرها."),
                                 Message(role="user", content=select_prompt)
                             ],
-                            max_tokens=800,
+                            max_tokens=max(800, err_dynamic_max * 40),
                             temperature=0.2
                         )
 
-                        selected = _parse_ai_selected_files(select_response.content, code_files, max_files=20)
+                        selected = _parse_ai_selected_files(select_response.content, code_files, max_files=err_dynamic_max)
                         if not selected:
-                            selected = _fallback_file_selection(code_files, request.message, max_files=20)
-                        selected = _ensure_balanced_selection(selected, code_files, max_files=20)
+                            selected = _fallback_file_selection(code_files, request.message, max_files=err_dynamic_max)
+                        selected = _ensure_balanced_selection(selected, code_files, max_files=err_dynamic_max)
 
                         # محدود کردن حجم کد بر اساس ظرفیت مدل
                         max_err_code_chars = int(max_input_chars * 0.65)
@@ -10562,9 +10651,18 @@ GitHub: {_proj_github}
 
         else:  # ACTION
             # درخواست اقدام: تحلیل عمیق + آماده‌سازی تغییرات
+
+            # 🆕 تشخیص دامنه درخواست — آیا کاربر همه فایل‌ها رو میخواد یا فقط بخشی؟
+            request_scope = _detect_request_scope(request.message, history_text)
+            scope_labels = {
+                "FULL_PROJECT": "کل پروژه",
+                "BROAD": "بررسی گسترده",
+                "TARGETED": "هدفمند"
+            }
+
             yield sse("progress", {
                 "step": "reading_project",
-                "message": f"📂 در حال خواندن ساختار پروژه {owner}/{repo}..."
+                "message": f"📂 در حال خواندن ساختار پروژه {owner}/{repo}... (دامنه: {scope_labels.get(request_scope, request_scope)})"
             })
 
             code_context = ""
@@ -10578,21 +10676,81 @@ GitHub: {_proj_github}
                         code_files = [f["path"] for f in all_files
                                       if _is_code_file(f["path"], file_size=f.get("size", 0))]
 
+                        # 🆕 تعداد فایل‌ها بر اساس دامنه درخواست
+                        dynamic_max_files = _get_max_files_for_scope(request_scope, len(code_files))
+
                         yield sse("progress", {
                             "step": "tree_loaded",
-                            "message": f"✅ ساختار پروژه خوانده شد ({len(code_files)} فایل)"
+                            "message": f"✅ ساختار پروژه خوانده شد ({len(code_files)} فایل) — بررسی تا {dynamic_max_files} فایل"
                         })
 
                         # ساخت خلاصه ساختار پروژه
                         act_tree_summary = _build_project_tree_summary(code_files)
 
-                        # AI انتخاب فایل‌های مرتبط
-                        yield sse("progress", {
-                            "step": "selecting_files",
-                            "message": f"🤖 مدل {primary_model} در حال شناسایی فایل‌های مرتبط..."
-                        })
+                        # 🆕 اگر دامنه FULL_PROJECT باشه، همه فایل‌ها رو بخون بدون انتخاب AI
+                        if request_scope == "FULL_PROJECT":
+                            selected = code_files[:dynamic_max_files]
+                            yield sse("progress", {
+                                "step": "files_selected",
+                                "message": f"📋 دامنه کل پروژه: {len(selected)} فایل از {len(code_files)} فایل انتخاب شد"
+                            })
+                        elif request_scope == "BROAD":
+                            # BROAD: AI انتخاب میکنه ولی با سقف بالاتر
+                            yield sse("progress", {
+                                "step": "selecting_files",
+                                "message": f"🤖 مدل {primary_model} در حال شناسایی فایل‌های مرتبط (دامنه گسترده: تا {dynamic_max_files} فایل)..."
+                            })
 
-                        select_prompt = f"""بر اساس درخواست کاربر و تاریخچه مکالمه، فایل‌های مرتبط را انتخاب کن:
+                            select_prompt = f"""بر اساس درخواست کاربر و تاریخچه مکالمه، فایل‌های مرتبط را انتخاب کن:
+
+درخواست کاربر:
+{request.message}
+
+تاریخچه مکالمه (تا ۵۰۰۰ کاراکتر آخر):
+{history_text[-5000:]}
+
+{act_tree_summary}
+{prev_files_hint}
+
+فایل‌های پروژه:
+{chr(10).join(code_files[:500])}
+
+## راهنمای انتخاب — دامنه گسترده:
+- کاربر درخواست بررسی گسترده دارد — فایل‌های بیشتری انتخاب کن
+- اول منظور واقعی کاربر را بفهم — ممکن است مستقیم نگفته باشد کدام فایل‌ها
+- تاریخچه مکالمه را بخوان
+- از هر بخش پروژه (frontend/backend/shared/config/test) فایل انتخاب کن
+- فایل‌های config، types، test و utility هم مهمن
+
+حداکثر {dynamic_max_files} فایل. فقط مسیرها، هر کدام در یک خط."""
+
+                            select_response = await ai_manager.generate(
+                                model_id=primary_model,
+                                messages=[
+                                    Message(role="system", content=f"انتخاب‌گر فایل حرفه‌ای. درخواست کاربر بررسی گسترده پروژه است. تا {dynamic_max_files} فایل مرتبط انتخاب کن. فقط مسیرها."),
+                                    Message(role="user", content=select_prompt)
+                                ],
+                                max_tokens=2000,
+                                temperature=0.2
+                            )
+
+                            selected = _parse_ai_selected_files(select_response.content, code_files, max_files=dynamic_max_files)
+                            if not selected:
+                                selected = _fallback_file_selection(code_files, request.message, max_files=dynamic_max_files)
+                            selected = _ensure_balanced_selection(selected, code_files, max_files=dynamic_max_files)
+
+                            yield sse("progress", {
+                                "step": "files_selected",
+                                "message": f"📋 {len(selected)} فایل مرتبط شناسایی شد (دامنه گسترده)"
+                            })
+                        else:
+                            # TARGETED: مثل قبل — AI انتخاب با سقف 25
+                            yield sse("progress", {
+                                "step": "selecting_files",
+                                "message": f"🤖 مدل {primary_model} در حال شناسایی فایل‌های مرتبط..."
+                            })
+
+                            select_prompt = f"""بر اساس درخواست کاربر و تاریخچه مکالمه، فایل‌های مرتبط را انتخاب کن:
 
 درخواست کاربر:
 {request.message}
@@ -10618,25 +10776,25 @@ GitHub: {_proj_github}
 
 حداکثر ۲۵ فایل. فقط مسیرها، هر کدام در یک خط."""
 
-                        select_response = await ai_manager.generate(
-                            model_id=primary_model,
-                            messages=[
-                                Message(role="system", content="انتخاب‌گر فایل هوشمند و حرفه‌ای. اول منظور واقعی درخواست کاربر و تاریخچه مکالمه را عمیقاً بفهم، سپس فایل‌های مرتبط + زنجیره وابستگی‌ها + فایل‌های تست را انتخاب کن. فایل‌های جدید و بررسی‌نشده اولویت دارند. از همه بخش‌های پروژه (frontend/backend/shared) فایل مرتبط انتخاب کن. فقط مسیرها."),
-                                Message(role="user", content=select_prompt)
-                            ],
-                            max_tokens=1000,
-                            temperature=0.2
-                        )
+                            select_response = await ai_manager.generate(
+                                model_id=primary_model,
+                                messages=[
+                                    Message(role="system", content="انتخاب‌گر فایل هوشمند و حرفه‌ای. اول منظور واقعی درخواست کاربر و تاریخچه مکالمه را عمیقاً بفهم، سپس فایل‌های مرتبط + زنجیره وابستگی‌ها + فایل‌های تست را انتخاب کن. فایل‌های جدید و بررسی‌نشده اولویت دارند. از همه بخش‌های پروژه (frontend/backend/shared) فایل مرتبط انتخاب کن. فقط مسیرها."),
+                                    Message(role="user", content=select_prompt)
+                                ],
+                                max_tokens=1000,
+                                temperature=0.2
+                            )
 
-                        selected = _parse_ai_selected_files(select_response.content, code_files, max_files=25)
-                        if not selected:
-                            selected = _fallback_file_selection(code_files, request.message, max_files=20)
-                        selected = _ensure_balanced_selection(selected, code_files, max_files=25)
+                            selected = _parse_ai_selected_files(select_response.content, code_files, max_files=25)
+                            if not selected:
+                                selected = _fallback_file_selection(code_files, request.message, max_files=20)
+                            selected = _ensure_balanced_selection(selected, code_files, max_files=25)
 
-                        yield sse("progress", {
-                            "step": "files_selected",
-                            "message": f"📋 {len(selected)} فایل مرتبط شناسایی شد"
-                        })
+                            yield sse("progress", {
+                                "step": "files_selected",
+                                "message": f"📋 {len(selected)} فایل مرتبط شناسایی شد"
+                            })
 
                         # خواندن فایل‌ها (با رعایت حد context window مدل)
                         # محدود کردن حجم کل کد بر اساس ظرفیت مدل
