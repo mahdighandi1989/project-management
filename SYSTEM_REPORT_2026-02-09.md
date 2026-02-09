@@ -1,8 +1,8 @@
 # گزارش جامع سیستم مدیریت پروژه هوشمند
 
-**تاریخ:** 2026-02-08
-**شاخه:** `claude/review-project-inspector-tab-VwMfG`
-**وضعیت:** به‌روز شده - نسخه 3.1 (بازبینی کامل + رفع 9 باگ جدید + بهینه‌سازی + تکمیل Visual Debug)
+**تاریخ:** 2026-02-09
+**شاخه:** `claude/review-structure-fix-inspector-s421b`
+**وضعیت:** به‌روز شده - نسخه 4.0 (ساخت سرویس Render + بازنویسی Visual Debug + بودجه هوشمند پرامپت)
 
 ---
 
@@ -22,23 +22,23 @@
 
 ## 1. خلاصه اجرایی
 
-### آمار کلی پروژه (به‌روز شده 2026-02-08)
+### آمار کلی پروژه (به‌روز شده 2026-02-09)
 
 | بخش | تعداد فایل | خط کد |
 |-----|-----------|--------|
-| Backend Routes | 26 | ~41,261 |
-| Backend Services | 50 | ~34,995 |
+| Backend Routes | 26 | ~42,601 |
+| Backend Services | 50 | ~35,058 |
 | Database Models | 11 | ~1,821 |
-| Frontend Pages | 12 | ~17,703 |
-| Frontend Components | 12 | ~8,370 |
-| **کل** | **129** | **~114,123** |
+| Frontend Pages | 16 | ~18,555 |
+| Frontend Components | 14 | ~9,769 |
+| **کل** | **117** | **~107,804** |
 
 ### فایل‌های کلیدی
 
 | فایل | خط کد | توضیح |
 |------|-------|--------|
-| render_logs.py | 10,349 | بک‌اند بازرس ویژه + لاگ Render |
-| projects/[id]/page.tsx | 11,456 | فرانت‌اند صفحه پروژه |
+| render_logs.py | 11,648 | بک‌اند بازرس ویژه + لاگ Render (رشد +1,299 از نسخه 3.1) |
+| projects/[id]/page.tsx | 12,043 | فرانت‌اند صفحه پروژه (رشد +587 از نسخه 3.1) |
 | project_memory.py | 6,750 | مدیریت حافظه و فیلدها |
 | project_journal.py | 5,705 | ژورنال و گزارشات |
 | project_health.py | 5,416 | تحلیل سلامت |
@@ -47,10 +47,10 @@
 
 | وضعیت | تعداد | توضیح |
 |-------|-------|--------|
-| ✅ رفع شده | 64+ | شامل تمام باگ‌های بازرس ویژه + 9 باگ جدید |
-| ⚠️ نیاز به بهبود | 4 | موارد UI و بهینه‌سازی |
+| ✅ رفع شده | 75+ | شامل تمام باگ‌های بازرس ویژه + باگ‌های جدید نسخه 4.0 |
+| ⚠️ نیاز به بهبود | 3 | موارد UI و بهینه‌سازی |
 | 🔴 باقیمانده | 2 | مشکلات جزئی |
-| 🆕 قابلیت جدید | 26+ | شامل سیستم کامل بازرس ویژه |
+| 🆕 قابلیت جدید | 30+ | شامل سیستم کامل بازرس ویژه + ساخت سرویس Render |
 
 ---
 
@@ -131,7 +131,7 @@
 
 ### بخش ۵: لاگ‌های Render
 
-**فایل:** `backend/app/api/routes/render_logs.py` (10,349 خط)
+**فایل:** `backend/app/api/routes/render_logs.py` (11,648 خط)
 
 #### ✅ قابلیت‌های پیاده‌سازی شده
 
@@ -145,6 +145,7 @@
 | بایگانی لاگ‌های منتقل شده | ✅ |
 | Auto-transfer (هر 30 دقیقه) | ✅ |
 | بایگانی ایرادات قدیمی بعد از دیپلوی | ✅ |
+| 🆕 ساخت سرویس Render از Inspector | ✅ |
 
 ---
 
@@ -177,10 +178,10 @@
 - `frontend/src/components/help/HelpSystem.tsx` (466 خط)
 - `frontend/src/components/help/HelpTooltip.tsx` (131 خط)
 - `frontend/src/components/help/HelpProvider.tsx` (286 خط)
-- `frontend/src/components/help/helpData.ts` (1,358 خط)
+- `frontend/src/components/help/helpData.ts` (1,365 خط)
 
 #### ✅ قابلیت‌ها
-- دکمه شناور راهنما ❓ در گوشه پایین چپ
+- دکمه شناور راهنما در گوشه پایین چپ
 - پنل کشویی با توضیحات کامل
 - دیاگرام ساختاری Mermaid
 - قابلیت دانلود Markdown
@@ -189,77 +190,63 @@
 
 ---
 
-## 3. تغییرات اخیر انجام شده (2026-02-06 تا 2026-02-08 نسخه 3.1)
+## 3. تغییرات اخیر انجام شده (2026-02-08 تا 2026-02-09 نسخه 4.0)
 
-### 🆕 قابلیت‌های جدید پیاده‌سازی شده
+### 🆕 قابلیت‌های جدید پیاده‌سازی شده (پس از نسخه 3.1)
 
-#### 3.1 سیستم Smart-Chat پیشرفته
-- **طبقه‌بندی هوشمند پیام:** سه نوع QUESTION / ERROR_LOG / ACTION
-- **محدودیت فایل متفاوت:** QUESTION=5, ERROR_LOG=10, ACTION=15
-- **خلاصه ساختار پروژه** (`_build_project_tree_summary`) در همه پرامپت‌ها
-- **انتخاب متوازن فایل** (`_ensure_balanced_selection`) از دایرکتوری‌های مختلف
-- **ردیابی تاریخچه فایل‌ها** (`previously_read_files`) برای جلوگیری از تکرار
-- **پاسخ‌گویی به پیام خاص** (Reply-to) با استفاده از مدل اصلی
+#### 3.1 ساخت هوشمند سرویس Render (2026-02-08)
+- **endpoint**: `POST /api/render/inspector/create-render-service`
+- **تشخیص خودکار ساختار پروژه** از فایل‌های GitHub (package.json، requirements.txt و...)
+- **خواندن فایل‌های واقعی** از GitHub با token برای repo های private
+- **تولید هوشمند تنظیمات** با AI (build command، start command، env vars)
+- **ایجاد خودکار سرویس** در Render API با ownerId
+- **رفع مسیریابی SPA** برای Vite/CRA static sites
+- **شناسایی خودکار env vars** از فایل‌های پروژه
+- **دکمه ساخت سرویس** در UI Inspector
 
-#### 3.2 Visual Debug با عکس‌برداری
-- **عکس‌برداری از صفحه**: endpoint `POST /api/render/inspector/screenshot`
-- **تحلیل بصری**: endpoint `POST /api/render/inspector/visual-debug` (SSE)
-- **انتخاب خودکار مدل‌های Vision** (GPT-4o, Gemini Pro Vision)
-- **خواندن 8-12 فایل مرتبط** برای context تحلیل
-- **پرامپت اختصاصی** `VISUAL_DEBUG_SYSTEM_PROMPT` با دسترسی به عکس + لاگ + فایل‌ها
+#### 3.2 بازنویسی Visual Debug به Visual Inspector (2026-02-08)
+- **بازنویسی کامل** به سیستم هوشمند و چندمنظوره
+- **پشتیبانی از ساخت قابلیت جدید** (feature creation) علاوه بر رفع خطا
+- **پرامپت عمومی** (general-purpose) بجای فقط debug
+- **تشخیص هوشمند مسیر API** برای پروژه‌های مختلف
 
-#### 3.3 تشخیص و ردیابی Overlay ها
-- **MutationObserver** برای تشخیص overlay‌های جدید
-- **اسکن دوره‌ای** هر 2000ms برای المان‌های fullscreen
-- **pointerdown fallback** برای کلیک‌هایی که overlay مانع می‌شود
-- **console interception کامل**: log, warn, error, info, debug
+#### 3.3 بودجه هوشمند پرامپت (2026-02-09)
+- **سیستم Smart Prompt Budget**: محاسبه خودکار حداکثر کاراکتر برای هر بخش پرامپت
+- **توزیع بودجه** بین فایل‌ها، لاگ‌ها و context بر اساس نوع پیام
+- **Auto-retry هوشمند**: اگر AI پاسخ خالی بدهد، خودکار با مدل دیگر تلاش مجدد
 
-#### 3.4 سیستم Prompt Field Management
-- **مدیریت فیلدهای پرامپت**: دستورات، حافظه، آموزش
-- **دسته‌بندی**: instruction, function, variable, context, constraint
-- **دکمه ارسال به چت** (Send-to-chat)
-- **Highlight** فیلدهای در حال استفاده
-- **تزریق در پرامپت Smart-Chat** به صورت `prompt_fields_text`
+#### 3.4 تحلیل عمیق با آگاهی از Retry (2026-02-09)
+- **Retry-aware deep analysis** در تمام پرامپت‌های Inspector
+- **دریافت لاگ‌های تازه** از Render API هنگام عکس‌برداری (بجای لاگ‌های کش شده)
 
-#### 3.5 جستجوی خطا و اصلاح خودکار (AI Investigation)
-- **endpoint**: `POST /api/render/inspector/analyze-error`
-- **دو مرحله‌ای**: بررسی (investigate) + اصلاح (fix)
-- **خواندن دو مرحله‌ای فایل‌ها**: اول فایل‌های مرتبط با خطا، بعد فایل‌های model/DB
-- **دفاع دو لایه** در برابر action_plan‌های ساختگی AI
-- **دکمه Apply Fix** برای اعمال تغییرات پیشنهادی
+#### 3.5 سیستم Bridge Auto-Update (2026-02-08)
+- **endpoint**: `POST /api/render/inspector/update-bridge/{project_id}`
+- **endpoint**: `POST /api/render/inspector/fix-all-bridges`
+- **ردیابی نسخه Bridge Script** و به‌روزرسانی خودکار
+- **رفع خودکار bridge های قدیمی** با اسکریپت quick-fix
+- **@ts-nocheck** در تمام قالب‌های bridge برای جلوگیری از خطای TypeScript
 
-#### 3.6 بازبینی و بهینه‌سازی کد (نسخه 3.1 - 2026-02-08)
+#### 3.6 تشخیص هوشمند مسیر API (2026-02-08)
+- **تحلیل خودکار base path** API پروژه
+- **پشتیبانی از الگوهای مختلف**: `/api/`, `/v1/`, root-level routes
+- **تایید با Bridge Script**: بررسی وضعیت اتصال از طریق bridge
 
-**9 باگ جدید کشف و رفع شده:**
+#### 3.7 رفع مشکلات Build و Deploy (2026-02-08)
+- **رفع CORS blank page** برای سایت‌های Vite static با `--base=/`
+- **رفع SPA routing** با اضافه کردن rewrite rules از طریق Render API
+- **رفع خطای SWC parser** در Python triple-quoted strings
+- **رفع خطای TypeScript build** در InspectorBridge.tsx template
+- **@ts-nocheck قبل از "use client"** - باید اولین خط فایل باشد
 
-| # | باگ | شدت | راه‌حل |
-|---|-----|------|--------|
-| 1 | `used_field_ids` undefined variable (NameError) | 🔴 بحرانی | حذف کد ارجاع نادرست |
-| 2 | `slog.warn()` بجای `slog.warning()` (10 مورد) | 🟡 متوسط | اصلاح به warning() |
-| 3 | `response.usage` بجای `response.tokens_used` (3 مورد) | 🟡 متوسط | اصلاح با getattr |
-| 4 | `print()` بجای `slog` (10 مورد) | 🟡 متوسط | تبدیل به slog.error/warning |
-| 5 | نشت حافظه `_bridge_connections` | 🔴 بحرانی | اضافه idle timeout cleanup |
-| 6 | Regex ضعیف برای action_plan | 🟡 متوسط | JSON parsing + regex fallback |
-| 7 | کد تکراری Bridge handler (~120 خط) | ⚠️ بهبود | استخراج handleBridgeEvent |
-| 8 | useEffect dependency array ناقص | 🟡 متوسط | اصلاح وابستگی‌ها |
-| 9 | 20+ import داخلی تکراری | ⚠️ بهبود | انتقال به سطح ماژول |
-
-**بهینه‌سازی‌ها:**
-- استخراج تابع مشترک `_is_code_file()` (جایگزین 5 تکرار)
-- ثوابت اشتراکی: `IGNORED_PATH_PREFIXES`, `IGNORED_FILENAMES`, `CODE_EXTENSIONS`
-- حذف alias های import (`_re`, `regex_module`, `re_q` → `re`)
-- کاهش ~130 خط از page.tsx با استخراج توابع مشترک
-
-### 🔧 باگ‌فیکس‌های مهم (50+ کامیت)
+### 🔧 باگ‌فیکس‌های مهم (72+ کامیت جدید پس از نسخه 3.1)
 
 | دسته | تعداد | توضیح |
 |------|-------|--------|
-| Smart-Chat | 12+ | طبقه‌بندی اشتباه، خواندن فایل ناموفق، پاسخ خالی، timeout |
-| SSE Streaming | 4 | قطعی اتصال، lock bug، chunk parsing، heartbeat |
-| Client-Side Crashes | 5 | undefined property access در صفحات مختلف |
-| Verification System | 5 | تیک‌مارک‌ها، ذخیره لاگ، شمارشگر صفر |
-| Bridge Script | 3 | force_update، تشخیص وضعیت، cross-origin |
-| مدل‌ها و API | 4 | timeout، model selection، GitHub push، token fallback |
+| Bridge Script & Deploy | 15+ | TypeScript errors، SWC parser، @ts-nocheck، auto-update |
+| Render Service Creation | 8+ | ownerId، private repos، SPA routing، env vars |
+| Visual Debug/Inspector | 6+ | بازنویسی به general-purpose، prompt fixes، file paths |
+| Verification & Logic | 3+ | منطق تایید، prompt template braces |
+| Smart Prompt Budget | 3+ | بودجه خودکار، auto-retry، fresh logs |
 
 ---
 
@@ -315,7 +302,7 @@
 |-------|------|--------|
 | ۶-۱ | رنگ فونت همرنگ پس‌زمینه | ⚠️ نیاز به اصلاح |
 
-### دسته ۷: بازرس ویژه (جدید)
+### دسته ۷: بازرس ویژه
 
 | شماره | مشکل | وضعیت |
 |-------|------|--------|
@@ -323,12 +310,17 @@
 | ۷-۲ | Overlay ها کلیک را می‌بلعند | ✅ حل شده با pointerdown + MutationObserver |
 | ۷-۳ | طبقه‌بندی اشتباه پیام‌ها | ✅ حل شده با prompt engineering عمیق |
 | ۷-۴ | AI فایل‌ها را نمی‌خواند | ✅ حل شده با two-pass reading |
-| ۷-۵ | پاسخ خالی از مدل‌ها | ✅ حل شده با error handling بهتر |
+| ۷-۵ | پاسخ خالی از مدل‌ها | ✅ حل شده با auto-retry + smart budget |
 | ۷-۶ | SSE قطعی و timeout | ✅ حل شده با heartbeat + chunk parser |
 | ۷-۷ | تیک‌مارک‌های تایید گیر می‌کنند | ✅ حل شده |
 | ۷-۸ | Client crash از undefined | ✅ حل شده با defensive access |
-| ۷-۹ | عکس‌برداری بصری (Visual Debug) | ✅ پیاده‌سازی شده |
+| ۷-۹ | عکس‌برداری بصری (Visual Debug) | ✅ پیاده‌سازی شده + بازنویسی به Visual Inspector |
 | ۷-۱۰ | مدیریت فیلدهای پرامپت | ✅ پیاده‌سازی شده |
+| ۷-۱۱ | TypeScript errors در bridge | ✅ حل شده با @ts-nocheck |
+| ۷-۱۲ | Bridge Script قدیمی | ✅ حل شده با auto-update + version tracking |
+| ۷-۱۳ | CORS blank page (Vite) | ✅ حل شده با --base=/ |
+| ۷-۱۴ | SPA routing ناقص | ✅ حل شده با rewrite rules via Render API |
+| ۷-۱۵ | پاسخ خالی بدون retry | ✅ حل شده با auto-retry on empty response |
 
 ---
 
@@ -349,8 +341,11 @@
 | ۹ | سیستم مدیریت لاگ‌های Render | ✅ پیاده‌سازی شده |
 | ۱۰ | مدیریت پرامپت‌ها + نمایش زنده | ✅ پیاده‌سازی شده (Inspector) |
 | ۱۱ | بازرس ویژه با چت هوشمند | ✅ پیاده‌سازی شده |
-| ۱۲ | عکس‌برداری بصری + تحلیل AI | ✅ پیاده‌سازی شده |
+| ۱۲ | عکس‌برداری بصری + تحلیل AI | ✅ پیاده‌سازی شده + بازنویسی به Visual Inspector |
 | ۱۳ | تشخیص overlay و خطاهای بصری | ✅ پیاده‌سازی شده |
+| ۱۴ | 🆕 ساخت سرویس Render از Inspector | ✅ پیاده‌سازی شده |
+| ۱۵ | 🆕 بودجه هوشمند پرامپت | ✅ پیاده‌سازی شده |
+| ۱۶ | 🆕 به‌روزرسانی خودکار Bridge Script | ✅ پیاده‌سازی شده |
 
 ---
 
@@ -375,7 +370,7 @@
 
 ---
 
-## 7. ساختار تب‌ها (به‌روز شده)
+## 7. ساختار تب‌ها (به‌روز شده 2026-02-09)
 
 ```
 ├── تب حافظه و دستورات
@@ -409,22 +404,26 @@
 │   ├── انتخاب مدل
 │   └── سطح عمق (quick/standard/deep/thorough)
 │
-├── 🆕 تب بازرس ویژه (Inspector) ✅
+├── تب بازرس ویژه (Inspector) ✅ [نسخه 4.0]
 │   ├── پیش‌نمایش زنده (iframe)
-│   │   └── Bridge Script تزریقی
+│   │   └── Bridge Script تزریقی (نسخه‌بندی + auto-update)
 │   │   └── WebSocket Bridge Hub
 │   │   └── تشخیص Overlay
 │   │   └── Console Interception
 │   ├── چت هوشمند (Smart-Chat) ✅
 │   │   └── طبقه‌بندی خودکار پیام
+│   │   └── بودجه هوشمند پرامپت 🆕
 │   │   └── انتخاب فایل متوازن
 │   │   └── ردیابی تاریخچه فایل
 │   │   └── Reply-to پیام خاص
 │   │   └── SSE Streaming
-│   ├── Visual Debug ✅
+│   │   └── Auto-retry on empty response 🆕
+│   ├── Visual Inspector (بازنویسی شده از Visual Debug) ✅ 🆕
 │   │   └── عکس‌برداری از صفحه
 │   │   └── تحلیل بصری با Vision Models
+│   │   └── ساخت قابلیت جدید (feature creation)
 │   │   └── ادغام لاگ + عکس + فایل
+│   │   └── دریافت لاگ تازه هنگام عکس‌برداری 🆕
 │   ├── مدیریت فیلدهای پرامپت ✅
 │   │   └── دستورات عمومی
 │   │   └── حافظه
@@ -433,6 +432,14 @@
 │   │   └── AI Investigation
 │   │   └── Apply Fix
 │   │   └── دفاع در برابر hallucination
+│   ├── 🆕 ساخت سرویس Render ✅
+│   │   └── تشخیص خودکار ساختار پروژه
+│   │   └── تولید هوشمند تنظیمات با AI
+│   │   └── SPA routing + env vars
+│   ├── سیستم Bridge Auto-Update 🆕
+│   │   └── ردیابی نسخه
+│   │   └── به‌روزرسانی خودکار
+│   │   └── رفع bridge های قدیمی
 │   ├── سیستم تایید پیام ✅
 │   │   └── اسکن لاگ بک‌اند
 │   │   └── تفکیک console از backend
@@ -456,98 +463,125 @@
 
 | وضعیت | تعداد | درصد |
 |-------|-------|------|
-| ✅ رفع شده | 64+ | 90%+ |
-| ⚠️ نیاز به بهبود | 4 | 6% |
-| 🔴 باقیمانده | 2 | 3% |
-| **کل** | **~70** | **100%** |
+| ✅ رفع شده | 75+ | 92%+ |
+| ⚠️ نیاز به بهبود | 3 | 4% |
+| 🔴 باقیمانده | 2 | 2% |
+| **کل** | **~80** | **100%** |
 
-### کامیت‌های اصلی بازرس ویژه (2026-02-04 تا 2026-02-08)
+### کامیت‌های اصلی بازرس ویژه (2026-02-04 تا 2026-02-09)
 
-| Commit | توضیح |
-|--------|--------|
-| `75469ae` | Refactor: optimize render_logs.py - extract shared helpers, clean imports |
-| `1fe2d3d` | Enhance: improve visual-debug file selection and URL extraction |
-| `d2f3992` | Fix: resolve critical Inspector bugs and refactor duplicate code |
-| `8ec9297` | Enhanced overlay click detection + visual debug UI improvements |
-| `df28faf` | Visual debug with screenshots, full console interception, and error overlay detection |
-| `ab4a065` | Smart-chat major upgrade — higher file limits, smarter selection, file history tracking |
-| `f8874a8` | Replace DB field auto-injection with general system instructions + add send-to-chat button |
-| `5c892f4` | 4 improvements - verify retry, visual task detection, field relevance, search fallthrough |
-| `c974b41` | 5 critical issues - GitHub push, model selection, prompt fields, service detection, token fallback |
-| `5b0cd00` | Inspector prompt field management - instructions, memory & training controls |
-| `801fba4` | Smart-chat AI models fail to understand user intent - deep prompt engineering overhaul |
-| `ad09b6f` | Smart-chat models blind to project structure - add tree summary, balanced file selection |
-| `c50d5ec` | Inspector smart-chat - wrong classification, no file reading, empty responses, timeouts |
-| `3f02a8c` | Smart contextual chat with message classification + Apply button |
-| `2eeaab2` | AI-powered error investigation and auto-fix in Inspector tab |
-| `9ed3fc2` | Inspector session persistence, chat panel actions, and backend log verification |
-| `962de99` | Replace postMessage with WebSocket bridge to solve cross-origin issue |
+| تاریخ | Commit | توضیح |
+|-------|--------|--------|
+| 02-09 | `0339de7` | Smart prompt budget + auto-retry on empty AI response |
+| 02-09 | `cd830a8` | Retry-aware deep analysis for all inspector prompts |
+| 02-09 | `2f3f06e` | Fetch fresh backend logs from Render API at screenshot time |
+| 02-08 | `e27020d` | Rewrite Visual Debug as smart Visual Inspector |
+| 02-08 | `98cfbc1` | AI-powered Render service creation with Inspector chat results |
+| 02-08 | `53b2d07` | Smart Render service creation - read actual files from GitHub |
+| 02-08 | `eaf5fbf` | Smart Render service creation - auto-detect project structure |
+| 02-08 | `d0beb9c` | Add Render service creation button + action type filter |
+| 02-08 | `1368d57` | Bridge auto-update endpoints and version tracking |
+| 02-08 | `dc91e33` | Smart API path detection + general-purpose visual debug |
+| 02-08 | `cb22c8c` | Bridge script click detection bug + visual debug screenshot packs |
+| 02-08 | `75469ae` | Refactor: optimize render_logs.py - extract shared helpers |
+| 02-08 | `d2f3992` | Fix: resolve critical Inspector bugs + refactor duplicate code |
+| 02-08 | `8ec9297` | Enhanced overlay click detection + visual debug UI |
+| 02-08 | `df28faf` | Visual debug with screenshots + full console interception |
+| 02-08 | `ab4a065` | Smart-chat major upgrade — higher file limits, smarter selection |
+| 02-07 | `f8874a8` | Replace DB field auto-injection with general system instructions |
+| 02-07 | `5b0cd00` | Inspector prompt field management |
+| 02-07 | `801fba4` | Smart-chat deep prompt engineering overhaul |
+| 02-07 | `ad09b6f` | Add tree summary + balanced file selection |
+| 02-07 | `c50d5ec` | Smart-chat: wrong classification, no file reading fixes |
+| 02-06 | `3f02a8c` | Smart contextual chat with message classification + Apply button |
+| 02-06 | `2eeaab2` | AI-powered error investigation and auto-fix |
+| 02-06 | `9ed3fc2` | Inspector session persistence + backend log verification |
+| 02-06 | `962de99` | Replace postMessage with WebSocket bridge |
+| 02-05 | `7862048` | Implement Bridge Script injection for cross-origin iframe tracking |
+| 02-05 | `6501dad` | Remove Playwright, add log monitoring toggle |
+| 02-05 | `0749cd5` | Implement live action tracking in Inspector tab |
 
 ---
 
 ## 9. بازرس ویژه (Inspector Tab) - گزارش جامع
 
-### وضعیت کلی (به‌روزرسانی 2026-02-08)
+### وضعیت کلی (به‌روزرسانی 2026-02-09)
 
 | معیار | وضعیت |
 |-------|--------|
-| وضعیت | 🟢 **فعال و عملیاتی** - تمام قابلیت‌ها پیاده‌سازی شده (نیاز به تست واقعی) |
-| درصد پیشرفت | ~95% (نیاز به تست end-to-end) |
-| تاریخ شروع | 2026-02-04 |
-| آخرین به‌روزرسانی | 2026-02-08 |
-| تعداد کامیت‌ها | 50+ |
-| خطوط کد بک‌اند | ~6,000+ (از render_logs.py) |
-| خطوط کد فرانت‌اند | ~3,000+ (از page.tsx) |
+| وضعیت | **فعال و عملیاتی** - تمام قابلیت‌ها پیاده‌سازی شده |
+| درصد پیشرفت | ~97% (نیاز به تست end-to-end) |
+| تاریخ شروع | 2026-02-05 |
+| آخرین به‌روزرسانی | 2026-02-09 |
+| تعداد کامیت‌ها | 130+ (بدون merge commits) |
+| خطوط کد بک‌اند | ~7,500+ (از render_logs.py) |
+| خطوط کد فرانت‌اند | ~4,000+ (از page.tsx) |
+| تعداد Endpoint ها | 53 |
 
 ### فازهای توسعه
 
-#### فاز 1: Playwright (منسوخ)
+#### فاز 1: Playwright (منسوخ - 2026-02-05)
 - تلاش برای تعامل با صفحه از طریق headless browser
 - 7 راه‌حل مختلف امتحان شد - همه ناموفق
 - مشکل اصلی: iframe و Playwright دو instance جدا بودند
 - **نتیجه:** کنار گذاشته شد
 
-#### فاز 2: Bridge Script (2026-02-04 تا 2026-02-05)
+#### فاز 2: Bridge Script (2026-02-05)
 - تزریق اسکریپت پل در پروژه کاربر
 - تشخیص خودکار فریم‌ورک (Next.js, React, Vue, Angular, Python)
 - مشکل cross-origin برای postMessage
 - **نتیجه:** postMessage ناپایدار بود
 
-#### فاز 3: WebSocket Bridge Hub (2026-02-05 تا حال)
+#### فاز 3: WebSocket Bridge Hub (2026-02-05 تا 2026-02-08)
 - جایگزینی postMessage با WebSocket
 - Bridge Hub مرکزی در بک‌اند
 - ارتباط دو طرفه بین Bridge Script و Inspector
 - **نتیجه:** ✅ حل مشکل cross-origin
 
+#### فاز 4: Smart Inspector + Render Creation (2026-02-08 تا حال)
+- بازنویسی Visual Debug به Visual Inspector (چندمنظوره)
+- ساخت هوشمند سرویس Render مستقیماً از Inspector
+- Bridge Auto-Update با نسخه‌بندی
+- بودجه هوشمند پرامپت با auto-retry
+- **نتیجه:** ✅ سیستم کامل و یکپارچه
+
 ### معماری فعلی
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                      Frontend                         │
-│  ┌────────────────┐     ┌───────────────────────┐    │
-│  │    iframe       │     │     Chat Panel        │    │
-│  │  (پروژه کاربر) │     │  + Smart-Chat         │    │
-│  │                 │     │  + Visual Debug        │    │
-│  │ Bridge Script ──┼─────│──► WebSocket Client    │    │
-│  │  (تزریق شده)   │     │                       │    │
-│  └────────────────┘     └───────────────────────┘    │
-│           │                        │                  │
-│           │ WebSocket              │ API              │
-│           ▼                        ▼                  │
-│  ┌─────────────────────────────────────────────┐     │
-│  │        Backend (FastAPI)                     │     │
-│  │                                              │     │
-│  │  ┌──────────────┐  ┌──────────────────┐     │     │
-│  │  │ Bridge Hub   │  │   Smart-Chat     │     │     │
-│  │  │ (WebSocket)  │  │   (SSE Stream)   │     │     │
-│  │  └──────────────┘  └──────────────────┘     │     │
-│  │                                              │     │
-│  │  ┌──────────────┐  ┌──────────────────┐     │     │
-│  │  │ Visual Debug │  │   Session DB     │     │     │
-│  │  │ (Screenshot) │  │   (Messages)     │     │     │
-│  │  └──────────────┘  └──────────────────┘     │     │
-│  └─────────────────────────────────────────────┘     │
-└──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                        Frontend                               │
+│  ┌────────────────┐     ┌──────────────────────────────┐     │
+│  │    iframe       │     │       Chat Panel              │     │
+│  │  (پروژه کاربر) │     │  + Smart-Chat (Budget-Aware)  │     │
+│  │                 │     │  + Visual Inspector            │     │
+│  │ Bridge Script ──┼─────│──► WebSocket Client            │     │
+│  │ (نسخه‌بندی شده)│     │  + Render Service Creator     │     │
+│  └────────────────┘     └──────────────────────────────┘     │
+│           │                        │                          │
+│           │ WebSocket              │ API / SSE                │
+│           ▼                        ▼                          │
+│  ┌───────────────────────────────────────────────────────┐   │
+│  │          Backend (FastAPI) - 53 Endpoints              │   │
+│  │                                                        │   │
+│  │  ┌──────────────┐  ┌────────────────────────────┐     │   │
+│  │  │ Bridge Hub   │  │   Smart-Chat               │     │   │
+│  │  │ (WebSocket)  │  │ (Budget + Auto-retry)      │     │   │
+│  │  │ + Auto-Update│  │   (SSE Stream)             │     │   │
+│  │  └──────────────┘  └────────────────────────────┘     │   │
+│  │                                                        │   │
+│  │  ┌──────────────┐  ┌────────────────────────────┐     │   │
+│  │  │ Visual       │  │   Session DB               │     │   │
+│  │  │ Inspector    │  │   (Messages + Verify)      │     │   │
+│  │  │ (Screenshot) │  │                            │     │   │
+│  │  └──────────────┘  └────────────────────────────┘     │   │
+│  │                                                        │   │
+│  │  ┌──────────────┐  ┌────────────────────────────┐     │   │
+│  │  │ Render       │  │   Prompt Fields            │     │   │
+│  │  │ Service      │  │   (Budget Management)      │     │   │
+│  │  │ Creator 🆕   │  │                            │     │   │
+│  │  └──────────────┘  └────────────────────────────┘     │   │
+│  └───────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### قابلیت‌های پیاده‌سازی شده
@@ -564,6 +598,9 @@
 | تشخیص Overlay | ✅ | MutationObserver + اسکن دوره‌ای 2000ms |
 | تشخیص خطای بصری | ✅ | error-overlay detection با CSS selector ها |
 | Debounce | ✅ | 100ms برای جلوگیری از flood |
+| 🆕 نسخه‌بندی Bridge | ✅ | ردیابی نسخه + auto-update خودکار |
+| 🆕 @ts-nocheck | ✅ | جلوگیری از خطای TypeScript در پروژه‌های هدف |
+| 🆕 Bridge Auto-Update | ✅ | به‌روزرسانی خودکار bridge های قدیمی |
 
 #### 9.2 Smart-Chat
 
@@ -578,8 +615,11 @@
 | Heartbeat | ✅ | جلوگیری از QUIC timeout |
 | Context Window Management | ✅ | محاسبه خودکار max_input_chars |
 | ردیابی فایل‌های خوانده شده | ✅ | previously_read_files |
+| 🆕 Smart Prompt Budget | ✅ | توزیع بودجه بین فایل‌ها/لاگ‌ها/context |
+| 🆕 Auto-retry on empty | ✅ | تلاش مجدد با مدل دیگر |
+| 🆕 Retry-aware analysis | ✅ | تحلیل عمیق در تمام پرامپت‌ها |
 
-#### 9.3 Visual Debug
+#### 9.3 Visual Inspector (بازنویسی شده)
 
 | قابلیت | وضعیت | توضیح |
 |--------|--------|--------|
@@ -589,6 +629,9 @@
 | پرامپت اختصاصی | ✅ | VISUAL_DEBUG_SYSTEM_PROMPT |
 | SSE Streaming | ✅ | نمایش لحظه‌ای نتایج |
 | انتخاب خودکار مدل Vision | ✅ | از MODEL_REGISTRY |
+| 🆕 ساخت قابلیت جدید | ✅ | feature creation علاوه بر debug |
+| 🆕 پرامپت چندمنظوره | ✅ | general-purpose (نه فقط debug) |
+| 🆕 دریافت لاگ تازه | ✅ | fetch از Render API هنگام عکس‌برداری |
 
 #### 9.4 مدیریت Session
 
@@ -606,9 +649,10 @@
 |--------|--------|--------|
 | اسکن لاگ بک‌اند | ✅ | در بازه زمانی اقدام |
 | تفکیک console از backend | ✅ | جداسازی خطاهای واقعی |
-| نشانگر بصری | ✅ | 🔍 pending / ✓ ok / ✕ error |
+| نشانگر بصری | ✅ | pending / ok / error |
 | Retry خودکار | ✅ | با exponential backoff |
 | ذخیره در DB | ✅ | backend_verified + log_summary |
+| 🆕 تایید بر اساس Bridge | ✅ | بررسی وضعیت از طریق bridge |
 
 #### 9.6 AI Investigation & Fix
 
@@ -620,94 +664,74 @@
 | دفاع در برابر hallucination | ✅ | dual-layer validation |
 | two-pass file reading | ✅ | فایل‌های مرتبط + model files |
 
-#### 9.7 Endpoints بک‌اند
+#### 9.7 ساخت سرویس Render (جدید)
 
-| # | Endpoint | نوع | توضیح |
-|---|----------|-----|--------|
-| 1 | `ws/bridge/{project_id}` | WebSocket | Bridge Hub |
-| 2 | `inspector/session/create` | POST | ایجاد session |
-| 3 | `inspector/sessions/{project_id}` | GET | لیست sessions |
-| 4 | `inspector/session/{id}/messages` | GET | پیام‌های session |
-| 5 | `inspector/session/message` | POST | ذخیره پیام |
-| 6 | `inspector/session/{id}/archive` | POST | بایگانی session |
-| 7 | `inspector/smart-chat` | POST (SSE) | چت هوشمند |
-| 8 | `inspector/smart-select-model/{id}` | GET | انتخاب مدل |
-| 9 | `inspector/models` | GET | لیست مدل‌ها |
-| 10 | `inspector/screenshot` | POST | عکس‌برداری |
-| 11 | `inspector/visual-debug` | POST (SSE) | تحلیل بصری |
-| 12 | `inspector/vision-models` | GET | مدل‌های Vision |
-| 13 | `inspector/message/{id}/verify` | POST | تایید پیام |
-| 14 | `inspector/inject-bridge` | POST | تزریق bridge |
-| 15 | `inspector/check-bridge-status` | POST | وضعیت bridge |
-| 16 | `inspector/bridge-connections/{id}` | GET | اتصالات bridge |
-| 17 | `inspector/analyze-error` | POST | تحلیل خطا |
-| 18 | `inspector/visual-scan` | POST | اسکن بصری |
-| 19 | `inspector/get-elements` | POST | دریافت المان‌ها |
-| 20 | `inspector/find-and-click` | POST | پیدا کردن و کلیک |
+| قابلیت | وضعیت | توضیح |
+|--------|--------|--------|
+| تشخیص خودکار ساختار | ✅ | خواندن package.json, requirements.txt از GitHub |
+| تولید تنظیمات با AI | ✅ | build/start command, env vars |
+| ایجاد سرویس در Render | ✅ | API call با ownerId |
+| SPA routing | ✅ | rewrite rules برای Vite/CRA |
+| env var detection | ✅ | شناسایی خودکار متغیرهای محیطی |
+| دکمه UI | ✅ | در Inspector chat |
 
-### درخواست‌های باقیمانده کاربر
+#### 9.8 Endpoints بک‌اند (53 endpoint)
 
-#### درخواست ۱: خطاهای لایه بالاتر از Bridge Script
-**وضعیت: ✅ پیاده‌سازی شده**
-
-| مورد | وضعیت |
-|------|--------|
-| تشخیص overlay ها | ✅ MutationObserver + اسکن دوره‌ای |
-| pointerdown fallback | ✅ برای کلیک‌های بلعیده شده |
-| Console interception کامل | ✅ log, warn, error, info, debug |
-| Error overlay detection | ✅ CSS selectors + className matching |
-
-#### درخواست ۲: عکس‌برداری بصری + تحلیل پیشرفته
-**وضعیت: ✅ پیاده‌سازی شده (نیاز به تست واقعی)**
-
-| مورد | وضعیت | توضیح |
-|------|--------|--------|
-| عکس‌برداری از صفحه | ✅ | endpoint screenshot |
-| تعداد نامحدود عکس | ✅ | آرایه visualDebugScreenshots - چندین عکس پشتیبانی می‌شود |
-| لاگ بک‌اند همراه عکس | ✅ | ارسال به visual-debug |
-| لاگ کنسول تفکیک شده | ✅ | console vs backend جدا |
-| شناسایی آدرس‌های مرتبط | ✅ | استخراج URL از لاگ console + backend (حداکثر 20) |
-| توضیح اختیاری کاربر | ✅ | textarea در UI مودال visual-debug |
-| انتخاب مدل قبل از بررسی | ✅ | مودال با checkbox مدل‌های Vision |
-| تایید کاربر قبل از اجرا | ✅ | مودال تایید قبل از ارسال |
-| پرامپت ثابت قابل مشاهده | ✅ | VISUAL_DEBUG_SYSTEM_PROMPT + fields_in_use + animate-pulse |
-| اعمال تغییرات در فایل‌ها | ✅ | branch + commit + PR via GitHub API |
+| دسته | تعداد | توضیح |
+|------|-------|--------|
+| Bridge Script & Connection | 8 | inject, status, update, fix-all, WebSocket hub |
+| Session Management | 5 | create, list, messages, save, archive |
+| Smart-Chat & Actions | 2 | smart-chat (SSE), apply-action |
+| Visual Inspector | 3 | screenshot, vision-models, visual-debug |
+| Investigation & Fix | 2 | investigate, fix |
+| Prompt Fields | 9 | CRUD + reorder, test, usage-log, init-defaults |
+| Models | 4 | list, smart-select, for-investigation, quick-enable |
+| Browser Control | 3 | session, action, close |
+| AI Interaction | 6 | ai-interact, get-elements, find-click, click-at, visual-scan, sync |
+| GitHub Integration | 2 | files read, files update |
+| Smart Task | 3 | execute, status, add-action |
+| Analysis | 2 | analyze-action, analyze-error |
+| Render Service | 1 | create-render-service |
+| General Instructions | 1 | get-general-instructions |
+| Chat (legacy) | 2 | chat, chat/multi |
+| **کل** | **53** | |
 
 ---
 
 ## نتیجه‌گیری
 
-### ✅ دستاوردهای اصلی (نسخه 3.1)
+### ✅ دستاوردهای اصلی (نسخه 4.0)
 
-1. **سیستم کامل بازرس ویژه:** 53+ کامیت، 20 endpoint، 9000+ خط کد
-2. **WebSocket Bridge Hub:** حل مشکل cross-origin
-3. **Smart-Chat پیشرفته:** طبقه‌بندی هوشمند + خواندن فایل + SSE
-4. **Visual Debug کامل:** عکس‌برداری چندتایی + تحلیل بصری + انتخاب مدل + Apply Fix
-5. **Session Management:** ذخیره و بازیابی کامل
-6. **Verification System:** تایید خودکار با لاگ بک‌اند
-7. **Overlay Detection:** تشخیص و bypass المان‌های روی صفحه
-8. **بازبینی کد نسخه 3.1:** رفع 9 باگ جدید + بهینه‌سازی import + استخراج توابع مشترک
+1. **سیستم کامل بازرس ویژه:** 130+ کامیت، 53 endpoint، 11,500+ خط کد بک‌اند
+2. **WebSocket Bridge Hub:** حل مشکل cross-origin + نسخه‌بندی + auto-update
+3. **Smart-Chat پیشرفته:** طبقه‌بندی هوشمند + بودجه پرامپت + auto-retry
+4. **Visual Inspector:** بازنویسی کامل - حالا چندمنظوره (debug + feature creation)
+5. **ساخت سرویس Render:** تشخیص خودکار + تولید تنظیمات با AI + SPA routing
+6. **Bridge Auto-Update:** نسخه‌بندی + به‌روزرسانی خودکار + @ts-nocheck
+7. **Session Management:** ذخیره و بازیابی کامل
+8. **Verification System:** تایید خودکار با لاگ بک‌اند + تایید از Bridge
 
 ### ⚠️ موارد باقیمانده
 
 1. بهبود UI محدودیت فایل‌ها در تحلیل سلامت
 2. تحلیل فرانت‌اند در تحلیل سلامت
-3. ⚠️ **تمام قابلیت‌های پیاده‌سازی شده نیاز به تست واقعی (end-to-end) دارند**
+3. **تمام قابلیت‌های پیاده‌سازی شده نیاز به تست واقعی (end-to-end) دارند**
 
-### 📊 خلاصه پیشرفت کلی
+### خلاصه پیشرفت کلی
 
-| معیار | نسخه 2.6 (02-06) | نسخه 3.0 (02-08) | نسخه 3.1 (02-08) |
+| معیار | نسخه 3.0 (02-08) | نسخه 3.1 (02-08) | نسخه 4.0 (02-09) |
 |-------|-------------------|-------------------|-------------------|
-| خط کد بک‌اند Inspector | ~2,000 | ~6,000+ | ~6,000+ (بهینه‌تر) |
-| خط کد فرانت‌اند Inspector | ~1,000 | ~3,000+ | ~3,000+ (بهینه‌تر) |
-| Endpoint ها | 6 | 20 | 20 |
-| باگ‌فیکس‌ها | 10 | 45+ | 54+ |
-| قابلیت‌های اصلی | 4 | 10+ | 10+ (تکمیل شده) |
-| render_logs.py | ~5,800 خط | ~10,308 خط | ~10,349 خط |
-| page.tsx | ~8,500 خط | ~11,590 خط | ~11,456 خط |
+| خط کد بک‌اند Inspector | ~6,000+ | ~6,000+ (بهینه‌تر) | ~7,500+ |
+| خط کد فرانت‌اند Inspector | ~3,000+ | ~3,000+ (بهینه‌تر) | ~4,000+ |
+| Endpoint ها | 20 | 20 | 53 |
+| باگ‌فیکس‌ها | 45+ | 54+ | 75+ |
+| قابلیت‌های اصلی | 10+ | 10+ (تکمیل شده) | 16+ |
+| render_logs.py | ~10,308 خط | ~10,349 خط | ~11,648 خط |
+| page.tsx | ~11,590 خط | ~11,456 خط | ~12,043 خط |
+| فازهای توسعه | 3 | 3 | 4 |
 
 ---
 
-**تاریخ به‌روزرسانی:** 2026-02-08
-**نسخه گزارش:** 3.1
-**شاخه:** `claude/review-project-inspector-tab-VwMfG`
+**تاریخ به‌روزرسانی:** 2026-02-09
+**نسخه گزارش:** 4.0
+**شاخه:** `claude/review-structure-fix-inspector-s421b`

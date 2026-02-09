@@ -368,12 +368,13 @@ export const projectDetailHelp: PageHelp = {
     {
       id: 'tab-inspector',
       title: 'تب بازرس ویژه',
-      description: 'ابزار پیشرفته برای بازرسی و تحلیل عمیق پروژه. شامل پیش‌نمایش زنده در iframe، چت هوشمند (Smart-Chat) با طبقه‌بندی خودکار پیام، عکس‌برداری بصری چندتایی (Visual Debug)، تشخیص overlay، مدیریت فیلدهای پرامپت، سیستم تایید پیام، و اعمال تغییرات روی GitHub.',
+      description: 'ابزار پیشرفته برای بازرسی و تحلیل عمیق پروژه. شامل پیش‌نمایش زنده در iframe، چت هوشمند (Smart-Chat) با بودجه هوشمند پرامپت و auto-retry، بازرس بصری (Visual Inspector) چندمنظوره، ساخت سرویس Render، تشخیص overlay، مدیریت فیلدهای پرامپت، Bridge Auto-Update، و اعمال تغییرات روی GitHub.',
       type: 'tab',
       tips: [
-        '✅ WebSocket Bridge Hub: اتصال بدون محدودیت cross-origin',
-        '✅ Smart-Chat: طبقه‌بندی خودکار پیام (QUESTION/ERROR_LOG/ACTION)',
-        '✅ Visual Debug: عکس‌برداری چندتایی + تحلیل بصری با مدل‌های Vision',
+        '✅ WebSocket Bridge Hub: اتصال بدون محدودیت cross-origin + نسخه‌بندی + auto-update',
+        '✅ Smart-Chat: طبقه‌بندی خودکار پیام + بودجه هوشمند پرامپت + auto-retry',
+        '✅ Visual Inspector: عکس‌برداری چندتایی + تحلیل بصری + ساخت قابلیت جدید',
+        '✅ ساخت سرویس Render: تشخیص خودکار ساختار + تولید تنظیمات با AI',
         '✅ تشخیص overlay: MutationObserver + pointerdown fallback',
         '✅ Console Interception: ثبت کامل log/warn/error/info/debug',
         '✅ مدیریت فیلدهای پرامپت: دستورات، حافظه، آموزش',
@@ -382,6 +383,8 @@ export const projectDetailHelp: PageHelp = {
         '✅ Reply-to: پاسخ به پیام خاص با مدل اصلی',
         '✅ Apply Changes: ایجاد branch + commit + PR در GitHub',
         '✅ استخراج URL: شناسایی خودکار آدرس‌های مرتبط از لاگ‌ها',
+        '✅ Bridge Auto-Update: نسخه‌بندی + به‌روزرسانی خودکار bridge های قدیمی',
+        '✅ @ts-nocheck: جلوگیری از خطای TypeScript در پروژه‌های هدف',
         'URL واقعی سرویس از Render API دریافت می‌شود',
         'برای پروژه‌های بدون فرانت‌اند هشدار مناسب نمایش می‌دهد'
       ],
@@ -389,25 +392,30 @@ export const projectDetailHelp: PageHelp = {
     {
       id: 'inspector-screen',
       title: 'اسکرین پیش‌نمایش',
-      description: 'نمایشگر افقی بزرگ (840px عرض) با نسبت 1.82:1 برای پیش‌نمایش زنده پروژه. Bridge Script در پروژه تزریق شده و از طریق WebSocket رویدادها را گزارش می‌دهد.',
+      description: 'نمایشگر افقی بزرگ (840px عرض) با نسبت 1.82:1 برای پیش‌نمایش زنده پروژه. Bridge Script نسخه‌بندی شده در پروژه تزریق شده و از طریق WebSocket رویدادها را گزارش می‌دهد.',
       type: 'panel',
       tips: [
         'فرانت‌اند در iframe لود می‌شود',
         'لاگ‌های بک‌اند با 30% شفافیت در پس‌زمینه',
+        '✅ Bridge Script نسخه‌بندی شده + auto-update خودکار',
         '✅ Bridge Script از طریق WebSocket اطلاعات را ارسال می‌کند',
         '✅ تشخیص خودکار overlay و خطاهای بصری',
         '✅ Console Interception: تمام لاگ‌های console ثبت می‌شود',
         '✅ pointerdown fallback: کلیک حتی اگر overlay مانع شود',
+        '✅ @ts-nocheck: جلوگیری از خطای TypeScript در پروژه‌های هدف',
         'URL واقعی از Render API دریافت می‌شود'
       ],
     },
     {
       id: 'inspector-chat',
       title: 'چت دستیار بازرس هوشمند (Smart-Chat)',
-      description: 'پنل چت هوشمند با طبقه‌بندی خودکار پیام (سوال/خطا/اقدام)، انتخاب خودکار فایل‌ها از GitHub، تایید خودکار با لاگ بک‌اند، و قابلیت Reply-to.',
+      description: 'پنل چت هوشمند با بودجه هوشمند پرامپت، طبقه‌بندی خودکار پیام (سوال/خطا/اقدام)، auto-retry روی پاسخ خالی، انتخاب خودکار فایل‌ها از GitHub، و قابلیت Reply-to.',
       type: 'panel',
       tips: [
         '✅ Smart-Chat: طبقه‌بندی خودکار پیام (QUESTION=5فایل, ERROR_LOG=10فایل, ACTION=15فایل)',
+        '✅ بودجه هوشمند پرامپت: توزیع خودکار بین فایل‌ها/لاگ‌ها/context',
+        '✅ Auto-retry: اگر AI پاسخ خالی بدهد، خودکار با مدل دیگر تلاش مجدد',
+        '✅ Retry-aware deep analysis: تحلیل عمیق در تمام پرامپت‌ها',
         '✅ خلاصه ساختار پروژه در همه پرامپت‌ها (project tree summary)',
         '✅ انتخاب متوازن فایل از دایرکتوری‌های مختلف',
         '✅ ردیابی تاریخچه فایل‌های خوانده شده (جلوگیری از تکرار)',
@@ -559,38 +567,43 @@ export const projectDetailHelp: PageHelp = {
     },
     {
       id: 'inspector-bridge-system',
-      title: 'سیستم Bridge Script + WebSocket Hub',
-      description: 'Bridge Script در پروژه تزریق شده و از طریق WebSocket Bridge Hub (نه postMessage) با Inspector ارتباط برقرار می‌کند. مشکل cross-origin حل شده است.',
+      title: 'سیستم Bridge Script + WebSocket Hub + Auto-Update',
+      description: 'Bridge Script نسخه‌بندی شده در پروژه تزریق می‌شود و از طریق WebSocket Bridge Hub با Inspector ارتباط برقرار می‌کند. مشکل cross-origin حل شده. Bridge های قدیمی خودکار به‌روزرسانی می‌شوند.',
       type: 'area',
       tips: [
         '✅ سه قالب: HTML، JS/TS، Next.js Client Component',
         '✅ تشخیص خودکار فریم‌ورک (Next.js، React، Vue، Angular، Python)',
         '✅ WebSocket Bridge Hub: حل مشکل cross-origin',
+        '✅ نسخه‌بندی Bridge Script + ردیابی نسخه',
+        '✅ Auto-Update: به‌روزرسانی خودکار bridge های قدیمی',
+        '✅ @ts-nocheck: جلوگیری از خطای TypeScript در پروژه‌های هدف',
         '✅ ثبت رویدادها: click، pointerdown، scroll، input، focus، error',
         '✅ Console Interception: log، warn، error، info، debug (حداکثر 200 لاگ)',
         '✅ تشخیص Overlay: MutationObserver + اسکن دوره‌ای 2000ms',
         '✅ Error overlay detection: تشخیص خطاهای بصری فریم‌ورک‌ها',
         '✅ Debounce 100ms: جلوگیری از ارسال بیش از حد',
         '✅ محافظت نشت حافظه: cleanup خودکار اتصالات بیکار (1 ساعت)',
-        '📝 جزئیات کامل در SYSTEM_REPORT_2026-02-08.md بخش 9'
+        '📝 جزئیات کامل در SYSTEM_REPORT_2026-02-09.md بخش 9'
       ],
     },
     {
       id: 'inspector-visual-debug',
-      title: 'عکس‌برداری بصری (Visual Debug)',
-      description: 'قابلیت عکس‌برداری چندتایی از صفحه پروژه و تحلیل بصری توسط مدل‌های Vision (GPT-4o, Gemini Pro Vision). عکس‌ها + لاگ بک‌اند + لاگ کنسول (تفکیک شده) + آدرس‌های مرتبط + توضیح کاربر + فایل‌های مرتبط به AI ارسال می‌شود.',
+      title: 'بازرس بصری (Visual Inspector)',
+      description: 'سیستم چندمنظوره بازنویسی شده از Visual Debug. علاوه بر رفع خطا، قابلیت ساخت قابلیت جدید (feature creation) را هم دارد. عکس‌ها + لاگ تازه از Render API + لاگ کنسول + آدرس‌ها + فایل‌ها به AI ارسال می‌شود.',
       type: 'area',
       tips: [
+        '✅ بازنویسی شده: حالا چندمنظوره (debug + feature creation)',
         '✅ عکس‌برداری چندتایی از صفحه (بدون محدودیت)',
-        '✅ تحلیل بصری با مدل‌های Vision',
+        '✅ تحلیل بصری با مدل‌های Vision (GPT-4o, Gemini)',
+        '✅ دریافت لاگ تازه از Render API هنگام عکس‌برداری',
         '✅ ادغام عکس + لاگ بک‌اند + لاگ کنسول + فایل‌ها',
-        '✅ پرامپت اختصاصی (VISUAL_DEBUG_SYSTEM_PROMPT) با انیمیشن pulse',
+        '✅ پرامپت چندمنظوره (general-purpose) با انیمیشن pulse',
         '✅ SSE Streaming: نمایش لحظه‌ای نتایج',
-        '✅ فیلد "visual_debug_prompt" در لیست پرامپت‌ها قابل مشاهده',
         '✅ انتخاب مدل Vision توسط کاربر (مودال با checkbox)',
         '✅ تایید کاربر قبل از اجرا',
         '✅ توضیح اختیاری کاربر (textarea)',
         '✅ شناسایی خودکار URL‌های مرتبط از لاگ‌ها (حداکثر 20)',
+        '✅ تشخیص هوشمند مسیر API پروژه',
         '✅ اعمال تغییرات: ایجاد branch + commit + PR',
       ],
     },
@@ -608,8 +621,35 @@ export const projectDetailHelp: PageHelp = {
       ],
     },
     {
+      id: 'inspector-render-service',
+      title: 'ساخت سرویس Render',
+      description: 'ساخت هوشمند سرویس Render مستقیماً از Inspector. ساختار پروژه خودکار تشخیص داده شده و تنظیمات با AI تولید می‌شود.',
+      type: 'button',
+      tips: [
+        '✅ تشخیص خودکار ساختار پروژه از فایل‌های GitHub',
+        '✅ خواندن فایل‌های واقعی (package.json، requirements.txt)',
+        '✅ تولید هوشمند build/start command با AI',
+        '✅ شناسایی خودکار env vars',
+        '✅ رفع مسیریابی SPA برای Vite/CRA',
+        '✅ ایجاد خودکار سرویس در Render API',
+        'پروژه باید به GitHub متصل باشد',
+      ],
+    },
+    {
+      id: 'inspector-smart-budget',
+      title: 'بودجه هوشمند پرامپت',
+      description: 'سیستم توزیع خودکار بودجه پرامپت بین فایل‌ها، لاگ‌ها و context بر اساس نوع پیام و context window مدل.',
+      type: 'section',
+      tips: [
+        '✅ محاسبه خودکار حداکثر کاراکتر برای هر بخش',
+        '✅ توزیع بودجه بر اساس نوع پیام (QUESTION/ERROR/ACTION)',
+        '✅ Auto-retry: اگر AI پاسخ خالی بدهد، مدل دیگر امتحان می‌شود',
+        '✅ Retry-aware: تحلیل عمیق در همه پرامپت‌ها',
+      ],
+    },
+    {
       id: 'inspector-github-status',
-      title: '🆕 وضعیت اتصال GitHub',
+      title: 'وضعیت اتصال GitHub',
       description: 'نشانگر وضعیت اتصال به GitHub برای خواندن و ویرایش فایل‌های پروژه.',
       type: 'section',
       tips: [
@@ -705,9 +745,10 @@ export const projectDetailHelp: PageHelp = {
     subgraph InspectorTab["🔍 بازرس ویژه"]
         Screen["📱 اسکرین پیش‌نمایش"]
         PowerBtn["🔘 دکمه پاور"]
-        Chat["💬 Smart-Chat"]
-        VisualDbg["📸 Visual Debug"]
+        Chat["💬 Smart-Chat + Budget"]
+        VisualInsp["📸 Visual Inspector"]
         PromptMgr["📋 فیلدهای پرامپت"]
+        RenderSvc["🚀 ساخت سرویس Render"]
     end
 
     subgraph ScreenContent["📺 محتوای اسکرین"]
@@ -744,8 +785,9 @@ export const projectDetailHelp: PageHelp = {
     Inspector --> Screen
     Inspector --> PowerBtn
     Inspector --> Chat
-    Inspector --> VisualDbg
+    Inspector --> VisualInsp
     Inspector --> PromptMgr
+    Inspector --> RenderSvc
     PowerBtn --> ScreenContent
     Screen --> Frontend
     Frontend --> BridgeWS
