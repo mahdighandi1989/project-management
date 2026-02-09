@@ -9584,6 +9584,50 @@ def _ensure_balanced_selection(selected: list, code_files: list, max_files: int)
     return selected
 
 
+# ─── کاهش هوشمند حجم پرامپت برای تلاش مجدد ───
+def _reduce_prompt_for_retry(prompt: str) -> str:
+    """کاهش حجم پرامپت با حذف بخشی از تاریخچه، کد و لاگ‌ها"""
+    if len(prompt) < 10000:
+        return prompt
+
+    result = prompt
+
+    # 1. کاهش تاریخچه مکالمه (بزرگ‌ترین بخش قابل حذف)
+    hist_start = result.find("## تاریخچه کامل مکالمه:")
+    if hist_start >= 0:
+        next_sect = result.find("\n## ", hist_start + 30)
+        if next_sect > hist_start:
+            old_hist = result[hist_start:next_sect]
+            if len(old_hist) > 800:
+                new_hist = "## تاریخچه کامل مکالمه:\n" + old_hist[30:][-500:] + "\n"
+                result = result[:hist_start] + new_hist + result[next_sect:]
+
+    # 2. کاهش بخش کد (حفظ نیمه اول)
+    code_start = result.find("## کد فایل‌های مرتبط")
+    if code_start >= 0:
+        code_end = result.find("## فرمت پاسخ", code_start)
+        if code_end < 0:
+            code_end = result.find("## وظیفه:", code_start)
+        if code_end > code_start:
+            old_code = result[code_start:code_end]
+            max_len = max(5000, len(old_code) // 2)
+            if len(old_code) > max_len:
+                result = result[:code_start] + old_code[:max_len] + "\n\n... [بخشی از فایل‌ها برای بهینه‌سازی حذف شد]\n\n" + result[code_end:]
+
+    # 3. کاهش لاگ‌ها
+    for log_marker in ["## لاگ‌های اخیر:", "## لاگ‌های بک‌اند:"]:
+        log_start = result.find(log_marker)
+        if log_start >= 0:
+            next_sect = result.find("\n\n##", log_start + len(log_marker))
+            if next_sect > log_start:
+                old_logs = result[log_start:next_sect]
+                if len(old_logs) > 400:
+                    result = result[:log_start] + log_marker + "\n" + old_logs[len(log_marker):][-200:] + "\n" + result[next_sect:]
+            break
+
+    return result
+
+
 # ─── انتخاب هوشمند مدل بر اساس آرشیو چت‌ها ───
 async def _smart_select_model(db, project_id: str) -> str:
     """
@@ -10318,6 +10362,16 @@ GitHub: {_proj_github}
 - اگر بتوانی مسیر دقیق فایل مشکل‌دار را تشخیص بدهی (از ساختار پروژه بالا)، بگو کدام فایل باید بررسی شود
 - هرگز محتوای فایل حدس نزن — فقط تحلیل متنی ارائه بده"""
 
+            # ── محاسبه بودجه هوشمند بخش‌های متغیر پرامپت خطا ──
+            _err_code_len = len(err_code_section)
+            _err_inst_len = len(general_instructions_text)
+            _err_msg_len = len(request.message)
+            _err_reply_len = len(reply_context_text) if reply_context_text else 0
+            _err_fixed = _err_code_len + _err_inst_len + _err_msg_len + _err_reply_len + 4000
+            _err_var_budget = max(2000, max_input_chars - _err_fixed)
+            _err_hist_limit = min(5000, int(_err_var_budget * 0.75))
+            _err_logs_limit = min(1500, int(_err_var_budget * 0.25))
+
             error_analysis_prompt = f"""شما بازرس ارشد پروژه {owner}/{repo} هستید.
 {general_instructions_text}
 ## ⚠️ اصل اول: فهم عمیق منظور کاربر
@@ -10337,13 +10391,13 @@ GitHub: {_proj_github}
 آن را در ارتباط با تمام مکالمات قبلی این جلسه تحلیل کنید.
 
 ## تاریخچه کامل مکالمه:
-{history_text[-5000:]}
+{history_text[-_err_hist_limit:]}
 {reply_context_text if reply_context_text else ''}
 ## پیام جدید کاربر (حاوی لاگ خطا):
 {request.message}
 
 ## لاگ‌های بک‌اند:
-{logs_text[-1500:] if logs_text else 'موجود نیست'}
+{logs_text[-_err_logs_limit:] if logs_text else 'موجود نیست'}
 
 {err_code_section}
 
@@ -10428,17 +10482,47 @@ GitHub: {_proj_github}
                     return
                 response = gen_task.result()
 
-                # بررسی پاسخ خالی
-                if not response.content or not response.content.strip():
-                    slog.warning(f"[smart-chat] Empty ERROR_LOG response from model={primary_model}")
-                    yield sse("error", {
-                        "message": f"⚠️ مدل {primary_model} پاسخ خالی برگرداند. لطفاً دوباره تلاش کنید یا مدل دیگری استفاده نمایید."
-                    })
-                else:
+                # بررسی پاسخ خالی + تلاش مجدد هوشمند
+                _err_content = response.content
+                _err_model_used = response.model_id
+                _err_tokens = response.tokens_used
+                if not _err_content or not _err_content.strip():
+                    slog.warning(f"[smart-chat] Empty ERROR_LOG response, model={primary_model}, prompt_len={len(error_analysis_prompt)}")
+                    _err_sys_msg = f"تو بازرس ارشد پروژه هستی. {'مستقیماً کد مشکل‌دار را پیدا کن، اصلاحش را بنویس و action_plan ارائه بده.' if has_err_code_files else 'فایل‌ها خوانده نشدند — فقط تحلیل خطا ارائه بده.'} با لحن صمیمی و حرفه‌ای پاسخ بده."
+                    _reduced_err = _reduce_prompt_for_retry(error_analysis_prompt)
+                    _retry_models = [primary_model]
+                    _fb = ai_manager.find_fallback_model(primary_model)
+                    if _fb and _fb != primary_model:
+                        _retry_models.append(_fb)
+                    for _ri, _rm in enumerate(_retry_models):
+                        _rl = "پرامپت کاهش‌یافته" if _ri == 0 else f"مدل جایگزین ({_rm})"
+                        yield sse("progress", {"step": "retry_empty", "message": f"⚠️ پاسخ خالی — تلاش مجدد با {_rl}..."})
+                        try:
+                            _rr = await ai_manager.generate(
+                                model_id=_rm,
+                                messages=[Message(role="system", content=_err_sys_msg), Message(role="user", content=_reduced_err)],
+                                max_tokens=min(model_max_output, 6144),
+                                temperature=0.4,
+                            )
+                            if _rr.content and _rr.content.strip():
+                                _err_content = _rr.content
+                                _err_model_used = _rr.model_id
+                                _err_tokens = _rr.tokens_used
+                                slog.info(f"[smart-chat] ERROR_LOG retry succeeded: model={_rm}")
+                                yield sse("progress", {"step": "retry_success", "message": f"✅ تلاش مجدد موفق — مدل {_rm} پاسخ داد"})
+                                break
+                        except Exception as _re:
+                            slog.warning(f"[smart-chat] ERROR_LOG retry {_ri+1} failed: {_re}")
+                    if not _err_content or not _err_content.strip():
+                        yield sse("error", {
+                            "message": f"❌ مدل {primary_model} پاسخ خالی برگرداند (حتی بعد از تلاش مجدد) | حجم: ~{len(error_analysis_prompt)} کاراکتر",
+                            "detail": f"مدل: {primary_model} | حجم: ~{len(error_analysis_prompt)} | context: {model_context_window}"
+                        })
+                if _err_content and _err_content.strip():
                     # استخراج action_plan
                     action_plan = None
                     try:
-                        json_match = re.search(r'```json\s*\n(.*?)\n```', response.content, re.DOTALL)
+                        json_match = re.search(r'```json\s*\n(.*?)\n```', _err_content, re.DOTALL)
                         if json_match:
                             parsed = json.loads(json_match.group(1))
                             if parsed.get("files") and len(parsed["files"]) > 0:
@@ -10454,15 +10538,15 @@ GitHub: {_proj_github}
                         slog.warning(f"[smart-chat ERROR_LOG] AI generated action_plan without reading files — stripped")
                         action_plan = None
 
-                    has_code_action = action_plan is not None or any(marker in response.content for marker in [
+                    has_code_action = action_plan is not None or any(marker in _err_content for marker in [
                         "```", "فایل‌هایی که باید تغییر", "اصلاح کنید"
                     ])
 
                     yield sse("response", {
                         "type": "error_analysis",
-                        "content": response.content,
-                        "model_used": response.model_id,
-                        "tokens_used": response.tokens_used,
+                        "content": _err_content,
+                        "model_used": _err_model_used,
+                        "tokens_used": _err_tokens,
                         "has_action": has_code_action,
                         "action_plan": action_plan,
                         "files_were_read": has_err_code_files,
@@ -10638,6 +10722,28 @@ GitHub: {_proj_github}
 - هرگز محتوای فایل حدس نزن — فقط تحلیل متنی ارائه بده
 - بگو برای ارائه کد اصلاحی به دسترسی GitHub نیاز داری"""
 
+            # ── محاسبه بودجه هوشمند بخش‌های متغیر پرامپت اصلی ──
+            _act_code_len = len(code_section)
+            _act_inst_len = len(general_instructions_text)
+            _act_msg_len = len(request.message)
+            _act_reply_len = len(reply_context_text) if reply_context_text else 0
+            _act_fixed = _act_code_len + _act_inst_len + _act_msg_len + _act_reply_len + 4000
+            _act_var_budget = max(2000, max_input_chars - _act_fixed)
+            _act_hist_limit = min(5000, int(_act_var_budget * 0.70))
+            _act_logs_limit = min(1000, int(_act_var_budget * 0.15))
+
+            # اگر حجم کل هنوز بیش از ظرفیته، code_section رو کاهش بده
+            _total_est = _act_code_len + _act_inst_len + _act_msg_len + _act_reply_len + _act_hist_limit + _act_logs_limit + 4000
+            if _total_est > max_input_chars and _act_code_len > 5000:
+                _allowed_code = max(5000, max_input_chars - (_act_inst_len + _act_msg_len + _act_reply_len + _act_hist_limit + _act_logs_limit + 4000))
+                if _allowed_code < _act_code_len:
+                    code_section = code_section[:_allowed_code] + "\n\n... [بخشی از فایل‌ها به دلیل محدودیت ظرفیت مدل حذف شد]"
+                    slog.warning(f"[smart-chat] Code section truncated: {_act_code_len} -> {_allowed_code}")
+                    yield sse("progress", {
+                        "step": "prompt_truncation",
+                        "message": f"⚠️ حجم کد ({_act_code_len:,}) بیش از ظرفیت مدل — بهینه‌سازی شد"
+                    })
+
             action_prompt = f"""شما بازرس ارشد و توسعه‌دهنده پروژه {owner}/{repo} هستید.
 {general_instructions_text}
 ## ⚠️ اصل اول: فهم عمیق منظور کاربر
@@ -10657,13 +10763,13 @@ GitHub: {_proj_github}
 - اگر فایلی لازم است که ندیده‌ای، صادقانه بگو ولی برای فایل‌هایی که داری، راه‌حل کامل ارائه بده
 
 ## تاریخچه کامل مکالمه:
-{history_text[-5000:]}
+{history_text[-_act_hist_limit:]}
 {reply_context_text if reply_context_text else ''}
 ## درخواست جدید کاربر:
 {request.message}
 
 ## لاگ‌های اخیر:
-{logs_text[-1000:] if logs_text else 'موجود نیست'}
+{logs_text[-_act_logs_limit:] if logs_text else 'موجود نیست'}
 
 {code_section}
 
@@ -10743,15 +10849,43 @@ GitHub: {_proj_github}
                     return
                 response = gen_task.result()
 
-                # بررسی پاسخ خالی
+                # بررسی پاسخ خالی + تلاش مجدد هوشمند
                 content = response.content
+                _act_model_used = response.model_id
+                _act_tokens = response.tokens_used
                 if not content or not content.strip():
-                    slog.warning(f"[smart-chat] Empty response from model={primary_model}")
-                    yield sse("error", {
-                        "message": f"⚠️ مدل {primary_model} پاسخ خالی برگرداند. لطفاً دوباره تلاش کنید یا مدل دیگری استفاده نمایید.",
-                        "detail": f"مدل: {primary_model} | حجم پرامپت: ~{len(action_prompt)} کاراکتر"
-                    })
-                else:
+                    slog.warning(f"[smart-chat] Empty response, model={primary_model}, prompt_len={len(action_prompt)}")
+                    _act_sys_msg = f"تو توسعه‌دهنده ارشد پروژه هستی. {'مستقیماً مشکل را پیدا کن، کد اصلاح‌شده کامل بنویس و action_plan معتبر JSON ارائه بده.' if has_code_files else 'فایل‌ها خوانده نشدند — فقط تحلیل ارائه بده.'} با لحن صمیمی و حرفه‌ای پاسخ بده."
+                    _reduced_act = _reduce_prompt_for_retry(action_prompt)
+                    _retry_models = [primary_model]
+                    _fb = ai_manager.find_fallback_model(primary_model)
+                    if _fb and _fb != primary_model:
+                        _retry_models.append(_fb)
+                    for _ri, _rm in enumerate(_retry_models):
+                        _rl = "پرامپت کاهش‌یافته" if _ri == 0 else f"مدل جایگزین ({_rm})"
+                        yield sse("progress", {"step": "retry_empty", "message": f"⚠️ پاسخ خالی — تلاش مجدد با {_rl}..."})
+                        try:
+                            _rr = await ai_manager.generate(
+                                model_id=_rm,
+                                messages=[Message(role="system", content=_act_sys_msg), Message(role="user", content=_reduced_act)],
+                                max_tokens=safe_max_tokens,
+                                temperature=0.35,
+                            )
+                            if _rr.content and _rr.content.strip():
+                                content = _rr.content
+                                _act_model_used = _rr.model_id
+                                _act_tokens = _rr.tokens_used
+                                slog.info(f"[smart-chat] ACTION retry succeeded: model={_rm}")
+                                yield sse("progress", {"step": "retry_success", "message": f"✅ تلاش مجدد موفق — مدل {_rm} پاسخ داد"})
+                                break
+                        except Exception as _re:
+                            slog.warning(f"[smart-chat] ACTION retry {_ri+1} failed: {_re}")
+                    if not content or not content.strip():
+                        yield sse("error", {
+                            "message": f"❌ مدل {primary_model} پاسخ خالی برگرداند (حتی بعد از تلاش مجدد) | حجم: ~{len(action_prompt)} کاراکتر",
+                            "detail": f"مدل: {primary_model} | حجم: ~{len(action_prompt)} | context: {model_context_window}"
+                        })
+                if content and content.strip():
                     # استخراج action_plan از پاسخ
                     action_plan = None
                     try:
@@ -10777,8 +10911,8 @@ GitHub: {_proj_github}
                     yield sse("response", {
                         "type": "action",
                         "content": content,
-                        "model_used": response.model_id,
-                        "tokens_used": response.tokens_used,
+                        "model_used": _act_model_used,
+                        "tokens_used": _act_tokens,
                         "has_action": action_plan is not None,
                         "action_plan": action_plan,
                         "files_were_read": has_code_files,
