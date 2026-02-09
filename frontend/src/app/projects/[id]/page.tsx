@@ -1477,6 +1477,15 @@ export default function ProjectDetailPage() {
 
       if (backendServiceIds.length === 0) return;
 
+      // 🔴 ابتدا لاگ‌های جدید رو از Render API بگیر و در DB ذخیره کن
+      try {
+        await Promise.all(backendServiceIds.map(id =>
+          fetch(`${API_BASE}/api/render/logs/fetch?service_id=${id}&limit=50`, { method: 'POST' })
+            .catch(() => null)
+        ));
+      } catch {}
+
+      // سپس از DB بخون
       const params = new URLSearchParams();
       backendServiceIds.forEach(id => params.append('service_ids', id));
       params.append('minutes', '30');
@@ -3162,6 +3171,36 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     if (!inspectorFrontendUrl) return;
     setVisualDebugTakingScreenshot(true);
     try {
+      // 🔴 ابتدا لاگ‌های تازه بکند رو مستقیم از Render API بگیر
+      let freshBackendLogs: Array<{ level: string; message: string; timestamp: string; service_name: string }> = [];
+      try {
+        const backendServiceIds = inspectorServices
+          .filter(s => s.role === 'backend' || s.role === 'unified' || !s.role)
+          .map(s => s.id);
+        if (backendServiceIds.length > 0) {
+          // اول از Render API لاگ‌های جدید رو fetch کن
+          await Promise.all(backendServiceIds.map(id =>
+            fetch(`${API_BASE}/api/render/logs/fetch?service_id=${id}&limit=50`, { method: 'POST' })
+              .catch(() => null)
+          ));
+          // بعد از DB بخون
+          const params = new URLSearchParams();
+          backendServiceIds.forEach(id => params.append('service_ids', id));
+          params.append('minutes', '30');
+          params.append('limit', '50');
+          const logsRes = await fetch(`${API_BASE}/api/render/logs?${params}`);
+          const logsData = await logsRes.json();
+          if (logsData.success && logsData.logs) {
+            freshBackendLogs = logsData.logs;
+            setInspectorBackendLogs(logsData.logs); // state رو هم آپدیت کن
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to fetch fresh backend logs:', err);
+        // fallback به state فعلی
+        freshBackendLogs = [...inspectorBackendLogs];
+      }
+
       const res = await fetch(`${API_BASE}/api/render/inspector/screenshot`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3179,7 +3218,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         const captureConsoleLogs = [...importedProjectConsoleLogs].slice(-50).map(l => ({
           level: l.level, message: l.message, timestamp: l.timestamp, source: l.source
         }));
-        const captureBackendLogs = [...inspectorBackendLogs].slice(-30).map(l => ({
+        // 🔴 از لاگ‌های تازه استفاده کن (نه state قدیمی)
+        const captureBackendLogs = freshBackendLogs.slice(-30).map(l => ({
           level: l.level, message: l.message, timestamp: l.timestamp, service_name: l.service_name
         }));
 
@@ -3192,7 +3232,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         // Extract URLs and API endpoints from console logs
         const allLogMessages = [
           ...importedProjectConsoleLogs.slice(-50).map(l => l.message),
-          ...inspectorBackendLogs.slice(-30).map(l => l.message),
+          ...freshBackendLogs.slice(-30).map(l => l.message),
         ];
         allLogMessages.forEach(msg => {
           // Full URLs
