@@ -2793,32 +2793,39 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   // ============================================
 
   // 🆕 ارسال پیام به AI
-  const sendInspectorChat = async (overrideMessage?: string) => {
+  const sendInspectorChat = async (overrideMessage?: string, _isRetry = false) => {
     // در حالت انتخاب خودکار، نیازی به انتخاب دستی مدل نیست
     const userMessage = (overrideMessage || inspectorChatInput).trim();
     if (!userMessage) return;
     if (!inspectorAutoSelect && inspectorSelectedModels.length === 0) return;
 
-    if (!overrideMessage) setInspectorChatInput('');
+    if (!overrideMessage && !_isRetry) setInspectorChatInput('');
     setInspectorChatLoading(true);
 
-    // اضافه کردن پیام کاربر به چت (با ریپلای اگر هست)
-    const userMsgId = `user_${Date.now()}`;
-    setInspectorChatMessages(prev => [...prev, {
-      id: userMsgId,
-      role: 'user',
-      content: userMessage,
-      timestamp: new Date(),
-      ...(inspectorReplyTo ? { reply_to_id: inspectorReplyTo.id, reply_to_content: inspectorReplyTo.content?.slice(0, 100) } : {}),
-    } as any]);
+    // 🆕 در حالت retry، پیام کاربر قبلاً اضافه شده — فقط پیام‌های خطا رو پاک کن
+    if (_isRetry) {
+      setInspectorChatMessages(prev =>
+        prev.filter(m => !m.id.startsWith('smart_fail_') && !m.id.startsWith('error_') && !m.id.startsWith('retry_'))
+      );
+    } else {
+      // اضافه کردن پیام کاربر به چت (با ریپلای اگر هست)
+      const userMsgId = `user_${Date.now()}`;
+      setInspectorChatMessages(prev => [...prev, {
+        id: userMsgId,
+        role: 'user',
+        content: userMessage,
+        timestamp: new Date(),
+        ...(inspectorReplyTo ? { reply_to_id: inspectorReplyTo.id, reply_to_content: inspectorReplyTo.content?.slice(0, 100) } : {}),
+      } as any]);
 
-    // ذخیره پیام کاربر در دیتابیس
-    if (inspectorSessionIdRef.current) {
-      fetch(`${API_BASE}/api/render/inspector/session/message`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: inspectorSessionIdRef.current, role: 'user', content: userMessage })
-      }).catch(err => console.error('Save user msg failed:', err));
+      // ذخیره پیام کاربر در دیتابیس
+      if (inspectorSessionIdRef.current) {
+        fetch(`${API_BASE}/api/render/inspector/session/message`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: inspectorSessionIdRef.current, role: 'user', content: userMessage })
+        }).catch(err => console.error('Save user msg failed:', err));
+      }
     }
 
     try {
@@ -3112,8 +3119,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
         // 🆕 اگر استریم تمام شد ولی هنوز پاسخی نیامده (بدون done event)
         if (!responseReceived) {
+          if (!_isRetry) {
+            // 🆕 تلاش خودکار — بک‌اند یافته‌های قبلی رو از کش برمیگردونه
+            setInspectorChatMessages(prev => [...prev, {
+              id: `retry_${Date.now()}`,
+              role: 'assistant' as const,
+              content: '🔄 اتصال قطع شد — تلاش خودکار برای ادامه از جایی که متوقف شده...',
+              timestamp: new Date(),
+            }]);
+            setTimeout(() => sendInspectorChat(userMessage, true), 2000);
+            return;
+          }
+          // اگر retry هم جواب نداد — پیام خطا نشون بده
           setInspectorChatMessages(prev => {
-            // بررسی اینکه آیا قبلاً پیام خطا اضافه شده
             const hasFailMsg = prev.some(m => m.id.startsWith('smart_fail_'));
             if (!hasFailMsg) {
               return [...prev, {
@@ -3133,15 +3151,29 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     } catch (err: any) {
       console.error('Error sending inspector chat:', err);
       if (err.name !== 'AbortError') {
-        // 🆕 تشخیص نوع خطا و پیام مناسب
         const isNetworkError = err.message?.includes('network') || err.message?.includes('ERR_QUIC') || err.message?.includes('Failed to fetch');
+        if (isNetworkError && !_isRetry) {
+          // 🆕 خطای شبکه → تلاش خودکار (بک‌اند یافته‌های قبلی رو کش کرده)
+          setInspectorChatMessages(prev => {
+            const filtered = prev.filter(m => !m.id.startsWith('system_') && !m.id.startsWith('error_'));
+            return [...filtered, {
+              id: `retry_${Date.now()}`,
+              role: 'assistant',
+              content: '🔄 اتصال قطع شد — تلاش خودکار برای ادامه از جایی که متوقف شده...',
+              timestamp: new Date()
+            }];
+          });
+          setTimeout(() => sendInspectorChat(userMessage, true), 3000);
+          return;
+        }
+        // retry هم جواب نداد یا خطای غیرشبکه‌ای
         setInspectorChatMessages(prev => {
-          const filtered = prev.filter(m => !m.id.startsWith('system_'));
+          const filtered = prev.filter(m => !m.id.startsWith('system_') && !m.id.startsWith('retry_'));
           return [...filtered, {
             id: `error_${Date.now()}`,
             role: 'assistant',
             content: isNetworkError
-              ? '❌ ارتباط با سرور قطع شد (احتمالاً timeout). لطفاً چند لحظه صبر کنید و دوباره تلاش کنید.'
+              ? '❌ ارتباط با سرور قطع شد. تلاش خودکار هم ناموفق بود. لطفاً دوباره تلاش کنید.'
               : `❌ خطا در اتصال به سرور: ${err.message?.slice(0, 100) || 'ناشناخته'}`,
             timestamp: new Date()
           }];
