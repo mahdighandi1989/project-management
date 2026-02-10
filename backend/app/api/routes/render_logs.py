@@ -11076,7 +11076,7 @@ GitHub: {_proj_github}
 
                             # 🆕 بررسی کش — آیا قبلاً بخشی از کار انجام شده؟
                             _cache_key = _batch_cache_key(
-                                str(render_log.project_id) if render_log else "",
+                                str(request.project_id) if request.project_id else "",
                                 request.message,
                                 selected
                             )
