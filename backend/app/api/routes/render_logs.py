@@ -8830,6 +8830,13 @@ class FixRequest(BaseModel):
     error_message: str
 
 
+class BulkInvestigateRequest(BaseModel):
+    """درخواست بررسی کلی چند خطا با هم"""
+    message_ids: List[int]  # شناسه‌های DB پیام‌های خطا
+    project_id: str
+    model_ids: List[str]
+
+
 @router.get("/inspector/models/for-investigation/{project_id}")
 async def get_models_for_investigation(project_id: str, db: Session = Depends(get_db)):
     """
@@ -9352,6 +9359,330 @@ async def investigate_error(request: InvestigateRequest, db: Session = Depends(g
             "files_to_fix": files_to_fix,
             "error_content": error_content,
             "github_repo": f"{owner}/{repo}",
+            "tokens_used": getattr(analysis, 'tokens_used', 0)
+        })
+
+        yield sse("done", {"success": True})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+@router.post("/inspector/investigate-bulk")
+async def investigate_errors_bulk(request: BulkInvestigateRequest, db: Session = Depends(get_db)):
+    """
+    بررسی کلی چند خطا با هم — تحلیل اولویت، وابستگی و ریشه مشترک
+    SSE streaming
+    """
+    from fastapi.responses import StreamingResponse
+    from ...models.inspector_session import InspectorMessage
+    from ...models.project import Project
+    from ...services.github_import import get_github_import_service
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+
+    if not request.message_ids or len(request.message_ids) == 0:
+        return {"success": False, "error": "هیچ خطایی انتخاب نشده"}
+
+    # دریافت پیام‌های خطا از DB
+    from sqlalchemy import or_
+    error_messages = db.query(InspectorMessage).filter(
+        InspectorMessage.id.in_(request.message_ids)
+    ).order_by(InspectorMessage.timestamp).all()
+
+    if not error_messages:
+        return {"success": False, "error": "پیام‌های خطا یافت نشد"}
+
+    # دریافت اطلاعات پروژه
+    project = db.query(Project).filter(Project.id == request.project_id).first()
+    if not project:
+        return {"success": False, "error": "پروژه یافت نشد"}
+
+    extra_data = {}
+    if project.extra_data:
+        try:
+            extra_data = json.loads(project.extra_data) if isinstance(project.extra_data, str) else project.extra_data
+        except Exception:
+            extra_data = {}
+
+    owner = extra_data.get("owner", "")
+    repo = extra_data.get("repo", "")
+    github_path = project.github_path or ""
+    if not owner and "/" in github_path:
+        owner, repo = github_path.split("/", 1)
+
+    if not owner or not repo:
+        return {"success": False, "error": "اطلاعات GitHub پروژه یافت نشد"}
+
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        from ...models.setting import Setting as _BulkSetting
+        token = _BulkSetting.get_value(db, "api_key_github") or ""
+
+    model_ids = request.model_ids
+
+    # ساخت context کامل تمام خطاها با جزئیات
+    errors_detail_parts = []
+    all_nearby_errors = set()
+    for idx, em in enumerate(error_messages, 1):
+        error_type = "خطای کنسول" if em.action_type == "console-error" else "خطای بک‌اند"
+        ts = em.timestamp.strftime("%H:%M:%S") if em.timestamp else "نامشخص"
+        detail = f"### خطای {idx}: [{error_type}] — زمان: {ts}\n"
+        detail += f"**محتوا:** {em.content}\n"
+
+        if em.backend_log_summary:
+            detail += f"**خلاصه لاگ بک‌اند:** {em.backend_log_summary}\n"
+
+        # لاگ‌های نزدیک
+        nearby = db.query(InspectorMessage).filter(
+            InspectorMessage.session_id == em.session_id,
+            or_(
+                InspectorMessage.action_type == 'error',
+                InspectorMessage.action_type == 'console-error'
+            ),
+            InspectorMessage.timestamp >= (em.timestamp - timedelta(seconds=30)) if em.timestamp else True,
+            InspectorMessage.timestamp <= (em.timestamp + timedelta(seconds=30)) if em.timestamp else True,
+        ).order_by(InspectorMessage.timestamp).limit(5).all()
+
+        if nearby:
+            related = [n.content for n in nearby if n.id not in [e.id for e in error_messages]]
+            if related:
+                detail += f"**خطاهای نزدیک:** {'; '.join(related[:3])}\n"
+
+        errors_detail_parts.append(detail)
+        all_nearby_errors.update(n.content for n in nearby)
+
+    errors_full_context = "\n".join(errors_detail_parts)
+
+    async def event_stream():
+        import asyncio
+        github_svc = get_github_import_service()
+        ai_manager = get_ai_manager()
+
+        def sse(event: str, data: dict) -> str:
+            return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        yield sse("progress", {
+            "step": "start",
+            "message": f"🔍 شروع بررسی کلی {len(error_messages)} خطا..."
+        })
+
+        # --- مرحله ۱: ساختار پروژه ---
+        yield sse("progress", {
+            "step": "reading_tree",
+            "message": f"📂 خواندن ساختار پروژه {owner}/{repo}..."
+        })
+
+        tree_result = await github_svc.get_repo_tree(owner, repo, token=token)
+        if not tree_result.get("success"):
+            yield sse("error", {"message": f"خطا در دسترسی GitHub: {tree_result.get('error', 'unknown')}"})
+            yield sse("done", {"success": False})
+            return
+
+        all_files = [f for f in tree_result.get("tree", []) if f.get("type") == "blob"]
+        code_files = [f["path"] for f in all_files if _is_code_file(f["path"], file_size=f.get("size", 0))]
+        file_list_text = "\n".join(code_files[:500])
+
+        yield sse("progress", {
+            "step": "tree_loaded",
+            "message": f"✅ {len(code_files)} فایل کد شناسایی شد"
+        })
+
+        # --- مرحله ۲: AI انتخاب فایل‌ها ---
+        primary_model = model_ids[0] if model_ids else "gemini-2.0-flash"
+
+        yield sse("progress", {
+            "step": "selecting_files",
+            "message": f"🤖 مدل {primary_model} در حال شناسایی فایل‌های مرتبط با {len(error_messages)} خطا..."
+        })
+
+        select_prompt = f"""شما بازرس خطای پروژه {owner}/{repo} هستید.
+{len(error_messages)} خطا برای بررسی کلی ارسال شده:
+
+{errors_full_context}
+
+فایل‌های پروژه:
+{file_list_text}
+
+⚠️ فایل‌های InspectorBridge ابزار inject شده‌اند و مربوط به پروژه نیستند.
+
+بر اساس تمام خطاها، حداکثر ۱۵ فایل مرتبط انتخاب کنید.
+فایل‌های مرتبط با ریشه مشترک خطاها اولویت دارند.
+فقط مسیر فایل‌ها، هر کدام در یک خط."""
+
+        try:
+            select_response = await ai_manager.generate(
+                model_id=primary_model,
+                messages=[
+                    Message(role="system", content="بازرس کد. فقط مسیر فایل‌ها."),
+                    Message(role="user", content=select_prompt)
+                ],
+                max_tokens=800,
+                temperature=0.3
+            )
+            selected_files = _parse_ai_selected_files(select_response.content, code_files, max_files=15)
+            if not selected_files:
+                selected_files = _fallback_file_selection(code_files, errors_full_context, max_files=10)
+        except Exception as e:
+            yield sse("progress", {"step": "select_fallback", "message": f"⚠️ فالبک: {str(e)[:60]}"})
+            selected_files = _fallback_file_selection(code_files, errors_full_context, max_files=10)
+
+        yield sse("progress", {
+            "step": "files_selected",
+            "message": f"📋 {len(selected_files)} فایل مرتبط: {', '.join(f.split('/')[-1] for f in selected_files[:8])}{'...' if len(selected_files) > 8 else ''}"
+        })
+
+        # --- مرحله ۳: خواندن فایل‌ها ---
+        file_contents = {}
+        for i, file_path in enumerate(selected_files):
+            yield sse("progress", {
+                "step": "reading_file",
+                "message": f"📖 خواندن {file_path} ({i+1}/{len(selected_files)})..."
+            })
+            try:
+                result = await github_svc.get_file_content(owner, repo, file_path, token=token)
+                if result.get("success"):
+                    content = result.get("content", "")
+                    if len(content) > 12000:
+                        content = content[:12000] + "\n... [truncated]"
+                    file_contents[file_path] = content
+            except Exception:
+                pass
+            await asyncio.sleep(0.2)
+
+        yield sse("progress", {
+            "step": "files_read",
+            "message": f"✅ {len(file_contents)} فایل خوانده شد. شروع تحلیل کلی..."
+        })
+
+        # --- مرحله ۴: تحلیل کلی AI ---
+        code_context = ""
+        for path, content in file_contents.items():
+            code_context += f"\n\n=== {path} ===\n{content}"
+
+        bulk_investigate_prompt = f"""شما بازرس ارشد پروژه {owner}/{repo} هستید.
+{len(error_messages)} خطا برای تحلیل کلی ارسال شده. وظیفه شما تحلیل جامع، اولویت‌بندی و شناسایی وابستگی‌هاست.
+
+## ⚠️ قوانین حیاتی:
+1. InspectorBridge ابزار inject شده و جزو پروژه نیست — نادیده بگیرید.
+2. فقط بر اساس شواهد واقعی تحلیل کنید.
+3. وابستگی بین خطاها مهم‌ترین بخش تحلیل شماست.
+
+## خطاهای ارسالی (به ترتیب زمانی):
+{errors_full_context}
+
+## کد پروژه:
+{code_context}
+
+## وظیفه شما — تحلیل کلی:
+
+### ۱. 📊 نقشه وابستگی خطاها
+- آیا خطاها به هم مرتبط هستند؟ کدام خطا ممکنه علت خطای دیگه باشه؟
+- آیا ریشه مشترکی وجود داره؟ (مثلاً یک import خراب که چند خطا ایجاد کرده)
+- نمودار وابستگی: خطای X ← خطای Y (Y علت X هست)
+
+### ۲. 🎯 اولویت‌بندی (از مهم‌ترین تا کم‌اهمیت‌ترین)
+برای هر خطا مشخص کنید:
+- **سطح بحرانی**: بحرانی / بالا / متوسط / پایین
+- **دلیل اولویت**: چرا این خطا مهم‌تره؟ (امنیت، عملکرد، UX، ...)
+- **توصیه ترتیب رفع**: کدام اول باید رفع بشه (ممکنه رفع یک خطا، خطاهای دیگه رو هم حل کنه)
+
+### ۳. 🔍 تحلیل ریشه‌ای هر خطا
+برای هر خطا:
+- علت ریشه‌ای (با شماره خط دقیق)
+- فایل و محل مشکل
+- راه‌حل پیشنهادی
+
+### ۴. 🛠️ برنامه اصلاح یکپارچه
+یک برنامه اصلاح منسجم که:
+- ترتیب بهینه رفع خطاها رو مشخص کنه
+- اگر رفع یک خطا، خطای دیگه‌ای رو هم حل می‌کنه ← مشخص کنه
+- فایل‌هایی که باید تغییر کنن با دستورالعمل دقیق
+
+### ۵. 📝 فایل‌های نیاز به تغییر
+لیست فایل‌هایی که واقعاً باید تغییر کنن."""
+
+        yield sse("progress", {
+            "step": "deep_analysis",
+            "message": f"🔬 مدل {primary_model} در حال تحلیل کلی {len(error_messages)} خطا..."
+        })
+
+        system_msg = f"""بازرس ارشد کد پروژه. {len(error_messages)} خطا برای تحلیل کلی.
+قوانین:
+- تحلیل وابستگی و ریشه مشترک خطاها مهم‌ترین بخش کار شماست
+- اولویت‌بندی بر اساس: ۱) وابستگی (ریشه‌ای‌ترین خطا اول) ۲) بحرانیت ۳) ترتیب زمانی
+- InspectorBridge ابزار inject شده — نادیده بگیرید
+- فقط بر اساس شواهد واقعی. حدس نزنید.
+- پاسخ فارسی، ساختارمند و جامع."""
+
+        try:
+            analysis = await ai_manager.generate(
+                model_id=primary_model,
+                messages=[
+                    Message(role="system", content=system_msg),
+                    Message(role="user", content=bulk_investigate_prompt)
+                ],
+                max_tokens=6000,
+                temperature=0.2,
+                task_type="debugging"
+            )
+            report = analysis.content
+        except Exception as e:
+            yield sse("error", {"message": f"خطا در تحلیل: {str(e)[:100]}"})
+            yield sse("done", {"success": False})
+            return
+
+        # --- مرحله ۵: بررسی متقابل (اگر مدل دوم هست) ---
+        if len(model_ids) > 1:
+            second_model = model_ids[1]
+            yield sse("progress", {
+                "step": "cross_review",
+                "message": f"🔄 بررسی متقابل توسط {second_model}..."
+            })
+            try:
+                review = await ai_manager.generate(
+                    model_id=second_model,
+                    messages=[
+                        Message(role="system", content="بازرس متقابل. گزارش همکار را نقادانه بررسی کنید. آیا وابستگی‌ها درست شناسایی شدند؟ آیا اولویت‌بندی منطقی است؟"),
+                        Message(role="user", content=f"خطاها:\n{errors_full_context[:3000]}\n\nگزارش:\n{report[:4000]}\n\nتأیید یا اصلاح کنید.")
+                    ],
+                    max_tokens=2000,
+                    temperature=0.3
+                )
+                if "تأیید" not in review.content.lower()[:50]:
+                    report += f"\n\n---\n### 🔄 نظر تکمیلی ({second_model}):\n{review.content}"
+            except Exception:
+                pass
+
+        # --- استخراج فایل‌های نیاز به تغییر ---
+        files_to_fix = []
+        report_lower = report.lower()
+        seen = set()
+        for path in file_contents.keys():
+            if path.lower() in report_lower:
+                files_to_fix.append({"path": path, "in_report": True})
+                seen.add(path)
+        for path in code_files:
+            if path not in seen and path.lower() in report_lower:
+                files_to_fix.append({"path": path, "in_report": True, "not_read": True})
+                seen.add(path)
+
+        yield sse("report", {
+            "report": report,
+            "model_used": primary_model,
+            "models_used": model_ids,
+            "files_investigated": list(file_contents.keys()),
+            "files_to_fix": files_to_fix,
+            "error_content": errors_full_context,
+            "github_repo": f"{owner}/{repo}",
+            "error_count": len(error_messages),
             "tokens_used": getattr(analysis, 'tokens_used', 0)
         })
 

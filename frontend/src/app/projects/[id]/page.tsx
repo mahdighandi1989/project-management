@@ -378,6 +378,11 @@ export default function ProjectDetailPage() {
   const [fixSelectedModels, setFixSelectedModels] = useState<string[]>([]);
   const [fixLoading, setFixLoading] = useState(false);
 
+  // 🆕 انتخاب چندتایی خطاها برای بررسی کلی
+  const [errorMultiSelectMode, setErrorMultiSelectMode] = useState(false);
+  const [selectedErrorIds, setSelectedErrorIds] = useState<string[]>([]);
+  const [bulkInvestigateModalOpen, setBulkInvestigateModalOpen] = useState(false);
+
   // 🔒 قفل عملیات - iframe و چت قفل میشن هنگام بررسی/اصلاح
   const [inspectorOpLock, setInspectorOpLock] = useState(false);
   const [inspectorOpPaused, setInspectorOpPaused] = useState(false);
@@ -1851,6 +1856,124 @@ export default function ProjectDetailPage() {
       // 🔓 آزاد کردن قفل بعد از پایان بررسی (قبل از اصلاح)
       setInspectorOpLock(false);
       setInspectorOpType(null);
+    }
+  };
+
+  // 🆕 شروع بررسی کلی چند خطا با هم
+  const startBulkInvestigation = async () => {
+    if (selectedErrorIds.length === 0 || investigateSelectedModels.length === 0) return;
+
+    const errorMsgs = selectedErrorIds
+      .map(id => inspectorChatMessages.find(m => m.id === id))
+      .filter(Boolean) as typeof inspectorChatMessages;
+
+    if (errorMsgs.length === 0) return;
+
+    setBulkInvestigateModalOpen(false);
+    setErrorMultiSelectMode(false);
+    setInvestigateLoading(true);
+    setInspectorOpLock(true);
+    setInspectorOpType('investigate');
+    inspectorOpAbortRef.current = new AbortController();
+
+    const errorSummaries = errorMsgs.map((msg, i) => {
+      const type = (msg as any).action_type === 'console-error' ? 'خطای کنسول' : 'خطای بک‌اند';
+      const verified = (msg as any).backend_verified === false ? 'تأیید شده' : 'بررسی نشده';
+      const logs = (msg as any).checked_logs || [];
+      const summary = (msg as any).backend_log_summary || '';
+      return `${i + 1}. [${type}] ${msg.content} | وضعیت: ${verified}${summary ? ' | خلاصه: ' + summary : ''}${logs.length > 0 ? ' | لاگ: ' + logs.map((l: any) => l.message).join('; ') : ''}`;
+    }).join('\n');
+
+    setInspectorChatMessages(prev => [...prev, {
+      id: `bulk_inv_start_${Date.now()}`,
+      role: 'system' as const,
+      content: `🔍 شروع بررسی کلی ${errorMsgs.length} خطا با مدل ${investigateSelectedModels.join(', ')}...\n${errorSummaries}`,
+      timestamp: new Date(),
+    }]);
+
+    try {
+      // ارسال شناسه‌های DB پیام‌های خطا
+      const messageIds = errorMsgs.map(m => (m as any).db_id).filter(Boolean);
+
+      const res = await fetch(`${API_BASE}/api/render/inspector/investigate-bulk`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message_ids: messageIds,
+          project_id: projectId,
+          model_ids: investigateSelectedModels,
+        }),
+        signal: inspectorOpAbortRef.current?.signal,
+      });
+
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let eventType = '';
+
+      if (!reader) throw new Error('No reader');
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            eventType = line.slice(7).trim();
+          } else if (line.startsWith('data: ') && eventType) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              if (eventType === 'progress') {
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `bulk_inv_p_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                  role: 'system' as const,
+                  content: data.message,
+                  timestamp: new Date(),
+                }]);
+              } else if (eventType === 'error') {
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `bulk_inv_err_${Date.now()}`,
+                  role: 'system' as const,
+                  content: `❌ ${data.message}`,
+                  timestamp: new Date(),
+                }]);
+              } else if (eventType === 'report') {
+                setInvestigateReport(data);
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `bulk_inv_report_${Date.now()}`,
+                  role: 'assistant' as const,
+                  content: data.report,
+                  timestamp: new Date(),
+                  model_id: data.model_used,
+                  action_type: 'investigate_report' as any,
+                }]);
+              } else if (eventType === 'done') {
+                setInspectorOpLock(false);
+                setInspectorOpType(null);
+              }
+            } catch {}
+            eventType = '';
+          }
+        }
+      }
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        setInspectorChatMessages(prev => [...prev, {
+          id: `bulk_inv_fail_${Date.now()}`,
+          role: 'assistant' as const,
+          content: `❌ خطا در بررسی کلی: ${err.message?.slice(0, 100) || 'ناشناخته'}`,
+          timestamp: new Date(),
+        }]);
+      }
+    } finally {
+      setInvestigateLoading(false);
+      setInspectorOpLock(false);
+      setInspectorOpType(null);
+      setSelectedErrorIds([]);
     }
   };
 
@@ -10738,19 +10861,37 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                '✓'}
                             </span>
                           )}
-                          {/* دکمه بررسی خطا - فقط روی پیام‌هایی که واقعاً خطا دارند */}
+                          {/* دکمه بررسی خطا + چک‌باکس انتخاب چندتایی */}
                           {msg.role === 'action' && msg.backend_verified === false && (
-                            <button
-                              onClick={(e) => { e.stopPropagation(); openInvestigateModal(msg.id); }}
-                              className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
-                                msg.verified_by_model === 'console-error'
-                                  ? 'bg-orange-100 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400 hover:bg-orange-200 dark:hover:bg-orange-800/40'
-                                  : 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-800/40'
-                              }`}
-                              disabled={investigateLoading}
-                            >
-                              {investigateLoading ? '...' : msg.verified_by_model === 'console-error' ? '🖥️ بررسی' : '🔍 بررسی'}
-                            </button>
+                            <>
+                              {errorMultiSelectMode && (
+                                <input
+                                  type="checkbox"
+                                  checked={selectedErrorIds.includes(msg.id)}
+                                  onChange={(e) => {
+                                    e.stopPropagation();
+                                    if (e.target.checked) {
+                                      setSelectedErrorIds(prev => [...prev, msg.id]);
+                                    } else {
+                                      setSelectedErrorIds(prev => prev.filter(id => id !== msg.id));
+                                    }
+                                  }}
+                                  className="w-3.5 h-3.5 rounded border-red-300 text-red-500 focus:ring-red-400 cursor-pointer"
+                                  title="انتخاب برای بررسی کلی"
+                                />
+                              )}
+                              <button
+                                onClick={(e) => { e.stopPropagation(); openInvestigateModal(msg.id); }}
+                                className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
+                                  msg.verified_by_model === 'console-error'
+                                    ? 'bg-orange-100 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400 hover:bg-orange-200 dark:hover:bg-orange-800/40'
+                                    : 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-800/40'
+                                }`}
+                                disabled={investigateLoading}
+                              >
+                                {investigateLoading ? '...' : msg.verified_by_model === 'console-error' ? '🖥️ بررسی' : '🔍 بررسی'}
+                              </button>
+                            </>
                           )}
                           {/* دکمه اصلاح روی گزارش بررسی */}
                           {(msg as any).action_type === 'investigate_report' && investigateReport && (
@@ -11051,6 +11192,76 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   </div>
                 )}
 
+                {/* 🆕 مودال بررسی کلی چند خطا */}
+                {bulkInvestigateModalOpen && (
+                  <div className="absolute inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+                    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-md max-h-[80%] overflow-hidden" dir="rtl">
+                      <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+                        <h3 className="font-bold text-sm">🔍 بررسی کلی {selectedErrorIds.length} خطا</h3>
+                        <button onClick={() => setBulkInvestigateModalOpen(false)} className="text-gray-400 hover:text-gray-600 text-lg">&times;</button>
+                      </div>
+                      <div className="p-3 text-xs text-gray-500 bg-red-50 dark:bg-red-900/10 border-b border-gray-200 dark:border-gray-700">
+                        <p className="font-medium text-red-700 dark:text-red-300 mb-1">خطاهای انتخاب شده:</p>
+                        <ul className="space-y-0.5 max-h-24 overflow-y-auto">
+                          {selectedErrorIds.map((id, i) => {
+                            const m = inspectorChatMessages.find(msg => msg.id === id);
+                            return m ? (
+                              <li key={id} className="text-[10px] text-gray-600 dark:text-gray-300 truncate">
+                                {i + 1}. {(m as any).action_type === 'console-error' ? '🖥️' : '⚠️'} {m.content?.slice(0, 80)}
+                              </li>
+                            ) : null;
+                          })}
+                        </ul>
+                        <p className="mt-2 text-[10px] text-gray-400">مدل اولویت‌بندی، وابستگی و ریشه مشترک خطاها را تحلیل می‌کند.</p>
+                      </div>
+                      <div className="p-3 max-h-[40vh] overflow-y-auto space-y-1.5">
+                        {investigateModels.length === 0 ? (
+                          <div className="text-center py-4 text-gray-400 text-sm">در حال بارگذاری مدل‌ها...</div>
+                        ) : investigateModels.filter(m => m.enabled && m.provider_available).map(model => (
+                          <label
+                            key={model.id}
+                            className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer transition-colors ${
+                              investigateSelectedModels.includes(model.id)
+                                ? 'bg-red-50 dark:bg-red-900/20 border border-red-300 dark:border-red-700'
+                                : 'hover:bg-gray-50 dark:hover:bg-gray-750 border border-transparent'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={investigateSelectedModels.includes(model.id)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setInvestigateSelectedModels(prev => [...prev, model.id]);
+                                } else {
+                                  setInvestigateSelectedModels(prev => prev.filter(id => id !== model.id));
+                                }
+                              }}
+                              className="rounded"
+                            />
+                            <div className="flex-1 min-w-0">
+                              <span className="text-xs font-medium">{model.name}</span>
+                              <span className="text-[10px] text-gray-400 mr-1">({model.provider})</span>
+                              {model.recommended && (
+                                <span className="text-[9px] bg-green-100 text-green-600 px-1 rounded mr-1">پیشنهادی</span>
+                              )}
+                            </div>
+                          </label>
+                        ))}
+                      </div>
+                      <div className="p-3 border-t border-gray-200 dark:border-gray-700 flex items-center justify-between">
+                        <span className="text-[11px] text-gray-400">{investigateSelectedModels.length} مدل | {selectedErrorIds.length} خطا</span>
+                        <button
+                          onClick={startBulkInvestigation}
+                          disabled={investigateSelectedModels.length === 0}
+                          className="px-4 py-2 bg-red-500 text-white text-sm rounded-lg hover:bg-red-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        >
+                          🔍 شروع بررسی کلی
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* 🔧 مودال انتخاب مدل برای اصلاح */}
                 {fixModalOpen && (
                   <div className="absolute inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
@@ -11179,6 +11390,64 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           🔍 شروع تحلیل هوشمند
                         </button>
                       </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 🆕 نوار انتخاب چندتایی خطاها */}
+                {errorMultiSelectMode && (
+                  <div className="px-3 py-2 border-t border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/10 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-xs text-red-700 dark:text-red-300">
+                      <span className="font-medium">{selectedErrorIds.length} خطا انتخاب شده</span>
+                      {selectedErrorIds.length > 0 && (
+                        <button
+                          onClick={() => setSelectedErrorIds([])}
+                          className="text-[10px] text-red-400 hover:text-red-600 underline"
+                        >
+                          پاک کردن
+                        </button>
+                      )}
+                      {/* دکمه انتخاب همه خطاها */}
+                      <button
+                        onClick={() => {
+                          const allErrorIds = inspectorChatMessages
+                            .filter(m => m.role === 'action' && (m as any).backend_verified === false)
+                            .map(m => m.id);
+                          setSelectedErrorIds(allErrorIds);
+                        }}
+                        className="text-[10px] text-red-400 hover:text-red-600 underline"
+                      >
+                        انتخاب همه
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={async () => {
+                          if (selectedErrorIds.length === 0) return;
+                          // باز کردن مودال انتخاب مدل
+                          setBulkInvestigateModalOpen(true);
+                          // بارگذاری مدل‌ها
+                          try {
+                            const res = await fetch(`${API_BASE}/api/render/inspector/models/for-investigation/${projectId}`);
+                            const data = await res.json();
+                            if (data.success && Array.isArray(data.models)) {
+                              setInvestigateModels(data.models);
+                              const recommended = data.models.filter((m: any) => m.recommended).map((m: any) => m.id);
+                              setInvestigateSelectedModels(recommended.slice(0, 2));
+                            }
+                          } catch {}
+                        }}
+                        disabled={selectedErrorIds.length === 0 || investigateLoading}
+                        className="px-3 py-1 bg-red-500 text-white text-xs rounded-lg hover:bg-red-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      >
+                        🔍 بررسی کلی ({selectedErrorIds.length})
+                      </button>
+                      <button
+                        onClick={() => { setErrorMultiSelectMode(false); setSelectedErrorIds([]); }}
+                        className="px-2 py-1 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                      >
+                        انصراف
+                      </button>
                     </div>
                   </div>
                 )}
@@ -11351,6 +11620,18 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         className="text-gray-400 hover:text-red-500 transition-colors text-sm flex-shrink-0"
                       >
                         ✕
+                      </button>
+                    </div>
+                  )}
+
+                  {/* 🆕 دکمه ورود به حالت انتخاب چندتایی — فقط وقتی خطایی وجود داره */}
+                  {!errorMultiSelectMode && !inspectorOpLock && inspectorChatMessages.some(m => m.role === 'action' && (m as any).backend_verified === false) && (
+                    <div className="mb-2 flex items-center">
+                      <button
+                        onClick={() => setErrorMultiSelectMode(true)}
+                        className="text-[10px] px-2 py-1 bg-red-50 dark:bg-red-900/20 text-red-500 dark:text-red-400 rounded-lg hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors border border-red-200 dark:border-red-800"
+                      >
+                        ☑️ انتخاب چند خطا برای بررسی کلی
                       </button>
                     </div>
                   )}
