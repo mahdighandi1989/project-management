@@ -34,42 +34,280 @@ slog = StructuredLogger(__name__, "RENDER-API")
 
 router = APIRouter(prefix="/api/render", tags=["Render Logs"])
 
-# ── Batch Processing Cache — ادامه کار پس از قطع اتصال ──────────────
-# کش درون‌حافظه‌ای برای ذخیره یافته‌های دسته‌ای
-# اگر اتصال SSE قطع بشه، درخواست بعدی یافته‌های قبلی رو از کش میخونه
-_BATCH_CACHE: Dict[str, Dict[str, Any]] = {}
-_BATCH_CACHE_TTL = 1800  # ۳۰ دقیقه
+# ── Background Batch Tasks — پردازش مستقل از SSE ──────────────────
+# وقتی کاربر از صفحه خارج بشه یا اتصال قطع بشه، پردازش متوقف نمیشه.
+# SSE فقط "ناظر" هست — task اصلی تو بک‌گراند اجرا میشه.
+import asyncio as _asyncio
+
+_BATCH_TASKS: Dict[str, Dict[str, Any]] = {}
+_BATCH_TASKS_TTL = 1800  # ۳۰ دقیقه
 
 
-def _batch_cache_key(project_id: str, message: str, file_paths: list) -> str:
-    """ساخت کلید کش یکتا بر اساس پروژه + پیام + فایل‌ها"""
+def _batch_task_key(project_id: str, message: str, file_paths: list) -> str:
+    """ساخت کلید یکتا برای background task"""
     raw = f"{project_id}:{message}:{','.join(sorted(file_paths[:50]))}"
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
-def _batch_cache_get(key: str) -> Optional[Dict[str, Any]]:
-    """گرفتن یافته‌های ذخیره‌شده از کش (اگه موجود و منقضی‌نشده باشه)"""
-    entry = _BATCH_CACHE.get(key)
-    if entry and _time.time() - entry.get("ts", 0) < _BATCH_CACHE_TTL:
+def _get_batch_task(key: str) -> Optional[Dict[str, Any]]:
+    """گرفتن task موجود (اگه فعال یا تازه تموم شده باشه)"""
+    entry = _BATCH_TASKS.get(key)
+    if entry and _time.time() - entry.get("created_at", 0) < _BATCH_TASKS_TTL:
         return entry
-    if key in _BATCH_CACHE:
-        del _BATCH_CACHE[key]
+    if key in _BATCH_TASKS:
+        # پاکسازی task منقضی‌شده
+        task = entry.get("task")
+        if task and not task.done():
+            task.cancel()
+        del _BATCH_TASKS[key]
     return None
 
 
-def _batch_cache_set(key: str, findings: list, completed_batches: int, total_batches: int, total_read: int):
-    """ذخیره یافته‌های دسته‌ای در کش"""
-    # پاکسازی ورودی‌های قدیمی (حداکثر ۵۰ ورودی)
-    if len(_BATCH_CACHE) > 50:
-        oldest_key = min(_BATCH_CACHE, key=lambda k: _BATCH_CACHE[k].get("ts", 0))
-        del _BATCH_CACHE[oldest_key]
-    _BATCH_CACHE[key] = {
-        "findings": findings,
-        "completed_batches": completed_batches,
-        "total_batches": total_batches,
-        "total_read": total_read,
-        "ts": _time.time(),
+def _cleanup_old_batch_tasks():
+    """پاکسازی task‌های قدیمی (فراخوانی هر چند وقت یکبار)"""
+    now = _time.time()
+    expired = [k for k, v in _BATCH_TASKS.items()
+               if now - v.get("created_at", 0) > _BATCH_TASKS_TTL]
+    for k in expired:
+        entry = _BATCH_TASKS.pop(k, {})
+        task = entry.get("task")
+        if task and not task.done():
+            task.cancel()
+
+
+async def _run_batch_processing_bg(
+    task_key: str,
+    github_svc,
+    ai_manager,
+    owner: str,
+    repo: str,
+    token: str,
+    selected: list,
+    batches: list,
+    per_file_limit: int,
+    primary_model: str,
+    model_max_output: int,
+    request_message: str,
+    history_text: str,
+    tree_summary: str,
+    flow_type: str = "action",  # "action" | "question" | "error_log"
+):
+    """
+    پردازش دسته‌ای در بک‌گراند — مستقل از SSE connection.
+    نتایج تو _BATCH_TASKS ذخیره میشه و SSE از اونجا میخونه.
+    """
+    info = _BATCH_TASKS.get(task_key)
+    if not info:
+        return
+
+    try:
+        batch_count = len(batches)
+        findings = []
+        total_read = 0
+        read_failures = 0
+
+        for batch_idx, batch_files in enumerate(batches):
+            batch_code = ""
+            batch_ok = 0
+
+            info["events"].append(("progress", {
+                "step": "batch_reading",
+                "message": f"📖 خواندن دسته {batch_idx+1} از {batch_count} ({len(batch_files)} فایل)..."
+            }))
+            info["new_event"].set()
+
+            for fi, fp in enumerate(batch_files):
+                try:
+                    result = await github_svc.get_file_content(owner, repo, fp, token=token)
+                    if result.get("success"):
+                        content = result.get("content", "")
+                        if len(content) > per_file_limit:
+                            content = content[:per_file_limit] + "\n... [truncated]"
+                        batch_code += f"\n\n=== {fp} ===\n{content}"
+                        batch_ok += 1
+                    else:
+                        read_failures += 1
+                except Exception:
+                    read_failures += 1
+                if fi > 0 and fi % 5 == 0:
+                    info["events"].append(("heartbeat", {
+                        "message": f"📖 دسته {batch_idx+1}: {fi}/{len(batch_files)}..."
+                    }))
+                    info["new_event"].set()
+                await _asyncio.sleep(0.1)
+
+            total_read += batch_ok
+
+            if not batch_code.strip():
+                findings.append(f"### دسته {batch_idx+1}: هیچ فایلی خوانده نشد")
+                continue
+
+            info["events"].append(("progress", {
+                "step": "batch_analyzing",
+                "message": f"🧠 تحلیل دسته {batch_idx+1} از {batch_count} ({batch_ok} فایل)..."
+            }))
+            info["new_event"].set()
+
+            # ساخت پرامپت بر اساس نوع flow
+            if flow_type == "question":
+                batch_prompt = f"سؤال کاربر: {request_message}\n\nفایل‌های دسته {batch_idx+1}:{batch_code}\n\nساختار پروژه:\n{tree_summary[:2000]}\n\nیافته‌های مرتبط با سؤال را استخراج کن. خلاصه و دقیق."
+                sys_msg = f"تحلیل‌گر دسته‌ای. دسته {batch_idx+1}/{batch_count}. سؤال: {request_message[:200]}. یافته‌های کلیدی مرتبط."
+            elif flow_type == "error_log":
+                batch_prompt = f"خطا/لاگ: {request_message[:2000]}\n\nفایل‌های دسته {batch_idx+1}:{batch_code}\n\nساختار پروژه:\n{tree_summary[:2000]}\n\nیافته‌های مرتبط با خطا را استخراج کن. خلاصه و دقیق."
+                sys_msg = f"تحلیل‌گر دسته‌ای خطا. دسته {batch_idx+1}/{batch_count}. خطا: {request_message[:200]}. یافته‌های مرتبط با خطا."
+            else:  # action
+                batch_prompt = f"""## درخواست کاربر:
+{request_message}
+
+## تاریخچه مکالمه (خلاصه):
+{history_text[-2000:]}
+
+## فایل‌های دسته {batch_idx+1} از {batch_count} — محتوای کامل:
+{batch_code}
+
+## ساختار کلی پروژه:
+{tree_summary[:3000]}
+
+## وظیفه تو — تحلیل دسته‌ای:
+بر اساس درخواست کاربر، فایل‌های این دسته را دقیق تحلیل کن:
+- برای هر فایل: imports، exports، عملکرد اصلی، وابستگی‌ها
+- یافته‌های مرتبط با درخواست کاربر (فایل بلااستفاده، باگ، مشکل ساختاری، کد تکراری، ...)
+- ارجاعات بین فایلی: این فایل از کجاها import میکنه و احتمالاً کجاها ازش استفاده میشه
+- اگر مشکل یا نکته مهمی در خطوط پایین فایل هست، حتماً ذکر کن
+⚠️ فقط یافته‌ها و تحلیل دقیق بنویس — جمع‌بندی نهایی در مرحله بعد انجام میشه."""
+                sys_msg = f"تحلیل‌گر دسته‌ای پروژه. دسته {batch_idx+1}/{batch_count}. درخواست: {request_message[:200]}. فقط یافته‌های کلیدی. دقیق و کامل."
+
+            try:
+                from ...services.ai_base import Message
+                batch_task = _asyncio.create_task(ai_manager.generate(
+                    model_id=primary_model,
+                    messages=[
+                        Message(role="system", content=sys_msg),
+                        Message(role="user", content=batch_prompt)
+                    ],
+                    max_tokens=min(model_max_output, 3000),
+                    temperature=0.2
+                ))
+                bwait = 0
+                while not batch_task.done():
+                    done_set, _ = await _asyncio.wait({batch_task}, timeout=5.0)
+                    if done_set:
+                        break
+                    bwait += 5
+                    info["events"].append(("heartbeat", {
+                        "message": f"⏳ تحلیل دسته {batch_idx+1}/{batch_count}... ({bwait}s)"
+                    }))
+                    info["new_event"].set()
+                    if bwait >= 120:
+                        batch_task.cancel()
+                        raise TimeoutError(f"Batch {batch_idx+1} timed out")
+
+                batch_response = batch_task.result()
+                if batch_response.content and batch_response.content.strip():
+                    file_names = ", ".join(bf.split("/")[-1] for bf in batch_files[:5])
+                    if len(batch_files) > 5:
+                        file_names += f" و {len(batch_files)-5} فایل دیگر"
+                    findings.append(f"### 📦 دسته {batch_idx+1} ({file_names}):\n{batch_response.content}")
+            except Exception as e:
+                slog.warning(f"[batch-bg] Batch {batch_idx+1} failed: {e}")
+                findings.append(f"### دسته {batch_idx+1}: ❌ خطا: {str(e)[:100]}")
+
+            info["events"].append(("progress", {
+                "step": "batch_done",
+                "message": f"✅ دسته {batch_idx+1}/{batch_count} تحلیل شد ({total_read} فایل تا الان)"
+            }))
+            info["findings"] = list(findings)
+            info["total_read"] = total_read
+            info["new_event"].set()
+
+        # تکمیل
+        info["code_context"] = "\n\n".join(findings)
+        info["findings"] = findings
+        info["total_read"] = total_read
+        info["batch_count"] = batch_count
+        info["status"] = "completed"
+        info["events"].append(("progress", {
+            "step": "batch_complete",
+            "message": f"✅ پردازش دسته‌ای کامل: {batch_count} دسته، {total_read} فایل خوانده و تحلیل شد"
+        }))
+        info["new_event"].set()
+
+    except _asyncio.CancelledError:
+        info["status"] = "cancelled"
+        info["new_event"].set()
+    except Exception as e:
+        slog.error(f"[batch-bg] Background task failed: {e}")
+        info["status"] = "error"
+        info["error"] = str(e)
+        info["events"].append(("error", {"message": f"❌ خطا در پردازش: {str(e)[:150]}"}))
+        info["new_event"].set()
+
+
+async def _follow_bg_batch(info: dict, sse):
+    """
+    دنبال کردن یک background batch task — SSE event ها رو relay میکنه.
+    این async generator توسط SSE stream فراخوانی میشه.
+    اگر SSE قطع بشه، task اصلی بک‌گراند ادامه پیدا میکنه.
+    """
+    event_idx = 0
+    while info["status"] == "running":
+        while event_idx < len(info["events"]):
+            evt_type, evt_data = info["events"][event_idx]
+            yield sse(evt_type, evt_data)
+            event_idx += 1
+        try:
+            info["new_event"].clear()
+            await _asyncio.wait_for(info["new_event"].wait(), timeout=5.0)
+        except _asyncio.TimeoutError:
+            yield sse("heartbeat", {"message": "⏳ در حال پردازش..."})
+    # drain remaining events
+    while event_idx < len(info["events"]):
+        evt_type, evt_data = info["events"][event_idx]
+        yield sse(evt_type, evt_data)
+        event_idx += 1
+    # handle error
+    if info["status"] == "error":
+        yield sse("error", {"message": f"❌ {info.get('error', 'خطای ناشناخته')}"})
+
+
+def _start_bg_batch(
+    project_id: str, message: str, selected: list, batches: list,
+    per_file_limit: int, github_svc, ai_manager, owner: str, repo: str,
+    token: str, primary_model: str, model_max_output: int,
+    history_text: str, tree_summary: str, flow_type: str = "action"
+):
+    """
+    شروع یک background batch task جدید یا برگرداندن task موجود.
+    Returns: (task_key, info, is_reconnect)
+    """
+    _cleanup_old_batch_tasks()
+    task_key = _batch_task_key(project_id, message, selected)
+    existing = _get_batch_task(task_key)
+
+    if existing:
+        return task_key, existing, True
+
+    info = {
+        "task": None,
+        "events": [],
+        "new_event": _asyncio.Event(),
+        "status": "running",
+        "code_context": "",
+        "findings": [],
+        "total_read": 0,
+        "batch_count": len(batches),
+        "created_at": _time.time(),
+        "project_id": project_id,
+        "flow_type": flow_type,
     }
+    _BATCH_TASKS[task_key] = info
+    info["task"] = _asyncio.create_task(_run_batch_processing_bg(
+        task_key, github_svc, ai_manager, owner, repo, token,
+        selected, batches, per_file_limit, primary_model,
+        model_max_output, message, history_text, tree_summary,
+        flow_type=flow_type
+    ))
+    return task_key, info, False
 
 
 # ── Constants ────────────────────────────────────────────────────────
@@ -9940,6 +10178,61 @@ async def _smart_select_model(db, project_id: str) -> str:
     return FALLBACK_MODEL
 
 
+# ── Batch Task Status & Cancel ───────────────────────────────────────
+
+@router.get("/inspector/smart-chat/batch-status/{task_key}")
+async def batch_task_status(task_key: str):
+    """بررسی وضعیت background batch task"""
+    info = _get_batch_task(task_key)
+    if not info:
+        return {"success": True, "exists": False}
+    return {
+        "success": True,
+        "exists": True,
+        "status": info.get("status", "unknown"),
+        "batch_count": info.get("batch_count", 0),
+        "total_read": info.get("total_read", 0),
+        "flow_type": info.get("flow_type", "action"),
+        "event_count": len(info.get("events", [])),
+    }
+
+
+@router.get("/inspector/smart-chat/batch-active/{project_id}")
+async def batch_task_active(project_id: str):
+    """پیدا کردن task فعال برای یک پروژه — frontend هنگام mount صدا میزنه"""
+    _cleanup_old_batch_tasks()
+    for key, info in _BATCH_TASKS.items():
+        if info.get("project_id") == project_id and info.get("status") == "running":
+            return {
+                "success": True,
+                "has_active": True,
+                "task_key": key,
+                "status": "running",
+                "batch_count": info.get("batch_count", 0),
+                "total_read": info.get("total_read", 0),
+                "flow_type": info.get("flow_type", "action"),
+            }
+    return {"success": True, "has_active": False}
+
+
+@router.post("/inspector/smart-chat/batch-cancel/{task_key}")
+async def batch_task_cancel(task_key: str):
+    """لغو background batch task — دکمه توقف"""
+    info = _get_batch_task(task_key)
+    if not info:
+        return {"success": False, "error": "task not found"}
+    task = info.get("task")
+    if task and not task.done():
+        task.cancel()
+    info["status"] = "cancelled"
+    info["events"].append(("progress", {"step": "cancelled", "message": "⏹️ پردازش توسط کاربر لغو شد"}))
+    info["new_event"].set()
+    # پاکسازی
+    if task_key in _BATCH_TASKS:
+        del _BATCH_TASKS[task_key]
+    return {"success": True, "message": "cancelled"}
+
+
 @router.post("/inspector/smart-chat")
 async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
     """
@@ -10304,76 +10597,30 @@ GitHub: {_proj_github}
                         # 🆕 پردازش دسته‌ای برای FULL_PROJECT
                         q_use_batch = (q_scope == "FULL_PROJECT" and len(q_selected) > 30)
                         if q_use_batch:
+                            # ── Background Batch Processing — QUESTION ──
                             q_batch_budget = int(max_input_chars * 0.50)
                             per_file_q_limit = min(8000, max(2000, q_batch_budget // 25))
                             q_batch_size = max(10, min(30, q_batch_budget // max(per_file_q_limit, 1)))
                             q_batches = [q_selected[i:i+q_batch_size] for i in range(0, len(q_selected), q_batch_size)]
 
-                            yield sse("progress", {
-                                "step": "batch_mode",
-                                "message": f"🔄 پردازش دسته‌ای سؤال: {len(q_selected)} فایل در {len(q_batches)} دسته..."
-                            })
+                            _qproj_id = str(request.project_id) if request.project_id else ""
+                            q_task_key, q_bg_info, q_is_reconnect = _start_bg_batch(
+                                _qproj_id, request.message, q_selected, q_batches,
+                                per_file_q_limit, github_svc, ai_manager, owner, repo, token,
+                                primary_model, model_max_output, history_text, q_tree_summary,
+                                flow_type="question"
+                            )
 
-                            q_batch_findings = []
-                            q_read_failures = 0
-                            q_total_read = 0
-                            for qbi, qbatch in enumerate(q_batches):
-                                qb_code = ""
-                                qb_ok = 0
-                                for qfi, fp in enumerate(qbatch):
-                                    try:
-                                        result = await github_svc.get_file_content(owner, repo, fp, token=token)
-                                        if result.get("success"):
-                                            content = result.get("content", "")
-                                            if len(content) > per_file_q_limit:
-                                                content = content[:per_file_q_limit] + "\n... [truncated]"
-                                            qb_code += f"\n\n=== {fp} ===\n{content}"
-                                            qb_ok += 1
-                                        else:
-                                            q_read_failures += 1
-                                    except Exception:
-                                        q_read_failures += 1
-                                    if qfi > 0 and qfi % 5 == 0:
-                                        yield sse("heartbeat", {"message": f"📖 دسته {qbi+1}: {qfi}/{len(qbatch)}..."})
-                                    await asyncio.sleep(0.1)
-                                q_total_read += qb_ok
+                            if q_is_reconnect:
+                                yield sse("progress", {"step": "reconnect", "message": "♻️ اتصال مجدد — ادامه پردازش سؤال..."})
+                            else:
+                                yield sse("progress", {"step": "batch_mode", "message": f"🔄 پردازش دسته‌ای سؤال: {len(q_selected)} فایل در {len(q_batches)} دسته..."})
+                            yield sse("progress", {"step": "batch_task_key", "task_key": q_task_key})
 
-                                if not qb_code.strip():
-                                    continue
+                            async for evt in _follow_bg_batch(q_bg_info, sse):
+                                yield evt
 
-                                yield sse("progress", {
-                                    "step": "batch_analyzing",
-                                    "message": f"🧠 تحلیل دسته {qbi+1}/{len(q_batches)} ({qb_ok} فایل)..."
-                                })
-
-                                try:
-                                    _qt = asyncio.create_task(ai_manager.generate(
-                                        model_id=primary_model,
-                                        messages=[
-                                            Message(role="system", content=f"تحلیل‌گر دسته‌ای. دسته {qbi+1}/{len(q_batches)}. سؤال: {request.message[:200]}. یافته‌های کلیدی مرتبط."),
-                                            Message(role="user", content=f"سؤال کاربر: {request.message}\n\nفایل‌های دسته {qbi+1}:{qb_code}\n\nساختار پروژه:\n{q_tree_summary[:2000]}\n\nیافته‌های مرتبط با سؤال را استخراج کن. خلاصه و دقیق.")
-                                        ],
-                                        max_tokens=min(model_max_output, 2500),
-                                        temperature=0.2
-                                    ))
-                                    _qw = 0
-                                    while not _qt.done():
-                                        done_set, _ = await asyncio.wait({_qt}, timeout=5.0)
-                                        if done_set:
-                                            break
-                                        _qw += 5
-                                        yield sse("heartbeat", {"message": f"⏳ تحلیل دسته {qbi+1}... ({_qw}s)"})
-                                    qb_resp = _qt.result()
-                                    if qb_resp.content and qb_resp.content.strip():
-                                        q_batch_findings.append(f"### دسته {qbi+1}:\n{qb_resp.content}")
-                                except Exception as e:
-                                    slog.warning(f"[smart-chat QUESTION] Batch {qbi+1} failed: {e}")
-
-                            question_code_context = "\n\n".join(q_batch_findings)
-                            yield sse("progress", {
-                                "step": "batch_complete",
-                                "message": f"✅ {q_total_read} فایل خوانده و تحلیل شد"
-                            })
+                            question_code_context = q_bg_info.get("code_context", "")
                         else:
                             per_file_q_limit = min(10000, max(3000, max_q_code // max(len(q_selected), 1)))
                             q_read_failures = 0
@@ -10583,76 +10830,30 @@ GitHub: {_proj_github}
                         # 🆕 پردازش دسته‌ای برای FULL_PROJECT
                         err_use_batch = (err_scope == "FULL_PROJECT" and len(selected) > 30)
                         if err_use_batch:
+                            # ── Background Batch Processing — ERROR_LOG ──
                             e_batch_budget = int(max_input_chars * 0.50)
                             per_file_err_limit = min(8000, max(2000, e_batch_budget // 25))
                             e_batch_size = max(10, min(30, e_batch_budget // max(per_file_err_limit, 1)))
                             e_batches = [selected[i:i+e_batch_size] for i in range(0, len(selected), e_batch_size)]
 
-                            yield sse("progress", {
-                                "step": "batch_mode",
-                                "message": f"🔄 پردازش دسته‌ای خطا: {len(selected)} فایل در {len(e_batches)} دسته..."
-                            })
+                            _eproj_id = str(request.project_id) if request.project_id else ""
+                            e_task_key, e_bg_info, e_is_reconnect = _start_bg_batch(
+                                _eproj_id, request.message, selected, e_batches,
+                                per_file_err_limit, github_svc, ai_manager, owner, repo, token,
+                                primary_model, model_max_output, history_text, tree_summary,
+                                flow_type="error_log"
+                            )
 
-                            e_batch_findings = []
-                            err_read_failures = 0
-                            e_total_read = 0
-                            for ebi, ebatch in enumerate(e_batches):
-                                eb_code = ""
-                                eb_ok = 0
-                                for efi, file_path in enumerate(ebatch):
-                                    try:
-                                        result = await github_svc.get_file_content(owner, repo, file_path, token=token)
-                                        if result.get("success"):
-                                            content = result.get("content", "")
-                                            if len(content) > per_file_err_limit:
-                                                content = content[:per_file_err_limit] + "\n... [truncated]"
-                                            eb_code += f"\n\n=== {file_path} ===\n{content}"
-                                            eb_ok += 1
-                                        else:
-                                            err_read_failures += 1
-                                    except Exception:
-                                        err_read_failures += 1
-                                    if efi > 0 and efi % 5 == 0:
-                                        yield sse("heartbeat", {"message": f"📖 دسته {ebi+1}: {efi}/{len(ebatch)}..."})
-                                    await asyncio.sleep(0.1)
-                                e_total_read += eb_ok
+                            if e_is_reconnect:
+                                yield sse("progress", {"step": "reconnect", "message": "♻️ اتصال مجدد — ادامه تحلیل خطا..."})
+                            else:
+                                yield sse("progress", {"step": "batch_mode", "message": f"🔄 پردازش دسته‌ای خطا: {len(selected)} فایل در {len(e_batches)} دسته..."})
+                            yield sse("progress", {"step": "batch_task_key", "task_key": e_task_key})
 
-                                if not eb_code.strip():
-                                    continue
+                            async for evt in _follow_bg_batch(e_bg_info, sse):
+                                yield evt
 
-                                yield sse("progress", {
-                                    "step": "batch_analyzing",
-                                    "message": f"🧠 تحلیل دسته {ebi+1}/{len(e_batches)} ({eb_ok} فایل)..."
-                                })
-
-                                try:
-                                    _et = asyncio.create_task(ai_manager.generate(
-                                        model_id=primary_model,
-                                        messages=[
-                                            Message(role="system", content=f"تحلیل‌گر دسته‌ای خطا. دسته {ebi+1}/{len(e_batches)}. خطا: {request.message[:200]}. یافته‌های مرتبط با خطا."),
-                                            Message(role="user", content=f"خطا/لاگ: {request.message[:2000]}\n\nفایل‌های دسته {ebi+1}:{eb_code}\n\nیافته‌های مرتبط با خطا را استخراج کن. خلاصه و دقیق.")
-                                        ],
-                                        max_tokens=min(model_max_output, 2500),
-                                        temperature=0.2
-                                    ))
-                                    _ew = 0
-                                    while not _et.done():
-                                        done_set, _ = await asyncio.wait({_et}, timeout=5.0)
-                                        if done_set:
-                                            break
-                                        _ew += 5
-                                        yield sse("heartbeat", {"message": f"⏳ تحلیل دسته {ebi+1}... ({_ew}s)"})
-                                    eb_resp = _et.result()
-                                    if eb_resp.content and eb_resp.content.strip():
-                                        e_batch_findings.append(f"### دسته {ebi+1}:\n{eb_resp.content}")
-                                except Exception as e:
-                                    slog.warning(f"[smart-chat ERROR_LOG] Batch {ebi+1} failed: {e}")
-
-                            code_context = "\n\n".join(e_batch_findings)
-                            yield sse("progress", {
-                                "step": "batch_complete",
-                                "message": f"✅ {e_total_read} فایل خوانده و تحلیل شد"
-                            })
+                            code_context = e_bg_info.get("code_context", "")
                         else:
                             per_file_err_limit = min(12000, max(3000, max_err_code_chars // max(len(selected), 1)))
                             err_read_failures = 0
@@ -11067,162 +11268,41 @@ GitHub: {_proj_github}
                         use_batch_processing = (request_scope == "FULL_PROJECT" and len(selected) > 30)
 
                         if use_batch_processing:
-                            # ── Batch Processing Mode (با heartbeat + resume) ──
+                            # ── Background Batch Processing — مستقل از SSE ──
                             batch_budget = int(max_input_chars * 0.55)
                             per_file_limit = min(8000, max(2000, batch_budget // 25))
                             batch_size = max(10, min(30, batch_budget // max(per_file_limit, 1)))
                             batches = [selected[i:i+batch_size] for i in range(0, len(selected), batch_size)]
+
+                            _proj_id = str(request.project_id) if request.project_id else ""
+                            task_key, bg_info, is_reconnect = _start_bg_batch(
+                                _proj_id, request.message, selected, batches,
+                                per_file_limit, github_svc, ai_manager, owner, repo, token,
+                                primary_model, model_max_output, history_text, act_tree_summary,
+                                flow_type="action"
+                            )
                             _batch_count = len(batches)
 
-                            # 🆕 بررسی کش — آیا قبلاً بخشی از کار انجام شده؟
-                            _cache_key = _batch_cache_key(
-                                str(request.project_id) if request.project_id else "",
-                                request.message,
-                                selected
-                            )
-                            _cached = _batch_cache_get(_cache_key)
-                            _resume_from = 0
-                            batch_findings = []
-                            act_read_failures = 0
-
-                            if _cached and _cached.get("completed_batches", 0) > 0:
-                                _resume_from = _cached["completed_batches"]
-                                batch_findings = list(_cached.get("findings", []))
-                                _batch_total_read = _cached.get("total_read", 0)
+                            if is_reconnect:
                                 yield sse("progress", {
-                                    "step": "batch_resume",
-                                    "message": f"♻️ ادامه از دسته {_resume_from+1} — {_resume_from} دسته قبلاً تحلیل شده"
+                                    "step": "reconnect",
+                                    "message": f"♻️ اتصال مجدد — پردازش در حال اجرا ({bg_info.get('total_read', 0)} فایل تا الان)"
                                 })
                             else:
                                 yield sse("progress", {
                                     "step": "batch_mode",
-                                    "message": f"🔄 پردازش دسته‌ای: {len(selected)} فایل در {_batch_count} دسته (هر دسته تا {batch_size} فایل — خوانش کامل)"
+                                    "message": f"🔄 پردازش دسته‌ای بک‌گراند: {len(selected)} فایل در {_batch_count} دسته"
                                 })
+                            yield sse("progress", {"step": "batch_task_key", "task_key": task_key})
 
-                            for batch_idx, batch_files in enumerate(batches):
-                                # 🆕 رد کردن دسته‌های قبلاً تحلیل‌شده (resume)
-                                if batch_idx < _resume_from:
-                                    continue
+                            # دنبال کردن event‌های background task
+                            async for evt in _follow_bg_batch(bg_info, sse):
+                                yield evt
 
-                                batch_code = ""
-                                batch_read_ok = 0
-
-                                yield sse("progress", {
-                                    "step": "batch_reading",
-                                    "message": f"📖 خواندن دسته {batch_idx+1} از {_batch_count} ({len(batch_files)} فایل)..."
-                                })
-
-                                # 🆕 heartbeat حین خوانش فایل‌ها (هر ۵ فایل)
-                                for fi, fp in enumerate(batch_files):
-                                    try:
-                                        result = await github_svc.get_file_content(owner, repo, fp, token=token)
-                                        if result.get("success"):
-                                            content = result.get("content", "")
-                                            if len(content) > per_file_limit:
-                                                content = content[:per_file_limit] + "\n... [truncated]"
-                                            batch_code += f"\n\n=== {fp} ===\n{content}"
-                                            batch_read_ok += 1
-                                        else:
-                                            act_read_failures += 1
-                                    except Exception:
-                                        act_read_failures += 1
-                                    if fi > 0 and fi % 5 == 0:
-                                        yield sse("heartbeat", {
-                                            "message": f"📖 دسته {batch_idx+1}: {fi}/{len(batch_files)} فایل..."
-                                        })
-                                    await asyncio.sleep(0.1)
-
-                                _batch_total_read += batch_read_ok
-
-                                if not batch_code.strip():
-                                    batch_findings.append(f"### دسته {batch_idx+1}: هیچ فایلی خوانده نشد")
-                                    continue
-
-                                yield sse("progress", {
-                                    "step": "batch_analyzing",
-                                    "message": f"🧠 تحلیل دسته {batch_idx+1} از {_batch_count} توسط {primary_model} ({batch_read_ok} فایل)..."
-                                })
-
-                                batch_analysis_prompt = f"""## درخواست کاربر:
-{request.message}
-
-## تاریخچه مکالمه (خلاصه):
-{history_text[-2000:]}
-
-## فایل‌های دسته {batch_idx+1} از {_batch_count} — محتوای کامل:
-{batch_code}
-
-## ساختار کلی پروژه (برای درک وابستگی‌ها):
-{act_tree_summary[:3000]}
-
-## وظیفه تو — تحلیل دسته‌ای:
-بر اساس درخواست کاربر، فایل‌های این دسته را دقیق تحلیل کن:
-- برای هر فایل: imports، exports، عملکرد اصلی، وابستگی‌ها
-- یافته‌های مرتبط با درخواست کاربر (فایل بلااستفاده، باگ، مشکل ساختاری، کد تکراری، ...)
-- ارجاعات بین فایلی: این فایل از کجاها import میکنه و احتمالاً کجاها ازش استفاده میشه
-- اگر مشکل یا نکته مهمی در خطوط پایین فایل هست، حتماً ذکر کن
-⚠️ فقط یافته‌ها و تحلیل دقیق بنویس — جمع‌بندی نهایی در مرحله بعد انجام میشه."""
-
-                                # 🆕 AI call با heartbeat — جلوگیری از timeout
-                                try:
-                                    _btask = asyncio.create_task(ai_manager.generate(
-                                        model_id=primary_model,
-                                        messages=[
-                                            Message(role="system", content=f"تحلیل‌گر دسته‌ای پروژه. دسته {batch_idx+1}/{_batch_count}. درخواست: {request.message[:200]}. فقط یافته‌های کلیدی مرتبط با درخواست کاربر. دقیق و کامل."),
-                                            Message(role="user", content=batch_analysis_prompt)
-                                        ],
-                                        max_tokens=min(model_max_output, 3000),
-                                        temperature=0.2
-                                    ))
-                                    _bwait = 0
-                                    while not _btask.done():
-                                        done_set, _ = await asyncio.wait({_btask}, timeout=5.0)
-                                        if done_set:
-                                            break
-                                        _bwait += 5
-                                        yield sse("heartbeat", {
-                                            "message": f"⏳ تحلیل دسته {batch_idx+1}/{_batch_count}... ({_bwait}s)"
-                                        })
-                                        if _bwait >= 120:
-                                            _btask.cancel()
-                                            raise TimeoutError(f"Batch {batch_idx+1} timed out after {_bwait}s")
-
-                                    batch_response = _btask.result()
-                                    if batch_response.content and batch_response.content.strip():
-                                        file_names = ", ".join(bf.split("/")[-1] for bf in batch_files[:5])
-                                        if len(batch_files) > 5:
-                                            file_names += f" و {len(batch_files)-5} فایل دیگر"
-                                        batch_findings.append(
-                                            f"### 📦 دسته {batch_idx+1} ({file_names}):\n{batch_response.content}"
-                                        )
-                                except Exception as e:
-                                    slog.warning(f"[smart-chat ACTION] Batch {batch_idx+1} analysis failed: {e}")
-                                    batch_findings.append(f"### دسته {batch_idx+1}: ❌ خطا در تحلیل: {str(e)[:100]}")
-
-                                yield sse("progress", {
-                                    "step": "batch_done",
-                                    "message": f"✅ دسته {batch_idx+1}/{_batch_count} تحلیل شد ({_batch_total_read} فایل تا الان)"
-                                })
-
-                                # 🆕 ذخیره پیشرفت در کش (بعد از هر دسته)
-                                _batch_cache_set(
-                                    _cache_key, batch_findings,
-                                    completed_batches=batch_idx + 1,
-                                    total_batches=_batch_count,
-                                    total_read=_batch_total_read
-                                )
-
-                            # یافته‌های تمام دسته‌ها → code_context
-                            code_context = "\n\n".join(batch_findings)
-
-                            # پاکسازی کش (کار تمام شد)
-                            if _cache_key in _BATCH_CACHE:
-                                del _BATCH_CACHE[_cache_key]
-
-                            yield sse("progress", {
-                                "step": "batch_complete",
-                                "message": f"✅ پردازش دسته‌ای کامل: {_batch_count} دسته، {_batch_total_read} فایل خوانده و تحلیل شد"
-                            })
+                            # نتایج
+                            code_context = bg_info.get("code_context", "")
+                            _batch_total_read = bg_info.get("total_read", 0)
+                            _batch_count = bg_info.get("batch_count", _batch_count)
 
                         else:
                             # ── BROAD / TARGETED — خواندن عادی ──
