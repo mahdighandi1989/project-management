@@ -382,6 +382,7 @@ export default function ProjectDetailPage() {
   const [inspectorOpLock, setInspectorOpLock] = useState(false);
   const [inspectorOpPaused, setInspectorOpPaused] = useState(false);
   const inspectorOpAbortRef = useRef<AbortController | null>(null);
+  const inspectorBatchTaskKeyRef = useRef<string | null>(null);
   const [inspectorOpType, setInspectorOpType] = useState<'investigate' | 'fix' | null>(null);
 
   // 🆕 انتخاب خودکار مدل و همکاری
@@ -2792,6 +2793,45 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   // پایان Live Action Tracking
   // ============================================
 
+  // 🆕 بررسی background batch task فعال هنگام بازگشت به صفحه
+  useEffect(() => {
+    if (!inspectorPowerOn || !projectId) return;
+    const checkActiveBatchTask = async () => {
+      try {
+        // ابتدا sessionStorage بررسی کن
+        const stored = sessionStorage.getItem('inspector_batch_task');
+        if (!stored) return;
+        const { task_key, message, timestamp } = JSON.parse(stored);
+        // فقط task‌های کمتر از ۳۰ دقیقه
+        if (Date.now() - timestamp > 30 * 60 * 1000) {
+          sessionStorage.removeItem('inspector_batch_task');
+          return;
+        }
+        // بررسی وضعیت از سرور
+        const res = await fetch(`${API_BASE}/api/render/inspector/smart-chat/batch-status/${task_key}`);
+        const data = await res.json();
+        if (data.exists && data.status === 'running') {
+          // task هنوز فعاله — اتصال مجدد خودکار
+          inspectorBatchTaskKeyRef.current = task_key;
+          setInspectorChatMessages(prev => [...prev, {
+            id: `reconnect_${Date.now()}`,
+            role: 'system' as const,
+            content: `♻️ پردازش قبلی هنوز در حال اجرا — اتصال مجدد خودکار... (${data.total_read || 0} فایل تا الان)`,
+            timestamp: new Date(),
+          }]);
+          // re-trigger with retry to follow the existing task
+          setTimeout(() => sendInspectorChat(message, true), 500);
+        } else {
+          // task تمام شده یا وجود نداره — پاکسازی
+          sessionStorage.removeItem('inspector_batch_task');
+        }
+      } catch {
+        // ignore errors
+      }
+    };
+    checkActiveBatchTask();
+  }, [inspectorPowerOn, projectId]);
+
   // 🆕 ارسال پیام به AI
   const sendInspectorChat = async (overrideMessage?: string, _isRetry = false) => {
     // در حالت انتخاب خودکار، نیازی به انتخاب دستی مدل نیست
@@ -3017,6 +3057,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 const data = JSON.parse(line.slice(6));
 
                 if (eventType === 'progress') {
+                  // ذخیره task_key برای اتصال مجدد و لغو
+                  if (data.task_key && data.step === 'batch_task_key') {
+                    inspectorBatchTaskKeyRef.current = data.task_key;
+                    try {
+                      sessionStorage.setItem('inspector_batch_task', JSON.stringify({
+                        task_key: data.task_key,
+                        project_id: projectId,
+                        message: userMessage,
+                        timestamp: Date.now(),
+                      }));
+                    } catch {}
+                    // این event رو نمایش نده — فقط ذخیره کردن
+                  }
                   setInspectorChatMessages(prev => [...prev, {
                     id: `smart_p_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
                     role: 'system' as const,
@@ -3033,6 +3086,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   }]);
                 } else if (eventType === 'response') {
                   responseReceived = true;
+                  // پاکسازی batch task — کار تمام شد
+                  inspectorBatchTaskKeyRef.current = null;
+                  try { sessionStorage.removeItem('inspector_batch_task'); } catch {}
                   const responseId = `smart_response_${Date.now()}`;
 
                   // ذخیره فایل‌های خوانده‌شده برای هدایت AI به فایل‌های جدید در پیام‌های بعدی
@@ -9718,6 +9774,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                       if (inspectorOpAbortRef.current) {
                                         inspectorOpAbortRef.current.abort();
                                       }
+                                      // لغو background batch task
+                                      if (inspectorBatchTaskKeyRef.current) {
+                                        fetch(`${API_BASE}/api/render/inspector/smart-chat/batch-cancel/${inspectorBatchTaskKeyRef.current}`, { method: 'POST' }).catch(() => {});
+                                        inspectorBatchTaskKeyRef.current = null;
+                                        try { sessionStorage.removeItem('inspector_batch_task'); } catch {}
+                                      }
                                       setInspectorOpLock(false);
                                       setInspectorOpType(null);
                                       setInvestigateLoading(false);
@@ -11137,6 +11199,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           onClick={() => {
                             if (inspectorOpAbortRef.current) {
                               inspectorOpAbortRef.current.abort();
+                            }
+                            // لغو background batch task
+                            if (inspectorBatchTaskKeyRef.current) {
+                              fetch(`${API_BASE}/api/render/inspector/smart-chat/batch-cancel/${inspectorBatchTaskKeyRef.current}`, { method: 'POST' }).catch(() => {});
+                              inspectorBatchTaskKeyRef.current = null;
+                              try { sessionStorage.removeItem('inspector_batch_task'); } catch {}
                             }
                             setInspectorOpLock(false);
                             setInspectorOpType(null);
