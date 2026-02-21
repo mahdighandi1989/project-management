@@ -37,7 +37,7 @@ export default function InspectorBridge() {
 
     // 🌐 اتصال WebSocket
     const connectWS = () => {
-      if (!WS_URL || WS_URL === "wss://ai-creator-backend-q677.onrender.com/api/render/ws/bridge/gh_mahdighandi1989_project_management") return;
+      if (!WS_URL) return;
       try {
         ws = new WebSocket(WS_URL);
         ws.onopen = () => { ws.send(JSON.stringify({ type: "register", role: "bridge" })); };
@@ -147,6 +147,28 @@ export default function InspectorBridge() {
     };
     window.addEventListener("pointerdown", handlePointerDown, true);
 
+    // 🆕 ردیابی تغییر URL (SPA navigation)
+    let _lastKnownUrl = window.location.href;
+    const _notifyUrlChange = () => {
+      const cur = window.location.href;
+      if (cur !== _lastKnownUrl) {
+        _lastKnownUrl = cur;
+        sendToInspector("url-changed", { elementInfo: cur });
+        if (isInIframe) {
+          try { window.parent.postMessage({ type: "inspector-url-changed", pageUrl: cur, timestamp: Date.now() }, "*"); } catch(e) {}
+        }
+      }
+    };
+    window.addEventListener("popstate", _notifyUrlChange);
+    window.addEventListener("hashchange", _notifyUrlChange);
+    // Intercept pushState/replaceState (SPA frameworks use these without firing events)
+    const _origPushState = history.pushState;
+    const _origReplaceState = history.replaceState;
+    history.pushState = function(...args: any[]) { _origPushState.apply(this, args); setTimeout(_notifyUrlChange, 50); };
+    history.replaceState = function(...args: any[]) { _origReplaceState.apply(this, args); setTimeout(_notifyUrlChange, 50); };
+    // Periodic fallback (some frameworks bypass history API)
+    const _urlCheckInterval = setInterval(_notifyUrlChange, 1500);
+
     // 🔵 رهگیری تمام متدهای کنسول
     let consoleLogCount = 0;
     const MAX_CONSOLE_LOGS = 200;
@@ -253,6 +275,11 @@ export default function InspectorBridge() {
       window.removeEventListener("focus", handleFocus, true);
       window.removeEventListener("error", handleError);
       window.removeEventListener("unhandledrejection", handleRejection);
+      window.removeEventListener("popstate", _notifyUrlChange);
+      window.removeEventListener("hashchange", _notifyUrlChange);
+      clearInterval(_urlCheckInterval);
+      history.pushState = _origPushState;
+      history.replaceState = _origReplaceState;
       console.log = origLog; console.warn = origWarn; console.error = origError; console.info = origInfo; console.debug = origDebug;
       if (overlayObs) overlayObs.disconnect();
       clearInterval(heartbeat);
