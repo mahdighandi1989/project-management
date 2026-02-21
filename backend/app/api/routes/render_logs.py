@@ -12937,6 +12937,30 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
         )
         _vd_general_text = _build_general_instructions_text(_vd_instructions_list)
 
+        # ── بودجه‌بندی هوشمند بر اساس context window مدل ──
+        from ...core.models_registry import get_model as _vd_get_model
+        _vd_reg = _vd_get_model(primary_model)
+        _vd_context_window = getattr(_vd_reg, 'context_window', 32000) if _vd_reg else 32000
+        _vd_model_max_output = getattr(_vd_reg, 'max_tokens', 4096) if _vd_reg else 4096
+        _vd_max_output = min(8192, max(4096, _vd_model_max_output))
+
+        # تقریب: هر توکن ≈ 3 کاراکتر فارسی/انگلیسی
+        _vd_max_input_chars = max(10000, (_vd_context_window - _vd_max_output) * 3)
+
+        # تخمین فضای ثابت (پرامپت سیستم + دستورات عمومی)
+        _vd_prompt_overhead = len(_vd_general_text) + 5000  # ~5K for visual debug prompt template
+        _vd_reserve = 3000  # حاشیه ایمنی
+
+        # بودجه کد = کل ورودی − سربار ثابت − فضای کاربر (تخمین اولیه) − حاشیه
+        _vd_user_estimate = min(5000, len(request.user_description or '') + 2000)  # user text + screenshot captions
+        _vd_code_budget = max(15000, _vd_max_input_chars - _vd_prompt_overhead - _vd_user_estimate - _vd_reserve)
+
+        # تعداد فایل و سقف هر فایل — بر اساس بودجه کد
+        _vd_max_files = max(8, min(40, _vd_code_budget // 4000))  # ~4K میانگین هر فایل
+        _vd_per_file_limit = max(5000, min(25000, _vd_code_budget // max(_vd_max_files // 2, 1)))
+
+        yield sse("progress", {"step": "budget", "message": f"📊 بودجه: {_vd_context_window // 1000}K context → {_vd_max_files} فایل, {_vd_per_file_limit // 1000}K/فایل"})
+
         # ساخت پرامپت - اگر screenshot_packs موجود است، هر عکس را با لاگ‌های مربوطه ارسال کن
         user_parts = [f"## 📸 عکس‌های صفحه ({len(request.screenshots)} عکس)"]
 
@@ -13071,7 +13095,7 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                     # 🆕 AI file selection (مثل smart-chat)
                     api_path_context = " ".join(all_api_paths) if all_api_paths else ""
                     _vd_context = (request.user_description or "") + " " + api_path_context
-                    _vd_max_files = 20  # بیشتر از قبل (بود ۸)
+                    # _vd_max_files محاسبه شده از بودجه داینامیک مدل
 
                     yield sse("progress", {"step": "selecting_files", "message": f"🤖 مدل {primary_model} در حال انتخاب فایل‌های مرتبط..."})
                     try:
@@ -13139,12 +13163,21 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                         old_files = [f for f in selected_files if f in prev_files]
                         selected_files = (new_files + old_files)[:_vd_max_files]
                     if selected_files:
-                        yield sse("progress", {"step": "reading_files", "message": f"📖 خواندن {len(selected_files)} فایل..."})
+                        yield sse("progress", {"step": "reading_files", "message": f"📖 خواندن {len(selected_files)} فایل (بودجه {_vd_code_budget // 1000}K)..."})
+                        _vd_read_count = 0
                         for fp in selected_files:
+                            if len(code_context) >= _vd_code_budget:
+                                yield sse("progress", {"step": "budget_cap", "message": f"📊 بودجه کد پر شد ({len(code_context) // 1000}K) — {len(selected_files) - _vd_read_count} فایل باقیمانده نادیده گرفته شد"})
+                                break
                             try:
                                 file_result = await github_svc.get_file_content(owner, repo, fp, token=token)
                                 if file_result.get("success"):
-                                    code_context += f"\n--- {fp} ---\n{file_result.get('content', '')[:15000]}\n"
+                                    _file_content = file_result.get('content', '')
+                                    # سقف هر فایل: داینامیک بر اساس بودجه باقیمانده
+                                    _remaining = _vd_code_budget - len(code_context)
+                                    _this_limit = min(_vd_per_file_limit, max(3000, _remaining))
+                                    code_context += f"\n--- {fp} ---\n{_file_content[:_this_limit]}\n"
+                                    _vd_read_count += 1
                             except Exception:
                                 pass
             except Exception as e:
@@ -13163,7 +13196,16 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
         if project_tree_summary:
             full_system += f"\n\n## ساختار پروژه:\n{project_tree_summary}"
         if code_context:
-            full_system += f"\n\n## کد فایل‌ها:\n{code_context[:50000]}"
+            full_system += f"\n\n## کد فایل‌ها:\n{code_context[:_vd_code_budget]}"
+
+        # ── بررسی نهایی: آیا کل پرامپت در بودجه مدل جا میشه؟ ──
+        _vd_total_len = len(full_system) + len(user_text)
+        if _vd_total_len > _vd_max_input_chars:
+            # کد فایل‌ها در انتهای full_system هست — از انتها کوتاه کن
+            _vd_allowed_system = max(10000, _vd_max_input_chars - len(user_text) - 1000)
+            if len(full_system) > _vd_allowed_system:
+                full_system = full_system[:_vd_allowed_system] + "\n\n... [بخشی از فایل‌ها به دلیل محدودیت ظرفیت مدل حذف شد]"
+                yield sse("progress", {"step": "prompt_truncation", "message": f"⚠️ حجم پرامپت ({_vd_total_len // 1000}K) بیش از ظرفیت مدل ({_vd_max_input_chars // 1000}K) — بهینه‌سازی شد"})
 
         try:
             yield sse("progress", {"step": "sending_to_model", "message": f"📤 ارسال به {primary_model}..."})
@@ -13173,7 +13215,7 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                 Message(role="user", content=user_text, images=request.screenshots[:10])
             ]
             response_task = asyncio.create_task(
-                ai_manager.generate(model_id=primary_model, messages=messages, max_tokens=8000, temperature=0.3, task_type="code_analysis")
+                ai_manager.generate(model_id=primary_model, messages=messages, max_tokens=_vd_max_output, temperature=0.3, task_type="code_analysis")
             )
             while not response_task.done():
                 yield sse("heartbeat", {"ts": int(_time.time())})
