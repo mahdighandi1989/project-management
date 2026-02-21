@@ -524,6 +524,7 @@ export default function ProjectDetailPage() {
   const [visualDebugSelectedModels, setVisualDebugSelectedModels] = useState<string[]>([]);
   const [visualDebugLoading, setVisualDebugLoading] = useState(false);
   const [visualDebugPromptOpen, setVisualDebugPromptOpen] = useState(false);
+  const [visualDebugPromptData, setVisualDebugPromptData] = useState<{vd: Array<{id: string; title: string; content: string; icon: string; prompt_detail?: string}>; gen: Array<{id: string; title: string; content: string; icon: string; prompt_detail?: string}>} | null>(null);
 
   // 📋 لاگ‌های کنسول پروژه ایمپورت شده (تفکیک شده از پروژه اصلی)
   const [importedProjectConsoleLogs, setImportedProjectConsoleLogs] = useState<Array<{
@@ -1275,6 +1276,25 @@ export default function ProjectDetailPage() {
       }
     } catch (e) {
       console.error('Error loading general instructions:', e);
+    }
+  };
+
+  // 📸 پرامپت بازرس بصری (از منبع واحد بکند — خودکار همگام)
+  const loadVisualDebugPrompt = async () => {
+    if (!projectId) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/visual-debug-prompt/${projectId}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setVisualDebugPromptData({
+            vd: data.visual_debug_instructions || [],
+            gen: data.general_instructions || []
+          });
+        }
+      }
+    } catch (e) {
+      console.error('Error loading visual debug prompt:', e);
     }
   };
 
@@ -11693,7 +11713,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             <div className="mt-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden" dir="rtl">
               {/* هدر پنل - کلیک برای باز/بسته شدن */}
               <button
-                onClick={() => { setPromptFieldsOpen(!promptFieldsOpen); if (!promptFieldsOpen) { if (promptFields.length === 0) loadPromptFields(); if (generalInstructions.length === 0) loadGeneralInstructions(); } }}
+                onClick={() => { setPromptFieldsOpen(!promptFieldsOpen); if (!promptFieldsOpen) { if (promptFields.length === 0) loadPromptFields(); if (generalInstructions.length === 0) loadGeneralInstructions(); if (!visualDebugPromptData) loadVisualDebugPrompt(); } }}
                 className="w-full flex items-center justify-between px-4 py-3 bg-gradient-to-r from-purple-50 to-indigo-50 dark:from-purple-900/20 dark:to-indigo-900/20 hover:from-purple-100 hover:to-indigo-100 dark:hover:from-purple-900/30 dark:hover:to-indigo-900/30 transition-colors"
               >
                 <div className="flex items-center gap-3">
@@ -11771,25 +11791,34 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     </button>
                     {visualDebugPromptOpen && (
                       <div className="px-4 pb-3">
-                        <div className="p-3 bg-white/60 dark:bg-gray-800/40 rounded-lg text-[11px] text-gray-700 dark:text-gray-300 whitespace-pre-wrap leading-relaxed font-mono max-h-[200px] overflow-auto">
-{`## 🔍 بازرس بصری هوشمند پروژه
-
-مهندس ارشد نرم‌افزار با تسلط بر فرانت‌اند و بکند. اطلاعات دریافتی:
-
-📸 عکس‌های صفحه — ساختار UI، المان‌ها، وضعیت فعلی
-📦 پک لاگ هر عکس — کنسول، بکند، URL، مسیرهای API
-📂 کد فایل‌ها — فرانت و بکند مرتبط
-🗂️ ساختار پروژه — درخت فایل‌ها
-
-🎯 انواع درخواست:
-  🐛 رفع باگ → ردیابی ریشه‌ای خطا از لاگ‌ها و API paths
-  ✨ قابلیت جدید → تحلیل ساختار فعلی + پیاده‌سازی کامل
-  🎨 تغییر ظاهری → بررسی عکس + اصلاح CSS/JSX
-  🔧 بهبود/ریفکتور → حفظ عملکرد + کد بهتر
-
-💡 روش: ابتدا عکس‌ها و لاگ‌ها → سپس کد فعلی → تحلیل درخواست → پیاده‌سازی کامل با action_plan`}
-                        </div>
-                        <p className="text-[10px] text-purple-400 mt-2">این پرامپت هنگام ارسال عکس به مدل Vision فعال می‌شود — پشتیبانی از رفع باگ، ایجاد قابلیت جدید، تغییر ظاهر و تحلیل</p>
+                        {visualDebugPromptData ? (
+                          <div className="space-y-2 max-h-[300px] overflow-auto">
+                            <p className="text-[10px] font-bold text-purple-600 dark:text-purple-300 mb-1">پرامپت بازرس بصری ({visualDebugPromptData.vd.length} بخش):</p>
+                            {visualDebugPromptData.vd.map(inst => (
+                              <div key={inst.id} className="p-2 bg-white/60 dark:bg-gray-800/40 rounded-lg border border-purple-100 dark:border-purple-800/40">
+                                <div className="flex items-center gap-1 mb-1">
+                                  <span className="text-sm">{inst.icon}</span>
+                                  <span className="text-[11px] font-bold text-purple-800 dark:text-purple-200">{inst.title}</span>
+                                </div>
+                                <p className="text-[10px] text-gray-600 dark:text-gray-400 whitespace-pre-wrap leading-relaxed">{inst.prompt_detail || inst.content}</p>
+                              </div>
+                            ))}
+                            {visualDebugPromptData.gen.length > 0 && (
+                              <>
+                                <p className="text-[10px] font-bold text-green-600 dark:text-green-300 mt-2">+ دستورات عمومی ({visualDebugPromptData.gen.length} مورد) — خودکار تزریق می‌شود</p>
+                                {visualDebugPromptData.gen.map(inst => (
+                                  <div key={inst.id} className="p-1.5 bg-green-50/50 dark:bg-green-900/10 rounded border border-green-100 dark:border-green-800/30">
+                                    <span className="text-[10px] text-green-700 dark:text-green-300">{inst.icon} {inst.title}: </span>
+                                    <span className="text-[10px] text-gray-500 dark:text-gray-400">{inst.content}</span>
+                                  </div>
+                                ))}
+                              </>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="p-3 bg-white/60 dark:bg-gray-800/40 rounded-lg text-[11px] text-gray-500 text-center">در حال بارگذاری...</div>
+                        )}
+                        <p className="text-[10px] text-purple-400 mt-2">منبع واحد — هر تغییری در بکند خودکار اینجا منعکس می‌شود</p>
                       </div>
                     )}
                   </div>
