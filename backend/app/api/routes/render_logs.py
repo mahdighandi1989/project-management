@@ -10105,6 +10105,63 @@ def _fallback_file_selection(code_files: list, context_text: str, max_files: int
     return selected
 
 
+def _extract_file_paths_from_text(text: str, code_files: list) -> list:
+    """
+    استخراج مسیر فایل‌ها از متن خطا، stack trace، و پیام کاربر.
+    هر مسیری که در لیست فایل‌های واقعی پروژه (code_files) وجود داشته باشه
+    برگردانده میشه — اینجوری مطمئنیم فایل‌های ذکر شده در خطا حتماً خونده میشن.
+    """
+    if not text or not code_files:
+        return []
+
+    found = set()
+    code_files_set = set(code_files)
+
+    # ۱) Python stack trace: File "path/to/file.py", line 123
+    for m in re.finditer(r'File\s+"([^"]+)"', text):
+        found.add(m.group(1))
+
+    # ۲) Node.js / JS stack trace: at Something (path/to/file.js:123:45) or at path/to/file.js:123
+    for m in re.finditer(r'at\s+(?:[\w.<>]+\s+)?\(?([^\s()]+\.\w{1,5})(?::\d+){0,2}\)?', text):
+        found.add(m.group(1))
+
+    # ۳) Webpack/Next.js errors: ./src/components/Foo.tsx or Error in ./path
+    for m in re.finditer(r'(?:Error in\s+|Module not found[^\"]*[\'"]|from\s+[\'"]|import\s+[\'"])?\.\/([^\s\'"`,;)]+\.\w{1,5})', text):
+        found.add(m.group(1))
+
+    # ۴) Explicit file paths with common extensions (src/..., backend/..., app/..., pages/..., etc.)
+    for m in re.finditer(
+        r'(?:^|\s|[\'"`(,|])(((?:src|backend|frontend|app|pages|components|lib|utils|services|api|routes|models|config|public|scripts|hooks|store|context|middleware|types|interfaces|styles|assets|tests?|__tests__|spec)(?:/[\w.\-]+)+\.[\w]{1,5}))',
+        text
+    ):
+        found.add(m.group(2))
+
+    # ۵) Generic path patterns: any/thing/with/slashes.ext (at least 2 parts)
+    for m in re.finditer(r'(?:^|\s|[\'"`(,|])([\w][\w.\-]*/[\w.\-/]+\.(?:py|js|jsx|ts|tsx|vue|css|scss|html|json|yaml|yml|toml|cfg|env|md|sql|go|rs|rb|php|java|kt|swift|sh|bash))', text):
+        found.add(m.group(1))
+
+    # حالا مسیرهای پیدا شده رو با لیست واقعی فایل‌های پروژه مطابقت بده
+    matched = []
+    for raw_path in found:
+        # پاکسازی
+        clean = raw_path.strip().strip("'\"`,;)( ").rstrip(".")
+        if not clean:
+            continue
+
+        # مطابقت دقیق
+        if clean in code_files_set:
+            matched.append(clean)
+            continue
+
+        # مطابقت suffix — شاید مسیر نسبی باشه (مثلاً خطا فقط app/api/routes/foo.py گفته ولی full path بلندتره)
+        for cf in code_files:
+            if cf.endswith("/" + clean) or cf == clean:
+                matched.append(cf)
+                break
+
+    return list(dict.fromkeys(matched))  # حذف تکراری با حفظ ترتیب
+
+
 def _build_project_tree_summary(code_files: list, max_chars: int = 4000) -> str:
     """
     ساخت خلاصه ساختار پروژه از لیست فایل‌ها.
@@ -10924,6 +10981,16 @@ GitHub: {_proj_github}
                             if not q_selected:
                                 q_selected = _fallback_file_selection(q_code_files, request.message, max_files=q_dynamic_max)
                             q_selected = _ensure_balanced_selection(q_selected, q_code_files, max_files=q_dynamic_max)
+
+                        # 🆕 فایل‌های ذکرشده در پیام/تاریخچه حتماً خونده بشن
+                        _q_extracted = _extract_file_paths_from_text(
+                            request.message + "\n" + history_text[-5000:], q_code_files
+                        )
+                        if _q_extracted:
+                            for _ep in _q_extracted:
+                                if _ep not in q_selected:
+                                    q_selected.insert(0, _ep)
+
                         max_q_code = int(max_input_chars * 0.55)
                         # 🆕 پردازش دسته‌ای برای FULL_PROJECT
                         q_use_batch = (q_scope == "FULL_PROJECT" and len(q_selected) > 30)
@@ -11156,6 +11223,21 @@ GitHub: {_proj_github}
                             selected = _fallback_file_selection(code_files, request.message, max_files=err_dynamic_max)
                         selected = _ensure_balanced_selection(selected, code_files, max_files=err_dynamic_max)
 
+                        # 🆕 فایل‌های ذکرشده در خطا/stack trace حتماً خونده بشن
+                        _err_extracted = _extract_file_paths_from_text(
+                            request.message + "\n" + history_text[-5000:], code_files
+                        )
+                        if _err_extracted:
+                            _before_err = len(selected)
+                            for _ep in _err_extracted:
+                                if _ep not in selected:
+                                    selected.insert(0, _ep)
+                            if len(selected) > _before_err:
+                                yield sse("progress", {
+                                    "step": "extracted_files_added",
+                                    "message": f"📌 {len(selected) - _before_err} فایل ذکرشده در خطا به لیست اضافه شد"
+                                })
+
                         # محدود کردن حجم کد بر اساس ظرفیت مدل
                         max_err_code_chars = int(max_input_chars * 0.65)
                         # 🆕 پردازش دسته‌ای برای FULL_PROJECT
@@ -11233,7 +11315,9 @@ GitHub: {_proj_github}
                 err_code_section = f"## کد فایل‌های مرتبط (از GitHub خوانده شده):{code_context}"
                 if err_tree_summary:
                     err_code_section += f"\n\n## ساختار کلی پروژه (تو به همه این بخش‌ها دسترسی داری — فایل‌های بالا فقط بخشی از پروژه‌اند):\n{err_tree_summary}"
-                err_code_note = "- تو به فایل‌های پروژه دسترسی داری و کد آنها در بالا آمده — مستقیماً کد مشکل‌دار را پیدا کن"
+                err_code_note = """- تو به فایل‌های پروژه دسترسی داری و کد آنها در بالا آمده — مستقیماً کد مشکل‌دار را پیدا کن
+- 🔴 هرگز محتوای فایلی را حدس نزن — فقط بر اساس کد واقعی که در بالا آمده تحلیل و action_plan بنویس
+- اگر فایلی لازم است ولی محتوایش در بالا نیست، بگو «فایل X خوانده نشده» و آن را در action_plan نگذار"""
             else:
                 err_code_section = "## ⚠️ فایل‌های پروژه قابل خواندن نبودند"
                 if err_tree_summary:
@@ -11320,7 +11404,9 @@ GitHub: {_proj_github}
 - هر فایل باید path و content (محتوای کامل) داشته باشد
 - اگر نمی‌توانی محتوای کامل فایل را ارائه دهی، آن فایل را نذار
 - files خالی (`"files": []`) ممنوع است — یا فایل با محتوا بذار، یا action_plan نذار
-{'- اگر فایل‌ها خوانده نشدند، action_plan با محتوای حدسی تولید نکن — فقط تحلیل متنی ارائه بده.' if not has_err_code_files else ''}"""
+{'- اگر فایل‌ها خوانده نشدند، action_plan با محتوای حدسی تولید نکن — فقط تحلیل متنی ارائه بده.' if not has_err_code_files else ''}
+
+🚫 ممنوعیت مطلق حدس‌زنی: هرگز محتوای فایلی را که ندیده‌ای حدس نزن. اگر فایلی لازم است ولی در بالا نیست، بنویس کدام فایل لازم است."""
 
             try:
                 # 🆕 اجرای AI با heartbeat + timeout کلی
@@ -11481,6 +11567,11 @@ GitHub: {_proj_github}
                         # ساخت خلاصه ساختار پروژه
                         act_tree_summary = _build_project_tree_summary(code_files)
 
+                        # 🆕 استخراج فایل‌های ذکرشده در پیام/خطا/تاریخچه — حتماً باید خونده بشن
+                        _msg_extracted = _extract_file_paths_from_text(
+                            request.message + "\n" + history_text[-5000:], code_files
+                        )
+
                         # 🆕 اگر دامنه FULL_PROJECT باشه، همه فایل‌ها رو بخون بدون انتخاب AI
                         if request_scope == "FULL_PROJECT":
                             selected = code_files[:dynamic_max_files]
@@ -11589,6 +11680,18 @@ GitHub: {_proj_github}
                                 "step": "files_selected",
                                 "message": f"📋 {len(selected)} فایل مرتبط شناسایی شد"
                             })
+
+                        # 🆕 اطمینان از اینکه فایل‌های ذکرشده در پیام/خطا حتماً در لیست هستند
+                        if _msg_extracted:
+                            _before_merge = len(selected)
+                            for _ep in _msg_extracted:
+                                if _ep not in selected:
+                                    selected.insert(0, _ep)  # اولویت بالا — اول لیست
+                            if len(selected) > _before_merge:
+                                yield sse("progress", {
+                                    "step": "extracted_files_added",
+                                    "message": f"📌 {len(selected) - _before_merge} فایل ذکرشده در پیام/خطا به لیست اضافه شد"
+                                })
 
                         # خواندن فایل‌ها (با رعایت حد context window مدل)
                         max_code_chars = int(max_input_chars * 0.70)
@@ -11713,7 +11816,8 @@ GitHub: {_proj_github}
 - پاسخ نهایی جامع و کامل ارائه بده — هیچ دسته‌ای را نادیده نگیر
 - اگر یک فایل در دسته‌های مختلف ذکر شده، اطلاعات رو ترکیب کن
 - لیست کامل و مرتب نتایج ارائه بده
-- تحلیل قابل اتکاست چون فایل‌ها کامل خوانده شده‌اند — نیازی به حدس نیست"""
+- تحلیل قابل اتکاست چون فایل‌ها کامل خوانده شده‌اند — نیازی به حدس نیست
+- 🔴 ممنوعیت مطلق: هرگز محتوای فایلی را حدس نزن — فقط بر اساس محتوای واقعی خوانده‌شده"""
                 else:
                     code_section = f"""## کد فایل‌های مرتبط (از GitHub خوانده شده):
 {code_context}"""
@@ -11722,8 +11826,11 @@ GitHub: {_proj_github}
                     code_instructions = """- تو به فایل‌های پروژه دسترسی داری و کد آنها در بالا آمده
 - مستقیماً کد مشکل‌دار را پیدا کن و اصلاحش را ارائه بده
 - حتماً action_plan کامل با محتوای کامل فایل اصلاح‌شده ارائه بده
-- هیچ حدس و گمانی در کار نباشد - فقط بر اساس کد واقعی
-- اگر فایلی لازم است که در لیست بالا نیست اما در ساختار پروژه می‌بینی، صادقانه بگو"""
+- 🔴 ممنوعیت مطلق حدس و فرض: هرگز محتوای فایلی را که ندیده‌ای حدس نزن، فرض نکن، تصور نکن
+- 🔴 هرگز از عبارات «فرض می‌کنیم»، «احتمالاً محتوایش اینه»، «ساختارش باید اینطوری باشه» استفاده نکن
+- 🔴 اگر فایلی لازم است که محتوایش در بالا نیست: صراحتاً بگو «فایل X خوانده نشده — برای ارائه اصلاح دقیق نیاز به محتوای واقعی آن دارم» — سپس برای فایل‌هایی که داری action_plan بنویس
+- 🔴 اگر محتوای فایلی را نداری، آن فایل را در action_plan قرار نده — فقط فایل‌هایی که واقعاً خوانده‌ای و می‌بینی
+- فقط بر اساس کدی که واقعاً در بالا آمده کار کن — نه بر اساس حافظه، حدس، یا الگوهای رایج"""
             else:
                 code_section = """## ⚠️ دسترسی به فایل‌های پروژه:
 فایل‌های پروژه قابل خواندن نبودند (احتمالاً GitHub Token تنظیم نشده یا اطلاعات ریپو ناقص)."""
@@ -11772,7 +11879,7 @@ GitHub: {_proj_github}
 - هرگز از کاربر نخواه کاری دستی انجام دهد (مثل grep زدن، بررسی فایل، اجرای دستور در ترمینال)
 - تمام وابستگی‌ها (imports, types, configs) را بررسی کن
 - تغییرات باید با ساختار فعلی پروژه سازگار باشد
-- اگر فایلی لازم است که ندیده‌ای، صادقانه بگو ولی برای فایل‌هایی که داری، راه‌حل کامل ارائه بده
+- اگر فایلی لازم است ولی محتوایش در بالا نیست: صادقانه بنویس «فایل X خوانده نشده — لازم است بخوانم» — سیستم خودش می‌خواند. هرگز محتوای حدسی برای آن ننویس
 
 ## تاریخچه کامل مکالمه:
 {history_text[-_act_hist_limit:]}
@@ -11816,7 +11923,14 @@ GitHub: {_proj_github}
 - اگر نمی‌توانی محتوای کامل فایل را ارائه دهی، آن فایل را در action_plan نذار
 - اگر هیچ فایلی نداری که بتوانی محتوای کاملش را بنویسی، بخش action_plan را حذف کن
 - files خالی (`"files": []`) ممنوع است — یا فایل با محتوا بذار، یا action_plan نذار
-{'- اگر فایل‌ها خوانده نشدند، action_plan با محتوای حدسی تولید نکن — فقط تحلیل متنی ارائه بده.' if not has_code_files else ''}"""
+{'- اگر فایل‌ها خوانده نشدند، action_plan با محتوای حدسی تولید نکن — فقط تحلیل متنی ارائه بده.' if not has_code_files else ''}
+
+🚫🔴 ممنوعیت مطلق حدس‌زنی محتوای فایل:
+- هرگز محتوای فایلی را که در بالا ندیده‌ای حدس نزن، تصور نکن، فرض نکن
+- از عبارات «فرض می‌کنیم»، «احتمالاً»، «ساختارش باید اینطوری باشه» استفاده نکن
+- اگر فایلی در کد بالا نیست: بگو «فایل X خوانده نشده» و action_plan آن فایل را نده
+- فقط فایل‌هایی را در action_plan بگذار که محتوای واقعی‌شان در بالا آمده باشد
+- اگر برای حل مشکل فایل‌های بیشتری لازم است، بنویس کدام فایل‌ها لازمند (سیستم خودش می‌خواند)"""
 
             try:
                 # 🆕 اجرای AI با heartbeat برای جلوگیری از QUIC timeout
@@ -11824,7 +11938,7 @@ GitHub: {_proj_github}
                 gen_task = asyncio.create_task(ai_manager.generate(
                     model_id=primary_model,
                     messages=[
-                        Message(role="system", content=f"تو توسعه‌دهنده ارشد پروژه هستی. مهم‌ترین کارت فهمیدن دقیق منظور کاربر است — حتی وقتی مبهم، کوتاه یا غیرمستقیم صحبت می‌کند. تاریخچه مکالمه را بخوان تا context کامل را بفهمی. {'مستقیماً مشکل را پیدا کن، کد اصلاح‌شده کامل بنویس و action_plan معتبر JSON ارائه بده.' if has_code_files else 'فایل‌ها خوانده نشدند — فقط تحلیل و تشخیص ارائه بده. هرگز action_plan با محتوای حدسی تولید نکن.'} اگر قبلاً راه‌حلی پیشنهاد شده و جواب نداده، رویکرد متفاوتی بگیر. هرگز از کاربر نخواه کار دستی انجام دهد. با لحن صمیمی و حرفه‌ای پاسخ بده."),
+                        Message(role="system", content=f"تو توسعه‌دهنده ارشد پروژه هستی. مهم‌ترین کارت فهمیدن دقیق منظور کاربر است — حتی وقتی مبهم، کوتاه یا غیرمستقیم صحبت می‌کند. تاریخچه مکالمه را بخوان تا context کامل را بفهمی. {'مستقیماً مشکل را پیدا کن، کد اصلاح‌شده کامل بنویس و action_plan معتبر JSON ارائه بده.' if has_code_files else 'فایل‌ها خوانده نشدند — فقط تحلیل و تشخیص ارائه بده. هرگز action_plan با محتوای حدسی تولید نکن.'} اگر قبلاً راه‌حلی پیشنهاد شده و جواب نداده، رویکرد متفاوتی بگیر. هرگز از کاربر نخواه کار دستی انجام دهد. 🔴 هرگز محتوای فایلی را حدس نزن — فقط فایل‌هایی که واقعاً در پرامپت دیده‌ای. اگر فایلی ندیده‌ای، بگو خوانده نشده. با لحن صمیمی و حرفه‌ای پاسخ بده."),
                         Message(role="user", content=action_prompt)
                     ],
                     max_tokens=safe_max_tokens,
@@ -11897,6 +12011,97 @@ GitHub: {_proj_github}
                             "message": f"❌ مدل {primary_model} پاسخ خالی برگرداند (حتی بعد از تلاش مجدد) | حجم: ~{len(action_prompt)} کاراکتر",
                             "detail": f"مدل: {primary_model} | حجم: ~{len(action_prompt)} | context: {model_context_window}"
                         })
+                # --- مرحله دو مرحله‌ای: اگر AI فایل‌هایی رو لازم داشت که نخونده ---
+                if content and content.strip() and has_code_files and not use_batch_processing:
+                    _missing_markers = [
+                        "نداریم", "ارائه نشده", "در دسترس نیست",
+                        "نداشتیم", "ندیدیم", "فرضی", "فرض می‌کنیم",
+                        "فرض می‌کنم", "فرض کنیم", "این فایل را نداریم",
+                        "کد مدل را نداریم", "not provided", "not available",
+                        "couldn't read", "we don't have", "we assume",
+                        "از کدهای بالا نیست", "در کدهای بالا نیست",
+                        "محتوای این فایل", "دسترسی به این فایل"
+                    ]
+                    _needs_2nd_pass = any(m in content for m in _missing_markers)
+
+                    if _needs_2nd_pass:
+                        yield sse("progress", {
+                            "step": "second_pass",
+                            "message": "🔄 مدل فایل‌های بیشتری نیاز دارد. شناسایی و خواندن فایل‌های ناخوانده..."
+                        })
+                        try:
+                            _missing_req = await ai_manager.generate(
+                                model_id=primary_model,
+                                messages=[
+                                    Message(role="system", content="فقط مسیر فایل‌هایی را بنویسید که برای تکمیل تحلیل و نوشتن action_plan نیاز دارید. هر مسیر در یک خط. حداکثر ۱۰ فایل."),
+                                    Message(role="user", content=f"پاسخ شما:\n{content[:3000]}\n\nفایل‌هایی که خوانده شدند:\n{chr(10).join(selected)}\n\nتمام فایل‌های پروژه:\n{chr(10).join(code_files[:500])}\n\nکدام فایل‌ها را نخوانده‌اید و لازم دارید؟ فقط مسیر بنویسید.")
+                                ],
+                                max_tokens=400,
+                                temperature=0.1
+                            )
+
+                            _extra_files = []
+                            for _line in _missing_req.content.strip().split("\n"):
+                                _line = _line.strip().strip("`- ").strip()
+                                if _line and _line in code_files and _line not in selected:
+                                    _extra_files.append(_line)
+
+                            # همچنین فایل‌هایی که خود پاسخ AI بهشون اشاره کرده رو هم استخراج کن
+                            _resp_extracted = _extract_file_paths_from_text(content, code_files)
+                            for _rp in _resp_extracted:
+                                if _rp not in selected and _rp not in _extra_files:
+                                    _extra_files.append(_rp)
+
+                            if _extra_files:
+                                _extra_contents = {}
+                                for _fp in _extra_files[:10]:
+                                    yield sse("progress", {
+                                        "step": "reading_extra",
+                                        "message": f"📖 خواندن فایل اضافی: {_fp}...",
+                                        "file": _fp
+                                    })
+                                    try:
+                                        _res = await github_svc.get_file_content(owner, repo, _fp, token=token)
+                                        if _res.get("success"):
+                                            _fc = _res.get("content", "")
+                                            if len(_fc) > 15000:
+                                                _fc = _fc[:15000] + "\n... [truncated]"
+                                            _extra_contents[_fp] = _fc
+                                    except Exception:
+                                        pass
+                                    await asyncio.sleep(0.2)
+
+                                if _extra_contents:
+                                    _extra_ctx = ""
+                                    for _path, _cnt in _extra_contents.items():
+                                        _extra_ctx += f"\n\n=== {_path} ===\n{_cnt}"
+
+                                    yield sse("progress", {
+                                        "step": "reanalysis",
+                                        "message": f"🔬 تحلیل مجدد با {len(_extra_contents)} فایل اضافی...",
+                                        "model": primary_model
+                                    })
+
+                                    _reanalysis = await ai_manager.generate(
+                                        model_id=primary_model,
+                                        messages=[
+                                            Message(role="system", content=f"تو توسعه‌دهنده ارشد پروژه {owner}/{repo} هستی. فایل‌های جدیدی که درخواست کرده بودی حالا در دسترس هستند. پاسخ قبلی‌ات رو با اطلاعات واقعی فایل‌ها بازنویسی کن. هرگز حدس نزن — فقط بر اساس کد واقعی تحلیل و action_plan بنویس."),
+                                            Message(role="user", content=f"تحلیل قبلی شما:\n{content[:4000]}\n\nفایل‌های جدید:\n{_extra_ctx}\n\nلطفاً تحلیل و action_plan خود را با اطلاعات واقعی فایل‌ها بازنویسی کنید. فرمت قبلی (action_plan با JSON) را حفظ کنید. هرگز محتوای حدسی ننویسید.")
+                                        ],
+                                        max_tokens=safe_max_tokens,
+                                        temperature=0.3
+                                    )
+                                    if _reanalysis.content and _reanalysis.content.strip():
+                                        content = _reanalysis.content
+                                        _act_model_used = _reanalysis.model_id
+                                        _act_tokens = _reanalysis.tokens_used
+                                        yield sse("progress", {
+                                            "step": "reanalysis_done",
+                                            "message": f"✅ تحلیل مجدد با {len(_extra_contents)} فایل واقعی انجام شد — حدس‌ها حذف شد"
+                                        })
+                        except Exception as _2pe:
+                            slog.warning(f"[smart-chat] Second-pass failed: {_2pe}")
+
                 if content and content.strip():
                     # استخراج action_plan از پاسخ
                     action_plan = None
@@ -11919,6 +12124,19 @@ GitHub: {_proj_github}
                     if not has_code_files and action_plan is not None:
                         slog.warning(f"[smart-chat ACTION] AI generated action_plan without reading files — stripped. Files in plan: {[f.get('path') for f in (action_plan.get('files') or [])]}")
                         action_plan = None
+
+                    # لایه ۳: فایل‌هایی که واقعاً خوانده نشدن ولی AI محتوا حدس زده — حذف
+                    if action_plan and has_code_files and selected:
+                        _read_set = set(selected)
+                        _plan_files = action_plan.get("files", [])
+                        _verified = [f for f in _plan_files if f.get("path") in _read_set or f.get("operation") == "create"]
+                        _guessed = [f for f in _plan_files if f not in _verified]
+                        if _guessed:
+                            slog.warning(f"[smart-chat ACTION] Stripped {len(_guessed)} guessed files from action_plan: {[f.get('path') for f in _guessed]}")
+                            if _verified:
+                                action_plan["files"] = _verified
+                            else:
+                                action_plan = None
 
                     yield sse("response", {
                         "type": "action",
