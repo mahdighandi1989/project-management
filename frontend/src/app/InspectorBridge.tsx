@@ -262,6 +262,23 @@ export default function InspectorBridge() {
     connectWS();
     const heartbeat = setInterval(() => { if (ws && wsReady) try { ws.send(JSON.stringify({ type: "ping" })); } catch(e) {} }, 25000);
 
+    // 🆕 پاسخ به درخواست URL از parent (request-response pattern)
+    const _handleUrlRequest = (event: MessageEvent) => {
+      if (event.data?.type === 'inspector-get-url') {
+        if (isInIframe) {
+          try {
+            window.parent.postMessage({
+              type: 'inspector-current-url',
+              pageUrl: window.location.href,
+              title: document.title,
+              timestamp: Date.now()
+            }, '*');
+          } catch(e) {}
+        }
+      }
+    };
+    window.addEventListener('message', _handleUrlRequest);
+
     // فالبک postMessage
     if (isInIframe) {
       try { window.parent.postMessage({ type: "inspector-bridge-ready", pageUrl: window.location.href }, "*"); } catch(e) {}
@@ -280,6 +297,7 @@ export default function InspectorBridge() {
       clearInterval(_urlCheckInterval);
       history.pushState = _origPushState;
       history.replaceState = _origReplaceState;
+      window.removeEventListener('message', _handleUrlRequest);
       console.log = origLog; console.warn = origWarn; console.error = origError; console.info = origInfo; console.debug = origDebug;
       if (overlayObs) overlayObs.disconnect();
       clearInterval(heartbeat);
