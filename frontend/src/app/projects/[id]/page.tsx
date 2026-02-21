@@ -10918,6 +10918,20 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               🚫 فایل‌ها خوانده نشدند - ممکنه محتوا حدسی باشه
                             </span>
                           )}
+                          {/* هشدارهای سینتکس action_plan */}
+                          {(msg as any).action_plan?._syntax_warnings?.length > 0 && (
+                            <div className="w-full mt-1 p-1.5 bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded text-[10px]">
+                              <span className="font-bold text-amber-700 dark:text-amber-300">⚠️ هشدار سینتکس ({(msg as any).action_plan._syntax_warnings.length}):</span>
+                              <ul className="mt-0.5 space-y-0.5 text-amber-600 dark:text-amber-400">
+                                {(msg as any).action_plan._syntax_warnings.slice(0, 5).map((w: string, i: number) => (
+                                  <li key={i} className="pr-2">{w}</li>
+                                ))}
+                                {(msg as any).action_plan._syntax_warnings.length > 5 && (
+                                  <li className="text-amber-500">و {(msg as any).action_plan._syntax_warnings.length - 5} هشدار دیگر...</li>
+                                )}
+                              </ul>
+                            </div>
+                          )}
                           {/* نشانگر has_action بدون action_plan معتبر - دکمه درخواست مجدد اصلاح */}
                           {(msg as any).action_type === 'smart_action' && (!(msg as any).action_plan || !(msg as any).action_plan?.files?.length) && (
                             <button
