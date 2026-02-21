@@ -11719,11 +11719,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             <span className="text-sm mt-0.5">{inst.icon}</span>
                             <div className="flex-1 min-w-0">
                               <span className="text-xs font-bold text-green-800 dark:text-green-200">{inst.title}</span>
-                              <p className="text-[11px] text-gray-600 dark:text-gray-400 whitespace-pre-wrap leading-relaxed">{inst.content}</p>
+                              <p className="text-[11px] text-gray-600 dark:text-gray-400 whitespace-pre-wrap leading-relaxed">
+                                {inst.prompt_detail || inst.content}
+                              </p>
                             </div>
                             <span className="text-[10px] bg-green-200 dark:bg-green-800 text-green-700 dark:text-green-300 px-1.5 py-0.5 rounded-full whitespace-nowrap">همیشه فعال</span>
                           </div>
                         ))}
+                        <p className="text-[10px] text-green-500 dark:text-green-600 text-center mt-1">
+                          دقیقاً همین متن‌ها در پرامپت مدل‌ها تزریق می‌شود — تغییرات خودکار منعکس می‌شوند
+                        </p>
                       </div>
                     )}
                   </div>
