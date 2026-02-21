@@ -577,7 +577,7 @@ export default function ProjectDetailPage() {
   const [promptFieldTestResult, setPromptFieldTestResult] = useState<{field_id: string; passed: boolean; response: string; model_id: string} | null>(null);
   const [promptFieldsHighlighted, setPromptFieldsHighlighted] = useState<string[]>([]);
   const [promptFieldActiveCategory, setPromptFieldActiveCategory] = useState<'all' | 'instruction' | 'memory' | 'training'>('all');
-  const [generalInstructions, setGeneralInstructions] = useState<Array<{id: string; title: string; content: string; icon: string}>>([]);
+  const [generalInstructions, setGeneralInstructions] = useState<Array<{id: string; title: string; content: string; icon: string; prompt_detail?: string}>>([]);
   const [generalInstructionsOpen, setGeneralInstructionsOpen] = useState(false);
 
   const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
