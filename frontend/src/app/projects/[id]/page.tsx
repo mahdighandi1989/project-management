@@ -1081,6 +1081,11 @@ export default function ProjectDetailPage() {
       }
       if (event.data?.type === 'inspector-bridge-ready') {
         showBridgeTransient('🔗 اتصال postMessage به پروژه برقرار شد', 'Bridge');
+        if (event.data.pageUrl) setInspectorFrontendUrl(event.data.pageUrl);
+      }
+      // 🆕 دریافت تغییر URL از Bridge Script (ناوبری کاربر در iframe)
+      if (event.data?.type === 'inspector-url-changed') {
+        if (event.data.pageUrl) setInspectorFrontendUrl(event.data.pageUrl);
       }
     };
 
@@ -1175,6 +1180,11 @@ export default function ProjectDetailPage() {
             if (data.type === 'inspector-bridge-ready') {
               setBridgePeerConnected(true);
               showBridgeTransient('🌐 Bridge Script از طریق WebSocket متصل شد', 'WebSocket Bridge');
+              if (data.pageUrl) setInspectorFrontendUrl(data.pageUrl);
+            }
+            // 🆕 دریافت تغییر URL از Bridge (WebSocket)
+            if (data.type === 'inspector-url-changed' || (data.type === 'inspector-bridge-event' && data.action === 'url-changed')) {
+              if (data.pageUrl) setInspectorFrontendUrl(data.pageUrl);
             }
 
           } catch (e) {
@@ -3399,7 +3409,13 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
   // 📸 عکس‌برداری از صفحه پیش‌نمایش
   const takeVisualDebugScreenshot = async () => {
-    if (!inspectorFrontendUrl) return;
+    // 🆕 URL واقعی: اول از iframe ref بخون (same-origin)، بعد state (از bridge tracking)
+    let _currentPageUrl = inspectorFrontendUrl || '';
+    try {
+      const iframeHref = inspectorIframeRef.current?.contentWindow?.location?.href;
+      if (iframeHref && iframeHref !== 'about:blank') _currentPageUrl = iframeHref;
+    } catch (_e) { /* cross-origin: fall through to bridge-tracked state */ }
+    if (!_currentPageUrl) return;
     setVisualDebugTakingScreenshot(true);
     try {
       // 🔴 ابتدا لاگ‌های تازه بکند رو مستقیم از Render API بگیر
@@ -3437,7 +3453,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           project_id: projectId,
-          url: inspectorFrontendUrl,
+          url: _currentPageUrl,
           viewport_width: 1280,
           viewport_height: 720,
         }),
@@ -3445,7 +3461,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       const data = await res.json();
       if (data.success && data.screenshot) {
         // 📦 Snapshot current logs and URLs at capture time
-        const capturePageUrl = data.page_info?.url || inspectorFrontendUrl || '';
+        const capturePageUrl = data.page_info?.url || _currentPageUrl || '';
         const captureConsoleLogs = [...importedProjectConsoleLogs].slice(-50).map(l => ({
           level: l.level, message: l.message, timestamp: l.timestamp, source: l.source
         }));
@@ -3457,7 +3473,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         // 🔗 Extract related URLs AND backend API paths from logs
         const captureUrls: string[] = [];
         const captureApiPaths: string[] = [];
-        if (inspectorFrontendUrl) captureUrls.push(inspectorFrontendUrl);
+        if (_currentPageUrl) captureUrls.push(_currentPageUrl);
         if (capturePageUrl && !captureUrls.includes(capturePageUrl)) captureUrls.push(capturePageUrl);
 
         // Extract URLs and API endpoints from console logs
