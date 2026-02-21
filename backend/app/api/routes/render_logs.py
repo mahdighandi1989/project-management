@@ -146,6 +146,26 @@ def _build_general_instructions_list(
 - فقط فایل‌هایی را در action_plan بگذار که واقعاً محتوایشان خوانده شده و می‌بینی
 - سیستم خودکار فایل‌های ناخوانده را شناسایی و در مرحله دوم می‌خواند""",
         },
+        {
+            "id": "sys_deploy_safe",
+            "title": "محافظت از بیلد و دیپلوی",
+            "content": "کد تولیدی باید بدون خطای سینتکس، تایپ و import باشد. قبل از نوشتن action_plan، ذهنی بیلد و کامپایل را شبیه‌سازی کن. تمام import/export ها، پرانتزها، آکولادها، و تایپ‌ها را چک کن. هرگز فایل ناقص یا نیمه‌کاره تحویل نده.",
+            "icon": "🏗️",
+            "prompt_detail": """- 🔴 کد تولیدی باید مستقیماً بیلد و دیپلوی شود بدون هیچ خطایی — هر خطای سینتکس = شکست دیپلوی
+- قبل از نوشتن content هر فایل در action_plan، ذهنی مراحل بیلد را شبیه‌سازی کن:
+  ۱) آیا تمام import ها درست هستند؟ (مسیر، نام، default vs named)
+  ۲) آیا تمام پرانتزها () و آکولادها {} و براکت‌ها [] بسته شده‌اند؟
+  ۳) آیا هیچ متغیر، تابع یا تایپ undefined استفاده نشده؟
+  ۴) آیا export ها با import های فایل‌های دیگر سازگارند؟
+  ۵) آیا TypeScript types و interfaces صحیح هستند؟
+  ۶) آیا JSON ها valid هستند (کاما اضافی، کاما کم)؟
+  ۷) آیا JSX tags همه بسته شده‌اند؟
+  ۸) آیا async/await درست استفاده شده؟
+- محتوای هر فایل در action_plan باید **کامل و قابل جایگزینی** باشد — نه تکه‌ای از فایل
+- هرگز «// ... بقیه کد» یا «// rest of file» ننویس — محتوای کامل بده
+- اگر فایل بزرگ است و نمی‌توانی کامل بنویسی، آن فایل را در action_plan نگذار و توضیح بده چه تغییری لازم است
+- تمام وابستگی‌های بین فایلی را بررسی کن: اگر یک interface تغییر کرد، همه فایل‌های مصرف‌کننده باید آپدیت شوند""",
+        },
     ]
 
 
@@ -10232,6 +10252,84 @@ def _extract_file_paths_from_text(text: str, code_files: list) -> list:
     return list(dict.fromkeys(matched))  # حذف تکراری با حفظ ترتیب
 
 
+def _validate_action_plan_syntax(action_plan: dict) -> dict:
+    """
+    اعتبارسنجی ابتدایی سینتکس فایل‌های action_plan قبل از ارسال به فرانت.
+    فایل‌هایی که خطای آشکار سینتکس دارند، با warnings فلگ میشن.
+    خود فایل حذف نمیشه — فقط هشدار داده میشه تا کاربر مطلع باشه.
+    """
+    if not action_plan or not action_plan.get("files"):
+        return action_plan
+
+    warnings = []
+
+    for f in action_plan["files"]:
+        path = f.get("path", "")
+        content = f.get("content", "")
+        if not content:
+            continue
+
+        file_warnings = []
+        ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+
+        # ── چک‌های عمومی ──
+        # فایل نیمه‌کاره (placeholder comments)
+        _truncation_markers = [
+            "// ... rest of", "// ... بقیه", "// remaining code",
+            "/* existing code */", "// ... existing", "// ... ادامه",
+            "# ... rest of", "# ... بقیه",
+            "// TODO: rest", "/* ... */",
+        ]
+        for marker in _truncation_markers:
+            if marker.lower() in content.lower():
+                file_warnings.append(f"⚠️ فایل ناقص: محتوا شامل '{marker}' — باید کامل باشد")
+                break
+
+        # تعادل پرانتز/آکولاد/براکت
+        for open_c, close_c, name in [("(", ")", "پرانتز"), ("{", "}", "آکولاد"), ("[", "]", "براکت")]:
+            # شمارش ساده (بدون در نظر گرفتن رشته‌ها — تقریبی ولی مفید)
+            opens = content.count(open_c)
+            closes = content.count(close_c)
+            diff = abs(opens - closes)
+            if diff > 2:  # فرق بیش از 2 تا مشکوکه
+                file_warnings.append(f"⚠️ عدم تعادل {name}: {open_c}={opens} vs {close_c}={closes} (اختلاف {diff})")
+
+        # ── چک‌های خاص Python ──
+        if ext == "py":
+            try:
+                compile(content, path, "exec")
+            except SyntaxError as se:
+                file_warnings.append(f"❌ خطای سینتکس Python خط {se.lineno}: {se.msg}")
+
+        # ── چک‌های خاص JSON ──
+        if ext == "json":
+            try:
+                json.loads(content)
+            except json.JSONDecodeError as je:
+                file_warnings.append(f"❌ JSON نامعتبر خط {je.lineno}: {je.msg}")
+
+        # ── چک‌های خاص TypeScript/JavaScript/JSX/TSX ──
+        if ext in ("ts", "tsx", "js", "jsx"):
+            # JSX self-closing tags check
+            # import without from
+            for line_num, line in enumerate(content.split("\n"), 1):
+                stripped = line.strip()
+                if stripped.startswith("import ") and "from" not in stripped and ";" in stripped and "{" not in stripped and "type" not in stripped:
+                    if not stripped.endswith("';") and not stripped.endswith('";'):
+                        file_warnings.append(f"⚠️ خط {line_num}: import بدون from — احتمال خطای سینتکس")
+                        break
+
+        if file_warnings:
+            f["_warnings"] = file_warnings
+            warnings.extend([f"📄 {path}: {w}" for w in file_warnings])
+
+    if warnings:
+        action_plan["_syntax_warnings"] = warnings
+        slog.warning(f"[action_plan validation] {len(warnings)} warnings: {warnings[:5]}")
+
+    return action_plan
+
+
 def _build_project_tree_summary(code_files: list, max_chars: int = 4000) -> str:
     """
     ساخت خلاصه ساختار پروژه از لیست فایل‌ها.
@@ -11175,7 +11273,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     "model_used": response.model_id,
                     "tokens_used": response.tokens_used,
                     "has_action": q_action_plan is not None,
-                    "action_plan": q_action_plan,
+                    "action_plan": _validate_action_plan_syntax(q_action_plan) if q_action_plan else None,
                     "files_were_read": has_q_code,
                     "selected_file_paths": q_selected if has_q_code else [],
                 })
@@ -11440,7 +11538,12 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - files خالی (`"files": []`) ممنوع است — یا فایل با محتوا بذار، یا action_plan نذار
 {'- اگر فایل‌ها خوانده نشدند، action_plan با محتوای حدسی تولید نکن — فقط تحلیل متنی ارائه بده.' if not has_err_code_files else ''}
 
-🚫 ممنوعیت مطلق حدس‌زنی: هرگز محتوای فایلی را که ندیده‌ای حدس نزن. اگر فایلی لازم است ولی در بالا نیست، بنویس کدام فایل لازم است."""
+🚫 ممنوعیت مطلق حدس‌زنی: هرگز محتوای فایلی را که ندیده‌ای حدس نزن. اگر فایلی لازم است ولی در بالا نیست، بنویس کدام فایل لازم است.
+
+🏗️ قوانین بیلد و دیپلوی:
+- content هر فایل باید محتوای کامل و قابل جایگزینی باشد — نه بخشی از فایل
+- هرگز «// ... بقیه کد» یا «// rest of file» ننویس
+- imports، پرانتزها، تایپ‌ها و export ها را قبل از نوشتن بررسی کن — هر خطا = شکست دیپلوی"""
 
             try:
                 # 🆕 اجرای AI با heartbeat + timeout کلی
@@ -11548,7 +11651,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         "model_used": _err_model_used,
                         "tokens_used": _err_tokens,
                         "has_action": has_code_action,
-                        "action_plan": action_plan,
+                        "action_plan": _validate_action_plan_syntax(action_plan) if action_plan else None,
                         "files_were_read": has_err_code_files,
                         "selected_file_paths": selected if has_err_code_files else [],
                     })
@@ -11964,7 +12067,17 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - از عبارات «فرض می‌کنیم»، «احتمالاً»، «ساختارش باید اینطوری باشه» استفاده نکن
 - اگر فایلی در کد بالا نیست: بگو «فایل X خوانده نشده» و action_plan آن فایل را نده
 - فقط فایل‌هایی را در action_plan بگذار که محتوای واقعی‌شان در بالا آمده باشد
-- اگر برای حل مشکل فایل‌های بیشتری لازم است، بنویس کدام فایل‌ها لازمند (سیستم خودش می‌خواند)"""
+- اگر برای حل مشکل فایل‌های بیشتری لازم است، بنویس کدام فایل‌ها لازمند (سیستم خودش می‌خواند)
+
+🏗️ قوانین حیاتی بیلد و دیپلوی (عدم رعایت = شکست دیپلوی):
+- content هر فایل باید **محتوای کامل و قابل جایگزینی** باشد — نه بخشی از فایل
+- هرگز «// ... بقیه کد»، «// rest of file»، «/* existing code */» ننویس — کل فایل را بده
+- قبل از نوشتن هر فایل، بررسی کن: imports صحیح؟ پرانتز/آکولاد بسته؟ تایپ‌ها درست؟ export سازگار؟
+- اگر فایل بزرگ‌تر از توان تولید توست، آن را در action_plan نگذار — به جایش بنویس چه تغییری لازم است
+- تمام وابستگی‌های بین فایلی: اگر type/interface تغییر کرد، تمام فایل‌های مصرف‌کننده هم باید آپدیت شوند
+- JSX/TSX: تمام تگ‌ها بسته شوند، className نه class، htmlFor نه for
+- JSON: بدون trailing comma، کلیدها string باشند
+- Python: indentation یکدست (4 spaces)، import ها valid، async/await صحیح"""
 
             try:
                 # 🆕 اجرای AI با heartbeat برای جلوگیری از QUIC timeout
@@ -12178,7 +12291,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         "model_used": _act_model_used,
                         "tokens_used": _act_tokens,
                         "has_action": action_plan is not None,
-                        "action_plan": action_plan,
+                        "action_plan": _validate_action_plan_syntax(action_plan) if action_plan else None,
                         "files_were_read": has_code_files,
                         "selected_file_paths": selected if has_code_files else [],
                     })
@@ -12901,7 +13014,7 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                 "content": response.content, "model_used": primary_model,
                 "tokens_used": getattr(response, 'tokens_used', 0) or 0,
                 "type": "visual_debug", "screenshots_count": len(request.screenshots),
-                "action_plan": action_plan, "has_action": action_plan is not None,
+                "action_plan": _validate_action_plan_syntax(action_plan) if action_plan else None, "has_action": action_plan is not None,
             })
         except Exception as e:
             yield sse("error", {"message": f"خطا: {str(e)[:200]}", "detail": type(e).__name__})
