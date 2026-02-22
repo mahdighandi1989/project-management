@@ -11276,7 +11276,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         Message(role="system", content="تو بازرس هوشمند پروژه هستی با دسترسی کامل به تمام فایل‌های پروژه. مهم‌ترین وظیفه‌ات فهمیدن منظور واقعی کاربر است — حتی وقتی مبهم، کوتاه یا غیرمستقیم صحبت می‌کند. تاریخچه مکالمه را بخوان تا context را بفهمی. مستقیماً تحلیل کن و راه‌حل عملی ارائه بده. هرگز از کاربر نخواه کار دستی انجام دهد. هرگز نگو «دسترسی ندارم» یا «محتوای فایل را در اختیار ندارم» — تو دسترسی کامل داری. با لحن صمیمی و حرفه‌ای پاسخ بده."),
                         Message(role="user", content=answer_prompt)
                     ],
-                    max_tokens=min(model_max_output, 4096),
+                    max_tokens=max(8192, model_max_output),
                     temperature=0.5
                 ))
                 while not gen_task.done():
@@ -11591,7 +11591,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         Message(role="system", content=f"تو بازرس ارشد پروژه هستی. مهم‌ترین کارت فهمیدن منظور واقعی کاربر و ارتباط آن با تاریخچه مکالمه است. {'مستقیماً کد مشکل‌دار را پیدا کن، اصلاحش را بنویس و action_plan ارائه بده.' if has_err_code_files else 'فایل‌ها خوانده نشدند — فقط تحلیل خطا و تشخیص علت ارائه بده. هرگز action_plan با محتوای حدسی تولید نکن.'} اگر قبلاً راه‌حلی پیشنهاد شده و جواب نداده، رویکرد متفاوتی بگیر. هرگز کاربر را به کار دستی ارجاع نده. با لحن صمیمی و حرفه‌ای پاسخ بده."),
                         Message(role="user", content=error_analysis_prompt)
                     ],
-                    max_tokens=min(model_max_output, 6144),
+                    max_tokens=max(8192, model_max_output),
                     temperature=0.4
                 ))
                 total_wait_err = 0
@@ -11642,7 +11642,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             _rr = await ai_manager.generate(
                                 model_id=_rm,
                                 messages=[Message(role="system", content=_err_sys_msg), Message(role="user", content=_reduced_err)],
-                                max_tokens=min(model_max_output, 6144),
+                                max_tokens=max(8192, model_max_output),
                                 temperature=0.4,
                             )
                             if _rr.content and _rr.content.strip():
@@ -12120,7 +12120,9 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
             try:
                 # 🆕 اجرای AI با heartbeat برای جلوگیری از QUIC timeout
-                safe_max_tokens = min(model_max_output, 8192)
+                # اجازه خروجی بزرگ‌تر برای مدل‌هایی مثل gemini-2.5-pro (65K output)
+                # تا action_plan با محتوای کامل فایل ناقص نماند
+                safe_max_tokens = max(8192, model_max_output)
                 gen_task = asyncio.create_task(ai_manager.generate(
                     model_id=primary_model,
                     messages=[
@@ -12130,10 +12132,11 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     max_tokens=safe_max_tokens,
                     temperature=0.35
                 ))
-                # heartbeat هر 5 ثانیه + timeout با مهلت اضافی برای مدل‌های کند
+                # heartbeat هر 5 ثانیه + timeout با مهلت اضافی برای مدل‌هایی با خروجی بزرگ
                 total_wait = 0
-                initial_wait = 180  # هشدار اولیه در 3 دقیقه
-                max_wait = 360  # حداکثر مطلق 6 دقیقه
+                # مدل‌هایی مثل gemini-2.5-pro با 65K خروجی نیاز به زمان بیشتری دارند
+                initial_wait = 300  # هشدار اولیه در 5 دقیقه
+                max_wait = 600  # حداکثر مطلق 10 دقیقه
                 warned = False
                 timed_out = False
                 while not gen_task.done():
@@ -13149,7 +13152,8 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
         _vd_reg = _vd_get_model(primary_model)
         _vd_context_window = getattr(_vd_reg, 'context_window', 32000) if _vd_reg else 32000
         _vd_model_max_output = getattr(_vd_reg, 'max_tokens', 4096) if _vd_reg else 4096
-        _vd_max_output = min(8192, max(4096, _vd_model_max_output))
+        # اجازه خروجی بزرگ‌تر برای مدل‌هایی مثل gemini-2.5-pro (65K)
+        _vd_max_output = max(8192, _vd_model_max_output)
 
         # تقریب: هر توکن ≈ 3 کاراکتر فارسی/انگلیسی
         _vd_max_input_chars = max(10000, (_vd_context_window - _vd_max_output) * 3)
