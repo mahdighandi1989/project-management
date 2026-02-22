@@ -481,6 +481,12 @@ class AIManager:
             slog.error("Provider not available", provider=str(provider))
             raise AIServiceError(f"Provider {provider} not available", "manager", model_id)
 
+        # 🔑 حذف سقف مصنوعی: همیشه از ظرفیت واقعی خروجی مدل استفاده کن
+        # مثلاً gemini-2.5-pro ظرفیت 65536 داره ولی caller ممکنه 4096 فرستاده باشه
+        _model_registered_max = getattr(model, 'max_tokens', 0)
+        if _model_registered_max > 0 and _model_registered_max > max_tokens:
+            max_tokens = _model_registered_max
+
         response = await service.generate(model_id, messages, max_tokens, temperature, **kwargs)
 
         # 🆕 اضافه کردن اطلاعات fallback به response

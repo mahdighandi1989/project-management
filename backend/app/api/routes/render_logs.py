@@ -307,7 +307,7 @@ async def _run_batch_processing_bg(
                         Message(role="system", content=sys_msg),
                         Message(role="user", content=batch_prompt)
                     ],
-                    max_tokens=min(model_max_output, 3000),
+                    max_tokens=model_max_output,
                     temperature=0.2
                 ))
                 bwait = 0
@@ -10932,10 +10932,10 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         from ...core.models_registry import get_model as get_reg_model
         reg_model = get_reg_model(primary_model)
         model_context_window = 32000  # پیش‌فرض
-        model_max_output = 4096  # پیش‌فرض
+        model_max_output = 16384  # پیش‌فرض سخاوتمند (مدل‌های رجیستری مقدار واقعی دارند)
         if reg_model:
             model_context_window = getattr(reg_model, 'context_window', 32000)
-            model_max_output = getattr(reg_model, 'max_tokens', 4096)
+            model_max_output = getattr(reg_model, 'max_tokens', 16384)
 
         # حداکثر کاراکتر ورودی ≈ (context_window - max_output) × 3 (تقریب توکن به کاراکتر)
         max_input_chars = max(8000, (model_context_window - model_max_output) * 3)
@@ -11276,7 +11276,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         Message(role="system", content="تو بازرس هوشمند پروژه هستی با دسترسی کامل به تمام فایل‌های پروژه. مهم‌ترین وظیفه‌ات فهمیدن منظور واقعی کاربر است — حتی وقتی مبهم، کوتاه یا غیرمستقیم صحبت می‌کند. تاریخچه مکالمه را بخوان تا context را بفهمی. مستقیماً تحلیل کن و راه‌حل عملی ارائه بده. هرگز از کاربر نخواه کار دستی انجام دهد. هرگز نگو «دسترسی ندارم» یا «محتوای فایل را در اختیار ندارم» — تو دسترسی کامل داری. با لحن صمیمی و حرفه‌ای پاسخ بده."),
                         Message(role="user", content=answer_prompt)
                     ],
-                    max_tokens=max(8192, model_max_output),
+                    max_tokens=model_max_output,
                     temperature=0.5
                 ))
                 while not gen_task.done():
@@ -11591,12 +11591,12 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         Message(role="system", content=f"تو بازرس ارشد پروژه هستی. مهم‌ترین کارت فهمیدن منظور واقعی کاربر و ارتباط آن با تاریخچه مکالمه است. {'مستقیماً کد مشکل‌دار را پیدا کن، اصلاحش را بنویس و action_plan ارائه بده.' if has_err_code_files else 'فایل‌ها خوانده نشدند — فقط تحلیل خطا و تشخیص علت ارائه بده. هرگز action_plan با محتوای حدسی تولید نکن.'} اگر قبلاً راه‌حلی پیشنهاد شده و جواب نداده، رویکرد متفاوتی بگیر. هرگز کاربر را به کار دستی ارجاع نده. با لحن صمیمی و حرفه‌ای پاسخ بده."),
                         Message(role="user", content=error_analysis_prompt)
                     ],
-                    max_tokens=max(8192, model_max_output),
+                    max_tokens=model_max_output,
                     temperature=0.4
                 ))
                 total_wait_err = 0
-                initial_wait_err = 150  # هشدار اولیه در 2.5 دقیقه
-                max_wait_err = 300  # حداکثر مطلق 5 دقیقه
+                initial_wait_err = 300  # هشدار اولیه در 5 دقیقه
+                max_wait_err = 600  # حداکثر مطلق 10 دقیقه
                 warned_err = False
                 timed_out_err = False
                 while not gen_task.done():
@@ -11642,7 +11642,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             _rr = await ai_manager.generate(
                                 model_id=_rm,
                                 messages=[Message(role="system", content=_err_sys_msg), Message(role="user", content=_reduced_err)],
-                                max_tokens=max(8192, model_max_output),
+                                max_tokens=model_max_output,
                                 temperature=0.4,
                             )
                             if _rr.content and _rr.content.strip():
@@ -12120,9 +12120,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
             try:
                 # 🆕 اجرای AI با heartbeat برای جلوگیری از QUIC timeout
-                # اجازه خروجی بزرگ‌تر برای مدل‌هایی مثل gemini-2.5-pro (65K output)
-                # تا action_plan با محتوای کامل فایل ناقص نماند
-                safe_max_tokens = max(8192, model_max_output)
+                # بدون سقف مصنوعی — از ظرفیت واقعی مدل استفاده شود
+                safe_max_tokens = model_max_output
                 gen_task = asyncio.create_task(ai_manager.generate(
                     model_id=primary_model,
                     messages=[
@@ -13151,9 +13150,9 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
         from ...core.models_registry import get_model as _vd_get_model
         _vd_reg = _vd_get_model(primary_model)
         _vd_context_window = getattr(_vd_reg, 'context_window', 32000) if _vd_reg else 32000
-        _vd_model_max_output = getattr(_vd_reg, 'max_tokens', 4096) if _vd_reg else 4096
-        # اجازه خروجی بزرگ‌تر برای مدل‌هایی مثل gemini-2.5-pro (65K)
-        _vd_max_output = max(8192, _vd_model_max_output)
+        _vd_model_max_output = getattr(_vd_reg, 'max_tokens', 16384) if _vd_reg else 16384
+        # بدون سقف مصنوعی — از ظرفیت واقعی مدل استفاده شود
+        _vd_max_output = _vd_model_max_output
 
         # تقریب: هر توکن ≈ 3 کاراکتر فارسی/انگلیسی
         _vd_max_input_chars = max(10000, (_vd_context_window - _vd_max_output) * 3)
