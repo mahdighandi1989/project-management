@@ -12823,22 +12823,26 @@ async def take_screenshot(request: ScreenshotRequest, db: Session = Depends(get_
         session.viewport = {"width": request.viewport_width, "height": request.viewport_height}
 
         # 🔀 اگر DOM snapshot ارسال شده → رندر HTML فعلی بجای navigation به URL
-        if request.html_content and session.page is None:
+        if request.html_content:
             await session._start_browser_only()
             import re as _re_ss
             # حذف اسکریپت‌ها (فقط نمای بصری — بدون اجرای مجدد JS)
             static_html = _re_ss.sub(r'<script[\s\S]*?</script>', '', request.html_content)
-            # حذف اسکریپت proxy تزریقی
-            static_html = _re_ss.sub(r'<script[^>]*data-inspector-proxy[^>]*>[\s\S]*?</script>', '', static_html)
-            # تزریق base href برای لود شدن CSS و تصاویر از سرور واقعی
-            base_tag = f'<base href="{request.url}">'
-            if '<head>' in static_html:
-                static_html = static_html.replace('<head>', f'<head>{base_tag}', 1)
-            elif '<html' in static_html:
-                static_html = static_html.replace('<html', f'<html><head>{base_tag}</head>', 1)
-            else:
-                static_html = f'<head>{base_tag}</head>{static_html}'
-            await session.page.set_content(static_html, wait_until='networkidle', timeout=15000)
+            # route interception — Playwright به URL واقعی میره ولی HTML ما رو نشون میده
+            # اینطوری origin درسته و CSS/تصاویر با مسیر مطلق (/_next/...) درست لود میشن
+            _fulfilled = False
+            async def _intercept(route):
+                nonlocal _fulfilled
+                if not _fulfilled:
+                    _fulfilled = True
+                    await route.fulfill(body=static_html, content_type='text/html; charset=utf-8')
+                else:
+                    await route.continue_()
+            await session.page.route(request.url.rstrip('/') + '**', _intercept)
+            try:
+                await session.page.goto(request.url, wait_until='networkidle', timeout=20000)
+            except Exception:
+                pass  # timeout OK — ادامه بده
         else:
             await session.start()
 
