@@ -10148,6 +10148,7 @@ class ScreenshotRequest(BaseModel):
     viewport_width: int = 1280
     viewport_height: int = 720
     full_page: bool = False
+    html_content: Optional[str] = None  # DOM snapshot از iframe (برای SPA بدون تغییر URL)
 
 
 class VisualDebugRequest(BaseModel):
@@ -12820,7 +12821,27 @@ async def take_screenshot(request: ScreenshotRequest, db: Session = Depends(get_
             url=request.url
         )
         session.viewport = {"width": request.viewport_width, "height": request.viewport_height}
-        await session.start()
+
+        # 🔀 اگر DOM snapshot ارسال شده → رندر HTML فعلی بجای navigation به URL
+        if request.html_content and session.page is None:
+            await session._start_browser_only()
+            import re as _re_ss
+            # حذف اسکریپت‌ها (فقط نمای بصری — بدون اجرای مجدد JS)
+            static_html = _re_ss.sub(r'<script[\s\S]*?</script>', '', request.html_content)
+            # حذف اسکریپت proxy تزریقی
+            static_html = _re_ss.sub(r'<script[^>]*data-inspector-proxy[^>]*>[\s\S]*?</script>', '', static_html)
+            # تزریق base href برای لود شدن CSS و تصاویر از سرور واقعی
+            base_tag = f'<base href="{request.url}">'
+            if '<head>' in static_html:
+                static_html = static_html.replace('<head>', f'<head>{base_tag}', 1)
+            elif '<html' in static_html:
+                static_html = static_html.replace('<html', f'<html><head>{base_tag}</head>', 1)
+            else:
+                static_html = f'<head>{base_tag}</head>{static_html}'
+            await session.page.set_content(static_html, wait_until='networkidle', timeout=15000)
+        else:
+            await session.start()
+
         await asyncio.sleep(2)
         screenshot_b64 = await session.take_screenshot()
         page_info = await session.get_page_info()
