@@ -2418,7 +2418,7 @@ class InspectorChatRequest(BaseModel):
     chat_history: Optional[List[InspectorChatMessage]] = None
     session_context: Optional[InspectorSessionContext] = None
     # تنظیمات
-    max_tokens: int = 4096
+    max_tokens: int = 16384
     temperature: float = 0.7
     stream: bool = False
 
@@ -2436,7 +2436,7 @@ class InspectorMultiChatRequest(BaseModel):
     chat_history: Optional[List[InspectorChatMessage]] = None
     session_context: Optional[InspectorSessionContext] = None
     # تنظیمات
-    max_tokens: int = 4096
+    max_tokens: int = 16384
     temperature: float = 0.7
 
 

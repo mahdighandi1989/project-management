@@ -40,7 +40,7 @@ class DeepSeekService(AIServiceBase):
         self,
         model_id: str,
         messages: List[Message],
-        max_tokens: int = 4096,
+        max_tokens: int = 16384,
         temperature: float = 0.7,
         **kwargs
     ) -> AIResponse:
@@ -118,7 +118,7 @@ class DeepSeekService(AIServiceBase):
         self,
         model_id: str,
         messages: List[Message],
-        max_tokens: int = 4096,
+        max_tokens: int = 16384,
         temperature: float = 0.7,
         **kwargs
     ) -> AsyncIterator[str]:

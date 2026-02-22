@@ -394,7 +394,7 @@ class AIManager:
         self,
         model_id: str,
         messages: List[Message],
-        max_tokens: int = 4096,
+        max_tokens: int = 16384,
         temperature: float = 0.7,
         task_type: Optional[str] = None,  # 🆕 برای fallback هوشمند
         allow_fallback: bool = True,  # 🆕 اجازه استفاده از fallback
@@ -510,7 +510,7 @@ class AIManager:
         self,
         model_ids: List[str],
         messages: List[Message],
-        max_tokens: int = 4096,
+        max_tokens: int = 16384,
         temperature: float = 0.7,
         **kwargs
     ) -> AIResponse:
@@ -533,7 +533,7 @@ class AIManager:
         self,
         model_ids: List[str],
         messages: List[Message],
-        max_tokens: int = 4096,
+        max_tokens: int = 16384,
         temperature: float = 0.7,
         **kwargs
     ) -> List[AIResponse]:
