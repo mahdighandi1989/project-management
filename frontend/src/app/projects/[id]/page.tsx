@@ -273,6 +273,7 @@ export default function ProjectDetailPage() {
   const [inspectorLoading, setInspectorLoading] = useState(false);
   const [inspectorFrontendUrl, setInspectorFrontendUrl] = useState<string | null>(null);
   const [inspectorBaseUrl, setInspectorBaseUrl] = useState<string | null>(null); // URL اصلی پروژه (بدون path)
+  const [inspectorIframeSrc, setInspectorIframeSrc] = useState(''); // src واقعی iframe — فقط با اقدام صریح تغییر میکند
   const [inspectorIframeLoaded, setInspectorIframeLoaded] = useState(false);
   const [inspectorIframeError, setInspectorIframeError] = useState(false);
   const [inspectorBackendLogs, setInspectorBackendLogs] = useState<Array<{
@@ -1498,6 +1499,13 @@ export default function ProjectDetailPage() {
             }
             setInspectorFrontendUrl(data.frontend_url);
             setInspectorBaseUrl(data.frontend_url); // ذخیره URL پایه برای تبدیل proxy↔actual
+            // 🔀 src iframe فقط اینجا و در اقدامات صریح کاربر تنظیم میشه
+            try {
+              const _u = new URL(data.frontend_url);
+              setInspectorIframeSrc(`${API_BASE}/api/render/inspector/proxy/${projectId}${_u.pathname}${_u.search}${_u.hash}`);
+            } catch {
+              setInspectorIframeSrc(`${API_BASE}/api/render/inspector/proxy/${projectId}/`);
+            }
           }
         }
       } else {
@@ -1550,6 +1558,7 @@ export default function ProjectDetailPage() {
       setInspectorPowerOn(false);
       setInspectorFrontendUrl(null);
       setInspectorBaseUrl(null);
+      setInspectorIframeSrc('');
       setInspectorIframeLoaded(false);
       setInspectorIframeError(false);
       setInspectorBackendLogs([]);
@@ -9878,10 +9887,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                 value={inspectorFrontendUrl || ''}
                                 onChange={(e) => setInspectorFrontendUrl(e.target.value)}
                                 onKeyDown={(e) => {
-                                  if (e.key === 'Enter' && inspectorIframeRef.current) {
+                                  if (e.key === 'Enter') {
                                     const typed = (e.target as HTMLInputElement).value;
                                     setInspectorFrontendUrl(typed);
-                                    inspectorIframeRef.current.src = _getProxyUrl(typed);
+                                    setInspectorIframeSrc(_getProxyUrl(typed));
                                   }
                                 }}
                                 className="flex-1 text-[10px] bg-gray-700/80 text-gray-200 rounded px-2 py-0.5 border border-gray-600 focus:border-blue-500 focus:outline-none truncate"
@@ -9890,10 +9899,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               />
                               <button
                                 onClick={() => {
-                                  if (inspectorIframeRef.current && inspectorFrontendUrl) {
-                                    // بارگذاری مجدد از طریق proxy — t= برای cache-bust
+                                  if (inspectorFrontendUrl) {
+                                    // بارگذاری مجدد از طریق proxy — _t= برای cache-bust
                                     const _proxyReload = _getProxyUrl(inspectorFrontendUrl);
-                                    inspectorIframeRef.current.src = _proxyReload + (_proxyReload.includes('?') ? '&' : '?') + '_t=' + Date.now();
+                                    setInspectorIframeSrc(_proxyReload + (_proxyReload.includes('?') ? '&' : '?') + '_t=' + Date.now());
                                   }
                                 }}
                                 className="text-[10px] text-gray-400 hover:text-white px-1 flex-shrink-0"
@@ -9902,7 +9911,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             </div>
                             <iframe
                               ref={inspectorIframeRef}
-                              src={_getProxyUrl(inspectorFrontendUrl)}
+                              src={inspectorIframeSrc}
                               style={{ paddingTop: '24px' }}
                               className="w-full h-full border-0 bg-white"
                               title="پیش‌نمایش فرانت‌اند"
@@ -10038,9 +10047,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                     onClick={() => {
                                       setInspectorIframeError(false);
                                       setInspectorIframeLoaded(false);
-                                      if (inspectorIframeRef.current) {
-                                        inspectorIframeRef.current.src = _getProxyUrl(inspectorFrontendUrl);
-                                      }
+                                      setInspectorIframeSrc(_getProxyUrl(inspectorFrontendUrl));
                                     }}
                                     className="px-4 py-2 bg-blue-600 text-white text-xs rounded-lg hover:bg-blue-700 transition-colors"
                                   >
