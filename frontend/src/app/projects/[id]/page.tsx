@@ -9944,69 +9944,6 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                   <span className="bg-white text-purple-600 text-[9px] rounded-full px-1 font-bold">{visualDebugScreenshots.length}</span>
                                 )}
                               </button>
-                              {/* 🆕 Paste عکس از کلیپبورد */}
-                              <button
-                                onClick={async () => {
-                                  try {
-                                    const items = await navigator.clipboard.read();
-                                    for (const item of items) {
-                                      const imageType = item.types.find(t => t.startsWith('image/'));
-                                      if (imageType) {
-                                        const blob = await item.getType(imageType);
-                                        const reader = new FileReader();
-                                        reader.onload = (ev) => {
-                                          const b64 = (ev.target?.result as string)?.split(',')[1];
-                                          if (b64) {
-                                            setVisualDebugScreenshots(prev => [...prev, {
-                                              id: `ss_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-                                              base64: b64, timestamp: new Date(), pageUrl: inspectorFrontendUrl || '',
-                                              consoleLogs: [...importedProjectConsoleLogs].slice(-50).map(l => ({ level: l.level, message: l.message, timestamp: l.timestamp, source: l.source })),
-                                              backendLogs: [...inspectorBackendLogs].slice(-30).map(l => ({ level: l.level, message: l.message, timestamp: l.timestamp, service_name: l.service_name })),
-                                              relatedUrls: inspectorFrontendUrl ? [inspectorFrontendUrl] : [], apiPaths: [],
-                                            }]);
-                                            if (!visualDebugMode) setVisualDebugMode(true);
-                                          }
-                                        };
-                                        reader.readAsDataURL(blob);
-                                        break;
-                                      }
-                                    }
-                                  } catch (_e) { alert('برای paste عکس، ابتدا عکس را در کلیپبورد کپی کنید (Print Screen یا Snipping Tool)'); }
-                                }}
-                                className="px-2 py-1 bg-green-600/90 hover:bg-green-700 text-white text-[10px] rounded-md shadow-lg transition-all flex items-center gap-1"
-                                title="Paste عکس از کلیپبورد (Ctrl+V یا Print Screen)"
-                              >
-                                📋 Paste عکس
-                              </button>
-                              {/* 🆕 آپلود فایل عکس */}
-                              <label className="px-2 py-1 bg-blue-600/90 hover:bg-blue-700 text-white text-[10px] rounded-md shadow-lg transition-all flex items-center gap-1 cursor-pointer">
-                                📁 آپلود
-                                <input
-                                  type="file"
-                                  accept="image/*"
-                                  className="hidden"
-                                  onChange={(e) => {
-                                    const file = e.target.files?.[0];
-                                    if (!file) return;
-                                    const reader = new FileReader();
-                                    reader.onload = (ev) => {
-                                      const b64 = (ev.target?.result as string)?.split(',')[1];
-                                      if (b64) {
-                                        setVisualDebugScreenshots(prev => [...prev, {
-                                          id: `ss_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-                                          base64: b64, timestamp: new Date(), pageUrl: inspectorFrontendUrl || '',
-                                          consoleLogs: [...importedProjectConsoleLogs].slice(-50).map(l => ({ level: l.level, message: l.message, timestamp: l.timestamp, source: l.source })),
-                                          backendLogs: [...inspectorBackendLogs].slice(-30).map(l => ({ level: l.level, message: l.message, timestamp: l.timestamp, service_name: l.service_name })),
-                                          relatedUrls: inspectorFrontendUrl ? [inspectorFrontendUrl] : [], apiPaths: [],
-                                        }]);
-                                        if (!visualDebugMode) setVisualDebugMode(true);
-                                      }
-                                    };
-                                    reader.readAsDataURL(file);
-                                    e.target.value = '';
-                                  }}
-                                />
-                              </label>
                               {/* دکمه لاگ‌های کنسول پروژه ایمپورت شده */}
                               <button
                                 onClick={() => setShowImportedConsoleLogs(!showImportedConsoleLogs)}
