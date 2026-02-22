@@ -3520,7 +3520,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       const data = await res.json();
       if (data.success && data.screenshot) {
         // 📦 Snapshot current logs and URLs at capture time
-        const capturePageUrl = data.page_info?.url || _currentPageUrl || '';
+        // اولویت: URL خوانده شده از iframe (تبدیل شده از proxy) → بعد page_info از Playwright
+        const _playwrightUrl = data.page_info?.url || '';
+        const capturePageUrl = _currentPageUrl || _playwrightUrl;
         const captureConsoleLogs = [...importedProjectConsoleLogs].slice(-50).map(l => ({
           level: l.level, message: l.message, timestamp: l.timestamp, source: l.source
         }));
@@ -3534,6 +3536,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         const captureApiPaths: string[] = [];
         if (_currentPageUrl) captureUrls.push(_currentPageUrl);
         if (capturePageUrl && !captureUrls.includes(capturePageUrl)) captureUrls.push(capturePageUrl);
+
+        // 🆕 اضافه کردن URL سرویس‌های بکند پروژه
+        inspectorServices.forEach(svc => {
+          if (svc.url && !captureUrls.includes(svc.url)) captureUrls.push(svc.url);
+        });
 
         // Extract URLs and API endpoints from console logs
         const allLogMessages = [
