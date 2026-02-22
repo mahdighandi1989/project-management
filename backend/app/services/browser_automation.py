@@ -58,8 +58,8 @@ class BrowserSession:
         self.action_log: List[Dict] = []
         self._element_handles: List = []  # 🆕 برای کلیک مستقیم روی المان
 
-    async def start(self):
-        """شروع مرورگر و باز کردن صفحه"""
+    async def _start_browser_only(self):
+        """فقط مرورگر را باز کن (بدون ناوبری به URL) — برای set_content"""
         check_playwright_available()
         playwright = await async_playwright().start()
         self.browser = await playwright.chromium.launch(
@@ -71,6 +71,11 @@ class BrowserSession:
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         )
         self.page = await self.context.new_page()
+        return self
+
+    async def start(self):
+        """شروع مرورگر و باز کردن صفحه"""
+        await self._start_browser_only()
 
         try:
             await self.page.goto(self.url, wait_until='networkidle', timeout=30000)

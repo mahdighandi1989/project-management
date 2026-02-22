@@ -3496,6 +3496,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         freshBackendLogs = [...inspectorBackendLogs];
       }
 
+      // 🔀 DOM snapshot از iframe (same-origin) — برای SPA هایی که URL تغییر نمیکنه
+      let _capturedHtml: string | null = null;
+      try {
+        const iframeDoc = inspectorIframeRef.current?.contentDocument;
+        if (iframeDoc) {
+          const html = iframeDoc.documentElement.outerHTML;
+          if (html && html.length < 5_000_000) _capturedHtml = html; // حداکثر 5MB
+        }
+      } catch { /* اگر خطا شد ادامه بده با روش عادی */ }
+
       const res = await fetch(`${API_BASE}/api/render/inspector/screenshot`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3504,6 +3514,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           url: _currentPageUrl,
           viewport_width: 1280,
           viewport_height: 720,
+          html_content: _capturedHtml,
         }),
       });
       const data = await res.json();
