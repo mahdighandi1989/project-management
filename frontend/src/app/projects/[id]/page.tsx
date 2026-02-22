@@ -528,6 +528,12 @@ export default function ProjectDetailPage() {
   const [visualDebugPromptOpen, setVisualDebugPromptOpen] = useState(false);
   const [visualDebugPromptData, setVisualDebugPromptData] = useState<{vd: Array<{id: string; title: string; content: string; icon: string; prompt_detail?: string}>; gen: Array<{id: string; title: string; content: string; icon: string; prompt_detail?: string}>} | null>(null);
 
+  // 🔄 بازتحلیل دیباگ بصری با مدل دوم
+  const [reanalyzeModalOpen, setReanalyzeModalOpen] = useState(false);
+  const [reanalyzeSourceMsgId, setReanalyzeSourceMsgId] = useState<string>('');
+  const [reanalyzeSelectedModel, setReanalyzeSelectedModel] = useState<string>('');
+  const [reanalyzeLoading, setReanalyzeLoading] = useState(false);
+
   // 📋 لاگ‌های کنسول پروژه ایمپورت شده (تفکیک شده از پروژه اصلی)
   const [importedProjectConsoleLogs, setImportedProjectConsoleLogs] = useState<Array<{
     id: string;
@@ -3752,6 +3758,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   tokens_used: data.tokens_used,
                   action_type: data.has_action ? 'smart_action' as any : undefined,
                   action_plan: data.action_plan,
+                  is_visual_debug_report: true,
+                  original_user_description: visualDebugDescription || '',
                 } as any]);
                 setInspectorOpLock(false);
                 setInspectorOpType(null);
@@ -3802,6 +3810,152 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       }
     } finally {
       setVisualDebugLoading(false);
+      setInspectorOpLock(false);
+      setInspectorOpType(null);
+    }
+  };
+
+  // 🔄 باز کردن مودال انتخاب مدل برای اعمال تغییرات دیباگ بصری
+  const handleApplyWithModelSelection = (msgId: string) => {
+    setReanalyzeSourceMsgId(msgId);
+    setReanalyzeSelectedModel('');
+    // بارگذاری لیست مدل‌های فعال
+    loadVisionModels();
+    setReanalyzeModalOpen(true);
+  };
+
+  // 🔄 اعمال تغییرات: اگر همون مدل → مستقیم، اگر مدل دیگه → بازتحلیل
+  const handleReanalyzeConfirm = () => {
+    if (!reanalyzeSelectedModel || !reanalyzeSourceMsgId) return;
+    const msg = inspectorChatMessages.find(m => m.id === reanalyzeSourceMsgId) as any;
+    if (!msg) return;
+
+    setReanalyzeModalOpen(false);
+
+    if (reanalyzeSelectedModel === msg.model_id) {
+      // همون مدل → اعمال مستقیم
+      applySmartAction(reanalyzeSourceMsgId);
+    } else {
+      // مدل دیگه → بازتحلیل
+      sendReanalyze(reanalyzeSourceMsgId, reanalyzeSelectedModel);
+    }
+  };
+
+  // 🔄 ارسال درخواست بازتحلیل با مدل دوم
+  const sendReanalyze = async (msgId: string, newModelId: string) => {
+    const msg = inspectorChatMessages.find(m => m.id === msgId) as any;
+    if (!msg) return;
+
+    setReanalyzeLoading(true);
+    setInspectorOpLock(true);
+    setInspectorOpType('investigate');
+    inspectorOpAbortRef.current = new AbortController();
+
+    setInspectorChatMessages(prev => [...prev, {
+      id: `ra_start_${Date.now()}`,
+      role: 'system' as const,
+      content: `🔄 شروع بازتحلیل گزارش مدل ${msg.model_id} توسط مدل ${newModelId}...`,
+      timestamp: new Date(),
+    }]);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/visual-debug-reanalyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: projectId,
+          model_id: newModelId,
+          vision_report: msg.content,
+          vision_model_id: msg.model_id || 'unknown',
+          vision_action_plan: msg.action_plan || null,
+          user_description: (msg as any).original_user_description || '',
+          previously_read_files: previouslyReadFiles,
+        }),
+        signal: inspectorOpAbortRef.current?.signal,
+      });
+
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = '';
+      let responseReceived = false;
+      if (!reader) throw new Error('No reader');
+
+      let eventType = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        sseBuffer += decoder.decode(value, { stream: true });
+        const lines = sseBuffer.split('\n');
+        sseBuffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            eventType = line.slice(7).trim();
+          } else if (line.startsWith('data: ') && eventType) {
+            try {
+              const data = JSON.parse(line.slice(6));
+
+              if (eventType === 'progress') {
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `ra_p_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                  role: 'system' as const,
+                  content: data.message,
+                  timestamp: new Date(),
+                }]);
+              } else if (eventType === 'error') {
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `ra_err_${Date.now()}`,
+                  role: 'assistant' as const,
+                  content: `❌ ${data.message}${data.detail ? '\n📊 ' + data.detail : ''}`,
+                  timestamp: new Date(),
+                }]);
+              } else if (eventType === 'response') {
+                responseReceived = true;
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `ra_response_${Date.now()}`,
+                  role: 'assistant' as const,
+                  content: data.content,
+                  model_id: data.model_used,
+                  timestamp: new Date(),
+                  tokens_used: data.tokens_used,
+                  action_type: data.has_action ? 'smart_action' as any : undefined,
+                  action_plan: data.action_plan,
+                  is_reanalysis_report: true,
+                  vision_model: data.vision_model,
+                } as any]);
+                setInspectorOpLock(false);
+                setInspectorOpType(null);
+              } else if (eventType === 'heartbeat') {
+                // keep-alive
+              } else if (eventType === 'done') {
+                if (!responseReceived) {
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: `ra_fail_${Date.now()}`,
+                    role: 'assistant' as const,
+                    content: '⚠️ بازتحلیل بدون نتیجه پایان یافت. لطفاً دوباره تلاش کنید.',
+                    timestamp: new Date(),
+                  }]);
+                  setInspectorOpLock(false);
+                  setInspectorOpType(null);
+                }
+              }
+            } catch (e) {}
+            eventType = '';
+          }
+        }
+      }
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        setInspectorChatMessages(prev => [...prev, {
+          id: `ra_error_${Date.now()}`,
+          role: 'assistant' as const,
+          content: `❌ خطا در بازتحلیل: ${err.message?.slice(0, 100) || 'ناشناخته'}`,
+          timestamp: new Date(),
+        }]);
+      }
+    } finally {
+      setReanalyzeLoading(false);
       setInspectorOpLock(false);
       setInspectorOpType(null);
     }
@@ -10859,6 +11013,18 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         {msg.model_id && msg.role === 'assistant' && (
                           <p className="text-xs text-gray-400 mb-1">{msg.model_id}</p>
                         )}
+                        {(msg as any).is_visual_debug_report && (
+                          <div className="text-[10px] text-purple-500 dark:text-purple-400 mb-1 flex items-center gap-1">
+                            <span>📸</span>
+                            <span>گزارش دیباگ بصری</span>
+                          </div>
+                        )}
+                        {(msg as any).is_reanalysis_report && (
+                          <div className="text-[10px] text-blue-500 dark:text-blue-400 mb-1 flex items-center gap-1">
+                            <span>🔄</span>
+                            <span>بازتحلیل مستقل (گزارش اولیه: {(msg as any).vision_model})</span>
+                          </div>
+                        )}
                         <p className={`text-sm whitespace-pre-wrap ${
                           msg.role === 'user' ? '' :
                           msg.role === 'action' && msg.verified_by_model === 'console-error' ? 'text-orange-800 dark:text-orange-200' :
@@ -11039,13 +11205,23 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           )}
                           {/* 🧠 دکمه اعمال تغییرات روی پاسخ‌های smart-chat */}
                           {(msg as any).action_type === 'smart_action' && (msg as any).action_plan?.files?.length > 0 && (
-                            <button
-                              onClick={(e) => { e.stopPropagation(); applySmartAction(msg.id); }}
-                              className="text-[10px] bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 px-2 py-0.5 rounded hover:bg-green-200 dark:hover:bg-green-800/40 transition-colors font-medium"
-                              disabled={inspectorOpLock}
-                            >
-                              {inspectorOpLock ? '⏳ ...' : '✅ اعمال تغییرات'}
-                            </button>
+                            (msg as any).is_visual_debug_report ? (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); handleApplyWithModelSelection(msg.id); }}
+                                className="text-[10px] bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 px-2 py-0.5 rounded hover:bg-purple-200 dark:hover:bg-purple-800/40 transition-colors font-medium"
+                                disabled={inspectorOpLock}
+                              >
+                                {inspectorOpLock ? '⏳ ...' : '🔄 اعمال تغییرات (انتخاب مدل)'}
+                              </button>
+                            ) : (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); applySmartAction(msg.id); }}
+                                className="text-[10px] bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 px-2 py-0.5 rounded hover:bg-green-200 dark:hover:bg-green-800/40 transition-colors font-medium"
+                                disabled={inspectorOpLock}
+                              >
+                                {inspectorOpLock ? '⏳ ...' : '✅ اعمال تغییرات'}
+                              </button>
+                            )
                           )}
                           {(msg as any).action_type === 'smart_action' && (msg as any).action_plan?.files?.length > 0 && (msg as any).files_were_read === false && (
                             <span className="text-[9px] text-red-500 dark:text-red-400 px-1">
@@ -11536,6 +11712,88 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           className="px-4 py-2 bg-purple-500 text-white text-sm rounded-lg hover:bg-purple-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                         >
                           🔍 شروع تحلیل هوشمند
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 🔄 مودال انتخاب مدل برای اعمال تغییرات (بازتحلیل دیباگ بصری) */}
+                {reanalyzeModalOpen && (
+                  <div className="absolute inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+                    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-md max-h-[80%] overflow-hidden" dir="rtl">
+                      <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+                        <h3 className="font-bold text-sm">🔄 انتخاب مدل برای اعمال تغییرات</h3>
+                        <button onClick={() => setReanalyzeModalOpen(false)} className="text-gray-400 hover:text-gray-600 text-lg">&times;</button>
+                      </div>
+                      <div className="p-3 text-xs text-gray-500 bg-purple-50 dark:bg-purple-900/10 border-b border-gray-200 dark:border-gray-700">
+                        💡 اگر همان مدل Vision را انتخاب کنید، تغییرات مستقیم اعمال می‌شود.
+                        اگر مدل دیگری انتخاب کنید، آن مدل گزارش را بازتحلیل کرده و گزارش مستقل خودش را تولید می‌کند.
+                      </div>
+                      <div className="p-3 max-h-[50vh] overflow-y-auto space-y-1.5">
+                        {(() => {
+                          const sourceMsg = inspectorChatMessages.find(m => m.id === reanalyzeSourceMsgId) as any;
+                          const visionModelId = sourceMsg?.model_id;
+                          // ترکیب مدل‌های Vision و مدل‌های عادی
+                          const allModels = [
+                            ...visualDebugVisionModels.map(m => ({ ...m, isVision: true })),
+                            ...inspectorModels
+                              .filter(m => m.enabled && !visualDebugVisionModels.some(vm => vm.id === m.id))
+                              .map(m => ({ ...m, isVision: false, supports_images: false, capabilities: [], context_window: 0, recommended: false })),
+                          ];
+                          return allModels.length === 0 ? (
+                            <div className="text-center py-4 text-gray-400 text-sm">در حال بارگذاری مدل‌ها...</div>
+                          ) : allModels.map(model => (
+                            <label
+                              key={model.id}
+                              className={`flex items-center gap-2 p-2 rounded-lg transition-colors ${
+                                !model.enabled ? 'opacity-40 cursor-not-allowed' :
+                                reanalyzeSelectedModel === model.id
+                                  ? 'bg-purple-50 dark:bg-purple-900/20 border border-purple-300 dark:border-purple-700 cursor-pointer'
+                                  : 'hover:bg-gray-50 dark:hover:bg-gray-750 border border-transparent cursor-pointer'
+                              }`}
+                            >
+                              <input
+                                type="radio"
+                                name="reanalyze_model"
+                                checked={reanalyzeSelectedModel === model.id}
+                                disabled={!model.enabled}
+                                onChange={() => setReanalyzeSelectedModel(model.id)}
+                                className="rounded"
+                              />
+                              <div className="flex-1 min-w-0">
+                                <span className="text-xs font-medium">{model.name}</span>
+                                <span className="text-[10px] text-gray-400 mr-1">({model.provider})</span>
+                                {model.id === visionModelId && (
+                                  <span className="text-[9px] bg-purple-100 text-purple-600 px-1 rounded mr-1">مدل فعلی (اعمال مستقیم)</span>
+                                )}
+                                {model.id !== visionModelId && (model as any).isVision && (
+                                  <span className="text-[9px] bg-blue-100 text-blue-600 px-1 rounded mr-1">Vision</span>
+                                )}
+                                {model.id !== visionModelId && !(model as any).isVision && (
+                                  <span className="text-[9px] bg-gray-100 text-gray-500 px-1 rounded mr-1">بازتحلیل متنی</span>
+                                )}
+                              </div>
+                            </label>
+                          ));
+                        })()}
+                      </div>
+                      <div className="p-3 border-t border-gray-200 dark:border-gray-700 flex items-center justify-between">
+                        <span className="text-[11px] text-gray-400">
+                          {reanalyzeSelectedModel
+                            ? (reanalyzeSelectedModel === (inspectorChatMessages.find(m => m.id === reanalyzeSourceMsgId) as any)?.model_id
+                                ? '✅ اعمال مستقیم'
+                                : '🔄 بازتحلیل با مدل جدید')
+                            : 'یک مدل انتخاب کنید'}
+                        </span>
+                        <button
+                          onClick={handleReanalyzeConfirm}
+                          disabled={!reanalyzeSelectedModel}
+                          className="px-4 py-2 bg-purple-500 text-white text-sm rounded-lg hover:bg-purple-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        >
+                          {reanalyzeSelectedModel === (inspectorChatMessages.find(m => m.id === reanalyzeSourceMsgId) as any)?.model_id
+                            ? '✅ اعمال تغییرات'
+                            : '🔄 شروع بازتحلیل'}
                         </button>
                       </div>
                     </div>

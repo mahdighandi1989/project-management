@@ -13476,3 +13476,307 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
 
     return StreamingResponse(event_stream(), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+
+
+# ────────────────────────────────────────────────
+# 🔄 بازتحلیل دیباگ بصری با مدل دوم
+# ────────────────────────────────────────────────
+
+class VisualDebugReanalyzeRequest(BaseModel):
+    """درخواست بازتحلیل گزارش دیباگ بصری با مدل دیگر"""
+    project_id: str
+    model_id: str  # مدل جدید برای بازتحلیل
+    vision_report: str  # گزارش کامل مدل Vision (متن)
+    vision_model_id: str  # مدل Vision اولیه
+    vision_action_plan: Optional[dict] = None  # action_plan مدل Vision (اگر موجود)
+    user_description: Optional[str] = None  # توضیح اصلی کاربر
+    previously_read_files: Optional[List[str]] = None
+
+
+@router.post("/inspector/visual-debug-reanalyze")
+async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, db: Session = Depends(get_db)):
+    """بازتحلیل گزارش مدل Vision توسط مدل دوم: خواندن فایل‌ها + بررسی مستقل + گزارش نهایی. SSE streaming"""
+    from fastapi.responses import StreamingResponse
+    from ...models.project import Project
+    from ...services.github_import import get_github_import_service
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+
+    project = db.query(Project).filter(Project.id == request.project_id).first()
+    if not project:
+        return {"success": False, "error": "پروژه یافت نشد"}
+    if not request.vision_report:
+        return {"success": False, "error": "گزارش مدل Vision خالی است"}
+
+    extra_data = {}
+    if project.extra_data:
+        try:
+            extra_data = json.loads(project.extra_data) if isinstance(project.extra_data, str) else project.extra_data
+        except Exception:
+            extra_data = {}
+
+    owner = extra_data.get("owner", "")
+    repo = extra_data.get("repo", "")
+    github_path = project.github_path or ""
+    if not owner and "/" in github_path:
+        owner, repo = github_path.split("/", 1)
+
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        from ...models.setting import Setting as _RASetting
+        token = _RASetting.get_value(db, "api_key_github") or ""
+
+    reanalyze_model = request.model_id
+
+    async def event_stream():
+        ai_manager = get_ai_manager()
+        github_svc = get_github_import_service()
+
+        def sse(event: str, data: dict) -> str:
+            return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        yield sse("progress", {"step": "starting", "message": f"🔄 شروع بازتحلیل با مدل {reanalyze_model}..."})
+
+        # دستورات عمومی
+        _ra_instructions_list = _build_general_instructions_list(
+            project_name=project.name or "نامشخص",
+            technologies=project.technologies or "نامشخص",
+            github_path=f"{owner}/{repo}" if owner else "نامشخص"
+        )
+        _ra_general_text = _build_general_instructions_text(_ra_instructions_list)
+
+        # بودجه‌بندی بر اساس مدل جدید
+        from ...core.models_registry import get_model as _ra_get_model
+        _ra_reg = _ra_get_model(reanalyze_model)
+        _ra_context_window = getattr(_ra_reg, 'context_window', 32000) if _ra_reg else 32000
+        _ra_model_max_output = getattr(_ra_reg, 'max_tokens', 16384) if _ra_reg else 16384
+        _ra_max_output = _ra_model_max_output
+        _ra_max_input_chars = max(10000, (_ra_context_window - _ra_max_output) * 3)
+
+        _ra_prompt_overhead = len(_ra_general_text) + len(request.vision_report) + 5000
+        _ra_reserve = 3000
+        _ra_user_estimate = min(3000, len(request.user_description or '') + 1000)
+        _ra_code_budget = max(15000, _ra_max_input_chars - _ra_prompt_overhead - _ra_user_estimate - _ra_reserve)
+
+        _ra_max_files = max(8, min(40, _ra_code_budget // 4000))
+        _ra_per_file_limit = max(5000, min(25000, _ra_code_budget // max(_ra_max_files // 2, 1)))
+
+        yield sse("progress", {"step": "budget", "message": f"📊 بودجه: {_ra_context_window // 1000}K context → {_ra_max_files} فایل, {_ra_per_file_limit // 1000}K/فایل"})
+
+        # خواندن فایل‌های پروژه
+        project_tree_summary = ""
+        code_context = ""
+        selected_files = []
+
+        if owner and repo:
+            try:
+                yield sse("progress", {"step": "reading_project", "message": "📂 خواندن ساختار پروژه..."})
+                tree_result = await github_svc.get_repo_tree(owner, repo, token=token)
+                if tree_result.get("success"):
+                    all_files = [f for f in tree_result.get("tree", []) if f.get("type") == "blob"]
+                    code_files = [f["path"] for f in all_files
+                                  if _is_code_file(f["path"], file_size=f.get("size", 0))]
+                    project_tree_summary = _build_project_tree_summary(code_files)
+
+                    # استخراج فایل‌ها از گزارش Vision و action_plan
+                    _ra_report_files = _extract_file_paths_from_text(request.vision_report, code_files)
+
+                    if request.vision_action_plan and request.vision_action_plan.get("files"):
+                        for af in request.vision_action_plan["files"]:
+                            ap = af.get("path", "")
+                            if ap and ap in code_files and ap not in _ra_report_files:
+                                _ra_report_files.append(ap)
+
+                    # AI file selection با context گزارش
+                    _ra_context = (request.user_description or "") + " " + request.vision_report[:3000]
+
+                    yield sse("progress", {"step": "selecting_files", "message": f"🤖 مدل {reanalyze_model} در حال انتخاب فایل‌های مرتبط..."})
+                    try:
+                        _ra_select_prompt = f"""بر اساس گزارش مدل Vision زیر، فایل‌های مرتبط را برای بررسی مستقل انتخاب کن:
+
+## گزارش مدل Vision ({request.vision_model_id}):
+{request.vision_report[:4000]}
+
+## توضیح اصلی کاربر:
+{request.user_description or '(بدون توضیح)'}
+
+{project_tree_summary}
+
+فایل‌های پروژه:
+{chr(10).join(code_files[:500])}
+
+## راهنما:
+- فایل‌هایی که در گزارش Vision ذکر شده (مسیرهای دقیق)
+- فایل‌های مرتبط دیگر برای بررسی کامل
+- فایل‌های فرانت و بکند مرتبط
+- حداکثر {_ra_max_files} فایل. فقط مسیرها، هر کدام در یک خط."""
+
+                        _ra_sel_resp = await ai_manager.generate(
+                            model_id=reanalyze_model,
+                            messages=[
+                                Message(role="system", content=f"انتخاب‌گر فایل هوشمند. بر اساس گزارش Vision، فایل‌های فرانت و بکند مرتبط را انتخاب کن. حداکثر {_ra_max_files} فایل. فقط مسیرها."),
+                                Message(role="user", content=_ra_select_prompt)
+                            ],
+                            max_tokens=800,
+                            temperature=0.2
+                        )
+                        selected_files = _parse_ai_selected_files(_ra_sel_resp.content, code_files, max_files=_ra_max_files)
+                    except Exception:
+                        selected_files = []
+
+                    if not selected_files:
+                        selected_files = _fallback_file_selection(code_files, _ra_context[:3000], max_files=12)
+
+                    # ادغام فایل‌های استخراج‌شده از گزارش
+                    for _rf in _ra_report_files:
+                        if _rf not in selected_files:
+                            selected_files.insert(0, _rf)
+
+                    selected_files = _ensure_balanced_selection(selected_files, code_files, _ra_max_files)
+
+                    # اولویت فایل‌های جدید
+                    prev_files = set(request.previously_read_files or [])
+                    if prev_files:
+                        new_files = [f for f in selected_files if f not in prev_files]
+                        old_files = [f for f in selected_files if f in prev_files]
+                        selected_files = (new_files + old_files)[:_ra_max_files]
+
+                    if selected_files:
+                        yield sse("progress", {"step": "reading_files", "message": f"📖 خواندن {len(selected_files)} فایل (بودجه {_ra_code_budget // 1000}K)..."})
+                        _ra_read_count = 0
+                        for fp in selected_files:
+                            if len(code_context) >= _ra_code_budget:
+                                yield sse("progress", {"step": "budget_cap", "message": f"📊 بودجه کد پر شد — {len(selected_files) - _ra_read_count} فایل نادیده گرفته شد"})
+                                break
+                            try:
+                                file_result = await github_svc.get_file_content(owner, repo, fp, token=token)
+                                if file_result.get("success"):
+                                    _file_content = file_result.get('content', '')
+                                    _remaining = _ra_code_budget - len(code_context)
+                                    _this_limit = min(_ra_per_file_limit, max(3000, _remaining))
+                                    code_context += f"\n--- {fp} ---\n{_file_content[:_this_limit]}\n"
+                                    _ra_read_count += 1
+                            except Exception:
+                                pass
+            except Exception as e:
+                yield sse("progress", {"step": "github_error", "message": f"⚠️ خطا GitHub: {str(e)[:80]}"})
+
+        # ساخت پرامپت سیستم
+        full_system = _ra_general_text
+        full_system += f"""
+
+## 🔄 بازتحلیل مستقل گزارش مدل Vision
+
+### وظیفه شما:
+مدل Vision ({request.vision_model_id}) عکس‌های صفحه را بررسی کرده و گزارش زیر را تولید کرده.
+شما باید:
+1. گزارش مدل Vision را کامل و دقیق بخوانید
+2. فایل‌های ذکرشده را خودتان بررسی کنید (فایل‌ها در زیر ارائه شده‌اند)
+3. تحلیل مستقل خودتان را انجام دهید و اگر اشتباهی در گزارش Vision هست اصلاح کنید
+4. گزارش نهایی و دقیق با action_plan کامل تولید کنید
+
+### 🔑 دسترسی کامل به پروژه:
+شما دسترسی کامل به تمام فایل‌های این پروژه دارید. سیستم مرتبط‌ترین فایل‌ها را خوانده و ارائه کرده.
+
+### فرمت action_plan (ضروری):
+حتماً در پایان گزارش، بلوک JSON با فرمت زیر قرار بدهید:
+```json
+{{
+  "files": [
+    {{"path": "مسیر/فایل", "content": "محتوای کامل فایل", "operation": "modify"}}
+  ],
+  "commit_message": "توضیح تغییرات"
+}}
+```
+⚠️ محتوای هر فایل باید **کامل** باشه — فقط بخش تغییریافته نه، کل فایل."""
+
+        if selected_files:
+            full_system += f"\n\n## 📂 فایل‌های پروژه خوانده‌شده ({len(selected_files)} فایل):\n"
+            for sf in selected_files:
+                full_system += f"  - `{sf}`\n"
+        if project_tree_summary:
+            full_system += f"\n\n## ساختار پروژه:\n{project_tree_summary}"
+        if code_context:
+            full_system += f"\n\n## کد فایل‌ها:\n{code_context[:_ra_code_budget]}"
+
+        # پرامپت کاربر: گزارش Vision + توضیح اصلی
+        user_text = f"""## 📋 گزارش مدل Vision ({request.vision_model_id}):
+
+{request.vision_report}
+"""
+        if request.vision_action_plan:
+            user_text += f"""
+## 📦 action_plan پیشنهادی مدل Vision:
+```json
+{json.dumps(request.vision_action_plan, ensure_ascii=False, indent=2)[:5000]}
+```
+"""
+        if request.user_description:
+            user_text += f"\n## 💬 توضیح اصلی کاربر:\n{request.user_description}\n"
+
+        user_text += """
+## 📝 دستور:
+گزارش مدل Vision را بخوانید، فایل‌های ارائه‌شده را بررسی کنید، و گزارش نهایی مستقل خودتان را با action_plan کامل (شامل محتوای کامل فایل‌ها) تولید کنید.
+اگر تحلیل مدل Vision درست بود، آن را تأیید و تکمیل کنید. اگر اشتباهاتی دارد، اصلاح کنید."""
+
+        # بررسی بودجه نهایی
+        _ra_total_len = len(full_system) + len(user_text)
+        if _ra_total_len > _ra_max_input_chars:
+            _ra_allowed_system = max(10000, _ra_max_input_chars - len(user_text) - 1000)
+            if len(full_system) > _ra_allowed_system:
+                full_system = full_system[:_ra_allowed_system] + "\n\n... [بخشی از فایل‌ها حذف شد]"
+                yield sse("progress", {"step": "prompt_truncation", "message": f"⚠️ حجم پرامپت ({_ra_total_len // 1000}K) بهینه‌سازی شد"})
+
+        try:
+            yield sse("progress", {"step": "sending_to_model", "message": f"📤 ارسال به {reanalyze_model}..."})
+            import time as _time
+            messages = [
+                Message(role="system", content=full_system),
+                Message(role="user", content=user_text)
+            ]
+            response_task = asyncio.create_task(
+                ai_manager.generate(model_id=reanalyze_model, messages=messages, max_tokens=_ra_max_output, temperature=0.3, task_type="code_analysis")
+            )
+            while not response_task.done():
+                yield sse("heartbeat", {"ts": int(_time.time())})
+                await asyncio.sleep(8)
+            response = response_task.result()
+
+            action_plan = None
+            if "```" in response.content:
+                json_match = re.search(r'```json\s*\n(.*?)\n```', response.content, re.DOTALL)
+                if json_match:
+                    try:
+                        parsed = json.loads(json_match.group(1))
+                        if parsed.get("files") and len(parsed["files"]) > 0:
+                            valid_files = [f for f in parsed["files"] if f.get("path") and f.get("content")]
+                            if valid_files:
+                                parsed["files"] = valid_files
+                                action_plan = parsed
+                    except (json.JSONDecodeError, Exception):
+                        pass
+
+                if action_plan is None:
+                    code_blocks = re.findall(r'```[\w]*\n(.*?)```', response.content, re.DOTALL)
+                    if code_blocks:
+                        action_plan = {"files": [], "commit_message": f"fix: بازتحلیل - {(request.user_description or 'اصلاح')[:50]}"}
+                        fpm = re.findall(r'(?:فایل|file|path|مسیر|`)[:\s]*[`"]?([a-zA-Z0-9_./\-]+(?:\.[a-zA-Z]{1,10}))[`"]?', response.content)
+                        fpm = [p for p in fpm if '/' in p or '.' in p.split('/')[-1]]
+                        for i, block in enumerate(code_blocks[:5]):
+                            action_plan["files"].append({"path": fpm[i] if i < len(fpm) else f"file_{i+1}", "content": block.strip(), "operation": "modify"})
+                        if all(f["path"].startswith("file_") for f in action_plan["files"]):
+                            action_plan = None
+
+            yield sse("response", {
+                "content": response.content, "model_used": reanalyze_model,
+                "tokens_used": getattr(response, 'tokens_used', 0) or 0,
+                "type": "visual_debug_reanalyze", "vision_model": request.vision_model_id,
+                "action_plan": _validate_action_plan_syntax(action_plan) if action_plan else None, "has_action": action_plan is not None,
+            })
+        except Exception as e:
+            yield sse("error", {"message": f"خطا: {str(e)[:200]}", "detail": type(e).__name__})
+
+        yield sse("done", {"success": True})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
