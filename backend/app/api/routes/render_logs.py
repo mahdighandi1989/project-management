@@ -12650,9 +12650,6 @@ _PROXY_MONITOR_SCRIPT_TEMPLATE = """<script data-inspector-proxy="true">
     var a=e.target&&e.target.closest?e.target.closest('a'):null;
     if(!a||!a.href)return;
     var h=a.href;
-    /* لینک‌های خارجی (نه سایت پروژه) — باز کردن در تب جدید */
-    if(h.indexOf(BASE)!==0 && h.indexOf(location.origin)!==0)return;
-    /* تبدیل لینک واقعی به proxy */
     if(h.indexOf(BASE)===0){
       e.preventDefault();
       var rest=h.slice(BASE.length);
@@ -12660,17 +12657,17 @@ _PROXY_MONITOR_SCRIPT_TEMPLATE = """<script data-inspector-proxy="true">
     }
   },true);
 
-  /* رهگیری fetch — مسیرهای مطلق (/) به سرور واقعی ارسال شوند */
+  /* رهگیری fetch — مسیرهای مطلق (/) از طریق proxy ارسال شوند (same-origin = بدون CORS) */
   var _fetch=window.fetch;
   window.fetch=function(url,opts){
-    if(typeof url==='string'&&url.charAt(0)==='/'&&url.indexOf(PROXY)!==0){url=BASE+url;}
+    if(typeof url==='string'&&url.charAt(0)==='/'&&url.indexOf(PROXY)!==0){url=PROXY+url;}
     return _fetch.call(this,url,opts);
   };
 
   /* رهگیری XMLHttpRequest.open */
   var _xopen=XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open=function(m,url){
-    if(typeof url==='string'&&url.charAt(0)==='/'&&url.indexOf(PROXY)!==0){arguments[1]=BASE+url;}
+    if(typeof url==='string'&&url.charAt(0)==='/'&&url.indexOf(PROXY)!==0){arguments[1]=PROXY+url;}
     return _xopen.apply(this,arguments);
   };
 
@@ -12753,24 +12750,38 @@ async def inspector_page_proxy(
 
     ct = resp.headers.get("content-type", "")
 
-    # 4. اگر HTML است: اسکریپت رصد + تگ base + بازنویسی لینک‌ها
+    # 4. اگر HTML است: بازنویسی مسیرهای مطلق + تزریق اسکریپت رصد
     if "text/html" in ct:
         html = resp.text
         base_url = frontend_url.rstrip("/")
         proxy_prefix = f"/api/render/inspector/proxy/{project_id}"
+
+        # ✅ بازنویسی مسیرهای مطلق در attribute های HTML
+        # src="/_next/..." → src="/api/render/inspector/proxy/projId/_next/..."
+        # href="/styles..." → href="/api/render/inspector/proxy/projId/styles..."
+        import re as _re
+        html = _re.sub(
+            r'((?:src|href|action)\s*=\s*["\'])(\/(?!\/|api\/render\/inspector\/proxy))',
+            f'\\1{proxy_prefix}/',
+            html,
+        )
+        # srcset="/_next/image 1x, ..." — بازنویسی
+        html = _re.sub(
+            r'(srcset\s*=\s*["\'])(/)',
+            f'\\1{proxy_prefix}/',
+            html,
+        )
+
         # ساخت اسکریپت با مقادیر واقعی
         monitor_script = _PROXY_MONITOR_SCRIPT_TEMPLATE.replace("__BASE__", base_url).replace("__PROXY__", proxy_prefix)
-        # تگ base برای resolve شدن asset ها (CSS, JS, تصاویر)
-        base_tag = f'<base href="{base_url}/">'
-        inject = base_tag + monitor_script
         if "</head>" in html:
-            html = html.replace("</head>", inject + "</head>", 1)
+            html = html.replace("</head>", monitor_script + "</head>", 1)
         elif "<head>" in html:
-            html = html.replace("<head>", "<head>" + inject, 1)
+            html = html.replace("<head>", "<head>" + monitor_script, 1)
         elif "<html" in html:
-            html = html.replace("<html", f"<html>\n<head>{inject}</head>", 1)
+            html = html.replace("<html", f"<html>\n<head>{monitor_script}</head>", 1)
         else:
-            html = f"<head>{inject}</head>\n" + html
+            html = f"<head>{monitor_script}</head>\n" + html
 
         # حذف هدرهایی که iframe را بلاک میکنند
         return FastAPIResponse(

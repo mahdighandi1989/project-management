@@ -9900,10 +9900,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               />
                               <button
                                 onClick={() => {
-                                  if (inspectorFrontendUrl) {
-                                    // بارگذاری مجدد از طریق proxy — _t= برای cache-bust
-                                    const _proxyReload = _getProxyUrl(inspectorFrontendUrl);
-                                    setInspectorIframeSrc(_proxyReload + (_proxyReload.includes('?') ? '&' : '?') + '_t=' + Date.now());
+                                  // same-origin — reload مستقیم بدون تغییر آدرس
+                                  try {
+                                    inspectorIframeRef.current?.contentWindow?.location.reload();
+                                  } catch {
+                                    // fallback: تنظیم مجدد src
+                                    if (inspectorFrontendUrl) setInspectorIframeSrc(_getProxyUrl(inspectorFrontendUrl));
                                   }
                                 }}
                                 className="text-[10px] text-gray-400 hover:text-white px-1 flex-shrink-0"
