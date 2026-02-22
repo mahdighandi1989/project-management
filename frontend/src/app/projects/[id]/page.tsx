@@ -272,6 +272,7 @@ export default function ProjectDetailPage() {
   const [inspectorPowerOn, setInspectorPowerOn] = useState(false);
   const [inspectorLoading, setInspectorLoading] = useState(false);
   const [inspectorFrontendUrl, setInspectorFrontendUrl] = useState<string | null>(null);
+  const [inspectorBaseUrl, setInspectorBaseUrl] = useState<string | null>(null); // URL اصلی پروژه (بدون path)
   const [inspectorIframeLoaded, setInspectorIframeLoaded] = useState(false);
   const [inspectorIframeError, setInspectorIframeError] = useState(false);
   const [inspectorBackendLogs, setInspectorBackendLogs] = useState<Array<{
@@ -1087,6 +1088,11 @@ export default function ProjectDetailPage() {
       if (event.data?.type === 'inspector-url-changed') {
         if (event.data.pageUrl) setInspectorFrontendUrl(event.data.pageUrl);
       }
+      // 🔀 دریافت URL واقعی از اسکریپت تزریقی proxy (same-origin)
+      if (event.data?.type === 'proxy-url-change' && event.data.path) {
+        const actual = _proxyToActual(event.data.path);
+        if (actual) setInspectorFrontendUrl(actual);
+      }
     };
 
     window.addEventListener('message', handleBridgeMessage);
@@ -1486,12 +1492,12 @@ export default function ProjectDetailPage() {
             console.log('🔍 Checking frontend URL accessibility:', data.frontend_url);
             try {
               await fetch(data.frontend_url, { method: 'HEAD', mode: 'no-cors' });
-              setInspectorFrontendUrl(data.frontend_url);
               console.log('✅ Frontend URL accessible');
             } catch (healthErr) {
               console.warn('⚠️ Frontend URL may be unreachable:', healthErr);
-              setInspectorFrontendUrl(data.frontend_url);
             }
+            setInspectorFrontendUrl(data.frontend_url);
+            setInspectorBaseUrl(data.frontend_url); // ذخیره URL پایه برای تبدیل proxy↔actual
           }
         }
       } else {
@@ -1543,6 +1549,7 @@ export default function ProjectDetailPage() {
       // خاموش کردن
       setInspectorPowerOn(false);
       setInspectorFrontendUrl(null);
+      setInspectorBaseUrl(null);
       setInspectorIframeLoaded(false);
       setInspectorIframeError(false);
       setInspectorBackendLogs([]);
@@ -3408,43 +3415,44 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   };
 
   // 📸 عکس‌برداری از صفحه پیش‌نمایش
-  // 🆕 درخواست URL از Bridge Script (request-response postMessage)
-  const _requestUrlFromBridge = (): Promise<string> => {
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => resolve(''), 1500); // 1.5s timeout
-      const handler = (event: MessageEvent) => {
-        if (event.data?.type === 'inspector-current-url' && event.data.pageUrl) {
-          clearTimeout(timeout);
-          window.removeEventListener('message', handler);
-          resolve(event.data.pageUrl);
-        }
-      };
-      window.addEventListener('message', handler);
-      try {
-        inspectorIframeRef.current?.contentWindow?.postMessage({ type: 'inspector-get-url' }, '*');
-      } catch (_e) { clearTimeout(timeout); window.removeEventListener('message', handler); resolve(''); }
-    });
+
+  // 🔀 تبدیل URL پروکسی به URL واقعی (و بالعکس)
+  const _proxyPrefix = `/api/render/inspector/proxy/${projectId}`;
+  const _getProxyUrl = (actualUrl: string | null): string => {
+    if (!actualUrl) return '';
+    try {
+      const u = new URL(actualUrl);
+      return `${API_BASE}${_proxyPrefix}${u.pathname}${u.search}${u.hash}`;
+    } catch {
+      return `${API_BASE}${_proxyPrefix}/`;
+    }
+  };
+  const _proxyToActual = (proxyPath: string): string | null => {
+    if (!inspectorBaseUrl) return null;
+    const base = inspectorBaseUrl.replace(/\/$/, '');
+    // پروکسی path مثل /api/render/inspector/proxy/{id}/about → URL واقعی
+    const idx = proxyPath.indexOf(_proxyPrefix);
+    if (idx !== -1) {
+      const rest = proxyPath.slice(idx + _proxyPrefix.length) || '/';
+      return base + rest;
+    }
+    // SPA pushState — مسیر مستقیم مثل /about (بدون prefix proxy)
+    // اگر مسیر با proxy شروع نمیشه ولی ما base داریم → ساخت URL واقعی
+    return base + (proxyPath.startsWith('/') ? proxyPath : '/' + proxyPath);
+  };
+  // خواندن URL واقعی از iframe (same-origin — بدون خطای cross-origin)
+  const _readIframeActualUrl = (): string | null => {
+    try {
+      const loc = inspectorIframeRef.current?.contentWindow?.location;
+      if (!loc || loc.href === 'about:blank') return null;
+      const fullPath = loc.pathname + loc.search + loc.hash;
+      return _proxyToActual(fullPath);
+    } catch { return null; }
   };
 
   const takeVisualDebugScreenshot = async () => {
-    // 🆕 URL واقعی — ۳ روش به ترتیب اولویت:
-    let _currentPageUrl = inspectorFrontendUrl || '';
-
-    // روش ۱: درخواست مستقیم از Bridge (cross-origin هم کار میکنه — بهترین روش)
-    try {
-      const bridgeUrl = await _requestUrlFromBridge();
-      if (bridgeUrl) _currentPageUrl = bridgeUrl;
-    } catch (_e) {}
-
-    // روش ۲: خواندن از iframe ref (فقط same-origin)
-    if (_currentPageUrl === (inspectorFrontendUrl || '')) {
-      try {
-        const iframeHref = inspectorIframeRef.current?.contentWindow?.location?.href;
-        if (iframeHref && iframeHref !== 'about:blank') _currentPageUrl = iframeHref;
-      } catch (_e) { /* cross-origin */ }
-    }
-
-    // روش ۳: state (از bridge tracking یا مقدار اولیه)
+    // 🔀 خواندن URL واقعی از iframe (same-origin از طریق proxy)
+    let _currentPageUrl = _readIframeActualUrl() || inspectorFrontendUrl || '';
     if (!_currentPageUrl) return;
     setVisualDebugTakingScreenshot(true);
     try {
@@ -9871,7 +9879,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                 onChange={(e) => setInspectorFrontendUrl(e.target.value)}
                                 onKeyDown={(e) => {
                                   if (e.key === 'Enter' && inspectorIframeRef.current) {
-                                    inspectorIframeRef.current.src = (e.target as HTMLInputElement).value;
+                                    const typed = (e.target as HTMLInputElement).value;
+                                    setInspectorFrontendUrl(typed);
+                                    inspectorIframeRef.current.src = _getProxyUrl(typed);
                                   }
                                 }}
                                 className="flex-1 text-[10px] bg-gray-700/80 text-gray-200 rounded px-2 py-0.5 border border-gray-600 focus:border-blue-500 focus:outline-none truncate"
@@ -9881,13 +9891,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               <button
                                 onClick={() => {
                                   if (inspectorIframeRef.current && inspectorFrontendUrl) {
-                                    try {
-                                      const _reloadUrl = new URL(inspectorFrontendUrl);
-                                      _reloadUrl.searchParams.set('t', Date.now().toString());
-                                      inspectorIframeRef.current.src = _reloadUrl.toString();
-                                    } catch (_e) {
-                                      inspectorIframeRef.current.src = inspectorFrontendUrl.split('?')[0] + '?t=' + Date.now();
-                                    }
+                                    // بارگذاری مجدد از طریق proxy — t= برای cache-bust
+                                    const _proxyReload = _getProxyUrl(inspectorFrontendUrl);
+                                    inspectorIframeRef.current.src = _proxyReload + (_proxyReload.includes('?') ? '&' : '?') + '_t=' + Date.now();
                                   }
                                 }}
                                 className="text-[10px] text-gray-400 hover:text-white px-1 flex-shrink-0"
@@ -9896,7 +9902,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             </div>
                             <iframe
                               ref={inspectorIframeRef}
-                              src={inspectorFrontendUrl}
+                              src={_getProxyUrl(inspectorFrontendUrl)}
                               style={{ paddingTop: '24px' }}
                               className="w-full h-full border-0 bg-white"
                               title="پیش‌نمایش فرانت‌اند"
@@ -9904,25 +9910,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               onLoad={() => {
                                 setInspectorIframeLoaded(true);
                                 setInspectorIframeError(false);
-                                // بعد از هر navigation، URL واقعی رو بگیر
-                                try {
-                                  const _loadedUrl = inspectorIframeRef.current?.contentWindow?.location?.href;
-                                  if (_loadedUrl && _loadedUrl !== 'about:blank') {
-                                    // حذف پارامتر cache-buster از URL
-                                    try {
-                                      const _u = new URL(_loadedUrl);
-                                      _u.searchParams.delete('t');
-                                      const _cleanUrl = _u.toString().replace(/\?$/, '');
-                                      setInspectorFrontendUrl(_cleanUrl);
-                                    } catch (_e2) {
-                                      setInspectorFrontendUrl(_loadedUrl.replace(/[?&]t=\d+/g, '').replace(/\?$/, ''));
-                                    }
-                                  }
-                                } catch (_e) { /* cross-origin */ }
-                                // درخواست از Bridge Script (cross-origin)
-                                try {
-                                  inspectorIframeRef.current?.contentWindow?.postMessage({ type: 'inspector-get-url' }, '*');
-                                } catch (_e) {}
+                                // 🔀 same-origin (proxy) — خواندن URL واقعی بعد از هر navigation
+                                const actual = _readIframeActualUrl();
+                                if (actual) setInspectorFrontendUrl(actual);
                               }}
                               onError={() => {
                                 setInspectorIframeError(true);
@@ -10049,7 +10039,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                       setInspectorIframeError(false);
                                       setInspectorIframeLoaded(false);
                                       if (inspectorIframeRef.current) {
-                                        inspectorIframeRef.current.src = inspectorFrontendUrl + '?t=' + Date.now();
+                                        inspectorIframeRef.current.src = _getProxyUrl(inspectorFrontendUrl);
                                       }
                                     }}
                                     className="px-4 py-2 bg-blue-600 text-white text-xs rounded-lg hover:bg-blue-700 transition-colors"

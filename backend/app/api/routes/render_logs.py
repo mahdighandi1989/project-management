@@ -12630,6 +12630,168 @@ _ساخته شده توسط بازرس ویژه (Inspector)_"""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 🔀 Inspector Page Proxy - پروکسی برای رفع مشکل cross-origin iframe
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 🔗 اسکریپت تزریقی — رصد URL + ناوبری از طریق proxy + رفع fetch/XHR
+# __BASE__ و __PROXY__ در زمان inject جایگزین میشوند
+_PROXY_MONITOR_SCRIPT_TEMPLATE = """<script data-inspector-proxy="true">
+(function(){
+  var BASE='__BASE__', PROXY='__PROXY__';
+  var _ps=history.pushState,_rs=history.replaceState;
+  function _r(){try{window.parent.postMessage({type:'proxy-url-change',href:location.href,path:location.pathname+location.search+location.hash},'*');}catch(e){}}
+  history.pushState=function(){_ps.apply(this,arguments);_r();};
+  history.replaceState=function(){_rs.apply(this,arguments);_r();};
+  window.addEventListener('popstate',_r);
+  window.addEventListener('hashchange',_r);
+
+  /* رهگیری کلیک لینک‌ها — تبدیل URL واقعی به proxy */
+  document.addEventListener('click',function(e){
+    var a=e.target&&e.target.closest?e.target.closest('a'):null;
+    if(!a||!a.href)return;
+    var h=a.href;
+    /* لینک‌های خارجی (نه سایت پروژه) — باز کردن در تب جدید */
+    if(h.indexOf(BASE)!==0 && h.indexOf(location.origin)!==0)return;
+    /* تبدیل لینک واقعی به proxy */
+    if(h.indexOf(BASE)===0){
+      e.preventDefault();
+      var rest=h.slice(BASE.length);
+      location.href=PROXY+(rest.charAt(0)==='/'?rest:'/'+rest);
+    }
+  },true);
+
+  /* رهگیری fetch — مسیرهای مطلق (/) به سرور واقعی ارسال شوند */
+  var _fetch=window.fetch;
+  window.fetch=function(url,opts){
+    if(typeof url==='string'&&url.charAt(0)==='/'&&url.indexOf(PROXY)!==0){url=BASE+url;}
+    return _fetch.call(this,url,opts);
+  };
+
+  /* رهگیری XMLHttpRequest.open */
+  var _xopen=XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open=function(m,url){
+    if(typeof url==='string'&&url.charAt(0)==='/'&&url.indexOf(PROXY)!==0){arguments[1]=BASE+url;}
+    return _xopen.apply(this,arguments);
+  };
+
+  _r();
+})();
+</script>"""
+
+
+@router.get("/inspector/proxy/{project_id}/{path:path}")
+@router.get("/inspector/proxy/{project_id}")
+async def inspector_page_proxy(
+    project_id: str,
+    request: Request,
+    path: str = "",
+    db: Session = Depends(get_db),
+):
+    """
+    پروکسی معکوس — محتوای فرانت‌اند پروژه را از طریق origin خود سرور بازمیگرداند
+    تا iframe همیشه same-origin باشد و URL قابل خواندن باشد.
+    """
+    from fastapi.responses import Response as FastAPIResponse
+
+    # 1. پیدا کردن frontend_url پروژه
+    services = db.query(RenderService).filter(
+        RenderService.project_id == project_id
+    ).all()
+    if not services:
+        from ...models.project import Project
+        proj = db.query(Project).filter(Project.id == project_id).first()
+        if proj:
+            st = proj.name.lower().replace(" ", "-").replace("_", "-")
+            all_svc = db.query(RenderService).all()
+            services = [s for s in all_svc if st in s.name.lower() or s.name.lower() in st]
+
+    frontend_url = None
+    for s in services:
+        surl = s.service_url if hasattr(s, 'service_url') and s.service_url else None
+        if not surl and s.type in ("web_service", "static_site"):
+            slug = s.name.lower().replace(" ", "-").replace("_", "-")
+            surl = f"https://{slug}.onrender.com"
+        if surl:
+            nm = s.name.lower()
+            is_fe = any(x in nm for x in ("frontend", "front", "client", "ui", "static"))
+            is_be = any(x in nm for x in ("backend", "back", "api", "server"))
+            if is_fe and not is_be:
+                frontend_url = surl
+                break
+            if not frontend_url:
+                frontend_url = surl
+
+    if not frontend_url:
+        return FastAPIResponse(
+            content="<html><body><h3>فرانت‌اند یافت نشد</h3></body></html>",
+            status_code=404,
+            media_type="text/html",
+        )
+
+    # 2. ساخت URL هدف
+    target_url = frontend_url.rstrip("/")
+    if path:
+        target_url += "/" + path
+    qs = str(request.query_params)
+    if qs:
+        target_url += "?" + qs
+
+    # 3. ارسال درخواست به سرور واقعی
+    import httpx
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=20.0) as client:
+            resp = await client.get(target_url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            })
+    except Exception as exc:
+        return FastAPIResponse(
+            content=f"<html><body><h3>خطا در اتصال به {frontend_url}</h3><p>{str(exc)[:200]}</p></body></html>",
+            status_code=502,
+            media_type="text/html",
+        )
+
+    ct = resp.headers.get("content-type", "")
+
+    # 4. اگر HTML است: اسکریپت رصد + تگ base + بازنویسی لینک‌ها
+    if "text/html" in ct:
+        html = resp.text
+        base_url = frontend_url.rstrip("/")
+        proxy_prefix = f"/api/render/inspector/proxy/{project_id}"
+        # ساخت اسکریپت با مقادیر واقعی
+        monitor_script = _PROXY_MONITOR_SCRIPT_TEMPLATE.replace("__BASE__", base_url).replace("__PROXY__", proxy_prefix)
+        # تگ base برای resolve شدن asset ها (CSS, JS, تصاویر)
+        base_tag = f'<base href="{base_url}/">'
+        inject = base_tag + monitor_script
+        if "</head>" in html:
+            html = html.replace("</head>", inject + "</head>", 1)
+        elif "<head>" in html:
+            html = html.replace("<head>", "<head>" + inject, 1)
+        elif "<html" in html:
+            html = html.replace("<html", f"<html>\n<head>{inject}</head>", 1)
+        else:
+            html = f"<head>{inject}</head>\n" + html
+
+        # حذف هدرهایی که iframe را بلاک میکنند
+        return FastAPIResponse(
+            content=html,
+            status_code=resp.status_code,
+            media_type="text/html; charset=utf-8",
+            headers={
+                "X-Frame-Options": "ALLOWALL",
+                "Cache-Control": "no-cache",
+            },
+        )
+
+    # 5. سایر انواع (JS, CSS, تصاویر) — عبور بدون تغییر
+    return FastAPIResponse(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type=ct or "application/octet-stream",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 📸 Screenshot & Visual Debug - عکس‌برداری و دیباگ بصری
 # ─────────────────────────────────────────────────────────────────────────────
 
