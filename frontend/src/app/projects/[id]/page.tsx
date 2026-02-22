@@ -9879,7 +9879,17 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                 placeholder="URL..."
                               />
                               <button
-                                onClick={() => { if (inspectorIframeRef.current && inspectorFrontendUrl) inspectorIframeRef.current.src = inspectorFrontendUrl + '?t=' + Date.now(); }}
+                                onClick={() => {
+                                  if (inspectorIframeRef.current && inspectorFrontendUrl) {
+                                    try {
+                                      const _reloadUrl = new URL(inspectorFrontendUrl);
+                                      _reloadUrl.searchParams.set('t', Date.now().toString());
+                                      inspectorIframeRef.current.src = _reloadUrl.toString();
+                                    } catch (_e) {
+                                      inspectorIframeRef.current.src = inspectorFrontendUrl.split('?')[0] + '?t=' + Date.now();
+                                    }
+                                  }
+                                }}
                                 className="text-[10px] text-gray-400 hover:text-white px-1 flex-shrink-0"
                                 title="بارگذاری مجدد"
                               >🔄</button>
@@ -9894,13 +9904,22 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               onLoad={() => {
                                 setInspectorIframeLoaded(true);
                                 setInspectorIframeError(false);
-                                // 🆕 بعد از هر navigation در iframe، URL واقعی رو بگیر
-                                // روش ۱: مستقیم از iframe (فقط same-origin)
+                                // بعد از هر navigation، URL واقعی رو بگیر
                                 try {
                                   const _loadedUrl = inspectorIframeRef.current?.contentWindow?.location?.href;
-                                  if (_loadedUrl && _loadedUrl !== 'about:blank') setInspectorFrontendUrl(_loadedUrl);
+                                  if (_loadedUrl && _loadedUrl !== 'about:blank') {
+                                    // حذف پارامتر cache-buster از URL
+                                    try {
+                                      const _u = new URL(_loadedUrl);
+                                      _u.searchParams.delete('t');
+                                      const _cleanUrl = _u.toString().replace(/\?$/, '');
+                                      setInspectorFrontendUrl(_cleanUrl);
+                                    } catch (_e2) {
+                                      setInspectorFrontendUrl(_loadedUrl.replace(/[?&]t=\d+/g, '').replace(/\?$/, ''));
+                                    }
+                                  }
                                 } catch (_e) { /* cross-origin */ }
-                                // روش ۲: درخواست از Bridge Script (cross-origin هم کار میکنه)
+                                // درخواست از Bridge Script (cross-origin)
                                 try {
                                   inspectorIframeRef.current?.contentWindow?.postMessage({ type: 'inspector-get-url' }, '*');
                                 } catch (_e) {}
@@ -9908,17 +9927,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               onError={() => {
                                 setInspectorIframeError(true);
                                 setInspectorIframeLoaded(false);
-                                console.error('❌ iframe failed to load');
                               }}
                             />
-                            {/* 📸 نوار ابزار بالای iframe */}
-                            <div className="absolute top-2 left-2 z-50 flex gap-1 pointer-events-auto">
-                              {/* دکمه عکس‌برداری */}
+                            {/* 📸 نوار ابزار بالای iframe (زیر نوار آدرس) */}
+                            <div className="absolute top-7 left-2 z-50 flex gap-1 pointer-events-auto">
+                              {/* دکمه عکس‌برداری (Playwright) */}
                               <button
                                 onClick={takeVisualDebugScreenshot}
                                 disabled={visualDebugTakingScreenshot || inspectorOpLock}
                                 className="px-2 py-1 bg-purple-600/90 hover:bg-purple-700 text-white text-[10px] rounded-md shadow-lg transition-all disabled:opacity-50 flex items-center gap-1"
-                                title="عکس‌برداری از صفحه (دیباگ بصری)"
+                                title="عکس‌برداری از آدرس نوار بالا (Playwright)"
                               >
                                 {visualDebugTakingScreenshot ? <span className="animate-spin">⏳</span> : <span>📸</span>}
                                 عکس
@@ -9926,6 +9944,69 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                   <span className="bg-white text-purple-600 text-[9px] rounded-full px-1 font-bold">{visualDebugScreenshots.length}</span>
                                 )}
                               </button>
+                              {/* 🆕 Paste عکس از کلیپبورد */}
+                              <button
+                                onClick={async () => {
+                                  try {
+                                    const items = await navigator.clipboard.read();
+                                    for (const item of items) {
+                                      const imageType = item.types.find(t => t.startsWith('image/'));
+                                      if (imageType) {
+                                        const blob = await item.getType(imageType);
+                                        const reader = new FileReader();
+                                        reader.onload = (ev) => {
+                                          const b64 = (ev.target?.result as string)?.split(',')[1];
+                                          if (b64) {
+                                            setVisualDebugScreenshots(prev => [...prev, {
+                                              id: `ss_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                                              base64: b64, timestamp: new Date(), pageUrl: inspectorFrontendUrl || '',
+                                              consoleLogs: [...importedProjectConsoleLogs].slice(-50).map(l => ({ level: l.level, message: l.message, timestamp: l.timestamp, source: l.source })),
+                                              backendLogs: [...inspectorBackendLogs].slice(-30).map(l => ({ level: l.level, message: l.message, timestamp: l.timestamp, service_name: l.service_name })),
+                                              relatedUrls: inspectorFrontendUrl ? [inspectorFrontendUrl] : [], apiPaths: [],
+                                            }]);
+                                            if (!visualDebugMode) setVisualDebugMode(true);
+                                          }
+                                        };
+                                        reader.readAsDataURL(blob);
+                                        break;
+                                      }
+                                    }
+                                  } catch (_e) { alert('برای paste عکس، ابتدا عکس را در کلیپبورد کپی کنید (Print Screen یا Snipping Tool)'); }
+                                }}
+                                className="px-2 py-1 bg-green-600/90 hover:bg-green-700 text-white text-[10px] rounded-md shadow-lg transition-all flex items-center gap-1"
+                                title="Paste عکس از کلیپبورد (Ctrl+V یا Print Screen)"
+                              >
+                                📋 Paste عکس
+                              </button>
+                              {/* 🆕 آپلود فایل عکس */}
+                              <label className="px-2 py-1 bg-blue-600/90 hover:bg-blue-700 text-white text-[10px] rounded-md shadow-lg transition-all flex items-center gap-1 cursor-pointer">
+                                📁 آپلود
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  className="hidden"
+                                  onChange={(e) => {
+                                    const file = e.target.files?.[0];
+                                    if (!file) return;
+                                    const reader = new FileReader();
+                                    reader.onload = (ev) => {
+                                      const b64 = (ev.target?.result as string)?.split(',')[1];
+                                      if (b64) {
+                                        setVisualDebugScreenshots(prev => [...prev, {
+                                          id: `ss_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                                          base64: b64, timestamp: new Date(), pageUrl: inspectorFrontendUrl || '',
+                                          consoleLogs: [...importedProjectConsoleLogs].slice(-50).map(l => ({ level: l.level, message: l.message, timestamp: l.timestamp, source: l.source })),
+                                          backendLogs: [...inspectorBackendLogs].slice(-30).map(l => ({ level: l.level, message: l.message, timestamp: l.timestamp, service_name: l.service_name })),
+                                          relatedUrls: inspectorFrontendUrl ? [inspectorFrontendUrl] : [], apiPaths: [],
+                                        }]);
+                                        if (!visualDebugMode) setVisualDebugMode(true);
+                                      }
+                                    };
+                                    reader.readAsDataURL(file);
+                                    e.target.value = '';
+                                  }}
+                                />
+                              </label>
                               {/* دکمه لاگ‌های کنسول پروژه ایمپورت شده */}
                               <button
                                 onClick={() => setShowImportedConsoleLogs(!showImportedConsoleLogs)}
