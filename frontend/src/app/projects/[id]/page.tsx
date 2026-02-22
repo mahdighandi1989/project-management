@@ -3408,13 +3408,43 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   };
 
   // 📸 عکس‌برداری از صفحه پیش‌نمایش
+  // 🆕 درخواست URL از Bridge Script (request-response postMessage)
+  const _requestUrlFromBridge = (): Promise<string> => {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => resolve(''), 1500); // 1.5s timeout
+      const handler = (event: MessageEvent) => {
+        if (event.data?.type === 'inspector-current-url' && event.data.pageUrl) {
+          clearTimeout(timeout);
+          window.removeEventListener('message', handler);
+          resolve(event.data.pageUrl);
+        }
+      };
+      window.addEventListener('message', handler);
+      try {
+        inspectorIframeRef.current?.contentWindow?.postMessage({ type: 'inspector-get-url' }, '*');
+      } catch (_e) { clearTimeout(timeout); window.removeEventListener('message', handler); resolve(''); }
+    });
+  };
+
   const takeVisualDebugScreenshot = async () => {
-    // 🆕 URL واقعی: اول از iframe ref بخون (same-origin)، بعد state (از bridge tracking)
+    // 🆕 URL واقعی — ۳ روش به ترتیب اولویت:
     let _currentPageUrl = inspectorFrontendUrl || '';
+
+    // روش ۱: درخواست مستقیم از Bridge (cross-origin هم کار میکنه — بهترین روش)
     try {
-      const iframeHref = inspectorIframeRef.current?.contentWindow?.location?.href;
-      if (iframeHref && iframeHref !== 'about:blank') _currentPageUrl = iframeHref;
-    } catch (_e) { /* cross-origin: fall through to bridge-tracked state */ }
+      const bridgeUrl = await _requestUrlFromBridge();
+      if (bridgeUrl) _currentPageUrl = bridgeUrl;
+    } catch (_e) {}
+
+    // روش ۲: خواندن از iframe ref (فقط same-origin)
+    if (_currentPageUrl === (inspectorFrontendUrl || '')) {
+      try {
+        const iframeHref = inspectorIframeRef.current?.contentWindow?.location?.href;
+        if (iframeHref && iframeHref !== 'about:blank') _currentPageUrl = iframeHref;
+      } catch (_e) { /* cross-origin */ }
+    }
+
+    // روش ۳: state (از bridge tracking یا مقدار اولیه)
     if (!_currentPageUrl) return;
     setVisualDebugTakingScreenshot(true);
     try {
@@ -9832,16 +9862,48 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           </div>
                         ) : inspectorPowerOn && inspectorFrontendUrl ? (
                           <div className="relative w-full h-full">
+                            {/* 🆕 نوار آدرس — نمایش URL فعلی + امکان ویرایش + ناوبری */}
+                            <div className="absolute top-0 left-0 right-0 z-40 flex items-center gap-1 px-2 py-1 bg-gray-800/95 backdrop-blur-sm border-b border-gray-600" dir="ltr">
+                              <span className="text-[10px] text-gray-400 flex-shrink-0">🔗</span>
+                              <input
+                                type="text"
+                                value={inspectorFrontendUrl || ''}
+                                onChange={(e) => setInspectorFrontendUrl(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' && inspectorIframeRef.current) {
+                                    inspectorIframeRef.current.src = (e.target as HTMLInputElement).value;
+                                  }
+                                }}
+                                className="flex-1 text-[10px] bg-gray-700/80 text-gray-200 rounded px-2 py-0.5 border border-gray-600 focus:border-blue-500 focus:outline-none truncate"
+                                title="آدرس صفحه فعلی — قابل ویرایش. Enter برای ناوبری"
+                                placeholder="URL..."
+                              />
+                              <button
+                                onClick={() => { if (inspectorIframeRef.current && inspectorFrontendUrl) inspectorIframeRef.current.src = inspectorFrontendUrl + '?t=' + Date.now(); }}
+                                className="text-[10px] text-gray-400 hover:text-white px-1 flex-shrink-0"
+                                title="بارگذاری مجدد"
+                              >🔄</button>
+                            </div>
                             <iframe
                               ref={inspectorIframeRef}
                               src={inspectorFrontendUrl}
+                              style={{ paddingTop: '24px' }}
                               className="w-full h-full border-0 bg-white"
                               title="پیش‌نمایش فرانت‌اند"
                               sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                               onLoad={() => {
                                 setInspectorIframeLoaded(true);
                                 setInspectorIframeError(false);
-                                console.log('✅ iframe loaded successfully');
+                                // 🆕 بعد از هر navigation در iframe، URL واقعی رو بگیر
+                                // روش ۱: مستقیم از iframe (فقط same-origin)
+                                try {
+                                  const _loadedUrl = inspectorIframeRef.current?.contentWindow?.location?.href;
+                                  if (_loadedUrl && _loadedUrl !== 'about:blank') setInspectorFrontendUrl(_loadedUrl);
+                                } catch (_e) { /* cross-origin */ }
+                                // روش ۲: درخواست از Bridge Script (cross-origin هم کار میکنه)
+                                try {
+                                  inspectorIframeRef.current?.contentWindow?.postMessage({ type: 'inspector-get-url' }, '*');
+                                } catch (_e) {}
                               }}
                               onError={() => {
                                 setInspectorIframeError(true);
