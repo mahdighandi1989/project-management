@@ -1499,12 +1499,12 @@ export default function ProjectDetailPage() {
             }
             setInspectorFrontendUrl(data.frontend_url);
             setInspectorBaseUrl(data.frontend_url); // ذخیره URL پایه برای تبدیل proxy↔actual
-            // 🔀 src iframe فقط اینجا و در اقدامات صریح کاربر تنظیم میشه
+            // 🔀 src iframe — مسیر نسبی (same-origin از طریق Next.js rewrite)
             try {
               const _u = new URL(data.frontend_url);
-              setInspectorIframeSrc(`${API_BASE}/api/render/inspector/proxy/${projectId}${_u.pathname}${_u.search}${_u.hash}`);
+              setInspectorIframeSrc(`/api/render/inspector/proxy/${projectId}${_u.pathname}${_u.search}${_u.hash}`);
             } catch {
-              setInspectorIframeSrc(`${API_BASE}/api/render/inspector/proxy/${projectId}/`);
+              setInspectorIframeSrc(`/api/render/inspector/proxy/${projectId}/`);
             }
           }
         }
@@ -3431,9 +3431,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     if (!actualUrl) return '';
     try {
       const u = new URL(actualUrl);
-      return `${API_BASE}${_proxyPrefix}${u.pathname}${u.search}${u.hash}`;
+      // مسیر نسبی — Next.js rewrite خودکار به بکند پروکسی میکنه (same-origin)
+      return `${_proxyPrefix}${u.pathname}${u.search}${u.hash}`;
     } catch {
-      return `${API_BASE}${_proxyPrefix}/`;
+      return `${_proxyPrefix}/`;
     }
   };
   const _proxyToActual = (proxyPath: string): string | null => {
