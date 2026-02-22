@@ -40,8 +40,8 @@ class AIModel(BaseModel):
     name: str
     endpoint: str
     capabilities: List[ModelCapability]
-    max_tokens: int = 4096
-    context_window: int = 8192
+    max_tokens: int = 16384
+    context_window: int = 128000
     strengths: List[str] = []
     weaknesses: List[str] = []
     cost_per_1k_tokens: float = 0.01
@@ -75,7 +75,7 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
             ModelCapability.CODE,
             ModelCapability.REASONING
         ],
-        max_tokens=4096,
+        max_tokens=16384,
         context_window=128000,
         strengths=["image-analysis", "multimodal", "reasoning"],
         weaknesses=["cost"],
@@ -94,7 +94,7 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
             ModelCapability.IMAGE_ANALYSIS,
             ModelCapability.FAST_RESPONSE
         ],
-        max_tokens=4096,
+        max_tokens=16384,
         context_window=128000,
         strengths=["speed", "cost-effective", "multimodal"],
         weaknesses=["complex-reasoning"],
@@ -114,7 +114,7 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
             ModelCapability.REASONING,
             ModelCapability.LONG_CONTEXT
         ],
-        max_tokens=4096,
+        max_tokens=16384,
         context_window=128000,
         strengths=["reasoning", "code", "complex-tasks"],
         cost_per_1k_tokens=0.01,
@@ -131,7 +131,7 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
             ModelCapability.CODE,
             ModelCapability.FAST_RESPONSE
         ],
-        max_tokens=4096,
+        max_tokens=16384,
         context_window=16385,
         strengths=["speed", "cost-effective"],
         weaknesses=["complex-reasoning"],
@@ -168,7 +168,7 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
             ModelCapability.REASONING,
             ModelCapability.LONG_CONTEXT
         ],
-        max_tokens=4096,
+        max_tokens=16384,
         context_window=200000,
         strengths=["reasoning", "long-context", "accuracy", "latest"],
         cost_per_1k_tokens=0.003,
@@ -186,7 +186,7 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
             ModelCapability.REASONING,
             ModelCapability.LONG_CONTEXT
         ],
-        max_tokens=4096,
+        max_tokens=8192,
         context_window=200000,
         strengths=["reasoning", "accuracy", "balance"],
         cost_per_1k_tokens=0.003,
@@ -202,7 +202,7 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
             ModelCapability.TEXT,
             ModelCapability.FAST_RESPONSE
         ],
-        max_tokens=4096,
+        max_tokens=8192,
         context_window=200000,
         strengths=["speed", "cost-effective"],
         weaknesses=["complex-reasoning"],
@@ -223,7 +223,7 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
             ModelCapability.CODE,
             ModelCapability.REASONING
         ],
-        max_tokens=4096,
+        max_tokens=8192,
         context_window=32000,
         strengths=["code", "reasoning", "cost-effective"],
         weaknesses=["multimodal"],
@@ -240,7 +240,7 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
             ModelCapability.CODE,
             ModelCapability.TEXT
         ],
-        max_tokens=4096,
+        max_tokens=8192,
         context_window=16000,
         strengths=["code", "programming"],
         weaknesses=["general-text"],

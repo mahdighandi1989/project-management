@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class ModelConfig:
     """تنظیمات یک مدل"""
     model_id: str
-    max_tokens: int = 4000
+    max_tokens: int = 16384
     max_context: int = 128000
     timeout: int = 120
     temperature: float = 0.7
@@ -99,7 +99,7 @@ DEFAULT_MODEL_CONFIGS = {
     # OpenAI
     "gpt-4-turbo": ModelConfig(
         model_id="gpt-4-turbo",
-        max_tokens=4096,
+        max_tokens=16384,
         max_context=128000,
         timeout=120,
         priority=3,
@@ -108,7 +108,7 @@ DEFAULT_MODEL_CONFIGS = {
     ),
     "gpt-4o": ModelConfig(
         model_id="gpt-4o",
-        max_tokens=4096,
+        max_tokens=16384,
         max_context=128000,
         timeout=120,
         priority=2
