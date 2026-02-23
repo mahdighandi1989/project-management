@@ -13286,34 +13286,41 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
         # بدون سقف مصنوعی — از ظرفیت واقعی مدل استفاده شود
         _vd_max_output = _vd_model_max_output
 
-        # 🔑 تخمین حجم اسکرین‌شات‌ها (base64 → توکن)
-        # هر عکس base64 تقریباً: min(1000, len/80) توکن — ولی API ها معمولاً تبدیل داخلی دارن
-        # برای مدل‌هایی مثل Gemini: هر عکس ≈ 258 توکن (low-res) تا 1292 توکن (high-res)
-        # ولی base64 خام داخل پرامپت: هر 4 بایت = 1 توکن → len/4 (محافظه‌کارانه)
+        # 🔑 تخمین حجم اسکرین‌شات‌ها (توکن)
+        # Gemini/OpenAI: تصاویر به صورت image-part ارسال میشن ≈ 258-1292 توکن
+        # ولی base64 داخل پرامپت خیلی سنگین‌تره — محافظه‌کارانه حساب کنیم
         _vd_screenshot_tokens = 0
         for _ss_b64 in (request.screenshots or [])[:10]:
-            # تخمین محافظه‌کارانه: هر عکس حداقل 1000 توکن + حجم base64/80
-            _vd_screenshot_tokens += max(1000, len(_ss_b64) // 80)
+            # هر عکس حداقل 5000 توکن (محافظه‌کارانه برای جلوگیری از سرریز)
+            _vd_screenshot_tokens += max(5000, len(_ss_b64) // 40)
         slog.info("VD screenshot budget", count=len(request.screenshots or []), estimated_tokens=_vd_screenshot_tokens)
 
-        # تقریب: هر توکن ≈ 3 کاراکتر فارسی/انگلیسی
-        # 🔑 کم کردن بودجه عکس‌ها از فضای ورودی
-        _vd_available_tokens = _vd_context_window - _vd_max_output - _vd_screenshot_tokens
+        # 🔑 حاشیه ایمنی بزرگ: ۲۵٪ context window
+        _vd_safety_margin = max(10000, _vd_context_window // 4)
+
+        # توکن‌های قابل استفاده برای ورودی
+        _vd_available_tokens = _vd_context_window - _vd_max_output - _vd_screenshot_tokens - _vd_safety_margin
         _vd_max_input_chars = max(10000, _vd_available_tokens * 3)
 
-        # تخمین فضای ثابت (پرامپت سیستم + دستورات عمومی)
-        _vd_prompt_overhead = len(_vd_general_text) + 5000  # ~5K for visual debug prompt template
-        _vd_reserve = 3000  # حاشیه ایمنی
+        # 🔑 سقف عملی: حتی اگه context window بزرگه، بیشتر از 150K کاراکتر کد نخون
+        # دلیل: ۱) مدل نمیتونه ۳۸ فایل رو معنادار پردازش کنه ۲) خروجی محدوده
+        _VD_MAX_CODE_BUDGET = 150000  # 150K chars ≈ 50K tokens — عملی و قابل پردازش
 
-        # بودجه کد = کل ورودی − سربار ثابت − فضای کاربر (تخمین اولیه) − حاشیه
-        _vd_user_estimate = min(5000, len(request.user_description or '') + 2000)  # user text + screenshot captions
-        _vd_code_budget = max(10000, _vd_max_input_chars - _vd_prompt_overhead - _vd_user_estimate - _vd_reserve)
+        # تخمین فضای ثابت (پرامپت سیستم + دستورات عمومی + user description)
+        _vd_prompt_overhead = len(_vd_general_text) + 5000
+        _vd_user_estimate = min(10000, len(request.user_description or '') + 2000)
 
-        # تعداد فایل و سقف هر فایل — بر اساس بودجه کد
-        _vd_max_files = max(5, min(40, _vd_code_budget // 4000))  # ~4K میانگین هر فایل
-        _vd_per_file_limit = max(3000, min(25000, _vd_code_budget // max(_vd_max_files // 2, 1)))
+        # بودجه کد = حداقل(نظری, عملی)
+        _vd_code_budget = min(
+            _VD_MAX_CODE_BUDGET,
+            max(10000, _vd_max_input_chars - _vd_prompt_overhead - _vd_user_estimate)
+        )
 
-        yield sse("progress", {"step": "budget", "message": f"📊 بودجه: {_vd_context_window // 1000}K context, 📸 {_vd_screenshot_tokens // 1000}K عکس → {_vd_max_files} فایل, {_vd_per_file_limit // 1000}K/فایل"})
+        # تعداد فایل و سقف هر فایل — محدودیت عملی
+        _vd_max_files = max(5, min(15, _vd_code_budget // 8000))  # حداکثر ۱۵ فایل (عملی)
+        _vd_per_file_limit = max(3000, min(15000, _vd_code_budget // max(_vd_max_files, 1)))
+
+        yield sse("progress", {"step": "budget", "message": f"📊 بودجه: {_vd_context_window // 1000}K ctx, 📸 {_vd_screenshot_tokens // 1000}K img, 📁 {_vd_max_files} فایل × {_vd_per_file_limit // 1000}K (کد: {_vd_code_budget // 1000}K)"})
 
         # ساخت پرامپت - اگر screenshot_packs موجود است، هر عکس را با لاگ‌های مربوطه ارسال کن
         user_parts = [f"## 📸 عکس‌های صفحه ({len(request.screenshots)} عکس)"]
@@ -13692,21 +13699,24 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
         )
         _ra_general_text = _build_general_instructions_text(_ra_instructions_list)
 
-        # بودجه‌بندی بر اساس مدل جدید
+        # بودجه‌بندی بر اساس مدل جدید — با حد عملی
         from ...core.models_registry import get_model as _ra_get_model
         _ra_reg = _ra_get_model(reanalyze_model)
         _ra_context_window = getattr(_ra_reg, 'context_window', 32000) if _ra_reg else 32000
         _ra_model_max_output = getattr(_ra_reg, 'max_tokens', 16384) if _ra_reg else 16384
         _ra_max_output = _ra_model_max_output
-        _ra_max_input_chars = max(10000, (_ra_context_window - _ra_max_output) * 3)
+        _ra_safety = max(10000, _ra_context_window // 4)
+        _ra_max_input_chars = max(10000, (_ra_context_window - _ra_max_output - _ra_safety) * 3)
 
         _ra_prompt_overhead = len(_ra_general_text) + len(request.vision_report) + 5000
-        _ra_reserve = 3000
         _ra_user_estimate = min(3000, len(request.user_description or '') + 1000)
-        _ra_code_budget = max(15000, _ra_max_input_chars - _ra_prompt_overhead - _ra_user_estimate - _ra_reserve)
+        _ra_code_budget = min(
+            150000,  # سقف عملی
+            max(10000, _ra_max_input_chars - _ra_prompt_overhead - _ra_user_estimate)
+        )
 
-        _ra_max_files = max(8, min(40, _ra_code_budget // 4000))
-        _ra_per_file_limit = max(5000, min(25000, _ra_code_budget // max(_ra_max_files // 2, 1)))
+        _ra_max_files = max(5, min(15, _ra_code_budget // 8000))
+        _ra_per_file_limit = max(3000, min(15000, _ra_code_budget // max(_ra_max_files, 1)))
 
         yield sse("progress", {"step": "budget", "message": f"📊 بودجه: {_ra_context_window // 1000}K context → {_ra_max_files} فایل, {_ra_per_file_limit // 1000}K/فایل"})
 
