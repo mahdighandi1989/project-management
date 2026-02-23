@@ -3043,7 +3043,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   }, [inspectorPowerOn, projectId]);
 
   // 🧠 بهینه‌سازی پرامپت قبل از ارسال
-  const enhancePrompt = async (message: string, mode: 'chat' | 'visual_debug' = 'chat'): Promise<{ text: string; wasEnhanced: boolean; error?: string }> => {
+  const enhancePrompt = async (message: string, mode: 'chat' | 'visual_debug' = 'chat'): Promise<{ text: string; wasEnhanced: boolean; error?: string; steps?: { step_number: number; description: string }[]; basePrompt?: string }> => {
     if (!inspectorSmartPrompt) return { text: message, wasEnhanced: false };
     // پیام‌های خیلی کوتاه نیاز به بهینه‌سازی ندارن
     if (message.length < 10) return { text: message, wasEnhanced: false };
@@ -3078,13 +3078,231 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       });
       const data = await res.json();
       if (data.success && data.enhanced_prompt && data.enhanced_prompt !== message) {
-        return { text: data.enhanced_prompt, wasEnhanced: true };
+        return {
+          text: data.enhanced_prompt,
+          wasEnhanced: true,
+          steps: data.steps && data.steps.length > 1 ? data.steps : undefined,
+          basePrompt: data.base_prompt || data.enhanced_prompt,
+        };
       }
       return { text: message, wasEnhanced: false, error: data.error || 'مدل پرامپت رو تغییر نداد' };
     } catch (err: any) {
       console.error('Prompt enhance failed:', err);
       return { text: message, wasEnhanced: false, error: err?.message || String(err) };
     }
+  };
+
+  // 🔄 اجرای مرحله‌ای: هر مرحله جداگانه اجرا میشه و نتایج جمع میشه
+  const executeMultiStep = async (
+    rawMessage: string,
+    basePrompt: string,
+    steps: { step_number: number; description: string }[],
+  ) => {
+    setInspectorChatLoading(true);
+    setInspectorOpLock(true);
+    setInspectorOpType('investigate');
+
+    // نمایش پیام کاربر اصلی
+    const userMsgId = `user_ms_${Date.now()}`;
+    setInspectorChatMessages(prev => [...prev, {
+      id: userMsgId,
+      role: 'user' as const,
+      content: basePrompt,
+      timestamp: new Date(),
+      original_prompt: rawMessage,
+      enhanced_prompt: basePrompt,
+    } as any]);
+
+    // ذخیره پیام کاربر
+    if (inspectorSessionIdRef.current) {
+      fetch(`${API_BASE}/api/render/inspector/session/message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: inspectorSessionIdRef.current,
+          role: 'user',
+          content: basePrompt,
+          extra_data: { original_prompt: rawMessage, enhanced_prompt: basePrompt },
+        })
+      }).catch(() => {});
+    }
+
+    // نمایش نقشه مراحل
+    setInspectorChatMessages(prev => [...prev, {
+      id: `ms_plan_${Date.now()}`,
+      role: 'system' as const,
+      content: `📋 درخواست به ${steps.length} مرحله تجزیه شد:\n${steps.map(s => `  ${s.step_number}. ${s.description}`).join('\n')}\n\n▶️ شروع اجرای مرحله‌ای...`,
+      timestamp: new Date(),
+    }]);
+
+    const collectedActionFiles: any[] = [];
+    const collectedAnalysis: string[] = [];
+    let commitMessage = '';
+    let allFilesWereRead = true;
+    let lastModelUsed = '';
+    const modelIds = inspectorAutoSelect ? [] : inspectorSelectedModels;
+
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      const stepId = `ms_step_${i}_${Date.now()}`;
+
+      // نمایش شروع مرحله
+      setInspectorChatMessages(prev => [...prev, {
+        id: `ms_progress_${i}_${Date.now()}`,
+        role: 'system' as const,
+        content: `⏳ مرحله ${step.step_number} از ${steps.length}: ${step.description}`,
+        timestamp: new Date(),
+      }]);
+
+      // ساختن پرامپت مرحله با context مراحل قبلی
+      let stepPrompt = `${basePrompt}\n\n## ⚡ مرحله فعلی (${step.step_number} از ${steps.length}):\n${step.description}\n`;
+      if (collectedAnalysis.length > 0) {
+        stepPrompt += `\n## 📊 خلاصه مراحل قبلی:\n${collectedAnalysis.map((a, idx) => `مرحله ${idx + 1}: ${a.slice(0, 300)}`).join('\n')}\n`;
+      }
+      if (collectedActionFiles.length > 0) {
+        stepPrompt += `\n## 📁 فایل‌های تغییر یافته تا الان:\n${collectedActionFiles.map(f => `- ${f.path} (${f.operation})`).join('\n')}\n`;
+      }
+      stepPrompt += `\n## ⚠️ دستور: فقط مرحله ${step.step_number} رو انجام بده. تحلیل مختصر (حداکثر ۵ خط) + action_plan کامل.`;
+
+      try {
+        // تاریخچه چت برای context
+        const chatHistory = inspectorChatMessages
+          .filter(m => m.role === 'user' || m.role === 'assistant')
+          .slice(-5)
+          .map(m => ({ role: m.role, content: m.content?.slice(0, 200) }));
+
+        const res = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            project_id: projectId,
+            model_ids: modelIds,
+            message: stepPrompt,
+            chat_history: chatHistory,
+            backend_logs: inspectorBackendLogs,
+            frontend_url: inspectorFrontendUrl,
+            previously_read_files: previouslyReadFiles,
+          }),
+        });
+
+        const reader = res.body?.getReader();
+        const decoder = new TextDecoder();
+        let sseBuffer = '';
+        let eventType = '';
+        let stepResponseContent = '';
+        let stepActionPlan: any = null;
+        let stepFilesWereRead = false;
+
+        if (!reader) throw new Error('No reader');
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          sseBuffer += decoder.decode(value, { stream: true });
+          const lines = sseBuffer.split('\n');
+          sseBuffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              eventType = line.slice(7).trim();
+            } else if (line.startsWith('data: ') && eventType) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (eventType === 'response') {
+                  stepResponseContent = data.content || '';
+                  stepActionPlan = data.action_plan || null;
+                  stepFilesWereRead = data.files_were_read ?? false;
+                  lastModelUsed = data.model_used || '';
+
+                  // ذخیره فایل‌های خوانده‌شده
+                  if (data.selected_file_paths?.length) {
+                    setPreviouslyReadFiles(prev => {
+                      const newF = data.selected_file_paths.filter((f: string) => !prev.includes(f));
+                      return [...prev, ...newF];
+                    });
+                  }
+                } else if (eventType === 'error') {
+                  stepResponseContent = `❌ ${data.message}`;
+                }
+              } catch {}
+              eventType = '';
+            }
+          }
+        }
+
+        // جمع‌آوری نتایج مرحله
+        collectedAnalysis.push(stepResponseContent.slice(0, 500));
+        if (!stepFilesWereRead) allFilesWereRead = false;
+
+        if (stepActionPlan?.files?.length) {
+          for (const file of stepActionPlan.files) {
+            // اگه فایل قبلاً تغییر داده شده، جایگزین کن
+            const existingIdx = collectedActionFiles.findIndex((f: any) => f.path === file.path);
+            if (existingIdx >= 0) {
+              collectedActionFiles[existingIdx] = file;
+            } else {
+              collectedActionFiles.push(file);
+            }
+          }
+          if (stepActionPlan.commit_message) commitMessage = stepActionPlan.commit_message;
+        }
+
+        // نمایش نتیجه مرحله
+        setInspectorChatMessages(prev => [...prev, {
+          id: `ms_result_${i}_${Date.now()}`,
+          role: 'assistant' as const,
+          content: `**مرحله ${step.step_number}/${steps.length}: ${step.description}**\n\n${stepResponseContent}`,
+          model_id: lastModelUsed,
+          timestamp: new Date(),
+          action_type: stepActionPlan?.files?.length ? 'smart_action' as any : undefined,
+          action_plan: stepActionPlan,
+          files_were_read: stepFilesWereRead,
+          _is_multi_step_part: true,
+        } as any]);
+
+      } catch (err: any) {
+        setInspectorChatMessages(prev => [...prev, {
+          id: `ms_err_${i}_${Date.now()}`,
+          role: 'system' as const,
+          content: `❌ خطا در مرحله ${step.step_number}: ${err?.message || 'خطای ناشناخته'}`,
+          timestamp: new Date(),
+        }]);
+      }
+    }
+
+    // 📊 گزارش نهایی ترکیبی
+    const finalReportId = `ms_final_${Date.now()}`;
+    const totalFiles = collectedActionFiles.length;
+    let finalContent = `## 📊 گزارش نهایی — ${steps.length} مرحله کامل شد\n\n`;
+    finalContent += `**فایل‌های تغییر یافته: ${totalFiles}**\n`;
+    if (collectedActionFiles.length > 0) {
+      finalContent += collectedActionFiles.map(f => `- \`${f.path}\` (${f.operation || 'modify'})`).join('\n');
+      finalContent += '\n\n';
+    }
+    finalContent += collectedAnalysis.map((a, idx) => `**مرحله ${idx + 1}:** ${a.slice(0, 200)}`).join('\n\n');
+
+    // پیام نهایی با action_plan ترکیبی
+    const combinedActionPlan = totalFiles > 0 ? {
+      files: collectedActionFiles,
+      commit_message: commitMessage || `Multi-step fix: ${steps.map(s => s.description).join(', ')}`,
+    } : null;
+
+    setInspectorChatMessages(prev => [...prev, {
+      id: finalReportId,
+      role: 'assistant' as const,
+      content: finalContent,
+      model_id: lastModelUsed,
+      timestamp: new Date(),
+      action_type: combinedActionPlan ? 'smart_action' as any : undefined,
+      action_plan: combinedActionPlan,
+      files_were_read: allFilesWereRead,
+      is_multi_step_report: true,
+    } as any]);
+
+    setInspectorChatLoading(false);
+    setInspectorOpLock(false);
+    setInspectorOpType(null);
   };
 
   // 🆕 ارسال پیام به AI
@@ -3100,7 +3318,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     // 🧠 بهینه‌سازی پرامپت (اگر فعال باشه) — با نشانگر بارگذاری
     let userMessage = rawMessage;
     let wasEnhanced = false;
-    if (inspectorSmartPrompt && rawMessage.length >= 10) {
+    if (inspectorSmartPrompt && rawMessage.length >= 10 && !_isRetry) {
       const _enhLoadId = `enhance_load_${Date.now()}`;
       setInspectorChatMessages(prev => [...prev, {
         id: _enhLoadId,
@@ -3113,6 +3331,14 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       setInspectorChatMessages(prev => prev.filter(m => m.id !== _enhLoadId));
       userMessage = enhResult.text;
       wasEnhanced = enhResult.wasEnhanced;
+
+      // 🔄 اگه مراحل تشخیص داده شده → اجرای مرحله‌ای
+      if (wasEnhanced && enhResult.steps && enhResult.steps.length > 1) {
+        setInspectorChatLoading(false);
+        await executeMultiStep(rawMessage, enhResult.basePrompt || userMessage, enhResult.steps);
+        return;
+      }
+
       if (!wasEnhanced && enhResult.error) {
         setInspectorChatMessages(prev => [...prev, {
           id: `enhance_warn_${Date.now()}`,
@@ -11222,6 +11448,17 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             <span>بازتحلیل مستقل (گزارش اولیه: {(msg as any).vision_model})</span>
                           </div>
                         )}
+                        {(msg as any).is_multi_step_report && (
+                          <div className="text-[10px] text-transparent bg-clip-text bg-gradient-to-r from-blue-500 to-purple-500 mb-1 flex items-center gap-1 font-bold">
+                            <span>📊</span>
+                            <span>گزارش نهایی اجرای مرحله‌ای</span>
+                          </div>
+                        )}
+                        {(msg as any)._is_multi_step_part && (
+                          <div className="text-[9px] text-gray-400 dark:text-gray-500 mb-0.5">
+                            📎 بخشی از اجرای مرحله‌ای
+                          </div>
+                        )}
                         <p className={`text-sm whitespace-pre-wrap ${
                           msg.role === 'user' ? '' :
                           msg.role === 'action' && msg.verified_by_model === 'console-error' ? 'text-orange-800 dark:text-orange-200' :
@@ -11401,7 +11638,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             </button>
                           )}
                           {/* 🧠 دکمه اعمال تغییرات روی پاسخ‌های smart-chat */}
-                          {(msg as any).action_type === 'smart_action' && (msg as any).action_plan?.files?.length > 0 && (
+                          {(msg as any).action_type === 'smart_action' && (msg as any).action_plan?.files?.length > 0 && !(msg as any)._is_multi_step_part && (
                             (msg as any).is_visual_debug_report ? (
                               <button
                                 onClick={(e) => { e.stopPropagation(); handleApplyWithModelSelection(msg.id); }}
@@ -11409,6 +11646,14 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                 disabled={inspectorOpLock}
                               >
                                 {inspectorOpLock ? '⏳ ...' : '🔄 اعمال تغییرات (انتخاب مدل)'}
+                              </button>
+                            ) : (msg as any).is_multi_step_report ? (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); applySmartAction(msg.id); }}
+                                className="text-[11px] bg-gradient-to-r from-blue-500 to-purple-500 text-white px-3 py-1 rounded-lg hover:from-blue-600 hover:to-purple-600 transition-all font-bold shadow-md"
+                                disabled={inspectorOpLock}
+                              >
+                                {inspectorOpLock ? '⏳ ...' : `🚀 اعمال تمام تغییرات (${(msg as any).action_plan?.files?.length} فایل)`}
                               </button>
                             ) : (
                               <button
