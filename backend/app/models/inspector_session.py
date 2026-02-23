@@ -53,11 +53,18 @@ class InspectorMessage(Base):
     logs_checked = Column(Integer, nullable=True)  # تعداد لاگ‌های بررسی شده
     error_logs_count = Column(Integer, nullable=True)  # تعداد لاگ‌های خطا
     checked_logs_data = Column(Text, nullable=True)  # JSON array of checked log entries
+    extra_data = Column(Text, nullable=True)  # JSON: visual_debug_packs, action_plan, is_visual_debug_report, enhanced_prompt, ...
     timestamp = Column(DateTime, server_default=func.now())
 
     session = relationship("InspectorSession", back_populates="messages")
 
     def to_dict(self):
+        _extra = {}
+        if self.extra_data:
+            try:
+                _extra = json.loads(self.extra_data)
+            except Exception:
+                _extra = {}
         return {
             "id": self.id,
             "session_id": self.session_id,
@@ -73,4 +80,5 @@ class InspectorMessage(Base):
             "error_logs_count": self.error_logs_count,
             "checked_logs": json.loads(self.checked_logs_data) if self.checked_logs_data else [],
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            **_extra,
         }
