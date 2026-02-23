@@ -3350,11 +3350,17 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     }
     if (!userMessage) return;
 
-    // 🆕 در حالت retry، پیام کاربر قبلاً اضافه شده — فقط پیام‌های خطا رو پاک کن
+    // 🆕 در حالت retry: پیام‌های خطای قبلی پاک میشه + پیام سیستمی retry اضافه میشه
     if (_isRetry) {
-      setInspectorChatMessages(prev =>
-        prev.filter(m => !m.id.startsWith('smart_fail_') && !m.id.startsWith('error_') && !m.id.startsWith('retry_'))
-      );
+      setInspectorChatMessages(prev => {
+        const filtered = prev.filter(m => !m.id.startsWith('smart_fail_') && !m.id.startsWith('error_') && !m.id.startsWith('retry_'));
+        return [...filtered, {
+          id: `retry_req_${Date.now()}`,
+          role: 'system' as const,
+          content: '🔄 درخواست مجدد اصلاح — بدون ساختارمند مجدد',
+          timestamp: new Date(),
+        }];
+      });
     } else {
       // اضافه کردن پیام کاربر به چت — اگر ساختارمند شده، متن ساختارمند اصلی نمایش داده میشه
       const userMsgId = `user_${Date.now()}`;
@@ -11895,16 +11901,21 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               </ul>
                             </div>
                           )}
-                          {/* نشانگر has_action بدون action_plan معتبر - دکمه درخواست مجدد اصلاح */}
+                          {/* نشانگر has_action بدون action_plan معتبر - دکمه درخواست مجدد اصلاح (مستقیم — بدون ساختارمند مجدد) */}
                           {(msg as any).action_type === 'smart_action' && (!(msg as any).action_plan || !(msg as any).action_plan?.files?.length) && (
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                const retryMsg = (msg as any).original_message
-                                  ? `لطفاً دوباره بررسی کن و حتماً action_plan با کد کامل فایل‌ها ارائه بده: ${(msg as any).original_message}`
-                                  : 'لطفاً مشکل قبلی را دوباره بررسی کن و حتماً action_plan با کد کامل فایل‌ها ارائه بده';
+                                // 🔑 مستقیم ارسال با _isRetry=true — بدون enhance مجدد (جلوگیری از حلقه تکرار)
+                                const retryMsg = (msg as any).original_user_description
+                                  || (msg as any).original_prompt
+                                  || (msg as any).original_message
+                                  || '';
+                                const fixPrompt = retryMsg
+                                  ? `لطفاً دوباره بررسی کن و حتماً action_plan با فرمت JSON و فیلد "files" و کد کامل فایل‌ها ارائه بده:\n${retryMsg}`
+                                  : `لطفاً مشکل قبلی را دوباره بررسی کن و حتماً action_plan با فرمت JSON و فیلد "files" و کد کامل فایل‌ها ارائه بده.\n\nپاسخ قبلی شما:\n${msg.content?.slice(0, 500)}`;
                                 setInspectorReplyTo({ id: msg.id, content: msg.content, role: msg.role, model_id: msg.model_id });
-                                setInspectorChatInput(retryMsg);
+                                sendInspectorChat(fixPrompt, true);
                               }}
                               className="text-[10px] bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-1.5 py-0.5 rounded hover:bg-amber-200 dark:hover:bg-amber-800/40 transition-colors"
                               disabled={inspectorOpLock}
