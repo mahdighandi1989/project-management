@@ -481,11 +481,44 @@ class AIManager:
             slog.error("Provider not available", provider=str(provider))
             raise AIServiceError(f"Provider {provider} not available", "manager", model_id)
 
-        # 🔑 حذف سقف مصنوعی: همیشه از ظرفیت واقعی خروجی مدل استفاده کن
-        # مثلاً gemini-2.5-pro ظرفیت 65536 داره ولی caller ممکنه 4096 فرستاده باشه
-        _model_registered_max = getattr(model, 'max_tokens', 0)
-        if _model_registered_max > 0 and _model_registered_max > max_tokens:
-            max_tokens = _model_registered_max
+        # 🔑 بودجه‌بندی هوشمند مرکزی (برای همه مدل‌ها و پروایدرها)
+        # ────────────────────────────────────────────────────────
+        # مرحله ۱: از ظرفیت واقعی مدل استفاده کن (نه سقف مصنوعی caller)
+        _model_max_output = getattr(model, 'max_tokens', 16384) or 16384
+        _model_context_window = getattr(model, 'context_window', 128000) or 128000
+
+        # مرحله ۲: تخمین توکن‌های ورودی از روی پیام‌ها
+        _estimated_input_tokens = 0
+        for msg in messages:
+            # متن: هر ۳ کاراکتر ≈ ۱ توکن (ترکیب فارسی/انگلیسی)
+            _estimated_input_tokens += len(msg.content or '') // 3
+            # تصاویر: هر عکس base64 ≈ 1000-30000 توکن بسته به اندازه
+            if hasattr(msg, 'images') and msg.images:
+                for img in msg.images:
+                    # تخمین محافظه‌کارانه: هر 1KB base64 ≈ 12 توکن
+                    _img_tokens = max(1000, len(img) // 80)
+                    _estimated_input_tokens += _img_tokens
+
+        # مرحله ۳: محاسبه حداکثر خروجی ایمن
+        _safety_margin = max(500, _model_context_window // 100)  # 1% حاشیه ایمنی
+        _available_for_output = _model_context_window - _estimated_input_tokens - _safety_margin
+
+        # حداکثر خروجی = حداقل(ظرفیت واقعی مدل, فضای باقیمانده)
+        # اگر فضا کافیه → ظرفیت کامل مدل؛ اگر نه → هر چقدر که جا هست
+        _smart_max_tokens = min(_model_max_output, max(1024, _available_for_output))
+
+        # اگر caller عدد بزرگتری خواسته ولی بودجه اجازه نمیده → هشدار لاگ
+        if max_tokens > _smart_max_tokens:
+            slog.info("Smart budget adjusted max_tokens",
+                model=model_id,
+                requested=max_tokens,
+                smart=_smart_max_tokens,
+                estimated_input=_estimated_input_tokens,
+                context_window=_model_context_window,
+                model_max_output=_model_max_output,
+            )
+        # اگر caller عدد کوچک فرستاده → به حداکثر ایمن ارتقا بده
+        max_tokens = _smart_max_tokens
 
         response = await service.generate(model_id, messages, max_tokens, temperature, **kwargs)
 
