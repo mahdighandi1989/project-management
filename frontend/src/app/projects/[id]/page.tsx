@@ -3980,6 +3980,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     // 🧠 بهینه‌سازی توضیح دیباگ بصری (اگر فعال باشه) — با نشانگر بارگذاری
     let enhancedDescription = visualDebugDescription || '';
     let vdWasEnhanced = false;
+    let vdSteps: { step_number: number; description: string }[] = [];
+    let vdBasePrompt = '';
     if (visualDebugDescription && inspectorSmartPrompt && visualDebugDescription.length >= 10) {
       setInspectorChatMessages(prev => [...prev, {
         id: `vd_enhance_load_${Date.now()}`,
@@ -3989,13 +3991,29 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       }]);
       const vdEnhResult = await enhancePrompt(visualDebugDescription, 'visual_debug');
       setInspectorChatMessages(prev => prev.filter(m => !m.id.startsWith('vd_enhance_load_')));
-      enhancedDescription = vdEnhResult.text;
       vdWasEnhanced = vdEnhResult.wasEnhanced;
+      vdBasePrompt = vdEnhResult.basePrompt || vdEnhResult.text;
+      if (vdEnhResult.steps && vdEnhResult.steps.length > 1) {
+        vdSteps = vdEnhResult.steps;
+        // برای visual debug: فقط مرحله اول رو ارسال کن + خلاصه کلی
+        enhancedDescription = `${vdBasePrompt}\n\n⚡ لطفاً فقط مرحله اول رو انجام بده:\n${vdSteps[0].description}\n\n⚠️ تحلیل مختصر (۵ خط) + action_plan کامل فقط برای مرحله اول.`;
+      } else {
+        enhancedDescription = vdEnhResult.text;
+      }
       if (!vdWasEnhanced && vdEnhResult.error) {
         setInspectorChatMessages(prev => [...prev, {
           id: `vd_enhance_warn_${Date.now()}`,
           role: 'system' as const,
           content: `⚠️ ساختارمندسازی ناموفق: ${vdEnhResult.error?.slice(0, 100)} — توضیح اصلی ارسال می‌شود`,
+          timestamp: new Date(),
+        }]);
+      }
+      // اگه مراحل وجود داره، نقشه رو نشون بده
+      if (vdSteps.length > 1) {
+        setInspectorChatMessages(prev => [...prev, {
+          id: `vd_steps_plan_${Date.now()}`,
+          role: 'system' as const,
+          content: `📋 درخواست به ${vdSteps.length} مرحله تجزیه شد:\n${vdSteps.map(s => `  ${s.step_number}. ${s.description}`).join('\n')}\n\n▶️ مرحله ۱ با مدل بصری...`,
           timestamp: new Date(),
         }]);
       }
@@ -4115,6 +4133,13 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       let responseReceived = false;
       if (!reader) throw new Error('No reader');
 
+      // 🔑 ذخیره داده‌های پاسخ مرحله اول برای ادامه مراحل بعدی
+      let vdStep1Content = '';
+      let vdStep1ActionPlan: any = null;
+      let vdStep1ModelUsed = '';
+      let vdStep1SelectedFiles: string[] = [];
+      const _isMultiStep = vdSteps.length > 1;
+
       let eventType = '';
       while (true) {
         const { done, value } = await reader.read();
@@ -4147,20 +4172,30 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 }]);
               } else if (eventType === 'response') {
                 responseReceived = true;
+                // ذخیره داده‌های مرحله اول
+                vdStep1Content = data.content || '';
+                vdStep1ActionPlan = data.action_plan || null;
+                vdStep1ModelUsed = data.model_used || '';
+                vdStep1SelectedFiles = data.selected_file_paths || [];
+
                 setInspectorChatMessages(prev => [...prev, {
                   id: `vd_response_${Date.now()}`,
                   role: 'assistant' as const,
-                  content: data.content,
+                  content: _isMultiStep ? `**مرحله ۱/${vdSteps.length}: ${vdSteps[0].description}**\n\n${data.content}` : data.content,
                   model_id: data.model_used,
                   timestamp: new Date(),
                   tokens_used: data.tokens_used,
                   action_type: data.has_action ? 'smart_action' as any : undefined,
                   action_plan: data.action_plan,
-                  is_visual_debug_report: true,
+                  ...(_isMultiStep
+                    ? { _is_multi_step_part: true }
+                    : { is_visual_debug_report: true }),
                   original_user_description: visualDebugDescription || '',
                 } as any]);
-                setInspectorOpLock(false);
-                setInspectorOpType(null);
+                if (!_isMultiStep) {
+                  setInspectorOpLock(false);
+                  setInspectorOpType(null);
+                }
               } else if (eventType === 'fields_in_use') {
                 setPromptFieldsHighlighted(data.field_ids || []);
                 setInspectorChatMessages(prev => [...prev, {
@@ -4196,6 +4231,180 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         setVisualDebugScreenshots([]);
         setVisualDebugDescription('');
         setVisualDebugMode(false);
+
+        // 🔑 اگه چند مرحله‌ای هست، مراحل بعدی رو با smart-chat اجرا کن
+        if (_isMultiStep && vdSteps.length > 1) {
+          // ذخیره فایل‌های خوانده‌شده مرحله ۱
+          if (vdStep1SelectedFiles.length > 0) {
+            setPreviouslyReadFiles(prev => {
+              const newF = vdStep1SelectedFiles.filter(f => !prev.includes(f));
+              return [...prev, ...newF];
+            });
+          }
+
+          const collectedActionFiles: any[] = [];
+          const collectedAnalysis: string[] = [];
+          let commitMessage = '';
+          let lastModelUsed = vdStep1ModelUsed;
+
+          // مرحله ۱ رو به لیست نتایج اضافه کن
+          collectedAnalysis.push(vdStep1Content.slice(0, 500));
+          if (vdStep1ActionPlan?.files?.length) {
+            for (const file of vdStep1ActionPlan.files) {
+              collectedActionFiles.push(file);
+            }
+            if (vdStep1ActionPlan.commit_message) commitMessage = vdStep1ActionPlan.commit_message;
+          }
+
+          // مراحل ۲ به بعد رو اجرا کن
+          const modelIds = inspectorAutoSelect ? [] : inspectorSelectedModels;
+          const remainingSteps = vdSteps.slice(1);
+
+          for (let i = 0; i < remainingSteps.length; i++) {
+            const step = remainingSteps[i];
+            setInspectorChatMessages(prev => [...prev, {
+              id: `vd_ms_progress_${i}_${Date.now()}`,
+              role: 'system' as const,
+              content: `⏳ مرحله ${step.step_number} از ${vdSteps.length}: ${step.description}`,
+              timestamp: new Date(),
+            }]);
+
+            // ساختن پرامپت مرحله با context مراحل قبلی
+            let stepPrompt = `${vdBasePrompt}\n\n## ⚡ مرحله فعلی (${step.step_number} از ${vdSteps.length}):\n${step.description}\n`;
+            if (collectedAnalysis.length > 0) {
+              stepPrompt += `\n## 📊 خلاصه مراحل قبلی:\n${collectedAnalysis.map((a, idx) => `مرحله ${idx + 1}: ${a.slice(0, 300)}`).join('\n')}\n`;
+            }
+            if (collectedActionFiles.length > 0) {
+              stepPrompt += `\n## 📁 فایل‌های تغییر یافته تا الان:\n${collectedActionFiles.map(f => `- ${f.path} (${f.operation})`).join('\n')}\n`;
+            }
+            stepPrompt += `\n## ⚠️ دستور: فقط مرحله ${step.step_number} رو انجام بده. تحلیل مختصر (حداکثر ۵ خط) + action_plan کامل.`;
+
+            try {
+              const chatHistory = inspectorChatMessages
+                .filter(m => m.role === 'user' || m.role === 'assistant')
+                .slice(-5)
+                .map(m => ({ role: m.role, content: m.content?.slice(0, 200) }));
+
+              const stepRes = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  project_id: projectId,
+                  model_ids: modelIds,
+                  message: stepPrompt,
+                  chat_history: chatHistory,
+                  backend_logs: inspectorBackendLogs,
+                  frontend_url: inspectorFrontendUrl,
+                  previously_read_files: previouslyReadFiles,
+                }),
+              });
+
+              const stepReader = stepRes.body?.getReader();
+              const stepDecoder = new TextDecoder();
+              let stepSseBuffer = '';
+              let stepEventType = '';
+              let stepResponseContent = '';
+              let stepActionPlan: any = null;
+              let stepFilesWereRead = false;
+
+              if (!stepReader) throw new Error('No reader');
+
+              while (true) {
+                const { done, value } = await stepReader.read();
+                if (done) break;
+                stepSseBuffer += stepDecoder.decode(value, { stream: true });
+                const stepLines = stepSseBuffer.split('\n');
+                stepSseBuffer = stepLines.pop() || '';
+                for (const sLine of stepLines) {
+                  if (sLine.startsWith('event: ')) {
+                    stepEventType = sLine.slice(7).trim();
+                  } else if (sLine.startsWith('data: ') && stepEventType) {
+                    try {
+                      const sData = JSON.parse(sLine.slice(6));
+                      if (stepEventType === 'response') {
+                        stepResponseContent = sData.content || '';
+                        stepActionPlan = sData.action_plan || null;
+                        stepFilesWereRead = sData.files_were_read ?? false;
+                        lastModelUsed = sData.model_used || lastModelUsed;
+                        if (sData.selected_file_paths?.length) {
+                          setPreviouslyReadFiles(prev => {
+                            const newF = sData.selected_file_paths.filter((f: string) => !prev.includes(f));
+                            return [...prev, ...newF];
+                          });
+                        }
+                      } else if (stepEventType === 'error') {
+                        stepResponseContent = `❌ ${sData.message}`;
+                      }
+                    } catch {}
+                    stepEventType = '';
+                  }
+                }
+              }
+
+              // جمع‌آوری نتایج مرحله
+              collectedAnalysis.push(stepResponseContent.slice(0, 500));
+              if (stepActionPlan?.files?.length) {
+                for (const file of stepActionPlan.files) {
+                  const existingIdx = collectedActionFiles.findIndex((f: any) => f.path === file.path);
+                  if (existingIdx >= 0) {
+                    collectedActionFiles[existingIdx] = file;
+                  } else {
+                    collectedActionFiles.push(file);
+                  }
+                }
+                if (stepActionPlan.commit_message) commitMessage = stepActionPlan.commit_message;
+              }
+
+              // نمایش نتیجه مرحله
+              setInspectorChatMessages(prev => [...prev, {
+                id: `vd_ms_result_${i}_${Date.now()}`,
+                role: 'assistant' as const,
+                content: `**مرحله ${step.step_number}/${vdSteps.length}: ${step.description}**\n\n${stepResponseContent}`,
+                model_id: lastModelUsed,
+                timestamp: new Date(),
+                action_type: stepActionPlan?.files?.length ? 'smart_action' as any : undefined,
+                action_plan: stepActionPlan,
+                files_were_read: stepFilesWereRead,
+                _is_multi_step_part: true,
+              } as any]);
+
+            } catch (err: any) {
+              setInspectorChatMessages(prev => [...prev, {
+                id: `vd_ms_err_${i}_${Date.now()}`,
+                role: 'system' as const,
+                content: `❌ خطا در مرحله ${step.step_number}: ${err?.message || 'خطای ناشناخته'}`,
+                timestamp: new Date(),
+              }]);
+            }
+          }
+
+          // 📊 گزارش نهایی ترکیبی
+          const totalFiles = collectedActionFiles.length;
+          let finalContent = `## 📊 گزارش نهایی دیباگ بصری — ${vdSteps.length} مرحله کامل شد\n\n`;
+          finalContent += `**فایل‌های تغییر یافته: ${totalFiles}**\n`;
+          if (collectedActionFiles.length > 0) {
+            finalContent += collectedActionFiles.map(f => `- \`${f.path}\` (${f.operation || 'modify'})`).join('\n');
+            finalContent += '\n\n';
+          }
+          finalContent += collectedAnalysis.map((a, idx) => `**مرحله ${idx + 1}:** ${a.slice(0, 200)}`).join('\n\n');
+
+          const combinedActionPlan = totalFiles > 0 ? {
+            files: collectedActionFiles,
+            commit_message: commitMessage || `Multi-step visual debug fix: ${vdSteps.map(s => s.description).join(', ')}`,
+          } : null;
+
+          setInspectorChatMessages(prev => [...prev, {
+            id: `vd_ms_final_${Date.now()}`,
+            role: 'assistant' as const,
+            content: finalContent,
+            model_id: lastModelUsed,
+            timestamp: new Date(),
+            action_type: combinedActionPlan ? 'smart_action' as any : undefined,
+            action_plan: combinedActionPlan,
+            is_multi_step_report: true,
+            is_visual_debug_report: true,
+          } as any]);
+        }
       }
     } catch (err: any) {
       if (err.name !== 'AbortError') {
@@ -11639,15 +11848,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           )}
                           {/* 🧠 دکمه اعمال تغییرات روی پاسخ‌های smart-chat */}
                           {(msg as any).action_type === 'smart_action' && (msg as any).action_plan?.files?.length > 0 && !(msg as any)._is_multi_step_part && (
-                            (msg as any).is_visual_debug_report ? (
-                              <button
-                                onClick={(e) => { e.stopPropagation(); handleApplyWithModelSelection(msg.id); }}
-                                className="text-[10px] bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 px-2 py-0.5 rounded hover:bg-purple-200 dark:hover:bg-purple-800/40 transition-colors font-medium"
-                                disabled={inspectorOpLock}
-                              >
-                                {inspectorOpLock ? '⏳ ...' : '🔄 اعمال تغییرات (انتخاب مدل)'}
-                              </button>
-                            ) : (msg as any).is_multi_step_report ? (
+                            (msg as any).is_multi_step_report ? (
                               <div className="flex gap-1.5">
                                 <button
                                   onClick={(e) => { e.stopPropagation(); handleApplyWithModelSelection(msg.id); }}
@@ -11657,6 +11858,14 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                   {inspectorOpLock ? '⏳ ...' : `🚀 اعمال تمام تغییرات (${(msg as any).action_plan?.files?.length} فایل)`}
                                 </button>
                               </div>
+                            ) : (msg as any).is_visual_debug_report ? (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); handleApplyWithModelSelection(msg.id); }}
+                                className="text-[10px] bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 px-2 py-0.5 rounded hover:bg-purple-200 dark:hover:bg-purple-800/40 transition-colors font-medium"
+                                disabled={inspectorOpLock}
+                              >
+                                {inspectorOpLock ? '⏳ ...' : '🔄 اعمال تغییرات (انتخاب مدل)'}
+                              </button>
                             ) : (
                               <button
                                 onClick={(e) => { e.stopPropagation(); applySmartAction(msg.id); }}
