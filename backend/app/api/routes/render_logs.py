@@ -8003,6 +8003,7 @@ class SaveMessageRequest(BaseModel):
     action_type: str = None  # click, scroll, input, navigate, focus, hover
     model_id: str = None
     tokens_used: int = None
+    extra_data: Optional[dict] = None  # visual_debug_packs, action_plan, is_visual_debug_report, enhanced_prompt, ...
 
 
 @router.post("/inspector/session/message")
@@ -8024,7 +8025,8 @@ async def save_inspector_message(
         action_type=request.action_type,
         model_id=request.model_id,
         tokens_used=request.tokens_used,
-        backend_verified=None  # pending
+        backend_verified=None,  # pending
+        extra_data=json.dumps(request.extra_data, ensure_ascii=False) if request.extra_data else None,
     )
     db.add(msg)
     db.commit()

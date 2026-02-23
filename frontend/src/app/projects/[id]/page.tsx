@@ -1612,6 +1612,16 @@ export default function ProjectDetailPage() {
             verified_by_model: m.verified_by_model,
             logs_checked: m.logs_checked,
             error_logs_count: m.error_logs_count,
+            // بازیابی فیلدهای extra_data (action_plan, visual_debug_packs, enhanced_prompt, ...)
+            ...(m.action_plan ? { action_plan: m.action_plan } : {}),
+            ...(m.visual_debug_packs ? { visual_debug_packs: m.visual_debug_packs } : {}),
+            ...(m.enhanced_prompt ? { enhanced_prompt: m.enhanced_prompt } : {}),
+            ...(m.is_visual_debug_report ? { is_visual_debug_report: true } : {}),
+            ...(m.is_reanalysis_report ? { is_reanalysis_report: true } : {}),
+            ...(m.original_user_description ? { original_user_description: m.original_user_description } : {}),
+            ...(m.vision_model ? { vision_model: m.vision_model } : {}),
+            ...(m.files_were_read !== undefined ? { files_were_read: m.files_were_read } : {}),
+            ...(m.reply_to_id ? { reply_to_id: m.reply_to_id, reply_to_content: m.reply_to_content } : {}),
           }));
           setInspectorChatMessages(loadedMessages);
         }
@@ -1680,6 +1690,16 @@ export default function ProjectDetailPage() {
           verified_by_model: m.verified_by_model,
           logs_checked: m.logs_checked,
           error_logs_count: m.error_logs_count,
+          // بازیابی فیلدهای extra_data (action_plan, visual_debug_packs, enhanced_prompt, ...)
+          ...(m.action_plan ? { action_plan: m.action_plan } : {}),
+          ...(m.visual_debug_packs ? { visual_debug_packs: m.visual_debug_packs } : {}),
+          ...(m.enhanced_prompt ? { enhanced_prompt: m.enhanced_prompt } : {}),
+          ...(m.is_visual_debug_report ? { is_visual_debug_report: true } : {}),
+          ...(m.is_reanalysis_report ? { is_reanalysis_report: true } : {}),
+          ...(m.original_user_description ? { original_user_description: m.original_user_description } : {}),
+          ...(m.vision_model ? { vision_model: m.vision_model } : {}),
+          ...(m.files_were_read !== undefined ? { files_were_read: m.files_were_read } : {}),
+          ...(m.reply_to_id ? { reply_to_id: m.reply_to_id, reply_to_content: m.reply_to_content } : {}),
         }));
         setInspectorChatMessages(loadedMessages);
       }
@@ -1696,6 +1716,16 @@ export default function ProjectDetailPage() {
     const newMsgs = inspectorChatMessages.slice(lastSavedMsgCountRef.current);
     for (const msg of newMsgs) {
       if ((msg.role === 'assistant' || msg.role === 'system') && !msg.db_id) {
+        // جمع‌آوری extra_data برای ذخیره فیلدهای اضافی (action_plan, visual_debug, ...)
+        const _msgAny = msg as any;
+        const _extraData: Record<string, any> = {};
+        if (_msgAny.action_plan) _extraData.action_plan = _msgAny.action_plan;
+        if (_msgAny.action_type) _extraData.action_type_extra = _msgAny.action_type;
+        if (_msgAny.is_visual_debug_report) _extraData.is_visual_debug_report = true;
+        if (_msgAny.is_reanalysis_report) _extraData.is_reanalysis_report = true;
+        if (_msgAny.original_user_description) _extraData.original_user_description = _msgAny.original_user_description;
+        if (_msgAny.vision_model) _extraData.vision_model = _msgAny.vision_model;
+        if (_msgAny.files_were_read !== undefined) _extraData.files_were_read = _msgAny.files_were_read;
         fetch(`${API_BASE}/api/render/inspector/session/message`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1705,6 +1735,8 @@ export default function ProjectDetailPage() {
             content: msg.content,
             model_id: msg.model_id,
             tokens_used: msg.tokens_used,
+            action_type: _msgAny.action_type || undefined,
+            ...(Object.keys(_extraData).length > 0 ? { extra_data: _extraData } : {}),
           })
         }).catch(err => console.error('Auto-save msg failed:', err));
       }
@@ -3012,13 +3044,17 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   const enhancePrompt = async (message: string, mode: 'chat' | 'visual_debug' = 'chat'): Promise<string> => {
     if (!inspectorSmartPrompt) return message;
     // پیام‌های خیلی کوتاه نیاز به بهینه‌سازی ندارن
-    if (message.length < 15) return message;
+    if (message.length < 10) return message;
 
     try {
-      // مدل بهینه‌ساز: اولین مدل انتخابی یا خودکار
-      const enhancerModel = inspectorSelectedModels[0] || 'gemini-2.0-flash';
+      // مدل بهینه‌ساز: بسته به حالت، از مدل‌های مناسب استفاده کن
+      const enhancerModel = mode === 'visual_debug'
+        ? (visualDebugSelectedModels[0] || inspectorSelectedModels[0] || 'gemini-2.0-flash')
+        : (inspectorSelectedModels[0] || 'gemini-2.0-flash');
       // مدل هدف (که قراره جواب بده)
-      const targetModel = inspectorSelectedModels[0] || undefined;
+      const targetModel = mode === 'visual_debug'
+        ? (visualDebugSelectedModels[0] || undefined)
+        : (inspectorSelectedModels[0] || undefined);
 
       // تاریخچه مختصر چت
       const recentHistory = inspectorChatMessages
@@ -3082,10 +3118,18 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
       // ذخیره پیام کاربر در دیتابیس
       if (inspectorSessionIdRef.current) {
+        const _userExtra: Record<string, any> = {};
+        if (wasEnhanced) _userExtra.enhanced_prompt = userMessage;
+        if (inspectorReplyTo) { _userExtra.reply_to_id = inspectorReplyTo.id; _userExtra.reply_to_content = inspectorReplyTo.content?.slice(0, 100); }
         fetch(`${API_BASE}/api/render/inspector/session/message`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_id: inspectorSessionIdRef.current, role: 'user', content: rawMessage })
+          body: JSON.stringify({
+            session_id: inspectorSessionIdRef.current,
+            role: 'user',
+            content: rawMessage,
+            ...(Object.keys(_userExtra).length > 0 ? { extra_data: _userExtra } : {}),
+          })
         }).catch(err => console.error('Save user msg failed:', err));
       }
     }
@@ -3707,11 +3751,13 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
     // اضافه کردن پیام کاربر به چت - شامل اطلاعات پک‌ها
     const userMsgId = `vd_user_${Date.now()}`;
+    const vdWasEnhanced = inspectorSmartPrompt && visualDebugDescription && enhancedDescription !== visualDebugDescription;
     setInspectorChatMessages(prev => [...prev, {
       id: userMsgId,
       role: 'user' as const,
       content: `📸 دیباگ بصری: ${visualDebugScreenshots.length} عکس${visualDebugDescription ? `\n💬 ${visualDebugDescription}` : ''}`,
       timestamp: new Date(),
+      ...(vdWasEnhanced ? { enhanced_prompt: enhancedDescription } : {}),
       visual_debug_packs: screenshotPacks.map(p => ({
         index: p.index,
         base64: p.base64,
@@ -3726,6 +3772,36 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         errorCount: p.consoleLogs.filter(l => l.level === 'error').length + p.backendLogs.filter(l => l.level === 'error').length,
       })),
     } as any]);
+
+    // ذخیره پیام کاربر دیباگ بصری در دیتابیس
+    if (inspectorSessionIdRef.current) {
+      const _vdUserExtra: Record<string, any> = {
+        visual_debug_packs: screenshotPacks.map(p => ({
+          index: p.index,
+          base64: p.base64,
+          pageUrl: p.pageUrl,
+          timestamp: p.timestamp,
+          consoleLogsCount: p.consoleLogs.length,
+          backendLogsCount: p.backendLogs.length,
+          consoleLogs: p.consoleLogs,
+          backendLogs: p.backendLogs,
+          relatedUrls: p.relatedUrls,
+          apiPaths: p.apiPaths,
+          errorCount: p.consoleLogs.filter((l: any) => l.level === 'error').length + p.backendLogs.filter((l: any) => l.level === 'error').length,
+        })),
+      };
+      if (vdWasEnhanced) _vdUserExtra.enhanced_prompt = enhancedDescription;
+      fetch(`${API_BASE}/api/render/inspector/session/message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: inspectorSessionIdRef.current,
+          role: 'user',
+          content: `📸 دیباگ بصری: ${visualDebugScreenshots.length} عکس${visualDebugDescription ? `\n💬 ${visualDebugDescription}` : ''}`,
+          extra_data: _vdUserExtra,
+        })
+      }).catch(err => console.error('Save VD user msg failed:', err));
+    }
 
     // جمع‌آوری همه آدرس‌های مرتبط (union از همه پک‌ها)
     const allRelatedUrls: string[] = [];
