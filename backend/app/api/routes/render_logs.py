@@ -10291,6 +10291,56 @@ def _extract_file_paths_from_text(text: str, code_files: list) -> list:
     return list(dict.fromkeys(matched))  # حذف تکراری با حفظ ترتیب
 
 
+def _normalize_action_plan_json(parsed: dict) -> dict | None:
+    """
+    نرمال‌سازی فرمت‌های مختلف action_plan JSON.
+    مدل‌ها گاهی فرمت‌های متفاوتی برمی‌گردونن — اینجا همه رو به فرمت استاندارد تبدیل می‌کنیم.
+    فرمت استاندارد: {"files": [{"path": ..., "content": ..., "operation": ...}], "commit_message": ...}
+    """
+    if not parsed or not isinstance(parsed, dict):
+        return None
+
+    files = None
+
+    # فرمت استاندارد: {"files": [...]}
+    if parsed.get("files") and isinstance(parsed["files"], list) and len(parsed["files"]) > 0:
+        files = parsed["files"]
+
+    # فرمت جایگزین ۱: {"action_plan": [{"action": "UPDATE_FILE", "file_path": ..., "content": ...}]}
+    elif parsed.get("action_plan") and isinstance(parsed["action_plan"], list) and len(parsed["action_plan"]) > 0:
+        files = []
+        for item in parsed["action_plan"]:
+            if isinstance(item, dict) and (item.get("file_path") or item.get("path")):
+                files.append({
+                    "path": item.get("file_path") or item.get("path"),
+                    "content": item.get("content", ""),
+                    "operation": "create" if item.get("action", "").upper() == "CREATE_FILE" else "modify",
+                    "description": item.get("description", ""),
+                })
+
+    # فرمت جایگزین ۲: {"action_plan": {"files": [...]}}
+    elif parsed.get("action_plan") and isinstance(parsed["action_plan"], dict):
+        inner = parsed["action_plan"]
+        if inner.get("files") and isinstance(inner["files"], list):
+            files = inner["files"]
+
+    # فرمت جایگزین ۳: [{"path": ..., "content": ...}] — لیست مستقیم
+    # (handled if parsed itself is a list — but parsed is always dict here)
+
+    if not files or len(files) == 0:
+        return None
+
+    # اعتبارسنجی: هر فایل باید path و content داشته باشه
+    valid_files = [f for f in files if f.get("path") and f.get("content")]
+    if not valid_files:
+        return None
+
+    return {
+        "files": valid_files,
+        "commit_message": parsed.get("commit_message", ""),
+    }
+
+
 def _validate_action_plan_syntax(action_plan: dict) -> dict:
     """
     اعتبارسنجی ابتدایی سینتکس فایل‌های action_plan قبل از ارسال به فرانت.
@@ -10881,7 +10931,7 @@ async def enhance_prompt_endpoint(request: EnhancePromptRequest, db: Session = D
 2. **ساختار خروجی مدل**: به مدل بگو خروجیش چه ساختاری داشته باشه (تحلیل مختصر + کد کامل)
 3. **مدیریت بودجه خروجی**: به مدل تاکید کن تحلیل متنی حداکثر ۱۰ خط باشه و بودجه اصلی برای کد/action_plan باشه
 4. **anti-repetition**: تاکید کن "تکرار ممنوع — هر جمله فقط یک بار"
-5. **action_plan اجباری**: اگر درخواست کدنویسی/تغییر است، بگو حتما action_plan JSON با کد **کامل** فایل بده
+5. **action_plan اجباری**: اگر درخواست کدنویسی/تغییر است، بگو حتما action_plan JSON بده — اما **هرگز** نمونه JSON ننویس و فرمت خاصی تعیین نکن (سیستم خودش فرمت مناسب رو به مدل میده)
 6. **زبان فارسی**: پرامپت خروجی فارسی باشه
 7. **context چت**: اگر تاریخچه چت هست، مرتبط‌ترین بخش‌ها رو در پرامپت بگنجان
 8. **فقط پرامپت**: خروجی فقط متن پرامپت باشه — بدون توضیح اضافه، بدون پیشگفتار
@@ -10889,7 +10939,16 @@ async def enhance_prompt_endpoint(request: EnhancePromptRequest, db: Session = D
    - آخر پرامپت ساختارمند، یک بخش `## مراحل اجرا:` اضافه کن
    - هر مرحله یک خط با فرمت `[STEP N] توضیح مرحله` باشه
    - مراحل باید مستقل و قابل اجرای جداگانه باشن
-   - اگه درخواست ساده هست و نیاز به تجزیه نداره (فقط ۱ کار)، بخش مراحل نذار"""
+   - اگه درخواست ساده هست و نیاز به تجزیه نداره (فقط ۱ کار)، بخش مراحل نذار
+10. **ایمنی دیپلوی**: در پرامپت تاکید کن:
+   - کد تولیدی باید بدون هیچ خطای سینتکس، import و تایپ باشد
+   - وابستگی‌ها (requirements.txt, package.json) با نسخه‌های سازگار پین شوند
+   - قبل از نوشتن کد، ذهنی مراحل بیلد و دیپلوی رو شبیه‌سازی کن
+
+## ⛔ ممنوعیت‌ها:
+- هرگز بلوک ```json با نمونه action_plan ننویس — فرمت JSON رو سیستم تعیین می‌کنه نه تو
+- هرگز از کلید "action_plan" یا "action" در نمونه JSON استفاده نکن
+- خروجی فقط متن پرامپت ساختارمند باشه — بدون بلوک‌های کد JSON"""
 
     user_prompt = f"""## پیام اصلی کاربر:
 {request.message}
@@ -11417,17 +11476,13 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         yield sse("heartbeat", {"message": "⏳ مدل در حال پردازش..."})
                 response = gen_task.result()
 
-                # بررسی وجود action_plan در پاسخ سؤال هم
+                # بررسی وجود action_plan در پاسخ سؤال هم (با پشتیبانی فرمت‌های مختلف)
                 q_action_plan = None
                 try:
                     json_match = re.search(r'```json\s*\n(.*?)\n```', response.content, re.DOTALL)
                     if json_match:
                         parsed = json.loads(json_match.group(1))
-                        if parsed.get("files") and len(parsed["files"]) > 0:
-                            valid_files = [f for f in parsed["files"] if f.get("path") and f.get("content")]
-                            if valid_files:
-                                parsed["files"] = valid_files
-                                q_action_plan = parsed
+                        q_action_plan = _normalize_action_plan_json(parsed)
                 except Exception:
                     pass
 
@@ -11710,10 +11765,13 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
 🚫 ممنوعیت مطلق حدس‌زنی: هرگز محتوای فایلی را که ندیده‌ای حدس نزن. اگر فایلی لازم است ولی در بالا نیست، بنویس کدام فایل لازم است.
 
-🏗️ قوانین بیلد و دیپلوی:
+🏗️ قوانین بیلد و دیپلوی (بسیار مهم):
 - content هر فایل باید محتوای کامل و قابل جایگزینی باشد — نه بخشی از فایل
 - هرگز «// ... بقیه کد» یا «// rest of file» ننویس
-- imports، پرانتزها، تایپ‌ها و export ها را قبل از نوشتن بررسی کن — هر خطا = شکست دیپلوی"""
+- imports، پرانتزها، تایپ‌ها و export ها را قبل از نوشتن بررسی کن — هر خطا = شکست دیپلوی
+- وابستگی‌ها (requirements.txt, package.json) را با نسخه‌های سازگار و تست‌شده پین کن — هرگز بدون پین نذار
+- قبل از نوشتن هر تغییر، ذهنی بیلد و دیپلوی رو شبیه‌سازی کن: آیا بعد از اعمال این تغییرات، اپلیکیشن بدون خطا بالا میاد؟
+- اگر مشکل مربوط به نسخه وابستگی‌هاست، هم نسخه مشکل‌ساز رو پین کن، هم سایر وابستگی‌های مرتبط رو بررسی کن"""
 
             try:
                 # 🆕 اجرای AI با heartbeat + timeout کلی
@@ -11792,17 +11850,13 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             "detail": f"مدل: {primary_model} | حجم: ~{len(error_analysis_prompt)} | context: {model_context_window}"
                         })
                 if _err_content and _err_content.strip():
-                    # استخراج action_plan
+                    # استخراج action_plan (با پشتیبانی از فرمت‌های مختلف)
                     action_plan = None
                     try:
                         json_match = re.search(r'```json\s*\n(.*?)\n```', _err_content, re.DOTALL)
                         if json_match:
                             parsed = json.loads(json_match.group(1))
-                            if parsed.get("files") and len(parsed["files"]) > 0:
-                                valid_files = [f for f in parsed["files"] if f.get("path") and f.get("content")]
-                                if valid_files:
-                                    parsed["files"] = valid_files
-                                    action_plan = parsed
+                            action_plan = _normalize_action_plan_json(parsed)
                     except Exception:
                         pass
 
@@ -12248,7 +12302,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - تمام وابستگی‌های بین فایلی: اگر type/interface تغییر کرد، تمام فایل‌های مصرف‌کننده هم باید آپدیت شوند
 - JSX/TSX: تمام تگ‌ها بسته شوند، className نه class، htmlFor نه for
 - JSON: بدون trailing comma، کلیدها string باشند
-- Python: indentation یکدست (4 spaces)، import ها valid، async/await صحیح"""
+- Python: indentation یکدست (4 spaces)، import ها valid، async/await صحیح
+- وابستگی‌ها (requirements.txt, package.json) با نسخه‌های سازگار پین شوند — نسخه آزاد وابستگی ممنوع"""
 
             try:
                 # 🆕 اجرای AI با heartbeat برای جلوگیری از QUIC timeout
@@ -12423,20 +12478,13 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             slog.warning(f"[smart-chat] Second-pass failed: {_2pe}")
 
                 if content and content.strip():
-                    # استخراج action_plan از پاسخ
+                    # استخراج action_plan از پاسخ (با پشتیبانی از فرمت‌های مختلف)
                     action_plan = None
                     try:
-                        # پیدا کردن JSON در بلوک action_plan
                         json_match = re.search(r'```json\s*\n(.*?)\n```', content, re.DOTALL)
                         if json_match:
                             parsed = json.loads(json_match.group(1))
-                            # ✅ اعتبارسنجی: فقط وقتی action_plan معتبره که files غیرخالی داشته باشه
-                            if parsed.get("files") and len(parsed["files"]) > 0:
-                                # بررسی اینکه هر فایل حداقل path و content داشته باشه
-                                valid_files = [f for f in parsed["files"] if f.get("path") and f.get("content")]
-                                if valid_files:
-                                    parsed["files"] = valid_files
-                                    action_plan = parsed
+                            action_plan = _normalize_action_plan_json(parsed)
                     except Exception:
                         pass
 
@@ -13589,16 +13637,12 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
 
             action_plan = None
             if "```" in response.content:
-                # استخراج بلوک‌های JSON action_plan (روش اول - مشابه smart-chat)
+                # استخراج بلوک‌های JSON action_plan (با پشتیبانی فرمت‌های مختلف)
                 json_match = re.search(r'```json\s*\n(.*?)\n```', response.content, re.DOTALL)
                 if json_match:
                     try:
                         parsed = json.loads(json_match.group(1))
-                        if parsed.get("files") and len(parsed["files"]) > 0:
-                            valid_files = [f for f in parsed["files"] if f.get("path") and f.get("content")]
-                            if valid_files:
-                                parsed["files"] = valid_files
-                                action_plan = parsed
+                        action_plan = _normalize_action_plan_json(parsed)
                     except (json.JSONDecodeError, Exception):
                         pass
 
@@ -13905,11 +13949,7 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
                 if json_match:
                     try:
                         parsed = json.loads(json_match.group(1))
-                        if parsed.get("files") and len(parsed["files"]) > 0:
-                            valid_files = [f for f in parsed["files"] if f.get("path") and f.get("content")]
-                            if valid_files:
-                                parsed["files"] = valid_files
-                                action_plan = parsed
+                        action_plan = _normalize_action_plan_json(parsed)
                     except (json.JSONDecodeError, Exception):
                         pass
 
