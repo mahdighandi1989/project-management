@@ -10884,7 +10884,12 @@ async def enhance_prompt_endpoint(request: EnhancePromptRequest, db: Session = D
 5. **action_plan اجباری**: اگر درخواست کدنویسی/تغییر است، بگو حتما action_plan JSON با کد **کامل** فایل بده
 6. **زبان فارسی**: پرامپت خروجی فارسی باشه
 7. **context چت**: اگر تاریخچه چت هست، مرتبط‌ترین بخش‌ها رو در پرامپت بگنجان
-8. **فقط پرامپت**: خروجی فقط متن پرامپت باشه — بدون توضیح اضافه، بدون پیشگفتار"""
+8. **فقط پرامپت**: خروجی فقط متن پرامپت باشه — بدون توضیح اضافه، بدون پیشگفتار
+9. **تجزیه درخواست پیچیده**: اگر درخواست شامل چند کار مستقل یا فایل‌های مختلف هست:
+   - آخر پرامپت ساختارمند، یک بخش `## مراحل اجرا:` اضافه کن
+   - هر مرحله یک خط با فرمت `[STEP N] توضیح مرحله` باشه
+   - مراحل باید مستقل و قابل اجرای جداگانه باشن
+   - اگه درخواست ساده هست و نیاز به تجزیه نداره (فقط ۱ کار)، بخش مراحل نذار"""
 
     user_prompt = f"""## پیام اصلی کاربر:
 {request.message}
@@ -10913,9 +10918,33 @@ async def enhance_prompt_endpoint(request: EnhancePromptRequest, db: Session = D
             if enhanced.startswith("markdown\n") or enhanced.startswith("text\n"):
                 enhanced = enhanced.split("\n", 1)[1] if "\n" in enhanced else enhanced
 
+        # استخراج مراحل اگه درخواست تجزیه شده
+        steps = []
+        import re as _ep_re
+        _step_pattern = _ep_re.compile(r'\[STEP\s*(\d+)\]\s*(.+)', _ep_re.IGNORECASE)
+        for _line in enhanced.split('\n'):
+            _m = _step_pattern.match(_line.strip())
+            if _m:
+                steps.append({
+                    "step_number": int(_m.group(1)),
+                    "description": _m.group(2).strip(),
+                })
+
+        # اگه مراحل پیدا شد، پرامپت پایه رو بدون بخش مراحل جدا کن
+        base_prompt = enhanced
+        if steps:
+            # حذف بخش مراحل از پرامپت پایه
+            _step_section_idx = enhanced.find('## مراحل اجرا')
+            if _step_section_idx == -1:
+                _step_section_idx = enhanced.find('[STEP 1]')
+            if _step_section_idx > 0:
+                base_prompt = enhanced[:_step_section_idx].strip()
+
         return {
             "success": True,
             "enhanced_prompt": enhanced,
+            "base_prompt": base_prompt if steps else enhanced,
+            "steps": steps if steps else [],
             "original": request.message,
             "enhancer_model": request.model_id,
             "tokens_used": getattr(response, 'tokens_used', 0) or 0,
