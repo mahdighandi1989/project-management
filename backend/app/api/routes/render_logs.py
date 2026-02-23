@@ -10826,6 +10826,107 @@ async def batch_task_cancel(task_key: str):
     return {"success": True, "message": "cancelled"}
 
 
+# ────────────────────────────────────────────────
+# 🧠 تبدیل پیام کاربر به پرامپت ساختارمند
+# ────────────────────────────────────────────────
+
+class EnhancePromptRequest(BaseModel):
+    """درخواست بهینه‌سازی پرامپت"""
+    project_id: str
+    message: str  # پیام اصلی کاربر
+    model_id: str  # مدل بهینه‌ساز (مدل فعال تنظیمات)
+    target_model_id: Optional[str] = None  # مدل هدف (که قراره جواب بده)
+    target_model_max_output: Optional[int] = None  # ظرفیت خروجی مدل هدف
+    chat_history: Optional[List[dict]] = None  # تاریخچه چت
+    mode: str = "chat"  # "chat" | "visual_debug"
+
+
+@router.post("/inspector/enhance-prompt")
+async def enhance_prompt_endpoint(request: EnhancePromptRequest, db: Session = Depends(get_db)):
+    """تبدیل پیام ساده کاربر به پرامپت ساختارمند و دقیق برای مدل هدف"""
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+    from ...core.models_registry import get_model as _ep_get_model
+
+    ai_manager = get_ai_manager()
+
+    # اطلاعات مدل هدف
+    target_info = ""
+    if request.target_model_id:
+        _treg = _ep_get_model(request.target_model_id)
+        _tmax = getattr(_treg, 'max_tokens', 8192) if _treg else 8192
+        _tctx = getattr(_treg, 'context_window', 128000) if _treg else 128000
+        target_info = f"مدل هدف: {request.target_model_id} (خروجی: {_tmax} توکن, context: {_tctx})"
+    elif request.target_model_max_output:
+        target_info = f"ظرفیت خروجی مدل هدف: {request.target_model_max_output} توکن"
+
+    # تاریخچه چت (خلاصه)
+    history_context = ""
+    if request.chat_history:
+        recent = request.chat_history[-10:]
+        history_parts = []
+        for msg in recent:
+            role = msg.get('role', 'user')
+            content = msg.get('content', '')[:200]
+            history_parts.append(f"[{role}]: {content}")
+        history_context = "\n".join(history_parts)
+
+    system_prompt = """تو یک متخصص پرامپت‌نویسی (Prompt Engineer) هستی.
+وظیفه‌ات تبدیل پیام ساده کاربر به پرامپت ساختارمند و دقیق برای مدل AI هدف است.
+
+## قوانین:
+1. **حفظ هدف اصلی**: معنی و هدف پیام کاربر حفظ شود — فقط ساختارمند کن
+2. **ساختار خروجی مدل**: به مدل بگو خروجیش چه ساختاری داشته باشه (تحلیل مختصر + کد کامل)
+3. **مدیریت بودجه خروجی**: به مدل تاکید کن تحلیل متنی حداکثر ۱۰ خط باشه و بودجه اصلی برای کد/action_plan باشه
+4. **anti-repetition**: تاکید کن "تکرار ممنوع — هر جمله فقط یک بار"
+5. **action_plan اجباری**: اگر درخواست کدنویسی/تغییر است، بگو حتما action_plan JSON با کد **کامل** فایل بده
+6. **زبان فارسی**: پرامپت خروجی فارسی باشه
+7. **context چت**: اگر تاریخچه چت هست، مرتبط‌ترین بخش‌ها رو در پرامپت بگنجان
+8. **فقط پرامپت**: خروجی فقط متن پرامپت باشه — بدون توضیح اضافه، بدون پیشگفتار"""
+
+    user_prompt = f"""## پیام اصلی کاربر:
+{request.message}
+
+## حالت: {"دیباگ بصری (تحلیل عکس + لاگ)" if request.mode == "visual_debug" else "چت عادی (سوال/درخواست)"}
+{f"## {target_info}" if target_info else ""}
+{f"## تاریخچه چت اخیر:{chr(10)}{history_context}" if history_context else ""}
+
+## دستور:
+این پیام رو به پرامپت ساختارمند تبدیل کن. فقط متن پرامپت بهینه‌شده رو برگردون."""
+
+    try:
+        response = await ai_manager.generate(
+            model_id=request.model_id,
+            messages=[
+                Message(role="system", content=system_prompt),
+                Message(role="user", content=user_prompt),
+            ],
+            max_tokens=2048,
+            temperature=0.3,
+        )
+        enhanced = response.content.strip()
+        # حذف بکتیک‌ها اگه مدل داخل بلوک کد گذاشته
+        if enhanced.startswith("```") and enhanced.endswith("```"):
+            enhanced = enhanced.strip("`").strip()
+            if enhanced.startswith("markdown\n") or enhanced.startswith("text\n"):
+                enhanced = enhanced.split("\n", 1)[1] if "\n" in enhanced else enhanced
+
+        return {
+            "success": True,
+            "enhanced_prompt": enhanced,
+            "original": request.message,
+            "enhancer_model": request.model_id,
+            "tokens_used": getattr(response, 'tokens_used', 0) or 0,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "enhanced_prompt": request.message,  # فالبک: همون پیام اصلی
+            "original": request.message,
+            "error": str(e)[:200],
+        }
+
+
 @router.post("/inspector/smart-chat")
 async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
     """
