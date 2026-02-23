@@ -11648,13 +11648,15 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                 {inspectorOpLock ? '⏳ ...' : '🔄 اعمال تغییرات (انتخاب مدل)'}
                               </button>
                             ) : (msg as any).is_multi_step_report ? (
-                              <button
-                                onClick={(e) => { e.stopPropagation(); applySmartAction(msg.id); }}
-                                className="text-[11px] bg-gradient-to-r from-blue-500 to-purple-500 text-white px-3 py-1 rounded-lg hover:from-blue-600 hover:to-purple-600 transition-all font-bold shadow-md"
-                                disabled={inspectorOpLock}
-                              >
-                                {inspectorOpLock ? '⏳ ...' : `🚀 اعمال تمام تغییرات (${(msg as any).action_plan?.files?.length} فایل)`}
-                              </button>
+                              <div className="flex gap-1.5">
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleApplyWithModelSelection(msg.id); }}
+                                  className="text-[11px] bg-gradient-to-r from-blue-500 to-purple-500 text-white px-3 py-1 rounded-lg hover:from-blue-600 hover:to-purple-600 transition-all font-bold shadow-md"
+                                  disabled={inspectorOpLock}
+                                >
+                                  {inspectorOpLock ? '⏳ ...' : `🚀 اعمال تمام تغییرات (${(msg as any).action_plan?.files?.length} فایل)`}
+                                </button>
+                              </div>
                             ) : (
                               <button
                                 onClick={(e) => { e.stopPropagation(); applySmartAction(msg.id); }}
