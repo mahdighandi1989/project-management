@@ -164,7 +164,15 @@ def _build_general_instructions_list(
 - محتوای هر فایل در action_plan باید **کامل و قابل جایگزینی** باشد — نه تکه‌ای از فایل
 - هرگز «// ... بقیه کد» یا «// rest of file» ننویس — محتوای کامل بده
 - اگر فایل بزرگ است و نمی‌توانی کامل بنویسی، آن فایل را در action_plan نگذار و توضیح بده چه تغییری لازم است
-- تمام وابستگی‌های بین فایلی را بررسی کن: اگر یک interface تغییر کرد، همه فایل‌های مصرف‌کننده باید آپدیت شوند""",
+- تمام وابستگی‌های بین فایلی را بررسی کن: اگر یک interface تغییر کرد، همه فایل‌های مصرف‌کننده باید آپدیت شوند
+
+🔴 قوانین خاص فایل‌های زیرساختی (Dockerfile, deploy scripts, package.json, requirements.txt):
+- ⛔ هرگز فایل‌های deploy script (deploy.sh, cloudbuild.yaml و...) را کامل بازنویسی نکن — فقط خط‌های مشکل‌دار را تغییر بده
+- ⛔ قبل از تغییر Dockerfile، حتماً بفهم build context کجاست (از اسکریپت‌های deploy بررسی کن)
+- ⛔ اگر Dockerfile در پوشه backend/ هست و build context هم backend/ هست، مسیرها نسبت به backend باشند (مثلاً `COPY requirements.txt .` نه `COPY backend/requirements.txt .`)
+- ⛔ تمام وابستگی‌ها در package.json و requirements.txt باید با نسخه دقیق و سازگار پین شوند — هرگز نسخه آزاد (بدون پین) نگذار
+- ⛔ اگر نسخه پکیجی تغییر می‌کنه، بررسی کن با سایر وابستگی‌ها سازگار هست
+- ⛔ هرگز فایل TypeScript/JavaScript معتبر رو با محتوای JSON جایگزین نکن — اگر فایل .ts هست، content باید کد TypeScript باشه نه JSON""",
         },
     ]
 
@@ -10291,6 +10299,39 @@ def _extract_file_paths_from_text(text: str, code_files: list) -> list:
     return list(dict.fromkeys(matched))  # حذف تکراری با حفظ ترتیب
 
 
+def _strip_reasoning_blocks(text: str) -> str:
+    """
+    حذف بلوک‌های استدلال (reasoning/thinking) از پاسخ مدل‌ها.
+    مدل‌هایی مثل deepseek-reasoner بلوک‌های **استدلال:** یا <think> می‌فرستن
+    که نباید به کاربر نشون داده بشه.
+    """
+    if not text:
+        return text
+
+    import re as _sr_re
+
+    # حذف بلوک **استدلال:** تا **نتیجه:**
+    text = _sr_re.sub(
+        r'\*\*استدلال:\*\*.*?\*\*نتیجه:\*\*\s*',
+        '',
+        text,
+        flags=_sr_re.DOTALL
+    )
+
+    # حذف بلوک‌های <think>...</think>
+    text = _sr_re.sub(r'<think>.*?</think>\s*', '', text, flags=_sr_re.DOTALL)
+
+    # حذف بلوک‌های **Reasoning:**...**Result:**
+    text = _sr_re.sub(
+        r'\*\*Reasoning:\*\*.*?\*\*Result:\*\*\s*',
+        '',
+        text,
+        flags=_sr_re.DOTALL | _sr_re.IGNORECASE
+    )
+
+    return text.strip()
+
+
 def _normalize_action_plan_json(parsed: dict) -> dict | None:
     """
     نرمال‌سازی فرمت‌های مختلف action_plan JSON.
@@ -10307,14 +10348,23 @@ def _normalize_action_plan_json(parsed: dict) -> dict | None:
         files = parsed["files"]
 
     # فرمت جایگزین ۱: {"action_plan": [{"action": "UPDATE_FILE", "file_path": ..., "content": ...}]}
+    # یا: {"action_plan": [{"type": "file_update", "file_path": ..., "content": ...}]}
     elif parsed.get("action_plan") and isinstance(parsed["action_plan"], list) and len(parsed["action_plan"]) > 0:
         files = []
         for item in parsed["action_plan"]:
-            if isinstance(item, dict) and (item.get("file_path") or item.get("path")):
+            if not isinstance(item, dict):
+                continue
+            # فقط آیتم‌هایی که فایل هستن (نه دستورات command)
+            item_type = (item.get("type") or item.get("action") or "").lower()
+            if item_type in ("command", "run_command", "shell"):
+                continue  # دستور shell — در action_plan فایلی جای نداره
+            file_path = item.get("file_path") or item.get("path") or ""
+            content = item.get("content") or ""
+            if file_path and content:
                 files.append({
-                    "path": item.get("file_path") or item.get("path"),
-                    "content": item.get("content", ""),
-                    "operation": "create" if item.get("action", "").upper() == "CREATE_FILE" else "modify",
+                    "path": file_path,
+                    "content": content,
+                    "operation": "create" if item_type in ("create_file", "create") else "modify",
                     "description": item.get("description", ""),
                 })
 
@@ -10971,6 +11021,8 @@ async def enhance_prompt_endpoint(request: EnhancePromptRequest, db: Session = D
             temperature=0.3,
         )
         enhanced = response.content.strip()
+        # 🧹 حذف بلوک‌های استدلال/reasoning (مدل‌هایی مثل deepseek-reasoner)
+        enhanced = _strip_reasoning_blocks(enhanced)
         # حذف بکتیک‌ها اگه مدل داخل بلوک کد گذاشته
         if enhanced.startswith("```") and enhanced.endswith("```"):
             enhanced = enhanced.strip("`").strip()
@@ -11475,6 +11527,9 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     if not done_set:
                         yield sse("heartbeat", {"message": "⏳ مدل در حال پردازش..."})
                 response = gen_task.result()
+                # 🧹 حذف بلوک‌های استدلال/reasoning
+                if response.content:
+                    response.content = _strip_reasoning_blocks(response.content)
 
                 # بررسی وجود action_plan در پاسخ سؤال هم (با پشتیبانی فرمت‌های مختلف)
                 q_action_plan = None
@@ -11813,8 +11868,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     return
                 response = gen_task.result()
 
-                # بررسی پاسخ خالی + تلاش مجدد هوشمند
-                _err_content = response.content
+                # 🧹 حذف بلوک‌های استدلال/reasoning + بررسی پاسخ خالی
+                _err_content = _strip_reasoning_blocks(response.content) if response.content else ""
                 _err_model_used = response.model_id
                 _err_tokens = response.tokens_used
                 if not _err_content or not _err_content.strip():
@@ -12350,8 +12405,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     return
                 response = gen_task.result()
 
-                # بررسی پاسخ خالی + تلاش مجدد هوشمند
-                content = response.content
+                # 🧹 حذف بلوک‌های استدلال/reasoning + بررسی پاسخ خالی
+                content = _strip_reasoning_blocks(response.content) if response.content else ""
                 _act_model_used = response.model_id
                 _act_tokens = response.tokens_used
                 if not content or not content.strip():
@@ -13633,6 +13688,9 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                 yield sse("heartbeat", {"ts": int(_time.time())})
                 await asyncio.sleep(8)
             response = response_task.result()
+            # 🧹 حذف بلوک‌های استدلال/reasoning
+            if response.content:
+                response.content = _strip_reasoning_blocks(response.content)
             yield sse("fields_done", {"field_ids": ["visual_debug_prompt"]})
 
             action_plan = None
@@ -13942,6 +14000,9 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
                 yield sse("heartbeat", {"ts": int(_time.time())})
                 await asyncio.sleep(8)
             response = response_task.result()
+            # 🧹 حذف بلوک‌های استدلال/reasoning
+            if response.content:
+                response.content = _strip_reasoning_blocks(response.content)
 
             action_plan = None
             if "```" in response.content:
