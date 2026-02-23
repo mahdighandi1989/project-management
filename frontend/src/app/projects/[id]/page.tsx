@@ -395,6 +395,7 @@ export default function ProjectDetailPage() {
   // 🆕 انتخاب خودکار مدل و همکاری
   const [inspectorAutoSelect, setInspectorAutoSelect] = useState(true); // پیش‌فرض فعال
   const [inspectorCollaborativeMode, setInspectorCollaborativeMode] = useState(true);
+  const [inspectorSmartPrompt, setInspectorSmartPrompt] = useState(true); // 🧠 پرامپت ساختارمند — پیش‌فرض فعال
   const [inspectorActiveTask, setInspectorActiveTask] = useState<{
     id: string;
     description: string;
@@ -3007,10 +3008,54 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     checkActiveBatchTask();
   }, [inspectorPowerOn, projectId]);
 
+  // 🧠 بهینه‌سازی پرامپت قبل از ارسال
+  const enhancePrompt = async (message: string, mode: 'chat' | 'visual_debug' = 'chat'): Promise<string> => {
+    if (!inspectorSmartPrompt) return message;
+    // پیام‌های خیلی کوتاه نیاز به بهینه‌سازی ندارن
+    if (message.length < 15) return message;
+
+    try {
+      // مدل بهینه‌ساز: اولین مدل انتخابی یا خودکار
+      const enhancerModel = inspectorSelectedModels[0] || 'gemini-2.0-flash';
+      // مدل هدف (که قراره جواب بده)
+      const targetModel = inspectorSelectedModels[0] || undefined;
+
+      // تاریخچه مختصر چت
+      const recentHistory = inspectorChatMessages
+        .filter(m => m.role === 'user' || m.role === 'assistant')
+        .slice(-10)
+        .map(m => ({ role: m.role, content: m.content?.slice(0, 200) }));
+
+      const res = await fetch(`${API_BASE}/api/render/inspector/enhance-prompt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: projectId,
+          message,
+          model_id: enhancerModel,
+          target_model_id: targetModel,
+          chat_history: recentHistory,
+          mode,
+        }),
+      });
+      const data = await res.json();
+      if (data.success && data.enhanced_prompt) {
+        return data.enhanced_prompt;
+      }
+    } catch (err) {
+      console.error('Prompt enhance failed, using original:', err);
+    }
+    return message;
+  };
+
   // 🆕 ارسال پیام به AI
   const sendInspectorChat = async (overrideMessage?: string, _isRetry = false) => {
     // در حالت انتخاب خودکار، نیازی به انتخاب دستی مدل نیست
-    const userMessage = (overrideMessage || inspectorChatInput).trim();
+    const rawMessage = (overrideMessage || inspectorChatInput).trim();
+    if (!rawMessage) return;
+
+    // 🧠 بهینه‌سازی پرامپت (اگر فعال باشه)
+    const userMessage = await enhancePrompt(rawMessage, 'chat');
     if (!userMessage) return;
     if (!inspectorAutoSelect && inspectorSelectedModels.length === 0) return;
 
@@ -3023,13 +3068,15 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         prev.filter(m => !m.id.startsWith('smart_fail_') && !m.id.startsWith('error_') && !m.id.startsWith('retry_'))
       );
     } else {
-      // اضافه کردن پیام کاربر به چت (با ریپلای اگر هست)
+      // اضافه کردن پیام کاربر به چت — نمایش پیام اصلی + نشانگر بهینه‌سازی
       const userMsgId = `user_${Date.now()}`;
+      const wasEnhanced = inspectorSmartPrompt && rawMessage !== userMessage;
       setInspectorChatMessages(prev => [...prev, {
         id: userMsgId,
         role: 'user',
-        content: userMessage,
+        content: rawMessage,
         timestamp: new Date(),
+        ...(wasEnhanced ? { enhanced_prompt: userMessage } : {}),
         ...(inspectorReplyTo ? { reply_to_id: inspectorReplyTo.id, reply_to_content: inspectorReplyTo.content?.slice(0, 100) } : {}),
       } as any]);
 
@@ -3038,7 +3085,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         fetch(`${API_BASE}/api/render/inspector/session/message`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_id: inspectorSessionIdRef.current, role: 'user', content: userMessage })
+          body: JSON.stringify({ session_id: inspectorSessionIdRef.current, role: 'user', content: rawMessage })
         }).catch(err => console.error('Save user msg failed:', err));
       }
     }
@@ -3635,6 +3682,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       return;
     }
 
+    // 🧠 بهینه‌سازی توضیح دیباگ بصری (اگر فعال باشه)
+    const enhancedDescription = visualDebugDescription
+      ? await enhancePrompt(visualDebugDescription, 'visual_debug')
+      : '';
+
     setVisualDebugLoading(true);
     setVisualDebugModelSelection(false);
     setInspectorOpLock(true);
@@ -3705,7 +3757,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             level: l.level, message: l.message, timestamp: l.timestamp, service_id: l.service_name,
           })),
           related_urls: allRelatedUrls,
-          user_description: visualDebugDescription || undefined,
+          user_description: enhancedDescription || undefined,
           previously_read_files: previouslyReadFiles,
         }),
         signal: inspectorOpAbortRef.current?.signal,
@@ -10799,6 +10851,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           </div>
                         </label>
 
+                        <label className="flex items-center gap-2 cursor-pointer hover:bg-white/10 p-1 rounded mt-1">
+                          <input
+                            type="checkbox"
+                            checked={inspectorSmartPrompt}
+                            onChange={(e) => setInspectorSmartPrompt(e.target.checked)}
+                            className="w-4 h-4 rounded accent-white"
+                          />
+                          <div>
+                            <span className="text-xs font-medium">🧠 پرامپت ساختارمند</span>
+                            <p className="text-[10px] opacity-70">پیام شما قبل از ارسال بهینه‌سازی و ساختارمند می‌شود</p>
+                          </div>
+                        </label>
+
                         {/* نشانگر GitHub */}
                         <div className="flex items-center gap-2 mt-2 p-1">
                           <span className={`w-2 h-2 rounded-full ${inspectorGithubConnected ? 'bg-green-400' : 'bg-gray-400'}`}></span>
@@ -11009,6 +11074,15 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           }`}>
                             ↩️ {(msg as any).reply_to_content}...
                           </div>
+                        )}
+                        {/* 🧠 نشانگر پرامپت ساختارمند */}
+                        {msg.role === 'user' && (msg as any).enhanced_prompt && (
+                          <details className="text-[10px] mb-1">
+                            <summary className="cursor-pointer text-blue-200 hover:text-white">🧠 پرامپت ساختارمند شده</summary>
+                            <div className="mt-1 p-1.5 bg-blue-400/20 rounded text-[10px] text-blue-100 whitespace-pre-wrap max-h-32 overflow-auto">
+                              {(msg as any).enhanced_prompt}
+                            </div>
+                          </details>
                         )}
                         {msg.model_id && msg.role === 'assistant' && (
                           <p className="text-xs text-gray-400 mb-1">{msg.model_id}</p>
