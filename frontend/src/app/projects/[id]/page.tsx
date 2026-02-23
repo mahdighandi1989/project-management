@@ -1616,6 +1616,7 @@ export default function ProjectDetailPage() {
             ...(m.action_plan ? { action_plan: m.action_plan } : {}),
             ...(m.visual_debug_packs ? { visual_debug_packs: m.visual_debug_packs } : {}),
             ...(m.enhanced_prompt ? { enhanced_prompt: m.enhanced_prompt } : {}),
+            ...(m.original_prompt ? { original_prompt: m.original_prompt } : {}),
             ...(m.is_visual_debug_report ? { is_visual_debug_report: true } : {}),
             ...(m.is_reanalysis_report ? { is_reanalysis_report: true } : {}),
             ...(m.original_user_description ? { original_user_description: m.original_user_description } : {}),
@@ -1694,6 +1695,7 @@ export default function ProjectDetailPage() {
           ...(m.action_plan ? { action_plan: m.action_plan } : {}),
           ...(m.visual_debug_packs ? { visual_debug_packs: m.visual_debug_packs } : {}),
           ...(m.enhanced_prompt ? { enhanced_prompt: m.enhanced_prompt } : {}),
+          ...(m.original_prompt ? { original_prompt: m.original_prompt } : {}),
           ...(m.is_visual_debug_report ? { is_visual_debug_report: true } : {}),
           ...(m.is_reanalysis_report ? { is_reanalysis_report: true } : {}),
           ...(m.original_user_description ? { original_user_description: m.original_user_description } : {}),
@@ -3041,10 +3043,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   }, [inspectorPowerOn, projectId]);
 
   // 🧠 بهینه‌سازی پرامپت قبل از ارسال
-  const enhancePrompt = async (message: string, mode: 'chat' | 'visual_debug' = 'chat'): Promise<string> => {
-    if (!inspectorSmartPrompt) return message;
+  const enhancePrompt = async (message: string, mode: 'chat' | 'visual_debug' = 'chat'): Promise<{ text: string; wasEnhanced: boolean; error?: string }> => {
+    if (!inspectorSmartPrompt) return { text: message, wasEnhanced: false };
     // پیام‌های خیلی کوتاه نیاز به بهینه‌سازی ندارن
-    if (message.length < 10) return message;
+    if (message.length < 10) return { text: message, wasEnhanced: false };
 
     try {
       // مدل بهینه‌ساز: بسته به حالت، از مدل‌های مناسب استفاده کن
@@ -3075,13 +3077,14 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         }),
       });
       const data = await res.json();
-      if (data.success && data.enhanced_prompt) {
-        return data.enhanced_prompt;
+      if (data.success && data.enhanced_prompt && data.enhanced_prompt !== message) {
+        return { text: data.enhanced_prompt, wasEnhanced: true };
       }
-    } catch (err) {
-      console.error('Prompt enhance failed, using original:', err);
+      return { text: message, wasEnhanced: false, error: data.error || 'مدل پرامپت رو تغییر نداد' };
+    } catch (err: any) {
+      console.error('Prompt enhance failed:', err);
+      return { text: message, wasEnhanced: false, error: err?.message || String(err) };
     }
-    return message;
   };
 
   // 🆕 ارسال پیام به AI
@@ -3089,14 +3092,37 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     // در حالت انتخاب خودکار، نیازی به انتخاب دستی مدل نیست
     const rawMessage = (overrideMessage || inspectorChatInput).trim();
     if (!rawMessage) return;
-
-    // 🧠 بهینه‌سازی پرامپت (اگر فعال باشه)
-    const userMessage = await enhancePrompt(rawMessage, 'chat');
-    if (!userMessage) return;
     if (!inspectorAutoSelect && inspectorSelectedModels.length === 0) return;
 
     if (!overrideMessage && !_isRetry) setInspectorChatInput('');
     setInspectorChatLoading(true);
+
+    // 🧠 بهینه‌سازی پرامپت (اگر فعال باشه) — با نشانگر بارگذاری
+    let userMessage = rawMessage;
+    let wasEnhanced = false;
+    if (inspectorSmartPrompt && rawMessage.length >= 10) {
+      const _enhLoadId = `enhance_load_${Date.now()}`;
+      setInspectorChatMessages(prev => [...prev, {
+        id: _enhLoadId,
+        role: 'system' as const,
+        content: '🧠 در حال ساختارمند کردن پرامپت...',
+        timestamp: new Date(),
+      }]);
+      const enhResult = await enhancePrompt(rawMessage, 'chat');
+      // حذف پیام بارگذاری
+      setInspectorChatMessages(prev => prev.filter(m => m.id !== _enhLoadId));
+      userMessage = enhResult.text;
+      wasEnhanced = enhResult.wasEnhanced;
+      if (!wasEnhanced && enhResult.error) {
+        setInspectorChatMessages(prev => [...prev, {
+          id: `enhance_warn_${Date.now()}`,
+          role: 'system' as const,
+          content: `⚠️ ساختارمندسازی ناموفق: ${enhResult.error?.slice(0, 100)} — پیام اصلی ارسال می‌شود`,
+          timestamp: new Date(),
+        }]);
+      }
+    }
+    if (!userMessage) return;
 
     // 🆕 در حالت retry، پیام کاربر قبلاً اضافه شده — فقط پیام‌های خطا رو پاک کن
     if (_isRetry) {
@@ -3104,22 +3130,21 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         prev.filter(m => !m.id.startsWith('smart_fail_') && !m.id.startsWith('error_') && !m.id.startsWith('retry_'))
       );
     } else {
-      // اضافه کردن پیام کاربر به چت — نمایش پیام اصلی + نشانگر بهینه‌سازی
+      // اضافه کردن پیام کاربر به چت — اگر ساختارمند شده، متن ساختارمند اصلی نمایش داده میشه
       const userMsgId = `user_${Date.now()}`;
-      const wasEnhanced = inspectorSmartPrompt && rawMessage !== userMessage;
       setInspectorChatMessages(prev => [...prev, {
         id: userMsgId,
         role: 'user',
-        content: rawMessage,
+        content: wasEnhanced ? userMessage : rawMessage,
         timestamp: new Date(),
-        ...(wasEnhanced ? { enhanced_prompt: userMessage } : {}),
+        ...(wasEnhanced ? { original_prompt: rawMessage, enhanced_prompt: userMessage } : {}),
         ...(inspectorReplyTo ? { reply_to_id: inspectorReplyTo.id, reply_to_content: inspectorReplyTo.content?.slice(0, 100) } : {}),
       } as any]);
 
       // ذخیره پیام کاربر در دیتابیس
       if (inspectorSessionIdRef.current) {
         const _userExtra: Record<string, any> = {};
-        if (wasEnhanced) _userExtra.enhanced_prompt = userMessage;
+        if (wasEnhanced) { _userExtra.enhanced_prompt = userMessage; _userExtra.original_prompt = rawMessage; }
         if (inspectorReplyTo) { _userExtra.reply_to_id = inspectorReplyTo.id; _userExtra.reply_to_content = inspectorReplyTo.content?.slice(0, 100); }
         fetch(`${API_BASE}/api/render/inspector/session/message`, {
           method: 'POST',
@@ -3127,7 +3152,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           body: JSON.stringify({
             session_id: inspectorSessionIdRef.current,
             role: 'user',
-            content: rawMessage,
+            content: wasEnhanced ? userMessage : rawMessage,
             ...(Object.keys(_userExtra).length > 0 ? { extra_data: _userExtra } : {}),
           })
         }).catch(err => console.error('Save user msg failed:', err));
@@ -3726,10 +3751,29 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       return;
     }
 
-    // 🧠 بهینه‌سازی توضیح دیباگ بصری (اگر فعال باشه)
-    const enhancedDescription = visualDebugDescription
-      ? await enhancePrompt(visualDebugDescription, 'visual_debug')
-      : '';
+    // 🧠 بهینه‌سازی توضیح دیباگ بصری (اگر فعال باشه) — با نشانگر بارگذاری
+    let enhancedDescription = visualDebugDescription || '';
+    let vdWasEnhanced = false;
+    if (visualDebugDescription && inspectorSmartPrompt && visualDebugDescription.length >= 10) {
+      setInspectorChatMessages(prev => [...prev, {
+        id: `vd_enhance_load_${Date.now()}`,
+        role: 'system' as const,
+        content: '🧠 در حال ساختارمند کردن توضیح دیباگ بصری...',
+        timestamp: new Date(),
+      }]);
+      const vdEnhResult = await enhancePrompt(visualDebugDescription, 'visual_debug');
+      setInspectorChatMessages(prev => prev.filter(m => !m.id.startsWith('vd_enhance_load_')));
+      enhancedDescription = vdEnhResult.text;
+      vdWasEnhanced = vdEnhResult.wasEnhanced;
+      if (!vdWasEnhanced && vdEnhResult.error) {
+        setInspectorChatMessages(prev => [...prev, {
+          id: `vd_enhance_warn_${Date.now()}`,
+          role: 'system' as const,
+          content: `⚠️ ساختارمندسازی ناموفق: ${vdEnhResult.error?.slice(0, 100)} — توضیح اصلی ارسال می‌شود`,
+          timestamp: new Date(),
+        }]);
+      }
+    }
 
     setVisualDebugLoading(true);
     setVisualDebugModelSelection(false);
@@ -3749,15 +3793,15 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       apiPaths: ss.apiPaths || [],
     }));
 
-    // اضافه کردن پیام کاربر به چت - شامل اطلاعات پک‌ها
+    // اضافه کردن پیام کاربر به چت — اگر ساختارمند شده، متن ساختارمند نمایش داده میشه
     const userMsgId = `vd_user_${Date.now()}`;
-    const vdWasEnhanced = inspectorSmartPrompt && visualDebugDescription && enhancedDescription !== visualDebugDescription;
+    const vdDisplayDesc = vdWasEnhanced ? enhancedDescription : visualDebugDescription;
     setInspectorChatMessages(prev => [...prev, {
       id: userMsgId,
       role: 'user' as const,
-      content: `📸 دیباگ بصری: ${visualDebugScreenshots.length} عکس${visualDebugDescription ? `\n💬 ${visualDebugDescription}` : ''}`,
+      content: `📸 دیباگ بصری: ${visualDebugScreenshots.length} عکس${vdDisplayDesc ? `\n💬 ${vdDisplayDesc}` : ''}`,
       timestamp: new Date(),
-      ...(vdWasEnhanced ? { enhanced_prompt: enhancedDescription } : {}),
+      ...(vdWasEnhanced ? { original_prompt: visualDebugDescription, enhanced_prompt: enhancedDescription } : {}),
       visual_debug_packs: screenshotPacks.map(p => ({
         index: p.index,
         base64: p.base64,
@@ -3790,7 +3834,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           errorCount: p.consoleLogs.filter((l: any) => l.level === 'error').length + p.backendLogs.filter((l: any) => l.level === 'error').length,
         })),
       };
-      if (vdWasEnhanced) _vdUserExtra.enhanced_prompt = enhancedDescription;
+      if (vdWasEnhanced) { _vdUserExtra.enhanced_prompt = enhancedDescription; _vdUserExtra.original_prompt = visualDebugDescription; }
       fetch(`${API_BASE}/api/render/inspector/session/message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -11151,14 +11195,17 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             ↩️ {(msg as any).reply_to_content}...
                           </div>
                         )}
-                        {/* 🧠 نشانگر پرامپت ساختارمند */}
-                        {msg.role === 'user' && (msg as any).enhanced_prompt && (
-                          <details className="text-[10px] mb-1">
-                            <summary className="cursor-pointer text-blue-200 hover:text-white">🧠 پرامپت ساختارمند شده</summary>
-                            <div className="mt-1 p-1.5 bg-blue-400/20 rounded text-[10px] text-blue-100 whitespace-pre-wrap max-h-32 overflow-auto">
-                              {(msg as any).enhanced_prompt}
-                            </div>
-                          </details>
+                        {/* 🧠 نشانگر ساختارمندسازی + نمایش پیام اصلی */}
+                        {msg.role === 'user' && (msg as any).original_prompt && (
+                          <div className="mb-1">
+                            <span className="inline-block text-[9px] bg-green-400/30 text-green-100 px-1.5 py-0.5 rounded-full mb-1">🧠 ساختارمند شده</span>
+                            <details className="text-[10px]">
+                              <summary className="cursor-pointer text-blue-200 hover:text-white">📝 پیام اصلی</summary>
+                              <div className="mt-1 p-1.5 bg-blue-400/20 rounded text-[10px] text-blue-100 whitespace-pre-wrap max-h-32 overflow-auto">
+                                {(msg as any).original_prompt}
+                              </div>
+                            </details>
+                          </div>
                         )}
                         {msg.model_id && msg.role === 'assistant' && (
                           <p className="text-xs text-gray-400 mb-1">{msg.model_id}</p>
