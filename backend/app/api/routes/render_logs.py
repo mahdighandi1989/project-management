@@ -147,6 +147,43 @@ def _build_general_instructions_list(
 - از عبارات «فرض می‌کنیم»، «احتمالاً محتوایش اینه»، «ساختارش باید اینطوری باشه» استفاده نکن""",
         },
         {
+            "id": "sys_holistic_fix",
+            "title": "حل کامل و یکجا — نه تکه‌تکه",
+            "content": "قبل از نوشتن هر تغییر، کل زنجیره وابستگی را ردیابی کن. تمام فایل‌های config مرتبط (package.json, tsconfig, postcss.config, vite.config) را بررسی کن. نسخه پکیج‌ها فقط از فایل‌های موجود پروژه یا دانش قطعی. هرگز یک مشکل را نیمه‌کاره حل نکن.",
+            "icon": "🎯",
+            "prompt_detail": """## ⛔ ممنوعیت حل تکه‌تکه — هر تغییر باید کامل و نهایی باشد
+قبل از نوشتن action_plan، این مراحل را **حتماً** طی کن:
+
+### ۱) ردیابی زنجیره وابستگی (Dependency Chain Tracing):
+- اگر `postcss.config.js` تغییر میکنه → حتماً `package.json` (فیلد "type") و `tailwind.config` و `vite.config` هم بررسی شود
+- اگر `package.json` تغییر میکنه → حتماً سازگاری نسخه‌ها بین تمام وابستگی‌ها بررسی شود
+- اگر `requirements.txt` تغییر میکنه → حتماً سازگاری با Python version و Dockerfile بررسی شود
+- اگر `Dockerfile` تغییر میکنه → حتماً build context و مسیر فایل‌ها و deploy scripts بررسی شود
+
+### ۲) بررسی متقابل فایل‌های Config (Cross-Reference):
+- قبل از نوشتن هر فایل config:
+  ⚠️ اگر `package.json` دارای `"type": "module"` باشه → فایل‌های `.js` باید ESM syntax (export default) باشند، نه CJS (module.exports)
+  ⚠️ اگر `package.json` دارای `"type": "module"` نباشه → CJS مجاز ولی ESM هم کار میکنه
+  ⚠️ اگر فایل `.mjs` هست → حتماً ESM
+  ⚠️ اگر فایل `.cjs` هست → حتماً CJS
+- قبل از تغییر هر وابستگی → فایل lock (package-lock.json, yarn.lock) و سایر وابستگی‌ها را بررسی کن
+
+### ۳) نسخه پکیج‌ها — فقط نسخه‌های تأیید شده:
+- ⛔ هرگز نسخه‌ای پین نکن که مطمئن نیستی وجود دارد
+- ✅ نسخه‌ای که در package.json یا lock file فعلی پروژه هست → مجاز
+- ✅ نسخه‌ای که دقیقاً از دانش قبلی‌ات (training data) مطمئنی وجود دارد → مجاز
+- ⛔ نسخه‌ای که حدس میزنی شاید وجود داشته باشه → ممنوع — به جایش بنویس "نسخه سازگار X.Y.Z" یا range مثل "^X.Y.Z" بذار
+- ✅ اگر مطمئن نیستی، از caret range (^) استفاده کن که خودش نسخه سازگار را resolve میکنه
+
+### ۴) شبیه‌سازی ذهنی کل مسیر:
+قبل از نوشتن action_plan، ذهنی این سؤالات را بررسی کن:
+1. آیا بعد از اعمال تمام فایل‌های action_plan، اپلیکیشن بدون خطا build و deploy میشه؟
+2. آیا هیچ فایل config دیگری هست که باید آپدیت بشه ولی فراموش شده؟
+3. آیا نسخه‌های وابستگی‌ها با هم سازگارند؟ (مثلاً Tailwind v3 vs v4 plugins متفاوتی دارند)
+4. آیا module system سازگاره؟ (ESM vs CJS)
+5. آیا تغییر من مشکل جدیدی ایجاد نمیکنه؟""",
+        },
+        {
             "id": "sys_deploy_safe",
             "title": "محافظت از بیلد و دیپلوی",
             "content": "کد تولیدی باید بدون خطای سینتکس، تایپ و import باشد. قبل از نوشتن action_plan، ذهنی بیلد و کامپایل را شبیه‌سازی کن. تمام import/export ها، پرانتزها، آکولادها، و تایپ‌ها را چک کن. هرگز فایل ناقص یا نیمه‌کاره تحویل نده.",
@@ -170,9 +207,12 @@ def _build_general_instructions_list(
 - ⛔ هرگز فایل‌های deploy script (deploy.sh, cloudbuild.yaml و...) را کامل بازنویسی نکن — فقط خط‌های مشکل‌دار را تغییر بده
 - ⛔ قبل از تغییر Dockerfile، حتماً بفهم build context کجاست (از اسکریپت‌های deploy بررسی کن)
 - ⛔ اگر Dockerfile در پوشه backend/ هست و build context هم backend/ هست، مسیرها نسبت به backend باشند (مثلاً `COPY requirements.txt .` نه `COPY backend/requirements.txt .`)
-- ⛔ تمام وابستگی‌ها در package.json و requirements.txt باید با نسخه دقیق و سازگار پین شوند — هرگز نسخه آزاد (بدون پین) نگذار
-- ⛔ اگر نسخه پکیجی تغییر می‌کنه، بررسی کن با سایر وابستگی‌ها سازگار هست
-- ⛔ هرگز فایل TypeScript/JavaScript معتبر رو با محتوای JSON جایگزین نکن — اگر فایل .ts هست، content باید کد TypeScript باشه نه JSON""",
+- ⛔ تمام وابستگی‌ها در package.json و requirements.txt باید با نسخه سازگار پین شوند
+- ⛔ هرگز نسخه‌ای پین نکن که مطمئن نیستی وجود دارد — فقط از نسخه‌های موجود در فایل‌های پروژه یا دانش قطعی استفاده کن
+- ⛔ اگر نسخه پکیجی تغییر می‌کنه، بررسی کن با سایر وابستگی‌ها سازگار هست — Tailwind v3 plugins با Tailwind v4 متفاوتند
+- ⛔ قبل از نوشتن هر فایل config جاوااسکریپتی، حتماً `package.json` فیلد `"type"` را بررسی کن — اگر `"type": "module"` هست باید ESM syntax بنویسی
+- ⛔ هرگز فایل TypeScript/JavaScript معتبر رو با محتوای JSON جایگزین نکن — اگر فایل .ts هست، content باید کد TypeScript باشه نه JSON
+- ⛔ هرگز یک مشکل رو نیمه‌کاره حل نکن — اگر postcss.config.js تغییر میکنه، package.json و vite.config.ts هم بررسی بشن""",
         },
     ]
 
@@ -10503,14 +10543,20 @@ def _build_project_tree_summary(code_files: list, max_chars: int = 4000) -> str:
     return summary
 
 
-def _ensure_balanced_selection(selected: list, code_files: list, max_files: int) -> list:
+def _ensure_balanced_selection(selected: list, code_files: list, max_files: int, error_domain: str = "cross") -> list:
     """
     اگر همه فایل‌های انتخاب‌شده از یک دایرکتوری سطح اولن،
     فایل‌هایی از دایرکتوری‌های دیگه هم اضافه کن.
     مثلاً اگر فقط frontend/ انتخاب شده، backend/ هم اضافه شه.
+
+    ⚠️ اگر error_domain مشخص باشد (frontend/backend)، فایل از دامنه نامرتبط اضافه نمیشه.
     """
     if not selected or len(selected) >= max_files:
         return selected
+
+    # 🆕 اگر دامنه خطا مشخصه، فایل‌های نامرتبط رو اضافه نکن
+    _fe_dir_hints = {"frontend", "src", "app", "pages", "components", "public", "styles", "client"}
+    _be_dir_hints = {"backend", "server", "api", "models", "services", "db", "migrations", "alembic"}
 
     # تشخیص دایرکتوری‌های سطح اول
     selected_top_dirs = set()
@@ -10527,6 +10573,17 @@ def _ensure_balanced_selection(selected: list, code_files: list, max_files: int)
 
     # دایرکتوری‌هایی که اصلاً فایلی ازشون انتخاب نشده
     missing_dirs = all_top_dirs - selected_top_dirs
+
+    if not missing_dirs:
+        return selected
+
+    # 🆕 فیلتر دایرکتوری‌ها بر اساس دامنه خطا
+    if error_domain == "frontend":
+        # خطای frontend — فایل‌های backend اضافه نکن
+        missing_dirs = {d for d in missing_dirs if d.lower() not in _be_dir_hints}
+    elif error_domain == "backend":
+        # خطای backend — فایل‌های frontend اضافه نکن
+        missing_dirs = {d for d in missing_dirs if d.lower() not in _fe_dir_hints}
 
     if not missing_dirs:
         return selected
@@ -10626,6 +10683,58 @@ def _get_max_files_for_scope(scope: str, total_code_files: int) -> int:
     else:
         # TARGETED — مثل قبل
         return 25
+
+
+# ─── تشخیص دامنه خطا (frontend / backend / cross) ───
+# وقتی خطا مربوط به PostCSS/Vite/npm هست نباید فایل‌های Python بخونیم
+_FRONTEND_ERROR_SIGNALS = [
+    # ابزارها و bundlers
+    "postcss", "tailwind", "vite", "webpack", "esbuild", "rollup", "next.js", "nextjs",
+    "npm ", "npm:", "npx ", "yarn ", "pnpm ", "node_modules", "package.json",
+    # خطاهای JS/TS
+    "syntaxerror", "referenceerror", "typeerror", "module not found", "cannot find module",
+    "eresolve", "etarget", "peer dep", "peer dependency", "import error", "export default",
+    "module.exports", "esm", "commonjs", "cjs", "mjs",
+    # فایل‌ها
+    ".tsx", ".jsx", ".ts ", ".js ", ".css", ".scss", ".vue", ".svelte",
+    "tsconfig", "postcss.config", "tailwind.config", "vite.config", "next.config",
+    # کلمات کلیدی
+    "react", "angular", "vue", "svelte", "component", "render",
+    "build failed", "build error", "compile error",
+]
+_BACKEND_ERROR_SIGNALS = [
+    # Python
+    "traceback", "importerror", "modulenotfounderror", "attributeerror", "nameerror",
+    "gunicorn", "uvicorn", "fastapi", "django", "flask",
+    "requirements.txt", "pip ", "pip:", "pyproject.toml",
+    ".py ", ".py:", "python",
+    # Docker/Deploy
+    "dockerfile", "docker-compose", "docker build",
+    # DB
+    "sqlalchemy", "alembic", "migration", "database", "psycopg",
+]
+
+
+def _detect_error_domain(error_text: str) -> str:
+    """
+    تشخیص دامنه خطا:
+    - "frontend": خطا فقط مربوط به frontend (npm, PostCSS, Vite, webpack, React, ...)
+    - "backend": خطا فقط مربوط به backend (Python, pip, gunicorn, FastAPI, ...)
+    - "cross": خطا ممکن است مربوط به هر دو باشد یا مشخص نیست
+    """
+    text_lower = error_text.lower()
+    fe_score = sum(1 for sig in _FRONTEND_ERROR_SIGNALS if sig in text_lower)
+    be_score = sum(1 for sig in _BACKEND_ERROR_SIGNALS if sig in text_lower)
+
+    if fe_score >= 3 and be_score <= 1:
+        return "frontend"
+    if be_score >= 3 and fe_score <= 1:
+        return "backend"
+    if fe_score >= 2 and be_score == 0:
+        return "frontend"
+    if be_score >= 2 and fe_score == 0:
+        return "backend"
+    return "cross"
 
 
 # ─── خلاصه‌سازی محتوای فایل برای حالت FULL_PROJECT ───
@@ -10992,8 +11101,13 @@ async def enhance_prompt_endpoint(request: EnhancePromptRequest, db: Session = D
    - اگه درخواست ساده هست و نیاز به تجزیه نداره (فقط ۱ کار)، بخش مراحل نذار
 10. **ایمنی دیپلوی**: در پرامپت تاکید کن:
    - کد تولیدی باید بدون هیچ خطای سینتکس، import و تایپ باشد
-   - وابستگی‌ها (requirements.txt, package.json) با نسخه‌های سازگار پین شوند
+   - وابستگی‌ها با نسخه سازگار پین شوند — هرگز نسخه‌ای که مطمئن نیستی وجود داره پین نکن
    - قبل از نوشتن کد، ذهنی مراحل بیلد و دیپلوی رو شبیه‌سازی کن
+11. **حل کامل و یکجا**: در پرامپت تاکید کن:
+   - قبل از هر تغییر، کل زنجیره وابستگی رو ردیابی کن
+   - اگر فایل config تغییر میکنه، تمام configهای مرتبط هم بررسی بشن
+   - قبل از نوشتن فایل .js config، حتماً package.json فیلد "type" رو بررسی کن (ESM vs CJS)
+   - مشکل رو نیمه‌کاره حل نکن — تمام فایل‌های تحت تأثیر در action_plan باشن
 
 ## ⛔ ممنوعیت‌ها:
 - هرگز بلوک ```json با نمونه action_plan ننویس — فرمت JSON رو سیستم تعیین می‌کنه نه تو
@@ -11594,6 +11708,16 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         if err_scope == "TARGETED":
                             err_dynamic_max = 20  # مثل قبل
 
+                        # 🆕 تشخیص دامنه خطا (frontend/backend/cross) — جلوگیری از خواندن فایل‌های نامرتبط
+                        _err_domain = _detect_error_domain(request.message)
+                        _domain_hint = ""
+                        if _err_domain == "frontend":
+                            _domain_hint = "\n⚠️ این خطا مربوط به فرانت‌اند/build است — فقط فایل‌های فرانت‌اند، config، و package.json انتخاب کن. فایل‌های Python/backend نامرتبطند."
+                            err_dynamic_max = min(err_dynamic_max, 15)  # خطای frontend نیاز به 20 فایل ندارد
+                        elif _err_domain == "backend":
+                            _domain_hint = "\n⚠️ این خطا مربوط به بک‌اند است — فقط فایل‌های Python/backend، config، و requirements.txt انتخاب کن. فایل‌های frontend نامرتبطند."
+                            err_dynamic_max = min(err_dynamic_max, 15)
+
                         select_prompt = f"""بر اساس خطا و context مکالمه، فایل‌های مرتبط را انتخاب کن:
 
 خطا/لاگ:
@@ -11612,17 +11736,25 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - اول خطا را بخوان و بفهم ریشه مشکل کجاست — سپس فایل‌های مرتبط را انتخاب کن
 - stack trace را دقیق تحلیل کن — هر مسیر فایلی که در خطا ذکر شده حتماً انتخاب شود
 - تاریخچه مکالمه را هم بخوان — شاید کاربر قبلاً توضیح داده کدام بخش مشکل دارد
-- خطای frontend ممکن است ریشه در backend داشته باشد — هم frontend و هم backend مرتبط را انتخاب کن
-- فایل‌های types، config و API routes مرتبط را هم شامل کن
+- فایل‌های config مرتبط را حتماً شامل کن: package.json, tsconfig.json, postcss.config, vite.config, tailwind.config, next.config, requirements.txt, Dockerfile
 - فایل‌های import/dependency chain مرتبط با فایل خطادار را هم بررسی کن
 - اگر فایل‌هایی قبلاً بررسی شده‌اند (لیست بالا)، فایل‌های جدید و بررسی‌نشده را اولویت بده — مگر اینکه خطا واقعاً به همان فایل‌ها مربوط باشد
+{_domain_hint}
+
+⛔ مهم: فقط فایل‌هایی که واقعاً به این خطا مرتبطند انتخاب کن — خواندن فایل‌های نامرتبط باعث هدررفت بودجه و کاهش دقت تحلیل میشود.
 
 حداکثر {err_dynamic_max} فایل مرتبط. فقط مسیرها، هر کدام در یک خط."""
+
+                        _err_sys_domain_note = ""
+                        if _err_domain == "frontend":
+                            _err_sys_domain_note = " خطا فرانت‌اند/build است — فقط فایل‌های فرانت‌اند و config انتخاب کن، نه backend."
+                        elif _err_domain == "backend":
+                            _err_sys_domain_note = " خطا بک‌اند است — فقط فایل‌های Python/backend و config انتخاب کن، نه frontend."
 
                         select_response = await ai_manager.generate(
                             model_id=primary_model,
                             messages=[
-                                Message(role="system", content=f"انتخاب‌گر فایل هوشمند. ریشه خطا را با تحلیل stack trace و context تشخیص بده، سپس تا {err_dynamic_max} فایل مرتبط + زنجیره وابستگی‌ها انتخاب کن. فقط مسیرها."),
+                                Message(role="system", content=f"انتخاب‌گر فایل هوشمند. ریشه خطا را با تحلیل stack trace و context تشخیص بده، سپس تا {err_dynamic_max} فایل مرتبط + زنجیره وابستگی‌ها انتخاب کن.{_err_sys_domain_note} فقط مسیرها."),
                                 Message(role="user", content=select_prompt)
                             ],
                             max_tokens=max(800, err_dynamic_max * 40),
@@ -11632,7 +11764,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         selected = _parse_ai_selected_files(select_response.content, code_files, max_files=err_dynamic_max)
                         if not selected:
                             selected = _fallback_file_selection(code_files, request.message, max_files=err_dynamic_max)
-                        selected = _ensure_balanced_selection(selected, code_files, max_files=err_dynamic_max)
+                        selected = _ensure_balanced_selection(selected, code_files, max_files=err_dynamic_max, error_domain=_err_domain)
 
                         # 🆕 فایل‌های ذکرشده در خطا/stack trace حتماً خونده بشن
                         _err_extracted = _extract_file_paths_from_text(
@@ -11824,9 +11956,17 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - content هر فایل باید محتوای کامل و قابل جایگزینی باشد — نه بخشی از فایل
 - هرگز «// ... بقیه کد» یا «// rest of file» ننویس
 - imports، پرانتزها، تایپ‌ها و export ها را قبل از نوشتن بررسی کن — هر خطا = شکست دیپلوی
-- وابستگی‌ها (requirements.txt, package.json) را با نسخه‌های سازگار و تست‌شده پین کن — هرگز بدون پین نذار
+- وابستگی‌ها (requirements.txt, package.json) را با نسخه سازگار پین کن
+- ⛔ هرگز نسخه پکیجی پین نکن که مطمئن نیستی وجود دارد — اگر مطمئن نیستی، از caret range (^X.Y.Z) استفاده کن
 - قبل از نوشتن هر تغییر، ذهنی بیلد و دیپلوی رو شبیه‌سازی کن: آیا بعد از اعمال این تغییرات، اپلیکیشن بدون خطا بالا میاد؟
-- اگر مشکل مربوط به نسخه وابستگی‌هاست، هم نسخه مشکل‌ساز رو پین کن، هم سایر وابستگی‌های مرتبط رو بررسی کن"""
+- اگر مشکل مربوط به نسخه وابستگی‌هاست، هم نسخه مشکل‌ساز رو پین کن، هم سایر وابستگی‌های مرتبط رو بررسی کن
+
+🎯 حل کامل و یکجا (بسیار مهم — عدم رعایت = حلقه خطاهای متوالی):
+- ⛔ هرگز یک مشکل رو نیمه‌کاره حل نکن — قبل از نوشتن action_plan، کل زنجیره وابستگی رو ردیابی کن
+- اگر فایل config (postcss.config, vite.config, ...) تغییر میکنه → حتماً package.json و سایر configها هم بررسی بشن
+- قبل از نوشتن هر فایل .js config → حتماً package.json فیلد "type" رو بررسی کن: "type": "module" = ESM (export default) / بدون type = CJS (module.exports)
+- اگر وابستگی تغییر میکنه → حتماً نسخه‌های مرتبط هم بررسی بشن (مثلاً Tailwind v3 vs v4 پلاگین‌های متفاوتی دارند)
+- اگر قبلاً راه‌حلی ارائه شده و جواب نداده → مشکل عمیق‌تر از چیزیه که فکر میکنی — رویکرد کاملاً متفاوت بگیر"""
 
             try:
                 # 🆕 اجرای AI با heartbeat + timeout کلی
@@ -12051,6 +12191,14 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                 "message": f"🤖 مدل {primary_model} در حال شناسایی فایل‌های مرتبط..."
                             })
 
+                            # 🆕 تشخیص دامنه درخواست (frontend/backend/cross)
+                            _act_domain = _detect_error_domain(request.message + "\n" + history_text[-2000:])
+                            _act_domain_hint = ""
+                            if _act_domain == "frontend":
+                                _act_domain_hint = "\n⚠️ این درخواست مربوط به فرانت‌اند/build است — فقط فایل‌های فرانت‌اند و config انتخاب کن. فایل‌های Python/backend نامرتبطند."
+                            elif _act_domain == "backend":
+                                _act_domain_hint = "\n⚠️ این درخواست مربوط به بک‌اند است — فقط فایل‌های Python/backend و config انتخاب کن. فایل‌های frontend نامرتبطند."
+
                             select_prompt = f"""بر اساس درخواست کاربر و تاریخچه مکالمه، فایل‌های مرتبط را انتخاب کن:
 
 درخواست کاربر:
@@ -12069,18 +12217,20 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - اول منظور واقعی کاربر را بفهم — ممکن است مستقیم نگفته باشد کدام فایل‌ها باید تغییر کنند
 - تاریخچه مکالمه را بخوان — شاید درخواست در ادامه بحث قبلی باشد و فایل‌های مرتبط قبلاً ذکر شده باشند
 - فایل‌هایی که مستقیماً باید تغییر کنند + وابستگی‌هایشان (imports, types, configs, API routes, database models)
-- اگر پروژه هم frontend و هم backend دارد، از هر دو بخش فایل مرتبط انتخاب کن
-- فایل‌های config (package.json, requirements.txt, .env.example) و types هم مهمن
+- فایل‌های config مرتبط حتماً شامل شوند: package.json, tsconfig.json, postcss.config, vite.config, tailwind.config, requirements.txt, Dockerfile
 - اگر فایل‌هایی قبلاً بررسی شده‌اند (لیست بالا)، فایل‌های جدید و بررسی‌نشده را اولویت بده — مگر اینکه تغییرات واقعاً به همان فایل‌ها مربوط باشد
 - فایل‌های تست مرتبط با فایل‌های تغییردهنده را هم شامل کن
 - اگر تغییر API endpoint باشد، هم route و هم فرانت‌اند caller و هم types مرتبط را انتخاب کن
+{_act_domain_hint}
+
+⛔ فقط فایل‌های واقعاً مرتبط — خواندن فایل‌های نامرتبط باعث هدررفت بودجه میشود.
 
 حداکثر ۲۵ فایل. فقط مسیرها، هر کدام در یک خط."""
 
                             select_response = await ai_manager.generate(
                                 model_id=primary_model,
                                 messages=[
-                                    Message(role="system", content="انتخاب‌گر فایل هوشمند و حرفه‌ای. اول منظور واقعی درخواست کاربر و تاریخچه مکالمه را عمیقاً بفهم، سپس فایل‌های مرتبط + زنجیره وابستگی‌ها + فایل‌های تست را انتخاب کن. فایل‌های جدید و بررسی‌نشده اولویت دارند. از همه بخش‌های پروژه (frontend/backend/shared) فایل مرتبط انتخاب کن. فقط مسیرها."),
+                                    Message(role="system", content="انتخاب‌گر فایل هوشمند و حرفه‌ای. اول منظور واقعی درخواست کاربر و تاریخچه مکالمه را عمیقاً بفهم، سپس فایل‌های مرتبط + زنجیره وابستگی‌ها + فایل‌های تست را انتخاب کن. فایل‌های جدید و بررسی‌نشده اولویت دارند. فقط مسیرها."),
                                     Message(role="user", content=select_prompt)
                                 ],
                                 max_tokens=1000,
@@ -12090,7 +12240,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             selected = _parse_ai_selected_files(select_response.content, code_files, max_files=25)
                             if not selected:
                                 selected = _fallback_file_selection(code_files, request.message, max_files=20)
-                            selected = _ensure_balanced_selection(selected, code_files, max_files=25)
+                            selected = _ensure_balanced_selection(selected, code_files, max_files=25, error_domain=_act_domain)
 
                             yield sse("progress", {
                                 "step": "files_selected",
@@ -12358,7 +12508,14 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - JSX/TSX: تمام تگ‌ها بسته شوند، className نه class، htmlFor نه for
 - JSON: بدون trailing comma، کلیدها string باشند
 - Python: indentation یکدست (4 spaces)، import ها valid، async/await صحیح
-- وابستگی‌ها (requirements.txt, package.json) با نسخه‌های سازگار پین شوند — نسخه آزاد وابستگی ممنوع"""
+- وابستگی‌ها (requirements.txt, package.json) با نسخه سازگار پین شوند
+- ⛔ هرگز نسخه پکیجی پین نکن که مطمئن نیستی وجود دارد — اگر مطمئن نیستی از caret range (^X.Y.Z) استفاده کن
+
+🎯 حل کامل و یکجا — مهم‌ترین قانون:
+- ⛔ مشکل را نیمه‌کاره حل نکن — قبل از action_plan، کل زنجیره وابستگی رو ردیابی کن
+- قبل از نوشتن هر فایل .js config → package.json فیلد "type" رو بررسی کن: "type": "module" = ESM / بدون type = CJS
+- اگر config تغییر میکنه → تمام configهای مرتبط هم بررسی بشن (postcss → package.json → vite.config → tailwind.config)
+- اگر وابستگی تغییر میکنه → نسخه‌های مرتبط بررسی بشن (Tailwind v3 vs v4 پلاگین‌های متفاوت دارند)"""
 
             try:
                 # 🆕 اجرای AI با heartbeat برای جلوگیری از QUIC timeout
