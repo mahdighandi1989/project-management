@@ -10527,6 +10527,74 @@ def _try_repair_truncated_json(raw_json_str: str) -> dict | None:
     }
 
 
+def _extract_all_action_plans_from_response(content: str, is_truncated: bool = False) -> dict | None:
+    """
+    استخراج و ادغام action_plan از تمام بلوک‌های ```json در پاسخ مدل.
+    برخی مدل‌ها (مثل deepseek-reasoner) action_plan رو به چند بلوک JSON جداگانه تقسیم میکنن.
+    این تابع همه بلوک‌ها رو پیدا میکنه، parse میکنه و فایل‌هاشون رو ادغام میکنه.
+    اگر is_truncated باشه، آخرین بلوک ناقص هم با repair پردازش میشه.
+    """
+    if '```' not in content:
+        return None
+
+    all_files = []
+    commit_message = ""
+
+    # پیدا کردن تمام بلوک‌های ```json...``` کامل
+    json_blocks = re.findall(r'```json\s*\n(.*?)\n```', content, re.DOTALL)
+    for block in json_blocks:
+        try:
+            parsed = json.loads(block)
+            normalized = _normalize_action_plan_json(parsed)
+            if normalized and normalized.get("files"):
+                all_files.extend(normalized["files"])
+                if not commit_message and normalized.get("commit_message"):
+                    commit_message = normalized["commit_message"]
+        except (json.JSONDecodeError, Exception):
+            pass
+
+    # اگر truncated هست، آخرین بلوک ```json ممکنه ناقص باشه (بدون ```)
+    if is_truncated:
+        # پیدا کردن آخرین ```json که ``` پایانی ندارد
+        last_json_start = content.rfind('```json')
+        if last_json_start >= 0:
+            after_last = content[last_json_start + 7:]
+            # آیا این بلوک ``` پایانی داره؟
+            if '```' not in after_last:
+                # بلوک ناقصه — تلاش برای repair
+                repaired = _try_repair_truncated_json(after_last.strip())
+                if repaired:
+                    normalized = _normalize_action_plan_json(repaired)
+                    if normalized and normalized.get("files"):
+                        # فقط فایل‌هایی که قبلاً اضافه نشدن
+                        existing_paths = {f.get("path") for f in all_files}
+                        for f in normalized["files"]:
+                            if f.get("path") not in existing_paths:
+                                all_files.append(f)
+
+    if not all_files:
+        return None
+
+    # حذف فایل‌های تکراری (حفظ آخرین نسخه)
+    seen_paths = {}
+    for f in all_files:
+        path = f.get("path", "")
+        if path:
+            seen_paths[path] = f
+    unique_files = list(seen_paths.values())
+
+    if not unique_files:
+        return None
+
+    result = {
+        "files": unique_files,
+        "commit_message": commit_message,
+    }
+    if is_truncated:
+        result["_truncated"] = True
+    return result
+
+
 def _validate_action_plan_syntax(action_plan: dict) -> dict:
     """
     اعتبارسنجی ابتدایی سینتکس فایل‌های action_plan قبل از ارسال به فرانت.
@@ -12147,28 +12215,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             "detail": f"مدل: {primary_model} | حجم: ~{len(error_analysis_prompt)} | context: {model_context_window}"
                         })
                 if _err_content and _err_content.strip():
-                    # استخراج action_plan (با پشتیبانی از فرمت‌های مختلف)
-                    action_plan = None
-                    try:
-                        json_match = re.search(r'```json\s*\n(.*?)\n```', _err_content, re.DOTALL)
-                        if json_match:
-                            parsed = json.loads(json_match.group(1))
-                            action_plan = _normalize_action_plan_json(parsed)
-                    except Exception:
-                        pass
-
-                    # 🆕 اگر JSON ناقص بود (truncation) — تلاش برای تعمیر
-                    if action_plan is None and _err_is_truncated and '```json' in _err_content:
-                        _ej_start = _err_content.rfind('```json')
-                        if _ej_start >= 0:
-                            _ej_body = _err_content[_ej_start + 7:].replace('```', '').strip()
-                            _ej_repaired = _try_repair_truncated_json(_ej_body)
-                            if _ej_repaired:
-                                action_plan = _normalize_action_plan_json(_ej_repaired)
-                                if action_plan:
-                                    action_plan["_truncated"] = True
-                                    _ej_recovered = _ej_repaired.get("_recovered_file_count", 0)
-                                    yield sse("progress", {"step": "truncation_repaired", "message": f"⚠️ پاسخ ناقص بود — {_ej_recovered} فایل از action_plan نجات یافت"})
+                    # 🆕 استخراج و ادغام تمام بلوک‌های JSON (پشتیبانی از بلوک‌های متعدد + تعمیر ناقص)
+                    action_plan = _extract_all_action_plans_from_response(_err_content, is_truncated=_err_is_truncated)
 
                     # لایه ۲: اگر فایل‌ها خوانده نشدن، action_plan حذف شود
                     if not has_err_code_files and action_plan is not None:
@@ -12818,28 +12866,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             slog.warning(f"[smart-chat] Second-pass failed: {_2pe}")
 
                 if content and content.strip():
-                    # استخراج action_plan از پاسخ (با پشتیبانی از فرمت‌های مختلف)
-                    action_plan = None
-                    try:
-                        json_match = re.search(r'```json\s*\n(.*?)\n```', content, re.DOTALL)
-                        if json_match:
-                            parsed = json.loads(json_match.group(1))
-                            action_plan = _normalize_action_plan_json(parsed)
-                    except Exception:
-                        pass
-
-                    # 🆕 اگر JSON ناقص بود (truncation) — تلاش برای تعمیر
-                    if action_plan is None and _act_is_truncated and '```json' in content:
-                        _aj_start = content.rfind('```json')
-                        if _aj_start >= 0:
-                            _aj_body = content[_aj_start + 7:].replace('```', '').strip()
-                            _aj_repaired = _try_repair_truncated_json(_aj_body)
-                            if _aj_repaired:
-                                action_plan = _normalize_action_plan_json(_aj_repaired)
-                                if action_plan:
-                                    action_plan["_truncated"] = True
-                                    _aj_recovered = _aj_repaired.get("_recovered_file_count", 0)
-                                    yield sse("progress", {"step": "truncation_repaired", "message": f"⚠️ پاسخ ناقص بود — {_aj_recovered} فایل از action_plan نجات یافت"})
+                    # 🆕 استخراج و ادغام تمام بلوک‌های JSON (پشتیبانی از بلوک‌های متعدد + تعمیر ناقص)
+                    action_plan = _extract_all_action_plans_from_response(content, is_truncated=_act_is_truncated)
 
                     # لایه ۲: اگر فایل‌ها خوانده نشدن، action_plan حذف شود (جلوگیری از محتوای ساختگی)
                     if not has_code_files and action_plan is not None:
@@ -14005,53 +14033,28 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
             _vd_finish = getattr(response, 'finish_reason', '') or ''
             _vd_is_truncated = _vd_finish.lower() in ('length', 'max_tokens')
 
-            action_plan = None
-            if "```" in response.content:
-                # استخراج بلوک‌های JSON action_plan (با پشتیبانی فرمت‌های مختلف)
-                json_match = re.search(r'```json\s*\n(.*?)\n```', response.content, re.DOTALL)
-                if json_match:
-                    try:
-                        parsed = json.loads(json_match.group(1))
-                        action_plan = _normalize_action_plan_json(parsed)
-                    except (json.JSONDecodeError, Exception):
-                        pass
+            # 🆕 استخراج و ادغام تمام بلوک‌های JSON (پشتیبانی از بلوک‌های متعدد + تعمیر ناقص)
+            action_plan = _extract_all_action_plans_from_response(response.content, is_truncated=_vd_is_truncated)
 
-                # 🆕 اگر JSON ناقص بود (truncation) — تلاش برای تعمیر
-                if action_plan is None and _vd_is_truncated and '```json' in response.content:
-                    _vj_start = response.content.rfind('```json')
-                    if _vj_start >= 0:
-                        _vj_body = response.content[_vj_start + 7:].replace('```', '').strip()
-                        _vj_repaired = _try_repair_truncated_json(_vj_body)
-                        if _vj_repaired:
-                            action_plan = _normalize_action_plan_json(_vj_repaired)
-                            if action_plan:
-                                action_plan["_truncated"] = True
-                                _vj_recovered = _vj_repaired.get("_recovered_file_count", 0)
-                                yield sse("progress", {"step": "truncation_repaired", "message": f"⚠️ پاسخ ناقص بود — {_vj_recovered} فایل از action_plan نجات یافت"})
+            # فالبک: استخراج از بلوک‌های کد + نام فایل
+            if action_plan is None:
+                code_blocks = re.findall(r'```[\w]*\n(.*?)```', response.content, re.DOTALL)
+                if code_blocks:
+                    action_plan = {"files": [], "commit_message": f"fix: دیباگ بصری - {(request.user_description or 'اصلاح')[:50]}"}
+                    fpm = re.findall(r'(?:فایل|file|path|مسیر|`)[:\s]*[`"]?([a-zA-Z0-9_./\-]+(?:\.[a-zA-Z]{1,10}))[`"]?', response.content)
+                    fpm = [p for p in fpm if '/' in p or '.' in p.split('/')[-1]]
+                    for i, block in enumerate(code_blocks[:5]):
+                        action_plan["files"].append({"path": fpm[i] if i < len(fpm) else f"file_{i+1}", "content": block.strip(), "operation": "modify"})
+                    if all(f["path"].startswith("file_") for f in action_plan["files"]):
+                        action_plan = None
 
-                # روش دوم (فالبک): استخراج از بلوک‌های کد + نام فایل
-                if action_plan is None:
-                    code_blocks = re.findall(r'```[\w]*\n(.*?)```', response.content, re.DOTALL)
-                    if code_blocks:
-                        action_plan = {"files": [], "commit_message": f"fix: دیباگ بصری - {(request.user_description or 'اصلاح')[:50]}"}
-                        # regex بهبود یافته برای استخراج مسیر فایل‌ها
-                        fpm = re.findall(r'(?:فایل|file|path|مسیر|`)[:\s]*[`"]?([a-zA-Z0-9_./\-]+(?:\.[a-zA-Z]{1,10}))[`"]?', response.content)
-                        # حذف مسیرهای نامعتبر
-                        fpm = [p for p in fpm if '/' in p or '.' in p.split('/')[-1]]
-                        for i, block in enumerate(code_blocks[:5]):
-                            action_plan["files"].append({"path": fpm[i] if i < len(fpm) else f"file_{i+1}", "content": block.strip(), "operation": "modify"})
-                        # اگر هیچ فایلی اسم معتبر نداشت، action_plan رو حذف کن
-                        if all(f["path"].startswith("file_") for f in action_plan["files"]):
-                            action_plan = None
-
-            # 🆕 هشدار truncation به کاربر
+            # هشدار truncation به کاربر
             if _vd_is_truncated:
-                _trunc_msg = ""
+                _n_files = len(action_plan.get('files', [])) if action_plan else 0
                 if action_plan:
-                    _trunc_msg = f"\n\n---\n⚠️ **هشدار:** پاسخ مدل ناقص بود — {len(action_plan.get('files', []))} فایل از action_plan نجات یافت."
+                    response.content += f"\n\n---\n⚠️ **هشدار:** پاسخ مدل ناقص بود — {_n_files} فایل از action_plan نجات یافت."
                 else:
-                    _trunc_msg = "\n\n---\n⚠️ **هشدار:** پاسخ مدل به دلیل محدودیت خروجی ناقص قطع شد. لطفاً با مدل دیگری تلاش کنید."
-                response.content += _trunc_msg
+                    response.content += "\n\n---\n⚠️ **هشدار:** پاسخ مدل به دلیل محدودیت خروجی ناقص قطع شد. لطفاً با مدل دیگری تلاش کنید."
 
             yield sse("response", {
                 "content": response.content, "model_used": primary_model,
@@ -14351,55 +14354,28 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
             _ra_finish = getattr(response, 'finish_reason', '') or ''
             _ra_is_truncated = _ra_finish.lower() in ('length', 'max_tokens')
 
-            action_plan = None
-            if "```" in response.content:
-                json_match = re.search(r'```json\s*\n(.*?)\n```', response.content, re.DOTALL)
-                if json_match:
-                    try:
-                        parsed = json.loads(json_match.group(1))
-                        action_plan = _normalize_action_plan_json(parsed)
-                    except (json.JSONDecodeError, Exception):
-                        pass
+            # 🆕 استخراج و ادغام تمام بلوک‌های JSON (برخی مدل‌ها action_plan رو تکه‌تکه میدن)
+            action_plan = _extract_all_action_plans_from_response(response.content, is_truncated=_ra_is_truncated)
 
-                # 🆕 اگر JSON ناقص بود (truncation)، تلاش برای تعمیر
-                if action_plan is None and _ra_is_truncated:
-                    # استخراج بخش JSON ناقص از آخرین بلوک ```json
-                    _ra_last_json_start = response.content.rfind('```json')
-                    if _ra_last_json_start >= 0:
-                        _ra_json_body = response.content[_ra_last_json_start + 7:]  # بعد از ```json
-                        # حذف ``` پایانی اگر وجود داره
-                        _ra_json_body = _ra_json_body.replace('```', '').strip()
-                        _ra_repaired = _try_repair_truncated_json(_ra_json_body)
-                        if _ra_repaired:
-                            action_plan = _normalize_action_plan_json(_ra_repaired)
-                            if action_plan:
-                                action_plan["_truncated"] = True
-                                _recovered = _ra_repaired.get("_recovered_file_count", 0)
-                                _total_hint = _ra_repaired.get("_original_file_count_hint", 0)
-                                yield sse("progress", {
-                                    "step": "truncation_repaired",
-                                    "message": f"⚠️ پاسخ مدل ناقص بود — {_recovered} فایل از ~{_total_hint} فایل نجات یافت"
-                                })
+            # فالبک: استخراج از بلوک‌های کد + نام فایل
+            if action_plan is None:
+                code_blocks = re.findall(r'```[\w]*\n(.*?)```', response.content, re.DOTALL)
+                if code_blocks:
+                    action_plan = {"files": [], "commit_message": f"fix: بازتحلیل - {(request.user_description or 'اصلاح')[:50]}"}
+                    fpm = re.findall(r'(?:فایل|file|path|مسیر|`)[:\s]*[`"]?([a-zA-Z0-9_./\-]+(?:\.[a-zA-Z]{1,10}))[`"]?', response.content)
+                    fpm = [p for p in fpm if '/' in p or '.' in p.split('/')[-1]]
+                    for i, block in enumerate(code_blocks[:5]):
+                        action_plan["files"].append({"path": fpm[i] if i < len(fpm) else f"file_{i+1}", "content": block.strip(), "operation": "modify"})
+                    if all(f["path"].startswith("file_") for f in action_plan["files"]):
+                        action_plan = None
 
-                if action_plan is None:
-                    code_blocks = re.findall(r'```[\w]*\n(.*?)```', response.content, re.DOTALL)
-                    if code_blocks:
-                        action_plan = {"files": [], "commit_message": f"fix: بازتحلیل - {(request.user_description or 'اصلاح')[:50]}"}
-                        fpm = re.findall(r'(?:فایل|file|path|مسیر|`)[:\s]*[`"]?([a-zA-Z0-9_./\-]+(?:\.[a-zA-Z]{1,10}))[`"]?', response.content)
-                        fpm = [p for p in fpm if '/' in p or '.' in p.split('/')[-1]]
-                        for i, block in enumerate(code_blocks[:5]):
-                            action_plan["files"].append({"path": fpm[i] if i < len(fpm) else f"file_{i+1}", "content": block.strip(), "operation": "modify"})
-                        if all(f["path"].startswith("file_") for f in action_plan["files"]):
-                            action_plan = None
-
-            # 🆕 اگر هنوز action_plan نیست و truncated شده — هشدار به کاربر
-            _ra_truncation_warning = ""
+            # هشدار truncation به کاربر
             if _ra_is_truncated:
+                _ra_n_files = len(action_plan.get('files', [])) if action_plan else 0
                 if action_plan:
-                    _ra_truncation_warning = f"\n\n---\n⚠️ **هشدار:** پاسخ مدل به دلیل محدودیت خروجی ({_ra_max_output} توکن) ناقص بود. {len(action_plan.get('files', []))} فایل از action_plan نجات یافت — ممکن است برخی فایل‌ها ناقص یا غایب باشند."
+                    response.content += f"\n\n---\n⚠️ **هشدار:** پاسخ مدل به دلیل محدودیت خروجی ({_ra_max_output} توکن) ناقص بود. {_ra_n_files} فایل از action_plan نجات یافت — ممکن است برخی فایل‌ها ناقص یا غایب باشند."
                 else:
-                    _ra_truncation_warning = f"\n\n---\n⚠️ **هشدار:** پاسخ مدل به دلیل محدودیت خروجی ({_ra_max_output} توکن) ناقص قطع شد و action_plan کامل نشد. لطفاً با مدل دیگری دوباره تلاش کنید یا درخواست را ساده‌تر کنید."
-                response.content += _ra_truncation_warning
+                    response.content += f"\n\n---\n⚠️ **هشدار:** پاسخ مدل به دلیل محدودیت خروجی ({_ra_max_output} توکن) ناقص قطع شد و action_plan کامل نشد. لطفاً با مدل دیگری دوباره تلاش کنید یا درخواست را ساده‌تر کنید."
 
             yield sse("response", {
                 "content": response.content, "model_used": reanalyze_model,
