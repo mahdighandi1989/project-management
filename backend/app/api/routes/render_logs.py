@@ -10431,6 +10431,102 @@ def _normalize_action_plan_json(parsed: dict) -> dict | None:
     }
 
 
+def _try_repair_truncated_json(raw_json_str: str) -> dict | None:
+    """
+    تلاش برای تعمیر JSON ناقص (وقتی پاسخ مدل وسط action_plan قطع شده).
+    اول JSON کامل رو تست میکنه، اگه ناقص بود سعی میکنه فایل‌های کامل‌شده رو نجات بده.
+    """
+    if not raw_json_str or not raw_json_str.strip():
+        return None
+
+    # ۱) اول تلاش مستقیم
+    try:
+        return json.loads(raw_json_str)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # ۲) حذف trailing characters ناقص و تلاش برای بستن JSON
+    text = raw_json_str.strip()
+
+    # پیدا کردن آخرین آبجکت فایل کامل‌شده (حاوی "path" و "content" و بسته‌شده با })
+    # الگو: هر آبجکت {"path": ..., "content": ..., ...} که } بسته‌شده باشه
+    import re as _rj_re
+
+    # استخراج تمام آبجکت‌های فایل کامل از متن
+    # یک آبجکت فایل کامل باید "path" و "content" داشته باشه و } بسته شده باشه
+    completed_files = []
+    # مقادیر string در JSON ممکنه شامل \n, \", و ... باشن پس regex ساده کار نمیکنه
+    # بهترین روش: مرحله‌مرحله آبجکت‌های کامل رو از اول تا آخرین } پیدا کنیم
+
+    # پیدا کردن "files": [ و سپس هر آبجکت داخلش
+    files_start = text.find('"files"')
+    if files_start == -1:
+        # شاید "action_plan" باشه
+        files_start = text.find('"action_plan"')
+    if files_start == -1:
+        return None
+
+    bracket_start = text.find('[', files_start)
+    if bracket_start == -1:
+        return None
+
+    # حالا از bracket_start شروع میکنیم و هر آبجکت رو مرحله‌ای parse میکنیم
+    pos = bracket_start + 1
+    depth = 0
+    obj_start = -1
+
+    while pos < len(text):
+        ch = text[pos]
+
+        if ch == '"':
+            # skip string
+            pos += 1
+            while pos < len(text):
+                if text[pos] == '\\':
+                    pos += 2
+                    continue
+                if text[pos] == '"':
+                    break
+                pos += 1
+
+        elif ch == '{':
+            if depth == 0:
+                obj_start = pos
+            depth += 1
+
+        elif ch == '}':
+            depth -= 1
+            if depth == 0 and obj_start >= 0:
+                obj_str = text[obj_start:pos + 1]
+                try:
+                    obj = json.loads(obj_str)
+                    if obj.get("path") and obj.get("content"):
+                        completed_files.append(obj)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                obj_start = -1
+
+        pos += 1
+
+    if not completed_files:
+        return None
+
+    # ساخت action_plan از فایل‌های نجات‌یافته
+    # تلاش برای استخراج commit_message
+    commit_msg = ""
+    cm_match = _rj_re.search(r'"commit_message"\s*:\s*"([^"]*)"', text)
+    if cm_match:
+        commit_msg = cm_match.group(1)
+
+    return {
+        "files": completed_files,
+        "commit_message": commit_msg,
+        "_repaired": True,
+        "_original_file_count_hint": text.count('"path"'),
+        "_recovered_file_count": len(completed_files),
+    }
+
+
 def _validate_action_plan_syntax(action_plan: dict) -> dict:
     """
     اعتبارسنجی ابتدایی سینتکس فایل‌های action_plan قبل از ارسال به فرانت.
@@ -12012,6 +12108,10 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 _err_content = _strip_reasoning_blocks(response.content) if response.content else ""
                 _err_model_used = response.model_id
                 _err_tokens = response.tokens_used
+                # 🆕 تشخیص truncation
+                _err_finish = getattr(response, 'finish_reason', '') or ''
+                _err_is_truncated = _err_finish.lower() in ('length', 'max_tokens')
+
                 if not _err_content or not _err_content.strip():
                     slog.warning(f"[smart-chat] Empty ERROR_LOG response, model={primary_model}, prompt_len={len(error_analysis_prompt)}")
                     _err_sys_msg = f"تو بازرس ارشد پروژه هستی. {'مستقیماً کد مشکل‌دار را پیدا کن، اصلاحش را بنویس و action_plan ارائه بده.' if has_err_code_files else 'فایل‌ها خوانده نشدند — فقط تحلیل خطا ارائه بده.'} با لحن صمیمی و حرفه‌ای پاسخ بده."
@@ -12034,6 +12134,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                 _err_content = _rr.content
                                 _err_model_used = _rr.model_id
                                 _err_tokens = _rr.tokens_used
+                                _err_finish = getattr(_rr, 'finish_reason', '') or ''
+                                _err_is_truncated = _err_finish.lower() in ('length', 'max_tokens')
                                 slog.info(f"[smart-chat] ERROR_LOG retry succeeded: model={_rm}")
                                 yield sse("progress", {"step": "retry_success", "message": f"✅ تلاش مجدد موفق — مدل {_rm} پاسخ داد"})
                                 break
@@ -12055,6 +12157,19 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     except Exception:
                         pass
 
+                    # 🆕 اگر JSON ناقص بود (truncation) — تلاش برای تعمیر
+                    if action_plan is None and _err_is_truncated and '```json' in _err_content:
+                        _ej_start = _err_content.rfind('```json')
+                        if _ej_start >= 0:
+                            _ej_body = _err_content[_ej_start + 7:].replace('```', '').strip()
+                            _ej_repaired = _try_repair_truncated_json(_ej_body)
+                            if _ej_repaired:
+                                action_plan = _normalize_action_plan_json(_ej_repaired)
+                                if action_plan:
+                                    action_plan["_truncated"] = True
+                                    _ej_recovered = _ej_repaired.get("_recovered_file_count", 0)
+                                    yield sse("progress", {"step": "truncation_repaired", "message": f"⚠️ پاسخ ناقص بود — {_ej_recovered} فایل از action_plan نجات یافت"})
+
                     # لایه ۲: اگر فایل‌ها خوانده نشدن، action_plan حذف شود
                     if not has_err_code_files and action_plan is not None:
                         slog.warning(f"[smart-chat ERROR_LOG] AI generated action_plan without reading files — stripped")
@@ -12063,6 +12178,15 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     has_code_action = action_plan is not None or any(marker in _err_content for marker in [
                         "```", "فایل‌هایی که باید تغییر", "اصلاح کنید"
                     ])
+
+                    # 🆕 هشدار truncation به کاربر
+                    if _err_is_truncated:
+                        _trunc_msg = ""
+                        if action_plan:
+                            _trunc_msg = f"\n\n---\n⚠️ **هشدار:** پاسخ مدل ناقص بود — {len(action_plan.get('files', []))} فایل از action_plan نجات یافت."
+                        else:
+                            _trunc_msg = "\n\n---\n⚠️ **هشدار:** پاسخ مدل به دلیل محدودیت خروجی ناقص قطع شد. لطفاً با مدل دیگری تلاش کنید."
+                        _err_content += _trunc_msg
 
                     yield sse("response", {
                         "type": "error_analysis",
@@ -12073,6 +12197,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         "action_plan": _validate_action_plan_syntax(action_plan) if action_plan else None,
                         "files_were_read": has_err_code_files,
                         "selected_file_paths": selected if has_err_code_files else [],
+                        "truncated": _err_is_truncated,
                     })
 
             except asyncio.CancelledError:
@@ -12566,6 +12691,9 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 content = _strip_reasoning_blocks(response.content) if response.content else ""
                 _act_model_used = response.model_id
                 _act_tokens = response.tokens_used
+                # 🆕 تشخیص truncation
+                _act_finish = getattr(response, 'finish_reason', '') or ''
+                _act_is_truncated = _act_finish.lower() in ('length', 'max_tokens')
                 if not content or not content.strip():
                     slog.warning(f"[smart-chat] Empty response, model={primary_model}, prompt_len={len(action_prompt)}")
                     _act_sys_msg = f"تو توسعه‌دهنده ارشد پروژه هستی با دسترسی کامل به تمام فایل‌ها. {'مستقیماً مشکل را پیدا کن، کد اصلاح‌شده کامل بنویس و action_plan معتبر JSON ارائه بده.' if has_code_files else 'فایل‌ها در این دور خوانده نشدند — فقط تحلیل ارائه بده.'} هرگز نگو دسترسی ندارم. با لحن صمیمی و حرفه‌ای پاسخ بده."
@@ -12700,6 +12828,19 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     except Exception:
                         pass
 
+                    # 🆕 اگر JSON ناقص بود (truncation) — تلاش برای تعمیر
+                    if action_plan is None and _act_is_truncated and '```json' in content:
+                        _aj_start = content.rfind('```json')
+                        if _aj_start >= 0:
+                            _aj_body = content[_aj_start + 7:].replace('```', '').strip()
+                            _aj_repaired = _try_repair_truncated_json(_aj_body)
+                            if _aj_repaired:
+                                action_plan = _normalize_action_plan_json(_aj_repaired)
+                                if action_plan:
+                                    action_plan["_truncated"] = True
+                                    _aj_recovered = _aj_repaired.get("_recovered_file_count", 0)
+                                    yield sse("progress", {"step": "truncation_repaired", "message": f"⚠️ پاسخ ناقص بود — {_aj_recovered} فایل از action_plan نجات یافت"})
+
                     # لایه ۲: اگر فایل‌ها خوانده نشدن، action_plan حذف شود (جلوگیری از محتوای ساختگی)
                     if not has_code_files and action_plan is not None:
                         slog.warning(f"[smart-chat ACTION] AI generated action_plan without reading files — stripped. Files in plan: {[f.get('path') for f in (action_plan.get('files') or [])]}")
@@ -12718,6 +12859,15 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             else:
                                 action_plan = None
 
+                    # 🆕 هشدار truncation به کاربر
+                    if _act_is_truncated:
+                        _trunc_msg = ""
+                        if action_plan:
+                            _trunc_msg = f"\n\n---\n⚠️ **هشدار:** پاسخ مدل ناقص بود — {len(action_plan.get('files', []))} فایل از action_plan نجات یافت."
+                        else:
+                            _trunc_msg = "\n\n---\n⚠️ **هشدار:** پاسخ مدل به دلیل محدودیت خروجی ناقص قطع شد. لطفاً با مدل دیگری تلاش کنید."
+                        content += _trunc_msg
+
                     yield sse("response", {
                         "type": "action",
                         "content": content,
@@ -12727,6 +12877,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         "action_plan": _validate_action_plan_syntax(action_plan) if action_plan else None,
                         "files_were_read": has_code_files,
                         "selected_file_paths": selected if has_code_files else [],
+                        "truncated": _act_is_truncated,
                     })
 
             except asyncio.CancelledError:
@@ -13850,6 +14001,10 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                 response.content = _strip_reasoning_blocks(response.content)
             yield sse("fields_done", {"field_ids": ["visual_debug_prompt"]})
 
+            # 🆕 تشخیص truncation
+            _vd_finish = getattr(response, 'finish_reason', '') or ''
+            _vd_is_truncated = _vd_finish.lower() in ('length', 'max_tokens')
+
             action_plan = None
             if "```" in response.content:
                 # استخراج بلوک‌های JSON action_plan (با پشتیبانی فرمت‌های مختلف)
@@ -13860,6 +14015,19 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                         action_plan = _normalize_action_plan_json(parsed)
                     except (json.JSONDecodeError, Exception):
                         pass
+
+                # 🆕 اگر JSON ناقص بود (truncation) — تلاش برای تعمیر
+                if action_plan is None and _vd_is_truncated and '```json' in response.content:
+                    _vj_start = response.content.rfind('```json')
+                    if _vj_start >= 0:
+                        _vj_body = response.content[_vj_start + 7:].replace('```', '').strip()
+                        _vj_repaired = _try_repair_truncated_json(_vj_body)
+                        if _vj_repaired:
+                            action_plan = _normalize_action_plan_json(_vj_repaired)
+                            if action_plan:
+                                action_plan["_truncated"] = True
+                                _vj_recovered = _vj_repaired.get("_recovered_file_count", 0)
+                                yield sse("progress", {"step": "truncation_repaired", "message": f"⚠️ پاسخ ناقص بود — {_vj_recovered} فایل از action_plan نجات یافت"})
 
                 # روش دوم (فالبک): استخراج از بلوک‌های کد + نام فایل
                 if action_plan is None:
@@ -13876,11 +14044,21 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                         if all(f["path"].startswith("file_") for f in action_plan["files"]):
                             action_plan = None
 
+            # 🆕 هشدار truncation به کاربر
+            if _vd_is_truncated:
+                _trunc_msg = ""
+                if action_plan:
+                    _trunc_msg = f"\n\n---\n⚠️ **هشدار:** پاسخ مدل ناقص بود — {len(action_plan.get('files', []))} فایل از action_plan نجات یافت."
+                else:
+                    _trunc_msg = "\n\n---\n⚠️ **هشدار:** پاسخ مدل به دلیل محدودیت خروجی ناقص قطع شد. لطفاً با مدل دیگری تلاش کنید."
+                response.content += _trunc_msg
+
             yield sse("response", {
                 "content": response.content, "model_used": primary_model,
                 "tokens_used": getattr(response, 'tokens_used', 0) or 0,
                 "type": "visual_debug", "screenshots_count": len(request.screenshots),
                 "action_plan": _validate_action_plan_syntax(action_plan) if action_plan else None, "has_action": action_plan is not None,
+                "truncated": _vd_is_truncated,
             })
         except Exception as e:
             yield sse("error", {"message": f"خطا: {str(e)[:200]}", "detail": type(e).__name__})
@@ -14104,7 +14282,15 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
   "commit_message": "توضیح تغییرات"
 }}
 ```
-⚠️ محتوای هر فایل باید **کامل** باشه — فقط بخش تغییریافته نه، کل فایل."""
+
+### ⚠️ مدیریت بودجه خروجی (بسیار مهم):
+- محتوای هر فایل باید **کامل** باشه — فقط بخش تغییریافته نه، کل فایل
+- 🔴 **اما**: اگر فایل اصلی بزرگ است (بیش از ۱۰۰ خط) و فقط چند خط تغییر می‌کند:
+  - آن فایل را در action_plan **نگذار**
+  - به جایش توضیح بده دقیقاً چه خط‌هایی باید تغییر کنند
+- 🔴 ترتیب: اول فایل‌های **جدید** (create) و **کوچک** را بنویس، بعد فایل‌های بزرگ‌تر
+- 🔴 اگر فایل‌ها زیادند (بیش از ۵)، تحلیل متنی کوتاه بنویس و action_plan فقط مهم‌ترین فایل‌ها
+- هرگز فایل بزرگ موجود (مثل app.py 500+ خط) را کامل کپی نکن — فقط بخش‌های تغییریافته توضیح بده"""
 
         if selected_files:
             full_system += f"\n\n## 📂 فایل‌های پروژه خوانده‌شده ({len(selected_files)} فایل):\n"
@@ -14161,6 +14347,10 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
             if response.content:
                 response.content = _strip_reasoning_blocks(response.content)
 
+            # 🆕 تشخیص truncation — آیا پاسخ مدل ناقص قطع شده؟
+            _ra_finish = getattr(response, 'finish_reason', '') or ''
+            _ra_is_truncated = _ra_finish.lower() in ('length', 'max_tokens')
+
             action_plan = None
             if "```" in response.content:
                 json_match = re.search(r'```json\s*\n(.*?)\n```', response.content, re.DOTALL)
@@ -14170,6 +14360,26 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
                         action_plan = _normalize_action_plan_json(parsed)
                     except (json.JSONDecodeError, Exception):
                         pass
+
+                # 🆕 اگر JSON ناقص بود (truncation)، تلاش برای تعمیر
+                if action_plan is None and _ra_is_truncated:
+                    # استخراج بخش JSON ناقص از آخرین بلوک ```json
+                    _ra_last_json_start = response.content.rfind('```json')
+                    if _ra_last_json_start >= 0:
+                        _ra_json_body = response.content[_ra_last_json_start + 7:]  # بعد از ```json
+                        # حذف ``` پایانی اگر وجود داره
+                        _ra_json_body = _ra_json_body.replace('```', '').strip()
+                        _ra_repaired = _try_repair_truncated_json(_ra_json_body)
+                        if _ra_repaired:
+                            action_plan = _normalize_action_plan_json(_ra_repaired)
+                            if action_plan:
+                                action_plan["_truncated"] = True
+                                _recovered = _ra_repaired.get("_recovered_file_count", 0)
+                                _total_hint = _ra_repaired.get("_original_file_count_hint", 0)
+                                yield sse("progress", {
+                                    "step": "truncation_repaired",
+                                    "message": f"⚠️ پاسخ مدل ناقص بود — {_recovered} فایل از ~{_total_hint} فایل نجات یافت"
+                                })
 
                 if action_plan is None:
                     code_blocks = re.findall(r'```[\w]*\n(.*?)```', response.content, re.DOTALL)
@@ -14182,11 +14392,21 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
                         if all(f["path"].startswith("file_") for f in action_plan["files"]):
                             action_plan = None
 
+            # 🆕 اگر هنوز action_plan نیست و truncated شده — هشدار به کاربر
+            _ra_truncation_warning = ""
+            if _ra_is_truncated:
+                if action_plan:
+                    _ra_truncation_warning = f"\n\n---\n⚠️ **هشدار:** پاسخ مدل به دلیل محدودیت خروجی ({_ra_max_output} توکن) ناقص بود. {len(action_plan.get('files', []))} فایل از action_plan نجات یافت — ممکن است برخی فایل‌ها ناقص یا غایب باشند."
+                else:
+                    _ra_truncation_warning = f"\n\n---\n⚠️ **هشدار:** پاسخ مدل به دلیل محدودیت خروجی ({_ra_max_output} توکن) ناقص قطع شد و action_plan کامل نشد. لطفاً با مدل دیگری دوباره تلاش کنید یا درخواست را ساده‌تر کنید."
+                response.content += _ra_truncation_warning
+
             yield sse("response", {
                 "content": response.content, "model_used": reanalyze_model,
                 "tokens_used": getattr(response, 'tokens_used', 0) or 0,
                 "type": "visual_debug_reanalyze", "vision_model": request.vision_model_id,
                 "action_plan": _validate_action_plan_syntax(action_plan) if action_plan else None, "has_action": action_plan is not None,
+                "truncated": _ra_is_truncated,
             })
         except Exception as e:
             yield sse("error", {"message": f"خطا: {str(e)[:200]}", "detail": type(e).__name__})
