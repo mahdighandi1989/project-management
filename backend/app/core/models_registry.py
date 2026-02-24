@@ -223,7 +223,7 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
             ModelCapability.CODE,
             ModelCapability.REASONING
         ],
-        max_tokens=8192,
+        max_tokens=16384,
         context_window=32000,
         strengths=["code", "reasoning", "cost-effective"],
         weaknesses=["multimodal"],
@@ -240,7 +240,7 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
             ModelCapability.CODE,
             ModelCapability.TEXT
         ],
-        max_tokens=8192,
+        max_tokens=16384,
         context_window=16000,
         strengths=["code", "programming"],
         weaknesses=["general-text"],
@@ -258,7 +258,7 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
             ModelCapability.CODE,
             ModelCapability.THINKING
         ],
-        max_tokens=8192,
+        max_tokens=16384,
         context_window=64000,
         strengths=["reasoning", "math", "logic", "physics"],
         weaknesses=["speed", "cost"],
