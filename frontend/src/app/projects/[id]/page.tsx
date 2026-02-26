@@ -2178,8 +2178,8 @@ export default function ProjectDetailPage() {
   const applySmartAction = async (msgId: string) => {
     const msg = inspectorChatMessages.find(m => m.id === msgId) as any;
     if (!msg?.action_plan?.files || msg.action_plan.files.length === 0) {
-      // بررسی فایل‌های بدون محتوا
-      const hasEmptyContent = msg?.action_plan?.files?.some((f: any) => !f.content);
+      // بررسی فایل‌های بدون محتوا (modify_sections فایل‌ها بجای content از sections استفاده میکنن)
+      const hasEmptyContent = msg?.action_plan?.files?.some((f: any) => !f.content && f.operation !== 'modify_sections');
       setInspectorChatMessages(prev => [...prev, {
         id: `apply_err_${Date.now()}`,
         role: 'system' as const,
@@ -2210,7 +2210,7 @@ export default function ProjectDetailPage() {
     setInspectorChatMessages(prev => [...prev, {
       id: `apply_start_${Date.now()}`,
       role: 'system' as const,
-      content: `🔧 شروع اعمال تغییرات (${msg.action_plan.files.length} فایل)...`,
+      content: `🔧 شروع اعمال تغییرات (${msg.action_plan.files.length} فایل${msg.action_plan.files.some((f: any) => f.operation === 'modify_sections') ? ' — شامل modify_sections' : ''})...`,
       timestamp: new Date(),
     }]);
 
@@ -3164,6 +3164,13 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         stepPrompt += `\n## 📁 فایل‌های تغییر یافته تا الان (محتوای واقعی — بازنویسی نکن!):\n`;
         let contentBudget = 30000;
         for (const f of collectedActionFiles) {
+          // modify_sections: نمایش sections بجای content
+          if (f.operation === 'modify_sections' && f.sections) {
+            const sectionsStr = JSON.stringify(f.sections, null, 2);
+            stepPrompt += `\n### 📄 ${f.path} (modify_sections — ${f.sections.length} بخش):\n\`\`\`json\n${sectionsStr.slice(0, 3000)}\n\`\`\`\n`;
+            contentBudget -= Math.min(sectionsStr.length, 3000);
+            continue;
+          }
           const fileContent = f.content || '';
           const truncated = fileContent.length > 5000 ? fileContent.slice(0, 5000) + '\n// ... (ادامه فایل موجود)' : fileContent;
           if (contentBudget <= 0) {
@@ -4299,6 +4306,13 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
               stepPrompt += `\n## 📁 فایل‌های تغییر یافته تا الان (محتوای واقعی — بازنویسی نکن!):\n`;
               let contentBudget = 30000; // حداکثر 30K کاراکتر برای محتوای فایل‌ها
               for (const f of collectedActionFiles) {
+                // modify_sections: نمایش sections بجای content
+                if (f.operation === 'modify_sections' && f.sections) {
+                  const sectionsStr = JSON.stringify(f.sections, null, 2);
+                  stepPrompt += `\n### 📄 ${f.path} (modify_sections — ${f.sections.length} بخش):\n\`\`\`json\n${sectionsStr.slice(0, 3000)}\n\`\`\`\n`;
+                  contentBudget -= Math.min(sectionsStr.length, 3000);
+                  continue;
+                }
                 const fileContent = f.content || '';
                 const truncated = fileContent.length > 5000 ? fileContent.slice(0, 5000) + '\n// ... (ادامه فایل موجود)' : fileContent;
                 if (contentBudget <= 0) {
@@ -11913,6 +11927,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             <span className="text-[9px] text-red-500 dark:text-red-400 px-1">
                               🚫 فایل‌ها خوانده نشدند - ممکنه محتوا حدسی باشه
                             </span>
+                          )}
+                          {/* نشانگر modify_sections — فایل‌هایی که بصورت بخشی تغییر میکنن */}
+                          {(msg as any).action_plan?.files?.some((f: any) => f.operation === 'modify_sections') && (
+                            <div className="w-full mt-1 p-1.5 bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-700 rounded text-[10px]">
+                              <span className="font-bold text-blue-700 dark:text-blue-300">🔧 تغییرات بخشی (modify_sections):</span>
+                              <ul className="mt-0.5 space-y-0.5 text-blue-600 dark:text-blue-400">
+                                {(msg as any).action_plan.files.filter((f: any) => f.operation === 'modify_sections').map((f: any, i: number) => (
+                                  <li key={i} className="pr-2">
+                                    <code className="text-[9px]">{f.path}</code>: {f.sections?.length || 0} بخش تغییر
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
                           )}
                           {/* فایل‌های حذف‌شده به خاطر خطای بحرانی سینتکس */}
                           {(msg as any).action_plan?._rejected_files?.length > 0 && (

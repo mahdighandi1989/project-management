@@ -214,8 +214,21 @@ def _build_general_instructions_list(
 - محتوای هر فایل در action_plan باید **کامل و قابل جایگزینی** باشد — نه تکه‌ای از فایل
 - هرگز «// ... بقیه کد» یا «// rest of file» ننویس — محتوای کامل بده
 - ⚠️ **فایل‌های بزرگ (>200 خط)**: اگر فایلی بیش از ۲۰۰ خط دارد و فقط چند خط تغییر لازمه:
-  - content خروجی باید تعداد خطوطش **مشابه** فایل اصلی باشد (±۱۰٪)
-  - اگر نمی‌توانی تمام خطوط رو تولید کنی، آن فایل را در action_plan نگذار و فقط بگو «تغییرات لازم: ...»
+  - ✅ **روش ترجیحی: از `modify_sections` استفاده کن** (بجای بازنویسی کل فایل):
+    ```json
+    {"path": "path/to/file.tsx", "operation": "modify_sections", "sections": [
+      {"find": "متن دقیق بخشی از فایل اصلی", "replace": "متن جایگزین"},
+      {"find": "بخش دوم فایل اصلی", "replace": "جایگزین دوم"}
+    ], "description": "توضیح تغییرات"}
+    ```
+  - `find` = متن **دقیق** از فایل اصلی (چند خط، شامل import/function/block)
+  - `replace` = متن جایگزین (میتونه کمتر/بیشتر/خالی باشه)
+  - سیستم خودش فایل اصلی رو از ریپو میخونه و sections رو اعمال میکنه
+  - 🔴 مزیت: هیچ بخشی از فایل اصلی حذف نمیشه — فقط بخش‌های مشخص‌شده تغییر میکنن
+  - اگر بخواهی بخشی رو **حذف** کنی: `"replace": ""` (خالی)
+  - اگر بخواهی بخشی رو **اضافه** کنی: `find` = خط قبل از محل اضافه، `replace` = همان خط + کد جدید
+  - ⚠️ `find` باید **دقیقاً** مطابق متن فایل اصلی باشد (شامل فاصله‌ها و indentation)
+  - اگر operation = "modify" استفاده کنی → content خروجی باید تعداد خطوطش **مشابه** فایل اصلی باشد (±۱۰٪)
   - ❌ اگر فایل ۱۰۰۰ خط داره و خروجی تو ۱۰۰ خطه → حتماً بخش بزرگی حذف شده — ممنوع!
   - سیستم خودکار فایل‌هایی که کمتر از ۵۰٪ فایل اصلی باشند رو **حذف** میکنه
 - تمام وابستگی‌های بین فایلی را بررسی کن: اگر یک interface تغییر کرد، همه فایل‌های مصرف‌کننده باید آپدیت شوند
@@ -264,6 +277,20 @@ def _build_general_instructions_list(
 2. **فقط** بخش‌های مربوط به درخواست را تغییر بده
 3. باقی فایل (imports, state, handlers, UI sections, styles) را دقیقاً مثل اصل حفظ کن
 4. content نهایی = فایل اصلی + تغییرات تو (نه فایل جدید از صفر)
+
+### 🔧 modify_sections — راه‌حل فایل‌های بزرگ:
+- برای فایل‌های **بیش از ۲۰۰ خط** که فقط چند بخش تغییر لازم دارند → از `operation: "modify_sections"` استفاده کن
+- بجای نوشتن کل محتوای فایل، فقط بخش‌های تغییریافته رو مشخص کن:
+  ```json
+  {"path": "file.tsx", "operation": "modify_sections", "sections": [
+    {"find": "متن دقیق از فایل اصلی", "replace": "متن جایگزین"}
+  ]}
+  ```
+- سیستم خودش فایل اصلی رو میخونه و فقط بخش‌های مشخص‌شده رو عوض میکنه
+- ✅ برای اضافه کردن import: `find` = آخرین import موجود، `replace` = همان import + import جدید
+- ✅ برای حذف: `"replace": ""`
+- ⚠️ اگر **کل فایل** باید تغییر کنه (>50% محتوا) → از `modify` معمولی استفاده کن
+- ⚠️ `find` باید **دقیقاً** مطابق متن اصلی باشد (whitespace و indentation شامل)
 
 ### 🔄 قانون ویژه multi-step (اجرای مرحله‌ای):
 - اگر در پرامپت «فایل‌های تغییر یافته تا الان» آمده → **محتوای آن‌ها خروجی مراحل قبلی است**
@@ -10496,7 +10523,16 @@ def _normalize_action_plan_json(parsed: dict) -> dict | None:
                 continue  # دستور shell — در action_plan فایلی جای نداره
             file_path = item.get("file_path") or item.get("path") or ""
             content = item.get("content") or ""
-            if file_path and content:
+            sections = item.get("sections")
+            # modify_sections: فایل بخشی — sections بجای content
+            if file_path and sections and item_type in ("modify_sections",):
+                files.append({
+                    "path": file_path,
+                    "operation": "modify_sections",
+                    "sections": sections,
+                    "description": item.get("description", ""),
+                })
+            elif file_path and content:
                 files.append({
                     "path": file_path,
                     "content": content,
@@ -10516,8 +10552,14 @@ def _normalize_action_plan_json(parsed: dict) -> dict | None:
     if not files or len(files) == 0:
         return None
 
-    # اعتبارسنجی: هر فایل باید path و content داشته باشه
-    valid_files = [f for f in files if f.get("path") and f.get("content")]
+    # اعتبارسنجی: هر فایل باید path و (content یا sections) داشته باشه
+    valid_files = [
+        f for f in files
+        if f.get("path") and (
+            f.get("content")  # فایل‌های معمولی (modify/create)
+            or (f.get("operation", "").lower() == "modify_sections" and f.get("sections"))  # فایل‌های بخشی
+        )
+    ]
     if not valid_files:
         return None
 
@@ -10691,6 +10733,75 @@ def _extract_all_action_plans_from_response(content: str, is_truncated: bool = F
     return result
 
 
+def _apply_section_modifications(original_content: str, sections: list) -> dict:
+    """
+    اعمال تغییرات بخشی (modify_sections) روی فایل اصلی.
+    هر section یک find/replace است که روی محتوای اصلی اعمال میشه.
+
+    پارامترها:
+    - original_content: محتوای کامل فایل اصلی
+    - sections: لیست دیکشنری‌ها، هرکدام با "find" و "replace"
+
+    بازگشت: {"success": bool, "content": str, "applied": int, "errors": list}
+    """
+    if not sections or not isinstance(sections, list):
+        return {"success": False, "content": original_content, "applied": 0, "errors": ["sections خالی یا نامعتبر"]}
+
+    result_content = original_content
+    applied = 0
+    errors = []
+
+    for idx, section in enumerate(sections):
+        if not isinstance(section, dict):
+            errors.append(f"section[{idx}]: باید دیکشنری باشد")
+            continue
+
+        find_str = section.get("find", "")
+        replace_str = section.get("replace", "")
+
+        if not find_str:
+            errors.append(f"section[{idx}]: فیلد 'find' خالی است")
+            continue
+
+        # ── تلاش برای پیدا کردن متن (exact match) ──
+        if find_str in result_content:
+            result_content = result_content.replace(find_str, replace_str, 1)
+            applied += 1
+            continue
+
+        # ── تلاش دوم: مقایسه بدون فضای خالی اضافی (whitespace-flexible match) ──
+        # برای حالتی که مدل AI فضای خالی رو کمی متفاوت تولید کرده
+        import re as _sec_re
+        find_lines = find_str.strip().split("\n")
+        if len(find_lines) >= 1:
+            # ساخت regex pattern: هر خط stripped + فضای خالی انعطاف‌پذیر بین خطوط
+            pattern_parts = []
+            for line in find_lines:
+                # هر خط: فضای ابتدایی انعطاف‌پذیر + محتوای exact (escaped) + فضای انتهایی انعطاف‌پذیر
+                escaped = _sec_re.escape(line.strip())
+                pattern_parts.append(r'[ \t]*' + escaped + r'[ \t]*')
+            pattern = r'\n'.join(pattern_parts)
+            try:
+                match = _sec_re.search(pattern, result_content)
+                if match:
+                    result_content = result_content[:match.start()] + replace_str + result_content[match.end():]
+                    applied += 1
+                    continue
+            except _sec_re.error:
+                pass  # regex خطا داد — ادامه بده
+
+        errors.append(f"section[{idx}]: متن find پیدا نشد: '{find_str[:80]}...'")
+
+    success = applied > 0 and len(errors) < len(sections)
+    return {
+        "success": success,
+        "content": result_content,
+        "applied": applied,
+        "total": len(sections),
+        "errors": errors,
+    }
+
+
 def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None) -> dict:
     """
     اعتبارسنجی سینتکس فایل‌های action_plan قبل از ارسال به فرانت.
@@ -10710,7 +10821,32 @@ def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None)
 
     for f in action_plan["files"]:
         path = f.get("path", "")
+        operation = f.get("operation", "").lower()
         content = f.get("content", "")
+
+        # ── اعتبارسنجی ویژه modify_sections ──
+        if operation == "modify_sections":
+            sections = f.get("sections", [])
+            sec_errors = []
+            if not sections or not isinstance(sections, list):
+                sec_errors.append("❌ sections خالی یا نامعتبر — باید لیستی از {find, replace} باشد")
+            else:
+                for si, sec in enumerate(sections):
+                    if not isinstance(sec, dict):
+                        sec_errors.append(f"❌ section[{si}]: باید دیکشنری باشد")
+                    elif not sec.get("find"):
+                        sec_errors.append(f"❌ section[{si}]: فیلد 'find' خالی — چه متنی باید جایگزین شود؟")
+                    # replace میتونه خالی باشه (حذف بخش)
+            if sec_errors:
+                f["_warnings"] = sec_errors
+                rejected_files.append(f)
+                warnings.extend([f"🚫 {path}: {e}" for e in sec_errors])
+                slog.error(f"[action_plan validation] REJECTED modify_sections {path}: {sec_errors}")
+            else:
+                safe_files.append(f)
+                warnings.append(f"📄 {path}: ✅ modify_sections با {len(sections)} بخش")
+            continue
+
         if not content:
             safe_files.append(f)
             continue
@@ -13254,7 +13390,35 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
             try:
                 existing = await github_svc.get_file_content(owner, repo, file_path, token=token)
                 if existing.get("success"):
-                    final_files.append(f)
+                    # ── modify_sections: اعمال تغییرات بخشی روی فایل اصلی ──
+                    if operation == "modify_sections" and f.get("sections"):
+                        original_content = existing.get("content", "")
+                        if not original_content:
+                            yield sse("progress", {
+                                "step": "file_empty",
+                                "message": f"⚠️ {file_path}: فایل اصلی خالی است — modify_sections ممکن نیست"
+                            })
+                            continue
+                        merge_result = _apply_section_modifications(original_content, f["sections"])
+                        if merge_result["applied"] > 0:
+                            f["content"] = merge_result["content"]
+                            f["_sections_applied"] = merge_result["applied"]
+                            f["_sections_total"] = merge_result["total"]
+                            msg_parts = [f"🔧 {file_path}: {merge_result['applied']}/{merge_result['total']} بخش اعمال شد"]
+                            if merge_result["errors"]:
+                                msg_parts.append(f" (⚠️ {len(merge_result['errors'])} خطا: {merge_result['errors'][0][:60]})")
+                            yield sse("progress", {
+                                "step": "sections_applied",
+                                "message": "".join(msg_parts)
+                            })
+                            final_files.append(f)
+                        else:
+                            yield sse("progress", {
+                                "step": "sections_failed",
+                                "message": f"🚫 {file_path}: هیچ بخشی اعمال نشد — {merge_result['errors'][:2]}"
+                            })
+                    else:
+                        final_files.append(f)
                 else:
                     yield sse("progress", {
                         "step": "file_not_found",
@@ -13755,6 +13919,7 @@ def _build_visual_debug_prompt_list() -> list:
             "icon": "📦",
             "prompt_detail": """🔴 **اجباری**: برای هر درخواستی که نیاز به تغییر کد دارد، **حتماً** بلوک action_plan بنویس:
 
+### فرمت ۱: modify/create (محتوای کامل فایل)
 ```json
 {
   "files": [
@@ -13769,12 +13934,31 @@ def _build_visual_debug_prompt_list() -> list:
 }
 ```
 
+### فرمت ۲: modify_sections (فقط بخش‌های تغییریافته — ویژه فایل‌های بزرگ >200 خط)
+```json
+{
+  "files": [
+    {
+      "path": "مسیر/فایل-بزرگ.tsx",
+      "operation": "modify_sections",
+      "description": "توضیح تغییرات",
+      "sections": [
+        {"find": "متن دقیق بخشی از فایل اصلی", "replace": "متن جایگزین"},
+        {"find": "import { useState } from 'react';", "replace": "import { useState, useEffect } from 'react';"}
+      ]
+    }
+  ],
+  "commit_message": "پیام کامیت"
+}
+```
+
 ⚠️ قوانین action_plan:
-- هر فایل **باید** path و content داشته باشد
-- content = **محتوای کامل و قابل جایگزینی** فایل — نه بخشی از آن
-- operation: "modify" (ویرایش موجود) یا "create" (فایل جدید)
-- اگر نمی‌توانی محتوای کامل فایل را بنویسی، آن فایل را در action_plan نذار
-- files خالی ممنوع — یا فایل با محتوا بذار، یا action_plan نذار
+- operation: "modify" (ویرایش — محتوای کامل) یا "create" (فایل جدید) یا "modify_sections" (تغییر بخشی)
+- **modify**: content = محتوای کامل و قابل جایگزینی فایل
+- **modify_sections**: sections = لیست تغییرات {find, replace} — سیستم خودش فایل اصلی رو میخونه و sections رو اعمال میکنه
+- 🔴 **فایل‌های بزرگ (>200 خط)**: حتماً از `modify_sections` استفاده کن — اینطوری هیچ بخشی از فایل اصلی حذف نمیشه
+- find باید **دقیقاً** مطابق متن فایل اصلی باشد (شامل فاصله‌ها)
+- files خالی ممنوع — یا فایل با محتوا/sections بذار، یا action_plan نذار
 - بدون action_plan = بدون دکمه «اعمال تغییرات» ← کاربر نمی‌تواند تغییرات را اعمال کند""",
         },
         {
@@ -13783,8 +13967,9 @@ def _build_visual_debug_prompt_list() -> list:
             "content": "جواب کامل، فارسی، ممنوعیت حدس، محافظت بیلد/دیپلوی، تحلیل عمیق‌تر",
             "icon": "⚠️",
             "prompt_detail": """- به **فارسی** پاسخ بده. کدها و اصطلاحات فنی انگلیسی مجاز
-- **هرگز** جواب ناقص نده — اگر فایل بزرگ است، باز هم محتوای کامل بنویس
-- 🔴 **فایل‌های بزرگ (>200 خط)**: خطوط content باید ≥۸۰٪ فایل اصلی باشد. سیستم خودکار فایل‌های <۵۰٪ رو حذف میکنه! اگر نمیتونی کامل بنویسی → در action_plan نذار و توضیح بده
+- **هرگز** جواب ناقص نده — اگر فایل بزرگ است، از `modify_sections` استفاده کن
+- 🔴 **فایل‌های بزرگ (>200 خط)**: از `operation: "modify_sections"` استفاده کن — فقط بخش‌های تغییریافته رو مشخص کن، سیستم خودش بقیه رو حفظ میکنه
+- اگر از `modify` معمولی استفاده کنی → خطوط content باید ≥۸۰٪ فایل اصلی باشد. سیستم خودکار فایل‌های <۵۰٪ رو حذف میکنه!
 - اگر اطلاعات کافی نیست، **دقیقاً** بگو چه اطلاعات بیشتری نیاز داری
 
 🔴 تحلیل عمیق‌تر در هر تلاش مجدد:
