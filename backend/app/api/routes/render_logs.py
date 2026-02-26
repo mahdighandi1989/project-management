@@ -11958,6 +11958,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         if msg_type == "QUESTION":
             # سؤال: پاسخ با context کامل + خواندن فایل‌های مرتبط
             question_code_context = ""
+            file_contents = {}  # دیکشنری فایل‌های اصلی برای تشخیص بازنویسی مخرب
             q_tree_summary = ""
             if not owner or not repo:
                 yield sse("progress", {
@@ -12074,6 +12075,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                     result = await github_svc.get_file_content(owner, repo, fp, token=token)
                                     if result.get("success"):
                                         content = result.get("content", "")
+                                        file_contents[fp] = content  # ذخیره اصلی برای تشخیص بازنویسی مخرب
                                         if len(content) > per_file_q_limit:
                                             content = content[:per_file_q_limit] + "\n... [truncated]"
                                         question_code_context += f"\n\n=== {fp} ===\n{content}"
@@ -12203,6 +12205,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
             # خواندن فایل‌های مرتبط از GitHub اگر دسترسی داریم
             code_context = ""
+            file_contents = {}  # دیکشنری فایل‌های اصلی برای تشخیص بازنویسی مخرب
             err_tree_summary = ""
             if not owner or not repo:
                 yield sse("progress", {
@@ -12343,6 +12346,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                     result = await github_svc.get_file_content(owner, repo, file_path, token=token)
                                     if result.get("success"):
                                         content = result.get("content", "")
+                                        file_contents[file_path] = content  # ذخیره اصلی برای تشخیص بازنویسی مخرب
                                         if len(content) > per_file_err_limit:
                                             content = content[:per_file_err_limit] + "\n... [truncated]"
                                         code_context += f"\n\n=== {file_path} ===\n{content}"
@@ -12636,6 +12640,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
             code_context = ""
             code_files = []
+            file_contents = {}  # دیکشنری فایل‌های اصلی برای تشخیص بازنویسی مخرب
             act_tree_summary = ""
             use_batch_processing = False
             _batch_count = 0
@@ -12859,6 +12864,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                     result = await github_svc.get_file_content(owner, repo, file_path, token=token)
                                     if result.get("success"):
                                         content = result.get("content", "")
+                                        file_contents[file_path] = content  # ذخیره اصلی برای تشخیص بازنویسی مخرب
                                         if len(content) > per_file_limit:
                                             content = content[:per_file_limit] + "\n... [truncated]"
                                         code_context += f"\n\n=== {file_path} ===\n{content}"
