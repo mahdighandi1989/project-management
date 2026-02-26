@@ -213,7 +213,11 @@ def _build_general_instructions_list(
   ۸) آیا async/await درست استفاده شده؟
 - محتوای هر فایل در action_plan باید **کامل و قابل جایگزینی** باشد — نه تکه‌ای از فایل
 - هرگز «// ... بقیه کد» یا «// rest of file» ننویس — محتوای کامل بده
-- اگر فایل بزرگ است و نمی‌توانی کامل بنویسی، آن فایل را در action_plan نگذار و توضیح بده چه تغییری لازم است
+- ⚠️ **فایل‌های بزرگ (>200 خط)**: اگر فایلی بیش از ۲۰۰ خط دارد و فقط چند خط تغییر لازمه:
+  - content خروجی باید تعداد خطوطش **مشابه** فایل اصلی باشد (±۱۰٪)
+  - اگر نمی‌توانی تمام خطوط رو تولید کنی، آن فایل را در action_plan نگذار و فقط بگو «تغییرات لازم: ...»
+  - ❌ اگر فایل ۱۰۰۰ خط داره و خروجی تو ۱۰۰ خطه → حتماً بخش بزرگی حذف شده — ممنوع!
+  - سیستم خودکار فایل‌هایی که کمتر از ۵۰٪ فایل اصلی باشند رو **حذف** میکنه
 - تمام وابستگی‌های بین فایلی را بررسی کن: اگر یک interface تغییر کرد، همه فایل‌های مصرف‌کننده باید آپدیت شوند
 
 🔴 قوانین خاص فایل‌های زیرساختی (Dockerfile, deploy scripts, package.json, requirements.txt):
@@ -238,6 +242,7 @@ def _build_general_instructions_list(
 1. **هرگز یک فایل موجود را از صفر بازننویس** — حتی اگر فکر کنی ساختار بهتری داری
    - اگر فایل MonitoringPage.tsx دارای حساب معاملاتی، فیلتر، جدول و ۳۰۰ خط کد است → تغییرات تو باید فقط بخش مربوط به درخواست کاربر را عوض کند — **نه کل فایل**
    - اگر فایل ۵۰۰ خط دارد و تو فقط ۲۰ خط تغییر میدهی → content باید همان ۵۰۰ خط باشد با ۲۰ خط تغییر‌یافته
+   - 🔴 **قانون عددی**: تعداد خطوط content خروجی تو باید حداقل ۸۰٪ تعداد خطوط فایل اصلی باشد. اگر فایل اصلی ۱۰۰۰ خط دارد، content تو نباید کمتر از ۸۰۰ خط باشد. **سیستم خودکار فایل‌هایی با کمتر از ۵۰٪ خطوط اصلی رو حذف میکنه!**
 
 2. **هرگز قابلیت‌های موجود را حذف نکن** مگر کاربر صراحتاً خواسته باشد:
    - ❌ اگر صفحه‌ای دارای بخش‌های A, B, C, D است و کاربر خواسته C رو عوض کنی → A, B, D باید دست‌نخورده بمانند
@@ -10686,11 +10691,15 @@ def _extract_all_action_plans_from_response(content: str, is_truncated: bool = F
     return result
 
 
-def _validate_action_plan_syntax(action_plan: dict) -> dict:
+def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None) -> dict:
     """
     اعتبارسنجی سینتکس فایل‌های action_plan قبل از ارسال به فرانت.
     فایل‌هایی با خطای بحرانی (❌) از action_plan حذف میشن تا commit نشن.
     فایل‌هایی با هشدار (⚠️) باقی می‌مونن ولی هشدار نمایش داده میشه.
+
+    پارامترها:
+    - action_plan: نتیجه action_plan تولیدشده توسط AI
+    - original_files: دیکشنری {path: content} فایل‌های اصلی خوانده‌شده (برای تشخیص بازنویسی مخرب)
     """
     if not action_plan or not action_plan.get("files"):
         return action_plan
@@ -10764,6 +10773,26 @@ def _validate_action_plan_syntax(action_plan: dict) -> dict:
                     if not stripped.endswith("';") and not stripped.endswith('";'):
                         file_warnings.append(f"⚠️ خط {line_num}: import بدون from — احتمال خطای سینتکس")
                         break
+
+        # ── تشخیص بازنویسی مخرب (Destructive Rewrite Detection) ──
+        # اگر operation=modify/update و فایل اصلی رو داریم → مقایسه اندازه
+        operation = f.get("operation", "").lower()
+        if operation in ("modify", "update", "") and original_files:
+            # پیدا کردن فایل اصلی (ممکنه مسیر‌ها متفاوت باشن)
+            _orig_content = None
+            for _orig_path, _orig_c in original_files.items():
+                if _orig_path == path or _orig_path.endswith("/" + path) or path.endswith("/" + _orig_path):
+                    _orig_content = _orig_c
+                    break
+            if _orig_content and isinstance(_orig_content, str):
+                orig_lines = len(_orig_content.strip().split("\n"))
+                new_lines = len(content.strip().split("\n"))
+                # اگر فایل اصلی بزرگ بوده (>80 خط) و خروجی AI خیلی کوتاه‌تره → بازنویسی مخرب
+                if orig_lines > 80 and new_lines < orig_lines * 0.5:
+                    file_critical.append(
+                        f"❌ بازنویسی مخرب: فایل اصلی {orig_lines} خط بود ولی خروجی AI فقط {new_lines} خط دارد "
+                        f"({int(new_lines/orig_lines*100)}% از اصل) — احتمال حذف قابلیت‌های موجود — این فایل حذف شد"
+                    )
 
         # تصمیم‌گیری: حذف یا نگه‌داشتن
         if file_critical:
@@ -11966,7 +11995,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     "model_used": response.model_id,
                     "tokens_used": response.tokens_used,
                     "has_action": q_action_plan is not None,
-                    "action_plan": _validate_action_plan_syntax(q_action_plan) if q_action_plan else None,
+                    "action_plan": _validate_action_plan_syntax(q_action_plan, original_files=file_contents) if q_action_plan else None,
                     "files_were_read": has_q_code,
                     "selected_file_paths": q_selected if has_q_code else [],
                 })
@@ -12386,7 +12415,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         "model_used": _err_model_used,
                         "tokens_used": _err_tokens,
                         "has_action": has_code_action,
-                        "action_plan": _validate_action_plan_syntax(action_plan) if action_plan else None,
+                        "action_plan": _validate_action_plan_syntax(action_plan, original_files=file_contents) if action_plan else None,
                         "files_were_read": has_err_code_files,
                         "selected_file_paths": selected if has_err_code_files else [],
                         "truncated": _err_is_truncated,
@@ -13056,7 +13085,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         "model_used": _act_model_used,
                         "tokens_used": _act_tokens,
                         "has_action": action_plan is not None,
-                        "action_plan": _validate_action_plan_syntax(action_plan) if action_plan else None,
+                        "action_plan": _validate_action_plan_syntax(action_plan, original_files=file_contents) if action_plan else None,
                         "files_were_read": has_code_files,
                         "selected_file_paths": selected if has_code_files else [],
                         "truncated": _act_is_truncated,
@@ -13755,6 +13784,7 @@ def _build_visual_debug_prompt_list() -> list:
             "icon": "⚠️",
             "prompt_detail": """- به **فارسی** پاسخ بده. کدها و اصطلاحات فنی انگلیسی مجاز
 - **هرگز** جواب ناقص نده — اگر فایل بزرگ است، باز هم محتوای کامل بنویس
+- 🔴 **فایل‌های بزرگ (>200 خط)**: خطوط content باید ≥۸۰٪ فایل اصلی باشد. سیستم خودکار فایل‌های <۵۰٪ رو حذف میکنه! اگر نمیتونی کامل بنویسی → در action_plan نذار و توضیح بده
 - اگر اطلاعات کافی نیست، **دقیقاً** بگو چه اطلاعات بیشتری نیاز داری
 
 🔴 تحلیل عمیق‌تر در هر تلاش مجدد:
@@ -14136,6 +14166,7 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                         new_files = [f for f in selected_files if f not in prev_files]
                         old_files = [f for f in selected_files if f in prev_files]
                         selected_files = (new_files + old_files)[:_vd_max_files]
+                    _vd_file_contents = {}  # دیکشنری فایل‌های اصلی برای تشخیص بازنویسی مخرب
                     if selected_files:
                         yield sse("progress", {"step": "reading_files", "message": f"📖 خواندن {len(selected_files)} فایل (بودجه {_vd_code_budget // 1000}K)..."})
                         _vd_read_count = 0
@@ -14151,6 +14182,7 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                                     _remaining = _vd_code_budget - len(code_context)
                                     _this_limit = min(_vd_per_file_limit, max(3000, _remaining))
                                     code_context += f"\n--- {fp} ---\n{_file_content[:_this_limit]}\n"
+                                    _vd_file_contents[fp] = _file_content  # ذخیره برای مقایسه بازنویسی مخرب
                                     _vd_read_count += 1
                             except Exception:
                                 pass
@@ -14234,7 +14266,7 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                 "content": response.content, "model_used": primary_model,
                 "tokens_used": getattr(response, 'tokens_used', 0) or 0,
                 "type": "visual_debug", "screenshots_count": len(request.screenshots),
-                "action_plan": _validate_action_plan_syntax(action_plan) if action_plan else None, "has_action": action_plan is not None,
+                "action_plan": _validate_action_plan_syntax(action_plan, original_files=_vd_file_contents) if action_plan else None, "has_action": action_plan is not None,
                 "truncated": _vd_is_truncated,
             })
         except Exception as e:
@@ -14412,6 +14444,7 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
                         old_files = [f for f in selected_files if f in prev_files]
                         selected_files = (new_files + old_files)[:_ra_max_files]
 
+                    _ra_file_contents = {}  # دیکشنری فایل‌های اصلی برای تشخیص بازنویسی مخرب
                     if selected_files:
                         yield sse("progress", {"step": "reading_files", "message": f"📖 خواندن {len(selected_files)} فایل (بودجه {_ra_code_budget // 1000}K)..."})
                         _ra_read_count = 0
@@ -14426,6 +14459,7 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
                                     _remaining = _ra_code_budget - len(code_context)
                                     _this_limit = min(_ra_per_file_limit, max(3000, _remaining))
                                     code_context += f"\n--- {fp} ---\n{_file_content[:_this_limit]}\n"
+                                    _ra_file_contents[fp] = _file_content
                                     _ra_read_count += 1
                             except Exception:
                                 pass
@@ -14575,7 +14609,7 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
                 "content": response.content, "model_used": reanalyze_model,
                 "tokens_used": getattr(response, 'tokens_used', 0) or 0,
                 "type": "visual_debug_reanalyze", "vision_model": request.vision_model_id,
-                "action_plan": _validate_action_plan_syntax(action_plan) if action_plan else None, "has_action": action_plan is not None,
+                "action_plan": _validate_action_plan_syntax(action_plan, original_files=_ra_file_contents) if action_plan else None, "has_action": action_plan is not None,
                 "truncated": _ra_is_truncated,
             })
         except Exception as e:
