@@ -10740,8 +10740,19 @@ def _validate_action_plan_syntax(action_plan: dict) -> dict:
 
         # ── چک‌های خاص JSON ──
         if ext == "json":
+            json_content = content
+            # tsconfig.json, jsconfig.json و مشابه‌ها JSONC هستند (کامنت مجاز)
+            # قبل از اعتبارسنجی، کامنت‌ها رو حذف میکنیم
+            _fname = path.rsplit("/", 1)[-1].lower() if "/" in path else path.lower()
+            if _fname.startswith("tsconfig") or _fname.startswith("jsconfig"):
+                import re as _json_re
+                # حذف کامنت‌های تک‌خطی (//) و چندخطی (/* ... */)
+                json_content = _json_re.sub(r'//[^\n]*', '', json_content)
+                json_content = _json_re.sub(r'/\*[\s\S]*?\*/', '', json_content)
+                # حذف trailing commas قبل از } یا ]
+                json_content = _json_re.sub(r',\s*([}\]])', r'\1', json_content)
             try:
-                json.loads(content)
+                json.loads(json_content)
             except json.JSONDecodeError as je:
                 file_critical.append(f"❌ JSON نامعتبر خط {je.lineno}: {je.msg} — این فایل حذف شد")
 
