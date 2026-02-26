@@ -212,6 +212,7 @@ def _build_general_instructions_list(
   ۷) آیا JSX tags همه بسته شده‌اند؟
   ۸) آیا async/await درست استفاده شده؟
 - محتوای هر فایل در action_plan باید **کامل و قابل جایگزینی** باشد — نه تکه‌ای از فایل
+- 🔴 **تمام** فایل‌ها و content/sections باید **داخل** یک بلوک JSON باشد. کد رو جدا از action_plan ننویس!
 - هرگز «// ... بقیه کد» یا «// rest of file» ننویس — محتوای کامل بده
 - ⚠️ **فایل‌های بزرگ (>200 خط)**: اگر فایلی بیش از ۲۰۰ خط دارد و فقط چند خط تغییر لازمه:
   - ✅ **روش ترجیحی: از `modify_sections` استفاده کن** (بجای بازنویسی کل فایل):
@@ -10710,6 +10711,42 @@ def _extract_all_action_plans_from_response(content: str, is_truncated: bool = F
                             if f.get("path") not in existing_paths:
                                 all_files.append(f)
 
+    # ── بازیابی فایل‌های بدون content: اتصال به بلوک‌های کد markdown ──
+    # بعضی مدل‌ها action_plan JSON رو بدون content مینویسن، ولی کد واقعی رو در بلوک‌های جدا میذارن:
+    # مثال: ```tsx\nimport React...\n``` بعد از ذکر مسیر فایل
+    _empty_files = [f for f in all_files if f.get("path") and not f.get("content") and not f.get("sections")]
+    if _empty_files:
+        # پیدا کردن بلوک‌های کد غیر-JSON (tsx, ts, jsx, js, py, json, css, html)
+        _code_blocks = re.findall(
+            r'(?:####?\s*📄?\s*([^\n]+?)\s*\((?:create|modify|modify_sections)[^)]*\)\s*\n)?```(?:tsx?|jsx?|py|json|css|html|vue)\s*\n(.*?)\n```',
+            content, re.DOTALL
+        )
+        for _cb_title, _cb_code in _code_blocks:
+            if not _cb_code.strip():
+                continue
+            # تلاش برای اتصال بلوک کد به فایل بدون content
+            for ef in _empty_files:
+                ef_path = ef.get("path", "")
+                ef_fname = ef_path.rsplit("/", 1)[-1] if "/" in ef_path else ef_path
+                # اگر عنوان بلوک شامل نام فایل باشه یا کد شامل import/export مرتبط باشه
+                if _cb_title and ef_fname and ef_fname.lower() in _cb_title.lower():
+                    ef["content"] = _cb_code.strip()
+                    _empty_files.remove(ef)
+                    slog.info(f"[action_plan extraction] Recovered content for {ef_path} from markdown code block")
+                    break
+                # fallback: اگر بلوک کد بلافاصله بعد از ذکر مسیر فایل اومده
+                _path_mention_patterns = [ef_path, ef_fname]
+                for _pm in _path_mention_patterns:
+                    if _pm and _pm in content:
+                        _pm_pos = content.find(_pm)
+                        _cb_pos = content.find(_cb_code[:50])
+                        if _cb_pos > _pm_pos and (_cb_pos - _pm_pos) < 500:
+                            ef["content"] = _cb_code.strip()
+                            if ef in _empty_files:
+                                _empty_files.remove(ef)
+                            slog.info(f"[action_plan extraction] Recovered content for {ef_path} by proximity match")
+                            break
+
     if not all_files:
         return None
 
@@ -10836,7 +10873,24 @@ def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None)
                         sec_errors.append(f"❌ section[{si}]: باید دیکشنری باشد")
                     elif not sec.get("find"):
                         sec_errors.append(f"❌ section[{si}]: فیلد 'find' خالی — چه متنی باید جایگزین شود؟")
-                    # replace میتونه خالی باشه (حذف بخش)
+                    else:
+                        # replace میتونه خالی باشه (حذف بخش)
+                        # ── چک: آیا find واقعاً کد هست یا یه توصیف؟ ──
+                        _find_text = sec["find"].strip()
+                        _descriptive_markers = [
+                            "انتهای فایل", "قبل از export", "بعد از import", "در بخش",
+                            "end of file", "before export", "after import", "at the end",
+                            "// اینجا", "/* اینجا", "در خط", "ابتدای فایل",
+                        ]
+                        _is_descriptive = any(m in _find_text.lower() for m in _descriptive_markers)
+                        # find خیلی کوتاه (<15 کاراکتر) و بدون علائم کد هم مشکوکه
+                        _code_indicators = ["{", "}", "(", ")", "=", ";", "import ", "export ", "const ", "function ", "class ", "def ", "return ", "<", "/>"]
+                        _has_code = any(ci in _find_text for ci in _code_indicators)
+                        if _is_descriptive and not _has_code:
+                            sec_errors.append(
+                                f"⚠️ section[{si}]: find به نظر **توصیف محل تغییر** است نه **متن واقعی فایل**: "
+                                f"'{_find_text[:60]}' — find باید دقیقاً متن کپی‌شده از فایل اصلی باشد"
+                            )
             if sec_errors:
                 f["_warnings"] = sec_errors
                 rejected_files.append(f)
@@ -13958,6 +14012,7 @@ def _build_visual_debug_prompt_list() -> list:
 - **modify_sections**: sections = لیست تغییرات {find, replace} — سیستم خودش فایل اصلی رو میخونه و sections رو اعمال میکنه
 - 🔴 **فایل‌های بزرگ (>200 خط)**: حتماً از `modify_sections` استفاده کن — اینطوری هیچ بخشی از فایل اصلی حذف نمیشه
 - find باید **دقیقاً** مطابق متن فایل اصلی باشد (شامل فاصله‌ها)
+- 🔴 **تمام** فایل‌ها و content/sections باید **داخل** یک بلوک JSON باشد — هرگز کد رو جدا از action_plan ننویس
 - files خالی ممنوع — یا فایل با محتوا/sections بذار، یا action_plan نذار
 - بدون action_plan = بدون دکمه «اعمال تغییرات» ← کاربر نمی‌تواند تغییرات را اعمال کند""",
         },
@@ -14669,7 +14724,9 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
 شما دسترسی کامل به تمام فایل‌های این پروژه دارید. سیستم مرتبط‌ترین فایل‌ها را خوانده و ارائه کرده.
 
 ### فرمت action_plan (ضروری):
-حتماً در پایان گزارش، بلوک JSON با فرمت زیر قرار بدهید:
+حتماً در پایان گزارش، **یک** بلوک JSON با فرمت زیر قرار بدهید. تمام فایل‌ها و محتوا/sections باید **داخل** همین JSON باشد:
+
+فرمت ۱ — modify/create (محتوای کامل):
 ```json
 {{
   "files": [
@@ -14679,14 +14736,30 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
 }}
 ```
 
-### ⚠️ مدیریت بودجه خروجی (بسیار مهم):
-- محتوای هر فایل باید **کامل** باشه — فقط بخش تغییریافته نه، کل فایل
-- 🔴 **اما**: اگر فایل اصلی بزرگ است (بیش از ۱۰۰ خط) و فقط چند خط تغییر می‌کند:
-  - آن فایل را در action_plan **نگذار**
-  - به جایش توضیح بده دقیقاً چه خط‌هایی باید تغییر کنند
+فرمت ۲ — modify_sections (فقط بخش‌های تغییریافته — ویژه فایل‌های بزرگ >200 خط):
+```json
+{{
+  "files": [
+    {{"path": "مسیر/فایل-بزرگ.tsx", "operation": "modify_sections", "sections": [
+      {{"find": "متن دقیق کپی‌شده از فایل اصلی", "replace": "متن جایگزین"}}
+    ]}}
+  ],
+  "commit_message": "توضیح تغییرات"
+}}
+```
+
+⚠️ **قوانین مهم action_plan**:
+- **تمام** فایل‌ها و محتوا/sections باید **داخل** یک بلوک JSON باشد — هرگز content رو جدا از JSON ننویس
+- `find` در modify_sections باید **دقیقاً** متن کپی‌شده از فایل اصلی باشد — نه توصیف محل تغییر
+- ❌ غلط: `"find": "// انتهای فایل — قبل از export"` (این توصیف است، نه کد واقعی!)
+- ✅ صحیح: `"find": "export default MonitoringPage;"` (این متن واقعی فایل است)
+- فایل‌های بزرگ (>200 خط): حتماً از modify_sections استفاده کن
+
+### ⚠️ مدیریت بودجه خروجی:
+- فایل‌های کوچک: از modify با content کامل استفاده کن
+- فایل‌های بزرگ (>200 خط): از modify_sections استفاده کن — فقط بخش‌های تغییریافته
 - 🔴 ترتیب: اول فایل‌های **جدید** (create) و **کوچک** را بنویس، بعد فایل‌های بزرگ‌تر
 - 🔴 اگر فایل‌ها زیادند (بیش از ۵)، تحلیل متنی کوتاه بنویس و action_plan فقط مهم‌ترین فایل‌ها
-- هرگز فایل بزرگ موجود (مثل app.py 500+ خط) را کامل کپی نکن — فقط بخش‌های تغییریافته توضیح بده
 
 ### 🛡️ ممنوعیت بازنویسی مخرب (حیاتی):
 - ⛔ هرگز فایل موجود پروژه را از صفر بازننویس — فقط بخش‌های مربوط به درخواست کاربر تغییر کنند
@@ -14700,13 +14773,23 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
 - ❌ اگر کاربر بگه «ویجت فقط در صفحه X باشه» → هرگز آن را global در همه صفحات نکن
 - ❌ اگر کاربر بگه «ارتفاع رو کم کن» → فقط height تغییر بده، نه کل کامپوننت از صفر
 
-### 🔄 قوانین ویژه بازتحلیل:
-- **معیار اصلی: درخواست کاربر است** — نه نظر مدل قبلی
-- اگر مدل Vision بخشی را **درست** (مطابق درخواست کاربر) انجام داده → آن را تأیید کن و **تغییر نده**
-- اگر مدل Vision بخشی را **غلط** (خلاف درخواست کاربر) انجام داده → فقط همان بخش را اصلاح کن
-- ❌ هرگز یک تصمیم صحیح مدل قبلی را فقط به خاطر «متفاوت بودن» رد نکن
-- ❌ هرگز معنی درخواست کاربر را برعکس مدل قبلی تفسیر نکن
-- ✅ هر بخش action_plan را با درخواست اصلی کاربر مقایسه کن — اگر مطابقت دارد، حفظ کن"""
+### 🔄 قوانین ویژه بازتحلیل (بسیار حیاتی):
+
+🔴 **قانون شماره ۱: ابتدا درخواست اصلی کاربر رو بخون — بالای پیام آمده**
+- قبل از هر کاری، درخواست اصلی کاربر را دقیقاً بخوان (بخش «🎯 درخواست اصلی کاربر» در بالای پیام)
+- **معیار صحت هر تصمیم: آیا مستقیماً به درخواست کاربر مربوط است؟**
+- اگر مدل Vision کاری انجام داده که مستقیماً به درخواست کاربر مربوط است → **تأیید کن و تغییر نده**
+- اگر مدل Vision چیزی انجام داده که به درخواست کاربر ربطی ندارد → آن بخش را اصلاح کن
+
+🔴 **قانون شماره ۲: هرگز کار درست مدل قبلی رو برعکس نکن**
+- ❌ اگر کاربر خواسته «ارتباط شورای AI با ویجت» و مدل Vision store شورای AI ساخته → **صحیح است** — برعکسش نکن
+- ❌ اگر مدل Vision فایل‌های درست تغییر داده → آن‌ها رو حذف نکن و فایل‌های نامربوط جایگزین نکن
+- ❌ هرگز یک تفسیر متفاوت (ولی غلط) از درخواست کاربر ارائه نده فقط به خاطر «متفاوت بودن»
+
+🔴 **قانون شماره ۳: action_plan مدل قبلی رو حفظ + تکمیل کن**
+- ✅ اگر action_plan مدل Vision فایل‌های صحیح دارد → آن‌ها رو نگه‌دار و اگر نیاز هست تکمیل کن
+- ✅ اگر فایلی کم است → اضافه کن. اگر فایلی اضافی است → حذف کن. ولی فایل‌های صحیح رو دست نزن
+- ❌ هرگز کل action_plan رو دور بینداز و از صفر بنویس — مگر واقعاً همه فایل‌ها غلط باشن"""
 
         if selected_files:
             full_system += f"\n\n## 📂 فایل‌های پروژه خوانده‌شده ({len(selected_files)} فایل):\n"
@@ -14718,7 +14801,16 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
             full_system += f"\n\n## کد فایل‌ها:\n{code_context[:_ra_code_budget]}"
 
         # پرامپت کاربر: گزارش Vision + توضیح اصلی
-        user_text = f"""## 📋 گزارش مدل Vision ({request.vision_model_id}):
+        # 🔑 درخواست اصلی کاربر باید اول باشه تا مدل بازتحلیل آن را فراموش نکنه
+        user_text = ""
+        if request.user_description:
+            user_text += f"""## 🎯 درخواست اصلی کاربر (مهم‌ترین بخش — تمام تصمیمات باید بر اساس این باشد):
+**«{request.user_description}»**
+
+⚠️ معیار صحت: آیا هر تغییر مستقیماً به این درخواست مربوط است؟ اگر نه → آن تغییر غلط است.
+
+"""
+        user_text += f"""## 📋 گزارش مدل Vision ({request.vision_model_id}):
 
 {request.vision_report}
 """
@@ -14729,8 +14821,6 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
 {json.dumps(request.vision_action_plan, ensure_ascii=False, indent=2)[:5000]}
 ```
 """
-        if request.user_description:
-            user_text += f"\n## 💬 توضیح اصلی کاربر:\n{request.user_description}\n"
 
         user_text += """
 ## 📝 دستور:
