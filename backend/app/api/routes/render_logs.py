@@ -11046,6 +11046,75 @@ def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None)
     return action_plan
 
 
+def _validate_file_content_syntax(content: str, file_path: str) -> dict:
+    """
+    اعتبارسنجی سینتکس محتوای نهایی یک فایل قبل از commit.
+    این تابع بعد از merge شدن modify_sections و قبل از commit فراخوانی میشه
+    تا مطمئن بشیم کد سالم وارد ریپو میشه.
+
+    Returns:
+        dict: {"valid": bool, "errors": list, "warnings": list}
+    """
+    errors = []
+    warnings = []
+    ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+
+    # ── چک placeholder/truncation ──
+    _truncation_markers = [
+        "// ... rest of", "// ... بقیه", "// remaining code",
+        "/* existing code */", "// ... existing", "// ... ادامه",
+        "# ... rest of", "# ... بقیه",
+        "// TODO: rest", "/* ... */",
+    ]
+    for marker in _truncation_markers:
+        if marker.lower() in content.lower():
+            errors.append(f"محتوای ناقص: شامل '{marker}'")
+            break
+
+    # ── تعادل پرانتز/آکولاد/براکت ──
+    for open_c, close_c, name in [("(", ")", "پرانتز"), ("{", "}", "آکولاد"), ("[", "]", "براکت")]:
+        opens = content.count(open_c)
+        closes = content.count(close_c)
+        diff = abs(opens - closes)
+        if diff > 2:
+            errors.append(f"عدم تعادل {name}: {open_c}={opens} vs {close_c}={closes} (اختلاف {diff})")
+
+    # ── Python syntax ──
+    if ext == "py":
+        try:
+            compile(content, file_path, "exec")
+        except SyntaxError as se:
+            errors.append(f"خطای سینتکس Python خط {se.lineno}: {se.msg}")
+
+    # ── JSON validation ──
+    if ext == "json":
+        json_content = content
+        _fname = file_path.rsplit("/", 1)[-1].lower() if "/" in file_path else file_path.lower()
+        if _fname.startswith("tsconfig") or _fname.startswith("jsconfig"):
+            json_content = re.sub(r'//[^\n]*', '', json_content)
+            json_content = re.sub(r'/\*[\s\S]*?\*/', '', json_content)
+            json_content = re.sub(r',\s*([}\]])', r'\1', json_content)
+        try:
+            json.loads(json_content)
+        except json.JSONDecodeError as je:
+            errors.append(f"JSON نامعتبر خط {je.lineno}: {je.msg}")
+
+    # ── TypeScript/JavaScript/JSX/TSX basic checks ──
+    if ext in ("ts", "tsx", "js", "jsx"):
+        for line_num, line in enumerate(content.split("\n"), 1):
+            stripped = line.strip()
+            if stripped.startswith("import ") and "from" not in stripped and ";" in stripped and "{" not in stripped and "type" not in stripped:
+                if not stripped.endswith("';") and not stripped.endswith('";'):
+                    warnings.append(f"خط {line_num}: import بدون from — احتمال خطای سینتکس")
+                    break
+
+    return {
+        "valid": len(errors) == 0,
+        "errors": errors,
+        "warnings": warnings
+    }
+
+
 def _build_project_tree_summary(code_files: list, max_chars: int = 4000) -> str:
     """
     ساخت خلاصه ساختار پروژه از لیست فایل‌ها.
@@ -13480,7 +13549,25 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
             file_path = f.get("path", "").strip()
             operation = f.get("operation", "modify")
             if operation == "create":
-                # فایل‌های جدید مجازند
+                # فایل‌های جدید مجازند — ولی سینتکس‌شون باید سالم باشه
+                _create_content = f.get("content", "")
+                if _create_content:
+                    _syntax_check = _validate_file_content_syntax(_create_content, file_path)
+                    if not _syntax_check["valid"]:
+                        _errs = "; ".join(_syntax_check["errors"][:3])
+                        yield sse("progress", {
+                            "step": "syntax_error_rejected",
+                            "message": f"🚫 {file_path}: خطای سینتکس در فایل جدید — {_errs}"
+                        })
+                        dropped_files.append({"path": file_path, "reason": f"خطای سینتکس: {_errs[:120]}"})
+                        slog.error(f"[apply-action] REJECTED create {file_path}: syntax errors: {_errs}")
+                        continue
+                    elif _syntax_check["warnings"]:
+                        _warns = "; ".join(_syntax_check["warnings"][:3])
+                        yield sse("progress", {
+                            "step": "syntax_warning",
+                            "message": f"⚠️ {file_path}: هشدار سینتکس — {_warns}"
+                        })
                 final_files.append(f)
                 continue
             try:
@@ -13508,6 +13595,23 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                                 "step": "sections_applied",
                                 "message": "".join(msg_parts)
                             })
+                            # ── اعتبارسنجی سینتکس محتوای merge شده قبل از commit ──
+                            _syntax_check = _validate_file_content_syntax(f["content"], file_path)
+                            if not _syntax_check["valid"]:
+                                _errs = "; ".join(_syntax_check["errors"][:3])
+                                yield sse("progress", {
+                                    "step": "syntax_error_after_merge",
+                                    "message": f"🚫 {file_path}: خطای سینتکس بعد از merge — کد سالم commit نمیشه — {_errs}"
+                                })
+                                dropped_files.append({"path": file_path, "reason": f"خطای سینتکس بعد از merge: {_errs[:120]}"})
+                                slog.error(f"[apply-action] REJECTED merged {file_path}: syntax errors: {_errs}")
+                                continue
+                            elif _syntax_check["warnings"]:
+                                _warns = "; ".join(_syntax_check["warnings"][:3])
+                                yield sse("progress", {
+                                    "step": "syntax_warning_after_merge",
+                                    "message": f"⚠️ {file_path}: هشدار سینتکس بعد از merge — {_warns}"
+                                })
                             final_files.append(f)
                         else:
                             _errs = "; ".join(str(e)[:80] for e in merge_result['errors'][:3])
@@ -13528,7 +13632,28 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                             })
                             dropped_files.append({"path": file_path, "reason": f"modify_sections شکست: {_errs[:100]}"})
                     else:
-                        final_files.append(f)
+                        # ── اعتبارسنجی سینتکس محتوای نهایی قبل از commit ──
+                        _file_content = f.get("content", "")
+                        if _file_content:
+                            _syntax_check = _validate_file_content_syntax(_file_content, file_path)
+                            if not _syntax_check["valid"]:
+                                _errs = "; ".join(_syntax_check["errors"][:3])
+                                yield sse("progress", {
+                                    "step": "syntax_error_rejected",
+                                    "message": f"🚫 {file_path}: خطای سینتکس — کد سالم commit نمیشه — {_errs}"
+                                })
+                                dropped_files.append({"path": file_path, "reason": f"خطای سینتکس: {_errs[:120]}"})
+                                slog.error(f"[apply-action] REJECTED modify {file_path}: syntax errors: {_errs}")
+                            else:
+                                if _syntax_check["warnings"]:
+                                    _warns = "; ".join(_syntax_check["warnings"][:3])
+                                    yield sse("progress", {
+                                        "step": "syntax_warning",
+                                        "message": f"⚠️ {file_path}: هشدار سینتکس — {_warns}"
+                                    })
+                                final_files.append(f)
+                        else:
+                            final_files.append(f)
                 else:
                     yield sse("progress", {
                         "step": "file_not_found",
