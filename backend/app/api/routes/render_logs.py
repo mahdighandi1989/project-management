@@ -10831,7 +10831,15 @@ def _apply_section_modifications(original_content: str, sections: list) -> dict:
             except _sec_re.error:
                 pass  # regex خطا داد — ادامه بده
 
-        errors.append(f"section[{idx}]: متن find پیدا نشد: '{find_str[:80]}...'")
+        # نمایش سرنخ: اولین خط find را در فایل جستجو کن — شاید خط‌های مشابه وجود داره
+        _first_find_line = find_str.strip().split("\n")[0].strip()
+        _similar_hint = ""
+        if _first_find_line and len(_first_find_line) > 5:
+            for _li, _line in enumerate(result_content.split("\n")):
+                if _first_find_line[:30] in _line or _line.strip() == _first_find_line:
+                    _similar_hint = f" (خط مشابه در خط {_li + 1}: '{_line.strip()[:60]}')"
+                    break
+        errors.append(f"section[{idx}]: متن find پیدا نشد: '{find_str[:80]}...'{_similar_hint}")
 
     success = applied > 0 and len(errors) < len(sections)
     return {
@@ -13507,6 +13515,17 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                                 "step": "sections_failed",
                                 "message": f"🚫 {file_path}: هیچ بخشی اعمال نشد — {_errs}"
                             })
+                            # نمایش نمونه محتوای واقعی فایل برای دیباگ — چرا find مطابقت نداشت؟
+                            _orig_lines = original_content.split("\n")
+                            _total_lines = len(_orig_lines)
+                            if _total_lines > 30:
+                                _preview = "\n".join(_orig_lines[:10]) + f"\n... ({_total_lines - 20} خط میانی) ...\n" + "\n".join(_orig_lines[-10:])
+                            else:
+                                _preview = original_content[:1500]
+                            yield sse("progress", {
+                                "step": "sections_failed_preview",
+                                "message": f"📄 {file_path} ({_total_lines} خط) — نمونه محتوای واقعی:\n{_preview[:1500]}"
+                            })
                             dropped_files.append({"path": file_path, "reason": f"modify_sections شکست: {_errs[:100]}"})
                     else:
                         final_files.append(f)
@@ -14656,8 +14675,9 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
             max(10000, _ra_max_input_chars - _ra_prompt_overhead - _ra_user_estimate)
         )
 
-        _ra_max_files = max(5, min(15, _ra_code_budget // 8000))
-        _ra_per_file_limit = max(3000, min(15000, _ra_code_budget // max(_ra_max_files, 1)))
+        # بودجه reanalyze: فایل‌های کمتر با محتوای بیشتر (مدل باید متن واقعی ببینه برای modify_sections)
+        _ra_max_files = max(3, min(10, _ra_code_budget // 15000))
+        _ra_per_file_limit = max(5000, min(30000, _ra_code_budget // max(_ra_max_files, 1)))
 
         yield sse("progress", {"step": "budget", "message": f"📊 بودجه: {_ra_context_window // 1000}K context → {_ra_max_files} فایل, {_ra_per_file_limit // 1000}K/فایل"})
 
@@ -14740,8 +14760,15 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
                         selected_files = (new_files + old_files)[:_ra_max_files]
 
                     _ra_file_contents = {}  # دیکشنری فایل‌های اصلی برای تشخیص بازنویسی مخرب
+                    # فایل‌های action_plan (اولویت بالا) — مدل باید محتوای کامل‌تر ببینه
+                    _ra_priority_files = set(_ra_report_files)
+                    if request.vision_action_plan and request.vision_action_plan.get("files"):
+                        for _apf in request.vision_action_plan["files"]:
+                            _apfp = _apf.get("path", "")
+                            if _apfp:
+                                _ra_priority_files.add(_apfp)
                     if selected_files:
-                        yield sse("progress", {"step": "reading_files", "message": f"📖 خواندن {len(selected_files)} فایل (بودجه {_ra_code_budget // 1000}K)..."})
+                        yield sse("progress", {"step": "reading_files", "message": f"📖 خواندن {len(selected_files)} فایل (بودجه {_ra_code_budget // 1000}K, فایل‌های اولویت: {len(_ra_priority_files)})"})
                         _ra_read_count = 0
                         for fp in selected_files:
                             if len(code_context) >= _ra_code_budget:
@@ -14752,7 +14779,11 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
                                 if file_result.get("success"):
                                     _file_content = file_result.get('content', '')
                                     _remaining = _ra_code_budget - len(code_context)
-                                    _this_limit = min(_ra_per_file_limit, max(3000, _remaining))
+                                    # فایل‌های اولویت‌دار بودجه ۲ برابر دارن (نیاز به دیدن کامل برای modify_sections)
+                                    if fp in _ra_priority_files:
+                                        _this_limit = min(_ra_per_file_limit * 2, max(5000, _remaining))
+                                    else:
+                                        _this_limit = min(_ra_per_file_limit, max(3000, _remaining))
                                     code_context += f"\n--- {fp} ---\n{_file_content[:_this_limit]}\n"
                                     _ra_file_contents[fp] = _file_content
                                     _ra_read_count += 1
