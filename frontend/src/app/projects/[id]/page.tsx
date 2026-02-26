@@ -3160,7 +3160,20 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         stepPrompt += `\n## 📊 خلاصه مراحل قبلی:\n${collectedAnalysis.map((a, idx) => `مرحله ${idx + 1}: ${a.slice(0, 300)}`).join('\n')}\n`;
       }
       if (collectedActionFiles.length > 0) {
-        stepPrompt += `\n## 📁 فایل‌های تغییر یافته تا الان:\n${collectedActionFiles.map(f => `- ${f.path} (${f.operation})`).join('\n')}\n`;
+        // 🔑 پاس دادن محتوای واقعی فایل‌های مراحل قبلی
+        stepPrompt += `\n## 📁 فایل‌های تغییر یافته تا الان (محتوای واقعی — بازنویسی نکن!):\n`;
+        let contentBudget = 30000;
+        for (const f of collectedActionFiles) {
+          const fileContent = f.content || '';
+          const truncated = fileContent.length > 5000 ? fileContent.slice(0, 5000) + '\n// ... (ادامه فایل موجود)' : fileContent;
+          if (contentBudget <= 0) {
+            stepPrompt += `- \`${f.path}\` (${f.operation}) — [محتوا به خاطر حجم نمایش داده نشد]\n`;
+            continue;
+          }
+          stepPrompt += `\n### 📄 ${f.path} (${f.operation}):\n\`\`\`\n${truncated}\n\`\`\`\n`;
+          contentBudget -= truncated.length;
+        }
+        stepPrompt += `\n⚠️ **قانون حیاتی**: اگر فایلی در لیست بالا هست و در مرحله فعلی هم باید تغییر کنه → تمام محتوای بالا حفظ شود و فقط تغییرات جدید اضافه شود. هرگز از صفر بازنویسی نکن!\n`;
       }
       stepPrompt += `\n## ⚠️ دستور: فقط مرحله ${step.step_number} رو انجام بده. تحلیل مختصر (حداکثر ۵ خط) + action_plan کامل.`;
 
@@ -4281,7 +4294,21 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
               stepPrompt += `\n## 📊 خلاصه مراحل قبلی:\n${collectedAnalysis.map((a, idx) => `مرحله ${idx + 1}: ${a.slice(0, 300)}`).join('\n')}\n`;
             }
             if (collectedActionFiles.length > 0) {
-              stepPrompt += `\n## 📁 فایل‌های تغییر یافته تا الان:\n${collectedActionFiles.map(f => `- ${f.path} (${f.operation})`).join('\n')}\n`;
+              // 🔑 پاس دادن محتوای واقعی فایل‌های تغییر یافته مراحل قبلی
+              // تا مدل بداند چه کدی قبلاً نوشته شده و از صفر بازنویسی نکند
+              stepPrompt += `\n## 📁 فایل‌های تغییر یافته تا الان (محتوای واقعی — بازنویسی نکن!):\n`;
+              let contentBudget = 30000; // حداکثر 30K کاراکتر برای محتوای فایل‌ها
+              for (const f of collectedActionFiles) {
+                const fileContent = f.content || '';
+                const truncated = fileContent.length > 5000 ? fileContent.slice(0, 5000) + '\n// ... (ادامه فایل موجود)' : fileContent;
+                if (contentBudget <= 0) {
+                  stepPrompt += `- \`${f.path}\` (${f.operation}) — [محتوا به خاطر حجم نمایش داده نشد]\n`;
+                  continue;
+                }
+                stepPrompt += `\n### 📄 ${f.path} (${f.operation}):\n\`\`\`\n${truncated}\n\`\`\`\n`;
+                contentBudget -= truncated.length;
+              }
+              stepPrompt += `\n⚠️ **قانون حیاتی**: اگر فایلی در لیست بالا هست و در مرحله فعلی هم باید تغییر کنه → تمام محتوای بالا حفظ شود و فقط تغییرات جدید اضافه شود. هرگز از صفر بازنویسی نکن!\n`;
             }
             stepPrompt += `\n## ⚠️ دستور: فقط مرحله ${step.step_number} رو انجام بده. تحلیل مختصر (حداکثر ۵ خط) + action_plan کامل.`;
 
@@ -11886,6 +11913,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             <span className="text-[9px] text-red-500 dark:text-red-400 px-1">
                               🚫 فایل‌ها خوانده نشدند - ممکنه محتوا حدسی باشه
                             </span>
+                          )}
+                          {/* فایل‌های حذف‌شده به خاطر خطای بحرانی سینتکس */}
+                          {(msg as any).action_plan?._rejected_files?.length > 0 && (
+                            <div className="w-full mt-1 p-1.5 bg-red-50 dark:bg-red-900/20 border border-red-400 dark:border-red-700 rounded text-[10px]">
+                              <span className="font-bold text-red-700 dark:text-red-300">🚫 {(msg as any).action_plan._rejected_files.length} فایل به خاطر خطای سینتکس بحرانی حذف شدند:</span>
+                              <ul className="mt-0.5 space-y-0.5 text-red-600 dark:text-red-400">
+                                {(msg as any).action_plan._rejected_files.map((rf: any, i: number) => (
+                                  <li key={i} className="pr-2">
+                                    <code className="text-[9px]">{rf.path}</code>: {rf.reasons?.[0] || 'خطای سینتکس'}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
                           )}
                           {/* هشدارهای سینتکس action_plan */}
                           {(msg as any).action_plan?._syntax_warnings?.length > 0 && (
