@@ -258,7 +258,14 @@ def _build_general_instructions_list(
 1. کل محتوای فعلی فایل را بخوان و درک کن
 2. **فقط** بخش‌های مربوط به درخواست را تغییر بده
 3. باقی فایل (imports, state, handlers, UI sections, styles) را دقیقاً مثل اصل حفظ کن
-4. content نهایی = فایل اصلی + تغییرات تو (نه فایل جدید از صفر)""",
+4. content نهایی = فایل اصلی + تغییرات تو (نه فایل جدید از صفر)
+
+### 🔄 قانون ویژه multi-step (اجرای مرحله‌ای):
+- اگر در پرامپت «فایل‌های تغییر یافته تا الان» آمده → **محتوای آن‌ها خروجی مراحل قبلی است**
+- اگر فایلی در مرحله قبل تغییر یافته و در مرحله فعلی هم باید تغییر کنه → **تمام محتوای مرحله قبل حفظ شود** + تغییرات جدید اضافه شود
+- ❌ هرگز فایل مرحله قبل را دور بینداز و از صفر بنویس
+- ❌ URL‌ها، API baseها، نام event‌ها، نام متغیرها: **دقیقاً مثل مراحل قبلی** — تغییر ندهید
+- ✅ content مرحله فعلی = content مرحله قبل + تغییرات جدید""",
         },
         {
             "id": "sys_exact_intent",
@@ -10681,22 +10688,26 @@ def _extract_all_action_plans_from_response(content: str, is_truncated: bool = F
 
 def _validate_action_plan_syntax(action_plan: dict) -> dict:
     """
-    اعتبارسنجی ابتدایی سینتکس فایل‌های action_plan قبل از ارسال به فرانت.
-    فایل‌هایی که خطای آشکار سینتکس دارند، با warnings فلگ میشن.
-    خود فایل حذف نمیشه — فقط هشدار داده میشه تا کاربر مطلع باشه.
+    اعتبارسنجی سینتکس فایل‌های action_plan قبل از ارسال به فرانت.
+    فایل‌هایی با خطای بحرانی (❌) از action_plan حذف میشن تا commit نشن.
+    فایل‌هایی با هشدار (⚠️) باقی می‌مونن ولی هشدار نمایش داده میشه.
     """
     if not action_plan or not action_plan.get("files"):
         return action_plan
 
     warnings = []
+    rejected_files = []  # فایل‌هایی که به خاطر خطای بحرانی حذف شدن
+    safe_files = []  # فایل‌هایی که سالمن یا فقط هشدار دارن
 
     for f in action_plan["files"]:
         path = f.get("path", "")
         content = f.get("content", "")
         if not content:
+            safe_files.append(f)
             continue
 
         file_warnings = []
+        file_critical = []  # خطاهای بحرانی که باعث حذف فایل میشن
         ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
 
         # ── چک‌های عمومی ──
@@ -10709,36 +10720,33 @@ def _validate_action_plan_syntax(action_plan: dict) -> dict:
         ]
         for marker in _truncation_markers:
             if marker.lower() in content.lower():
-                file_warnings.append(f"⚠️ فایل ناقص: محتوا شامل '{marker}' — باید کامل باشد")
+                file_critical.append(f"❌ فایل ناقص: محتوا شامل '{marker}' — این فایل حذف شد")
                 break
 
         # تعادل پرانتز/آکولاد/براکت
         for open_c, close_c, name in [("(", ")", "پرانتز"), ("{", "}", "آکولاد"), ("[", "]", "براکت")]:
-            # شمارش ساده (بدون در نظر گرفتن رشته‌ها — تقریبی ولی مفید)
             opens = content.count(open_c)
             closes = content.count(close_c)
             diff = abs(opens - closes)
-            if diff > 2:  # فرق بیش از 2 تا مشکوکه
-                file_warnings.append(f"⚠️ عدم تعادل {name}: {open_c}={opens} vs {close_c}={closes} (اختلاف {diff})")
+            if diff > 2:
+                file_critical.append(f"❌ عدم تعادل بحرانی {name}: {open_c}={opens} vs {close_c}={closes} (اختلاف {diff}) — این فایل حذف شد")
 
         # ── چک‌های خاص Python ──
         if ext == "py":
             try:
                 compile(content, path, "exec")
             except SyntaxError as se:
-                file_warnings.append(f"❌ خطای سینتکس Python خط {se.lineno}: {se.msg}")
+                file_critical.append(f"❌ خطای سینتکس Python خط {se.lineno}: {se.msg} — این فایل حذف شد")
 
         # ── چک‌های خاص JSON ──
         if ext == "json":
             try:
                 json.loads(content)
             except json.JSONDecodeError as je:
-                file_warnings.append(f"❌ JSON نامعتبر خط {je.lineno}: {je.msg}")
+                file_critical.append(f"❌ JSON نامعتبر خط {je.lineno}: {je.msg} — این فایل حذف شد")
 
         # ── چک‌های خاص TypeScript/JavaScript/JSX/TSX ──
         if ext in ("ts", "tsx", "js", "jsx"):
-            # JSX self-closing tags check
-            # import without from
             for line_num, line in enumerate(content.split("\n"), 1):
                 stripped = line.strip()
                 if stripped.startswith("import ") and "from" not in stripped and ";" in stripped and "{" not in stripped and "type" not in stripped:
@@ -10746,13 +10754,33 @@ def _validate_action_plan_syntax(action_plan: dict) -> dict:
                         file_warnings.append(f"⚠️ خط {line_num}: import بدون from — احتمال خطای سینتکس")
                         break
 
-        if file_warnings:
-            f["_warnings"] = file_warnings
-            warnings.extend([f"📄 {path}: {w}" for w in file_warnings])
+        # تصمیم‌گیری: حذف یا نگه‌داشتن
+        if file_critical:
+            f["_warnings"] = file_critical + file_warnings
+            rejected_files.append(f)
+            warnings.extend([f"🚫 {path}: {w}" for w in file_critical])
+            slog.error(f"[action_plan validation] REJECTED file {path}: {file_critical}")
+        else:
+            if file_warnings:
+                f["_warnings"] = file_warnings
+                warnings.extend([f"📄 {path}: {w}" for w in file_warnings])
+            safe_files.append(f)
+
+    # جایگزینی لیست فایل‌ها با فایل‌های سالم
+    action_plan["files"] = safe_files
+
+    if rejected_files:
+        action_plan["_rejected_files"] = [
+            {"path": f.get("path", ""), "reasons": f.get("_warnings", [])}
+            for f in rejected_files
+        ]
+        rejection_msg = f"🚫 {len(rejected_files)} فایل به خاطر خطای سینتکس بحرانی حذف شدند: " + \
+            ", ".join(f.get("path", "") for f in rejected_files)
+        warnings.insert(0, rejection_msg)
 
     if warnings:
         action_plan["_syntax_warnings"] = warnings
-        slog.warning(f"[action_plan validation] {len(warnings)} warnings: {warnings[:5]}")
+        slog.warning(f"[action_plan validation] {len(warnings)} issues ({len(rejected_files)} rejected): {warnings[:5]}")
 
     return action_plan
 
@@ -13755,7 +13783,12 @@ def _build_visual_debug_prompt_list() -> list:
 - کلمات کاربر را تحت‌اللفظی بخوان: «فقط» = ONLY، «نباید» = MUST NOT
 - هرگز معنی درخواست را برعکس تفسیر نکن
 - مثال: «فقط در مانیتورینگ باشه» ≠ «در همه صفحات باشه»
-- در multi-step: هر مرحله باید با مراحل قبلی سازگار باشد""",
+
+🔄 قانون ویژه multi-step (اجرای مرحله‌ای):
+- اگر در پرامپت «فایل‌های تغییر یافته تا الان» آمده → آن محتوا خروجی مراحل قبلی است
+- اگر فایلی قبلاً تغییر یافته → تمام محتوای مرحله قبل حفظ شود + فقط تغییرات جدید اضافه شود
+- ⛔ URL‌ها، API base، نام event‌ها، نام متغیرها: دقیقاً مثل مراحل قبلی — تغییر ندهید
+- ⛔ هرگز فایل مرحله قبل را دور بینداز و از صفر بنویس""",
         },
     ]
 
