@@ -10969,7 +10969,7 @@ def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None)
                         break
 
         # ── تشخیص بازنویسی مخرب (Destructive Rewrite Detection) ──
-        # اگر operation=modify/update و فایل اصلی رو داریم → مقایسه اندازه
+        # اگر operation=modify/update و فایل اصلی رو داریم → مقایسه اندازه + محتوا
         operation = f.get("operation", "").lower()
         if operation in ("modify", "update", "") and original_files:
             # پیدا کردن فایل اصلی (ممکنه مسیر‌ها متفاوت باشن)
@@ -10981,12 +10981,31 @@ def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None)
             if _orig_content and isinstance(_orig_content, str):
                 orig_lines = len(_orig_content.strip().split("\n"))
                 new_lines = len(content.strip().split("\n"))
-                # اگر فایل اصلی بزرگ بوده (>80 خط) و خروجی AI خیلی کوتاه‌تره → بازنویسی مخرب
+                # لایه ۱: اگر فایل اصلی بزرگ بوده (>80 خط) و خروجی AI خیلی کوتاه‌تره → بازنویسی مخرب
                 if orig_lines > 80 and new_lines < orig_lines * 0.5:
                     file_critical.append(
                         f"❌ بازنویسی مخرب: فایل اصلی {orig_lines} خط بود ولی خروجی AI فقط {new_lines} خط دارد "
                         f"({int(new_lines/orig_lines*100)}% از اصل) — احتمال حذف قابلیت‌های موجود — این فایل حذف شد"
                     )
+                # لایه ۲: مقایسه محتوایی — حتی اگه تعداد خطوط مشابه باشه، آیا محتوای واقعی حفظ شده؟
+                # مدل ممکنه placeholder بنویسه با تعداد خطوط مشابه ولی محتوای کاملاً متفاوت
+                elif orig_lines > 100 and not file_critical:
+                    # استخراج خطوط معنادار (نه خالی، نه فقط پرانتز/براکت/بریس)
+                    _trivial = {"{", "}", "(", ")", "[", "]", "", "};", ");", "},", "],", "});", "export default", "return (", "return null;"}
+                    _orig_meaningful = set()
+                    for _ol in _orig_content.strip().split("\n"):
+                        _stripped = _ol.strip()
+                        if _stripped and _stripped not in _trivial and len(_stripped) > 10:
+                            _orig_meaningful.add(_stripped)
+                    if len(_orig_meaningful) > 20:
+                        # چند خط از فایل اصلی تو خروجی AI وجود دارن؟
+                        _preserved = sum(1 for _om in _orig_meaningful if _om in content)
+                        _preserve_ratio = _preserved / len(_orig_meaningful)
+                        if _preserve_ratio < 0.25:
+                            file_critical.append(
+                                f"❌ بازنویسی مخرب (محتوایی): فقط {int(_preserve_ratio*100)}% از خطوط معنادار فایل اصلی "
+                                f"({_preserved}/{len(_orig_meaningful)}) حفظ شده — مدل فایل رو از صفر نوشته — این فایل حذف شد"
+                            )
 
         # تصمیم‌گیری: حذف یا نگه‌داشتن
         if file_critical:
@@ -13448,6 +13467,7 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
             "message": f"🔍 بررسی وجود {len(validated_files)} فایل در ریپو..."
         })
         final_files = []
+        dropped_files = []  # فایل‌هایی که اعمال نشدن — برای گزارش به کاربر
         for f in validated_files:
             file_path = f.get("path", "").strip()
             operation = f.get("operation", "modify")
@@ -13466,6 +13486,7 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                                 "step": "file_empty",
                                 "message": f"⚠️ {file_path}: فایل اصلی خالی است — modify_sections ممکن نیست"
                             })
+                            dropped_files.append({"path": file_path, "reason": "فایل اصلی خالی"})
                             continue
                         merge_result = _apply_section_modifications(original_content, f["sections"])
                         if merge_result["applied"] > 0:
@@ -13481,10 +13502,12 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                             })
                             final_files.append(f)
                         else:
+                            _errs = "; ".join(str(e)[:80] for e in merge_result['errors'][:3])
                             yield sse("progress", {
                                 "step": "sections_failed",
-                                "message": f"🚫 {file_path}: هیچ بخشی اعمال نشد — {merge_result['errors'][:2]}"
+                                "message": f"🚫 {file_path}: هیچ بخشی اعمال نشد — {_errs}"
                             })
+                            dropped_files.append({"path": file_path, "reason": f"modify_sections شکست: {_errs[:100]}"})
                     else:
                         final_files.append(f)
                 else:
@@ -13492,11 +13515,22 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                         "step": "file_not_found",
                         "message": f"🚫 فایل {file_path} در ریپو وجود ندارد — رد شد (احتمالاً محتوای ساختگی)"
                     })
+                    dropped_files.append({"path": file_path, "reason": "فایل در ریپو وجود ندارد"})
             except Exception:
                 yield sse("progress", {
                     "step": "file_check_error",
                     "message": f"⚠️ بررسی وجود {file_path} ناموفق — رد شد برای ایمنی"
                 })
+                dropped_files.append({"path": file_path, "reason": "خطا در بررسی وجود فایل"})
+
+        # هشدار به کاربر اگه فایل‌هایی حذف شدن
+        if dropped_files:
+            _drop_msg = f"⚠️ {len(dropped_files)} فایل از {len(validated_files)} اعمال نشد:\n"
+            _drop_msg += "\n".join(f"  🚫 {d['path']}: {d['reason']}" for d in dropped_files)
+            yield sse("progress", {
+                "step": "dropped_files_warning",
+                "message": _drop_msg
+            })
 
         if not final_files:
             yield sse("error", {"message": "🚫 هیچ‌یک از فایل‌ها در ریپو وجود ندارند — احتمالاً محتوای ساختگی AI. اعمال لغو شد."})
@@ -13560,6 +13594,13 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
         })
 
         try:
+            _dropped_section = ""
+            if dropped_files:
+                _dropped_section = f"""
+
+**⚠️ فایل‌هایی که اعمال نشدند ({len(dropped_files)} فایل):**
+{chr(10).join(f'- `{d["path"]}`: {d["reason"]}' for d in dropped_files)}
+"""
             pr_body = f"""## 🔧 اعمال تغییرات بازرس ویژه
 
 **درخواست کاربر:**
@@ -13570,7 +13611,7 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
 
 **فایل‌های تغییر یافته:**
 {chr(10).join(f'- `{f}`' for f in committed_files)}
-
+{_dropped_section}
 ---
 _ساخته شده توسط بازرس ویژه (Inspector)_"""
 
