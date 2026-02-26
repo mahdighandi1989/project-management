@@ -415,6 +415,7 @@ async def _run_batch_processing_bg(
                     result = await github_svc.get_file_content(owner, repo, fp, token=token)
                     if result.get("success"):
                         content = result.get("content", "")
+                        info["file_contents"][fp] = content  # ذخیره اصلی برای تشخیص بازنویسی مخرب
                         if len(content) > per_file_limit:
                             content = content[:per_file_limit] + "\n... [truncated]"
                         batch_code += f"\n\n=== {fp} ===\n{content}"
@@ -593,6 +594,7 @@ def _start_bg_batch(
         "created_at": _time.time(),
         "project_id": project_id,
         "flow_type": flow_type,
+        "file_contents": {},  # ذخیره محتوای اصلی فایل‌ها برای تشخیص بازنویسی مخرب
     }
     _BATCH_TASKS[task_key] = info
     info["task"] = _asyncio.create_task(_run_batch_processing_bg(
@@ -10639,7 +10641,7 @@ def _try_repair_truncated_json(raw_json_str: str) -> dict | None:
                 obj_str = text[obj_start:pos + 1]
                 try:
                     obj = json.loads(obj_str)
-                    if obj.get("path") and obj.get("content"):
+                    if obj.get("path") and (obj.get("content") or obj.get("sections")):
                         completed_files.append(obj)
                 except (json.JSONDecodeError, ValueError):
                     pass
@@ -10721,17 +10723,20 @@ def _extract_all_action_plans_from_response(content: str, is_truncated: bool = F
             r'(?:####?\s*📄?\s*([^\n]+?)\s*\((?:create|modify|modify_sections)[^)]*\)\s*\n)?```(?:tsx?|jsx?|py|json|css|html|vue)\s*\n(.*?)\n```',
             content, re.DOTALL
         )
+        _matched_empty = set()  # ایندکس فایل‌هایی که content گرفتن — جلوگیری از تغییر لیست حین iteration
         for _cb_title, _cb_code in _code_blocks:
             if not _cb_code.strip():
                 continue
             # تلاش برای اتصال بلوک کد به فایل بدون content
-            for ef in _empty_files:
+            for ei, ef in enumerate(_empty_files):
+                if ei in _matched_empty:
+                    continue
                 ef_path = ef.get("path", "")
                 ef_fname = ef_path.rsplit("/", 1)[-1] if "/" in ef_path else ef_path
                 # اگر عنوان بلوک شامل نام فایل باشه یا کد شامل import/export مرتبط باشه
                 if _cb_title and ef_fname and ef_fname.lower() in _cb_title.lower():
                     ef["content"] = _cb_code.strip()
-                    _empty_files.remove(ef)
+                    _matched_empty.add(ei)
                     slog.info(f"[action_plan extraction] Recovered content for {ef_path} from markdown code block")
                     break
                 # fallback: اگر بلوک کد بلافاصله بعد از ذکر مسیر فایل اومده
@@ -10742,8 +10747,7 @@ def _extract_all_action_plans_from_response(content: str, is_truncated: bool = F
                         _cb_pos = content.find(_cb_code[:50])
                         if _cb_pos > _pm_pos and (_cb_pos - _pm_pos) < 500:
                             ef["content"] = _cb_code.strip()
-                            if ef in _empty_files:
-                                _empty_files.remove(ef)
+                            _matched_empty.add(ei)
                             slog.info(f"[action_plan extraction] Recovered content for {ef_path} by proximity match")
                             break
 
@@ -12065,6 +12069,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                 yield evt
 
                             question_code_context = q_bg_info.get("code_context", "")
+                            file_contents = q_bg_info.get("file_contents", {})
                         else:
                             per_file_q_limit = min(10000, max(3000, max_q_code // max(len(q_selected), 1)))
                             q_read_failures = 0
@@ -12332,6 +12337,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                 yield evt
 
                             code_context = e_bg_info.get("code_context", "")
+                            file_contents = e_bg_info.get("file_contents", {})
                         else:
                             per_file_err_limit = min(12000, max(3000, max_err_code_chars // max(len(selected), 1)))
                             err_read_failures = 0
@@ -12842,6 +12848,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
                             # نتایج
                             code_context = bg_info.get("code_context", "")
+                            file_contents = bg_info.get("file_contents", {})
                             _batch_total_read = bg_info.get("total_read", 0)
                             _batch_count = bg_info.get("batch_count", _batch_count)
 
@@ -13206,6 +13213,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                         _res = await github_svc.get_file_content(owner, repo, _fp, token=token)
                                         if _res.get("success"):
                                             _fc = _res.get("content", "")
+                                            file_contents[_fp] = _fc  # ذخیره اصلی برای تشخیص بازنویسی مخرب
                                             if len(_fc) > 15000:
                                                 _fc = _fc[:15000] + "\n... [truncated]"
                                             _extra_contents[_fp] = _fc
