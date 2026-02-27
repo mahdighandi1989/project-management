@@ -214,8 +214,8 @@ def _build_general_instructions_list(
 - محتوای هر فایل در action_plan باید **کامل و قابل جایگزینی** باشد — نه تکه‌ای از فایل
 - 🔴 **تمام** فایل‌ها و content/sections باید **داخل** یک بلوک JSON باشد. کد رو جدا از action_plan ننویس!
 - هرگز «// ... بقیه کد» یا «// rest of file» ننویس — محتوای کامل بده
-- ⚠️ **فایل‌های بزرگ (>200 خط)**: اگر فایلی بیش از ۲۰۰ خط دارد و فقط چند خط تغییر لازمه:
-  - ✅ **روش ترجیحی: از `modify_sections` استفاده کن** (بجای بازنویسی کل فایل):
+- 🔴 **فایل‌های بزرگ (>200 خط)**: اگر فایلی بیش از ۲۰۰ خط دارد → **الزامی** است از `modify_sections` استفاده کنی (بازنویسی کامل فایل ممنوع و خودکار حذف میشه!):
+  - ✅ **روش اجباری: از `modify_sections` استفاده کن** (بازنویسی کل فایل ممنوع):
     ```json
     {"path": "path/to/file.tsx", "operation": "modify_sections", "sections": [
       {"find": "متن دقیق بخشی از فایل اصلی", "replace": "متن جایگزین"},
@@ -279,8 +279,8 @@ def _build_general_instructions_list(
 3. باقی فایل (imports, state, handlers, UI sections, styles) را دقیقاً مثل اصل حفظ کن
 4. content نهایی = فایل اصلی + تغییرات تو (نه فایل جدید از صفر)
 
-### 🔧 modify_sections — راه‌حل فایل‌های بزرگ:
-- برای فایل‌های **بیش از ۲۰۰ خط** که فقط چند بخش تغییر لازم دارند → از `operation: "modify_sections"` استفاده کن
+### 🔧 modify_sections — **الزامی** برای فایل‌های بزرگ:
+- برای فایل‌های **بیش از ۲۰۰ خط** → **حتماً** از `operation: "modify_sections"` استفاده کن (سیستم بازنویسی‌های مخرب رو خودکار حذف میکنه!)
 - بجای نوشتن کل محتوای فایل، فقط بخش‌های تغییریافته رو مشخص کن:
   ```json
   {"path": "file.tsx", "operation": "modify_sections", "sections": [
@@ -9438,7 +9438,8 @@ async def investigate_error(request: InvestigateRequest, db: Session = Depends(g
         # --- مرحله ۴: تحلیل ریشه‌ای توسط AI ---
         code_context = ""
         for path, content in file_contents.items():
-            code_context += f"\n\n=== {path} ===\n{content}"
+            _fl_lines = len(content.split("\n"))
+            code_context += f"\n\n=== {path} ({_fl_lines} خط) ===\n{content}"
 
         investigate_prompt = f"""شما بازرس ارشد کد پروژه {owner}/{repo} هستید.
 
@@ -9895,7 +9896,8 @@ async def investigate_errors_bulk(request: BulkInvestigateRequest, db: Session =
         # --- مرحله ۴: تحلیل کلی AI ---
         code_context = ""
         for path, content in file_contents.items():
-            code_context += f"\n\n=== {path} ===\n{content}"
+            _fl_lines = len(content.split("\n"))
+            code_context += f"\n\n=== {path} ({_fl_lines} خط) ===\n{content}"
 
         bulk_investigate_prompt = f"""شما بازرس ارشد پروژه {owner}/{repo} هستید.
 {len(error_messages)} خطا برای تحلیل کلی ارسال شده. وظیفه شما تحلیل جامع، اولویت‌بندی و شناسایی وابستگی‌هاست.
@@ -12359,9 +12361,13 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                     if result.get("success"):
                                         content = result.get("content", "")
                                         file_contents[fp] = content  # ذخیره اصلی برای تشخیص بازنویسی مخرب
+                                        _total_lines = len(content.split("\n"))
+                                        _size_hint = ""
+                                        if _total_lines > 200:
+                                            _size_hint = f" ⚠️ فایل بزرگ — حتماً از modify_sections استفاده کن"
                                         if len(content) > per_file_q_limit:
-                                            content = content[:per_file_q_limit] + "\n... [truncated]"
-                                        question_code_context += f"\n\n=== {fp} ===\n{content}"
+                                            content = content[:per_file_q_limit] + f"\n... [truncated — فایل اصلی {_total_lines} خط دارد{_size_hint}]"
+                                        question_code_context += f"\n\n=== {fp} ({_total_lines} خط) ===\n{content}"
                                     else:
                                         q_read_failures += 1
                                         slog.warning(f"[smart-chat QUESTION] Failed to read file {fp}: {result.get('error', 'unknown')}")
@@ -12642,9 +12648,13 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                     if result.get("success"):
                                         content = result.get("content", "")
                                         file_contents[file_path] = content  # ذخیره اصلی برای تشخیص بازنویسی مخرب
+                                        _total_lines = len(content.split("\n"))
+                                        _size_hint = ""
+                                        if _total_lines > 200:
+                                            _size_hint = f" ⚠️ فایل بزرگ — حتماً از modify_sections استفاده کن"
                                         if len(content) > per_file_err_limit:
-                                            content = content[:per_file_err_limit] + "\n... [truncated]"
-                                        code_context += f"\n\n=== {file_path} ===\n{content}"
+                                            content = content[:per_file_err_limit] + f"\n... [truncated — فایل اصلی {_total_lines} خط دارد{_size_hint}]"
+                                        code_context += f"\n\n=== {file_path} ({_total_lines} خط) ===\n{content}"
                                     else:
                                         err_read_failures += 1
                                         slog.warning(f"[smart-chat ERROR_LOG] Failed to read file {file_path}: {result.get('error', 'unknown')}")
@@ -12750,30 +12760,55 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 [لیست فایل‌ها با توضیح تغییرات - هر فایل در فرمت: `مسیر/فایل`: توضیح]
 
 ### 📝 action_plan
+
+🔴 **فرمت ۱ — فایل‌های کوچک (<200 خط):** operation: "modify"
 ```json
 {{
   "files": [
     {{
-      "path": "مسیر/فایل",
+      "path": "مسیر/فایل-کوچک",
       "operation": "modify",
       "description": "توضیح تغییر",
-      "content": "محتوای کامل فایل اصلاح‌شده"
+      "content": "محتوای کامل فایل (فقط برای فایل‌های <200 خط)"
     }}
   ],
   "commit_message": "پیام کامیت مناسب"
 }}
 ```
+
+🔴 **فرمت ۲ — فایل‌های بزرگ (>200 خط) — الزامی:** operation: "modify_sections"
+```json
+{{
+  "files": [
+    {{
+      "path": "مسیر/فایل-بزرگ.tsx",
+      "operation": "modify_sections",
+      "description": "توضیح تغییر",
+      "sections": [
+        {{"find": "متن دقیق از فایل اصلی (چند خط)", "replace": "متن جایگزین"}},
+        {{"find": "بخش دوم فایل اصلی", "replace": "جایگزین دوم"}}
+      ]
+    }}
+  ],
+  "commit_message": "پیام کامیت مناسب"
+}}
+```
+- `find` باید **دقیقاً** مطابق متن فایل اصلی باشد (شامل فاصله‌ها)
+- سیستم خودش فایل اصلی رو از ریپو میخونه و sections رو اعمال میکنه
+
 ⚠️ قوانین action_plan:
-- هر فایل باید path و content (محتوای کامل) داشته باشد
-- اگر نمی‌توانی محتوای کامل فایل را ارائه دهی، آن فایل را نذار
-- files خالی (`"files": []`) ممنوع است — یا فایل با محتوا بذار، یا action_plan نذار
+- 🔴 **فایل‌های >200 خط**: حتماً از `modify_sections` استفاده کن — سیستم بازنویسی‌های مخرب (<50% اصل) رو **خودکار حذف** میکنه!
+- فایل‌های کوچک: content باید محتوای کامل فایل باشد
+- اگر نمی‌توانی محتوای کامل فایل بزرگ را بدهی → از modify_sections استفاده کن
+- files خالی (`"files": []`) ممنوع است — یا فایل با محتوا/sections بذار، یا action_plan نذار
 {'- اگر فایل‌ها خوانده نشدند، action_plan با محتوای حدسی تولید نکن — فقط تحلیل متنی ارائه بده.' if not has_err_code_files else ''}
 
 🚫 ممنوعیت مطلق حدس‌زنی: هرگز محتوای فایلی را که ندیده‌ای حدس نزن. اما **همیشه** با فایل‌های موجود action_plan بنویس. هرگز نگو «فایل در اختیارم نیست» یا «دوباره ارسال کنید».
 
 🏗️ قوانین بیلد و دیپلوی (بسیار مهم):
-- content هر فایل باید محتوای کامل و قابل جایگزینی باشد — نه بخشی از فایل
-- هرگز «// ... بقیه کد» یا «// rest of file» ننویس
+- فایل‌های کوچک (<200 خط): content باید محتوای کامل و قابل جایگزینی باشد
+- 🔴 **فایل‌های بزرگ (>200 خط): از modify_sections استفاده کن** — بازنویسی ممنوع!
+- هرگز «// ... بقیه کد» یا «// rest of file» ننویس — یا کل فایل بده یا modify_sections
 - imports، پرانتزها، تایپ‌ها و export ها را قبل از نوشتن بررسی کن — هر خطا = شکست دیپلوی
 - وابستگی‌ها (requirements.txt, package.json) را با نسخه سازگار پین کن
 - ⛔ هرگز نسخه پکیجی پین نکن که مطمئن نیستی وجود دارد — اگر مطمئن نیستی، از caret range (^X.Y.Z) استفاده کن
@@ -12791,6 +12826,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - ⛔ هرگز فایل موجود را از صفر بازننویس — فقط بخش مربوط به خطا را تغییر بده و باقی فایل دست‌نخورده بماند
 - ⛔ هرگز قابلیت‌های موجود (state, handlers, UI sections) را حذف نکن مگر مستقیماً مشکل‌ساز باشند
 - ⛔ قبل از create فایل جدید → بررسی کن آیا مشابهش در پروژه وجود داره
+- 🔴 **فایل‌های بزرگ >200 خط**: حتماً از `modify_sections` استفاده کن — سیستم فایل‌هایی که کمتر از 50% اصل باشند رو خودکار حذف میکنه!
+- ⚠️ تعداد خطوط هر فایل در عنوان نوشته شده (مثلاً `=== file.tsx (1321 خط) ===`) — از این اطلاعات برای تصمیم‌گیری استفاده کن
 
 🎯 فهم دقیق درخواست: کلمات کاربر را تحت‌اللفظی بخوان. «فقط» = ONLY، «نباید» = ممنوع. هرگز معنی درخواست را برعکس تفسیر نکن."""
 
@@ -12799,7 +12836,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 gen_task = asyncio.create_task(ai_manager.generate(
                     model_id=primary_model,
                     messages=[
-                        Message(role="system", content=f"تو بازرس ارشد پروژه هستی. مهم‌ترین کارت فهمیدن منظور واقعی کاربر و ارتباط آن با تاریخچه مکالمه است. {'مستقیماً کد مشکل‌دار را پیدا کن، اصلاحش را بنویس و action_plan ارائه بده.' if has_err_code_files else 'فایل‌ها خوانده نشدند — فقط تحلیل خطا و تشخیص علت ارائه بده. هرگز action_plan با محتوای حدسی تولید نکن.'} اگر قبلاً راه‌حلی پیشنهاد شده و جواب نداده، رویکرد متفاوتی بگیر. هرگز کاربر را به کار دستی ارجاع نده. ⛔ هرگز فایل موجود را از صفر بازننویس — فقط بخش مشکل‌ساز تغییر کن. هرگز قابلیت‌های موجود را حذف نکن. کلمات کاربر را تحت‌اللفظی بخوان: «فقط» = ONLY، «نباید» = ممنوع. ⛔ هرگز نگو «دسترسی ندارم» یا «دوباره ارسال کنید». با لحن صمیمی و حرفه‌ای پاسخ بده."),
+                        Message(role="system", content=f"تو بازرس ارشد پروژه هستی. مهم‌ترین کارت فهمیدن منظور واقعی کاربر و ارتباط آن با تاریخچه مکالمه است. {'مستقیماً کد مشکل‌دار را پیدا کن، اصلاحش را بنویس و action_plan ارائه بده.' if has_err_code_files else 'فایل‌ها خوانده نشدند — فقط تحلیل خطا و تشخیص علت ارائه بده. هرگز action_plan با محتوای حدسی تولید نکن.'} اگر قبلاً راه‌حلی پیشنهاد شده و جواب نداده، رویکرد متفاوتی بگیر. هرگز کاربر را به کار دستی ارجاع نده. ⛔ هرگز فایل موجود را از صفر بازننویس — فقط بخش مشکل‌ساز تغییر کن. هرگز قابلیت‌های موجود را حذف نکن. 🔴 فایل‌های بزرگ (>200 خط): حتماً از modify_sections استفاده کن — سیستم بازنویسی‌های مخرب رو خودکار حذف میکنه! تعداد خطوط هر فایل در عنوان نوشته شده. کلمات کاربر را تحت‌اللفظی بخوان: «فقط» = ONLY، «نباید» = ممنوع. ⛔ هرگز نگو «دسترسی ندارم» یا «دوباره ارسال کنید». با لحن صمیمی و حرفه‌ای پاسخ بده."),
                         Message(role="user", content=error_analysis_prompt)
                     ],
                     max_tokens=model_max_output,
@@ -13172,9 +13209,13 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                     if result.get("success"):
                                         content = result.get("content", "")
                                         file_contents[file_path] = content  # ذخیره اصلی برای تشخیص بازنویسی مخرب
+                                        _total_lines = len(content.split("\n"))
+                                        _size_hint = ""
+                                        if _total_lines > 200:
+                                            _size_hint = f" ⚠️ فایل بزرگ — حتماً از modify_sections استفاده کن"
                                         if len(content) > per_file_limit:
-                                            content = content[:per_file_limit] + "\n... [truncated]"
-                                        code_context += f"\n\n=== {file_path} ===\n{content}"
+                                            content = content[:per_file_limit] + f"\n... [truncated — فایل اصلی {_total_lines} خط دارد{_size_hint}]"
+                                        code_context += f"\n\n=== {file_path} ({_total_lines} خط) ===\n{content}"
                                     else:
                                         act_read_failures += 1
                                         slog.warning(f"[smart-chat ACTION] Failed to read file {file_path}: {result.get('error', 'unknown')}")
@@ -13320,25 +13361,47 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 [توضیح کامل هر تغییر]
 
 ### 📝 action_plan
+
+🔴 **فرمت ۱ — فایل‌های کوچک (<200 خط):** operation: "modify" با محتوای کامل
 ```json
 {{
   "files": [
     {{
-      "path": "مسیر/فایل",
+      "path": "مسیر/فایل-کوچک",
       "operation": "modify",
       "description": "توضیح تغییر",
-      "content": "محتوای کامل فایل جدید (نه فقط تکه‌ای از آن)"
+      "content": "محتوای کامل فایل (فقط برای فایل‌های <200 خط)"
     }}
   ],
   "commit_message": "پیام کامیت مناسب"
 }}
 ```
 
+🔴 **فرمت ۲ — فایل‌های بزرگ (>200 خط) — الزامی:** operation: "modify_sections"
+```json
+{{
+  "files": [
+    {{
+      "path": "مسیر/فایل-بزرگ.tsx",
+      "operation": "modify_sections",
+      "description": "توضیح تغییر",
+      "sections": [
+        {{"find": "متن دقیق از فایل اصلی (چند خط)", "replace": "متن جایگزین"}},
+        {{"find": "بخش دوم فایل اصلی", "replace": "جایگزین دوم"}}
+      ]
+    }}
+  ],
+  "commit_message": "پیام کامیت مناسب"
+}}
+```
+- `find` باید **دقیقاً** مطابق متن فایل اصلی باشد (شامل فاصله‌ها)
+- سیستم خودش فایل اصلی رو از ریپو میخونه و sections رو اعمال میکنه — هیچ بخشی حذف نمیشه
+
 ⚠️ قوانین action_plan:
-- هر فایل باید path و content داشته باشد (content باید محتوای کامل فایل باشد)
-- اگر نمی‌توانی محتوای کامل فایل را ارائه دهی، آن فایل را در action_plan نذار
-- اگر هیچ فایلی نداری که بتوانی محتوای کاملش را بنویسی، بخش action_plan را حذف کن
-- files خالی (`"files": []`) ممنوع است — یا فایل با محتوا بذار، یا action_plan نذار
+- 🔴 **فایل‌های >200 خط**: حتماً از `modify_sections` استفاده کن — سیستم بازنویسی‌های مخرب (<50% اصل) رو **خودکار حذف** میکنه!
+- فایل‌های کوچک (<200 خط): content باید محتوای کامل فایل باشد (نه تکه‌ای)
+- اگر نمی‌توانی محتوای کامل فایل بزرگ را بدهی → از modify_sections استفاده کن بجای حذف از action_plan
+- files خالی (`"files": []`) ممنوع است — یا فایل با محتوا/sections بذار، یا action_plan نذار
 {'- اگر فایل‌ها خوانده نشدند، action_plan با محتوای حدسی تولید نکن — فقط تحلیل متنی ارائه بده.' if not has_code_files else ''}
 
 🔑🔴 دسترسی کامل — ممنوعیت مطلق امتناع از action_plan:
@@ -13351,8 +13414,9 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - از عبارات «فرض می‌کنیم»، «احتمالاً»، «ساختارش باید اینطوری باشه» استفاده نکن
 
 🏗️ قوانین حیاتی بیلد و دیپلوی (عدم رعایت = شکست دیپلوی):
-- content هر فایل باید **محتوای کامل و قابل جایگزینی** باشد — نه بخشی از فایل
-- هرگز «// ... بقیه کد»، «// rest of file»، «/* existing code */» ننویس — کل فایل را بده
+- فایل‌های کوچک (<200 خط): content باید **محتوای کامل و قابل جایگزینی** باشد — نه بخشی از فایل
+- 🔴 **فایل‌های بزرگ (>200 خط): از modify_sections استفاده کن** — بازنویسی کامل فایل بزرگ ممنوع و خودکار حذف میشه!
+- هرگز «// ... بقیه کد»، «// rest of file»، «/* existing code */» ننویس — یا کل فایل بده (اگر <200 خط) یا modify_sections بنویس
 - قبل از نوشتن هر فایل، بررسی کن: imports صحیح؟ پرانتز/آکولاد بسته؟ تایپ‌ها درست؟ export سازگار؟
 - اگر فایل بزرگ‌تر از توان تولید توست، آن را در action_plan نگذار — به جایش بنویس چه تغییری لازم است
 - تمام وابستگی‌های بین فایلی: اگر type/interface تغییر کرد، تمام فایل‌های مصرف‌کننده هم باید آپدیت شوند
@@ -13383,7 +13447,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 gen_task = asyncio.create_task(ai_manager.generate(
                     model_id=primary_model,
                     messages=[
-                        Message(role="system", content=f"تو توسعه‌دهنده ارشد پروژه هستی با دسترسی کامل به تمام فایل‌های پروژه. مهم‌ترین کارت فهمیدن دقیق منظور کاربر است — حتی وقتی مبهم، کوتاه یا غیرمستقیم صحبت می‌کند. تاریخچه مکالمه را بخوان تا context کامل را بفهمی. {'مستقیماً مشکل را پیدا کن، کد اصلاح‌شده کامل بنویس و action_plan معتبر JSON ارائه بده.' if has_code_files else 'فایل‌ها در این دور خوانده نشدند — فقط تحلیل و تشخیص ارائه بده. هرگز action_plan با محتوای حدسی تولید نکن.'} اگر قبلاً راه‌حلی پیشنهاد شده و جواب نداده، رویکرد متفاوتی بگیر. هرگز از کاربر نخواه کار دستی انجام دهد. 🔴 هرگز محتوای فایلی را حدس نزن — فقط بر اساس فایل‌هایی که واقعاً دیده‌ای کد بنویس. ⛔ هرگز نگو «دسترسی ندارم»، «در اختیارم نیست»، «دوباره ارسال کنید». ⛔ هرگز فایل موجود را از صفر بازننویس — فقط بخش مربوط به درخواست تغییر کن. قابلیت‌های موجود (state, handlers, UI) حذف نکن. کلمات کاربر را دقیق بخوان: «فقط»=ONLY، «نباید»=ممنوع. با لحن صمیمی و حرفه‌ای پاسخ بده."),
+                        Message(role="system", content=f"تو توسعه‌دهنده ارشد پروژه هستی با دسترسی کامل به تمام فایل‌های پروژه. مهم‌ترین کارت فهمیدن دقیق منظور کاربر است — حتی وقتی مبهم، کوتاه یا غیرمستقیم صحبت می‌کند. تاریخچه مکالمه را بخوان تا context کامل را بفهمی. {'مستقیماً مشکل را پیدا کن، کد اصلاح‌شده بنویس و action_plan معتبر JSON ارائه بده.' if has_code_files else 'فایل‌ها در این دور خوانده نشدند — فقط تحلیل و تشخیص ارائه بده. هرگز action_plan با محتوای حدسی تولید نکن.'} اگر قبلاً راه‌حلی پیشنهاد شده و جواب نداده، رویکرد متفاوتی بگیر. هرگز از کاربر نخواه کار دستی انجام دهد. 🔴 هرگز محتوای فایلی را حدس نزن — فقط بر اساس فایل‌هایی که واقعاً دیده‌ای کد بنویس. ⛔ هرگز نگو «دسترسی ندارم»، «در اختیارم نیست»، «دوباره ارسال کنید». ⛔ هرگز فایل موجود را از صفر بازننویس — فقط بخش مربوط به درخواست تغییر کن. قابلیت‌های موجود (state, handlers, UI) حذف نکن. 🔴 فایل‌های بزرگ (>200 خط): حتماً از modify_sections استفاده کن — سیستم بازنویسی‌های مخرب رو خودکار حذف میکنه! تعداد خطوط هر فایل در عنوان نوشته شده. کلمات کاربر را دقیق بخوان: «فقط»=ONLY، «نباید»=ممنوع. با لحن صمیمی و حرفه‌ای پاسخ بده."),
                         Message(role="user", content=action_prompt)
                     ],
                     max_tokens=safe_max_tokens,
@@ -13941,9 +14005,57 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                                             f"({_preserved}/{len(_orig_meaningful)}) حفظ شده — مدل فایل رو از صفر نوشته"
                                         )
                             if _is_destructive:
+                                # ── Auto-recovery: merge AI changes into original instead of dropping ──
+                                import difflib as _difflib
+                                _orig_lines_list = _orig_content.split("\n")
+                                _new_lines_list = _file_content.split("\n")
+                                try:
+                                    _matcher = _difflib.SequenceMatcher(None, _orig_lines_list, _new_lines_list)
+                                    _merged_lines = []
+                                    _kept_deleted = 0
+                                    _changes_applied = 0
+                                    for _tag, _i1, _i2, _j1, _j2 in _matcher.get_opcodes():
+                                        if _tag == 'equal':
+                                            _merged_lines.extend(_orig_lines_list[_i1:_i2])
+                                        elif _tag == 'replace':
+                                            # AI changed these lines — keep the changes
+                                            _merged_lines.extend(_new_lines_list[_j1:_j2])
+                                            _changes_applied += 1
+                                        elif _tag == 'insert':
+                                            # AI added new lines — keep them
+                                            _merged_lines.extend(_new_lines_list[_j1:_j2])
+                                            _changes_applied += 1
+                                        elif _tag == 'delete':
+                                            # AI removed these lines — RESTORE from original (this is the recovery!)
+                                            _merged_lines.extend(_orig_lines_list[_i1:_i2])
+                                            _kept_deleted += (_i2 - _i1)
+                                    _recovery_content = "\n".join(_merged_lines)
+                                    _recovery_lines = len(_recovery_content.split("\n"))
+                                    if _kept_deleted > 0 and _recovery_lines >= _orig_lines * 0.8 and _changes_applied > 0:
+                                        # Validate syntax of recovered content
+                                        _recov_syntax = _validate_file_content_syntax(_recovery_content, file_path)
+                                        if _recov_syntax["valid"] and not _recov_syntax.get("warnings"):
+                                            f["content"] = _recovery_content
+                                            final_files.append(f)
+                                            yield sse("progress", {
+                                                "step": "destructive_rewrite_recovered",
+                                                "message": f"🔄 {file_path}: بازنویسی مخرب شناسایی شد — بازیابی خودکار: {_kept_deleted} خط حذف‌شده بازگردانده شد ({_recovery_lines} خط نهایی از {_orig_lines} اصلی)"
+                                            })
+                                            slog.info(f"[apply-action] RECOVERED destructive rewrite {file_path}: restored {_kept_deleted} deleted lines, applied {_changes_applied} changes, final={_recovery_lines}")
+                                            continue
+                                        else:
+                                            _recov_errs = "; ".join((_recov_syntax.get("errors") or _recov_syntax.get("warnings", []))[:2])
+                                            yield sse("progress", {
+                                                "step": "recovery_syntax_error",
+                                                "message": f"⚠️ {file_path}: بازیابی خودکار هم با خطای سینتکس مواجه شد — {_recov_errs}"
+                                            })
+                                            slog.warning(f"[apply-action] Recovery syntax failed {file_path}: {_recov_errs}")
+                                except Exception as _merge_err:
+                                    slog.warning(f"[apply-action] Auto-recovery failed for {file_path}: {_merge_err}")
+                                # If recovery failed or wasn't applicable, drop the file
                                 yield sse("progress", {
                                     "step": "destructive_rewrite_rejected",
-                                    "message": f"🚫 {file_path}: {_reason}"
+                                    "message": f"🚫 {file_path}: {_reason} — بازیابی خودکار هم ناموفق بود"
                                 })
                                 dropped_files.append({"path": file_path, "reason": _reason[:150]})
                                 slog.error(f"[apply-action] REJECTED destructive rewrite {file_path}: {_reason}")
@@ -15239,7 +15351,14 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
                                         _this_limit = min(_ra_per_file_limit * 2, max(5000, _remaining))
                                     else:
                                         _this_limit = min(_ra_per_file_limit, max(3000, _remaining))
-                                    code_context += f"\n--- {fp} ---\n{_file_content[:_this_limit]}\n"
+                                    _ra_total_lines = len(_file_content.split("\n"))
+                                    _ra_size_note = ""
+                                    if _ra_total_lines > 200:
+                                        _ra_size_note = f" ⚠️ فایل بزرگ — حتماً از modify_sections استفاده کن"
+                                    _truncated_content = _file_content[:_this_limit]
+                                    if len(_file_content) > _this_limit:
+                                        _truncated_content += f"\n... [truncated — فایل اصلی {_ra_total_lines} خط{_ra_size_note}]"
+                                    code_context += f"\n--- {fp} ({_ra_total_lines} خط) ---\n{_truncated_content}\n"
                                     _ra_file_contents[fp] = _file_content
                                     _ra_read_count += 1
                             except Exception:
