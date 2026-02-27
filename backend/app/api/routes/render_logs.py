@@ -10347,7 +10347,7 @@ class ApplyActionRequest(BaseModel):
     project_id: str
     model_ids: List[str]
     action_description: str
-    action_files: List[dict]  # [{path, content, operation: 'modify'|'create'|'delete'}]
+    action_files: List[dict]  # [{path, content, operation: 'modify'|'create'|'delete'|'modify_sections', sections?: [{find, replace}]}]
     commit_message: str
     original_message: str  # پیام اصلی کاربر
 
@@ -10560,6 +10560,16 @@ _REASONING_CONTAMINATION_PATTERNS = [
     r'\*\*Result:\*\*',        # English: **Result:**
     r'^<think>',               # XML thinking block
     r'^</think>',              # XML thinking block close
+    r'\*\*تحلیل:\*\*',         # فارسی: **تحلیل:**
+    r'\*\*بررسی:\*\*',         # فارسی: **بررسی:**
+    r'\*\*راه‌حل:\*\*',        # فارسی: **راه‌حل:**
+    r'\*\*خطا:\*\*',           # فارسی: **خطا:**
+    r'\*\*Analysis:\*\*',      # English: **Analysis:**
+    r'\*\*Solution:\*\*',      # English: **Solution:**
+    r'\*\*Error:\*\*',         # English: **Error:**
+    r'\*\*Explanation:\*\*',   # English: **Explanation:**
+    r'^#{1,4}\s+[\u0600-\u06FF]',  # Markdown heading followed by Persian text at start of line
+    r'^```(?:typescript|tsx|jsx|python|json)\s*$',  # Markdown code fence at start of line (not in code)
 ]
 
 
@@ -11041,6 +11051,21 @@ def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None)
                             sec_errors.append(
                                 f"⚠️ section[{si}]: find به نظر **توصیف محل تغییر** است نه **متن واقعی فایل**: "
                                 f"'{_find_text[:60]}' — find باید دقیقاً متن کپی‌شده از فایل اصلی باشد"
+                            )
+                        # ── چک: آیا find شامل markdown code fence هست؟ (خطای رایج AI) ──
+                        if "```" in _find_text:
+                            sec_errors.append(
+                                f"⚠️ section[{si}]: find شامل markdown code fence (```) است — "
+                                f"find باید متن خام فایل باشد نه قالب‌بندی markdown: '{_find_text[:60]}'"
+                            )
+                        # ── چک: آیا find فقط متن فارسی/عربی هست بدون کد؟ ──
+                        import re as _val_re
+                        _persian_ratio = len(_val_re.findall(r'[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]', _find_text))
+                        _total_chars = len(_find_text.replace(" ", "").replace("\n", ""))
+                        if _total_chars > 10 and _persian_ratio / max(_total_chars, 1) > 0.5 and not _has_code:
+                            sec_errors.append(
+                                f"⚠️ section[{si}]: find عمدتاً متن فارسی است (نه کد): '{_find_text[:60]}' — "
+                                f"احتمالاً محتوای reasoning مدل AI بجای کد واقعی فایل قرار گرفته"
                             )
             if sec_errors:
                 f["_warnings"] = sec_errors
@@ -13743,7 +13768,11 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
         for f in request.action_files:
             file_path = f.get("path", "").strip()
             file_content = f.get("content", "")
-            if not file_path or not file_content:
+            file_operation = f.get("operation", "").lower()
+            file_sections = f.get("sections")
+            # modify_sections فقط sections داره (نه content) — نباید فیلتر بشه
+            has_payload = bool(file_content) or (file_operation == "modify_sections" and file_sections)
+            if not file_path or not has_payload:
                 continue
             # بررسی path traversal و مسیرهای خطرناک
             if ".." in file_path or file_path.startswith("/") or file_path.startswith("\\"):
@@ -13867,7 +13896,40 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                                 "step": "sections_failed_preview",
                                 "message": f"📄 {file_path} ({_total_lines} خط) — نمونه محتوای واقعی:\n{_preview[:1500]}"
                             })
-                            dropped_files.append({"path": file_path, "reason": f"modify_sections شکست: {_errs[:100]}"})
+                            # ── Fallback: اگر تمام sections شکست خورد، بررسی آیا replace ها بتنهایی فایل معتبری میسازن ──
+                            # مورد خاص: وقتی find = محتوای آلوده (reasoning) و replace = کد تمیز
+                            # سعی کن محتوای آلوده رو شناسایی و حذف کن
+                            _fallback_applied = False
+                            if len(f["sections"]) == 1 and f["sections"][0].get("replace", "").strip():
+                                _section = f["sections"][0]
+                                _replace_content = _section["replace"].strip()
+                                # آیا replace محتوای کد معتبر هست؟ (شامل import/export/function)
+                                _code_markers = ["import ", "export ", "function ", "const ", "class ", "def ", "from ", "return "]
+                                _is_code = any(m in _replace_content[:200] for m in _code_markers)
+                                # آیا فایل اصلی آلوده به reasoning هست؟
+                                _contamination = _detect_reasoning_contamination(original_content, file_path)
+                                _starts_with_non_code = original_content.strip().startswith("**") or original_content.strip().startswith("##") or original_content.strip().startswith("```")
+                                if _is_code and (_contamination or _starts_with_non_code):
+                                    # Fallback: replace محتوای کامل فایل با replace_content
+                                    f["content"] = _replace_content
+                                    f["_fallback_full_replace"] = True
+                                    _syntax_check = _validate_file_content_syntax(f["content"], file_path)
+                                    if _syntax_check["valid"] and not _syntax_check.get("warnings"):
+                                        yield sse("progress", {
+                                            "step": "sections_fallback_applied",
+                                            "message": f"🔄 {file_path}: فایل اصلی آلوده بود — fallback: جایگزینی کامل با کد تمیز"
+                                        })
+                                        final_files.append(f)
+                                        _fallback_applied = True
+                                        slog.info(f"[apply-action] FALLBACK full-replace for contaminated {file_path}")
+                                    else:
+                                        _fb_errs = "; ".join((_syntax_check.get("errors") or _syntax_check.get("warnings", []))[:2])
+                                        yield sse("progress", {
+                                            "step": "sections_fallback_syntax_error",
+                                            "message": f"🚫 {file_path}: fallback هم شکست — کد replace خطای سینتکس داره: {_fb_errs}"
+                                        })
+                            if not _fallback_applied:
+                                dropped_files.append({"path": file_path, "reason": f"modify_sections شکست: {_errs[:100]}"})
                     else:
                         # ── تشخیص بازنویسی مخرب در apply_action (لایه دوم) ──
                         _file_content = f.get("content", "")
