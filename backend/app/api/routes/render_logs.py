@@ -10188,6 +10188,9 @@ async def fix_error(request: FixRequest, db: Session = Depends(get_db)):
                         # آخرین بلوک کد = خروجی واقعی (نه مثال‌های میانی)
                         fixed_content = _code_blocks[-1].strip()
 
+                # 🛡️ پاکسازی نهایی محتوا
+                fixed_content = _sanitize_file_content(fixed_content, file_path)
+
                 if fixed_content and fixed_content != current_content:
                     # 🛡️ بررسی آلودگی reasoning قبل از commit
                     _contamination = _detect_reasoning_contamination(fixed_content, file_path)
@@ -10549,7 +10552,154 @@ def _strip_reasoning_blocks(text: str) -> str:
         flags=_sr_re.DOTALL | _sr_re.IGNORECASE
     )
 
+    # حذف بلوک‌های **تحلیل:**...**نتیجه:** و **بررسی:**...**نتیجه:**
+    for label in ['تحلیل', 'بررسی', 'راه‌حل', 'خطا', 'Analysis', 'Solution', 'Error', 'Explanation', 'Summary']:
+        text = _sr_re.sub(
+            r'\*\*' + _sr_re.escape(label) + r':\*\*.*?\*\*(?:نتیجه|Result|Output|Code|خروجی):\*\*\s*',
+            '',
+            text,
+            flags=_sr_re.DOTALL | _sr_re.IGNORECASE
+        )
+        # حالت ناقص (بدون بلوک پایانی)
+        text = _sr_re.sub(
+            r'\*\*' + _sr_re.escape(label) + r':\*\*.*$',
+            '',
+            text,
+            flags=_sr_re.DOTALL | _sr_re.IGNORECASE
+        )
+
+    # حذف بلوک‌های <analysis>...</analysis> و <reasoning>...</reasoning>
+    for tag in ['analysis', 'reasoning', 'thinking', 'reflection', 'summary']:
+        text = _sr_re.sub(rf'<{tag}>.*?</{tag}>\s*', '', text, flags=_sr_re.DOTALL | _sr_re.IGNORECASE)
+        text = _sr_re.sub(rf'<{tag}>.*$', '', text, flags=_sr_re.DOTALL | _sr_re.IGNORECASE)
+
     return text.strip()
+
+
+def _sanitize_file_content(content: str, file_path: str) -> str:
+    """
+    پاکسازی محتوای فایل از آلودگی reasoning/markdown قبل از نوشتن یا commit.
+    این تابع باید روی هر محتوای فایل قبل از ذخیره‌سازی اعمال بشه.
+
+    ۱) حذف بلوک‌های reasoning/thinking
+    ۲) حذف متن غیرکد (فارسی/عربی/markdown) از ابتدای فایل‌های کد
+    ۳) حذف markdown code fences دور کل محتوا
+    ۴) حذف متن غیرکد از انتهای فایل (بعد از ```)
+    """
+    if not content or not content.strip():
+        return content
+
+    import re as _sc_re
+
+    # ---- مرحله ۱: حذف reasoning blocks (فقط بلوک‌های جفتی — نه orphan) ----
+    # برای محتوای فایل، فقط بلوک‌های reasoning که بسته‌شده‌اند رو حذف می‌کنیم
+    # orphan patterns (.*$) روی محتوای فایل خطرناکن چون ممکنه کد واقعی رو هم حذف کنن
+    content = _sc_re.sub(r'\*\*استدلال:\*\*.*?\*\*نتیجه:\*\*\s*', '', content, flags=_sc_re.DOTALL)
+    content = _sc_re.sub(r'\*\*Reasoning:\*\*.*?\*\*Result:\*\*\s*', '', content, flags=_sc_re.DOTALL | _sc_re.IGNORECASE)
+    content = _sc_re.sub(r'<think>.*?</think>\s*', '', content, flags=_sc_re.DOTALL)
+    for tag in ['analysis', 'reasoning', 'thinking', 'reflection', 'summary']:
+        content = _sc_re.sub(rf'<{tag}>.*?</{tag}>\s*', '', content, flags=_sc_re.DOTALL | _sc_re.IGNORECASE)
+    content = content.strip()
+
+    # ---- مرحله ۲: حذف متن غیرکد قبل از کد واقعی ----
+    ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+    code_extensions = {"ts", "tsx", "js", "jsx", "py", "css", "html", "vue", "json", "yaml", "yml", "sql", "go", "rs", "java", "kt", "swift", "rb", "php"}
+
+    if ext in code_extensions:
+        lines = content.split('\n')
+
+        # تشخیص اولین خط کد واقعی
+        _code_start_patterns = {
+            "ts": ["import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ", "type ", "interface ", "enum ", "{", "declare ", "namespace ", "module "],
+            "tsx": ["import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ", "type ", "interface ", "enum ", "{", "declare ", "namespace ", "module "],
+            "js": ["import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ", "{", "module."],
+            "jsx": ["import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ", "{"],
+            "py": ["import ", "from ", "#", '"""', "'''", "def ", "class ", "@", "if ", "try:", "async ", "\"\"\""],
+            "css": [".", "#", "@", "*", ":", "/", "body", "html", "div", "span", "a", "p", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "nav", "header", "footer", "main", "section", "article"],
+            "html": ["<", "<!"],
+            "json": ["{", "[", '"'],
+            "yaml": ["---", "#", "version", "name", "services", "apiVersion"],
+            "yml": ["---", "#", "version", "name", "services", "apiVersion"],
+            "sql": ["SELECT", "CREATE", "INSERT", "UPDATE", "DELETE", "ALTER", "DROP", "--", "/*"],
+            "vue": ["<template", "<script", "<style", "<!--"],
+        }
+        valid_starts = _code_start_patterns.get(ext, [])
+
+        if valid_starts:
+            # پیدا کردن اولین خط معتبر (کد یا markdown fence)
+            first_valid_idx = 0
+            for i, line in enumerate(lines):
+                stripped_line = line.strip()
+                if not stripped_line:
+                    continue
+                # خط کد واقعی یا markdown fence (مرحله بعد حذفش میکنه)
+                if any(stripped_line.startswith(s) for s in valid_starts) or stripped_line.startswith("```"):
+                    first_valid_idx = i
+                    break
+                # اگر خط حاوی متن فارسی/عربی + markdown بود → skip
+                _has_persian = bool(_sc_re.search(r'[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]', stripped_line))
+                _has_markdown = stripped_line.startswith("**") or stripped_line.startswith("##") or stripped_line.startswith("- ") or stripped_line.startswith("* ")
+                if _has_persian or _has_markdown:
+                    first_valid_idx = i + 1
+                    continue
+                # خط غیر فارسی، غیر markdown، و غیر کد → ممکنه توضیح انگلیسی باشه
+                # فقط اگه خط‌های اولیه هستن (قبل از هر کد) حذف کن
+                if i < 5:
+                    _code_syntax_chars = ["{", "}", "(", ")", "=", ";", "<", ">", "//", "/*", "=>"]
+                    _looks_like_prose = len(stripped_line) > 15 and not any(c in stripped_line for c in _code_syntax_chars)
+                    # خطوطی که با حروف شروع و با : ختم میشن → احتمالاً توضیح (نه کد)
+                    _is_explanation = stripped_line.endswith(":") and not any(
+                        stripped_line.startswith(s) for s in ["import", "export", "from", "const", "var", "let", "def", "class", "return", "if", "for", "while", "try", "async", "function"]
+                    )
+                    if _looks_like_prose or _is_explanation:
+                        first_valid_idx = i + 1
+                        continue
+                break
+
+            if first_valid_idx > 0:
+                lines = lines[first_valid_idx:]
+                content = '\n'.join(lines)
+                slog.info(f"[sanitize] Stripped {first_valid_idx} non-code lines from start of {file_path}")
+
+    # ---- مرحله ۳: حذف markdown code fence دور محتوا ----
+    # بعد از حذف متن غیرکد، ممکنه محتوا با ```lang شروع بشه
+    stripped = content.strip()
+    _fence_match = _sc_re.match(r'^```[\w]*\s*\n(.*?)```\s*$', stripped, _sc_re.DOTALL)
+    if _fence_match:
+        content = _fence_match.group(1)
+    else:
+        if stripped.startswith("```"):
+            lines = stripped.split('\n')
+            lines = lines[1:]  # حذف خط اول (```language)
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            content = '\n'.join(lines)
+
+    # ---- مرحله ۴: حذف متن غیرکد از انتهای فایل ----
+    # بعد از ``` ممکنه مدل توضیحات اضافی نوشته باشه
+    if ext in code_extensions:
+        _trailing_lines = content.split('\n')
+        _last_valid = len(_trailing_lines)
+        for i in range(len(_trailing_lines) - 1, -1, -1):
+            _tl = _trailing_lines[i].strip()
+            if not _tl:
+                continue
+            _has_persian = bool(_sc_re.search(r'[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]', _tl))
+            _has_markdown = _tl.startswith("**") or _tl.startswith("##") or _tl.startswith("- ") or _tl.startswith("---")
+            if _has_persian or _has_markdown:
+                _last_valid = i
+                continue
+            # خط مثل ```tsx یا ``` در انتها → حذف
+            if _tl.startswith("```"):
+                _last_valid = i
+                continue
+            break
+        if _last_valid < len(_trailing_lines):
+            _removed = len(_trailing_lines) - _last_valid
+            content = '\n'.join(_trailing_lines[:_last_valid])
+            slog.info(f"[sanitize] Stripped {_removed} non-code lines from end of {file_path}")
+
+    return content.strip()
 
 
 # --- الگوهای آلودگی reasoning در کد منبع ---
@@ -10568,8 +10718,22 @@ _REASONING_CONTAMINATION_PATTERNS = [
     r'\*\*Solution:\*\*',      # English: **Solution:**
     r'\*\*Error:\*\*',         # English: **Error:**
     r'\*\*Explanation:\*\*',   # English: **Explanation:**
+    r'\*\*Summary:\*\*',       # English: **Summary:**
+    r'\*\*توضیح:\*\*',         # فارسی: **توضیح:**
+    r'\*\*علت:\*\*',           # فارسی: **علت:**
+    r'\*\*مشکل:\*\*',          # فارسی: **مشکل:**
+    r'\*\*پیشنهاد:\*\*',       # فارسی: **پیشنهاد:**
+    r'\*\*اصلاح:\*\*',         # فارسی: **اصلاح:**
+    r'\*\*تغییرات:\*\*',       # فارسی: **تغییرات:**
+    r'\*\*کد اصلاح‌شده:\*\*',  # فارسی: **کد اصلاح‌شده:**
+    r'^<analysis>',            # XML analysis block
+    r'^<reasoning>',           # XML reasoning block
+    r'^<thinking>',            # XML thinking block
+    r'^<reflection>',          # XML reflection block
     r'^#{1,4}\s+[\u0600-\u06FF]',  # Markdown heading followed by Persian text at start of line
     r'^```(?:typescript|tsx|jsx|python|json)\s*$',  # Markdown code fence at start of line (not in code)
+    r'^\*\*\d+[\.\)]\s',      # Numbered list with bold: **1. ..., **2) ...
+    r'^\*\*[\u0600-\u06FF]',  # Bold Persian text at start of line: **فارسی
 ]
 
 
@@ -10603,6 +10767,29 @@ def _detect_reasoning_contamination(content: str, file_path: str) -> str | None:
                          "async ", "\"\"\"", "'''")
         if not any(first_line.startswith(s) for s in _valid_starts):
             return f"خط اول فایل {file_path} معتبر نیست برای Python: '{first_line[:80]}'"
+
+    if ext == "css" and first_line:
+        _valid_starts = (".", "#", "@", "*", ":", "/", "body", "html", "div", "span", "a", "p",
+                         "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "nav", "header",
+                         "footer", "main", "section", "article", "button", "input", "form",
+                         "table", "tr", "td", "th", "img", "video", "audio", "canvas", "svg")
+        if not any(first_line.startswith(s) for s in _valid_starts):
+            return f"خط اول فایل {file_path} معتبر نیست برای CSS: '{first_line[:80]}'"
+
+    if ext in ("html", "htm") and first_line:
+        _valid_starts = ("<", "<!",)
+        if not any(first_line.startswith(s) for s in _valid_starts):
+            return f"خط اول فایل {file_path} معتبر نیست برای HTML: '{first_line[:80]}'"
+
+    if ext == "json" and first_line:
+        _valid_starts = ("{", "[", '"')
+        if not any(first_line.startswith(s) for s in _valid_starts):
+            return f"خط اول فایل {file_path} معتبر نیست برای JSON: '{first_line[:80]}'"
+
+    if ext == "vue" and first_line:
+        _valid_starts = ("<template", "<script", "<style", "<!--")
+        if not any(first_line.startswith(s) for s in _valid_starts):
+            return f"خط اول فایل {file_path} معتبر نیست برای Vue: '{first_line[:80]}'"
 
     return None
 
@@ -10674,6 +10861,11 @@ def _normalize_action_plan_json(parsed: dict) -> dict | None:
     ]
     if not valid_files:
         return None
+
+    # 🛡️ پاکسازی محتوای فایل‌ها از آلودگی reasoning/markdown
+    for f in valid_files:
+        if f.get("content") and f.get("path"):
+            f["content"] = _sanitize_file_content(f["content"], f["path"])
 
     return {
         "files": valid_files,
@@ -10751,6 +10943,9 @@ def _try_repair_truncated_json(raw_json_str: str) -> dict | None:
                 try:
                     obj = json.loads(obj_str)
                     if obj.get("path") and (obj.get("content") or obj.get("sections")):
+                        # 🛡️ پاکسازی محتوا از آلودگی reasoning
+                        if obj.get("content"):
+                            obj["content"] = _sanitize_file_content(obj["content"], obj["path"])
                         completed_files.append(obj)
                 except (json.JSONDecodeError, ValueError):
                     pass
@@ -10844,7 +11039,7 @@ def _extract_all_action_plans_from_response(content: str, is_truncated: bool = F
                 ef_fname = ef_path.rsplit("/", 1)[-1] if "/" in ef_path else ef_path
                 # اگر عنوان بلوک شامل نام فایل باشه یا کد شامل import/export مرتبط باشه
                 if _cb_title and ef_fname and ef_fname.lower() in _cb_title.lower():
-                    ef["content"] = _cb_code.strip()
+                    ef["content"] = _sanitize_file_content(_cb_code.strip(), ef_path)
                     _matched_empty.add(ei)
                     slog.info(f"[action_plan extraction] Recovered content for {ef_path} from markdown code block")
                     break
@@ -10855,7 +11050,7 @@ def _extract_all_action_plans_from_response(content: str, is_truncated: bool = F
                         _pm_pos = content.find(_pm)
                         _cb_pos = content.find(_cb_code[:50])
                         if _cb_pos > _pm_pos and (_cb_pos - _pm_pos) < 500:
-                            ef["content"] = _cb_code.strip()
+                            ef["content"] = _sanitize_file_content(_cb_code.strip(), ef_path)
                             _matched_empty.add(ei)
                             slog.info(f"[action_plan extraction] Recovered content for {ef_path} by proximity match")
                             break
@@ -11250,6 +11445,11 @@ def _validate_file_content_syntax(content: str, file_path: str) -> dict:
     errors = []
     warnings = []
     ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+
+    # ── چک آلودگی reasoning (قبل از هر چک دیگری) ──
+    _contamination = _detect_reasoning_contamination(content, file_path)
+    if _contamination:
+        errors.append(f"آلودگی reasoning: {_contamination}")
 
     # ── چک placeholder/truncation ──
     _truncation_markers = [

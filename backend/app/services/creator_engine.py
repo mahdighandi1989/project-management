@@ -1069,8 +1069,23 @@ class ProjectCreator:
         if result.success:
             # استخراج کد از پاسخ
             code = result.output
-            # حذف markdown اگر موجود باشد
-            if code.startswith("```"):
+
+            # 🛡️ پاکسازی کامل محتوا از آلودگی reasoning/markdown
+            import re as _gf_re
+            # حذف reasoning blocks
+            code = _gf_re.sub(r'<think>.*?</think>\s*', '', code, flags=_gf_re.DOTALL)
+            code = _gf_re.sub(r'<think>.*$', '', code, flags=_gf_re.DOTALL)
+            code = _gf_re.sub(r'\*\*استدلال:\*\*.*?\*\*نتیجه:\*\*\s*', '', code, flags=_gf_re.DOTALL)
+            code = _gf_re.sub(r'\*\*استدلال:\*\*.*$', '', code, flags=_gf_re.DOTALL)
+            code = _gf_re.sub(r'\*\*Reasoning:\*\*.*?\*\*Result:\*\*\s*', '', code, flags=_gf_re.DOTALL | _gf_re.IGNORECASE)
+            code = _gf_re.sub(r'\*\*Reasoning:\*\*.*$', '', code, flags=_gf_re.DOTALL | _gf_re.IGNORECASE)
+            code = code.strip()
+
+            # حذف markdown code fence
+            _fence = _gf_re.match(r'^```[\w]*\s*\n(.*?)```\s*$', code, _gf_re.DOTALL)
+            if _fence:
+                code = _fence.group(1)
+            elif code.startswith("```"):
                 lines = code.split('\n')
                 code = '\n'.join(lines[1:-1] if lines[-1].strip() == '```' else lines[1:])
 
