@@ -24,7 +24,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="fa" dir="rtl">
-      <head>
+      <body>
         <Script
           id="runtime-config"
           strategy="beforeInteractive"
@@ -32,11 +32,11 @@ export default function RootLayout({
             __html: `window.__NEXT_PUBLIC_API_URL__ = "${apiUrl}";`,
           }}
         />
-      </head>
-      <body>
         <HelpProvider>
-          <Layout>{<InspectorBridge />}
-        {children}</Layout>
+          <Layout>
+            <InspectorBridge />
+            {children}
+          </Layout>
           <HelpSystem />
         </HelpProvider>
       </body>
