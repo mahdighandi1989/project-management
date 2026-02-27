@@ -10176,30 +10176,37 @@ async def fix_error(request: FixRequest, db: Session = Depends(get_db)):
                     task_type="code_generation"
                 )
 
-                # استخراج کد از پاسخ
-                fixed_content = fix_response.content.strip()
+                # 🧹 حذف بلوک‌های استدلال/reasoning (لایه ایمنی)
+                fixed_content = _strip_reasoning_blocks(fix_response.content.strip())
+
+                # استخراج کد از آخرین بلوک کد (نه اولین — ممکنه reasoning هم بلوک کد داشته باشه)
                 if "```" in fixed_content:
-                    # استخراج از بلوک کد
-                    parts = fixed_content.split("```")
-                    if len(parts) >= 3:
-                        code_block = parts[1]
-                        # حذف نام زبان از خط اول
-                        lines = code_block.split("\n")
-                        if lines and lines[0].strip() in ["js", "jsx", "ts", "tsx", "python", "py", "json", "html", "css", "yaml", "yml", "md", "java", "go", "rust", "c", "cpp", "swift", "kotlin", "ruby", "php"]:
-                            code_block = "\n".join(lines[1:])
-                        fixed_content = code_block.strip()
+                    import re as _fix_re
+                    # پیدا کردن همه بلوک‌های کد
+                    _code_blocks = _fix_re.findall(r'```[\w]*\n(.*?)```', fixed_content, _fix_re.DOTALL)
+                    if _code_blocks:
+                        # آخرین بلوک کد = خروجی واقعی (نه مثال‌های میانی)
+                        fixed_content = _code_blocks[-1].strip()
 
                 if fixed_content and fixed_content != current_content:
-                    fixed_files.append({
-                        "path": file_path,
-                        "content": fixed_content,
-                        "original_size": len(current_content),
-                        "fixed_size": len(fixed_content)
-                    })
-                    yield sse("progress", {
-                        "step": "file_fixed",
-                        "message": f"✅ فایل {file_path} اصلاح شد"
-                    })
+                    # 🛡️ بررسی آلودگی reasoning قبل از commit
+                    _contamination = _detect_reasoning_contamination(fixed_content, file_path)
+                    if _contamination:
+                        yield sse("progress", {
+                            "step": "contamination_blocked",
+                            "message": f"🛡️ محتوای آلوده بلاک شد: {_contamination[:100]}"
+                        })
+                    else:
+                        fixed_files.append({
+                            "path": file_path,
+                            "content": fixed_content,
+                            "original_size": len(current_content),
+                            "fixed_size": len(fixed_content)
+                        })
+                        yield sse("progress", {
+                            "step": "file_fixed",
+                            "message": f"✅ فایل {file_path} اصلاح شد"
+                        })
                 else:
                     yield sse("progress", {
                         "step": "no_change",
@@ -10497,16 +10504,24 @@ def _strip_reasoning_blocks(text: str) -> str:
     """
     حذف بلوک‌های استدلال (reasoning/thinking) از پاسخ مدل‌ها.
     مدل‌هایی مثل deepseek-reasoner بلوک‌های **استدلال:** یا <think> می‌فرستن
-    که نباید به کاربر نشون داده بشه.
+    که نباید در خروجی کد باشه.
     """
     if not text:
         return text
 
     import re as _sr_re
 
-    # حذف بلوک **استدلال:** تا **نتیجه:**
+    # حذف بلوک **استدلال:** تا **نتیجه:** (حالت کامل)
     text = _sr_re.sub(
         r'\*\*استدلال:\*\*.*?\*\*نتیجه:\*\*\s*',
+        '',
+        text,
+        flags=_sr_re.DOTALL
+    )
+
+    # حذف **استدلال:** بدون **نتیجه:** (حالت ناقص — وقتی مدل فقط reasoning فرستاده)
+    text = _sr_re.sub(
+        r'\*\*استدلال:\*\*.*$',
         '',
         text,
         flags=_sr_re.DOTALL
@@ -10515,7 +10530,10 @@ def _strip_reasoning_blocks(text: str) -> str:
     # حذف بلوک‌های <think>...</think>
     text = _sr_re.sub(r'<think>.*?</think>\s*', '', text, flags=_sr_re.DOTALL)
 
-    # حذف بلوک‌های **Reasoning:**...**Result:**
+    # حذف <think> بدون </think> (ناقص)
+    text = _sr_re.sub(r'<think>.*$', '', text, flags=_sr_re.DOTALL)
+
+    # حذف بلوک‌های **Reasoning:**...**Result:** (حالت کامل)
     text = _sr_re.sub(
         r'\*\*Reasoning:\*\*.*?\*\*Result:\*\*\s*',
         '',
@@ -10523,7 +10541,60 @@ def _strip_reasoning_blocks(text: str) -> str:
         flags=_sr_re.DOTALL | _sr_re.IGNORECASE
     )
 
+    # حذف **Reasoning:** بدون **Result:** (حالت ناقص)
+    text = _sr_re.sub(
+        r'\*\*Reasoning:\*\*.*$',
+        '',
+        text,
+        flags=_sr_re.DOTALL | _sr_re.IGNORECASE
+    )
+
     return text.strip()
+
+
+# --- الگوهای آلودگی reasoning در کد منبع ---
+_REASONING_CONTAMINATION_PATTERNS = [
+    r'\*\*استدلال:\*\*',       # فارسی: **استدلال:**
+    r'\*\*نتیجه:\*\*',         # فارسی: **نتیجه:**
+    r'\*\*Reasoning:\*\*',     # English: **Reasoning:**
+    r'\*\*Result:\*\*',        # English: **Result:**
+    r'^<think>',               # XML thinking block
+    r'^</think>',              # XML thinking block close
+]
+
+
+def _detect_reasoning_contamination(content: str, file_path: str) -> str | None:
+    """
+    بررسی آلودگی محتوای فایل با خروجی reasoning مدل‌های AI.
+    اگر آلودگی پیدا شد، رشته خطا برمی‌گردونه. اگه تمیز بود None.
+    """
+    if not content:
+        return None
+
+    import re as _dc_re
+
+    for pattern in _REASONING_CONTAMINATION_PATTERNS:
+        if _dc_re.search(pattern, content, _dc_re.MULTILINE | _dc_re.IGNORECASE):
+            return f"محتوای فایل {file_path} با خروجی reasoning مدل AI آلوده شده: الگوی '{pattern}' شناسایی شد"
+
+    # بررسی اضافی: آیا خط اول فایل کد، یک خط معتبر کد هست؟
+    first_line = content.split("\n")[0].strip() if content.strip() else ""
+    ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+
+    if ext in ("ts", "tsx", "js", "jsx") and first_line:
+        # فایل‌های JS/TS باید با import, export, //, /*, 'use, const, var, let, type, interface, enum, { شروع بشن
+        _valid_starts = ("import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ",
+                         "type ", "interface ", "enum ", "{", "declare ", "namespace ", "module ")
+        if not any(first_line.startswith(s) for s in _valid_starts):
+            return f"خط اول فایل {file_path} معتبر نیست برای {ext}: '{first_line[:80]}'"
+
+    if ext == "py" and first_line:
+        _valid_starts = ("import ", "from ", "#", '"""', "'''", "def ", "class ", "@", "if ", "try:",
+                         "async ", "\"\"\"", "'''")
+        if not any(first_line.startswith(s) for s in _valid_starts):
+            return f"خط اول فایل {file_path} معتبر نیست برای Python: '{first_line[:80]}'"
+
+    return None
 
 
 def _normalize_action_plan_json(parsed: dict) -> dict | None:
@@ -13837,6 +13908,18 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                                 dropped_files.append({"path": file_path, "reason": _reason[:150]})
                                 slog.error(f"[apply-action] REJECTED destructive rewrite {file_path}: {_reason}")
                                 continue
+                        # ── بررسی آلودگی reasoning قبل از هر چیز ──
+                        if _file_content:
+                            _contamination = _detect_reasoning_contamination(_file_content, file_path)
+                            if _contamination:
+                                yield sse("progress", {
+                                    "step": "contamination_blocked",
+                                    "message": f"🛡️ محتوای آلوده بلاک شد: {_contamination[:100]}"
+                                })
+                                dropped_files.append({"path": file_path, "reason": f"آلودگی reasoning: {_contamination[:120]}"})
+                                slog.error(f"[apply-action] BLOCKED reasoning contamination in {file_path}: {_contamination}")
+                                continue
+
                         # ── اعتبارسنجی سینتکس محتوای نهایی قبل از commit ──
                         if _file_content:
                             _syntax_check = _validate_file_content_syntax(_file_content, file_path)
