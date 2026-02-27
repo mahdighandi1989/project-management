@@ -231,18 +231,67 @@ class SimpleProjectCreator:
 
         response = await ai_generate(prompt)
 
-        # پاکسازی
+        # پاکسازی — حذف reasoning blocks و markdown fences
         content = response.strip()
 
-        # حذف markdown code blocks
-        if content.startswith("```"):
+        # حذف بلوک‌های reasoning/thinking
+        import re as _gen_re
+        # <think>...</think>
+        content = _gen_re.sub(r'<think>.*?</think>\s*', '', content, flags=_gen_re.DOTALL)
+        content = _gen_re.sub(r'<think>.*$', '', content, flags=_gen_re.DOTALL)
+        # **استدلال:**...**نتیجه:**
+        content = _gen_re.sub(r'\*\*استدلال:\*\*.*?\*\*نتیجه:\*\*\s*', '', content, flags=_gen_re.DOTALL)
+        content = _gen_re.sub(r'\*\*استدلال:\*\*.*$', '', content, flags=_gen_re.DOTALL)
+        # **Reasoning:**...**Result:**
+        content = _gen_re.sub(r'\*\*Reasoning:\*\*.*?\*\*Result:\*\*\s*', '', content, flags=_gen_re.DOTALL | _gen_re.IGNORECASE)
+        content = _gen_re.sub(r'\*\*Reasoning:\*\*.*$', '', content, flags=_gen_re.DOTALL | _gen_re.IGNORECASE)
+        # <analysis>...</analysis>
+        for tag in ['analysis', 'reasoning', 'thinking', 'reflection']:
+            content = _gen_re.sub(rf'<{tag}>.*?</{tag}>\s*', '', content, flags=_gen_re.DOTALL | _gen_re.IGNORECASE)
+
+        content = content.strip()
+
+        # حذف markdown code blocks — حالت کامل
+        _fence_match = _gen_re.match(r'^```[\w]*\s*\n(.*?)```\s*$', content, _gen_re.DOTALL)
+        if _fence_match:
+            content = _fence_match.group(1)
+        elif content.startswith("```"):
             lines = content.split('\n')
-            # حذف خط اول (```python یا ```)
             lines = lines[1:]
-            # حذف خط آخر اگه ``` باشه
             if lines and lines[-1].strip() == "```":
                 lines = lines[:-1]
             content = '\n'.join(lines)
+
+        # حذف متن غیرکد از ابتدای فایل (فارسی/markdown)
+        ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+        if ext in ("py", "ts", "tsx", "js", "jsx", "json", "css", "html"):
+            _valid_start_map = {
+                "py": ["import ", "from ", "#", '"""', "'''", "def ", "class ", "@"],
+                "ts": ["import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ", "type ", "interface ", "{"],
+                "tsx": ["import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ", "type ", "interface ", "{"],
+                "js": ["import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ", "{", "module."],
+                "jsx": ["import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ", "{"],
+                "json": ["{", "[", '"'],
+                "css": [".", "#", "@", "*", ":", "/"],
+                "html": ["<", "<!"],
+            }
+            _valid = _valid_start_map.get(ext, [])
+            if _valid:
+                _lines = content.split('\n')
+                _skip = 0
+                for _i, _line in enumerate(_lines):
+                    _s = _line.strip()
+                    if not _s:
+                        continue
+                    if any(_s.startswith(v) for v in _valid):
+                        _skip = _i
+                        break
+                    if _i < 5:
+                        _skip = _i + 1
+                    else:
+                        break
+                if _skip > 0:
+                    content = '\n'.join(_lines[_skip:])
 
         return content
 
