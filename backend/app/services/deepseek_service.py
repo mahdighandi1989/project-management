@@ -88,12 +88,10 @@ class DeepSeekService(AIServiceBase):
 
             latency = int((datetime.now() - start_time).total_seconds() * 1000)
 
-            # برای DeepSeek Reasoner، ممکن است reasoning_content هم داشته باشیم
+            # برای DeepSeek Reasoner، reasoning_content جدا از content نگهداری میشه
+            # هرگز reasoning رو با content ترکیب نکن — این باعث آلوده شدن خروجی کد میشه
             content = data["choices"][0]["message"].get("content", "")
             reasoning = data["choices"][0]["message"].get("reasoning_content", "")
-
-            if reasoning:
-                content = f"**استدلال:**\n{reasoning}\n\n**نتیجه:**\n{content}"
 
             return AIResponse(
                 model_id=model_id,
@@ -105,6 +103,7 @@ class DeepSeekService(AIServiceBase):
                     "prompt_tokens": data.get("usage", {}).get("prompt_tokens", 0),
                     "completion_tokens": data.get("usage", {}).get("completion_tokens", 0),
                     "has_reasoning": bool(reasoning),
+                    "reasoning_content": reasoning if reasoning else None,
                 }
             )
 
@@ -157,9 +156,9 @@ class DeepSeekService(AIServiceBase):
                             delta = data["choices"][0].get("delta", {})
                             if "content" in delta:
                                 yield delta["content"]
-                            # برای Reasoner
-                            if "reasoning_content" in delta:
-                                yield delta["reasoning_content"]
+                            # reasoning_content فقط لاگ میشه، yield نمیشه
+                            # چون در streaming قابل تفکیک از content نیست
+                            # و باعث آلوده شدن خروجی کد میشه
                         except json.JSONDecodeError:
                             continue
 
