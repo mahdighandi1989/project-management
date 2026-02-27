@@ -9702,6 +9702,22 @@ async def investigate_errors_bulk(request: BulkInvestigateRequest, db: Session =
     if not error_messages:
         return {"success": False, "error": "پیام‌های خطا یافت نشد"}
 
+    # ── Deduplication: حذف خطاهای تکراری بر اساس محتوا ──
+    _seen_contents = set()
+    _unique_messages = []
+    _dup_count = 0
+    for em in error_messages:
+        # نرمال‌سازی: حذف timestamp و whitespace اضافی برای مقایسه بهتر
+        _normalized = em.content.strip().lower() if em.content else ""
+        if _normalized and _normalized not in _seen_contents:
+            _seen_contents.add(_normalized)
+            _unique_messages.append(em)
+        else:
+            _dup_count += 1
+    if _dup_count > 0:
+        slog.info(f"[investigate-bulk] Deduplicated: {_dup_count} duplicate errors removed, {len(_unique_messages)} unique remaining")
+    error_messages = _unique_messages
+
     # دریافت اطلاعات پروژه
     project = db.query(Project).filter(Project.id == request.project_id).first()
     if not project:
@@ -9771,9 +9787,10 @@ async def investigate_errors_bulk(request: BulkInvestigateRequest, db: Session =
         def sse(event: str, data: dict) -> str:
             return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
+        _dedup_note = f" ({_dup_count} تکراری حذف شد)" if _dup_count > 0 else ""
         yield sse("progress", {
             "step": "start",
-            "message": f"🔍 شروع بررسی کلی {len(error_messages)} خطا..."
+            "message": f"🔍 شروع بررسی کلی {len(error_messages)} خطای یکتا{_dedup_note}..."
         })
 
         # --- مرحله ۱: ساختار پروژه ---
@@ -9842,6 +9859,17 @@ async def investigate_errors_bulk(request: BulkInvestigateRequest, db: Session =
         })
 
         # --- مرحله ۳: خواندن فایل‌ها ---
+        # حذف فایل‌های تکراری
+        _seen_bulk = set()
+        _deduped_bulk = []
+        for _sf in selected_files:
+            if _sf not in _seen_bulk:
+                _seen_bulk.add(_sf)
+                _deduped_bulk.append(_sf)
+        if len(_deduped_bulk) < len(selected_files):
+            slog.info(f"[investigate-bulk] Deduplicated file list: {len(selected_files)} → {len(_deduped_bulk)}")
+        selected_files = _deduped_bulk
+
         file_contents = {}
         for i, file_path in enumerate(selected_files):
             yield sse("progress", {
@@ -10831,15 +10859,55 @@ def _apply_section_modifications(original_content: str, sections: list) -> dict:
             except _sec_re.error:
                 pass  # regex خطا داد — ادامه بده
 
-        # نمایش سرنخ: اولین خط find را در فایل جستجو کن — شاید خط‌های مشابه وجود داره
-        _first_find_line = find_str.strip().split("\n")[0].strip()
-        _similar_hint = ""
-        if _first_find_line and len(_first_find_line) > 5:
-            for _li, _line in enumerate(result_content.split("\n")):
-                if _first_find_line[:30] in _line or _line.strip() == _first_find_line:
-                    _similar_hint = f" (خط مشابه در خط {_li + 1}: '{_line.strip()[:60]}')"
+        # ── تلاش سوم: fuzzy line-by-line matching ──
+        # اولین و آخرین خط معنادار find رو پیدا کن و محدوده بینشون رو جایگزین کن
+        import re as _sec_re2
+        _find_lines_stripped = [l.strip() for l in find_str.strip().split("\n") if l.strip()]
+        _fuzzy_matched = False
+        if len(_find_lines_stripped) >= 2:
+            _first_line = _find_lines_stripped[0]
+            _last_line = _find_lines_stripped[-1]
+            _content_lines = result_content.split("\n")
+            _start_idx = None
+            _end_idx = None
+            # پیدا کردن اولین خط (حداقل 60% مشابهت)
+            for _ci, _cl in enumerate(_content_lines):
+                _cl_stripped = _cl.strip()
+                if _cl_stripped == _first_line:
+                    _start_idx = _ci
                     break
-        errors.append(f"section[{idx}]: متن find پیدا نشد: '{find_str[:80]}...'{_similar_hint}")
+                elif len(_first_line) > 10 and _first_line[:int(len(_first_line)*0.6)] in _cl_stripped:
+                    _start_idx = _ci
+                    break
+            if _start_idx is not None:
+                # پیدا کردن آخرین خط (بعد از start)
+                for _ci in range(_start_idx + 1, min(_start_idx + len(_find_lines_stripped) + 10, len(_content_lines))):
+                    _cl_stripped = _content_lines[_ci].strip()
+                    if _cl_stripped == _last_line:
+                        _end_idx = _ci
+                        break
+                    elif len(_last_line) > 10 and _last_line[:int(len(_last_line)*0.6)] in _cl_stripped:
+                        _end_idx = _ci
+                        break
+            if _start_idx is not None and _end_idx is not None and _end_idx > _start_idx:
+                # جایگزینی محدوده پیدا شده
+                _before = "\n".join(_content_lines[:_start_idx])
+                _after = "\n".join(_content_lines[_end_idx + 1:])
+                result_content = _before + ("\n" if _before else "") + replace_str + ("\n" if _after else "") + _after
+                applied += 1
+                _fuzzy_matched = True
+                errors.append(f"section[{idx}]: ⚠️ fuzzy match استفاده شد (خط {_start_idx+1}-{_end_idx+1}) — دقت کمتر از exact match")
+
+        if not _fuzzy_matched:
+            # نمایش سرنخ: اولین خط find را در فایل جستجو کن — شاید خط‌های مشابه وجود داره
+            _first_find_line = find_str.strip().split("\n")[0].strip()
+            _similar_hint = ""
+            if _first_find_line and len(_first_find_line) > 5:
+                for _li, _line in enumerate(result_content.split("\n")):
+                    if _first_find_line[:30] in _line or _line.strip() == _first_find_line:
+                        _similar_hint = f" (خط مشابه در خط {_li + 1}: '{_line.strip()[:60]}')"
+                        break
+            errors.append(f"section[{idx}]: متن find پیدا نشد: '{find_str[:80]}...'{_similar_hint}")
 
     success = applied > 0 and len(errors) < len(sections)
     return {
@@ -10976,6 +11044,34 @@ def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None)
                         file_warnings.append(f"⚠️ خط {line_num}: import بدون from — احتمال خطای سینتکس")
                         break
 
+            # ── بررسی تعادل backtick (template literal) ──
+            _bt_count = content.count("`")
+            if _bt_count % 2 != 0:
+                file_critical.append(f"❌ عدم تعادل backtick (template literal): {_bt_count} عدد (فرد) — یک ` باز یا بسته اضافی — این فایل حذف شد")
+
+            # ── بررسی template literal تو در تو (nested backtick) ──
+            import re as _tsx_re
+            _nested_bt_pattern = r'`[^`]*\$\{[^}]*`[^`]*`[^}]*\}[^`]*`'
+            _nested_bt_matches = _tsx_re.findall(_nested_bt_pattern, content)
+            if _nested_bt_matches:
+                file_critical.append(
+                    f"❌ template literal تو در تو: {len(_nested_bt_matches)} مورد — "
+                    f"esbuild قادر به transform نیست — باید از string concatenation استفاده شود — این فایل حذف شد"
+                )
+
+            # ── بررسی JSX/TSX — className بدون تگ (خطای رایج AI) ──
+            if ext in ("tsx", "jsx"):
+                _lines = content.split("\n")
+                for _ln, _line in enumerate(_lines, 1):
+                    _stripped = _line.strip()
+                    if _stripped.startswith("className=") and _ln > 1:
+                        _prev = "\n".join(_lines[max(0, _ln - 4):_ln - 1])
+                        if "<" not in _prev and "..." not in _prev:
+                            file_critical.append(
+                                f"❌ خط {_ln}: className بدون تگ JSX — کد خارج از کامپوننت قرار گرفته — این فایل حذف شد"
+                            )
+                            break
+
         # ── تشخیص بازنویسی مخرب (Destructive Rewrite Detection) ──
         # اگر operation=modify/update و فایل اصلی رو داریم → مقایسه اندازه + محتوا
         operation = f.get("operation", "").lower()
@@ -11099,7 +11195,7 @@ def _validate_file_content_syntax(content: str, file_path: str) -> dict:
         except json.JSONDecodeError as je:
             errors.append(f"JSON نامعتبر خط {je.lineno}: {je.msg}")
 
-    # ── TypeScript/JavaScript/JSX/TSX basic checks ──
+    # ── TypeScript/JavaScript/JSX/TSX checks ──
     if ext in ("ts", "tsx", "js", "jsx"):
         for line_num, line in enumerate(content.split("\n"), 1):
             stripped = line.strip()
@@ -11107,6 +11203,48 @@ def _validate_file_content_syntax(content: str, file_path: str) -> dict:
                 if not stripped.endswith("';") and not stripped.endswith('";'):
                     warnings.append(f"خط {line_num}: import بدون from — احتمال خطای سینتکس")
                     break
+
+        # ── بررسی تعادل backtick (template literal) ──
+        backtick_count = content.count("`")
+        if backtick_count % 2 != 0:
+            errors.append(f"عدم تعادل backtick (template literal): {backtick_count} عدد (فرد) — یک ` باز یا بسته اضافی وجود دارد")
+
+        # ── بررسی template literal تو در تو (nested backtick) ──
+        # الگوی `...${...`...`...}...` باعث خطای esbuild transform میشه
+        import re as _tsx_re
+        _nested_bt_pattern = r'`[^`]*\$\{[^}]*`[^`]*`[^}]*\}[^`]*`'
+        _nested_matches = _tsx_re.findall(_nested_bt_pattern, content)
+        if _nested_matches:
+            errors.append(
+                f"template literal تو در تو (nested backtick): {len(_nested_matches)} مورد شناسایی شد — "
+                f"esbuild قادر به transform نیست — از string concatenation استفاده کنید"
+            )
+
+        # ── بررسی JSX/TSX — تگ‌های باز بدون بسته ──
+        if ext in ("tsx", "jsx"):
+            # شمارش className یا attribute بیرون از تگ JSX (خطای رایج AI)
+            lines = content.split("\n")
+            for line_num, line in enumerate(lines, 1):
+                stripped = line.strip()
+                # className به عنوان اولین چیز در خط و بدون تگ باز قبلش
+                if stripped.startswith("className=") and line_num > 1:
+                    prev_lines = "\n".join(lines[max(0, line_num - 4):line_num - 1])
+                    if "<" not in prev_lines and "..." not in prev_lines:
+                        errors.append(
+                            f"خط {line_num}: className بدون تگ JSX — احتمالاً کد خارج از کامپوننت قرار گرفته"
+                        )
+                        break
+
+        # ── بررسی خطاهای رایج esbuild: export/return بیرون از تابع ──
+        lines = content.split("\n")
+        has_function_or_component = False
+        for line in lines:
+            stripped = line.strip()
+            if any(kw in stripped for kw in ["function ", "const ", "class ", "export default", "export function"]):
+                has_function_or_component = True
+                break
+        if not has_function_or_component and len(lines) > 5:
+            warnings.append("فایل فاقد تعریف تابع، کامپوننت یا export — ممکن است ناقص باشد")
 
     return {
         "valid": len(errors) == 0,
@@ -12404,6 +12542,17 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                     "message": f"📌 {len(selected) - _before_err} فایل ذکرشده در خطا به لیست اضافه شد"
                                 })
 
+                        # ── حذف فایل‌های تکراری از لیست (حفظ ترتیب) ──
+                        _seen_err_files = set()
+                        _deduped_err = []
+                        for _sf in selected:
+                            if _sf not in _seen_err_files:
+                                _seen_err_files.add(_sf)
+                                _deduped_err.append(_sf)
+                        if len(_deduped_err) < len(selected):
+                            slog.info(f"[smart-chat ERROR_LOG] Deduplicated file list: {len(selected)} → {len(_deduped_err)}")
+                        selected = _deduped_err
+
                         # محدود کردن حجم کد بر اساس ظرفیت مدل
                         max_err_code_chars = int(max_input_chars * 0.65)
                         # 🆕 پردازش دسته‌ای برای FULL_PROJECT
@@ -12901,6 +13050,17 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                     "step": "extracted_files_added",
                                     "message": f"📌 {len(selected) - _before_merge} فایل ذکرشده در پیام/خطا به لیست اضافه شد"
                                 })
+
+                        # ── حذف فایل‌های تکراری از لیست (حفظ ترتیب) ──
+                        _seen_files = set()
+                        _deduped_selected = []
+                        for _sf in selected:
+                            if _sf not in _seen_files:
+                                _seen_files.add(_sf)
+                                _deduped_selected.append(_sf)
+                        if len(_deduped_selected) < len(selected):
+                            slog.info(f"[smart-chat ACTION] Deduplicated file list: {len(selected)} → {len(_deduped_selected)}")
+                        selected = _deduped_selected
 
                         # خواندن فایل‌ها (با رعایت حد context window مدل)
                         max_code_chars = int(max_input_chars * 0.70)
@@ -13565,9 +13725,12 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                     elif _syntax_check["warnings"]:
                         _warns = "; ".join(_syntax_check["warnings"][:3])
                         yield sse("progress", {
-                            "step": "syntax_warning",
-                            "message": f"⚠️ {file_path}: هشدار سینتکس — {_warns}"
+                            "step": "syntax_warning_rejected",
+                            "message": f"🚫 {file_path}: هشدار سینتکس — فایل commit نمیشه تا رفع نشه — {_warns}"
                         })
+                        dropped_files.append({"path": file_path, "reason": f"هشدار سینتکس: {_warns[:120]}"})
+                        slog.warning(f"[apply-action] REJECTED create {file_path}: syntax warnings treated as errors: {_warns}")
+                        continue
                 final_files.append(f)
                 continue
             try:
@@ -13609,9 +13772,12 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                             elif _syntax_check["warnings"]:
                                 _warns = "; ".join(_syntax_check["warnings"][:3])
                                 yield sse("progress", {
-                                    "step": "syntax_warning_after_merge",
-                                    "message": f"⚠️ {file_path}: هشدار سینتکس بعد از merge — {_warns}"
+                                    "step": "syntax_warning_rejected_after_merge",
+                                    "message": f"🚫 {file_path}: هشدار سینتکس بعد از merge — فایل commit نمیشه تا رفع نشه — {_warns}"
                                 })
+                                dropped_files.append({"path": file_path, "reason": f"هشدار سینتکس بعد از merge: {_warns[:120]}"})
+                                slog.warning(f"[apply-action] REJECTED merged {file_path}: syntax warnings treated as errors: {_warns}")
+                                continue
                             final_files.append(f)
                         else:
                             _errs = "; ".join(str(e)[:80] for e in merge_result['errors'][:3])
@@ -13632,8 +13798,46 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                             })
                             dropped_files.append({"path": file_path, "reason": f"modify_sections شکست: {_errs[:100]}"})
                     else:
-                        # ── اعتبارسنجی سینتکس محتوای نهایی قبل از commit ──
+                        # ── تشخیص بازنویسی مخرب در apply_action (لایه دوم) ──
                         _file_content = f.get("content", "")
+                        _orig_content = existing.get("content", "")
+                        if _file_content and _orig_content:
+                            _orig_lines = len(_orig_content.strip().split("\n"))
+                            _new_lines = len(_file_content.strip().split("\n"))
+                            _is_destructive = False
+                            # لایه ۱: فایل بزرگ خیلی کوچک شده
+                            if _orig_lines > 80 and _new_lines < _orig_lines * 0.5:
+                                _is_destructive = True
+                                _reason = (
+                                    f"بازنویسی مخرب: فایل اصلی {_orig_lines} خط بود ولی خروجی AI فقط {_new_lines} خط "
+                                    f"({int(_new_lines/_orig_lines*100)}% از اصل) — احتمال حذف قابلیت‌های موجود"
+                                )
+                            # لایه ۲: محتوای واقعی حفظ نشده
+                            elif _orig_lines > 100:
+                                _trivial = {"{", "}", "(", ")", "[", "]", "", "};", ");", "},", "],", "});", "export default", "return (", "return null;"}
+                                _orig_meaningful = set()
+                                for _ol in _orig_content.strip().split("\n"):
+                                    _stripped_ol = _ol.strip()
+                                    if _stripped_ol and _stripped_ol not in _trivial and len(_stripped_ol) > 10:
+                                        _orig_meaningful.add(_stripped_ol)
+                                if len(_orig_meaningful) > 20:
+                                    _preserved = sum(1 for _om in _orig_meaningful if _om in _file_content)
+                                    _preserve_ratio = _preserved / len(_orig_meaningful)
+                                    if _preserve_ratio < 0.25:
+                                        _is_destructive = True
+                                        _reason = (
+                                            f"بازنویسی مخرب (محتوایی): فقط {int(_preserve_ratio*100)}% از خطوط معنادار "
+                                            f"({_preserved}/{len(_orig_meaningful)}) حفظ شده — مدل فایل رو از صفر نوشته"
+                                        )
+                            if _is_destructive:
+                                yield sse("progress", {
+                                    "step": "destructive_rewrite_rejected",
+                                    "message": f"🚫 {file_path}: {_reason}"
+                                })
+                                dropped_files.append({"path": file_path, "reason": _reason[:150]})
+                                slog.error(f"[apply-action] REJECTED destructive rewrite {file_path}: {_reason}")
+                                continue
+                        # ── اعتبارسنجی سینتکس محتوای نهایی قبل از commit ──
                         if _file_content:
                             _syntax_check = _validate_file_content_syntax(_file_content, file_path)
                             if not _syntax_check["valid"]:
@@ -13648,10 +13852,13 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                                 if _syntax_check["warnings"]:
                                     _warns = "; ".join(_syntax_check["warnings"][:3])
                                     yield sse("progress", {
-                                        "step": "syntax_warning",
-                                        "message": f"⚠️ {file_path}: هشدار سینتکس — {_warns}"
+                                        "step": "syntax_warning_rejected",
+                                        "message": f"🚫 {file_path}: هشدار سینتکس — فایل commit نمیشه تا رفع نشه — {_warns}"
                                     })
-                                final_files.append(f)
+                                    dropped_files.append({"path": file_path, "reason": f"هشدار سینتکس: {_warns[:120]}"})
+                                    slog.warning(f"[apply-action] REJECTED modify {file_path}: syntax warnings treated as errors: {_warns}")
+                                else:
+                                    final_files.append(f)
                         else:
                             final_files.append(f)
                 else:
