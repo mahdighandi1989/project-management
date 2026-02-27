@@ -837,67 +837,16 @@ class ProjectEngineIntegrator:
     def _sanitize_generated_content(self, content: str, file_path: str) -> str:
         """
         پاکسازی محتوای تولید شده توسط AI قبل از ذخیره‌سازی.
-        حذف reasoning blocks، markdown fences، و متن غیرکد.
+        دلیگیت به ماژول مرکزی content_sanitizer (برای یکپارچگی با سایر سرویس‌ها).
         """
-        import re as _sg_re
-
+        from .content_sanitizer import strip_reasoning_blocks, sanitize_file_content
         if not content or not content.strip():
             return content
-
-        # ---- حذف reasoning blocks ----
-        content = _sg_re.sub(r'<think>.*?</think>\s*', '', content, flags=_sg_re.DOTALL)
-        content = _sg_re.sub(r'<think>.*$', '', content, flags=_sg_re.DOTALL)
-        content = _sg_re.sub(r'\*\*استدلال:\*\*.*?\*\*نتیجه:\*\*\s*', '', content, flags=_sg_re.DOTALL)
-        content = _sg_re.sub(r'\*\*استدلال:\*\*.*$', '', content, flags=_sg_re.DOTALL)
-        content = _sg_re.sub(r'\*\*Reasoning:\*\*.*?\*\*Result:\*\*\s*', '', content, flags=_sg_re.DOTALL | _sg_re.IGNORECASE)
-        content = _sg_re.sub(r'\*\*Reasoning:\*\*.*$', '', content, flags=_sg_re.DOTALL | _sg_re.IGNORECASE)
-        for tag in ['analysis', 'reasoning', 'thinking', 'reflection']:
-            content = _sg_re.sub(rf'<{tag}>.*?</{tag}>\s*', '', content, flags=_sg_re.DOTALL | _sg_re.IGNORECASE)
-
-        content = content.strip()
-
-        # ---- حذف markdown code fence دور کل محتوا ----
-        _fence_match = _sg_re.match(r'^```[\w]*\s*\n(.*?)```\s*$', content, _sg_re.DOTALL)
-        if _fence_match:
-            content = _fence_match.group(1)
-        elif content.startswith("```"):
-            lines = content.split('\n')
-            lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            content = '\n'.join(lines)
-
-        # ---- حذف متن غیرکد از ابتدای فایل ----
-        ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
-        _valid_start_map = {
-            "py": ["import ", "from ", "#", '"""', "'''", "def ", "class ", "@"],
-            "ts": ["import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ", "type ", "interface ", "{"],
-            "tsx": ["import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ", "type ", "interface ", "{"],
-            "js": ["import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ", "{", "module."],
-            "jsx": ["import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ", "{"],
-            "json": ["{", "[", '"'],
-            "css": [".", "#", "@", "*", ":", "/"],
-            "html": ["<", "<!"],
-        }
-        _valid = _valid_start_map.get(ext, [])
-        if _valid:
-            _lines = content.split('\n')
-            _skip = 0
-            for _i, _line in enumerate(_lines):
-                _s = _line.strip()
-                if not _s:
-                    continue
-                if any(_s.startswith(v) for v in _valid):
-                    _skip = _i
-                    break
-                if _i < 5:
-                    _skip = _i + 1
-                else:
-                    break
-            if _skip > 0:
-                content = '\n'.join(_lines[_skip:])
-
-        return content.strip()
+        # ابتدا orphan reasoning blocks رو حذف کن (شامل ناقص‌ها)
+        content = strip_reasoning_blocks(content)
+        # سپس پاکسازی کامل فایل (فارسی، markdown، fence، trailing)
+        content = sanitize_file_content(content, file_path)
+        return content
 
     async def load_workflow_from_github(self, project_id: str) -> Optional[Dict]:
         """

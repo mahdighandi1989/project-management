@@ -10506,292 +10506,32 @@ def _extract_file_paths_from_text(text: str, code_files: list) -> list:
 def _strip_reasoning_blocks(text: str) -> str:
     """
     حذف بلوک‌های استدلال (reasoning/thinking) از پاسخ مدل‌ها.
-    مدل‌هایی مثل deepseek-reasoner بلوک‌های **استدلال:** یا <think> می‌فرستن
-    که نباید در خروجی کد باشه.
+    دلیگیت به ماژول مرکزی content_sanitizer.
     """
-    if not text:
-        return text
-
-    import re as _sr_re
-
-    # حذف بلوک **استدلال:** تا **نتیجه:** (حالت کامل)
-    text = _sr_re.sub(
-        r'\*\*استدلال:\*\*.*?\*\*نتیجه:\*\*\s*',
-        '',
-        text,
-        flags=_sr_re.DOTALL
-    )
-
-    # حذف **استدلال:** بدون **نتیجه:** (حالت ناقص — وقتی مدل فقط reasoning فرستاده)
-    text = _sr_re.sub(
-        r'\*\*استدلال:\*\*.*$',
-        '',
-        text,
-        flags=_sr_re.DOTALL
-    )
-
-    # حذف بلوک‌های <think>...</think>
-    text = _sr_re.sub(r'<think>.*?</think>\s*', '', text, flags=_sr_re.DOTALL)
-
-    # حذف <think> بدون </think> (ناقص)
-    text = _sr_re.sub(r'<think>.*$', '', text, flags=_sr_re.DOTALL)
-
-    # حذف بلوک‌های **Reasoning:**...**Result:** (حالت کامل)
-    text = _sr_re.sub(
-        r'\*\*Reasoning:\*\*.*?\*\*Result:\*\*\s*',
-        '',
-        text,
-        flags=_sr_re.DOTALL | _sr_re.IGNORECASE
-    )
-
-    # حذف **Reasoning:** بدون **Result:** (حالت ناقص)
-    text = _sr_re.sub(
-        r'\*\*Reasoning:\*\*.*$',
-        '',
-        text,
-        flags=_sr_re.DOTALL | _sr_re.IGNORECASE
-    )
-
-    # حذف بلوک‌های **تحلیل:**...**نتیجه:** و **بررسی:**...**نتیجه:**
-    for label in ['تحلیل', 'بررسی', 'راه‌حل', 'خطا', 'Analysis', 'Solution', 'Error', 'Explanation', 'Summary']:
-        text = _sr_re.sub(
-            r'\*\*' + _sr_re.escape(label) + r':\*\*.*?\*\*(?:نتیجه|Result|Output|Code|خروجی):\*\*\s*',
-            '',
-            text,
-            flags=_sr_re.DOTALL | _sr_re.IGNORECASE
-        )
-        # حالت ناقص (بدون بلوک پایانی)
-        text = _sr_re.sub(
-            r'\*\*' + _sr_re.escape(label) + r':\*\*.*$',
-            '',
-            text,
-            flags=_sr_re.DOTALL | _sr_re.IGNORECASE
-        )
-
-    # حذف بلوک‌های <analysis>...</analysis> و <reasoning>...</reasoning>
-    for tag in ['analysis', 'reasoning', 'thinking', 'reflection', 'summary']:
-        text = _sr_re.sub(rf'<{tag}>.*?</{tag}>\s*', '', text, flags=_sr_re.DOTALL | _sr_re.IGNORECASE)
-        text = _sr_re.sub(rf'<{tag}>.*$', '', text, flags=_sr_re.DOTALL | _sr_re.IGNORECASE)
-
-    return text.strip()
+    from ...services.content_sanitizer import strip_reasoning_blocks as _central_strip
+    return _central_strip(text)
 
 
 def _sanitize_file_content(content: str, file_path: str) -> str:
     """
     پاکسازی محتوای فایل از آلودگی reasoning/markdown قبل از نوشتن یا commit.
-    این تابع باید روی هر محتوای فایل قبل از ذخیره‌سازی اعمال بشه.
-
-    ۱) حذف بلوک‌های reasoning/thinking
-    ۲) حذف متن غیرکد (فارسی/عربی/markdown) از ابتدای فایل‌های کد
-    ۳) حذف markdown code fences دور کل محتوا
-    ۴) حذف متن غیرکد از انتهای فایل (بعد از ```)
+    دلیگیت به ماژول مرکزی content_sanitizer.
     """
-    if not content or not content.strip():
-        return content
-
-    import re as _sc_re
-
-    # ---- مرحله ۱: حذف reasoning blocks (فقط بلوک‌های جفتی — نه orphan) ----
-    # برای محتوای فایل، فقط بلوک‌های reasoning که بسته‌شده‌اند رو حذف می‌کنیم
-    # orphan patterns (.*$) روی محتوای فایل خطرناکن چون ممکنه کد واقعی رو هم حذف کنن
-    content = _sc_re.sub(r'\*\*استدلال:\*\*.*?\*\*نتیجه:\*\*\s*', '', content, flags=_sc_re.DOTALL)
-    content = _sc_re.sub(r'\*\*Reasoning:\*\*.*?\*\*Result:\*\*\s*', '', content, flags=_sc_re.DOTALL | _sc_re.IGNORECASE)
-    content = _sc_re.sub(r'<think>.*?</think>\s*', '', content, flags=_sc_re.DOTALL)
-    for tag in ['analysis', 'reasoning', 'thinking', 'reflection', 'summary']:
-        content = _sc_re.sub(rf'<{tag}>.*?</{tag}>\s*', '', content, flags=_sc_re.DOTALL | _sc_re.IGNORECASE)
-    content = content.strip()
-
-    # ---- مرحله ۲: حذف متن غیرکد قبل از کد واقعی ----
-    ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
-    code_extensions = {"ts", "tsx", "js", "jsx", "py", "css", "html", "vue", "json", "yaml", "yml", "sql", "go", "rs", "java", "kt", "swift", "rb", "php"}
-
-    if ext in code_extensions:
-        lines = content.split('\n')
-
-        # تشخیص اولین خط کد واقعی
-        _code_start_patterns = {
-            "ts": ["import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ", "type ", "interface ", "enum ", "{", "declare ", "namespace ", "module "],
-            "tsx": ["import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ", "type ", "interface ", "enum ", "{", "declare ", "namespace ", "module "],
-            "js": ["import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ", "{", "module."],
-            "jsx": ["import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ", "{"],
-            "py": ["import ", "from ", "#", '"""', "'''", "def ", "class ", "@", "if ", "try:", "async ", "\"\"\""],
-            "css": [".", "#", "@", "*", ":", "/", "body", "html", "div", "span", "a", "p", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "nav", "header", "footer", "main", "section", "article"],
-            "html": ["<", "<!"],
-            "json": ["{", "[", '"'],
-            "yaml": ["---", "#", "version", "name", "services", "apiVersion"],
-            "yml": ["---", "#", "version", "name", "services", "apiVersion"],
-            "sql": ["SELECT", "CREATE", "INSERT", "UPDATE", "DELETE", "ALTER", "DROP", "--", "/*"],
-            "vue": ["<template", "<script", "<style", "<!--"],
-        }
-        valid_starts = _code_start_patterns.get(ext, [])
-
-        if valid_starts:
-            # پیدا کردن اولین خط معتبر (کد یا markdown fence)
-            first_valid_idx = 0
-            for i, line in enumerate(lines):
-                stripped_line = line.strip()
-                if not stripped_line:
-                    continue
-                # خط کد واقعی یا markdown fence (مرحله بعد حذفش میکنه)
-                if any(stripped_line.startswith(s) for s in valid_starts) or stripped_line.startswith("```"):
-                    first_valid_idx = i
-                    break
-                # اگر خط حاوی متن فارسی/عربی + markdown بود → skip
-                _has_persian = bool(_sc_re.search(r'[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]', stripped_line))
-                _has_markdown = stripped_line.startswith("**") or stripped_line.startswith("##") or stripped_line.startswith("- ") or stripped_line.startswith("* ")
-                if _has_persian or _has_markdown:
-                    first_valid_idx = i + 1
-                    continue
-                # خط غیر فارسی، غیر markdown، و غیر کد → ممکنه توضیح انگلیسی باشه
-                # فقط اگه خط‌های اولیه هستن (قبل از هر کد) حذف کن
-                if i < 5:
-                    _code_syntax_chars = ["{", "}", "(", ")", "=", ";", "<", ">", "//", "/*", "=>"]
-                    _looks_like_prose = len(stripped_line) > 15 and not any(c in stripped_line for c in _code_syntax_chars)
-                    # خطوطی که با حروف شروع و با : ختم میشن → احتمالاً توضیح (نه کد)
-                    _is_explanation = stripped_line.endswith(":") and not any(
-                        stripped_line.startswith(s) for s in ["import", "export", "from", "const", "var", "let", "def", "class", "return", "if", "for", "while", "try", "async", "function"]
-                    )
-                    if _looks_like_prose or _is_explanation:
-                        first_valid_idx = i + 1
-                        continue
-                break
-
-            if first_valid_idx > 0:
-                lines = lines[first_valid_idx:]
-                content = '\n'.join(lines)
-                slog.info(f"[sanitize] Stripped {first_valid_idx} non-code lines from start of {file_path}")
-
-    # ---- مرحله ۳: حذف markdown code fence دور محتوا ----
-    # بعد از حذف متن غیرکد، ممکنه محتوا با ```lang شروع بشه
-    stripped = content.strip()
-    _fence_match = _sc_re.match(r'^```[\w]*\s*\n(.*?)```\s*$', stripped, _sc_re.DOTALL)
-    if _fence_match:
-        content = _fence_match.group(1)
-    else:
-        if stripped.startswith("```"):
-            lines = stripped.split('\n')
-            lines = lines[1:]  # حذف خط اول (```language)
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            content = '\n'.join(lines)
-
-    # ---- مرحله ۴: حذف متن غیرکد از انتهای فایل ----
-    # بعد از ``` ممکنه مدل توضیحات اضافی نوشته باشه
-    if ext in code_extensions:
-        _trailing_lines = content.split('\n')
-        _last_valid = len(_trailing_lines)
-        for i in range(len(_trailing_lines) - 1, -1, -1):
-            _tl = _trailing_lines[i].strip()
-            if not _tl:
-                continue
-            _has_persian = bool(_sc_re.search(r'[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]', _tl))
-            _has_markdown = _tl.startswith("**") or _tl.startswith("##") or _tl.startswith("- ") or _tl.startswith("---")
-            if _has_persian or _has_markdown:
-                _last_valid = i
-                continue
-            # خط مثل ```tsx یا ``` در انتها → حذف
-            if _tl.startswith("```"):
-                _last_valid = i
-                continue
-            break
-        if _last_valid < len(_trailing_lines):
-            _removed = len(_trailing_lines) - _last_valid
-            content = '\n'.join(_trailing_lines[:_last_valid])
-            slog.info(f"[sanitize] Stripped {_removed} non-code lines from end of {file_path}")
-
-    return content.strip()
+    from ...services.content_sanitizer import sanitize_file_content as _central_sanitize
+    return _central_sanitize(content, file_path)
 
 
-# --- الگوهای آلودگی reasoning در کد منبع ---
-_REASONING_CONTAMINATION_PATTERNS = [
-    r'\*\*استدلال:\*\*',       # فارسی: **استدلال:**
-    r'\*\*نتیجه:\*\*',         # فارسی: **نتیجه:**
-    r'\*\*Reasoning:\*\*',     # English: **Reasoning:**
-    r'\*\*Result:\*\*',        # English: **Result:**
-    r'^<think>',               # XML thinking block
-    r'^</think>',              # XML thinking block close
-    r'\*\*تحلیل:\*\*',         # فارسی: **تحلیل:**
-    r'\*\*بررسی:\*\*',         # فارسی: **بررسی:**
-    r'\*\*راه‌حل:\*\*',        # فارسی: **راه‌حل:**
-    r'\*\*خطا:\*\*',           # فارسی: **خطا:**
-    r'\*\*Analysis:\*\*',      # English: **Analysis:**
-    r'\*\*Solution:\*\*',      # English: **Solution:**
-    r'\*\*Error:\*\*',         # English: **Error:**
-    r'\*\*Explanation:\*\*',   # English: **Explanation:**
-    r'\*\*Summary:\*\*',       # English: **Summary:**
-    r'\*\*توضیح:\*\*',         # فارسی: **توضیح:**
-    r'\*\*علت:\*\*',           # فارسی: **علت:**
-    r'\*\*مشکل:\*\*',          # فارسی: **مشکل:**
-    r'\*\*پیشنهاد:\*\*',       # فارسی: **پیشنهاد:**
-    r'\*\*اصلاح:\*\*',         # فارسی: **اصلاح:**
-    r'\*\*تغییرات:\*\*',       # فارسی: **تغییرات:**
-    r'\*\*کد اصلاح‌شده:\*\*',  # فارسی: **کد اصلاح‌شده:**
-    r'^<analysis>',            # XML analysis block
-    r'^<reasoning>',           # XML reasoning block
-    r'^<thinking>',            # XML thinking block
-    r'^<reflection>',          # XML reflection block
-    r'^#{1,4}\s+[\u0600-\u06FF]',  # Markdown heading followed by Persian text at start of line
-    r'^```(?:typescript|tsx|jsx|python|json)\s*$',  # Markdown code fence at start of line (not in code)
-    r'^\*\*\d+[\.\)]\s',      # Numbered list with bold: **1. ..., **2) ...
-    r'^\*\*[\u0600-\u06FF]',  # Bold Persian text at start of line: **فارسی
-]
+# --- الگوهای آلودگی reasoning در کد منبع (دلیگیت به ماژول مرکزی) ---
+from ...services.content_sanitizer import REASONING_CONTAMINATION_PATTERNS as _REASONING_CONTAMINATION_PATTERNS
 
 
 def _detect_reasoning_contamination(content: str, file_path: str) -> str | None:
     """
     بررسی آلودگی محتوای فایل با خروجی reasoning مدل‌های AI.
-    اگر آلودگی پیدا شد، رشته خطا برمی‌گردونه. اگه تمیز بود None.
+    دلیگیت به ماژول مرکزی content_sanitizer.
     """
-    if not content:
-        return None
-
-    import re as _dc_re
-
-    for pattern in _REASONING_CONTAMINATION_PATTERNS:
-        if _dc_re.search(pattern, content, _dc_re.MULTILINE | _dc_re.IGNORECASE):
-            return f"محتوای فایل {file_path} با خروجی reasoning مدل AI آلوده شده: الگوی '{pattern}' شناسایی شد"
-
-    # بررسی اضافی: آیا خط اول فایل کد، یک خط معتبر کد هست؟
-    first_line = content.split("\n")[0].strip() if content.strip() else ""
-    ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
-
-    if ext in ("ts", "tsx", "js", "jsx") and first_line:
-        # فایل‌های JS/TS باید با import, export, //, /*, 'use, const, var, let, type, interface, enum, { شروع بشن
-        _valid_starts = ("import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ",
-                         "type ", "interface ", "enum ", "{", "declare ", "namespace ", "module ")
-        if not any(first_line.startswith(s) for s in _valid_starts):
-            return f"خط اول فایل {file_path} معتبر نیست برای {ext}: '{first_line[:80]}'"
-
-    if ext == "py" and first_line:
-        _valid_starts = ("import ", "from ", "#", '"""', "'''", "def ", "class ", "@", "if ", "try:",
-                         "async ", "\"\"\"", "'''")
-        if not any(first_line.startswith(s) for s in _valid_starts):
-            return f"خط اول فایل {file_path} معتبر نیست برای Python: '{first_line[:80]}'"
-
-    if ext == "css" and first_line:
-        _valid_starts = (".", "#", "@", "*", ":", "/", "body", "html", "div", "span", "a", "p",
-                         "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "nav", "header",
-                         "footer", "main", "section", "article", "button", "input", "form",
-                         "table", "tr", "td", "th", "img", "video", "audio", "canvas", "svg")
-        if not any(first_line.startswith(s) for s in _valid_starts):
-            return f"خط اول فایل {file_path} معتبر نیست برای CSS: '{first_line[:80]}'"
-
-    if ext in ("html", "htm") and first_line:
-        _valid_starts = ("<", "<!",)
-        if not any(first_line.startswith(s) for s in _valid_starts):
-            return f"خط اول فایل {file_path} معتبر نیست برای HTML: '{first_line[:80]}'"
-
-    if ext == "json" and first_line:
-        _valid_starts = ("{", "[", '"')
-        if not any(first_line.startswith(s) for s in _valid_starts):
-            return f"خط اول فایل {file_path} معتبر نیست برای JSON: '{first_line[:80]}'"
-
-    if ext == "vue" and first_line:
-        _valid_starts = ("<template", "<script", "<style", "<!--")
-        if not any(first_line.startswith(s) for s in _valid_starts):
-            return f"خط اول فایل {file_path} معتبر نیست برای Vue: '{first_line[:80]}'"
-
-    return None
+    from ...services.content_sanitizer import detect_reasoning_contamination as _central_detect
+    return _central_detect(content, file_path)
 
 
 def _normalize_action_plan_json(parsed: dict) -> dict | None:
@@ -11107,6 +10847,14 @@ def _apply_section_modifications(original_content: str, sections: list) -> dict:
         if not find_str:
             errors.append(f"section[{idx}]: فیلد 'find' خالی است")
             continue
+
+        # 🛡️ پاکسازی replace_str از آلودگی reasoning/markdown
+        from ...services.content_sanitizer import sanitize_section_content as _sanitize_sec
+        if replace_str:
+            _clean_replace = _sanitize_sec(replace_str, "section_replace")
+            if _clean_replace != replace_str:
+                slog.info(f"[modify_sections] section[{idx}]: replace_str پاکسازی شد از آلودگی")
+                replace_str = _clean_replace
 
         # ── تلاش برای پیدا کردن متن (exact match) ──
         if find_str in result_content:
@@ -14009,9 +13757,23 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
             file_path = f.get("path", "").strip()
             operation = f.get("operation", "modify")
             if operation == "create":
-                # فایل‌های جدید مجازند — ولی سینتکس‌شون باید سالم باشه
+                # فایل‌های جدید مجازند — ولی باید پاکسازی + سینتکس‌شون سالم باشه
                 _create_content = f.get("content", "")
                 if _create_content:
+                    # 🛡️ پاکسازی محتوا از آلودگی reasoning/markdown (لایه ایمنی)
+                    from ...services.content_sanitizer import sanitize_file_content as _cs_sanitize, detect_reasoning_contamination as _cs_detect
+                    _create_content = _cs_sanitize(_create_content, file_path)
+                    f["content"] = _create_content
+                    # 🛡️ بررسی آلودگی بعد از پاکسازی
+                    _contamination = _cs_detect(_create_content, file_path)
+                    if _contamination:
+                        yield sse("progress", {
+                            "step": "contamination_blocked",
+                            "message": f"🛡️ فایل جدید {file_path}: محتوای آلوده بلاک شد: {_contamination[:100]}"
+                        })
+                        dropped_files.append({"path": file_path, "reason": f"آلودگی reasoning: {_contamination[:120]}"})
+                        slog.error(f"[apply-action] BLOCKED reasoning contamination in new file {file_path}: {_contamination}")
+                        continue
                     _syntax_check = _validate_file_content_syntax(_create_content, file_path)
                     if not _syntax_check["valid"]:
                         _errs = "; ".join(_syntax_check["errors"][:3])
@@ -14058,6 +13820,17 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                                 "step": "sections_applied",
                                 "message": "".join(msg_parts)
                             })
+                            # 🛡️ بررسی آلودگی reasoning بعد از merge (لایه ایمنی)
+                            from ...services.content_sanitizer import detect_reasoning_contamination as _cs_detect_ms
+                            _merge_contamination = _cs_detect_ms(f["content"], file_path)
+                            if _merge_contamination:
+                                yield sse("progress", {
+                                    "step": "contamination_blocked_after_merge",
+                                    "message": f"🛡️ {file_path}: محتوای merge شده آلوده به reasoning — بلاک شد: {_merge_contamination[:100]}"
+                                })
+                                dropped_files.append({"path": file_path, "reason": f"آلودگی reasoning بعد از merge: {_merge_contamination[:120]}"})
+                                slog.error(f"[apply-action] BLOCKED reasoning contamination after merge in {file_path}: {_merge_contamination}")
+                                continue
                             # ── اعتبارسنجی سینتکس محتوای merge شده قبل از commit ──
                             _syntax_check = _validate_file_content_syntax(f["content"], file_path)
                             if not _syntax_check["valid"]:
@@ -14131,8 +13904,13 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                             if not _fallback_applied:
                                 dropped_files.append({"path": file_path, "reason": f"modify_sections شکست: {_errs[:100]}"})
                     else:
-                        # ── تشخیص بازنویسی مخرب در apply_action (لایه دوم) ──
+                        # 🛡️ پاکسازی محتوا از آلودگی reasoning/markdown قبل از بررسی‌ها
                         _file_content = f.get("content", "")
+                        if _file_content:
+                            from ...services.content_sanitizer import sanitize_file_content as _cs_sanitize_mod
+                            _file_content = _cs_sanitize_mod(_file_content, file_path)
+                            f["content"] = _file_content
+                        # ── تشخیص بازنویسی مخرب در apply_action (لایه دوم) ──
                         _orig_content = existing.get("content", "")
                         if _file_content and _orig_content:
                             _orig_lines = len(_orig_content.strip().split("\n"))
