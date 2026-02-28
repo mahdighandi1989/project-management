@@ -10945,6 +10945,106 @@ def _apply_section_modifications(original_content: str, sections: list) -> dict:
     }
 
 
+def _auto_convert_modify_to_sections(orig_content: str, new_content: str, file_path: str) -> list | None:
+    """
+    🆕 تبدیل خودکار یک modify مخرب به modify_sections با استفاده از diff.
+
+    وقتی مدل AI فایل بزرگ رو بجای modify_sections با modify می‌نویسه و خروجی ناقص/کوتاهه،
+    این تابع تغییرات واقعی رو از تفاوت بین فایل اصلی و خروجی AI استخراج میکنه
+    و به فرمت modify_sections (لیست {find, replace}) تبدیل میکنه.
+
+    Returns: لیست sections یا None اگر تبدیل ممکن نبود
+    """
+    import difflib
+
+    orig_lines = orig_content.split("\n")
+    new_lines = new_content.split("\n")
+
+    if not orig_lines or not new_lines:
+        return None
+
+    try:
+        matcher = difflib.SequenceMatcher(None, orig_lines, new_lines)
+        sections = []
+
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == 'equal':
+                continue
+            elif tag == 'delete':
+                # خطوط حذف‌شده — در بازنویسی مخرب معمولاً مدل نتونسته تولید کنه
+                # ایمن‌ترین کار: نادیده گرفتن (خطوط اصلی حفظ میشن چون modify_sections فقط بخش‌های find شده رو تغییر میده)
+                continue
+            elif tag in ('replace', 'insert'):
+                # تغییرات واقعی مدل — اینها رو باید استخراج کنیم
+
+                # context: ۳ خط قبل و بعد از تغییر برای matching مطمئن
+                ctx_before_start = max(0, i1 - 3)
+                ctx_after_end = min(len(orig_lines), i2 + 3)
+
+                # find: خطوط اصلی با context
+                find_lines = orig_lines[ctx_before_start:ctx_after_end]
+                find_text = "\n".join(find_lines)
+
+                # replace: context قبل + خطوط جدید + context بعد
+                if tag == 'replace':
+                    replace_lines = (
+                        orig_lines[ctx_before_start:i1] +
+                        new_lines[j1:j2] +
+                        orig_lines[i2:ctx_after_end]
+                    )
+                else:  # insert
+                    replace_lines = (
+                        orig_lines[ctx_before_start:i1] +
+                        new_lines[j1:j2] +
+                        orig_lines[i1:ctx_after_end]
+                    )
+                replace_text = "\n".join(replace_lines)
+
+                # فقط اگه find در فایل اصلی unique باشه اضافه کن
+                if find_text and orig_content.count(find_text) == 1:
+                    sections.append({
+                        "find": find_text,
+                        "replace": replace_text,
+                    })
+                elif find_text and len(find_lines) >= 3:
+                    # تلاش با context بیشتر (۵ خط قبل و بعد)
+                    _wider_start = max(0, i1 - 5)
+                    _wider_end = min(len(orig_lines), i2 + 5)
+                    _wider_find = "\n".join(orig_lines[_wider_start:_wider_end])
+                    if orig_content.count(_wider_find) == 1:
+                        if tag == 'replace':
+                            _wider_replace_lines = (
+                                orig_lines[_wider_start:i1] +
+                                new_lines[j1:j2] +
+                                orig_lines[i2:_wider_end]
+                            )
+                        else:
+                            _wider_replace_lines = (
+                                orig_lines[_wider_start:i1] +
+                                new_lines[j1:j2] +
+                                orig_lines[i1:_wider_end]
+                            )
+                        sections.append({
+                            "find": _wider_find,
+                            "replace": "\n".join(_wider_replace_lines),
+                        })
+
+        if not sections:
+            return None
+
+        # حداکثر ۲۰ section — اگه بیشتر شد یعنی تغییرات خیلی زیاده و auto-convert مناسب نیست
+        if len(sections) > 20:
+            slog.warning(f"[auto-convert] {file_path}: {len(sections)} sections too many for auto-convert, skipping")
+            return None
+
+        slog.info(f"[auto-convert] {file_path}: extracted {len(sections)} sections from destructive modify")
+        return sections
+
+    except Exception as e:
+        slog.error(f"[auto-convert] {file_path}: failed: {e}")
+        return None
+
+
 def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None) -> dict:
     """
     اعتبارسنجی سینتکس فایل‌های action_plan قبل از ارسال به فرانت.
@@ -11126,16 +11226,17 @@ def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None)
             if _orig_content and isinstance(_orig_content, str):
                 orig_lines = len(_orig_content.strip().split("\n"))
                 new_lines = len(content.strip().split("\n"))
+                _is_destructive = False
+                _destructive_reason = ""
                 # لایه ۱: اگر فایل اصلی بزرگ بوده (>80 خط) و خروجی AI خیلی کوتاه‌تره → بازنویسی مخرب
                 if orig_lines > 80 and new_lines < orig_lines * 0.5:
-                    file_critical.append(
-                        f"❌ بازنویسی مخرب: فایل اصلی {orig_lines} خط بود ولی خروجی AI فقط {new_lines} خط دارد "
-                        f"({int(new_lines/orig_lines*100)}% از اصل) — احتمال حذف قابلیت‌های موجود — این فایل حذف شد"
+                    _is_destructive = True
+                    _destructive_reason = (
+                        f"فایل اصلی {orig_lines} خط بود ولی خروجی AI فقط {new_lines} خط دارد "
+                        f"({int(new_lines/orig_lines*100)}% از اصل)"
                     )
                 # لایه ۲: مقایسه محتوایی — حتی اگه تعداد خطوط مشابه باشه، آیا محتوای واقعی حفظ شده؟
-                # مدل ممکنه placeholder بنویسه با تعداد خطوط مشابه ولی محتوای کاملاً متفاوت
-                elif orig_lines > 100 and not file_critical:
-                    # استخراج خطوط معنادار (نه خالی، نه فقط پرانتز/براکت/بریس)
+                elif orig_lines > 100:
                     _trivial = {"{", "}", "(", ")", "[", "]", "", "};", ");", "},", "],", "});", "export default", "return (", "return null;"}
                     _orig_meaningful = set()
                     for _ol in _orig_content.strip().split("\n"):
@@ -11143,14 +11244,34 @@ def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None)
                         if _stripped and _stripped not in _trivial and len(_stripped) > 10:
                             _orig_meaningful.add(_stripped)
                     if len(_orig_meaningful) > 20:
-                        # چند خط از فایل اصلی تو خروجی AI وجود دارن؟
                         _preserved = sum(1 for _om in _orig_meaningful if _om in content)
                         _preserve_ratio = _preserved / len(_orig_meaningful)
                         if _preserve_ratio < 0.25:
-                            file_critical.append(
-                                f"❌ بازنویسی مخرب (محتوایی): فقط {int(_preserve_ratio*100)}% از خطوط معنادار فایل اصلی "
-                                f"({_preserved}/{len(_orig_meaningful)}) حفظ شده — مدل فایل رو از صفر نوشته — این فایل حذف شد"
+                            _is_destructive = True
+                            _destructive_reason = (
+                                f"فقط {int(_preserve_ratio*100)}% از خطوط معنادار فایل اصلی "
+                                f"({_preserved}/{len(_orig_meaningful)}) حفظ شده — مدل فایل رو از صفر نوشته"
                             )
+
+                # 🆕 اگر بازنویسی مخرب شناسایی شد → تلاش برای auto-convert به modify_sections
+                if _is_destructive:
+                    _converted_sections = _auto_convert_modify_to_sections(_orig_content, content, path)
+                    if _converted_sections:
+                        # ✅ تبدیل موفق: عملیات modify → modify_sections
+                        f["operation"] = "modify_sections"
+                        f["sections"] = _converted_sections
+                        f.pop("content", None)
+                        _conv_msg = (
+                            f"🔄 {path}: بازنویسی مخرب شناسایی شد ({_destructive_reason}) — "
+                            f"تبدیل خودکار به modify_sections با {len(_converted_sections)} بخش تغییریافته"
+                        )
+                        file_warnings.append(_conv_msg)
+                        warnings.append(_conv_msg)
+                        slog.info(f"[action_plan validation] AUTO-CONVERTED destructive modify → modify_sections for {path}: {len(_converted_sections)} sections")
+                    else:
+                        file_critical.append(
+                            f"❌ بازنویسی مخرب: {_destructive_reason} — تبدیل خودکار به modify_sections هم ممکن نبود — این فایل حذف شد"
+                        )
 
         # تصمیم‌گیری: حذف یا نگه‌داشتن
         if file_critical:
@@ -14051,11 +14172,33 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                                             })
                                             slog.warning(f"[apply-action] Recovery syntax failed {file_path}: {_recov_errs}")
                                 except Exception as _merge_err:
-                                    slog.warning(f"[apply-action] Auto-recovery failed for {file_path}: {_merge_err}")
-                                # If recovery failed or wasn't applicable, drop the file
+                                    slog.warning(f"[apply-action] Auto-recovery (merge) failed for {file_path}: {_merge_err}")
+
+                                # 🆕 Fallback دوم: auto-convert به modify_sections با diff
+                                _fallback_sections = _auto_convert_modify_to_sections(_orig_content, _file_content, file_path)
+                                if _fallback_sections:
+                                    # اعمال sections روی فایل اصلی
+                                    _sec_result = _apply_section_modifications(_orig_content, _fallback_sections)
+                                    if _sec_result["applied"] > 0:
+                                        _sec_syntax = _validate_file_content_syntax(_sec_result["content"], file_path)
+                                        if _sec_syntax["valid"]:
+                                            f["content"] = _sec_result["content"]
+                                            final_files.append(f)
+                                            yield sse("progress", {
+                                                "step": "destructive_rewrite_section_converted",
+                                                "message": f"🔄 {file_path}: بازنویسی مخرب → تبدیل خودکار به modify_sections: "
+                                                           f"{_sec_result['applied']}/{len(_fallback_sections)} بخش اعمال شد"
+                                            })
+                                            slog.info(f"[apply-action] AUTO-CONVERTED destructive rewrite {file_path}: {_sec_result['applied']} sections applied")
+                                            continue
+                                        else:
+                                            _sec_errs = "; ".join(_sec_syntax.get("errors", [])[:2])
+                                            slog.warning(f"[apply-action] Section-convert syntax failed {file_path}: {_sec_errs}")
+
+                                # If all recovery methods failed, drop the file
                                 yield sse("progress", {
                                     "step": "destructive_rewrite_rejected",
-                                    "message": f"🚫 {file_path}: {_reason} — بازیابی خودکار هم ناموفق بود"
+                                    "message": f"🚫 {file_path}: {_reason} — بازیابی خودکار (merge + sections) ناموفق بود"
                                 })
                                 dropped_files.append({"path": file_path, "reason": _reason[:150]})
                                 slog.error(f"[apply-action] REJECTED destructive rewrite {file_path}: {_reason}")
@@ -14649,13 +14792,21 @@ def _build_visual_debug_prompt_list() -> list:
 
 ⚠️ قوانین action_plan:
 - operation: "modify" (ویرایش — محتوای کامل) یا "create" (فایل جدید) یا "modify_sections" (تغییر بخشی)
-- **modify**: content = محتوای کامل و قابل جایگزینی فایل
+- **modify**: content = محتوای کامل و قابل جایگزینی فایل — فقط برای فایل‌های کوچک (<200 خط)
 - **modify_sections**: sections = لیست تغییرات {find, replace} — سیستم خودش فایل اصلی رو میخونه و sections رو اعمال میکنه
-- 🔴 **فایل‌های بزرگ (>200 خط)**: حتماً از `modify_sections` استفاده کن — اینطوری هیچ بخشی از فایل اصلی حذف نمیشه
 - find باید **دقیقاً** مطابق متن فایل اصلی باشد (شامل فاصله‌ها)
 - 🔴 **تمام** فایل‌ها و content/sections باید **داخل** یک بلوک JSON باشد — هرگز کد رو جدا از action_plan ننویس
 - files خالی ممنوع — یا فایل با محتوا/sections بذار، یا action_plan نذار
-- بدون action_plan = بدون دکمه «اعمال تغییرات» ← کاربر نمی‌تواند تغییرات را اعمال کند""",
+- بدون action_plan = بدون دکمه «اعمال تغییرات» ← کاربر نمی‌تواند تغییرات را اعمال کند
+
+🚨🚨🚨 **قانون اجباری modify_sections — عدم رعایت = حذف خودکار فایل**:
+- سیستم تعداد خطوط هر فایل را در هدر (`--- فایل (N خط)`) نوشته — آن عدد را ببین!
+- ⛔ فایل بالای ۲۰۰ خط + operation: "modify" = **سیستم خودکار فایل را حذف میکند**
+- ⛔ فایل بالای ۸۰ خط + content کمتر از ۵۰٪ اصل = **سیستم خودکار فایل را حذف میکند**
+- ✅ فایل بالای ۲۰۰ خط → **باید** از `modify_sections` استفاده شود
+- ✅ فایل زیر ۲۰۰ خط → از `modify` با content کامل استفاده شود
+- ✅ فایل جدید → از `create` با content کامل استفاده شود
+- مثال: اگر فایل ۸۰۰ خط دارد و ۱۵ خط تغییر میخواهد → ۳ تا section با find/replace بنویس، نه ۸۰۰ خط content""",
         },
         {
             "id": "vd_rules",
@@ -14664,8 +14815,9 @@ def _build_visual_debug_prompt_list() -> list:
             "icon": "⚠️",
             "prompt_detail": """- به **فارسی** پاسخ بده. کدها و اصطلاحات فنی انگلیسی مجاز
 - **هرگز** جواب ناقص نده — اگر فایل بزرگ است، از `modify_sections` استفاده کن
-- 🔴 **فایل‌های بزرگ (>200 خط)**: از `operation: "modify_sections"` استفاده کن — فقط بخش‌های تغییریافته رو مشخص کن، سیستم خودش بقیه رو حفظ میکنه
-- اگر از `modify` معمولی استفاده کنی → خطوط content باید ≥۸۰٪ فایل اصلی باشد. سیستم خودکار فایل‌های <۵۰٪ رو حذف میکنه!
+- 🚨 **فایل‌های بزرگ (>200 خط)**: **اجباری** از `operation: "modify_sections"` استفاده کن — اگر modify بنویسی سیستم **خودکار فایل رو حذف میکنه** و تغییراتت از دست میره!
+- 🚨 **بالای ۸۰ خط**: اگر content خروجی < ۵۰٪ فایل اصلی باشه → سیستم آن فایل رو **حذف** میکنه!
+- ✅ راه‌حل: هر فایلی که در هدر نوشته شده «⚠️ فایل بزرگ» → حتماً modify_sections بنویس
 - اگر اطلاعات کافی نیست، **دقیقاً** بگو چه اطلاعات بیشتری نیاز داری
 
 🔴 تحلیل عمیق‌تر در هر تلاش مجدد:
@@ -15062,7 +15214,15 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                                     # سقف هر فایل: داینامیک بر اساس بودجه باقیمانده
                                     _remaining = _vd_code_budget - len(code_context)
                                     _this_limit = min(_vd_per_file_limit, max(3000, _remaining))
-                                    code_context += f"\n--- {fp} ---\n{_file_content[:_this_limit]}\n"
+                                    # 🆕 اضافه کردن اندازه فایل و اخطار modify_sections برای فایل‌های بزرگ
+                                    _vd_total_lines = len(_file_content.split("\n"))
+                                    _vd_size_note = ""
+                                    if _vd_total_lines > 200:
+                                        _vd_size_note = f" ⚠️ فایل بزرگ ({_vd_total_lines} خط) — حتماً از modify_sections استفاده کن"
+                                    _truncated_content = _file_content[:_this_limit]
+                                    if len(_file_content) > _this_limit:
+                                        _truncated_content += f"\n... [truncated — فایل اصلی {_vd_total_lines} خط{_vd_size_note}]"
+                                    code_context += f"\n--- {fp} ({_vd_total_lines} خط){_vd_size_note} ---\n{_truncated_content}\n"
                                     _vd_file_contents[fp] = _file_content  # ذخیره برای مقایسه بازنویسی مخرب
                                     _vd_read_count += 1
                             except Exception:
@@ -15235,8 +15395,15 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
         _ra_safety = max(10000, _ra_context_window // 4)
         _ra_max_input_chars = max(10000, (_ra_context_window - _ra_max_output - _ra_safety) * 3)
 
-        _ra_prompt_overhead = len(_ra_general_text) + len(request.vision_report) + 5000
-        _ra_user_estimate = min(3000, len(request.user_description or '') + 1000)
+        # 🆕 محاسبه حجم واقعی vision_action_plan (قبلاً حساب نمی‌شد → سرریز)
+        _ra_action_plan_size = 0
+        if request.vision_action_plan:
+            try:
+                _ra_action_plan_size = min(5000, len(json.dumps(request.vision_action_plan, ensure_ascii=False)))
+            except Exception:
+                _ra_action_plan_size = 3000
+        _ra_prompt_overhead = len(_ra_general_text) + len(request.vision_report) + _ra_action_plan_size + 5000
+        _ra_user_estimate = min(5000, len(request.user_description or '') + 1000 + _ra_action_plan_size)
         _ra_code_budget = min(
             150000,  # سقف عملی
             max(10000, _ra_max_input_chars - _ra_prompt_overhead - _ra_user_estimate)
@@ -15413,18 +15580,24 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
 - `find` در modify_sections باید **دقیقاً** متن کپی‌شده از فایل اصلی باشد — نه توصیف محل تغییر
 - ❌ غلط: `"find": "// انتهای فایل — قبل از export"` (این توصیف است، نه کد واقعی!)
 - ✅ صحیح: `"find": "export default MonitoringPage;"` (این متن واقعی فایل است)
-- فایل‌های بزرگ (>200 خط): حتماً از modify_sections استفاده کن
+
+🚨🚨🚨 **قانون اجباری modify_sections — عدم رعایت = حذف خودکار فایل**:
+- سیستم تعداد خطوط هر فایل را در هدر (`--- فایل (N خط)`) نوشته — آن عدد را ببین!
+- ⛔ فایل بالای ۲۰۰ خط + operation: "modify" = **سیستم خودکار فایل را حذف میکند**
+- ⛔ فایل بالای ۸۰ خط + content کمتر از ۵۰٪ اصل = **سیستم خودکار فایل را حذف میکند**
+- ✅ فایل بالای ۲۰۰ خط → **باید** از `modify_sections` استفاده شود
+- ✅ فایل زیر ۲۰۰ خط → از `modify` با content کامل استفاده شود
 
 ### ⚠️ مدیریت بودجه خروجی:
-- فایل‌های کوچک: از modify با content کامل استفاده کن
-- فایل‌های بزرگ (>200 خط): از modify_sections استفاده کن — فقط بخش‌های تغییریافته
+- فایل‌های کوچک (<200 خط): از modify با content کامل استفاده کن
+- فایل‌های بزرگ (>200 خط): **اجباری** از modify_sections — فقط بخش‌های تغییریافته
 - 🔴 ترتیب: اول فایل‌های **جدید** (create) و **کوچک** را بنویس، بعد فایل‌های بزرگ‌تر
 - 🔴 اگر فایل‌ها زیادند (بیش از ۵)، تحلیل متنی کوتاه بنویس و action_plan فقط مهم‌ترین فایل‌ها
 
 ### 🛡️ ممنوعیت بازنویسی مخرب (حیاتی):
 - ⛔ هرگز فایل موجود پروژه را از صفر بازننویس — فقط بخش‌های مربوط به درخواست کاربر تغییر کنند
 - ⛔ هرگز قابلیت‌های موجود فایل (state, event handlers, API calls, UI sections, styles) را حذف نکن
-- ⛔ اگر فایل ۳۰۰ خط دارد و تو ۲۰ خط تغییر میدی → content باید همان ۳۰۰ خط باشد با ۲۰ خط تغییریافته
+- ⛔ اگر فایل ۳۰۰ خط دارد و تو ۲۰ خط تغییر میدی → از modify_sections با ۳-۵ section استفاده کن (نه ۳۰۰ خط content)
 - ⛔ هرگز عملکرد واقعی (iframe, chart, widget فعال) را با placeholder خالی جایگزین نکن
 - ⛔ قبل از create فایل جدید → بررسی کن آیا کامپوننت مشابه در ساختار پروژه وجود داره (ساختار پروژه بالا آمده)
 
