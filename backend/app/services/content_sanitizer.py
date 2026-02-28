@@ -49,7 +49,9 @@ REASONING_CONTAMINATION_PATTERNS = [
     r'^<reasoning>',           # XML reasoning block
     r'^<thinking>',            # XML thinking block
     r'^<reflection>',          # XML reflection block
-    r'^#{1,4}\s+[\u0600-\u06FF]',  # Markdown heading followed by Persian text at start of line
+    # ⚠️ الگوی markdown heading فارسی حذف شد — false positive زیاد داشت
+    # (مثلاً # کامنت فارسی در Python) — در عوض در detect_reasoning_contamination
+    # بررسی context-aware انجام میشه (فقط اگر خطوط متعدد markdown باشن)
     r'^```(?:typescript|tsx|jsx|python|json|javascript|css|html|go|rust|java|kotlin|swift|ruby|php|sql|yaml|csharp|cpp|c)\s*$',
     r'^\*\*\d+[\.\)]\s',      # Numbered list with bold: **1. ..., **2) ...
     r'^\*\*[\u0600-\u06FF]',   # Bold Persian text at start of line: **فارسی
@@ -277,6 +279,23 @@ def detect_reasoning_contamination(content: str, file_path: str) -> str | None:
     for pattern in REASONING_CONTAMINATION_PATTERNS:
         if re.search(pattern, content, re.MULTILINE | re.IGNORECASE):
             return f"محتوای فایل {file_path} با خروجی reasoning مدل AI آلوده شده: الگوی '{pattern}' شناسایی شد"
+
+    # بررسی context-aware برای markdown فارسی (جایگزین الگوی ساده قبلی)
+    # فقط اگر ۳+ خط markdown فارسی باشه → آلودگی reasoning
+    # (۱-۲ خط ممکنه کامنت معمولی باشه)
+    _ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+    if _ext not in ("md", "txt", ""):  # فایل‌های markdown مجاز هستن
+        _md_persian_count = 0
+        for _line in content.split("\n"):
+            _stripped = _line.strip()
+            # خط markdown heading فارسی (## عنوان فارسی)
+            if re.match(r'^#{1,4}\s+[\u0600-\u06FF]', _stripped):
+                _md_persian_count += 1
+        if _md_persian_count >= 3:
+            return (
+                f"محتوای فایل {file_path} با خروجی reasoning مدل AI آلوده شده: "
+                f"{_md_persian_count} هدینگ markdown فارسی شناسایی شد"
+            )
 
     # بررسی اضافی: آیا خط اول فایل کد، یک خط معتبر کد هست؟
     first_line = content.split("\n")[0].strip() if content.strip() else ""

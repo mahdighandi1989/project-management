@@ -222,13 +222,15 @@ def _build_general_instructions_list(
       {"find": "بخش دوم فایل اصلی", "replace": "جایگزین دوم"}
     ], "description": "توضیح تغییرات"}
     ```
-  - `find` = متن **دقیق** از فایل اصلی (چند خط، شامل import/function/block)
+  - `find` = متن **COPY-PASTE دقیق** از فایل اصلی (حداقل ۲-۳ خط کامل و یکتا)
   - `replace` = متن جایگزین (میتونه کمتر/بیشتر/خالی باشه)
   - سیستم خودش فایل اصلی رو از ریپو میخونه و sections رو اعمال میکنه
   - 🔴 مزیت: هیچ بخشی از فایل اصلی حذف نمیشه — فقط بخش‌های مشخص‌شده تغییر میکنن
   - اگر بخواهی بخشی رو **حذف** کنی: `"replace": ""` (خالی)
   - اگر بخواهی بخشی رو **اضافه** کنی: `find` = خط قبل از محل اضافه، `replace` = همان خط + کد جدید
-  - ⚠️ `find` باید **دقیقاً** مطابق متن فایل اصلی باشد (شامل فاصله‌ها و indentation)
+  - 🔴🔴🔴 `find` باید **دقیقاً** مطابق متن فایل اصلی باشد — شامل فاصله‌ها، tab ها، indentation و حتی کامنت‌ها
+  - ⛔ **هرگز find رو حدس نزن** — حتماً از متن فایل که بالاتر آمده COPY کن — حتی ۱ کاراکتر فرق = شکست
+  - ✅ find رو بزرگ‌تر بگیر (۵-۱۰ خط) تا شانس تطبیق بالا بره — خط کوتاه ممکنه تکراری باشه
   - اگر operation = "modify" استفاده کنی → content خروجی باید تعداد خطوطش **مشابه** فایل اصلی باشد (±۱۰٪)
   - ❌ اگر فایل ۱۰۰۰ خط داره و خروجی تو ۱۰۰ خطه → حتماً بخش بزرگی حذف شده — ممنوع!
   - سیستم خودکار فایل‌هایی که کمتر از ۵۰٪ فایل اصلی باشند رو **حذف** میکنه
@@ -10885,55 +10887,92 @@ def _apply_section_modifications(original_content: str, sections: list) -> dict:
             except _sec_re.error:
                 pass  # regex خطا داد — ادامه بده
 
-        # ── تلاش سوم: fuzzy line-by-line matching ──
-        # اولین و آخرین خط معنادار find رو پیدا کن و محدوده بینشون رو جایگزین کن
-        import re as _sec_re2
+        # ── تلاش سوم: تطبیق بر اساس difflib.SequenceMatcher ──
+        # خطوط find رو با خطوط فایل مقایسه میکنه و بهترین محدوده رو پیدا میکنه
+        import difflib as _sec_difflib
         _find_lines_stripped = [l.strip() for l in find_str.strip().split("\n") if l.strip()]
-        _fuzzy_matched = False
-        if len(_find_lines_stripped) >= 2:
-            _first_line = _find_lines_stripped[0]
-            _last_line = _find_lines_stripped[-1]
-            _content_lines = result_content.split("\n")
-            _start_idx = None
-            _end_idx = None
-            # پیدا کردن اولین خط (حداقل 60% مشابهت)
-            for _ci, _cl in enumerate(_content_lines):
-                _cl_stripped = _cl.strip()
-                if _cl_stripped == _first_line:
-                    _start_idx = _ci
-                    break
-                elif len(_first_line) > 10 and _first_line[:int(len(_first_line)*0.6)] in _cl_stripped:
-                    _start_idx = _ci
-                    break
-            if _start_idx is not None:
-                # پیدا کردن آخرین خط (بعد از start)
-                for _ci in range(_start_idx + 1, min(_start_idx + len(_find_lines_stripped) + 10, len(_content_lines))):
-                    _cl_stripped = _content_lines[_ci].strip()
-                    if _cl_stripped == _last_line:
-                        _end_idx = _ci
-                        break
-                    elif len(_last_line) > 10 and _last_line[:int(len(_last_line)*0.6)] in _cl_stripped:
-                        _end_idx = _ci
-                        break
-            if _start_idx is not None and _end_idx is not None and _end_idx > _start_idx:
-                # جایگزینی محدوده پیدا شده
-                _before = "\n".join(_content_lines[:_start_idx])
-                _after = "\n".join(_content_lines[_end_idx + 1:])
+        _content_lines = result_content.split("\n")
+        _content_lines_stripped = [l.strip() for l in _content_lines]
+        _difflib_matched = False
+
+        if len(_find_lines_stripped) >= 1:
+            # استفاده از SequenceMatcher برای پیدا کردن بهترین محدوده تطبیقی
+            best_ratio = 0.0
+            best_start = -1
+            best_end = -1
+            _window_size = len(_find_lines_stripped)
+
+            for _wi in range(len(_content_lines_stripped) - _window_size + 1):
+                _window = _content_lines_stripped[_wi:_wi + _window_size]
+                _sm = _sec_difflib.SequenceMatcher(None, _find_lines_stripped, _window)
+                _ratio = _sm.ratio()
+                if _ratio > best_ratio:
+                    best_ratio = _ratio
+                    best_start = _wi
+                    best_end = _wi + _window_size - 1
+
+            # حداقل ۸۵٪ شباهت لازم — بالاتر از قبلی (۶۰٪) برای دقت بیشتر
+            if best_ratio >= 0.85 and best_start >= 0:
+                _before = "\n".join(_content_lines[:best_start])
+                _after = "\n".join(_content_lines[best_end + 1:])
                 result_content = _before + ("\n" if _before else "") + replace_str + ("\n" if _after else "") + _after
                 applied += 1
-                _fuzzy_matched = True
-                errors.append(f"section[{idx}]: ⚠️ fuzzy match استفاده شد (خط {_start_idx+1}-{_end_idx+1}) — دقت کمتر از exact match")
+                _difflib_matched = True
+                if best_ratio < 1.0:
+                    errors.append(f"section[{idx}]: ⚠️ difflib match استفاده شد (خط {best_start+1}-{best_end+1}, شباهت {best_ratio:.0%}) — دقت کمتر از exact match")
 
-        if not _fuzzy_matched:
-            # نمایش سرنخ: اولین خط find را در فایل جستجو کن — شاید خط‌های مشابه وجود داره
-            _first_find_line = find_str.strip().split("\n")[0].strip()
-            _similar_hint = ""
-            if _first_find_line and len(_first_find_line) > 5:
-                for _li, _line in enumerate(result_content.split("\n")):
-                    if _first_find_line[:30] in _line or _line.strip() == _first_find_line:
-                        _similar_hint = f" (خط مشابه در خط {_li + 1}: '{_line.strip()[:60]}')"
+        if not _difflib_matched:
+            # ── تلاش چهارم: fuzzy line-by-line matching (فالبک) ──
+            _fuzzy_matched = False
+            if len(_find_lines_stripped) >= 2:
+                _first_line = _find_lines_stripped[0]
+                _last_line = _find_lines_stripped[-1]
+                _start_idx = None
+                _end_idx = None
+                # پیدا کردن اولین خط (exact match اول، بعد ۷۰٪ شباهت)
+                for _ci, _cl_stripped in enumerate(_content_lines_stripped):
+                    if _cl_stripped == _first_line:
+                        _start_idx = _ci
                         break
-            errors.append(f"section[{idx}]: متن find پیدا نشد: '{find_str[:80]}...'{_similar_hint}")
+                    elif len(_first_line) > 10 and len(_cl_stripped) > 5:
+                        _line_ratio = _sec_difflib.SequenceMatcher(None, _first_line, _cl_stripped).ratio()
+                        if _line_ratio >= 0.70:
+                            _start_idx = _ci
+                            break
+                if _start_idx is not None:
+                    # پیدا کردن آخرین خط (بعد از start)
+                    for _ci in range(_start_idx + 1, min(_start_idx + len(_find_lines_stripped) + 10, len(_content_lines))):
+                        _cl_stripped = _content_lines_stripped[_ci]
+                        if _cl_stripped == _last_line:
+                            _end_idx = _ci
+                            break
+                        elif len(_last_line) > 10 and len(_cl_stripped) > 5:
+                            _line_ratio = _sec_difflib.SequenceMatcher(None, _last_line, _cl_stripped).ratio()
+                            if _line_ratio >= 0.70:
+                                _end_idx = _ci
+                                break
+                if _start_idx is not None and _end_idx is not None and _end_idx > _start_idx:
+                    # اعتبارسنجی اضافی: تعداد خطوط محدوده باید نزدیک به تعداد خطوط find باشه
+                    _range_size = _end_idx - _start_idx + 1
+                    _expected_size = len(_find_lines_stripped)
+                    if abs(_range_size - _expected_size) <= max(3, _expected_size * 0.3):
+                        _before = "\n".join(_content_lines[:_start_idx])
+                        _after = "\n".join(_content_lines[_end_idx + 1:])
+                        result_content = _before + ("\n" if _before else "") + replace_str + ("\n" if _after else "") + _after
+                        applied += 1
+                        _fuzzy_matched = True
+                        errors.append(f"section[{idx}]: ⚠️ fuzzy match استفاده شد (خط {_start_idx+1}-{_end_idx+1}) — دقت کمتر از exact match")
+
+            if not _fuzzy_matched:
+                # نمایش سرنخ: اولین خط find را در فایل جستجو کن — شاید خط‌های مشابه وجود داره
+                _first_find_line = find_str.strip().split("\n")[0].strip()
+                _similar_hint = ""
+                if _first_find_line and len(_first_find_line) > 5:
+                    for _li, _line in enumerate(_content_lines):
+                        if _first_find_line[:30] in _line or _line.strip() == _first_find_line:
+                            _similar_hint = f" (خط مشابه در خط {_li + 1}: '{_line.strip()[:60]}')"
+                            break
+                errors.append(f"section[{idx}]: متن find پیدا نشد: '{find_str[:80]}...'{_similar_hint}")
 
     success = applied > 0 and len(errors) < len(sections)
     return {
@@ -11144,11 +11183,14 @@ def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None)
                 break
 
         # تعادل پرانتز/آکولاد/براکت
+        # threshold نسبی: فایل‌های بزرگ‌تر اختلاف بیشتری مجازن
+        _content_lines = len(content.split("\n"))
+        _balance_threshold = max(3, min(8, _content_lines // 100))  # حداقل ۳، حداکثر ۸
         for open_c, close_c, name in [("(", ")", "پرانتز"), ("{", "}", "آکولاد"), ("[", "]", "براکت")]:
             opens = content.count(open_c)
             closes = content.count(close_c)
             diff = abs(opens - closes)
-            if diff > 2:
+            if diff > _balance_threshold:
                 file_critical.append(f"❌ عدم تعادل بحرانی {name}: {open_c}={opens} vs {close_c}={closes} (اختلاف {diff}) — این فایل حذف شد")
 
         # ── چک‌های خاص Python ──
@@ -11335,11 +11377,14 @@ def _validate_file_content_syntax(content: str, file_path: str) -> dict:
             break
 
     # ── تعادل پرانتز/آکولاد/براکت ──
+    # threshold نسبی: فایل‌های بزرگ‌تر اختلاف بیشتری مجازن
+    _v_content_lines = len(content.split("\n"))
+    _v_balance_threshold = max(3, min(8, _v_content_lines // 100))  # حداقل ۳، حداکثر ۸
     for open_c, close_c, name in [("(", ")", "پرانتز"), ("{", "}", "آکولاد"), ("[", "]", "براکت")]:
         opens = content.count(open_c)
         closes = content.count(close_c)
         diff = abs(opens - closes)
-        if diff > 2:
+        if diff > _v_balance_threshold:
             errors.append(f"عدم تعادل {name}: {open_c}={opens} vs {close_c}={closes} (اختلاف {diff})")
 
     # ── Python syntax ──
@@ -12485,7 +12530,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                         _total_lines = len(content.split("\n"))
                                         _size_hint = ""
                                         if _total_lines > 200:
-                                            _size_hint = f" ⚠️ فایل بزرگ — حتماً از modify_sections استفاده کن"
+                                            _size_hint = f" ⚠️ فایل بزرگ — حتماً از modify_sections استفاده کن — find فقط از همین بخش نمایش‌داده‌شده COPY شود"
                                         if len(content) > per_file_q_limit:
                                             content = content[:per_file_q_limit] + f"\n... [truncated — فایل اصلی {_total_lines} خط دارد{_size_hint}]"
                                         question_code_context += f"\n\n=== {fp} ({_total_lines} خط) ===\n{content}"
@@ -12772,7 +12817,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                         _total_lines = len(content.split("\n"))
                                         _size_hint = ""
                                         if _total_lines > 200:
-                                            _size_hint = f" ⚠️ فایل بزرگ — حتماً از modify_sections استفاده کن"
+                                            _size_hint = f" ⚠️ فایل بزرگ — حتماً از modify_sections استفاده کن — find فقط از همین بخش نمایش‌داده‌شده COPY شود"
                                         if len(content) > per_file_err_limit:
                                             content = content[:per_file_err_limit] + f"\n... [truncated — فایل اصلی {_total_lines} خط دارد{_size_hint}]"
                                         code_context += f"\n\n=== {file_path} ({_total_lines} خط) ===\n{content}"
@@ -12914,7 +12959,11 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
   "commit_message": "پیام کامیت مناسب"
 }}
 ```
-- `find` باید **دقیقاً** مطابق متن فایل اصلی باشد (شامل فاصله‌ها)
+- 🔴🔴🔴 `find` باید **COPY-PASTE دقیق** از متن فایل اصلی (بالاتر) باشد — شامل تمام فاصله‌ها، tab ها و کامنت‌ها
+- ⛔ **هرگز find رو حدس نزن یا از حافظه بنویس** — حتماً از متن فایل که بالاتر آمده COPY کن
+- ⛔ اگر find حتی ۱ کاراکتر با فایل واقعی فرق داشته باشه → section **شکست میخوره** و تغییرات اعمال نمیشه
+- ✅ find باید حداقل ۲-۳ خط کامل و یکتا از فایل باشه (نه ۱ خط کوتاه)
+- ✅ اگر مطمئن نیستی متن دقیقه → find رو بزرگ‌تر بگیر (۵-۱۰ خط)
 - سیستم خودش فایل اصلی رو از ریپو میخونه و sections رو اعمال میکنه
 
 ⚠️ قوانین action_plan:
@@ -13333,7 +13382,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                                         _total_lines = len(content.split("\n"))
                                         _size_hint = ""
                                         if _total_lines > 200:
-                                            _size_hint = f" ⚠️ فایل بزرگ — حتماً از modify_sections استفاده کن"
+                                            _size_hint = f" ⚠️ فایل بزرگ — حتماً از modify_sections استفاده کن — find فقط از همین بخش نمایش‌داده‌شده COPY شود"
                                         if len(content) > per_file_limit:
                                             content = content[:per_file_limit] + f"\n... [truncated — فایل اصلی {_total_lines} خط دارد{_size_hint}]"
                                         code_context += f"\n\n=== {file_path} ({_total_lines} خط) ===\n{content}"
@@ -13515,7 +13564,9 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
   "commit_message": "پیام کامیت مناسب"
 }}
 ```
-- `find` باید **دقیقاً** مطابق متن فایل اصلی باشد (شامل فاصله‌ها)
+- 🔴🔴🔴 `find` باید **COPY-PASTE دقیق** از متن فایل اصلی باشد — شامل تمام فاصله‌ها، tab ها و کامنت‌ها
+- ⛔ **هرگز find رو حدس نزن** — حتماً از متن فایل COPY کن — حتی ۱ کاراکتر فرق = شکست
+- ✅ find حداقل ۲-۳ خط یکتا — اگر مطمئن نیستی، بزرگ‌تر بگیر (۵-۱۰ خط)
 - سیستم خودش فایل اصلی رو از ریپو میخونه و sections رو اعمال میکنه — هیچ بخشی حذف نمیشه
 
 ⚠️ قوانین action_plan:
@@ -13972,12 +14023,11 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                     elif _syntax_check["warnings"]:
                         _warns = "; ".join(_syntax_check["warnings"][:3])
                         yield sse("progress", {
-                            "step": "syntax_warning_rejected",
-                            "message": f"🚫 {file_path}: هشدار سینتکس — فایل commit نمیشه تا رفع نشه — {_warns}"
+                            "step": "syntax_warning_info",
+                            "message": f"⚠️ {file_path}: هشدار سینتکس (فایل commit میشه ولی چک کنید) — {_warns}"
                         })
-                        dropped_files.append({"path": file_path, "reason": f"هشدار سینتکس: {_warns[:120]}"})
-                        slog.warning(f"[apply-action] REJECTED create {file_path}: syntax warnings treated as errors: {_warns}")
-                        continue
+                        slog.warning(f"[apply-action] WARNING (not rejected) create {file_path}: syntax warnings: {_warns}")
+                        # هشدارها دیگه فایل رو بلاک نمیکنن — ادامه بده
                 final_files.append(f)
                 continue
             try:
@@ -14030,12 +14080,11 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                             elif _syntax_check["warnings"]:
                                 _warns = "; ".join(_syntax_check["warnings"][:3])
                                 yield sse("progress", {
-                                    "step": "syntax_warning_rejected_after_merge",
-                                    "message": f"🚫 {file_path}: هشدار سینتکس بعد از merge — فایل commit نمیشه تا رفع نشه — {_warns}"
+                                    "step": "syntax_warning_info_after_merge",
+                                    "message": f"⚠️ {file_path}: هشدار سینتکس بعد از merge (فایل commit میشه ولی چک کنید) — {_warns}"
                                 })
-                                dropped_files.append({"path": file_path, "reason": f"هشدار سینتکس بعد از merge: {_warns[:120]}"})
-                                slog.warning(f"[apply-action] REJECTED merged {file_path}: syntax warnings treated as errors: {_warns}")
-                                continue
+                                slog.warning(f"[apply-action] WARNING (not rejected) merged {file_path}: syntax warnings: {_warns}")
+                                # هشدارها دیگه فایل رو بلاک نمیکنن — فقط خطاهای بحرانی
                             final_files.append(f)
                         else:
                             _errs = "; ".join(str(e)[:80] for e in merge_result['errors'][:3])
@@ -14086,6 +14135,74 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                                             "step": "sections_fallback_syntax_error",
                                             "message": f"🚫 {file_path}: fallback هم شکست — کد replace خطای سینتکس داره: {_fb_errs}"
                                         })
+                            # ── Fallback 2: AI auto-retry — تصحیح خودکار find/replace با استفاده از محتوای واقعی فایل ──
+                            if not _fallback_applied and len(f["sections"]) <= 5:
+                                try:
+                                    from ...services.ai_manager import get_ai_manager as _retry_get_aim
+                                    from ...services.ai_base import Message as _RetryMsg
+                                    _retry_aim = _retry_get_aim()
+                                    # ساخت context محتوای واقعی فایل (حداکثر ۴۰۰۰ کاراکتر)
+                                    _retry_file_preview = original_content[:4000]
+                                    if len(original_content) > 4000:
+                                        _retry_file_preview += f"\n... [ادامه فایل — مجموعاً {_total_lines} خط]"
+                                    _failed_sections_info = json.dumps(f["sections"], ensure_ascii=False, indent=2)[:2000]
+                                    _retry_prompt = f"""find/replace زیر روی فایل اعمال نشد چون متن find در فایل واقعی پیدا نشد.
+محتوای واقعی فایل:
+```
+{_retry_file_preview}
+```
+
+section‌های شکست‌خورده:
+{_failed_sections_info}
+
+لطفاً section‌ها رو تصحیح کن. find باید **دقیقاً** از متن واقعی فایل بالا کپی بشه (حتی فاصله‌ها و tab ها).
+فقط JSON خالص برگردون:
+{{"sections": [{{"find": "متن دقیق از فایل", "replace": "کد جدید"}}]}}"""
+
+                                    yield sse("progress", {
+                                        "step": "sections_auto_retry",
+                                        "message": f"🔄 {file_path}: تلاش خودکار برای تصحیح find/replace..."
+                                    })
+                                    # استفاده از مدل سریع برای تصحیح
+                                    _retry_model = request.model_ids[0] if request.model_ids else "gemini-2.0-flash"
+                                    _retry_resp = await _retry_aim.generate(
+                                        model_id=_retry_model,
+                                        messages=[
+                                            _RetryMsg(role="system", content="تو ابزار تصحیح find/replace هستی. فقط JSON خالص برگردون. find باید دقیقاً از متن فایل کپی بشه."),
+                                            _RetryMsg(role="user", content=_retry_prompt)
+                                        ],
+                                        max_tokens=2000,
+                                        temperature=0.1,
+                                    )
+                                    # استخراج JSON از پاسخ
+                                    _retry_text = _retry_resp.content.strip()
+                                    _retry_json_match = re.search(r'\{[\s\S]*"sections"[\s\S]*\}', _retry_text)
+                                    if _retry_json_match:
+                                        _retry_parsed = json.loads(_retry_json_match.group(0))
+                                        _retry_sections = _retry_parsed.get("sections", [])
+                                        if _retry_sections:
+                                            _retry_merge = _apply_section_modifications(original_content, _retry_sections)
+                                            if _retry_merge["applied"] > 0:
+                                                f["content"] = _retry_merge["content"]
+                                                f["_auto_retry_applied"] = True
+                                                _retry_syntax = _validate_file_content_syntax(f["content"], file_path)
+                                                if _retry_syntax["valid"]:
+                                                    yield sse("progress", {
+                                                        "step": "sections_auto_retry_success",
+                                                        "message": f"✅ {file_path}: تصحیح خودکار موفق — {_retry_merge['applied']} بخش اعمال شد"
+                                                    })
+                                                    final_files.append(f)
+                                                    _fallback_applied = True
+                                                    slog.info(f"[apply-action] AUTO-RETRY success for {file_path}: {_retry_merge['applied']} sections applied")
+                                                else:
+                                                    _r_errs = "; ".join(_retry_syntax["errors"][:2])
+                                                    yield sse("progress", {
+                                                        "step": "sections_auto_retry_syntax_fail",
+                                                        "message": f"🚫 {file_path}: تصحیح خودکار اعمال شد ولی سینتکس خطا داره: {_r_errs}"
+                                                    })
+                                except Exception as _retry_err:
+                                    slog.warning(f"[apply-action] AUTO-RETRY failed for {file_path}: {_retry_err}")
+
                             if not _fallback_applied:
                                 dropped_files.append({"path": file_path, "reason": f"modify_sections شکست: {_errs[:100]}"})
                     else:
@@ -14230,13 +14347,12 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                                 if _syntax_check["warnings"]:
                                     _warns = "; ".join(_syntax_check["warnings"][:3])
                                     yield sse("progress", {
-                                        "step": "syntax_warning_rejected",
-                                        "message": f"🚫 {file_path}: هشدار سینتکس — فایل commit نمیشه تا رفع نشه — {_warns}"
+                                        "step": "syntax_warning_info",
+                                        "message": f"⚠️ {file_path}: هشدار سینتکس (فایل commit میشه ولی چک کنید) — {_warns}"
                                     })
-                                    dropped_files.append({"path": file_path, "reason": f"هشدار سینتکس: {_warns[:120]}"})
-                                    slog.warning(f"[apply-action] REJECTED modify {file_path}: syntax warnings treated as errors: {_warns}")
-                                else:
-                                    final_files.append(f)
+                                    slog.warning(f"[apply-action] WARNING (not rejected) modify {file_path}: syntax warnings: {_warns}")
+                                    # هشدارها دیگه فایل رو بلاک نمیکنن
+                                final_files.append(f)
                         else:
                             final_files.append(f)
                 else:
@@ -14794,7 +14910,11 @@ def _build_visual_debug_prompt_list() -> list:
 - operation: "modify" (ویرایش — محتوای کامل) یا "create" (فایل جدید) یا "modify_sections" (تغییر بخشی)
 - **modify**: content = محتوای کامل و قابل جایگزینی فایل — فقط برای فایل‌های کوچک (<200 خط)
 - **modify_sections**: sections = لیست تغییرات {find, replace} — سیستم خودش فایل اصلی رو میخونه و sections رو اعمال میکنه
-- find باید **دقیقاً** مطابق متن فایل اصلی باشد (شامل فاصله‌ها)
+- 🔴🔴🔴 **find باید COPY-PASTE دقیق از متن فایل اصلی باشد** — شامل تمام فاصله‌ها، tab ها، نام متغیرها و حتی کامنت‌ها
+- ⛔ **هرگز find رو حدس نزن یا از حافظه بنویس** — حتماً از متن فایل که بالاتر داده شده COPY کن
+- ⛔ اگر find حتی ۱ کاراکتر با فایل واقعی فرق داشته باشه → section **شکست میخوره** و تغییرات اعمال نمیشه
+- ✅ find باید حداقل ۲-۳ خط کامل و یکتا از فایل باشه — نه فقط یک خط کوتاه که ممکنه تکراری باشه
+- ✅ اگر مطمئن نیستی متن دقیقه → find رو بزرگ‌تر بگیر (۵-۱۰ خط) تا شانس تطبیق بالا بره
 - 🔴 **تمام** فایل‌ها و content/sections باید **داخل** یک بلوک JSON باشد — هرگز کد رو جدا از action_plan ننویس
 - files خالی ممنوع — یا فایل با محتوا/sections بذار، یا action_plan نذار
 - بدون action_plan = بدون دکمه «اعمال تغییرات» ← کاربر نمی‌تواند تغییرات را اعمال کند
@@ -15577,7 +15697,10 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
 
 ⚠️ **قوانین مهم action_plan**:
 - **تمام** فایل‌ها و محتوا/sections باید **داخل** یک بلوک JSON باشد — هرگز content رو جدا از JSON ننویس
-- `find` در modify_sections باید **دقیقاً** متن کپی‌شده از فایل اصلی باشد — نه توصیف محل تغییر
+- 🔴🔴🔴 `find` باید **COPY-PASTE دقیق** از متن فایل اصلی باشد — شامل فاصله‌ها، tab ها و کامنت‌ها
+- ⛔ **هرگز find رو حدس نزن یا از حافظه بنویس** — حتماً از متن فایل COPY کن
+- ⛔ حتی ۱ کاراکتر فرق = section شکست میخوره و تغییرات اعمال نمیشه
+- ✅ find حداقل ۲-۳ خط کامل و یکتا باشه — اگر مطمئن نیستی، ۵-۱۰ خط بگیر
 - ❌ غلط: `"find": "// انتهای فایل — قبل از export"` (این توصیف است، نه کد واقعی!)
 - ✅ صحیح: `"find": "export default MonitoringPage;"` (این متن واقعی فایل است)
 
