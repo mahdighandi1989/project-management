@@ -11248,10 +11248,22 @@ def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None)
                 for _ln, _line in enumerate(_lines, 1):
                     _stripped = _line.strip()
                     if _stripped.startswith("className=") and _ln > 1:
-                        _prev = "\n".join(_lines[max(0, _ln - 4):_ln - 1])
-                        if "<" not in _prev and "..." not in _prev:
-                            file_critical.append(
-                                f"❌ خط {_ln}: className بدون تگ JSX — کد خارج از کامپوننت قرار گرفته — این فایل حذف شد"
+                        # بررسی ۲۰ خط قبل (بجای ۴) — در JSX واقعی تگ باز ممکنه خیلی بالاتر باشه
+                        _lookback = 20
+                        _prev = "\n".join(_lines[max(0, _ln - 1 - _lookback):_ln - 1])
+                        # بررسی وجود تگ JSX یا الگوهای مرتبط JSX
+                        _jsx_indicators = [
+                            "<", "...", "style=", "onClick=", "onChange=", "onSubmit=",
+                            "ref=", "key=", "id=", "data-", "aria-", "htmlFor=",
+                            "disabled", "placeholder=", "value=", "type=", "name=",
+                            "href=", "src=", "alt=", "role=", "tabIndex=",
+                        ]
+                        _has_jsx_context = any(ind in _prev for ind in _jsx_indicators)
+                        if not _has_jsx_context:
+                            # 🔧 تنزل از خطای بحرانی به هشدار: این یک هیوریستیک ناقص‌نگر هست
+                            # و در JSX واقعی (تگ با props زیاد، conditional rendering) false positive تولید میکنه
+                            file_warnings.append(
+                                f"⚠️ خط {_ln}: className بدون تگ JSX — ممکنه کد خارج از کامپوننت قرار گرفته باشه (لطفاً بررسی کنید)"
                             )
                             break
 
@@ -11440,10 +11452,22 @@ def _validate_file_content_syntax(content: str, file_path: str) -> dict:
                 stripped = line.strip()
                 # className به عنوان اولین چیز در خط و بدون تگ باز قبلش
                 if stripped.startswith("className=") and line_num > 1:
-                    prev_lines = "\n".join(lines[max(0, line_num - 4):line_num - 1])
-                    if "<" not in prev_lines and "..." not in prev_lines:
-                        errors.append(
-                            f"خط {line_num}: className بدون تگ JSX — احتمالاً کد خارج از کامپوننت قرار گرفته"
+                    # بررسی ۲۰ خط قبل (بجای ۴) — در JSX واقعی تگ باز ممکنه خیلی بالاتر باشه
+                    _lookback = 20
+                    prev_lines = "\n".join(lines[max(0, line_num - 1 - _lookback):line_num - 1])
+                    # بررسی وجود تگ JSX یا الگوهای مرتبط JSX
+                    _jsx_indicators = [
+                        "<", "...", "style=", "onClick=", "onChange=", "onSubmit=",
+                        "ref=", "key=", "id=", "data-", "aria-", "htmlFor=",
+                        "disabled", "placeholder=", "value=", "type=", "name=",
+                        "href=", "src=", "alt=", "role=", "tabIndex=",
+                    ]
+                    _has_jsx_context = any(ind in prev_lines for ind in _jsx_indicators)
+                    if not _has_jsx_context:
+                        # 🔧 تنزل از خطای بحرانی به هشدار: این هیوریستیک در JSX واقعی
+                        # (تگ‌های چند خطی با props زیاد) false positive تولید میکنه
+                        warnings.append(
+                            f"خط {line_num}: className بدون تگ JSX — ممکنه کد خارج از کامپوننت قرار گرفته باشه (لطفاً بررسی کنید)"
                         )
                         break
 
@@ -14014,12 +14038,62 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                     if not _syntax_check["valid"]:
                         _errs = "; ".join(_syntax_check["errors"][:3])
                         yield sse("progress", {
-                            "step": "syntax_error_rejected",
-                            "message": f"🚫 {file_path}: خطای سینتکس در فایل جدید — {_errs}"
+                            "step": "syntax_error_create",
+                            "message": f"⚠️ {file_path}: خطای سینتکس در فایل جدید — شروع تصحیح خودکار... — {_errs}"
                         })
-                        dropped_files.append({"path": file_path, "reason": f"خطای سینتکس: {_errs[:120]}"})
-                        slog.error(f"[apply-action] REJECTED create {file_path}: syntax errors: {_errs}")
-                        continue
+                        # 🔧 تلاش برای تصحیح خودکار خطای سینتکس در فایل جدید با AI
+                        _create_fixed = False
+                        try:
+                            from ...services.ai_manager import get_ai_manager as _cfx_get_aim
+                            from ...services.ai_base import Message as _CfxMsg
+                            _cfx_aim = _cfx_get_aim()
+                            _cfx_preview = _create_content[:5000]
+                            _cfx_prompt = f"""فایل جدید زیر خطای سینتکس دارد. لطفاً فقط خطاهای سینتکس را رفع کن.
+
+خطاها: {_errs}
+
+فایل ({file_path}):
+```
+{_cfx_preview}
+```
+
+⚠️ فقط خطاهای سینتکس رو رفع کن — تغییر منطقی ایجاد نکن.
+⚠️ فایل کامل رو برگردون — فقط کد خالص بدون markdown."""
+                            _cfx_model = request.model_ids[0] if request.model_ids else "gemini-2.0-flash"
+                            _cfx_resp = await _cfx_aim.generate(
+                                model_id=_cfx_model,
+                                messages=[
+                                    _CfxMsg(role="system", content="تو ابزار تصحیح سینتکس هستی. فقط خطاهای سینتکس رو رفع کن. کد کامل فایل رو بدون markdown برگردون."),
+                                    _CfxMsg(role="user", content=_cfx_prompt)
+                                ],
+                                max_tokens=8000,
+                                temperature=0.1,
+                            )
+                            _cfx_result = _cfx_resp.content.strip()
+                            import re as _cfx_re
+                            _cfx_code_match = _cfx_re.search(r'```(?:tsx?|jsx?|py|json|css|html)?\s*\n(.*?)\n```', _cfx_result, _cfx_re.DOTALL)
+                            if _cfx_code_match:
+                                _cfx_result = _cfx_code_match.group(1).strip()
+                            if _cfx_result and len(_cfx_result) > 50:
+                                _cfx_check = _validate_file_content_syntax(_cfx_result, file_path)
+                                if _cfx_check["valid"]:
+                                    f["content"] = _cfx_result
+                                    _create_fixed = True
+                                    yield sse("progress", {
+                                        "step": "syntax_fix_create_success",
+                                        "message": f"✅ {file_path}: تصحیح خودکار AI موفق — خطای سینتکس فایل جدید رفع شد"
+                                    })
+                                    slog.info(f"[apply-action] AI syntax fix success for new file {file_path}")
+                        except Exception as _cfx_err:
+                            slog.warning(f"[apply-action] AI syntax fix failed for new file {file_path}: {_cfx_err}")
+                        if not _create_fixed:
+                            yield sse("progress", {
+                                "step": "syntax_error_rejected",
+                                "message": f"🚫 {file_path}: خطای سینتکس در فایل جدید (تصحیح خودکار هم ناموفق بود) — {_errs}"
+                            })
+                            dropped_files.append({"path": file_path, "reason": f"خطای سینتکس: {_errs[:120]}"})
+                            slog.error(f"[apply-action] REJECTED create {file_path}: syntax errors: {_errs}")
+                            continue
                     elif _syntax_check["warnings"]:
                         _warns = "; ".join(_syntax_check["warnings"][:3])
                         yield sse("progress", {
@@ -14072,11 +14146,119 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                                 _errs = "; ".join(_syntax_check["errors"][:3])
                                 yield sse("progress", {
                                     "step": "syntax_error_after_merge",
-                                    "message": f"🚫 {file_path}: خطای سینتکس بعد از merge — کد سالم commit نمیشه — {_errs}"
+                                    "message": f"⚠️ {file_path}: خطای سینتکس بعد از merge — شروع بازیابی خودکار... — {_errs}"
                                 })
-                                dropped_files.append({"path": file_path, "reason": f"خطای سینتکس بعد از merge: {_errs[:120]}"})
-                                slog.error(f"[apply-action] REJECTED merged {file_path}: syntax errors: {_errs}")
-                                continue
+                                slog.warning(f"[apply-action] Syntax errors after merge in {file_path}: {_errs} — attempting recovery...")
+
+                                # ── 🔧 مرحله بازیابی ۱: اعمال تدریجی sections (تک‌تک) ──
+                                _recovery_success = False
+                                _sections_list = f.get("sections", [])
+                                if len(_sections_list) > 1:
+                                    yield sse("progress", {
+                                        "step": "syntax_recovery_incremental",
+                                        "message": f"🔄 {file_path}: تلاش بازیابی — اعمال تدریجی {len(_sections_list)} بخش..."
+                                    })
+                                    _incr_content = original_content
+                                    _incr_applied = 0
+                                    _incr_skipped = []
+                                    for _si, _sec in enumerate(_sections_list):
+                                        _single_merge = _apply_section_modifications(_incr_content, [_sec])
+                                        if _single_merge["applied"] > 0:
+                                            _single_check = _validate_file_content_syntax(_single_merge["content"], file_path)
+                                            if _single_check["valid"]:
+                                                _incr_content = _single_merge["content"]
+                                                _incr_applied += 1
+                                            else:
+                                                _incr_skipped.append(_si)
+                                                slog.info(f"[apply-action] incremental recovery: section[{_si}] breaks syntax, skipping")
+                                        else:
+                                            _incr_skipped.append(_si)
+                                    if _incr_applied > 0:
+                                        _incr_final_check = _validate_file_content_syntax(_incr_content, file_path)
+                                        if _incr_final_check["valid"]:
+                                            f["content"] = _incr_content
+                                            f["_sections_applied"] = _incr_applied
+                                            f["_recovery_method"] = "incremental"
+                                            _recovery_success = True
+                                            yield sse("progress", {
+                                                "step": "syntax_recovery_incremental_success",
+                                                "message": f"✅ {file_path}: بازیابی تدریجی موفق — {_incr_applied}/{len(_sections_list)} بخش اعمال شد"
+                                                    + (f" (⚠️ {len(_incr_skipped)} بخش به خاطر خطای سینتکس رد شد)" if _incr_skipped else "")
+                                            })
+                                            slog.info(f"[apply-action] RECOVERY incremental success for {file_path}: {_incr_applied}/{len(_sections_list)} sections, skipped {_incr_skipped}")
+
+                                # ── 🔧 مرحله بازیابی ۲: تصحیح خودکار با AI ──
+                                if not _recovery_success:
+                                    try:
+                                        from ...services.ai_manager import get_ai_manager as _sfx_get_aim
+                                        from ...services.ai_base import Message as _SfxMsg
+                                        _sfx_aim = _sfx_get_aim()
+                                        _sfx_merged_preview = f["content"][:5000]
+                                        if len(f["content"]) > 5000:
+                                            _sfx_merged_preview += f"\n... [ادامه فایل — مجموعاً {len(f['content'].split(chr(10)))} خط]"
+                                        _sfx_prompt = f"""فایل زیر بعد از merge تغییرات، خطای سینتکس دارد. لطفاً فقط خطاهای سینتکس را رفع کن و کد اصلاح‌شده را برگردان.
+
+خطاهای شناسایی‌شده: {_errs}
+
+محتوای فایل ({file_path}):
+```
+{_sfx_merged_preview}
+```
+
+⚠️ فقط خطاهای سینتکس رو رفع کن — هیچ تغییر منطقی یا عملکردی ایجاد نکن.
+⚠️ فایل کامل رو برگردون (نه فقط بخش تغییریافته).
+⚠️ هیچ توضیح یا markdown ننویس — فقط کد خالص."""
+
+                                        yield sse("progress", {
+                                            "step": "syntax_recovery_ai",
+                                            "message": f"🤖 {file_path}: تلاش تصحیح خودکار خطای سینتکس با AI..."
+                                        })
+                                        _sfx_model = request.model_ids[0] if request.model_ids else "gemini-2.0-flash"
+                                        _sfx_resp = await _sfx_aim.generate(
+                                            model_id=_sfx_model,
+                                            messages=[
+                                                _SfxMsg(role="system", content="تو ابزار تصحیح سینتکس هستی. فقط خطاهای سینتکس رو رفع کن. کد کامل فایل رو بدون markdown و توضیح برگردون."),
+                                                _SfxMsg(role="user", content=_sfx_prompt)
+                                            ],
+                                            max_tokens=8000,
+                                            temperature=0.1,
+                                        )
+                                        _sfx_fixed = _sfx_resp.content.strip()
+                                        # حذف احتمالی markdown code fences
+                                        import re as _sfx_re
+                                        _sfx_code_match = _sfx_re.search(r'```(?:tsx?|jsx?|py|json|css|html)?\s*\n(.*?)\n```', _sfx_fixed, _sfx_re.DOTALL)
+                                        if _sfx_code_match:
+                                            _sfx_fixed = _sfx_code_match.group(1).strip()
+                                        if _sfx_fixed and len(_sfx_fixed) > 50:
+                                            _sfx_check = _validate_file_content_syntax(_sfx_fixed, file_path)
+                                            if _sfx_check["valid"]:
+                                                f["content"] = _sfx_fixed
+                                                f["_recovery_method"] = "ai_syntax_fix"
+                                                _recovery_success = True
+                                                yield sse("progress", {
+                                                    "step": "syntax_recovery_ai_success",
+                                                    "message": f"✅ {file_path}: تصحیح خودکار AI موفق — خطای سینتکس رفع شد"
+                                                })
+                                                slog.info(f"[apply-action] RECOVERY AI syntax fix success for {file_path}")
+                                            else:
+                                                _sfx_new_errs = "; ".join(_sfx_check["errors"][:2])
+                                                yield sse("progress", {
+                                                    "step": "syntax_recovery_ai_failed",
+                                                    "message": f"⚠️ {file_path}: تصحیح AI هم خطای سینتکس داره: {_sfx_new_errs}"
+                                                })
+                                                slog.warning(f"[apply-action] AI syntax fix still has errors for {file_path}: {_sfx_new_errs}")
+                                    except Exception as _sfx_err:
+                                        slog.warning(f"[apply-action] AI syntax fix failed for {file_path}: {_sfx_err}")
+
+                                # اگر هیچ بازیابی موفق نبود → حذف فایل
+                                if not _recovery_success:
+                                    yield sse("progress", {
+                                        "step": "syntax_error_final_drop",
+                                        "message": f"🚫 {file_path}: تمام تلاش‌های بازیابی شکست خوردند — فایل commit نمیشه — {_errs}"
+                                    })
+                                    dropped_files.append({"path": file_path, "reason": f"خطای سینتکس بعد از merge (بازیابی ناموفق): {_errs[:120]}"})
+                                    slog.error(f"[apply-action] REJECTED merged {file_path} after all recovery attempts: {_errs}")
+                                    continue
                             elif _syntax_check["warnings"]:
                                 _warns = "; ".join(_syntax_check["warnings"][:3])
                                 yield sse("progress", {
@@ -14338,21 +14520,72 @@ section‌های شکست‌خورده:
                             if not _syntax_check["valid"]:
                                 _errs = "; ".join(_syntax_check["errors"][:3])
                                 yield sse("progress", {
-                                    "step": "syntax_error_rejected",
-                                    "message": f"🚫 {file_path}: خطای سینتکس — کد سالم commit نمیشه — {_errs}"
+                                    "step": "syntax_error_modify",
+                                    "message": f"⚠️ {file_path}: خطای سینتکس — شروع تصحیح خودکار... — {_errs}"
                                 })
-                                dropped_files.append({"path": file_path, "reason": f"خطای سینتکس: {_errs[:120]}"})
-                                slog.error(f"[apply-action] REJECTED modify {file_path}: syntax errors: {_errs}")
-                            else:
-                                if _syntax_check["warnings"]:
-                                    _warns = "; ".join(_syntax_check["warnings"][:3])
+                                # 🔧 تلاش تصحیح خودکار سینتکس با AI
+                                _mod_fixed = False
+                                try:
+                                    from ...services.ai_manager import get_ai_manager as _mfx_get_aim
+                                    from ...services.ai_base import Message as _MfxMsg
+                                    _mfx_aim = _mfx_get_aim()
+                                    _mfx_preview = _file_content[:5000]
+                                    if len(_file_content) > 5000:
+                                        _mfx_preview += f"\n... [ادامه — {len(_file_content.split(chr(10)))} خط]"
+                                    _mfx_prompt = f"""فایل زیر خطای سینتکس دارد. فقط خطاهای سینتکس را رفع کن.
+
+خطاها: {_errs}
+
+فایل ({file_path}):
+```
+{_mfx_preview}
+```
+
+⚠️ فقط خطاهای سینتکس — تغییر منطقی ایجاد نکن. فایل کامل، بدون markdown."""
+                                    _mfx_model = request.model_ids[0] if request.model_ids else "gemini-2.0-flash"
+                                    _mfx_resp = await _mfx_aim.generate(
+                                        model_id=_mfx_model,
+                                        messages=[
+                                            _MfxMsg(role="system", content="ابزار تصحیح سینتکس. فقط خطاهای سینتکس رو رفع کن. کد کامل بدون markdown."),
+                                            _MfxMsg(role="user", content=_mfx_prompt)
+                                        ],
+                                        max_tokens=8000,
+                                        temperature=0.1,
+                                    )
+                                    _mfx_result = _mfx_resp.content.strip()
+                                    import re as _mfx_re
+                                    _mfx_code_match = _mfx_re.search(r'```(?:tsx?|jsx?|py|json|css|html)?\s*\n(.*?)\n```', _mfx_result, _mfx_re.DOTALL)
+                                    if _mfx_code_match:
+                                        _mfx_result = _mfx_code_match.group(1).strip()
+                                    if _mfx_result and len(_mfx_result) > 50:
+                                        _mfx_check = _validate_file_content_syntax(_mfx_result, file_path)
+                                        if _mfx_check["valid"]:
+                                            f["content"] = _mfx_result
+                                            _mod_fixed = True
+                                            yield sse("progress", {
+                                                "step": "syntax_fix_modify_success",
+                                                "message": f"✅ {file_path}: تصحیح خودکار AI موفق — خطای سینتکس رفع شد"
+                                            })
+                                            slog.info(f"[apply-action] AI syntax fix success for modify {file_path}")
+                                except Exception as _mfx_err:
+                                    slog.warning(f"[apply-action] AI syntax fix failed for modify {file_path}: {_mfx_err}")
+                                if not _mod_fixed:
                                     yield sse("progress", {
-                                        "step": "syntax_warning_info",
-                                        "message": f"⚠️ {file_path}: هشدار سینتکس (فایل commit میشه ولی چک کنید) — {_warns}"
+                                        "step": "syntax_error_rejected",
+                                        "message": f"🚫 {file_path}: خطای سینتکس (تصحیح خودکار ناموفق) — {_errs}"
                                     })
-                                    slog.warning(f"[apply-action] WARNING (not rejected) modify {file_path}: syntax warnings: {_warns}")
-                                    # هشدارها دیگه فایل رو بلاک نمیکنن
-                                final_files.append(f)
+                                    dropped_files.append({"path": file_path, "reason": f"خطای سینتکس: {_errs[:120]}"})
+                                    slog.error(f"[apply-action] REJECTED modify {file_path}: syntax errors: {_errs}")
+                                    continue
+                            # هشدارها فایل رو بلاک نمیکنن — فقط لاگ میشن
+                            if _syntax_check.get("warnings"):
+                                _warns = "; ".join(_syntax_check["warnings"][:3])
+                                yield sse("progress", {
+                                    "step": "syntax_warning_info",
+                                    "message": f"⚠️ {file_path}: هشدار سینتکس (فایل commit میشه ولی چک کنید) — {_warns}"
+                                })
+                                slog.warning(f"[apply-action] WARNING (not rejected) modify {file_path}: syntax warnings: {_warns}")
+                            final_files.append(f)
                         else:
                             final_files.append(f)
                 else:
