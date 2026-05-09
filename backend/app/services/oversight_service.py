@@ -985,7 +985,9 @@ class OversightService:
             except Exception as e:
                 logger.warning(f"context build failed: {e}")
 
-        system_prompt = f"""تو یک معمار ارشد نرم‌افزاری. وظیفه‌ات این است که ایده/مشکل/درخواست خام کاربر را به یک پرامپت کاملاً اجرایی، دقیق و ساختار یافته (با قالب الزامی زیر) تبدیل کنی.
+        system_prompt = f"""تو یک معمار ارشد نرم‌افزاری. وظیفه‌ات این است که ایده/مشکل/درخواست خام کاربر را به یک تسک ساختاریافته با موقعیت‌های دقیق فایل و خط، snippet کد، فایل‌های مرتبط، و معیارهای قابل تست تبدیل کنی.
+
+خروجی این تسک به یک ابزار کدنویس خارجی (Cursor/Copilot/ChatGPT) داده می‌شود — پس فیلدها باید **کاملاً مشخص و قابل اعمال** باشند.
 
 # 🎯 هدف اصلی پروژه (از زبان کاربر)
 {user_goal or '(کاربر یادداشتی ثبت نکرده است)'}
@@ -1001,63 +1003,55 @@ class OversightService:
 {idea.strip()}
 \"\"\"
 
-# خروجی موردانتظار
-یک JSON دقیقاً با این ساختار برگردان (و فقط همین JSON بدون متن اضافی):
+# خروجی فقط JSON خالص (بدون متن اضافی، بدون ```)
 
 {{
-  "title": "عنوان کوتاه و گویا تسک",
-  "prompt": "پرامپت کامل با قالب الزامی زیر",
-  "target_files": ["لیست فایل‌های مرتبط که باید لمس/بررسی شوند"],
-  "acceptance_criteria": ["معیار قابل تست ۱", "معیار قابل تست ۲", "..."],
-  "type": "bug | feature | refactor | docs | security | other",
+  "title": "عنوان کوتاه و گویا تسک — یک جمله قابل سنجش",
+  "description": "پاراگراف کامل: چه چیزی، چرا، شواهد",
+  "proposed_action": "پیشنهاد عملی برای پیاده‌سازی",
+  "type": "bug | feature_request | refactor | docs | security | other",
   "priority": "low | medium | high | critical",
-  "estimate": "small | medium | large"
+  "estimated_complexity": "small | medium | large",
+
+  "target_locations": [
+    {{
+      "path": "backend/app/services/foo.py",
+      "lines": "245-289",
+      "symbol": "function_or_class_name",
+      "snippet": "snippet کوتاه از کد فعلی یا (اگر فایل جدید است) skeleton مورد انتظار",
+      "note": "این چه چیزی است / چرا اینجا"
+    }}
+  ],
+
+  "related_files": [
+    {{"path": "frontend/src/...", "reason": "این endpoint/کامپوننت را call می‌کند"}},
+    {{"path": "backend/app/models/...", "reason": "schema مرتبط"}}
+  ],
+
+  "dependency_summary": "این بخش در نقشهٔ پروژه چه نقشی دارد و چه چیزی روی آن اثر می‌گذارد",
+
+  "tech_context": "Stack مرتبط (مثل FastAPI + Next.js 14)",
+
+  "before_after_examples": [
+    {{"label": "...", "before": "...", "after": "..."}}
+  ],
+
+  "acceptance_criteria": [
+    "معیار قابل تست ۱ (مثلاً: endpoint /api/x برای ورودی نامعتبر ۴۰۰ برمی‌گرداند)",
+    "معیار قابل تست ۲"
+  ],
+
+  "validation_commands": ["pytest ...", "npm run test -- ..."],
+
+  "risks": "هشدارها و رگرشن‌های احتمالی"
 }}
 
-# قالب الزامی پرامپت (همین ساختار را در فیلد prompt بگذار):
-
-## 🎯 هدف
-<عنوان دقیق و قابل سنجش — یک جمله>
-
-## 📍 موقعیت در پروژه
-<file_path>:<line_range یا کل فایل>
-<file_path_2>:<...>
-
-## 🧭 هدف اصلی پروژه (از یادداشت کاربر)
-{user_goal or '(کاربر یادداشتی ثبت نکرده است)'}
-
-## 🔍 Context و وضعیت فعلی
-- توضیح کوتاه از کد فعلی (snippet اگر مفید)
-- چرا این یک مشکل/نیاز است
-- چه تأثیری بر کاربر/امنیت/پایداری دارد
-
-## ✅ معیار پذیرش (Acceptance Criteria)
-- [ ] <معیار قابل تست ۱>
-- [ ] <معیار قابل تست ۲>
-- [ ] هیچ تستی fail نمی‌شود (npm test / pytest)
-- [ ] linter بدون warning عبور می‌کند
-- [ ] type-check موفق است
-
-## 🪜 مراحل اجرایی پیشنهادی
-1. <مرحله ۱ با فایل/تابع مشخص>
-2. <مرحله ۲>
-...
-
-## 📤 خروجی مورد انتظار
-<diff/PR/فایل ساخته‌شده/تغییر مشخص — قابل لمس>
-
-## ⚠️ ریسک‌ها و موارد احتیاط
-<چه چیزهایی ممکن است بشکند/رگرشن>
-
-## 🔗 وابستگی‌ها
-<task_idهای دیگر یا قطعات بیرونی>
-
-## 🏷 دسته‌بندی
-- نوع: <type>
-- اولویت: <priority>
-- تخمین زمان: <estimate>
-
-پرامپت باید به فارسی، طولانی، عملی، و کاملاً قابل اجرا باشد."""
+# قوانین مهم
+1. path همیشه از ریشهٔ ریپو (مثل `backend/app/...` یا `frontend/src/...`).
+2. اگر دقیقاً نمی‌دانی فایل چیست، از Context پروژه/files_sample بهترین حدس را بزن و در note بنویس "بر اساس ساختار پروژه — توسط مجری تأیید شود".
+3. snippet کوتاه ولی نشان‌دهندهٔ مسئله/راه‌حل باشد.
+4. acceptance_criteria باید قابل تست باشد، نه تعریف کلی.
+5. عنوان فارسی و حرفه‌ای بنویس."""
 
         try:
             effective_models = model_ids or ([model_id] if model_id else None)
@@ -1082,13 +1076,17 @@ class OversightService:
         except Exception as e:
             raise RuntimeError(f"خطا در تولید پرامپت: {e}")
 
+        from .oversight_strong_prompt import build_strong_prompt
+
         parsed = self._extract_json(response)
-        if not parsed or "prompt" not in parsed:
+        if not parsed:
             # fallback: کل خروجی را پرامپت بدان
             return {
                 "title": (idea.strip().split("\n")[0])[:80],
                 "prompt": response.strip(),
                 "target_files": [],
+                "target_locations": [],
+                "related_files": [],
                 "acceptance_criteria": [],
                 "type": type_,
                 "priority": priority,
@@ -1096,14 +1094,54 @@ class OversightService:
                 "raw_response": response,
             }
 
+        # locations جدید + fallback به target_files قدیمی
+        target_locations = parsed.get("target_locations") or []
+        target_files: List[str] = list(parsed.get("target_files") or [])
+        if target_locations and not target_files:
+            target_files = [
+                l.get("path") for l in target_locations
+                if isinstance(l, dict) and l.get("path")
+            ]
+        if not target_locations and target_files:
+            target_locations = [{"path": p} for p in target_files]
+
+        related = parsed.get("related_files") or []
+        examples = parsed.get("before_after_examples") or []
+        vcmds = parsed.get("validation_commands") or []
+        ac = parsed.get("acceptance_criteria") or []
+        title = (parsed.get("title") or (idea.strip().split("\n")[0])[:80]).strip()
+
+        # اگر AI خودش فیلد prompt آماده داد، احترام می‌گذاریم؛ ولی بهتر است always
+        # از build_strong_prompt استفاده کنیم تا قالب یکدست بماند.
+        full_prompt = build_strong_prompt(
+            title=title,
+            user_goal=user_goal,
+            description=parsed.get("description", ""),
+            proposed_action=parsed.get("proposed_action", ""),
+            target_files=target_files,
+            target_locations=target_locations,
+            related_files=related if isinstance(related, list) else [],
+            dependency_summary=(parsed.get("dependency_summary") or "").strip(),
+            tech_context=(parsed.get("tech_context") or "").strip(),
+            before_after_examples=examples if isinstance(examples, list) else [],
+            validation_commands=vcmds if isinstance(vcmds, list) else [],
+            acceptance_criteria=ac,
+            risks=(parsed.get("risks") or "").strip(),
+            type_=parsed.get("type") or type_,
+            priority=parsed.get("priority") or priority,
+            estimate=(parsed.get("estimated_complexity") or parsed.get("estimate") or "medium"),
+        )
+
         return {
-            "title": parsed.get("title") or (idea.strip().split("\n")[0])[:80],
-            "prompt": parsed.get("prompt") or response.strip(),
-            "target_files": parsed.get("target_files") or [],
-            "acceptance_criteria": parsed.get("acceptance_criteria") or [],
+            "title": title,
+            "prompt": full_prompt,
+            "target_files": target_files,
+            "target_locations": target_locations,
+            "related_files": related,
+            "acceptance_criteria": ac,
             "type": parsed.get("type") or type_,
             "priority": parsed.get("priority") or priority,
-            "estimate": parsed.get("estimate") or "medium",
+            "estimate": parsed.get("estimated_complexity") or parsed.get("estimate") or "medium",
             "raw_response": response,
         }
 
@@ -1432,21 +1470,51 @@ class OversightService:
 - **تست‌های گم‌شده یا ناکافی**
 - **پیشرفت ناقص قابلیت‌ها**
 
-هر مورد شامل:
-- title (کوتاه)
+برای هر مورد، این فیلدها را با حداکثر دقت پر کن — خروجی این تسک به ابزار کدنویس خارجی (Cursor/Copilot) داده می‌شود، پس باید کاملاً قابل اعمال باشد:
+
+- title (کوتاه و قابل سنجش)
 - type (bug | refactor | docs | feature_request | security | other)
 - priority (low | medium | high | critical)
-- description (پاراگراف کامل)
-- proposed_action (پیشنهاد عملی)
-- target_files (لیست فایل‌های مرتبط با این یافته - اگر مشخص نیست خالی)
-- acceptance_criteria (۲ تا ۴ معیار قابل سنجش که نشان می‌دهد یافته رفع شده)
+- description (پاراگراف کامل: شواهد + تأثیر)
+- proposed_action (پیشنهاد عملی برای رفع)
+- target_locations: لیست {{path, lines, symbol, snippet, note}} — مسیر کامل از ریشهٔ ریپو، خط/بازهٔ خط، نام تابع/کلاس، و snippet کوتاه از کد فعلی
+- related_files: لیست {{path, reason, at_line}} — فایل‌هایی که با این تسک مرتبط هستند (caller، importer، shared state)
+- dependency_summary: نقش این بخش در پروژه و چه چیزی روی آن اثر می‌گذارد
+- tech_context: پشتهٔ مرتبط (مثل "FastAPI + JWT + Next.js 14")
+- before_after_examples: لیست {{label, before, after}} برای روشن کردن تغییر مورد انتظار (اختیاری ولی مفید)
+- validation_commands: دستورات shell که برای تأیید رفع مشکل باید اجرا شوند
+- acceptance_criteria: ۲ تا ۴ معیار قابل تست
+- estimated_complexity: small | medium | large
+- risks: هشدارها و رگرشن‌های احتمالی
 
-# خروجی فقط JSON
+# خروجی فقط JSON خالص (بدون متن اضافی، بدون ```)
 {{
   "needs": [
-    {{ "title": "...", "type": "...", "priority": "...", "description": "...", "proposed_action": "...", "target_files": [], "acceptance_criteria": [] }}
+    {{
+      "title": "...",
+      "type": "...",
+      "priority": "...",
+      "description": "...",
+      "proposed_action": "...",
+      "target_locations": [{{"path": "backend/app/...", "lines": "245-289", "symbol": "func_name", "snippet": "...", "note": "..."}}],
+      "related_files": [{{"path": "...", "reason": "...", "at_line": 67}}],
+      "dependency_summary": "...",
+      "tech_context": "...",
+      "before_after_examples": [{{"label": "...", "before": "...", "after": "..."}}],
+      "validation_commands": ["pytest ...", "npm run ..."],
+      "acceptance_criteria": ["...", "..."],
+      "estimated_complexity": "medium",
+      "risks": "..."
+    }}
   ]
-}}"""
+}}
+
+قوانین:
+1. path همیشه از ریشهٔ ریپو (مثل `backend/app/services/foo.py`).
+2. اگر شمارهٔ خط دقیق نمی‌دانی، lines را خالی بگذار — ولی path الزامی است.
+3. snippet حتماً مسئلهٔ مورد نظر را نشان دهد.
+4. حداکثر ۸ نیاز مهم. کیفیت > کمیت.
+"""
 
         try:
             response = await self._ai_generate(
@@ -1466,7 +1534,22 @@ class OversightService:
                 title = (n.get("title") or "").strip()[:200]
                 if not title:
                     continue
-                target_files = n.get("target_files") or []
+
+                # locations جدید + fallback به target_files قدیمی
+                target_locations = n.get("target_locations") or []
+                target_files: List[str] = list(n.get("target_files") or [])
+                if target_locations and not target_files:
+                    target_files = [
+                        l.get("path") for l in target_locations
+                        if isinstance(l, dict) and l.get("path")
+                    ]
+                if not target_locations and target_files:
+                    target_locations = [{"path": p} for p in target_files]
+
+                related = n.get("related_files") or []
+                examples = n.get("before_after_examples") or []
+                vcmds = n.get("validation_commands") or []
+
                 ac = n.get("acceptance_criteria") or []
                 if not ac:
                     ac = [
@@ -1474,16 +1557,24 @@ class OversightService:
                         "linter بدون warning عبور می‌کند",
                         "type-check موفق است",
                     ]
+
                 full_prompt = build_strong_prompt(
                     title=title,
                     user_goal=watched.user_notes,
                     description=n.get("description", ""),
                     proposed_action=n.get("proposed_action", ""),
                     target_files=target_files,
+                    target_locations=target_locations,
+                    related_files=related if isinstance(related, list) else [],
+                    dependency_summary=(n.get("dependency_summary") or "").strip(),
+                    tech_context=(n.get("tech_context") or "").strip(),
+                    before_after_examples=examples if isinstance(examples, list) else [],
+                    validation_commands=vcmds if isinstance(vcmds, list) else [],
                     acceptance_criteria=ac,
+                    risks=(n.get("risks") or "").strip(),
                     type_=n.get("type", "other"),
                     priority=n.get("priority", "medium"),
-                    estimate="medium",
+                    estimate=(n.get("estimated_complexity") or "medium"),
                 )
                 t = OversightTask(
                     id=str(uuid.uuid4()),
