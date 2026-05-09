@@ -7952,6 +7952,13 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         </div>
 
         {/* محتوای تب فایل‌ها */}
+        {/* ====================================================================
+          * TAB: FILES — مرور فایل‌های پروژه (import شده یا generated) + chat AI
+          * Data: loadProject() → files state؛ loadFileContent برای انتخابی
+          * Endpoints: /api/projects/{id}/files/{path} یا /api/github/imported/...
+          * Cross-deps: chat به memoryInstructions و availableModels نیاز دارد
+          * Source-of-truth: همان endpoint اصلی پروژه (نه /oversight)
+          * ==================================================================== */}
         {activeTab === 'files' && (
           <>
             {/* اطلاعات پروژه - GitHub */}
@@ -8336,6 +8343,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         )}
 
         {/* محتوای تب حافظه */}
+        {/* ====================================================================
+          * TAB: MEMORY & AI INSTRUCTIONS — source-of-truth برای dynamic_fields
+          * Data: loadMemory() → memoryInstructions + dynamicFields + pending
+          * Endpoints: /api/projects/{id}/memory/* (instructions, fields, ...)
+          * Cross-deps:
+          *   • /oversight/project_tasks فقط view + verify می‌کند، تغییر نمی‌دهد
+          *   • Approval flow: form → quickApprove → execute → archive
+          *   • Approval polling: هر 30s اگر panel باز باشد (Commit 2)
+          *   • bridge: /api/oversight/external-tasks/... برای read-only mirror
+          * Source-of-truth: این تب — اگر اینجا تغییر کرد، در /oversight هم
+          *   منعکس می‌شود (با polling)
+          * Race protection: deletingField + memoryBusyGlobal locks (Commit 2)
+          * ==================================================================== */}
         {activeTab === 'memory' && (
           <div className="space-y-6">
             {/* دکمه راه‌اندازی خودکار جامع */}
@@ -8483,6 +8503,13 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   </button>
                   <button
                     onClick={() => setShowNewFieldForm(true)}
+                    title={
+                      'افزودن یک dynamic field جدید با action_type قابل انتخاب:\n' +
+                      '• display = فقط نمایش متن (نه اجرا)\n' +
+                      '• github_commit = AI کد می‌نویسد و یک فایل را commit می‌کند\n' +
+                      '• github_multi_commit = چند فایل تغییر می‌کنند\n' +
+                      '• file_edit = ویرایش یک فایل خاص'
+                    }
                     className="px-3 py-1 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600"
                   >
                     + افزودن فیلد
@@ -9317,6 +9344,21 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                   ⚠️ نیاز به تایید
                                 </span>
                               ) : null}
+                              {/* 🔗 Badge: از /oversight ساخته شده — برای فیلدهایی که از طریق
+                                  Engineering workflow یا oversight scan آمده‌اند */}
+                              {(field.source_issue_id || field.validation_marker === 'auto_pending') && (
+                                <a
+                                  href={`/oversight?project=${encodeURIComponent(projectId as string)}`}
+                                  onClick={(e) => e.stopPropagation()}
+                                  title={
+                                    'این فیلد از طریق مرکز نظارت ساخته شده.\n' +
+                                    'کلیک: باز کردن /oversight با فیلتر این پروژه'
+                                  }
+                                  className="px-2 py-0.5 bg-cyan-100 dark:bg-cyan-900/40 text-cyan-700 dark:text-cyan-300 text-xs rounded hover:bg-cyan-200 dark:hover:bg-cyan-900/60"
+                                >
+                                  🔗 از /oversight
+                                </a>
+                              )}
                             </div>
                             <div className="flex gap-1">
                               {field.archived ? (
@@ -9535,6 +9577,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         )}
 
         {/* محتوای تب ساختار پروژه */}
+        {/* ====================================================================
+          * TAB: STRUCTURE — graph معماری پروژه با React Flow + رنگ‌بندی سلامت
+          * Data: loadStructure() → structure + file_health_map موازی
+          * Endpoints: /api/projects/{id}/structure + /api/projects/{id}/health/file-map
+          * Cross-deps:
+          *   • health-map ↔ Health tab: بعد از Health analyze، healthDataVersion
+          *     افزایش می‌یابد و Structure در باز شدن مجدد fresh data می‌گیرد (Commit 3)
+          *   • react-flow rendering: convertToReactFlow → nodes/edges
+          * Source-of-truth: backend project_structure.py (نه /oversight)
+          * ==================================================================== */}
         {activeTab === 'structure' && (
           <div className="space-y-6">
             {/* تنظیمات تحلیل */}
@@ -9746,6 +9798,20 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         )}
 
         {/* محتوای تب ژورنال و گزارشات */}
+        {/* ====================================================================
+          * TAB: JOURNAL & REPORTS — تاریخچهٔ activity + گزارشات + roadmap + profiles
+          * Data: loadJournal + loadJournalStats + loadReports + loadReportTrigger
+          *       sub-tabs: 'roadmap' (loadRoadmap) / 'profiles' (loadModelProfiles)
+          * Endpoints: /api/projects/{id}/journal[/stats] + /reports + /roadmap
+          * Cross-deps:
+          *   • journalDataVersion → بعد از Memory field execute موفق، invalidate
+          *     می‌شود تا activity log جدید نمایش داده شود (Commit 3)
+          *   • روadmap parser چندفرمتی: [x], ✅, ☑, ☐ همه پشتیبانی می‌شوند (Commit 4)
+          * Difference from /oversight reports:
+          *   • Journal = activity log داخلی این پروژه
+          *   • /oversight reports = گزارش verifier ها در همهٔ watched repos
+          *   نه duplicate — scope متفاوت
+          * ==================================================================== */}
         {activeTab === 'journal' && (
           <div className="space-y-6">
             {/* سابتب‌ها */}
@@ -11603,6 +11669,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         )}
 
         {/* محتوای تب تحلیل سلامت */}
+        {/* ====================================================================
+          * TAB: HEALTH ANALYSIS — تحلیل سلامت پروژه (bug detection + score)
+          * Data: ProjectHealthPanel کامپوننت مستقل (در components/)
+          * Endpoints: داخل کامپوننت ProjectHealthPanel
+          * Cross-deps:
+          *   • onHealthUpdate callback → loadProject + setHealthDataVersion
+          *     → Structure tab fresh شود در باز شدن مجدد (Commit 3)
+          *   • Potential overlap با /oversight/scan_project & deep_scan:
+          *     این موضوع هنوز تصمیم‌گیری نشده — جداگانه audit خواهد شد
+          * ==================================================================== */}
         {activeTab === 'health' && (
           <div className="space-y-6">
             <ProjectHealthPanel
@@ -11619,6 +11695,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         )}
 
         {/* محتوای تب بازرس ویژه */}
+        {/* ====================================================================
+          * TAB: INSPECTOR (بازرس ویژه) — ⚠️ این تب توسط audit لمس نمی‌شود ⚠️
+          * منطق: render_logs.py Bridge + WebSocket + smart-chat + apply-action
+          * این تب ساختار پیچیده‌ای دارد و کاربر صریحاً گفته نباید لمس شود.
+          * هر تغییری روی این تب باید جدا و با احتیاط فوق‌العاده انجام شود.
+          * Cross-deps:
+          *   • smart-chat → action_plan تولید می‌کند که در /oversight هم
+          *     استفاده می‌شود (bridge با apply-action)
+          *   • WebSocket bridge → live monitoring + dedup map
+          * ==================================================================== */}
         {activeTab === 'inspector' && (
           <div className="space-y-4">
             {/* هدر */}
@@ -14480,6 +14566,15 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         )}
 
         {/* 🔗 External Projects Panel */}
+        {/* ====================================================================
+          * TAB: EXTERNAL — اتصال به یک repo GitHub خارج از سیستم
+          * Data: loadExternalFiles + loadExternalReadme + loadExternalFileContent
+          * Endpoints: /api/external-projects/* (connect, files, file/{path}, analyze)
+          * تفاوت با تب FILES:
+          *   • FILES = فایل‌های پروژهٔ اصلی (import شده در DB)
+          *   • EXTERNAL = repo خارجی (بدون import کامل، فقط مرور و تحلیل)
+          * Cross-deps: مستقل از /oversight و سایر تب‌ها
+          * ==================================================================== */}
         {activeTab === 'external' && (
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
             {!externalConnected ? (
@@ -14493,6 +14588,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                       یک repo GitHub خارجی را با URL + توکن مستقل وصل کن — مستقل از پروژهٔ فعلی
                     </p>
                   </div>
+                </div>
+
+                {/* 💡 راهنما: تفاوت با تب فایل‌ها */}
+                <div className="mb-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/40 rounded-lg p-3 text-sm text-blue-800 dark:text-blue-200">
+                  💡 <strong>تفاوت با تب «فایل‌ها»:</strong> تب فایل‌ها فایل‌های پروژهٔ اصلی (که در DB import شده) را نشان می‌دهد. این تب برای مرور و تحلیل سریع یک repo دیگر است <em>بدون</em> import کامل آن. توکن فقط برای این اتصال استفاده می‌شود.
                 </div>
 
                 <div className="space-y-4">
