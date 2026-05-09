@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import Link from 'next/link';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -159,7 +159,112 @@ const TYPE_ICONS: Record<string, string> = {
 type RepoSort = 'pushed_desc' | 'pushed_asc' | 'name' | 'stars';
 
 export default function OversightPage() {
-  const [tab, setTab] = useState<'watched' | 'repos' | 'ideas' | 'tasks' | 'reports'>('watched');
+  const [tab, setTab] = useState<'watched' | 'repos' | 'ideas' | 'tasks' | 'reports' | 'project_tasks'>('watched');
+
+  // 🔗 External project tasks bridge — تسک‌های /projects که در /oversight نمایش داده می‌شوند
+  const [externalTasks, setExternalTasks] = useState<Array<{
+    id: string;
+    source: string;
+    origin_project_id: string;
+    origin_project_name: string;
+    origin_field_id: string;
+    project_full_name: string;
+    title: string;
+    type: string;
+    priority: string;
+    status: string;
+    prompt: string;
+    target_files: string[];
+    target_locations: Array<{path: string}>;
+    external_prompt: string;
+    action_type: string;
+    last_run_at?: string;
+    next_run_at?: string;
+    created_at?: string;
+    field_type?: string;
+  }>>([]);
+  const [externalTasksLoading, setExternalTasksLoading] = useState(false);
+  const [externalTasksFilterProject, setExternalTasksFilterProject] = useState<string>('');
+  const [externalVerifyingId, setExternalVerifyingId] = useState<string | null>(null);
+  const [externalVerifyResult, setExternalVerifyResult] = useState<Record<string, any>>({});
+  const [externalCopyFeedbackId, setExternalCopyFeedbackId] = useState<string | null>(null);
+
+  const loadExternalTasks = useCallback(async (projectId?: string) => {
+    setExternalTasksLoading(true);
+    try {
+      const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
+      const res = await fetch(`${API_BASE}/api/oversight/external-tasks${qs}`);
+      const data = await res.json();
+      setExternalTasks(Array.isArray(data?.items) ? data.items : []);
+    } catch (e) {
+      console.warn('loadExternalTasks failed', e);
+      setExternalTasks([]);
+    } finally {
+      setExternalTasksLoading(false);
+    }
+  }, []);
+
+  const verifyExternalTask = useCallback(async (it: any) => {
+    setExternalVerifyingId(it.id);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/oversight/external-tasks/${encodeURIComponent(it.origin_project_id)}/${encodeURIComponent(it.origin_field_id)}/verify-now`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        }
+      );
+      const data = await res.json();
+      setExternalVerifyResult(prev => ({ ...prev, [it.id]: data }));
+      if (typeof showSuccess === 'function') showSuccess('verify انجام شد');
+    } catch (e: any) {
+      setExternalVerifyResult(prev => ({ ...prev, [it.id]: { error: e?.message || 'failed' } }));
+    } finally {
+      setExternalVerifyingId(null);
+    }
+  }, []);
+
+  const copyExternalPrompt = useCallback(async (it: any) => {
+    try {
+      const txt = (it.external_prompt && it.external_prompt.trim().length > 50) ? it.external_prompt : it.prompt;
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(txt);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = txt;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setExternalCopyFeedbackId(it.id);
+      setTimeout(() => setExternalCopyFeedbackId(null), 1500);
+    } catch (e) { /* non-critical */ }
+  }, []);
+
+  // وقتی تب project_tasks باز می‌شود، خودکار بارگذاری
+  useEffect(() => {
+    if (tab === 'project_tasks' && externalTasks.length === 0 && !externalTasksLoading) {
+      loadExternalTasks(externalTasksFilterProject || undefined);
+    }
+  }, [tab, externalTasks.length, externalTasksLoading, externalTasksFilterProject, loadExternalTasks]);
+
+  // اگر URL پارام project=ID داشت، خودکار به این تب برو و فیلتر کن
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const sp = new URLSearchParams(window.location.search);
+      const pid = sp.get('project');
+      if (pid) {
+        setExternalTasksFilterProject(pid);
+        setTab('project_tasks');
+        loadExternalTasks(pid);
+      }
+    } catch (e) {}
+    // فقط یک بار در mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [status, setStatus] = useState<Status | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -1131,6 +1236,7 @@ export default function OversightPage() {
               { id: 'repos', label: 'مخازن GitHub', icon: '📦', count: repos.length },
               { id: 'ideas', label: 'ایده/مشکل', icon: '💡', count: 0 },
               { id: 'tasks', label: 'تسک‌ها', icon: '📋', count: tasks.length },
+              { id: 'project_tasks', label: 'تسک‌های پروژه‌ها', icon: '🔗', count: externalTasks.length },
               { id: 'reports', label: 'گزارش‌ها', icon: '📊', count: reports.length },
             ] as const
           ).map((t) => (
@@ -1539,6 +1645,156 @@ export default function OversightPage() {
             onShowHistory={openVerifyHistory}
             fmtDate={fmtDate}
           />
+        ) : tab === 'project_tasks' ? (
+          // ─── 🔗 تب «تسک‌های پروژه‌ها» — bridge با /projects ───
+          <div>
+            <div className="flex items-center justify-between mb-4 pb-3 border-b dark:border-gray-700">
+              <div>
+                <h2 className="text-lg font-bold text-gray-800 dark:text-gray-100 flex items-center gap-2">
+                  <span>🔗</span> تسک‌های پروژه‌های محلی
+                </h2>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  فیلدهای dynamic از <code className="bg-gray-100 dark:bg-gray-700 px-1 rounded">/projects</code>
+                  &nbsp;که action_type آنها commit/refactor است — با verifier همان مرکز نظارت قابل بررسی‌اند.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={externalTasksFilterProject}
+                  onChange={e => setExternalTasksFilterProject(e.target.value)}
+                  placeholder="فیلتر بر اساس project_id"
+                  className="px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm w-56"
+                />
+                <button
+                  onClick={() => loadExternalTasks(externalTasksFilterProject || undefined)}
+                  disabled={externalTasksLoading}
+                  className="px-3 py-1.5 bg-cyan-600 text-white rounded-lg hover:bg-cyan-700 disabled:opacity-50 text-sm"
+                >
+                  {externalTasksLoading ? '⏳' : '🔄'} بروزرسانی
+                </button>
+              </div>
+            </div>
+
+            {externalTasksLoading ? (
+              <div className="text-center py-12 text-gray-500">⏳ در حال بارگذاری تسک‌های پروژه‌ها...</div>
+            ) : externalTasks.length === 0 ? (
+              <div className="text-center py-12 text-gray-500 dark:text-gray-400">
+                <div className="text-4xl mb-2">🔗</div>
+                <p className="mb-1">هیچ تسک پروژه‌ای یافت نشد</p>
+                <p className="text-xs">
+                  در صفحهٔ <code className="bg-gray-100 dark:bg-gray-700 px-1 rounded">/projects</code> یک پروژه باز کنید،
+                  تب memory ⇒ یک dynamic field با action_type=github_commit بسازید — اینجا ظاهر می‌شود.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {externalTasks.map(it => {
+                  const verifyResult = externalVerifyResult[it.id];
+                  const verifyReportStatus = verifyResult?.report?.status;
+                  return (
+                    <div key={it.id} className="border border-gray-200 dark:border-gray-700 rounded-xl p-4 bg-white dark:bg-gray-800">
+                      {/* Header */}
+                      <div className="flex items-start justify-between mb-2 gap-3">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <h3 className="font-semibold text-gray-800 dark:text-gray-100 truncate">{it.title}</h3>
+                            <span className={`px-2 py-0.5 rounded text-xs ${
+                              it.priority === 'critical' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' :
+                              it.priority === 'high' ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300' :
+                              it.priority === 'medium' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300' :
+                              'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300'
+                            }`}>
+                              {it.priority}
+                            </span>
+                            <span className="px-2 py-0.5 rounded text-xs bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300">
+                              🔗 {it.action_type}
+                            </span>
+                            {verifyReportStatus && (
+                              <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                                verifyReportStatus === 'done' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300' :
+                                verifyReportStatus === 'partial' ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300' :
+                                verifyReportStatus === 'not_done' ? 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300' :
+                                'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'
+                              }`}>
+                                verify: {verifyReportStatus}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                            <span>📁 پروژه: <strong>{it.origin_project_name}</strong></span>
+                            {it.project_full_name && it.project_full_name !== it.origin_project_name && (
+                              <> · <code className="bg-gray-100 dark:bg-gray-700 px-1 rounded">{it.project_full_name}</code></>
+                            )}
+                            {it.last_run_at && <> · last_run: {fmtDate(it.last_run_at)}</>}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Prompt preview */}
+                      {it.prompt && (
+                        <details className="mt-2">
+                          <summary className="cursor-pointer text-xs text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200">
+                            👁 نمایش پرامپت ({it.prompt.length} کاراکتر)
+                          </summary>
+                          <pre className="mt-2 text-xs bg-gray-50 dark:bg-gray-900/50 p-3 rounded max-h-64 overflow-auto whitespace-pre-wrap font-mono text-gray-700 dark:text-gray-300">
+                            {it.prompt.slice(0, 4000)}
+                            {it.prompt.length > 4000 && '\n... [TRUNCATED]'}
+                          </pre>
+                        </details>
+                      )}
+
+                      {/* Verify result preview */}
+                      {verifyResult?.report?.summary && (
+                        <div className="mt-2 p-3 bg-blue-50 dark:bg-blue-900/20 rounded text-xs">
+                          <div className="font-medium text-blue-800 dark:text-blue-200 mb-1">📋 خلاصه verifier:</div>
+                          <div className="text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
+                            {verifyResult.report.summary || verifyResult.report.raw_response?.slice(0, 500) || '(بدون خلاصه)'}
+                          </div>
+                        </div>
+                      )}
+                      {verifyResult?.error && (
+                        <div className="mt-2 p-3 bg-red-50 dark:bg-red-900/20 rounded text-xs text-red-700 dark:text-red-300">
+                          ❌ {verifyResult.error}
+                        </div>
+                      )}
+
+                      {/* Actions */}
+                      <div className="flex items-center gap-2 mt-3 pt-3 border-t dark:border-gray-700">
+                        <button
+                          onClick={() => copyExternalPrompt(it)}
+                          className="px-3 py-1.5 bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 rounded-lg hover:bg-purple-200 dark:hover:bg-purple-900/50 text-xs flex items-center gap-1"
+                          title="کپی پرامپت قوی برای استفاده در ابزار خارجی (Cursor / ChatGPT / ...)"
+                        >
+                          📋 {externalCopyFeedbackId === it.id ? 'کپی شد ✓' : 'کپی پرامپت'}
+                        </button>
+                        <button
+                          onClick={() => verifyExternalTask(it)}
+                          disabled={externalVerifyingId === it.id}
+                          className="px-3 py-1.5 bg-cyan-600 text-white rounded-lg hover:bg-cyan-700 disabled:opacity-50 text-xs flex items-center gap-1"
+                          title="verify فوری — وضعیت فعلی repo را با acceptance criteria مقایسه می‌کند (semantic equivalence)"
+                        >
+                          {externalVerifyingId === it.id ? '⏳ در حال verify...' : '🔍 verify الان'}
+                        </button>
+                        <a
+                          href={`/projects/${it.origin_project_id}`}
+                          className="px-3 py-1.5 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 text-xs flex items-center gap-1"
+                          title="باز کردن پروژه در /projects/[id]"
+                        >
+                          👁 مشاهده در /projects
+                        </a>
+                        {it.target_files.length > 0 && (
+                          <span className="text-xs text-gray-500 dark:text-gray-400 ml-auto">
+                            🎯 {it.target_files.length} فایل هدف
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         ) : (
           <ReportsPanel
             reports={filteredReports}
