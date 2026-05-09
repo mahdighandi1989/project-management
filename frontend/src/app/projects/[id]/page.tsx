@@ -1065,6 +1065,97 @@ export default function ProjectDetailPage() {
     await restoreInspectorChatFromDb(true);
   }, [restoreInspectorChatFromDb]);
 
+  // 📋 Build strong external prompt for a prompt-field (client-side)
+  // ساختار خروجی هم‌تراز با oversight_strong_prompt است تا کاربر بتواند آن را
+  // در ابزار کدنویس خارجی (Cursor/Copilot) paste کند و دقیقاً بداند چه فایل‌هایی
+  // باید لمس شوند. بدون نیاز به API call — همه context را از state موجود می‌سازد.
+  const buildStrongPromptForField = useCallback((field: any): string => {
+    const lines: string[] = [];
+    const projectName = project?.name || 'Project';
+    const projectDesc = (project as any)?.description || '';
+    const technologies: string[] = ((project as any)?.technologies || []) as string[];
+    const features: any[] = ((project as any)?.features || []) as any[];
+    const memInst: string = ((project as any)?.memory_instructions?.content || '') as string;
+
+    lines.push(`## 🎯 هدف`);
+    lines.push(field?.title || 'فیلد بدون عنوان');
+    lines.push('');
+    lines.push(`## 🧭 هدف اصلی پروژه (از یادداشت کاربر)`);
+    lines.push(memInst || projectDesc || '(کاربر یادداشتی ثبت نکرده است)');
+    lines.push('');
+    if (technologies && technologies.length) {
+      lines.push(`## 🧱 پشتهٔ فناوری و معماری`);
+      lines.push(`Technologies: ${technologies.slice(0, 12).join(', ')}`);
+      if (features && features.length) {
+        lines.push('');
+        const featTitles = features.slice(0, 6).map((f: any) => typeof f === 'string' ? f : (f?.title || f?.name || JSON.stringify(f).slice(0, 60)));
+        lines.push(`Features: ${featTitles.join('؛ ')}`);
+      }
+      lines.push('');
+    }
+    lines.push(`## 📍 موقعیت دقیق در پروژه`);
+    lines.push(`_(file:line — symbol — snippet — توسط مجری بر اساس Context زیر شناسایی شود)_`);
+    lines.push('');
+    lines.push(`## 🔍 Context و وضعیت فعلی`);
+    lines.push(`Project: \`${projectName}\``);
+    if (projectDesc) {
+      lines.push('');
+      lines.push(`Description: ${projectDesc}`);
+    }
+    lines.push('');
+    lines.push(`### محتوای فیلد:`);
+    lines.push('');
+    lines.push(field?.content || '(محتوا خالی است)');
+    lines.push('');
+    if (field?.category) {
+      const catLabel = field.category === 'instruction' ? 'دستور' : field.category === 'memory' ? 'حافظه' : 'آموزش';
+      lines.push(`> دستهٔ این فیلد: **${catLabel}**`);
+      lines.push('');
+    }
+    lines.push(`## ✅ معیار پذیرش (Acceptance Criteria)`);
+    lines.push(`- [ ] نتیجهٔ اعمال این فیلد با مفاد آن مطابقت داشته باشد`);
+    lines.push(`- [ ] هیچ تستی fail نمی‌شود (\`npm run test\` / \`pytest\`)`);
+    lines.push(`- [ ] linter بدون warning عبور می‌کند`);
+    lines.push(`- [ ] type-check موفق است (\`tsc --noEmit\` / \`mypy\`)`);
+    lines.push('');
+    lines.push(`## 🪜 مراحل اجرایی پیشنهادی`);
+    lines.push(`_(مجری بر اساس Context و معیارهای پذیرش، مراحل را تعیین کند)_`);
+    lines.push('');
+    lines.push(`## 📤 خروجی مورد انتظار`);
+    lines.push(`تغییر کد در فایل‌های مرتبط، commit یا PR جدید با پیام واضح، و عبور تمام معیارهای پذیرش.`);
+    lines.push('');
+    lines.push(`## ⚠️ ریسک‌ها و موارد احتیاط`);
+    lines.push(`پیش از merge، تست‌های موجود اجرا شوند تا رگرشن ایجاد نشود.`);
+    lines.push('');
+    lines.push(`## 🏷 دسته‌بندی`);
+    const typeMap: Record<string, string> = { instruction: 'feature_request', memory: 'docs', training: 'docs' };
+    lines.push(`- نوع: ${typeMap[field?.category || ''] || 'other'}`);
+    lines.push(`- اولویت: ${(field?.priority ?? 0) > 5 ? 'high' : 'medium'}`);
+    lines.push(`- تخمین زمان: medium`);
+    return lines.join('\n');
+  }, [project]);
+
+  const [copyFieldFeedbackId, setCopyFieldFeedbackId] = useState<string | null>(null);
+  const copyStrongPromptForField = useCallback(async (field: any) => {
+    try {
+      const txt = buildStrongPromptForField(field);
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(txt);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = txt;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopyFieldFeedbackId(field.id);
+      setTimeout(() => setCopyFieldFeedbackId(null), 1500);
+    } catch (e) {
+      alert('کپی ناموفق: ' + (e as any)?.message);
+    }
+  }, [buildStrongPromptForField]);
+
   // ===========================================================
   // 📥 Export action timeline + 🔗 Send to Oversight
   // ===========================================================
@@ -13859,6 +13950,18 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                     title="تست زنده - بررسی اینکه مدل واقعاً این فیلد را می‌خواند"
                                   >
                                     {isTesting ? <span className="animate-spin text-sm">⏳</span> : <span className="text-sm">🧪</span>}
+                                  </button>
+                                  {/* 📋 کپی پرامپت قوی — برای ابزار کدنویس خارجی */}
+                                  <button
+                                    onClick={() => copyStrongPromptForField(field)}
+                                    className={`p-1.5 rounded-lg transition-colors ${
+                                      copyFieldFeedbackId === field.id
+                                        ? 'text-green-600 bg-green-50 dark:bg-green-900/30'
+                                        : 'text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20'
+                                    }`}
+                                    title="کپی پرامپت قوی - این پرامپت با ساختار scan_strong + موقعیت فایل‌ها قابل اعمال در ابزار خارجی (Cursor/Copilot) است"
+                                  >
+                                    <span className="text-sm">{copyFieldFeedbackId === field.id ? '✅' : '📋'}</span>
                                   </button>
                                   {/* دکمه ویرایش */}
                                   <button

@@ -2748,6 +2748,178 @@ async def preview_field_changes(
         raise HTTPException(status_code=500, detail=f"خطا در تولید پیش‌نمایش: {str(e)}")
 
 
+# =====================================================================
+# 📋 External Strong Prompt — برای کپی به ابزار کدنویس خارجی
+# =====================================================================
+# این endpoint یک پرامپت اجرایی فوق‌العاده دقیق برای یک dynamic field
+# می‌سازد، با همان ساختار غنی Oversight (target_locations + snippets +
+# acceptance_criteria + tech_context). کاربر می‌تواند خروجی را در Cursor
+# یا Copilot paste کند تا ابزار خارجی دقیقاً بفهمد چه فایل‌هایی را در
+# پروژهٔ این کاربر باید لمس کند.
+#
+# defensive: اگر oversight_strong_prompt در دسترس نباشد، fallback به
+# یک رندر ساده (همان field.value با یک wrapper) برمی‌گردد — هیچ-جا fail
+# نمی‌کند.
+@router.get("/{project_id}/memory/fields/{field_id}/external-prompt")
+async def get_field_external_prompt(
+    project_id: str,
+    field_id: str,
+    db: Session = Depends(get_db)
+):
+    """تولید پرامپت قوی قابل کپی برای یک dynamic field.
+
+    این پرامپت با کل context پروژه (technologies، files sample، memory
+    instructions، features) به‌صورت ساختاریافته رندر می‌شود تا کاربر
+    بتواند مستقیماً به ابزارهای کدنویس بدهد.
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # لود dynamic field
+    dynamic_fields: List[Dict[str, Any]] = []
+    try:
+        if project.dynamic_fields:
+            dynamic_fields = json.loads(project.dynamic_fields) if isinstance(project.dynamic_fields, str) else project.dynamic_fields
+    except Exception:
+        dynamic_fields = []
+
+    target_field: Optional[Dict[str, Any]] = None
+    for f in dynamic_fields:
+        if f.get("id") == field_id:
+            target_field = f
+            break
+    if not target_field:
+        raise HTTPException(status_code=404, detail="فیلد یافت نشد")
+
+    # لود context: technologies, features, memory_instructions
+    technologies: List[str] = []
+    features: List[str] = []
+    memory_instructions: Dict[str, Any] = {"content": "", "target_models": ["all"]}
+    try:
+        if project.technologies:
+            technologies = json.loads(project.technologies) if isinstance(project.technologies, str) else project.technologies
+    except Exception:
+        pass
+    try:
+        if project.features:
+            features = json.loads(project.features) if isinstance(project.features, str) else project.features
+    except Exception:
+        pass
+    try:
+        if getattr(project, "memory_instructions", None):
+            memory_instructions = json.loads(project.memory_instructions) if isinstance(project.memory_instructions, str) else project.memory_instructions
+    except Exception:
+        pass
+
+    # لود files sample (اگر مدل ProjectFile موجود است)
+    files_sample: List[str] = []
+    try:
+        from ...models.project import ProjectFile
+        files = (
+            db.query(ProjectFile)
+            .filter(ProjectFile.project_id == project_id)
+            .limit(80)
+            .all()
+        )
+        files_sample = [getattr(f, "path", "") for f in files if getattr(f, "path", "")]
+    except Exception:
+        files_sample = []
+
+    field_name = (target_field.get("name") or "").strip()
+    field_value = (target_field.get("value") or "").strip()
+    field_action_type = (target_field.get("action_type") or "").strip() or "other"
+    field_target_files = target_field.get("target_files") or []
+
+    # ساخت description غنی
+    description_parts: List[str] = []
+    if field_value:
+        description_parts.append(field_value)
+    if memory_instructions.get("content"):
+        description_parts.append(f"\n**یادداشت‌های حافظهٔ پروژه:**\n{memory_instructions['content'][:1500]}")
+    description = "\n\n".join(description_parts)
+
+    # tech_context
+    tech_context = ""
+    if technologies:
+        tech_context = "Technologies: " + ", ".join(technologies[:12])
+
+    # dependency_summary ساده از features
+    dependency_summary = ""
+    if features:
+        dependency_summary = "Features: " + "؛ ".join(str(f)[:80] for f in features[:6])
+
+    # target_locations از target_files موجود + اولین چند فایل sample
+    target_locations: List[Dict[str, Any]] = []
+    seen = set()
+    for p in field_target_files[:8]:
+        if isinstance(p, str) and p and p not in seen:
+            seen.add(p)
+            target_locations.append({"path": p})
+    # اگر فیلد مسیر صریح نداشت، چند فایل از sample را پیشنهاد بده
+    if not target_locations and files_sample:
+        for p in files_sample[:5]:
+            if p not in seen:
+                seen.add(p)
+                target_locations.append({"path": p, "note": "بر اساس ساختار پروژه — توسط مجری تأیید شود"})
+
+    # acceptance_criteria پایه + قوانین استاندارد توسط build_strong_prompt اضافه می‌شود
+    acceptance_criteria = []
+    if field_value:
+        acceptance_criteria.append("نتیجهٔ اعمال این فیلد با مفاد آن مطابقت کند")
+
+    # مپ نوع field به نوع تسک
+    type_map = {
+        "create_file": "feature_request",
+        "update_file": "refactor",
+        "delete_file": "refactor",
+        "fix_bug": "bug",
+        "review": "docs",
+    }
+    task_type = type_map.get(field_action_type, "other")
+
+    external_prompt = ""
+    try:
+        from ...services.oversight_strong_prompt import build_strong_prompt
+        external_prompt = build_strong_prompt(
+            title=field_name or "فیلد بدون نام",
+            user_goal=memory_instructions.get("content", "")[:500],
+            description=description,
+            target_locations=target_locations,
+            tech_context=tech_context,
+            dependency_summary=dependency_summary,
+            acceptance_criteria=acceptance_criteria,
+            type_=task_type,
+            priority="medium",
+            estimate="medium",
+        )
+    except Exception as e:
+        # fallback: رندر ساده
+        external_prompt = (
+            f"## 🎯 هدف\n{field_name}\n\n"
+            f"## 🧭 هدف اصلی پروژه\n{memory_instructions.get('content', '(کاربر یادداشتی ثبت نکرده است)')[:500]}\n\n"
+            f"## 📍 موقعیت در پروژه\n"
+            + ("\n".join(f"- `{l['path']}`" for l in target_locations) if target_locations else "_(فایل‌های دقیق توسط مجری شناسایی شوند)_")
+            + f"\n\n## 🔍 Context\n{description}\n\n"
+            f"## ✅ معیار پذیرش\n- [ ] نتیجه با مفاد فیلد مطابقت داشته باشد\n"
+        )
+
+    return {
+        "success": True,
+        "field": {
+            "id": target_field.get("id"),
+            "name": field_name,
+            "value": field_value,
+            "action_type": field_action_type,
+        },
+        "external_prompt": external_prompt,
+        "target_files": [l["path"] for l in target_locations],
+        "acceptance_criteria": acceptance_criteria,
+        "tech_context": tech_context,
+        "render_engine": "oversight_strong_prompt" if "## 🎯 هدف\n" + field_name in external_prompt and "## 📍 موقعیت دقیق" in external_prompt else "fallback",
+    }
+
+
 @router.post("/{project_id}/memory/fields/{field_id}/trigger/execute")
 async def execute_field_trigger(
     project_id: str,
