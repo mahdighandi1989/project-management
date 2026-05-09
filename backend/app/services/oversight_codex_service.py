@@ -171,3 +171,265 @@ def get_codex_for_files(watched_id: str, paths: List[str]) -> Dict[str, Any]:
     codex = read_codex(watched_id)
     files = codex.get("files") or {}
     return {p: files.get(p) for p in paths if p in files}
+
+
+# =====================================================================
+# 🆕 Roadmap & README auto-generation (مهاجرت از Health analysis)
+# =====================================================================
+
+def _roadmap_path(watched_id: str) -> Path:
+    return CODEX_DIR / f"{watched_id}_roadmap.json"
+
+
+def _readme_path(watched_id: str) -> Path:
+    return CODEX_DIR / f"{watched_id}_readme.json"
+
+
+def read_roadmap(watched_id: str) -> Dict[str, Any]:
+    """خواندن roadmap ذخیره شده. خالی اگر تولید نشده."""
+    return _read_json(_roadmap_path(watched_id), {}) or {}
+
+
+def write_roadmap(watched_id: str, data: Dict[str, Any]) -> None:
+    _write_json(_roadmap_path(watched_id), data)
+
+
+def read_readme_doc(watched_id: str) -> Dict[str, Any]:
+    """خواندن README ذخیره شده. خالی اگر تولید نشده."""
+    return _read_json(_readme_path(watched_id), {}) or {}
+
+
+def write_readme_doc(watched_id: str, data: Dict[str, Any]) -> None:
+    _write_json(_readme_path(watched_id), data)
+
+
+async def generate_roadmap_for_watched(
+    watched_id: str,
+    *,
+    model_id: Optional[str] = None,
+    tone: str = "professional",
+) -> Dict[str, Any]:
+    """تولید روadmap از structure + findings + user_notes با AI.
+
+    خروجی:
+    {
+      "roadmap_markdown": "...",   # markdown با checkbox list ساختاریافته
+      "ideal_state": "...",         # توصیف وضعیت مطلوب پروژه
+      "phases": [{name, items, eta}],
+      "generated_at": iso,
+      "model_used": str
+    }
+
+    ذخیره در storage/oversight/codex/{watched_id}_roadmap.json
+    """
+    service = get_oversight_service()
+    watched = service._find_watched(watched_id)
+    if watched is None:
+        raise ValueError("Watched project یافت نشد")
+
+    # context: structure + last scan findings + user_notes
+    from .oversight_deep_scan_service import STRUCTURE_DIR, SCAN_RESULTS_DIR
+    structure = _read_json(STRUCTURE_DIR / f"{watched_id}.json", {}) or {}
+    scan_results = _read_json(SCAN_RESULTS_DIR / f"{watched_id}.json", {}) or {}
+
+    files_count = structure.get("files_count", 0)
+    stacks = ", ".join(structure.get("stacks", [])) or "نامشخص"
+    findings = (scan_results.get("findings") or [])[:30]
+    findings_text = "\n".join(
+        f"- [{f.get('priority', '?')}] {f.get('title', '')[:120]}"
+        for f in findings
+    ) or "(scan هنوز اجرا نشده — روadmap بر اساس structure تنها)"
+
+    user_goal = (watched.user_notes or "").strip()
+    existing = read_roadmap(watched_id)
+    prior_ideal = existing.get("ideal_state", "")
+    prior_md = existing.get("roadmap_markdown", "")
+
+    prompt = f"""تو یک معمار ارشد نرم‌افزاری هستی که یک نقشهٔ راه (roadmap)
+مدون برای پروژه می‌سازی.
+
+# پروژه
+{watched.repo_full_name}
+- تعداد فایل: {files_count}
+- Stack: {stacks}
+- هدف اصلی کاربر: {user_goal or '(تعریف نشده)'}
+
+# یافته‌های آخرین deep scan ({len(findings)} مورد)
+{findings_text}
+
+{"# روadmap قبلی (برای حفظ پیشرفت)" + chr(10) + prior_md[:2000] if prior_md else ""}
+{"# Ideal state قبلی" + chr(10) + prior_ideal[:1000] if prior_ideal else ""}
+
+# وظیفهٔ تو
+خروجی JSON با ساختار زیر بساز ({tone} tone):
+
+{{
+  "ideal_state": "پاراگراف ۳-۵ جمله‌ای: پروژه در حالت ایده‌آل به چه شکل است؟ چه قابلیت‌هایی دارد؟ کاربران چطور از آن استفاده می‌کنند؟",
+  "phases": [
+    {{
+      "name": "فاز اول: پایه‌گذاری",
+      "eta": "۱-۲ هفته",
+      "items": [
+        {{"text": "رفع اسپلش امنیتی X", "completed": false, "priority": "high"}},
+        ...
+      ]
+    }},
+    {{
+      "name": "فاز دوم: تثبیت",
+      "eta": "۳-۴ هفته",
+      "items": [...]
+    }},
+    {{
+      "name": "فاز سوم: گسترش",
+      "eta": "۲ ماه",
+      "items": [...]
+    }}
+  ],
+  "roadmap_markdown": "## فاز اول: پایه‌گذاری (۱-۲ هفته)\\n- [ ] رفع اسپلش امنیتی X\\n- [x] (اگر قبلاً انجام شده)\\n\\n## فاز دوم: تثبیت\\n..."
+}}
+
+قوانین:
+- اگر روadmap قبلی موجود است، item های completed را با `[x]` نگه دار
+- اولویت بالا: critical/security findings از scan
+- هر فاز ۳-۸ item داشته باشد
+- متن فارسی و حرفه‌ای
+- فقط JSON خالص (بدون ``` و توضیح)
+"""
+
+    try:
+        response = await service._ai_generate(
+            prompt, model_id=model_id, max_tokens=3500, temperature=0.3
+        )
+    except Exception as e:
+        raise RuntimeError(f"خطا در تولید روadmap: {e}")
+
+    parsed = service._extract_json(response) or {}
+    roadmap_md = parsed.get("roadmap_markdown", "") or ""
+    ideal_state = parsed.get("ideal_state", "") or ""
+    phases = parsed.get("phases") or []
+
+    if not roadmap_md and not phases:
+        # fallback minimal — اگر AI structure نداد
+        roadmap_md = f"## نقشهٔ راه\n\nهدف: {user_goal or 'تعریف نشده'}\n\n- [ ] تعریف ideal state\n- [ ] انجام scan کامل\n"
+        ideal_state = ideal_state or "هنوز تعریف نشده — لطفاً دستی ویرایش کنید."
+
+    data = {
+        "watched_id": watched_id,
+        "repo": watched.repo_full_name,
+        "roadmap_markdown": roadmap_md,
+        "ideal_state": ideal_state,
+        "phases": phases,
+        "generated_at": now_iso(),
+        "model_used": model_id or "default",
+        "tone": tone,
+    }
+    write_roadmap(watched_id, data)
+    return data
+
+
+async def generate_readme_for_watched(
+    watched_id: str,
+    *,
+    model_id: Optional[str] = None,
+    sections: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """تولید README از structure + key files با AI."""
+    service = get_oversight_service()
+    watched = service._find_watched(watched_id)
+    if watched is None:
+        raise ValueError("Watched project یافت نشد")
+
+    sections = sections or ["overview", "setup", "usage", "structure", "contributing"]
+
+    from .oversight_deep_scan_service import STRUCTURE_DIR
+    structure = _read_json(STRUCTURE_DIR / f"{watched_id}.json", {}) or {}
+
+    files_count = structure.get("files_count", 0)
+    stacks = ", ".join(structure.get("stacks", [])) or "نامشخص"
+    files_sample = (structure.get("files") or [])[:30]
+    files_text = "\n".join(f"- {p}" for p in files_sample)
+
+    user_goal = (watched.user_notes or "").strip()
+    sections_str = ", ".join(sections)
+
+    prompt = f"""تو یک technical writer حرفه‌ای هستی. یک README با کیفیت بالا
+برای پروژهٔ زیر بساز.
+
+# پروژه
+{watched.repo_full_name}
+- Stack: {stacks}
+- تعداد فایل: {files_count}
+- هدف اصلی: {user_goal or '(تعریف نشده)'}
+
+# نمونه فایل‌ها
+{files_text}
+
+# بخش‌های موردنیاز
+{sections_str}
+
+خروجی فقط JSON خالص:
+{{
+  "readme_markdown": "# عنوان پروژه\\n\\n...کل README در markdown..."
+}}
+
+قوانین:
+- ساختار استاندارد README (badges، توضیح، installation، usage، ...)
+- فارسی + technical terms انگلیسی
+- code blocks مناسب
+- table اگر منطقی است
+- حداقل ۸۰۰ کلمه
+"""
+
+    try:
+        response = await service._ai_generate(
+            prompt, model_id=model_id, max_tokens=3500, temperature=0.4
+        )
+    except Exception as e:
+        raise RuntimeError(f"خطا در تولید README: {e}")
+
+    parsed = service._extract_json(response) or {}
+    readme_md = parsed.get("readme_markdown", "") or response[:5000]
+
+    data = {
+        "watched_id": watched_id,
+        "repo": watched.repo_full_name,
+        "readme_markdown": readme_md,
+        "sections": sections,
+        "generated_at": now_iso(),
+        "model_used": model_id or "default",
+    }
+    write_readme_doc(watched_id, data)
+    return data
+
+
+def toggle_roadmap_item(watched_id: str, item_id: str) -> Optional[Dict[str, Any]]:
+    """تاگل completed یک item در روadmap.
+
+    item_id فرمت: "phase_index:item_index" (مثال: "0:2" = آیتم سوم فاز اول)
+    یا یک ID مستقل اگر phases آن را داشت.
+    """
+    data = read_roadmap(watched_id)
+    if not data:
+        return None
+    phases = data.get("phases") or []
+    try:
+        phase_idx, item_idx = item_id.split(":", 1)
+        pi, ii = int(phase_idx), int(item_idx)
+        if 0 <= pi < len(phases) and 0 <= ii < len(phases[pi].get("items", [])):
+            phases[pi]["items"][ii]["completed"] = not phases[pi]["items"][ii].get("completed", False)
+            data["phases"] = phases
+            data["updated_at"] = now_iso()
+            # روadmap_markdown هم به‌روز شود (regenerate از phases)
+            md_lines = []
+            for ph in phases:
+                md_lines.append(f"## {ph.get('name', 'فاز')}" + (f" ({ph['eta']})" if ph.get("eta") else ""))
+                for it in ph.get("items", []):
+                    chk = "[x]" if it.get("completed") else "[ ]"
+                    md_lines.append(f"- {chk} {it.get('text', '')}")
+                md_lines.append("")
+            data["roadmap_markdown"] = "\n".join(md_lines)
+            write_roadmap(watched_id, data)
+            return data
+    except (ValueError, IndexError, KeyError):
+        pass
+    return None

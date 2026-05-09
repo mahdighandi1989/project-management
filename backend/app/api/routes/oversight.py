@@ -634,6 +634,116 @@ async def refresh_codex(watched_id: str, payload: Optional[CodexRefreshRequest] 
 
 
 # ============================================================
+# 🆕 Roadmap & README management (مهاجرت از Health analysis)
+# ============================================================
+
+class GenerateRoadmapRequest(BaseModel):
+    model_id: Optional[str] = None
+    tone: str = "professional"
+
+
+class GenerateReadmeRequest(BaseModel):
+    model_id: Optional[str] = None
+    sections: Optional[List[str]] = None
+
+
+class UpdateRoadmapRequest(BaseModel):
+    """ویرایش دستی روadmap — فقط markdown یا کل ساختار."""
+    roadmap_markdown: Optional[str] = None
+    ideal_state: Optional[str] = None
+    phases: Optional[List[Dict[str, Any]]] = None
+
+
+class UpdateReadmeRequest(BaseModel):
+    readme_markdown: str
+
+
+@router.get("/codex/{watched_id}/roadmap")
+async def get_roadmap(watched_id: str):
+    """خواندن روadmap ذخیره شده. اگر تولید نشده، dict خالی."""
+    from ...services.oversight_codex_service import read_roadmap
+    return read_roadmap(watched_id)
+
+
+@router.post("/codex/{watched_id}/generate-roadmap")
+async def generate_roadmap_endpoint(watched_id: str, payload: Optional[GenerateRoadmapRequest] = None):
+    """تولید روadmap با AI از structure + scan findings + user_notes."""
+    from ...services.oversight_codex_service import generate_roadmap_for_watched
+    payload = payload or GenerateRoadmapRequest()
+    try:
+        return await generate_roadmap_for_watched(
+            watched_id, model_id=payload.model_id, tone=payload.tone,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/codex/{watched_id}/roadmap")
+async def update_roadmap_endpoint(watched_id: str, payload: UpdateRoadmapRequest):
+    """ویرایش دستی روadmap (markdown یا phases)."""
+    from ...services.oversight_codex_service import read_roadmap, write_roadmap, now_iso
+    data = read_roadmap(watched_id) or {"watched_id": watched_id}
+    if payload.roadmap_markdown is not None:
+        data["roadmap_markdown"] = payload.roadmap_markdown
+    if payload.ideal_state is not None:
+        data["ideal_state"] = payload.ideal_state
+    if payload.phases is not None:
+        data["phases"] = payload.phases
+    data["updated_at"] = now_iso()
+    if not data.get("generated_at"):
+        data["generated_at"] = data["updated_at"]
+    write_roadmap(watched_id, data)
+    return data
+
+
+@router.patch("/codex/{watched_id}/roadmap/items/{item_id}")
+async def toggle_roadmap_item_endpoint(watched_id: str, item_id: str):
+    """تاگل completed یک item. item_id فرمت 'phase_idx:item_idx'."""
+    from ...services.oversight_codex_service import toggle_roadmap_item
+    result = toggle_roadmap_item(watched_id, item_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="item یا روadmap یافت نشد")
+    return result
+
+
+@router.get("/codex/{watched_id}/readme")
+async def get_readme(watched_id: str):
+    """خواندن README ذخیره شده."""
+    from ...services.oversight_codex_service import read_readme_doc
+    return read_readme_doc(watched_id)
+
+
+@router.post("/codex/{watched_id}/generate-readme")
+async def generate_readme_endpoint(watched_id: str, payload: Optional[GenerateReadmeRequest] = None):
+    """تولید README با AI."""
+    from ...services.oversight_codex_service import generate_readme_for_watched
+    payload = payload or GenerateReadmeRequest()
+    try:
+        return await generate_readme_for_watched(
+            watched_id, model_id=payload.model_id, sections=payload.sections,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/codex/{watched_id}/readme")
+async def update_readme_endpoint(watched_id: str, payload: UpdateReadmeRequest):
+    """ویرایش دستی README."""
+    from ...services.oversight_codex_service import read_readme_doc, write_readme_doc, now_iso
+    data = read_readme_doc(watched_id) or {"watched_id": watched_id}
+    data["readme_markdown"] = payload.readme_markdown
+    data["updated_at"] = now_iso()
+    if not data.get("generated_at"):
+        data["generated_at"] = data["updated_at"]
+    write_readme_doc(watched_id, data)
+    return data
+
+
+# ============================================================
 # 🔗 External Project Tasks Bridge — wiring /projects ↔ /oversight
 # ============================================================
 # هدف: dynamic_fields از پروژه‌های local که action_type='github_commit' دارند
