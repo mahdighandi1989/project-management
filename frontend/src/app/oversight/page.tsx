@@ -1830,9 +1830,10 @@ export default function OversightPage() {
             <button
               onClick={generatePrompt}
               disabled={generating || !idea.trim()}
+              title="AI کل ساختار پروژه را اسکن می‌کند، ۱۸ فایل کلیدی را می‌خواند، گراف importها را می‌سازد، و پرامپت را با ارجاع به کد واقعی (file:line) می‌نویسد. ممکن است ۱۰–۳۰ ثانیه طول بکشد."
               className="w-full py-3 bg-purple-500 text-white rounded-lg font-bold hover:bg-purple-600 disabled:opacity-50"
             >
-              {generating ? '⏳ AI در حال تبدیل به پرامپت قدرتمند...' : '🪄 تبدیل به پرامپت با AI'}
+              {generating ? '⏳ در حال خواندن پروژه (۱۸ فایل کلیدی) و ساخت پرامپت grounded...' : '🪄 تبدیل به پرامپت با AI (با خواندن کد پروژه)'}
             </button>
 
             {previewPrompt && (

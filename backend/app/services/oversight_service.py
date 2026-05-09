@@ -951,8 +951,31 @@ class OversightService:
         watched = self._find_watched(watched_id) if watched_id else None
         ctx_text = ""
         user_goal = ""
+        deep_ctx: Dict[str, Any] = {}  # خروجی build_deep_context_for_idea (محتوای واقعی)
         if watched:
             user_goal = (watched.user_notes or "").strip()
+            # ✨ Deep context: محتوای ۱۸ فایل برتر با شمارهٔ خط + نقشهٔ
+            # importهای داخلی + special filesها (README، tsconfig، ...)
+            # بدون این مرحله، AI فقط نام فایل‌ها را می‌بیند و پرامپتش
+            # عمومی و جدا از پروژه می‌شود.
+            try:
+                token_for_deep = get_github_token()
+                if token_for_deep:
+                    from .oversight_deep_scan_service import build_deep_context_for_idea
+                    deep_ctx = await build_deep_context_for_idea(
+                        watched.repo_full_name,
+                        branch=watched.default_branch or "main",
+                        token=token_for_deep,
+                        max_deep_read=18,
+                    )
+                    if not deep_ctx.get("ok"):
+                        logger.warning(f"deep_context for idea failed: {deep_ctx.get('error')}")
+                        deep_ctx = {}
+            except Exception as _e:
+                logger.warning(f"build_deep_context_for_idea exception: {_e}")
+                deep_ctx = {}
+
+            # Context سطحی: README + commits + issues — همچنان مفید است
             try:
                 ctx = await self.build_project_context(watched.repo_full_name)
                 summary_lines = []
@@ -962,13 +985,10 @@ class OversightService:
                     summary_lines.append(f"زبان اصلی: {ctx['language']}")
                 if ctx.get("topics"):
                     summary_lines.append(f"تاپیک‌ها: {', '.join(ctx['topics'])}")
+                if deep_ctx.get("ok") and deep_ctx.get("stacks"):
+                    summary_lines.append(f"Stack تشخیص داده شده: {', '.join(deep_ctx['stacks'])}")
                 if ctx.get("readme"):
                     summary_lines.append(f"README (خلاصه):\n{ctx['readme'][:1500]}")
-                if ctx.get("files_sample"):
-                    summary_lines.append(
-                        f"نمونه فایل‌ها ({ctx.get('files_count', 0)} مجموع):\n"
-                        + "\n".join(ctx["files_sample"][:30])
-                    )
                 if ctx.get("recent_commits"):
                     summary_lines.append(
                         "آخرین کامیت‌ها:\n"
@@ -985,17 +1005,69 @@ class OversightService:
             except Exception as e:
                 logger.warning(f"context build failed: {e}")
 
-        system_prompt = f"""تو یک معمار ارشد نرم‌افزاری. وظیفه‌ات این است که ایده/مشکل/درخواست خام کاربر را به یک تسک ساختاریافته با موقعیت‌های دقیق فایل و خط، snippet کد، فایل‌های مرتبط، و معیارهای قابل تست تبدیل کنی.
+        # ─── ساخت system prompt متناسب با موجود بودن یا نبودن deep_ctx ───
+        deep_block = ""
+        deep_rules_block = ""
+        if deep_ctx.get("ok"):
+            files_summary = deep_ctx.get("files_summary", "")
+            deep_blob = deep_ctx.get("deep_files_blob", "")
+            pkg_blob = deep_ctx.get("package_files_blob", "")
+            spec_blob = deep_ctx.get("special_files_blob", "")
+            graph_blob = deep_ctx.get("import_graph_summary", "")
+            deep_paths = deep_ctx.get("deep_paths", [])
+            deep_block = f"""
+# 📂 ساختار کامل پروژه ({deep_ctx.get('files_count', 0)} فایل — نمونه)
+{files_summary}
 
-خروجی این تسک به یک ابزار کدنویس خارجی (Cursor/Copilot/ChatGPT) داده می‌شود — پس فیلدها باید **کاملاً مشخص و قابل اعمال** باشند.
+# 📄 محتوای فایل‌های کلیدی (با شمارهٔ خط — به این‌ها استناد کن)
+{deep_blob[:60000]}
+
+# 📦 فایل‌های Dependency
+{pkg_blob[:8000] if pkg_blob else '(فایل dependency پیدا نشد)'}
+
+# 📚 فایل‌های context ویژه (README، tsconfig، next.config، docs)
+{spec_blob[:12000] if spec_blob else '(context ویژه‌ای موجود نیست)'}
+
+# 🌐 نقشهٔ Importهای داخلی (هاب‌های پروژه)
+{graph_blob if graph_blob else '(گراف import محاسبه نشد)'}
+"""
+            deep_rules_block = f"""
+# 🚨 قانون استناد (الزامی برای جلوگیری از پرامپت‌های توخالی)
+- **هر `target_locations[i].path` که می‌نویسی، باید واقعاً در «ساختار کامل پروژه» بالا موجود باشد** — حق ساختن مسیر فرضی نداری.
+- **`lines`** را از روی شمارهٔ خط‌های واقعی در «محتوای فایل‌های کلیدی» انتخاب کن. اگر خط دقیقی پیدا نکردی، lines را خالی بگذار (نه عدد ساختگی).
+- **`snippet`** باید **عیناً همان متنی** باشد که در «محتوای فایل‌های کلیدی» با شمارهٔ خط مشخص آمده. اگر در deep blob موجود نیست، snippet را خالی بگذار.
+- **`related_files`** را از «نقشهٔ Importهای داخلی» استخراج کن (فایل‌هایی که path هدف را import می‌کنند یا بالعکس). نه حدس عمومی.
+- **`dependency_summary`** را با ذکر نام واقعی فایل‌ها/توابع از پروژه بنویس — نه جملات قالبی.
+- **`tech_context`**: Stack تشخیص داده شده در بالا = `{', '.join(deep_ctx.get('stacks', [])) or '(نامشخص)'}` — از همین استفاده کن.
+- **`risks`**: ریسک‌های واقعی این کدبیس را بگو (مثلاً «این تابع از ۳ روتر import می‌شود؛ تغییرش روی همه اثر دارد») — نه جملات کلی مثل «احتیاط در استقرار کنید».
+- **`validation_commands`**: بر اساس Stack واقعی پیشنهاد بده (pytest برای پایتون، npm run test برای JS).
+
+اگر هیچ‌کدام از فایل‌های deep-read با ایدهٔ کاربر مرتبط نبود، **به‌صراحت** بنویس:
+  در `note` بگذار: "این فایل deep-read نشده — مجری باید مسیر را خود تأیید کند"
+  ولی `path` باز هم باید از «ساختار کامل پروژه» انتخاب شود (نه ساخته‌شده).
+
+⛔ ممنوعیت‌ها:
+- ❌ هرگز path اختراعی ننویس (مثل `src/utils/auth.ts` در حالی که هیچ فایلی به این نام موجود نیست).
+- ❌ هرگز snippet جعلی ننویس — اگر کد دقیق نداری، خالی بگذار.
+- ❌ هرگز risks عمومی ننویس — یا با نام فایل/تابع ground بده، یا کوتاه بگذار.
+- ❌ هرگز فقط ایدهٔ کاربر را با کلمات حرفه‌ای‌تر بازنویسی نکن — این کار را خود کاربر می‌کرد.
+
+✅ فایل‌های deep-read شده که می‌توانی آزادانه به آن‌ها استناد کنی:
+{chr(10).join(f'  • {p}' for p in deep_paths[:25]) if deep_paths else '  (هیچ‌کدام)'}
+"""
+
+        system_prompt = f"""تو یک معمار ارشد نرم‌افزاری هستی که به repository واقعی پروژه دسترسی داری. وظیفه‌ات این است که ایده/مشکل/درخواست خام کاربر را به یک تسک ساختاریافتهٔ **مبتنی بر کد واقعی پروژه** تبدیل کنی — نه یک پرامپت عمومی.
+
+خروجی این تسک به یک ابزار کدنویس خارجی (Cursor/Copilot/ChatGPT) داده می‌شود — پس فیلدها باید **کاملاً مشخص، grounded در کد واقعی، و قابل اعمال** باشند.
 
 # 🎯 هدف اصلی پروژه (از زبان کاربر)
 {user_goal or '(کاربر یادداشتی ثبت نکرده است)'}
 
-# Context پروژه
+# 📋 Context کلی پروژه
 {ctx_text or 'پروژه مشخص نیست'}
+{deep_block}
 
-# ایده/درخواست خام کاربر
+# 💬 ایده/درخواست خام کاربر
 نوع: {type_}
 اولویت: {priority}
 متن:
@@ -1003,12 +1075,12 @@ class OversightService:
 {idea.strip()}
 \"\"\"
 
-# خروجی فقط JSON خالص (بدون متن اضافی، بدون ```)
+# 📤 خروجی فقط JSON خالص (بدون متن اضافی، بدون ```)
 
 {{
-  "title": "عنوان کوتاه و گویا تسک — یک جمله قابل سنجش",
-  "description": "پاراگراف کامل: چه چیزی، چرا، شواهد",
-  "proposed_action": "پیشنهاد عملی برای پیاده‌سازی",
+  "title": "عنوان کوتاه و گویا تسک — یک جمله قابل سنجش (فارسی)",
+  "description": "پاراگراف کامل: چه چیزی، چرا، شواهد در کد واقعی پروژه (نام فایل و خط ذکر کن)",
+  "proposed_action": "پیشنهاد عملی برای پیاده‌سازی — با ذکر فایل‌ها/توابع واقعی",
   "type": "bug | feature_request | refactor | docs | security | other",
   "priority": "low | medium | high | critical",
   "estimated_complexity": "small | medium | large",
@@ -1018,48 +1090,55 @@ class OversightService:
       "path": "backend/app/services/foo.py",
       "lines": "245-289",
       "symbol": "function_or_class_name",
-      "snippet": "snippet کوتاه از کد فعلی یا (اگر فایل جدید است) skeleton مورد انتظار",
+      "snippet": "snippet دقیق از کد فعلی (همان که در deep blob دیدی)",
       "note": "این چه چیزی است / چرا اینجا"
     }}
   ],
 
   "related_files": [
-    {{"path": "frontend/src/...", "reason": "این endpoint/کامپوننت را call می‌کند"}},
-    {{"path": "backend/app/models/...", "reason": "schema مرتبط"}}
+    {{"path": "frontend/src/...", "reason": "این endpoint/کامپوننت را call می‌کند", "at_line": 78}}
   ],
 
-  "dependency_summary": "این بخش در نقشهٔ پروژه چه نقشی دارد و چه چیزی روی آن اثر می‌گذارد",
+  "dependency_summary": "این بخش در نقشهٔ پروژه چه نقشی دارد، با ذکر نام فایل‌های caller/importer",
 
-  "tech_context": "Stack مرتبط (مثل FastAPI + Next.js 14)",
+  "tech_context": "Stack شناسایی‌شده + کتابخانه‌های مرتبط",
 
   "before_after_examples": [
-    {{"label": "...", "before": "...", "after": "..."}}
+    {{"label": "...", "before": "کد فعلی از deep blob", "after": "کد پیشنهادی"}}
   ],
 
   "acceptance_criteria": [
-    "معیار قابل تست ۱ (مثلاً: endpoint /api/x برای ورودی نامعتبر ۴۰۰ برمی‌گرداند)",
+    "معیار قابل تست ۱ — با مرجع به فایل/تابع واقعی",
     "معیار قابل تست ۲"
   ],
 
-  "validation_commands": ["pytest ...", "npm run test -- ..."],
+  "validation_commands": ["pytest backend/...", "npm run test -- ..."],
 
-  "risks": "هشدارها و رگرشن‌های احتمالی"
+  "risks": "ریسک‌های specific این کدبیس (نه جملات عمومی) — مثلاً 'این تابع توسط ۳ روتر استفاده می‌شود، تغییرش روی همه اثر دارد'"
 }}
+{deep_rules_block}
 
-# قوانین مهم
+# قوانین کلی نهایی
 1. path همیشه از ریشهٔ ریپو (مثل `backend/app/...` یا `frontend/src/...`).
-2. اگر دقیقاً نمی‌دانی فایل چیست، از Context پروژه/files_sample بهترین حدس را بزن و در note بنویس "بر اساس ساختار پروژه — توسط مجری تأیید شود".
-3. snippet کوتاه ولی نشان‌دهندهٔ مسئله/راه‌حل باشد.
-4. acceptance_criteria باید قابل تست باشد، نه تعریف کلی.
-5. عنوان فارسی و حرفه‌ای بنویس."""
+2. acceptance_criteria باید قابل تست باشد، نه تعریف کلی.
+3. عنوان و توضیحات فارسی و حرفه‌ای.
+4. حداقل ۱ مورد در target_locations الزامی است (مگر اینکه ایدهٔ کاربر کاملاً غیرفنی باشد — مثلاً «اضافه کردن صفحه درباره ما»).
+5. اگر deep context موجود نیست، در `note` هر location بنویس "بر اساس ساختار سطحی — توسط مجری تأیید شود"."""
 
         try:
+            # max_tokens افزایش یافت چون با deep_ctx، خروجی JSON ساختاریافته
+            # شامل snippetهای کد و related_files می‌شود — نیاز به فضای بیشتر
+            # دارد. temperature پایین‌تر برای grounding بیشتر در کد واقعی.
             effective_models = model_ids or ([model_id] if model_id else None)
+            grounded_max_tokens = 4000 if deep_ctx.get("ok") else 2500
+            grounded_temperature = 0.2 if deep_ctx.get("ok") else 0.4
             if effective_models and len(effective_models) > 1:
                 multi = await self._ai_generate_multi(
-                    system_prompt, model_ids=effective_models, max_tokens=2500, temperature=0.4
+                    system_prompt,
+                    model_ids=effective_models,
+                    max_tokens=grounded_max_tokens,
+                    temperature=grounded_temperature,
                 )
-                # برای idea_to_prompt، طولانی‌ترین پاسخ معتبر را انتخاب می‌کنیم
                 best = max(
                     (m for m in multi if not m.get("error") and m.get("content")),
                     key=lambda m: len(m["content"]),
@@ -1070,8 +1149,8 @@ class OversightService:
                 response = await self._ai_generate(
                     system_prompt,
                     model_id=(effective_models[0] if effective_models else None),
-                    max_tokens=2500,
-                    temperature=0.4,
+                    max_tokens=grounded_max_tokens,
+                    temperature=grounded_temperature,
                 )
         except Exception as e:
             raise RuntimeError(f"خطا در تولید پرامپت: {e}")
