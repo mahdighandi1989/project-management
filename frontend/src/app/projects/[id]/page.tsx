@@ -681,6 +681,8 @@ export default function ProjectDetailPage() {
 
   // Roadmap State (در تب ژورنال)
   const [roadmapContent, setRoadmapContent] = useState<string>('');
+  // 🆕 پیام هشدار اگر roadmap parse نشد ولی content موجود است
+  const [roadmapParseWarning, setRoadmapParseWarning] = useState<string>('');
   const [roadmapItems, setRoadmapItems] = useState<Array<{
     id: string;
     text: string;
@@ -730,6 +732,11 @@ export default function ProjectDetailPage() {
     analyzed_at: string;
   }>>({});
   const [healthDataLoaded, setHealthDataLoaded] = useState(false);
+  // 🔁 Cross-tab sync versions — هر بار analyze جدید Health یا اجرای
+  // موفق Memory field، این versionها افزایش می‌یابند تا تب‌های
+  // وابسته (Structure, Journal) خود را invalidate کنند.
+  const [healthDataVersion, setHealthDataVersion] = useState(0);
+  const [journalDataVersion, setJournalDataVersion] = useState(0);
   const [hoveredNode, setHoveredNode] = useState<string | null>(null);
 
   // Memory Box State
@@ -793,6 +800,11 @@ export default function ProjectDetailPage() {
   const [loadingApprovals, setLoadingApprovals] = useState(false);
   const [approvingField, setApprovingField] = useState<string | null>(null);
   const [rejectingField, setRejectingField] = useState<string | null>(null);
+  // 🆕 Race-condition fix: lock per field for delete + global lock for
+  // saveMemoryInstructions/runAutoSetup. تضمین می‌کند کاربر همزمان روی
+  // یک field دو عمل (مثل approve+delete) اجرا نمی‌کند.
+  const [deletingField, setDeletingField] = useState<string | null>(null);
+  const [memoryBusyGlobal, setMemoryBusyGlobal] = useState(false);
   const [rejectionReason, setRejectionReason] = useState('');
   const [autoConvertingIssues, setAutoConvertingIssues] = useState(false);
 
@@ -924,6 +936,20 @@ export default function ProjectDetailPage() {
     }
   }, [projectId]);
 
+  // 🆕 Polling pendingApprovals وقتی panel باز است — برای sync با /oversight
+  // (که از همان endpoint استفاده می‌کند). فقط در حالت باز بودن panel
+  // فعال است تا network noise اضافه ایجاد نکند.
+  useEffect(() => {
+    if (!showQuickApprovalPanel || !projectId) return;
+    const interval = setInterval(() => {
+      // اگر کاربر در حال approve/reject است، skip تا state درست بماند
+      if (approvingField || rejectingField || deletingField) return;
+      loadPendingApprovals();
+    }, 30000); // هر ۳۰ ثانیه
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showQuickApprovalPanel, projectId]);
+
   // 🔴 چک کردن وضعیت اجرای گروهی هنگام لود صفحه
   const checkBatchStatusOnLoad = async () => {
     try {
@@ -954,13 +980,20 @@ export default function ProjectDetailPage() {
   }, [syncSettings.auto_sync_enabled, syncSettings.sync_interval_minutes, project?.project_type]);
 
   // بارگذاری ساختار وقتی تب ساختار باز میشه
+  // 🔁 Cross-tab sync: healthDataVersion هم dependency است — اگر Health
+  // analyze موفق شود (در تب Health)، این effect دوباره fire می‌شود و
+  // structure با fresh health-map رنگ‌بندی می‌شود.
   useEffect(() => {
     if (activeTab === 'structure' && projectId) {
       loadStructure();
     }
-  }, [activeTab, projectId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, projectId, healthDataVersion]);
 
   // بارگذاری ژورنال وقتی تب ژورنال باز میشه
+  // 🔁 Cross-tab sync: journalDataVersion هم dependency — اگر Memory
+  // field موفق execute شود، این effect دوباره fire می‌شود تا activity
+  // log جدید (که توسط backend ثبت شده) نمایش داده شود.
   useEffect(() => {
     if (activeTab === 'journal' && projectId) {
       loadJournal();
@@ -968,7 +1001,8 @@ export default function ProjectDetailPage() {
       loadReports();
       loadReportTrigger();
     }
-  }, [activeTab, projectId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, projectId, journalDataVersion]);
 
   // بارگذاری پروفایل مدل‌ها وقتی سابتب تغییر کنه
   useEffect(() => {
@@ -2087,6 +2121,39 @@ export default function ProjectDetailPage() {
     }
     return false;
   };
+
+  // 🛡️ Defensive fetch wrapper — برای جلوگیری از stale state وقتی endpoint
+  // 4xx/5xx برمی‌گرداند ولی .ok چک نمی‌شده. هر تابعی که از این استفاده کند
+  // نتیجهٔ ساختاریافته با ok/data/error می‌گیرد و state موجود را reset
+  // نمی‌کند مگر اینکه data معتبر باشد. هیچ side-effect مستقیم — فقط داده.
+  // مصرف‌کنندگان می‌توانند showError را خود صدا بزنند.
+  const safeFetch = useCallback(async <T = any,>(
+    url: string,
+    init?: RequestInit,
+    options?: { silent?: boolean; defaultErrorMessage?: string }
+  ): Promise<{ ok: boolean; status: number; data: T | null; error: string }> => {
+    try {
+      const res = await fetch(url, init);
+      const text = await res.text().catch(() => '');
+      let parsed: any = null;
+      try { parsed = text ? JSON.parse(text) : null; } catch { parsed = text; }
+      if (!res.ok) {
+        const msg = (parsed && typeof parsed === 'object' && (parsed.detail || parsed.error || parsed.message))
+          || options?.defaultErrorMessage
+          || `HTTP ${res.status}`;
+        if (!options?.silent) {
+          // فقط console — تصمیم با مصرف‌کننده برای toast/UX
+          console.error('[safeFetch]', url, msg);
+        }
+        return { ok: false, status: res.status, data: null, error: String(msg) };
+      }
+      return { ok: true, status: res.status, data: parsed as T, error: '' };
+    } catch (e: any) {
+      const msg = e?.message || 'network error';
+      if (!options?.silent) console.error('[safeFetch]', url, msg);
+      return { ok: false, status: 0, data: null, error: msg };
+    }
+  }, []);
 
   const showError = (msg: string) => {
     setError(msg);
@@ -5547,56 +5614,59 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     }
   };
 
-  // 🆕 تایید سریع فیلد
+  // 🆕 تایید سریع فیلد — با safeFetch تا در 4xx/5xx، state قبلی (memory)
+  // و pendingApprovals بدون reload نشوند و دکمه drift نشود.
   const quickApproveField = async (fieldId: string, note?: string) => {
     setApprovingField(fieldId);
-    try {
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/quick-approval/approve/${fieldId}`, {
+    const result = await safeFetch<{ success: boolean; message?: string; error?: string }>(
+      `${API_BASE}/api/projects/${projectId}/quick-approval/approve/${fieldId}`,
+      {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ approver_note: note }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        showSuccess(data.message || 'فیلد با موفقیت تایید شد');
-        loadMemory();
-        loadPendingApprovals();
-      } else {
-        showError(data.error || 'خطا در تایید فیلد');
-      }
-    } catch (e) {
-      showError('خطا در ارتباط با سرور');
-    } finally {
-      setApprovingField(null);
+      },
+    );
+    setApprovingField(null);
+    if (!result.ok) {
+      showError(`خطا در تایید فیلد: ${result.error}`);
+      return;
+    }
+    if (result.data?.success) {
+      showSuccess(result.data.message || 'فیلد با موفقیت تایید شد');
+      loadMemory();
+      loadPendingApprovals();
+    } else {
+      showError(result.data?.error || 'خطا در تایید فیلد');
     }
   };
 
-  // 🆕 رد کردن فیلد
+  // 🆕 رد کردن فیلد — مشابه approve، با safeFetch
   const rejectField = async (fieldId: string, reason: string) => {
     if (!reason.trim()) {
       showError('لطفاً دلیل رد را وارد کنید');
       return;
     }
     setRejectingField(fieldId);
-    try {
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/quick-approval/reject/${fieldId}`, {
+    const result = await safeFetch<{ success: boolean; message?: string; error?: string }>(
+      `${API_BASE}/api/projects/${projectId}/quick-approval/reject/${fieldId}`,
+      {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rejection_reason: reason }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        showSuccess(data.message || 'فیلد رد و آرشیو شد');
-        loadMemory();
-        loadPendingApprovals();
-        setRejectionReason('');
-      } else {
-        showError(data.error || 'خطا در رد فیلد');
-      }
-    } catch (e) {
-      showError('خطا در ارتباط با سرور');
-    } finally {
-      setRejectingField(null);
+      },
+    );
+    setRejectingField(null);
+    if (!result.ok) {
+      showError(`خطا در رد فیلد: ${result.error}`);
+      return;
+    }
+    if (result.data?.success) {
+      showSuccess(result.data.message || 'فیلد رد و آرشیو شد');
+      loadMemory();
+      loadPendingApprovals();
+      setRejectionReason('');
+    } else {
+      showError(result.data?.error || 'خطا در رد فیلد');
     }
   };
 
@@ -5788,37 +5858,36 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     }
   };
 
-  // بارگذاری ساختار پروژه
+  // بارگذاری ساختار پروژه — با safeFetch، هر کدام مستقل fail می‌توانند بشوند
+  // و state قبلی structure یا fileHealthMap reset نمی‌شود.
   const loadStructure = async () => {
     setStructureLoading(true);
     try {
-      // بارگذاری همزمان ساختار و داده‌های سلامت
-      const [structureRes, healthRes] = await Promise.all([
-        fetch(`${API_BASE}/api/projects/${projectId}/structure`),
-        fetch(`${API_BASE}/api/projects/${projectId}/health/file-map`)
+      const [structureResult, healthResult] = await Promise.all([
+        safeFetch<{ success: boolean; structure?: any; settings?: any }>(
+          `${API_BASE}/api/projects/${projectId}/structure`,
+          undefined,
+          { silent: true },
+        ),
+        safeFetch<{ success: boolean; file_map?: Record<string, any> }>(
+          `${API_BASE}/api/projects/${projectId}/health/file-map`,
+          undefined,
+          { silent: true },
+        ),
       ]);
 
       let healthMap: Record<string, any> = {};
-      if (healthRes.ok) {
-        const healthData = await healthRes.json();
-        if (healthData.success && healthData.file_map) {
-          healthMap = healthData.file_map;
-          setFileHealthMap(healthMap);
-          setHealthDataLoaded(true);
-        }
+      if (healthResult.ok && healthResult.data?.success && healthResult.data.file_map) {
+        healthMap = healthResult.data.file_map;
+        setFileHealthMap(healthMap);
+        setHealthDataLoaded(true);
       }
 
-      if (structureRes.ok) {
-        const data = await structureRes.json();
-        if (data.success) {
-          setStructureData(data.structure);
-          setStructureSettings(data.settings);
-          // تبدیل به فرمت React Flow با رنگ‌بندی سلامت
-          convertToReactFlow(data.structure, healthMap);
-        }
+      if (structureResult.ok && structureResult.data?.success) {
+        setStructureData(structureResult.data.structure);
+        setStructureSettings(structureResult.data.settings);
+        convertToReactFlow(structureResult.data.structure, healthMap);
       }
-    } catch (e) {
-      console.error('Error loading structure:', e);
     } finally {
       setStructureLoading(false);
     }
@@ -6059,45 +6128,39 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
   // ===================== توابع ژورنال =====================
 
-  // بارگذاری لاگ‌های فعالیت
+  // بارگذاری لاگ‌های فعالیت — با safeFetch تا در صورت 4xx/5xx، logs قبلی
+  // (state) دست‌نخورده بمانند. silent چون stale data بهتر از empty list است.
   const loadJournal = async () => {
     setJournalLoading(true);
-    try {
-      const params = new URLSearchParams({
-        page: journalPage.toString(),
-        page_size: '20',
-      });
-      if (journalFilter.type) params.append('activity_type', journalFilter.type);
-      if (journalFilter.model) params.append('model_id', journalFilter.model);
-      if (journalFilter.success !== undefined) params.append('success', journalFilter.success.toString());
-
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/journal?${params}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          setJournalLogs(data.journal);
-          setJournalTotal(data.pagination?.total ?? 0);
-        }
-      }
-    } catch (e) {
-      console.error('Error loading journal:', e);
-    } finally {
-      setJournalLoading(false);
+    const params = new URLSearchParams({
+      page: journalPage.toString(),
+      page_size: '20',
+    });
+    if (journalFilter.type) params.append('activity_type', journalFilter.type);
+    if (journalFilter.model) params.append('model_id', journalFilter.model);
+    if (journalFilter.success !== undefined) params.append('success', journalFilter.success.toString());
+    const result = await safeFetch<{ success: boolean; journal?: any[]; pagination?: { total?: number } }>(
+      `${API_BASE}/api/projects/${projectId}/journal?${params}`,
+      undefined,
+      { silent: true },
+    );
+    setJournalLoading(false);
+    if (result.ok && result.data?.success) {
+      setJournalLogs(result.data.journal || []);
+      setJournalTotal(result.data.pagination?.total ?? 0);
     }
+    // در غیر این صورت، state قبلی حفظ می‌شود
   };
 
-  // بارگذاری آمار ژورنال
+  // بارگذاری آمار ژورنال — silent fail تا UI flicker نشود
   const loadJournalStats = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/journal/stats?days=30`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          setJournalStats(data.stats);
-        }
-      }
-    } catch (e) {
-      console.error('Error loading stats:', e);
+    const result = await safeFetch<{ success: boolean; stats?: any }>(
+      `${API_BASE}/api/projects/${projectId}/journal/stats?days=30`,
+      undefined,
+      { silent: true },
+    );
+    if (result.ok && result.data?.success) {
+      setJournalStats(result.data.stats);
     }
   };
 
@@ -6131,20 +6194,52 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             currentPriority = 'long_term';
           }
 
-          // پیدا کردن آیتم‌ها
+          // پیدا کردن آیتم‌ها — پشتیبانی از فرمت‌های مختلف:
+          //   - [ ] item / - [x] item   (markdown استاندارد)
+          //   * [X] item                (markdown با ستاره)
+          //   1. item                   (لیست عددی)
+          //   - ✅ item / - ☑ item       (Unicode checkbox پر)
+          //   - ☐ item / - 🔲 item      (Unicode checkbox خالی)
+          //   - ✓ item                  (تأیید ساده)
           if (trimmed.startsWith('- ') || trimmed.startsWith('* ') || trimmed.match(/^\d+\./)) {
-            const text = trimmed.replace(/^[-*]\s*/, '').replace(/^\d+\.\s*/, '');
-            const isCompleted = trimmed.includes('[x]') || trimmed.includes('✅') || trimmed.includes('✓');
-
-            items.push({
-              id: `roadmap_${index}`,
-              text: text.replace(/\[x\]|\[✓\]|\[✅\]/gi, '').trim(),
-              completed: isCompleted,
-              priority: currentPriority,
-              has_field: false,
-            });
+            let text = trimmed.replace(/^[-*]\s*/, '').replace(/^\d+\.\s*/, '');
+            // تشخیص completion با هر فرمتی
+            const isCompleted =
+              /\[\s*[xX✓✅]\s*\]/.test(trimmed) ||
+              /[✅✓☑]/.test(trimmed) ||
+              /^\s*-?\s*\[X\]/i.test(trimmed);
+            // پاک کردن همهٔ markerها از text — هم checked هم unchecked
+            text = text
+              .replace(/\[\s*[xX✓✅]\s*\]/g, '') // [x], [X], [✓], [✅]
+              .replace(/\[\s*\]/g, '')             // [ ]
+              .replace(/[✅☑]/g, '')                 // unicode checked
+              .replace(/[☐🔲]/g, '')                // unicode unchecked
+              .replace(/^\s*✓\s*/, '')             // leading ✓
+              .trim();
+            if (text) { // skip lines with only markers and no text
+              items.push({
+                id: `roadmap_${index}`,
+                text,
+                completed: isCompleted,
+                priority: currentPriority,
+                has_field: false,
+              });
+            }
           }
         });
+
+        // 🆕 اگر content غیر خالی است ولی هیچ آیتمی پارس نشد، یک پیام
+        // راهنما به کاربر بدهیم. content همچنان به‌صورت raw در بخش raw
+        // (text area در همان تب) قابل مشاهده است.
+        if (items.length === 0 && content.trim().length > 50) {
+          setRoadmapParseWarning(
+            'ساختار roadmap قابل تشخیص نیست — برای پارس صحیح از فرمت ' +
+            '`- [ ] item` یا `- [x] item` استفاده کنید. محتوای کامل ' +
+            'در بخش پایین قابل مشاهده است.'
+          );
+        } else {
+          setRoadmapParseWarning('');
+        }
 
         setRoadmapItems(items);
       }
@@ -6641,7 +6736,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   // ===================== پایان توابع ژورنال و پروفایل =====================
 
   const saveMemoryInstructions = async () => {
+    if (memoryBusyGlobal) return; // در حین auto-setup یا save دیگر، این بلاک می‌شود
     setSavingMemory(true);
+    setMemoryBusyGlobal(true);
     try {
       const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/instructions`, {
         method: 'PUT',
@@ -6658,6 +6755,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       showError('خطا در ارتباط');
     } finally {
       setSavingMemory(false);
+      setMemoryBusyGlobal(false);
     }
   };
 
@@ -6677,7 +6775,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       return;
     }
 
+    if (memoryBusyGlobal) {
+      showError('عملیات سراسری دیگری در جریان است — لطفاً صبر کنید');
+      return;
+    }
     setRunningAutoSetup(true);
+    setMemoryBusyGlobal(true);
     try {
       const res = await fetch(
         `${API_BASE}/api/projects/${projectId}/memory/auto-setup?use_ai=true&sync_github=true&clean_invalid=true`,
@@ -6748,6 +6851,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       showError(`خطا در ارتباط: ${e.message || e}`);
     } finally {
       setRunningAutoSetup(false);
+      setMemoryBusyGlobal(false);
     }
   };
 
@@ -6825,20 +6929,22 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
   const deleteDynamicField = async (fieldId: string) => {
     if (!confirm('حذف شود؟')) return;
-
-    try {
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields/${fieldId}`, {
-        method: 'DELETE',
-      });
-      const data = await res.json();
-      if (data.success) {
-        showSuccess('فیلد حذف شد');
-        loadMemory();
-      } else {
-        showError(data.detail || 'خطا');
-      }
-    } catch (e) {
-      showError('خطا در ارتباط');
+    if (deletingField || approvingField === fieldId || rejectingField === fieldId) return; // جلوگیری از race
+    setDeletingField(fieldId);
+    const result = await safeFetch<{ success: boolean; detail?: string; error?: string }>(
+      `${API_BASE}/api/projects/${projectId}/memory/fields/${fieldId}`,
+      { method: 'DELETE' },
+    );
+    setDeletingField(null);
+    if (!result.ok) {
+      showError(`خطا در حذف فیلد: ${result.error}`);
+      return;
+    }
+    if (result.data?.success) {
+      showSuccess('فیلد حذف شد');
+      loadMemory();
+    } else {
+      showError(result.data?.detail || result.data?.error || 'خطا');
     }
   };
 
@@ -6947,6 +7053,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
         showSuccess(successMsg);
         loadMemory();
+        // 🔁 Cross-tab sync: backend یک activity log در journal ثبت می‌کند،
+        // پس Journal tab باید stale نباشد. این version افزایش journal effect
+        // را trigger می‌کند هنگام بازشدن مجدد آن تب.
+        setJournalDataVersion(v => v + 1);
 
         // نمایش نتایج در console
         console.log('Trigger execution results:', data.results);
@@ -7205,26 +7315,22 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   };
 
   const loadFileContent = async (filePath: string) => {
-    try {
-      let res;
-      if (projectId.startsWith('gh_')) {
-        res = await fetch(`${API_BASE}/api/github/imported/${projectId}/file?path=${encodeURIComponent(filePath)}`);
-      } else {
-        res = await fetch(`${API_BASE}/api/projects/${projectId}/files/${encodeURIComponent(filePath)}`);
-      }
-
-      if (res.ok) {
-        const data = await res.json();
-        setSelectedFile({
-          path: filePath,
-          content: data.content,
-          github_url: data.github_url,
-        });
-      } else {
-        showError('فایل یافت نشد');
-      }
-    } catch (e) {
-      showError('خطا در خواندن فایل');
+    // 🛡️ از safeFetch استفاده می‌کنیم تا در صورت 404/500، state قبلی
+    // (selectedFile) دست‌نخورده بماند و فایل از list حذف نشود.
+    const url = projectId.startsWith('gh_')
+      ? `${API_BASE}/api/github/imported/${projectId}/file?path=${encodeURIComponent(filePath)}`
+      : `${API_BASE}/api/projects/${projectId}/files/${encodeURIComponent(filePath)}`;
+    const result = await safeFetch<{ content: string; github_url?: string }>(url);
+    if (!result.ok) {
+      showError(result.status === 404 ? 'فایل یافت نشد' : `خطا در خواندن فایل: ${result.error}`);
+      return;
+    }
+    if (result.data) {
+      setSelectedFile({
+        path: filePath,
+        content: result.data.content,
+        github_url: result.data.github_url,
+      });
     }
   };
 
@@ -7846,6 +7952,13 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         </div>
 
         {/* محتوای تب فایل‌ها */}
+        {/* ====================================================================
+          * TAB: FILES — مرور فایل‌های پروژه (import شده یا generated) + chat AI
+          * Data: loadProject() → files state؛ loadFileContent برای انتخابی
+          * Endpoints: /api/projects/{id}/files/{path} یا /api/github/imported/...
+          * Cross-deps: chat به memoryInstructions و availableModels نیاز دارد
+          * Source-of-truth: همان endpoint اصلی پروژه (نه /oversight)
+          * ==================================================================== */}
         {activeTab === 'files' && (
           <>
             {/* اطلاعات پروژه - GitHub */}
@@ -8230,6 +8343,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         )}
 
         {/* محتوای تب حافظه */}
+        {/* ====================================================================
+          * TAB: MEMORY & AI INSTRUCTIONS — source-of-truth برای dynamic_fields
+          * Data: loadMemory() → memoryInstructions + dynamicFields + pending
+          * Endpoints: /api/projects/{id}/memory/* (instructions, fields, ...)
+          * Cross-deps:
+          *   • /oversight/project_tasks فقط view + verify می‌کند، تغییر نمی‌دهد
+          *   • Approval flow: form → quickApprove → execute → archive
+          *   • Approval polling: هر 30s اگر panel باز باشد (Commit 2)
+          *   • bridge: /api/oversight/external-tasks/... برای read-only mirror
+          * Source-of-truth: این تب — اگر اینجا تغییر کرد، در /oversight هم
+          *   منعکس می‌شود (با polling)
+          * Race protection: deletingField + memoryBusyGlobal locks (Commit 2)
+          * ==================================================================== */}
         {activeTab === 'memory' && (
           <div className="space-y-6">
             {/* دکمه راه‌اندازی خودکار جامع */}
@@ -8270,7 +8396,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   </button>
                   <button
                     onClick={runAutoSetup}
-                    disabled={runningAutoSetup}
+                    disabled={runningAutoSetup || memoryBusyGlobal}
                     className="px-6 py-3 bg-white text-purple-600 rounded-xl font-bold hover:bg-gray-100 disabled:opacity-50 shadow-lg transform hover:scale-105 transition-all flex items-center gap-2"
                   >
                     {runningAutoSetup ? (
@@ -8331,7 +8457,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
               <button
                 onClick={saveMemoryInstructions}
-                disabled={savingMemory}
+                disabled={savingMemory || memoryBusyGlobal}
                 className="mt-4 w-full py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 disabled:opacity-50"
               >
                 {savingMemory ? '⏳ در حال ذخیره...' : '💾 ذخیره باکس حافظه'}
@@ -8377,6 +8503,13 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   </button>
                   <button
                     onClick={() => setShowNewFieldForm(true)}
+                    title={
+                      'افزودن یک dynamic field جدید با action_type قابل انتخاب:\n' +
+                      '• display = فقط نمایش متن (نه اجرا)\n' +
+                      '• github_commit = AI کد می‌نویسد و یک فایل را commit می‌کند\n' +
+                      '• github_multi_commit = چند فایل تغییر می‌کنند\n' +
+                      '• file_edit = ویرایش یک فایل خاص'
+                    }
                     className="px-3 py-1 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600"
                   >
                     + افزودن فیلد
@@ -9211,6 +9344,21 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                   ⚠️ نیاز به تایید
                                 </span>
                               ) : null}
+                              {/* 🔗 Badge: از /oversight ساخته شده — برای فیلدهایی که از طریق
+                                  Engineering workflow یا oversight scan آمده‌اند */}
+                              {(field.source_issue_id || field.validation_marker === 'auto_pending') && (
+                                <a
+                                  href={`/oversight?project=${encodeURIComponent(projectId as string)}`}
+                                  onClick={(e) => e.stopPropagation()}
+                                  title={
+                                    'این فیلد از طریق مرکز نظارت ساخته شده.\n' +
+                                    'کلیک: باز کردن /oversight با فیلتر این پروژه'
+                                  }
+                                  className="px-2 py-0.5 bg-cyan-100 dark:bg-cyan-900/40 text-cyan-700 dark:text-cyan-300 text-xs rounded hover:bg-cyan-200 dark:hover:bg-cyan-900/60"
+                                >
+                                  🔗 از /oversight
+                                </a>
+                              )}
                             </div>
                             <div className="flex gap-1">
                               {field.archived ? (
@@ -9253,10 +9401,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               )}
                               <button
                                 onClick={() => deleteDynamicField(field.id)}
-                                className="p-1 text-red-500 hover:bg-red-100 rounded"
-                                title="حذف"
+                                disabled={!!deletingField || approvingField === field.id || rejectingField === field.id || memoryBusyGlobal}
+                                className="p-1 text-red-500 hover:bg-red-100 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                                title={deletingField === field.id ? 'در حال حذف...' : 'حذف'}
                               >
-                                🗑️
+                                {deletingField === field.id ? '⏳' : '🗑️'}
                               </button>
                             </div>
                           </div>
@@ -9428,6 +9577,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         )}
 
         {/* محتوای تب ساختار پروژه */}
+        {/* ====================================================================
+          * TAB: STRUCTURE — graph معماری پروژه با React Flow + رنگ‌بندی سلامت
+          * Data: loadStructure() → structure + file_health_map موازی
+          * Endpoints: /api/projects/{id}/structure + /api/projects/{id}/health/file-map
+          * Cross-deps:
+          *   • health-map ↔ Health tab: بعد از Health analyze، healthDataVersion
+          *     افزایش می‌یابد و Structure در باز شدن مجدد fresh data می‌گیرد (Commit 3)
+          *   • react-flow rendering: convertToReactFlow → nodes/edges
+          * Source-of-truth: backend project_structure.py (نه /oversight)
+          * ==================================================================== */}
         {activeTab === 'structure' && (
           <div className="space-y-6">
             {/* تنظیمات تحلیل */}
@@ -9639,6 +9798,20 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         )}
 
         {/* محتوای تب ژورنال و گزارشات */}
+        {/* ====================================================================
+          * TAB: JOURNAL & REPORTS — تاریخچهٔ activity + گزارشات + roadmap + profiles
+          * Data: loadJournal + loadJournalStats + loadReports + loadReportTrigger
+          *       sub-tabs: 'roadmap' (loadRoadmap) / 'profiles' (loadModelProfiles)
+          * Endpoints: /api/projects/{id}/journal[/stats] + /reports + /roadmap
+          * Cross-deps:
+          *   • journalDataVersion → بعد از Memory field execute موفق، invalidate
+          *     می‌شود تا activity log جدید نمایش داده شود (Commit 3)
+          *   • روadmap parser چندفرمتی: [x], ✅, ☑, ☐ همه پشتیبانی می‌شوند (Commit 4)
+          * Difference from /oversight reports:
+          *   • Journal = activity log داخلی این پروژه
+          *   • /oversight reports = گزارش verifier ها در همهٔ watched repos
+          *   نه duplicate — scope متفاوت
+          * ==================================================================== */}
         {activeTab === 'journal' && (
           <div className="space-y-6">
             {/* سابتب‌ها */}
@@ -10674,6 +10847,22 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     <div className="text-4xl mb-2">📭</div>
                     <p>نقشه راه تعریف نشده</p>
                     <p className="text-sm mt-2">از تب تحلیل سلامت، گزارش مهندسی را اجرا کنید تا نقشه راه تولید شود</p>
+                    {/* 🆕 اگر content موجود است ولی parse نشد، هشدار + raw view */}
+                    {roadmapParseWarning && roadmapContent && (
+                      <div className="mt-6 text-right max-w-2xl mx-auto">
+                        <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40 rounded-lg p-3 text-amber-800 dark:text-amber-200 text-sm mb-3">
+                          ⚠️ {roadmapParseWarning}
+                        </div>
+                        <details className="bg-gray-50 dark:bg-gray-900/40 rounded-lg p-3 text-xs">
+                          <summary className="cursor-pointer text-gray-700 dark:text-gray-300 font-medium">
+                            📄 محتوای raw روadmap ({roadmapContent.length} کاراکتر)
+                          </summary>
+                          <pre className="mt-3 whitespace-pre-wrap font-mono text-gray-700 dark:text-gray-300 text-right max-h-96 overflow-auto">
+                            {roadmapContent}
+                          </pre>
+                        </details>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="space-y-4">
@@ -11480,13 +11669,42 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         )}
 
         {/* محتوای تب تحلیل سلامت */}
+        {/* ====================================================================
+          * TAB: HEALTH ANALYSIS — تحلیل سلامت پروژه (bug detection + score)
+          * Data: ProjectHealthPanel کامپوننت مستقل (در components/)
+          * Endpoints: داخل کامپوننت ProjectHealthPanel
+          * Cross-deps:
+          *   • onHealthUpdate callback → loadProject + setHealthDataVersion
+          *     → Structure tab fresh شود در باز شدن مجدد (Commit 3)
+          *   • Potential overlap با /oversight/scan_project & deep_scan:
+          *     این موضوع هنوز تصمیم‌گیری نشده — جداگانه audit خواهد شد
+          * ==================================================================== */}
         {activeTab === 'health' && (
           <div className="space-y-6">
-            <ProjectHealthPanel projectId={projectId as string} onHealthUpdate={loadProject} />
+            <ProjectHealthPanel
+              projectId={projectId as string}
+              onHealthUpdate={() => {
+                loadProject();
+                // 🔁 Health analyze موفق → Structure tab باید refresh شود
+                // (file_health_map ممکن است تغییر کرده باشد)
+                setHealthDataVersion(v => v + 1);
+                setHealthDataLoaded(false); // باعث می‌شود loadStructure در باز شدن مجدد، fresh fetch کند
+              }}
+            />
           </div>
         )}
 
         {/* محتوای تب بازرس ویژه */}
+        {/* ====================================================================
+          * TAB: INSPECTOR (بازرس ویژه) — ⚠️ این تب توسط audit لمس نمی‌شود ⚠️
+          * منطق: render_logs.py Bridge + WebSocket + smart-chat + apply-action
+          * این تب ساختار پیچیده‌ای دارد و کاربر صریحاً گفته نباید لمس شود.
+          * هر تغییری روی این تب باید جدا و با احتیاط فوق‌العاده انجام شود.
+          * Cross-deps:
+          *   • smart-chat → action_plan تولید می‌کند که در /oversight هم
+          *     استفاده می‌شود (bridge با apply-action)
+          *   • WebSocket bridge → live monitoring + dedup map
+          * ==================================================================== */}
         {activeTab === 'inspector' && (
           <div className="space-y-4">
             {/* هدر */}
@@ -14348,6 +14566,15 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         )}
 
         {/* 🔗 External Projects Panel */}
+        {/* ====================================================================
+          * TAB: EXTERNAL — اتصال به یک repo GitHub خارج از سیستم
+          * Data: loadExternalFiles + loadExternalReadme + loadExternalFileContent
+          * Endpoints: /api/external-projects/* (connect, files, file/{path}, analyze)
+          * تفاوت با تب FILES:
+          *   • FILES = فایل‌های پروژهٔ اصلی (import شده در DB)
+          *   • EXTERNAL = repo خارجی (بدون import کامل، فقط مرور و تحلیل)
+          * Cross-deps: مستقل از /oversight و سایر تب‌ها
+          * ==================================================================== */}
         {activeTab === 'external' && (
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
             {!externalConnected ? (
@@ -14361,6 +14588,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                       یک repo GitHub خارجی را با URL + توکن مستقل وصل کن — مستقل از پروژهٔ فعلی
                     </p>
                   </div>
+                </div>
+
+                {/* 💡 راهنما: تفاوت با تب فایل‌ها */}
+                <div className="mb-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/40 rounded-lg p-3 text-sm text-blue-800 dark:text-blue-200">
+                  💡 <strong>تفاوت با تب «فایل‌ها»:</strong> تب فایل‌ها فایل‌های پروژهٔ اصلی (که در DB import شده) را نشان می‌دهد. این تب برای مرور و تحلیل سریع یک repo دیگر است <em>بدون</em> import کامل آن. توکن فقط برای این اتصال استفاده می‌شود.
                 </div>
 
                 <div className="space-y-4">
