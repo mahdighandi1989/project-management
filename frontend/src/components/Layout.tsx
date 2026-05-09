@@ -20,6 +20,7 @@ import {
   ChartBarIcon,
   CommandLineIcon,
   ArchiveBoxIcon,
+  EyeIcon,
 } from '@heroicons/react/24/outline';
 import GlobalAnalysisProgress from './GlobalAnalysisProgress';
 
@@ -29,6 +30,7 @@ interface LayoutProps {
 
 const navItems = [
   { href: '/', label: 'خانه', icon: HomeIcon },
+  { href: '/oversight', label: 'مرکز نظارت', icon: EyeIcon },
   { href: '/creator', label: 'موتور خالق', icon: CommandLineIcon },
   { href: '/debate', label: 'مناظره', icon: ChatBubbleLeftRightIcon },
   { href: '/projects', label: 'پروژه‌ها', icon: RocketLaunchIcon },
