@@ -401,6 +401,9 @@ PASSES = [
     # 🆕 Pass I — اسکن امنیتی عمیق با خروجی ساختاریافته
     # (مهاجرت از /projects/[id]/health/security)
     ("security_deep", "اسکن امنیتی عمیق: secrets + license + dependencies"),
+    # 🆕 Pass J — تحلیل پوشش تست
+    # (مهاجرت از /projects/[id]/health/coverage)
+    ("coverage", "تحلیل پوشش تست — فایل‌های untested و gap detection"),
 ]
 
 
@@ -542,6 +545,50 @@ Stack تشخیص داده شده: {', '.join(stacks) or '(نامشخص)'}
   -5 برای هر sensitive file بدون gitignore، -15 اگر license missing،
   -10 برای CORS باز.
 حداقل 0.
+""",
+        "coverage": """
+فاز فعلی: **J — تحلیل پوشش تست (مهاجرت از Health analysis)**
+
+این pass شناسایی می‌کند فایل‌های source که فایل test متناظر ندارند یا
+دارای پوشش ضعیف‌اند، و untested critical paths را پیشنهاد می‌دهد.
+
+تشخیص فایل‌های test (الگوها):
+- Python: `tests/`, `test_*.py`, `*_test.py`, `conftest.py`
+- JS/TS: `__tests__/`, `*.test.{ts,tsx,js,jsx}`, `*.spec.*`,
+  `cypress/`, `e2e/`, `tests/`
+- جاوا: `src/test/`, `*Test.java`, `*Tests.java`
+- سایر: `spec/`, `test/`
+
+تمرکز:
+- فایل‌های source که فایل test متناظر ندارند
+- Critical paths (auth, payment, security) untested
+- محاسبهٔ تخمینی coverage = (فایل‌های با test متناظر) / (کل source)
+- پیشنهاد test cases مشخص برای ۳-۵ فایل critical untested
+
+# خروجی JSON اضافی (علاوه بر findings عادی)
+علاوه بر `findings[]` (هر کدام برای یک untested critical file)،
+یک کلید جدید `coverage_summary` هم برگردان:
+
+{
+  "findings": [...],
+  "coverage_summary": {
+    "total_source_files": 0,
+    "total_test_files": 0,
+    "test_to_source_ratio": 0.0,
+    "coverage_estimate_percent": 0,
+    "untested_files_count": 0,
+    "untested_files": ["path/to/file.py"],
+    "critical_untested": [{"path": "...", "reason": "auth flow", "suggested_tests": ["test_login_invalid", "..."]}],
+    "coverage_score": 75
+  }
+}
+
+`coverage_score` 0-100:
+- 100 اگر >80% فایل‌های source تست دارند
+- proportional decrease تا 0 اگر هیچ تستی نیست
+
+نکته: critical_untested فقط برای فایل‌هایی که در نقشهٔ Importهای داخلی
+hub هستند یا critical_path (/auth/, /payment/, /security/) را شامل می‌شوند.
 """,
     }
 
