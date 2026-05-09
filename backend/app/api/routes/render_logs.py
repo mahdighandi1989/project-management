@@ -4866,7 +4866,7 @@ class InjectBridgeRequest(BaseModel):
 # محتوای Bridge Script که به پروژه‌ها تزریق می‌شود (نسخه HTML)
 INSPECTOR_BRIDGE_SCRIPT = '''
 <!-- Inspector Bridge Script - Auto-injected -->
-<!-- Version: 2.2 -->
+<!-- Version: 2.4 -->
 <script>
 (function() {
   console.log('🌉 Inspector Bridge: Script starting...');
@@ -4985,7 +4985,8 @@ INSPECTOR_BRIDGE_SCRIPT = '''
         pageUrl: window.location.href,
         timestamp: Date.now(),
         level: data.level || null,
-        source: 'imported-project'
+        source: 'imported-project',
+        networkMeta: data.networkMeta || null
       };
 
       // ارسال از طریق WebSocket
@@ -5006,6 +5007,123 @@ INSPECTOR_BRIDGE_SCRIPT = '''
       console.warn('Inspector bridge: failed to send message', e);
     }
   }
+
+  // 🌐 Network Monitoring (fetch + XHR) — v2.4
+  // hook کردن window.fetch و XMLHttpRequest برای ثبت درخواست‌های شبکه پروژهٔ deploy شده.
+  // event ها: network-request (شروع)، network-response (موفق)، network-error (ناموفق).
+  // قبل از send، header های Authorization/Cookie و query paramهای حساس masked می‌شوند.
+  (function setupNetworkMonitoring() {
+    try {
+      var __netReqSeq = 0;
+      var __maskValue = function(v) {
+        if (!v) return v;
+        var s = String(v);
+        return s.length > 8 ? s.slice(0, 4) + '****' + s.slice(-2) : '****';
+      };
+      var __maskUrl = function(url) {
+        try {
+          var u = new URL(url, window.location.origin);
+          u.searchParams.forEach(function(val, key) {
+            var lk = key.toLowerCase();
+            if (lk.indexOf('token') >= 0 || lk.indexOf('key') >= 0 || lk.indexOf('secret') >= 0 || lk.indexOf('password') >= 0) {
+              u.searchParams.set(key, __maskValue(val));
+            }
+          });
+          return u.toString();
+        } catch (e) { return String(url); }
+      };
+      var __summarizeUrl = function(url) {
+        try {
+          var u = new URL(url, window.location.origin);
+          var path = u.pathname;
+          if (path.length > 80) path = path.slice(0, 77) + '...';
+          return u.host + path;
+        } catch (e) { return String(url).slice(0, 100); }
+      };
+      // ---- fetch ----
+      if (typeof window.fetch === 'function' && !window.__inspectorFetchHooked) {
+        window.__inspectorFetchHooked = true;
+        var origFetch = window.fetch.bind(window);
+        window.fetch = function(input, init) {
+          var reqId = 'fetch_' + (++__netReqSeq) + '_' + Date.now();
+          var url = typeof input === 'string' ? input : (input && input.url) || '';
+          var method = (init && init.method) || (input && input.method) || 'GET';
+          var maskedUrl = __maskUrl(url);
+          var startedAt = Date.now();
+          try {
+            sendToInspector('network-request', {
+              elementInfo: method.toUpperCase() + ' ' + __summarizeUrl(maskedUrl),
+              level: null,
+              networkMeta: { reqId: reqId, method: method.toUpperCase(), url: maskedUrl, startedAt: startedAt }
+            });
+          } catch (e) {}
+          return origFetch(input, init).then(function(res) {
+            try {
+              var dur = Date.now() - startedAt;
+              var ok = res && res.ok;
+              var status = res ? res.status : 0;
+              var label = method.toUpperCase() + ' ' + __summarizeUrl(maskedUrl) + ' → ' + status + ' (' + dur + 'ms)';
+              sendToInspector(ok ? 'network-response' : 'network-error', {
+                elementInfo: label,
+                level: ok ? null : 'error',
+                networkMeta: { reqId: reqId, method: method.toUpperCase(), url: maskedUrl, status: status, durationMs: dur, ok: !!ok }
+              });
+            } catch (e) {}
+            return res;
+          }).catch(function(err) {
+            try {
+              var dur = Date.now() - startedAt;
+              sendToInspector('network-error', {
+                elementInfo: method.toUpperCase() + ' ' + __summarizeUrl(maskedUrl) + ' ✗ ' + (err && err.message || 'fetch failed'),
+                level: 'error',
+                networkMeta: { reqId: reqId, method: method.toUpperCase(), url: maskedUrl, status: 0, durationMs: dur, ok: false, errorMessage: err && err.message }
+              });
+            } catch (e) {}
+            throw err;
+          });
+        };
+      }
+      // ---- XMLHttpRequest ----
+      if (window.XMLHttpRequest && !window.__inspectorXhrHooked) {
+        window.__inspectorXhrHooked = true;
+        var origOpen = XMLHttpRequest.prototype.open;
+        var origSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function(method, url) {
+          try {
+            this.__inspectorReqId = 'xhr_' + (++__netReqSeq) + '_' + Date.now();
+            this.__inspectorMethod = (method || 'GET').toUpperCase();
+            this.__inspectorUrl = __maskUrl(url);
+          } catch (e) {}
+          return origOpen.apply(this, arguments);
+        };
+        XMLHttpRequest.prototype.send = function() {
+          var xhr = this;
+          try {
+            xhr.__inspectorStartedAt = Date.now();
+            sendToInspector('network-request', {
+              elementInfo: xhr.__inspectorMethod + ' ' + __summarizeUrl(xhr.__inspectorUrl),
+              level: null,
+              networkMeta: { reqId: xhr.__inspectorReqId, method: xhr.__inspectorMethod, url: xhr.__inspectorUrl, startedAt: xhr.__inspectorStartedAt }
+            });
+            xhr.addEventListener('loadend', function() {
+              try {
+                var dur = Date.now() - xhr.__inspectorStartedAt;
+                var status = xhr.status || 0;
+                var ok = status >= 200 && status < 400;
+                var label = xhr.__inspectorMethod + ' ' + __summarizeUrl(xhr.__inspectorUrl) + ' → ' + status + ' (' + dur + 'ms)';
+                sendToInspector(ok ? 'network-response' : 'network-error', {
+                  elementInfo: label,
+                  level: ok ? null : 'error',
+                  networkMeta: { reqId: xhr.__inspectorReqId, method: xhr.__inspectorMethod, url: xhr.__inspectorUrl, status: status, durationMs: dur, ok: ok }
+                });
+              } catch (e) {}
+            });
+          } catch (e) {}
+          return origSend.apply(this, arguments);
+        };
+      }
+    } catch (e) { /* network monitoring boot failed - non-critical */ }
+  })();
 
   // شروع اتصال WebSocket
   connectWebSocket();
@@ -5318,7 +5436,7 @@ INSPECTOR_BRIDGE_SCRIPT = '''
 # 🆕 محتوای Bridge Script برای پروژه‌های React/Next.js (نسخه JS/TS)
 INSPECTOR_BRIDGE_SCRIPT_JS = '''
 // 🌉 Inspector Bridge Script - Auto-injected
-// Version: 2.2
+// Version: 2.4
 // ارتباط با Inspector از طریق WebSocket (حل مشکل cross-origin)
 /* eslint-disable */
 // @ts-nocheck
@@ -5390,7 +5508,8 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
       type: 'inspector-bridge-event', action,
       elementInfo: data.elementInfo || '', position: data.position || { xPercent: 50, yPercent: 50 },
       pageUrl: window.location.href, timestamp: Date.now(),
-      level: data.level || null, source: 'imported-project'
+      level: data.level || null, source: 'imported-project',
+      networkMeta: data.networkMeta || null
     };
     if (ws && wsReady) ws.send(JSON.stringify(message));
     else if (ws) messageQueue.push(message);
@@ -5540,6 +5659,118 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
     } catch(e) {}
   }, 2000);
 
+  // 🌐 Network Monitoring (fetch + XHR) — v2.4
+  (function setupNetworkMonitoring() {
+    try {
+      let __netReqSeq = 0;
+      const __maskValue = (v) => {
+        if (!v) return v;
+        const s = String(v);
+        return s.length > 8 ? s.slice(0, 4) + '****' + s.slice(-2) : '****';
+      };
+      const __maskUrl = (url) => {
+        try {
+          const u = new URL(url, window.location.origin);
+          u.searchParams.forEach((val, key) => {
+            const lk = key.toLowerCase();
+            if (lk.indexOf('token') >= 0 || lk.indexOf('key') >= 0 || lk.indexOf('secret') >= 0 || lk.indexOf('password') >= 0) {
+              u.searchParams.set(key, __maskValue(val));
+            }
+          });
+          return u.toString();
+        } catch(e) { return String(url); }
+      };
+      const __summarizeUrl = (url) => {
+        try {
+          const u = new URL(url, window.location.origin);
+          let path = u.pathname;
+          if (path.length > 80) path = path.slice(0, 77) + '...';
+          return u.host + path;
+        } catch(e) { return String(url).slice(0, 100); }
+      };
+      if (typeof window.fetch === 'function' && !window.__inspectorFetchHooked) {
+        window.__inspectorFetchHooked = true;
+        const origFetch = window.fetch.bind(window);
+        window.fetch = function(input, init) {
+          const reqId = 'fetch_' + (++__netReqSeq) + '_' + Date.now();
+          const url = typeof input === 'string' ? input : (input && input.url) || '';
+          const method = (init && init.method) || (input && input.method) || 'GET';
+          const maskedUrl = __maskUrl(url);
+          const startedAt = Date.now();
+          try {
+            sendToInspector('network-request', {
+              elementInfo: method.toUpperCase() + ' ' + __summarizeUrl(maskedUrl),
+              level: null,
+              networkMeta: { reqId, method: method.toUpperCase(), url: maskedUrl, startedAt }
+            });
+          } catch(e) {}
+          return origFetch(input, init).then((res) => {
+            try {
+              const dur = Date.now() - startedAt;
+              const ok = res && res.ok;
+              const status = res ? res.status : 0;
+              const label = method.toUpperCase() + ' ' + __summarizeUrl(maskedUrl) + ' → ' + status + ' (' + dur + 'ms)';
+              sendToInspector(ok ? 'network-response' : 'network-error', {
+                elementInfo: label,
+                level: ok ? null : 'error',
+                networkMeta: { reqId, method: method.toUpperCase(), url: maskedUrl, status, durationMs: dur, ok: !!ok }
+              });
+            } catch(e) {}
+            return res;
+          }).catch((err) => {
+            try {
+              const dur = Date.now() - startedAt;
+              sendToInspector('network-error', {
+                elementInfo: method.toUpperCase() + ' ' + __summarizeUrl(maskedUrl) + ' ✗ ' + (err && err.message || 'fetch failed'),
+                level: 'error',
+                networkMeta: { reqId, method: method.toUpperCase(), url: maskedUrl, status: 0, durationMs: dur, ok: false, errorMessage: err && err.message }
+              });
+            } catch(e) {}
+            throw err;
+          });
+        };
+      }
+      if (window.XMLHttpRequest && !window.__inspectorXhrHooked) {
+        window.__inspectorXhrHooked = true;
+        const origOpen = XMLHttpRequest.prototype.open;
+        const origSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function(method, url) {
+          try {
+            this.__inspectorReqId = 'xhr_' + (++__netReqSeq) + '_' + Date.now();
+            this.__inspectorMethod = (method || 'GET').toUpperCase();
+            this.__inspectorUrl = __maskUrl(url);
+          } catch(e) {}
+          return origOpen.apply(this, arguments);
+        };
+        XMLHttpRequest.prototype.send = function() {
+          const xhr = this;
+          try {
+            xhr.__inspectorStartedAt = Date.now();
+            sendToInspector('network-request', {
+              elementInfo: xhr.__inspectorMethod + ' ' + __summarizeUrl(xhr.__inspectorUrl),
+              level: null,
+              networkMeta: { reqId: xhr.__inspectorReqId, method: xhr.__inspectorMethod, url: xhr.__inspectorUrl, startedAt: xhr.__inspectorStartedAt }
+            });
+            xhr.addEventListener('loadend', () => {
+              try {
+                const dur = Date.now() - xhr.__inspectorStartedAt;
+                const status = xhr.status || 0;
+                const ok = status >= 200 && status < 400;
+                const label = xhr.__inspectorMethod + ' ' + __summarizeUrl(xhr.__inspectorUrl) + ' → ' + status + ' (' + dur + 'ms)';
+                sendToInspector(ok ? 'network-response' : 'network-error', {
+                  elementInfo: label,
+                  level: ok ? null : 'error',
+                  networkMeta: { reqId: xhr.__inspectorReqId, method: xhr.__inspectorMethod, url: xhr.__inspectorUrl, status, durationMs: dur, ok }
+                });
+              } catch(e) {}
+            });
+          } catch(e) {}
+          return origSend.apply(this, arguments);
+        };
+      }
+    } catch(e) { /* non-critical */ }
+  })();
+
   connectWS();
   setInterval(() => { if (ws && wsReady) try { ws.send(JSON.stringify({ type: 'ping' })); } catch(e) {} }, 25000);
 
@@ -5552,12 +5783,12 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
 '''
 
 # 🆕 Next.js App Router - Client Component برای Bridge Script (WebSocket)
-INSPECTOR_BRIDGE_VERSION = "2.3"  # نسخه فعلی bridge template - افزایش بده هر وقت template تغییر کرد
+INSPECTOR_BRIDGE_VERSION = "2.4"  # نسخه فعلی bridge template - افزایش بده هر وقت template تغییر کرد
 
 INSPECTOR_BRIDGE_CLIENT_COMPONENT = '''// @ts-nocheck
 "use client";
 // 🌉 Inspector Bridge Script - Client Component for Next.js App Router
-// Version: 2.3
+// Version: 2.4
 // ارتباط با Inspector از طریق WebSocket (حل مشکل cross-origin)
 import { useEffect } from "react";
 
@@ -5636,7 +5867,8 @@ export default function InspectorBridge() {
         type: "inspector-bridge-event", action,
         elementInfo: data.elementInfo || "", position: data.position || { xPercent: 50, yPercent: 50 },
         pageUrl: window.location.href, timestamp: Date.now(),
-        level: data.level || null, source: "imported-project"
+        level: data.level || null, source: "imported-project",
+        networkMeta: data.networkMeta || null
       };
       if (ws && wsReady) ws.send(JSON.stringify(message));
       else if (ws) messageQueue.push(message);
@@ -5792,6 +6024,118 @@ export default function InspectorBridge() {
         });
       } catch(e) {}
     }, 2000);
+
+    // 🌐 Network Monitoring (fetch + XHR) — v2.4
+    (function setupNetworkMonitoring() {
+      try {
+        let __netReqSeq = 0;
+        const __maskValue = (v) => {
+          if (!v) return v;
+          const s = String(v);
+          return s.length > 8 ? s.slice(0, 4) + "****" + s.slice(-2) : "****";
+        };
+        const __maskUrl = (url) => {
+          try {
+            const u = new URL(url, window.location.origin);
+            u.searchParams.forEach((val, key) => {
+              const lk = key.toLowerCase();
+              if (lk.indexOf("token") >= 0 || lk.indexOf("key") >= 0 || lk.indexOf("secret") >= 0 || lk.indexOf("password") >= 0) {
+                u.searchParams.set(key, __maskValue(val));
+              }
+            });
+            return u.toString();
+          } catch(e) { return String(url); }
+        };
+        const __summarizeUrl = (url) => {
+          try {
+            const u = new URL(url, window.location.origin);
+            let path = u.pathname;
+            if (path.length > 80) path = path.slice(0, 77) + "...";
+            return u.host + path;
+          } catch(e) { return String(url).slice(0, 100); }
+        };
+        if (typeof window.fetch === "function" && !window.__inspectorFetchHooked) {
+          window.__inspectorFetchHooked = true;
+          const origFetch = window.fetch.bind(window);
+          window.fetch = function(input, init) {
+            const reqId = "fetch_" + (++__netReqSeq) + "_" + Date.now();
+            const url = typeof input === "string" ? input : (input && input.url) || "";
+            const method = (init && init.method) || (input && input.method) || "GET";
+            const maskedUrl = __maskUrl(url);
+            const startedAt = Date.now();
+            try {
+              sendToInspector("network-request", {
+                elementInfo: method.toUpperCase() + " " + __summarizeUrl(maskedUrl),
+                level: null,
+                networkMeta: { reqId, method: method.toUpperCase(), url: maskedUrl, startedAt }
+              });
+            } catch(e) {}
+            return origFetch(input, init).then((res) => {
+              try {
+                const dur = Date.now() - startedAt;
+                const ok = res && res.ok;
+                const status = res ? res.status : 0;
+                const label = method.toUpperCase() + " " + __summarizeUrl(maskedUrl) + " → " + status + " (" + dur + "ms)";
+                sendToInspector(ok ? "network-response" : "network-error", {
+                  elementInfo: label,
+                  level: ok ? null : "error",
+                  networkMeta: { reqId, method: method.toUpperCase(), url: maskedUrl, status, durationMs: dur, ok: !!ok }
+                });
+              } catch(e) {}
+              return res;
+            }).catch((err) => {
+              try {
+                const dur = Date.now() - startedAt;
+                sendToInspector("network-error", {
+                  elementInfo: method.toUpperCase() + " " + __summarizeUrl(maskedUrl) + " ✗ " + (err && err.message || "fetch failed"),
+                  level: "error",
+                  networkMeta: { reqId, method: method.toUpperCase(), url: maskedUrl, status: 0, durationMs: dur, ok: false, errorMessage: err && err.message }
+                });
+              } catch(e) {}
+              throw err;
+            });
+          };
+        }
+        if (window.XMLHttpRequest && !window.__inspectorXhrHooked) {
+          window.__inspectorXhrHooked = true;
+          const origOpen = XMLHttpRequest.prototype.open;
+          const origSend = XMLHttpRequest.prototype.send;
+          XMLHttpRequest.prototype.open = function(method, url) {
+            try {
+              this.__inspectorReqId = "xhr_" + (++__netReqSeq) + "_" + Date.now();
+              this.__inspectorMethod = (method || "GET").toUpperCase();
+              this.__inspectorUrl = __maskUrl(url);
+            } catch(e) {}
+            return origOpen.apply(this, arguments);
+          };
+          XMLHttpRequest.prototype.send = function() {
+            const xhr = this;
+            try {
+              xhr.__inspectorStartedAt = Date.now();
+              sendToInspector("network-request", {
+                elementInfo: xhr.__inspectorMethod + " " + __summarizeUrl(xhr.__inspectorUrl),
+                level: null,
+                networkMeta: { reqId: xhr.__inspectorReqId, method: xhr.__inspectorMethod, url: xhr.__inspectorUrl, startedAt: xhr.__inspectorStartedAt }
+              });
+              xhr.addEventListener("loadend", () => {
+                try {
+                  const dur = Date.now() - xhr.__inspectorStartedAt;
+                  const status = xhr.status || 0;
+                  const ok = status >= 200 && status < 400;
+                  const label = xhr.__inspectorMethod + " " + __summarizeUrl(xhr.__inspectorUrl) + " → " + status + " (" + dur + "ms)";
+                  sendToInspector(ok ? "network-response" : "network-error", {
+                    elementInfo: label,
+                    level: ok ? null : "error",
+                    networkMeta: { reqId: xhr.__inspectorReqId, method: xhr.__inspectorMethod, url: xhr.__inspectorUrl, status, durationMs: dur, ok }
+                  });
+                } catch(e) {}
+              });
+            } catch(e) {}
+            return origSend.apply(this, arguments);
+          };
+        }
+      } catch(e) { /* non-critical */ }
+    })();
 
     connectWS();
     const heartbeat = setInterval(() => { if (ws && wsReady) try { ws.send(JSON.stringify({ type: "ping" })); } catch(e) {} }, 25000);

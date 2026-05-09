@@ -309,7 +309,17 @@ export default function ProjectDetailPage() {
     model_id?: string;
     timestamp: Date;
     tokens_used?: number;
-    action_type?: 'click' | 'type' | 'navigate' | 'edit' | 'read' | 'log' | 'scroll' | 'focus' | 'hover' | 'error' | 'console-error';
+    action_type?: 'click' | 'type' | 'navigate' | 'edit' | 'read' | 'log' | 'scroll' | 'focus' | 'hover' | 'error' | 'console-error' | 'network-request' | 'network-response' | 'network-error';
+    network_meta?: {
+      reqId?: string;
+      method?: string;
+      url?: string;
+      status?: number;
+      durationMs?: number;
+      ok?: boolean;
+      errorMessage?: string;
+      startedAt?: number;
+    } | null;
     backend_verified?: boolean | null;  // null=pending, true=ok, false=error
     backend_log_summary?: string;
     verified_by_model?: string;
@@ -333,7 +343,7 @@ export default function ProjectDetailPage() {
   const [inspectorChatInput, setInspectorChatInput] = useState('');
   const [inspectorChatLoading, setInspectorChatLoading] = useState(false);
   const [inspectorShowModelSelector, setInspectorShowModelSelector] = useState(false);
-  // 🔧 فیلتر انواع اکشن‌ها - همه فعال بجز scroll
+  // 🔧 فیلتر انواع اکشن‌ها - همه فعال بجز scroll و network-request پرسر و صدا
   const [inspectorActionFilters, setInspectorActionFilters] = useState<Record<string, boolean>>({
     'click': true,
     'scroll': false,
@@ -343,6 +353,10 @@ export default function ProjectDetailPage() {
     'error': true,
     'console-error': true,
     'error-overlay': true,
+    // 🌐 Network events — پاسخ‌ها و خطاها به‌صورت پیش‌فرض روشن، شروع درخواست خاموش
+    'network-request': false,
+    'network-response': true,
+    'network-error': true,
   });
   const inspectorActionFiltersRef = useRef<Record<string, boolean>>({
     'click': true,
@@ -353,6 +367,9 @@ export default function ProjectDetailPage() {
     'error': true,
     'console-error': true,
     'error-overlay': true,
+    'network-request': false,
+    'network-response': true,
+    'network-error': true,
   });
 
   // 🛡️ Inspector hardening: dedup + verify retry tracking + console log cap
@@ -967,7 +984,10 @@ export default function ProjectDetailPage() {
     'hover': 'موس بردی روی',
     'error': '🔴 خطای JS',
     'console-error': '🔴 console.error',
-    'error-overlay': '🔴 لایه خطا شناسایی شد'
+    'error-overlay': '🔴 لایه خطا شناسایی شد',
+    'network-request': '🌐 درخواست شبکه',
+    'network-response': '✅ پاسخ شبکه',
+    'network-error': '🔴 خطای شبکه',
   });
 
   const handleBridgeEvent = useCallback((data: any, sourceLabel: string) => {
@@ -979,7 +999,10 @@ export default function ProjectDetailPage() {
     try {
       const evtTs = data.timestamp || Date.now();
       const digestSrc = `${target || ''}|${elementInfo || ''}|${level || ''}`.slice(0, 200);
-      const dedupKey = `${action}:${evtTs}:${digestSrc}`;
+      // برای network events، reqId را در کلید قرار می‌دهیم تا response/error هر
+      // request منحصر به فرد بماند حتی اگر URL یکسان باشد
+      const reqIdPart = (data.networkMeta && data.networkMeta.reqId) ? `:${data.networkMeta.reqId}` : '';
+      const dedupKey = `${action}:${evtTs}:${digestSrc}${reqIdPart}`;
       const seen = inspectorSeenEventsRef.current;
       const lastSeen = seen.get(dedupKey);
       const now = Date.now();
@@ -1049,13 +1072,16 @@ export default function ProjectDetailPage() {
 
     // اضافه کردن به پیام‌های دائمی چت
     const msgId = `action_${sourceLabel}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    // برای network events، content را بدون «روی» می‌سازیم — فقط label + targetInfo
+    const isNetworkEvt = action === 'network-request' || action === 'network-response' || action === 'network-error';
     setInspectorChatMessages(prev => [...prev, {
       id: msgId,
       role: 'action' as const,
-      content: `${actionLabel} روی ${targetInfo}`,
+      content: isNetworkEvt ? `${actionLabel}: ${targetInfo}` : `${actionLabel} روی ${targetInfo}`,
       timestamp: new Date(),
       action_type: action as any,
       backend_verified: null,
+      network_meta: data.networkMeta || null,
     }]);
 
     // ذخیره در DB و verify (از ref استفاده می‌کنیم چون closure ممکنه قدیمی باشه)
@@ -1069,8 +1095,10 @@ export default function ProjectDetailPage() {
             body: JSON.stringify({
               session_id: currentSessionId,
               role: 'action',
-              content: `${actionLabel} روی ${targetInfo}`,
+              content: isNetworkEvt ? `${actionLabel}: ${targetInfo}` : `${actionLabel} روی ${targetInfo}`,
               action_type: action,
+              // 🌐 network_meta — backend که این فیلد را ندارد آن را نادیده می‌گیرد
+              network_meta: data.networkMeta || null,
             })
           });
           const saveData = await saveRes.json();
