@@ -257,6 +257,16 @@ export default function OversightPage() {
     setExecuteStartedAt(null);
     setExecutePromptOverride(null);
     setExecuteIsFollowup(false);
+    // auto-loop cleanup
+    autoLoopActiveRef.current = false;
+    if (autoLoopCountdownTimerRef.current) {
+      clearInterval(autoLoopCountdownTimerRef.current);
+      autoLoopCountdownTimerRef.current = null;
+    }
+    setAutoLoopEnabled(false);
+    setAutoLoopRound(0);
+    setAutoLoopStatus('idle');
+    setAutoLoopCountdown(0);
   }, []);
 
   const loadExternalTasks = useCallback(async (projectId?: string) => {
@@ -385,6 +395,18 @@ export default function OversightPage() {
   // به smart-chat می‌فرستیم. این state بدون ذخیرهٔ دائمی روی task است.
   const [executePromptOverride, setExecutePromptOverride] = useState<string | null>(null);
   const [executeIsFollowup, setExecuteIsFollowup] = useState(false);
+
+  // 🔁 Auto-loop state — اگر فعال باشد، پس از done در apply-action، خودکار
+  // verify می‌کند، اگر partial بود، followup را از backend می‌گیرد و دور
+  // بعدی را trigger می‌کند تا 5 دور یا تأیید نهایی.
+  const [autoLoopEnabled, setAutoLoopEnabled] = useState(false);
+  const [autoLoopRound, setAutoLoopRound] = useState(0);
+  const AUTO_LOOP_MAX_ROUNDS = 5;
+  const AUTO_LOOP_VERIFY_DELAY_MS = 30000;
+  const [autoLoopStatus, setAutoLoopStatus] = useState<'idle' | 'waiting_verify' | 'verifying' | 'next_round' | 'finished' | 'cancelled'>('idle');
+  const [autoLoopCountdown, setAutoLoopCountdown] = useState<number>(0);
+  const autoLoopActiveRef = useRef(false);
+  const autoLoopCountdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // فاز ۲: smart-chat برای تولید action_plan
   const startSmartChat = useCallback(async (task: any, projectId: string) => {
@@ -645,12 +667,166 @@ export default function OversightPage() {
       }
 
       setExecuteStage('done');
+
+      // 🔁 Auto-loop: اگر فعال است و به max نرسیدیم، شروع countdown verify
+      if (autoLoopActiveRef.current && autoLoopRound < AUTO_LOOP_MAX_ROUNDS) {
+        scheduleAutoLoopVerify();
+      }
     } catch (e: any) {
       setExecuteError(e?.message || 'خطای ناشناخته در apply-action');
       setExecuteStage('error');
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [executeModalTask, executeProjectInfo, executeActionPlan, selectedModelIds, consumeSSEStream]);
+  }, [executeModalTask, executeProjectInfo, executeActionPlan, selectedModelIds, consumeSSEStream, autoLoopRound]);
+
+  // ===== Auto-loop helpers =====
+
+  const cancelAutoLoop = useCallback(() => {
+    autoLoopActiveRef.current = false;
+    setAutoLoopEnabled(false);
+    setAutoLoopStatus('cancelled');
+    setAutoLoopCountdown(0);
+    if (autoLoopCountdownTimerRef.current) {
+      clearInterval(autoLoopCountdownTimerRef.current);
+      autoLoopCountdownTimerRef.current = null;
+    }
+    setExecuteProgress(prev => [...prev, '🛑 auto-loop توسط کاربر متوقف شد']);
+  }, []);
+
+  // پس از done، 30 ثانیه صبر، سپس verify
+  const scheduleAutoLoopVerify = useCallback(() => {
+    if (!autoLoopActiveRef.current) return;
+    setAutoLoopStatus('waiting_verify');
+    setAutoLoopCountdown(Math.floor(AUTO_LOOP_VERIFY_DELAY_MS / 1000));
+    setExecuteProgress(prev => [...prev, `⏱ ${AUTO_LOOP_VERIFY_DELAY_MS / 1000} ثانیه صبر برای verify...`]);
+    if (autoLoopCountdownTimerRef.current) clearInterval(autoLoopCountdownTimerRef.current);
+    autoLoopCountdownTimerRef.current = setInterval(() => {
+      setAutoLoopCountdown(prev => {
+        if (prev <= 1) {
+          if (autoLoopCountdownTimerRef.current) {
+            clearInterval(autoLoopCountdownTimerRef.current);
+            autoLoopCountdownTimerRef.current = null;
+          }
+          // ⚠️ trigger verify در next tick — درون setState callback نمی‌توانیم
+          setTimeout(() => runAutoLoopVerify(), 0);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const runAutoLoopVerify = useCallback(async () => {
+    if (!autoLoopActiveRef.current || !executeModalTask) return;
+    setAutoLoopStatus('verifying');
+    setExecuteProgress(prev => [...prev, '🔍 verify در حال اجرا...']);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/oversight/tasks/${encodeURIComponent(executeModalTask.id)}/verify-now`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) },
+      );
+      if (!res.ok) {
+        throw new Error(`verify-now HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const status = data?.report?.status || data?.task?.verification_status || 'unknown';
+      const final = !!data?.final;
+      setExecuteProgress(prev => [...prev, `🔍 verify: status=${status}${final ? ' (تأیید نهایی)' : ''}`]);
+
+      if (final || status === 'done') {
+        setAutoLoopStatus('finished');
+        setExecuteProgress(prev => [...prev, '✅ auto-loop به تأیید نهایی رسید']);
+        autoLoopActiveRef.current = false;
+        return;
+      }
+
+      // status partial/not_done/regressed → followup
+      const updatedTask = data?.task;
+      const followup = updatedTask?.followup_prompt;
+      if (!followup || followup.length < 50) {
+        setExecuteProgress(prev => [...prev, '⚠️ followup prompt تولید نشد — auto-loop متوقف']);
+        autoLoopActiveRef.current = false;
+        setAutoLoopStatus('cancelled');
+        return;
+      }
+
+      const nextRound = autoLoopRound + 1;
+      if (nextRound >= AUTO_LOOP_MAX_ROUNDS) {
+        setExecuteProgress(prev => [...prev, `⚠️ به max ${AUTO_LOOP_MAX_ROUNDS} دور رسیدیم — دستی ادامه دهید`]);
+        autoLoopActiveRef.current = false;
+        setAutoLoopStatus('cancelled');
+        // مدل را در حالت 'done' نگه می‌داریم تا کاربر دکمه‌های بعدی را ببیند
+        return;
+      }
+
+      // شروع دور بعدی
+      setAutoLoopRound(nextRound);
+      setAutoLoopStatus('next_round');
+      setExecuteProgress(prev => [...prev, `🚀 شروع دور ${nextRound + 1}: استفاده از followup_prompt`]);
+
+      // reset modal state برای دور جدید (ولی autoLoop خاموش نمی‌شود)
+      setExecuteActionPlan(null);
+      setExecutePrUrl(null);
+      setExecutePrBranch(null);
+      setExecuteFilesCommitted([]);
+      setExecuteError(null);
+      setExecutePromptOverride(followup);
+      setExecuteIsFollowup(true);
+      // شروع دوباره — resolve از قبل انجام شده، مستقیم برو smart-chat
+      setExecuteStage('planning');
+      try {
+        if (executeProjectInfo?.project_id) {
+          await startSmartChat(updatedTask, executeProjectInfo.project_id);
+          // اگر action_plan تولید شد، خودکار confirmAndApply را trigger می‌کنیم
+          // (در غیر این صورت user دستی preview را تأیید می‌کند)
+          // در اینجا فقط منتظر می‌مانیم — startSmartChat تنظیم state می‌کند
+          // به stage='preview' که modal preview را نشان می‌دهد
+          // — auto-loop می‌خواهد خودکار باشد، پس بعد از رسیدن به preview،
+          //   خودش confirmAndApply را call می‌کنیم
+          // (این در useEffect جداگانه handle می‌شود — پایین‌تر)
+        } else {
+          throw new Error('project_id برای دور بعدی موجود نیست');
+        }
+      } catch (e: any) {
+        setExecuteError(e?.message || 'خطا در شروع دور بعدی');
+        setExecuteStage('error');
+        autoLoopActiveRef.current = false;
+        setAutoLoopStatus('cancelled');
+      }
+    } catch (e: any) {
+      setExecuteProgress(prev => [...prev, `⚠️ verify ناموفق: ${e?.message}`]);
+      autoLoopActiveRef.current = false;
+      setAutoLoopStatus('cancelled');
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [executeModalTask, executeProjectInfo, autoLoopRound, startSmartChat]);
+
+  // skip countdown — verify الان
+  const skipCountdownAndVerify = useCallback(() => {
+    if (autoLoopCountdownTimerRef.current) {
+      clearInterval(autoLoopCountdownTimerRef.current);
+      autoLoopCountdownTimerRef.current = null;
+    }
+    setAutoLoopCountdown(0);
+    runAutoLoopVerify();
+  }, [runAutoLoopVerify]);
+
+  // ⚙️ هنگامی که auto-loop فعال است و stage='preview' (یعنی smart-chat
+  // در دور جدید action_plan تولید کرد)، خودکار confirmAndApply را trigger
+  // می‌کنیم تا چرخه ادامه پیدا کند بدون دخالت کاربر.
+  useEffect(() => {
+    if (autoLoopActiveRef.current && executeStage === 'preview' && executeActionPlan && autoLoopRound > 0) {
+      setExecuteProgress(prev => [...prev, `🤖 auto-loop: تأیید خودکار preview دور ${autoLoopRound + 1}...`]);
+      // فاصلهٔ کوتاه برای جلوگیری از race
+      setTimeout(() => {
+        if (autoLoopActiveRef.current) {
+          confirmAndApply();
+        }
+      }, 500);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [executeStage, executeActionPlan, autoLoopRound]);
 
   const [repos, setRepos] = useState<Repo[]>([]);
   const [reposSyncedAt, setReposSyncedAt] = useState<string | null>(null);
@@ -2302,6 +2478,72 @@ export default function OversightPage() {
               {executeStage === 'error' && executeError && (
                 <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-lg p-3 text-sm text-red-800 dark:text-red-200">
                   ❌ {executeError}
+                </div>
+              )}
+
+              {/* 🔁 Auto-loop checkbox — فقط در preview، فقط در دور اول */}
+              {executeStage === 'preview' && autoLoopRound === 0 && (
+                <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/40 rounded-lg p-3">
+                  <label className="flex items-start gap-2 cursor-pointer text-sm">
+                    <input
+                      type="checkbox"
+                      checked={autoLoopEnabled}
+                      onChange={(e) => {
+                        setAutoLoopEnabled(e.target.checked);
+                        autoLoopActiveRef.current = e.target.checked;
+                      }}
+                      className="mt-0.5"
+                    />
+                    <div className="flex-1">
+                      <div className="font-medium text-blue-800 dark:text-blue-200">
+                        🔁 اجرای خودکار تا تأیید نهایی (تا {AUTO_LOOP_MAX_ROUNDS} دور)
+                      </div>
+                      <div className="text-xs text-blue-700 dark:text-blue-300 mt-1">
+                        پس از هر apply-action، {AUTO_LOOP_VERIFY_DELAY_MS / 1000} ثانیه صبر، verify خودکار،
+                        و اگر done نبود، followup_prompt را از backend می‌گیرد و دور بعدی را trigger می‌کند.
+                        می‌توانید هر زمان لغو کنید.
+                      </div>
+                    </div>
+                  </label>
+                </div>
+              )}
+
+              {/* 🔁 Auto-loop status — در حال countdown یا verify */}
+              {(autoLoopStatus === 'waiting_verify' || autoLoopStatus === 'verifying' || autoLoopStatus === 'next_round') && (
+                <div className="bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800/40 rounded-lg p-3 flex items-center gap-3">
+                  <div className="text-purple-700 dark:text-purple-300 font-medium text-sm flex-1">
+                    {autoLoopStatus === 'waiting_verify' && (
+                      <>⏱ auto-loop دور {autoLoopRound + 1}: verify در {autoLoopCountdown} ثانیه...</>
+                    )}
+                    {autoLoopStatus === 'verifying' && <>🔍 auto-loop: در حال verify...</>}
+                    {autoLoopStatus === 'next_round' && <>🚀 auto-loop: شروع دور {autoLoopRound + 1}...</>}
+                  </div>
+                  {autoLoopStatus === 'waiting_verify' && (
+                    <button
+                      onClick={skipCountdownAndVerify}
+                      className="px-3 py-1 bg-purple-600 text-white rounded text-xs hover:bg-purple-700"
+                    >
+                      ⏭ verify الان
+                    </button>
+                  )}
+                  <button
+                    onClick={cancelAutoLoop}
+                    className="px-3 py-1 bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300 rounded text-xs hover:bg-red-200"
+                  >
+                    🛑 توقف auto-loop
+                  </button>
+                </div>
+              )}
+
+              {/* 🔁 Auto-loop finished/cancelled */}
+              {autoLoopStatus === 'finished' && (
+                <div className="bg-green-50 dark:bg-green-900/20 border border-green-300 dark:border-green-700 rounded-lg p-3 text-sm text-green-800 dark:text-green-200">
+                  ✅ auto-loop به تأیید نهایی رسید (پس از {autoLoopRound + 1} دور)
+                </div>
+              )}
+              {autoLoopStatus === 'cancelled' && autoLoopRound >= AUTO_LOOP_MAX_ROUNDS && (
+                <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded-lg p-3 text-sm text-amber-800 dark:text-amber-200">
+                  ⚠️ به max {AUTO_LOOP_MAX_ROUNDS} دور رسیدیم. روی کارت تسک، دکمه‌های پرامپت بعدی را برای ادامهٔ دستی ببینید.
                 </div>
               )}
 
