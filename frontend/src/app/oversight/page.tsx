@@ -180,10 +180,16 @@ type RepoSort = 'pushed_desc' | 'pushed_asc' | 'name' | 'stars';
 
 export default function OversightPage() {
   const [tab, setTab] = useState<'watched' | 'repos' | 'ideas' | 'tasks' | 'reports' | 'project_tasks' | 'health'>('watched');
+  // 🆕 (consolidation) ساب‌تب درون تب «تسک‌ها» — جایگزین تب‌های جداگانهٔ
+  // tasks و project_tasks. مقدار 'oversight' = تسک‌های Oversight بومی،
+  // 'project_local' = تسک‌های پروژه‌های محلی (project_tasks سابق)
+  const [tasksSubTab, setTasksSubTab] = useState<'oversight' | 'project_local'>('oversight');
 
   // 🆕 تب «🏥 سلامت پروژه» — مهاجرت از Health analysis در /projects
   type HealthSubTab = 'overview' | 'files' | 'security' | 'coverage' | 'validation' | 'docs';
+  type HealthGroup = 'metrics' | 'docs' | 'pipeline';
   const [selectedHealthWatchedId, setSelectedHealthWatchedId] = useState<string>('');
+  const [healthGroup, setHealthGroup] = useState<HealthGroup>('metrics');
   const [healthSubTab, setHealthSubTab] = useState<HealthSubTab>('overview');
   const [healthSummaries, setHealthSummaries] = useState<{
     pass_summaries?: {
@@ -2009,8 +2015,7 @@ export default function OversightPage() {
               { id: 'watched', label: 'تحت نظارت', icon: '👁️', count: watched.length },
               { id: 'repos', label: 'مخازن GitHub', icon: '📦', count: repos.length },
               { id: 'ideas', label: 'ایده/مشکل', icon: '💡', count: 0 },
-              { id: 'tasks', label: 'تسک‌ها', icon: '📋', count: tasks.length },
-              { id: 'project_tasks', label: 'تسک‌های پروژه‌ها', icon: '🔗', count: externalTasks.length },
+              { id: 'tasks', label: `تسک‌ها (${tasks.length} + ${externalTasks.length})`, icon: '📋', count: tasks.length + externalTasks.length },
               { id: 'health', label: 'سلامت پروژه', icon: '🏥', count: 0 },
               { id: 'reports', label: 'گزارش‌ها', icon: '📊', count: reports.length },
             ] as const
@@ -2397,7 +2402,35 @@ export default function OversightPage() {
             )}
           </div>
         ) : tab === 'tasks' ? (
-          <TasksPanel
+          // 🆕 (consolidation) درون تب «تسک‌ها»، sub-tab selector برای انتخاب
+          // بین tasks بومی Oversight و tasks پروژه‌های محلی (project_local)
+          <div>
+            <div className="flex gap-2 mb-4 bg-gray-100 dark:bg-gray-800 p-2 rounded-lg">
+              <button
+                onClick={() => setTasksSubTab('oversight')}
+                className={`flex-1 px-4 py-2 rounded-md text-sm transition ${
+                  tasksSubTab === 'oversight'
+                    ? 'bg-purple-600 text-white shadow'
+                    : 'text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'
+                }`}
+                title="تسک‌هایی که در /oversight ساخته شده‌اند (از ایده، scan، یا دستی) — کنترل کامل: اجرا، verify، follow-up"
+              >
+                📋 تسک‌های Oversight ({tasks.length})
+              </button>
+              <button
+                onClick={() => setTasksSubTab('project_local')}
+                className={`flex-1 px-4 py-2 rounded-md text-sm transition ${
+                  tasksSubTab === 'project_local'
+                    ? 'bg-cyan-600 text-white shadow'
+                    : 'text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'
+                }`}
+                title="dynamic_field های پروژه‌های /projects با action_type='github_commit' — فقط نمایش + verify (read-only). منبع اصلی در /projects است."
+              >
+                🔗 تسک‌های پروژه‌های محلی ({externalTasks.length})
+              </button>
+            </div>
+            {tasksSubTab === 'oversight' ? (
+              <TasksPanel
             tasks={tasks}
             filteredTasks={filteredTasks}
             watched={watched}
@@ -2430,8 +2463,10 @@ export default function OversightPage() {
             executeDisabledReason={selectedModelIds.length === 0 ? 'حداقل یک مدل انتخاب کنید' : ''}
             fmtDate={fmtDate}
           />
-        ) : tab === 'project_tasks' ? (
-          // ─── 🔗 تب «تسک‌های پروژه‌ها» — bridge با /projects ───
+            ) : (
+          // ─── 🔗 ساب‌تب «تسک‌های پروژه‌های محلی» — bridge با /projects ───
+          // (قبلاً تب جداگانه‌ای بود؛ در commit consolidation به ساب‌تب
+          // درون تب «تسک‌ها» تبدیل شد. کارکرد read-only + verify بدون تغییر.)
           <div>
             <div className="flex items-center justify-between mb-4 pb-3 border-b dark:border-gray-700">
               <div>
@@ -2580,6 +2615,8 @@ export default function OversightPage() {
               </div>
             )}
           </div>
+            )}
+          </div>
         ) : tab === 'health' ? (
           // ─── 🏥 تب سلامت پروژه (مهاجرت از Health analysis) ───
           <div>
@@ -2628,29 +2665,53 @@ export default function OversightPage() {
               </div>
             ) : (
               <>
-                {/* Sub-tabs */}
-                <div className="flex gap-2 mb-4 flex-wrap border-b dark:border-gray-700 pb-2">
+                {/* Group selector — سطح اول */}
+                <div className="flex gap-2 mb-3 flex-wrap">
                   {([
-                    { id: 'overview', label: 'مرور کلی', icon: '📊' },
-                    { id: 'files', label: 'نقشهٔ سلامت فایل‌ها', icon: '🗺️' },
-                    { id: 'security', label: 'امنیت', icon: '🔒' },
-                    { id: 'coverage', label: 'پوشش تست', icon: '🧪' },
-                    { id: 'docs', label: 'Roadmap & README', icon: '📋' },
-                    { id: 'validation', label: 'Chain Status', icon: '⛓️' },
-                  ] as const).map(st => (
+                    { id: 'metrics', label: 'سنجه‌ها', icon: '📊', defaultSub: 'overview' as HealthSubTab },
+                    { id: 'docs', label: 'مستندات', icon: '📋', defaultSub: 'docs' as HealthSubTab },
+                    { id: 'pipeline', label: 'Pipeline', icon: '⛓️', defaultSub: 'validation' as HealthSubTab },
+                  ] as const).map(g => (
                     <button
-                      key={st.id}
-                      onClick={() => setHealthSubTab(st.id as HealthSubTab)}
-                      className={`px-3 py-1.5 rounded-lg text-sm transition ${
-                        healthSubTab === st.id
-                          ? 'bg-cyan-600 text-white'
+                      key={g.id}
+                      onClick={() => {
+                        setHealthGroup(g.id as HealthGroup);
+                        setHealthSubTab(g.defaultSub);
+                      }}
+                      className={`px-4 py-2 rounded-lg text-sm font-semibold transition ${
+                        healthGroup === g.id
+                          ? 'bg-cyan-600 text-white shadow'
                           : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600'
                       }`}
                     >
-                      {st.icon} {st.label}
+                      {g.icon} {g.label}
                     </button>
                   ))}
                 </div>
+
+                {/* Sub-tabs — سطح دوم (فقط برای Metrics چندتایی است) */}
+                {healthGroup === 'metrics' && (
+                  <div className="flex gap-2 mb-4 flex-wrap border-b dark:border-gray-700 pb-2">
+                    {([
+                      { id: 'overview', label: 'مرور کلی', icon: '📊' },
+                      { id: 'files', label: 'نقشهٔ سلامت فایل‌ها', icon: '🗺️' },
+                      { id: 'security', label: 'امنیت', icon: '🔒' },
+                      { id: 'coverage', label: 'پوشش تست', icon: '🧪' },
+                    ] as const).map(st => (
+                      <button
+                        key={st.id}
+                        onClick={() => setHealthSubTab(st.id as HealthSubTab)}
+                        className={`px-3 py-1.5 rounded-lg text-sm transition ${
+                          healthSubTab === st.id
+                            ? 'bg-cyan-500 text-white'
+                            : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600'
+                        }`}
+                      >
+                        {st.icon} {st.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
 
                 {/* Sub-tab: overview */}
                 {healthSubTab === 'overview' && (
