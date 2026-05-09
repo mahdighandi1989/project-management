@@ -572,6 +572,30 @@ async def scan_progress(watched_id: str):
     return read_progress(watched_id)
 
 
+@router.get("/scan/{watched_id}/summaries")
+async def scan_summaries(watched_id: str):
+    """خواندن خلاصه‌های ساختاریافته از آخرین deep scan.
+
+    شامل: security_summary (از Pass I) + coverage_summary (از Pass J — بعداً)
+    + هر summary ساختاریافته دیگری که passes تخصصی تولید کرده‌اند.
+
+    این endpoint برای UI تب «🏥 سلامت پروژه» در /oversight استفاده می‌شود
+    تا metrics را بدون reparse کردن کل findings نمایش دهد.
+    """
+    from ...services.oversight_deep_scan_service import SCAN_RESULTS_DIR
+    from ...services.oversight_service import _read_json
+
+    data = _read_json(SCAN_RESULTS_DIR / f"{watched_id}.json", {}) or {}
+    return {
+        "watched_id": watched_id,
+        "ran_at": data.get("ran_at", ""),
+        "passes_run": data.get("passes_run", 0),
+        "pass_summaries": data.get("pass_summaries", {}),
+        "findings_count": len(data.get("findings") or []),
+        "tasks_created_count": len(data.get("tasks_created") or []),
+    }
+
+
 # ============================================================
 # Codex
 # ============================================================

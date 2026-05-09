@@ -398,6 +398,9 @@ PASSES = [
     ("quality", "کیفیت کد و dead code"),
     ("dependency", "ناسازگاری‌های runtime و dependency"),
     ("completeness", "کامل بودن نسبت به هدف کاربر"),
+    # 🆕 Pass I — اسکن امنیتی عمیق با خروجی ساختاریافته
+    # (مهاجرت از /projects/[id]/health/security)
+    ("security_deep", "اسکن امنیتی عمیق: secrets + license + dependencies"),
 ]
 
 
@@ -493,6 +496,52 @@ Stack تشخیص داده شده: {', '.join(stacks) or '(نامشخص)'}
 - آیا تمام بخش‌های لازم برای رسیدن به «هدف اصلی پروژه» پیاده شده‌اند؟
 - فیچرهای half-done که شروع شده ولی تمام نشده‌اند
 - placeholderها، mock dataهای جامانده، endpointهایی که فقط dummy response برمی‌گردانند
+""",
+        "security_deep": """
+فاز فعلی: **I — اسکن امنیتی عمیق (مهاجرت از Health analysis)**
+
+این pass تخصصی‌تر از pass D (security) است — علاوه بر findings عادی،
+یک خلاصهٔ ساختاریافته با شمارش دقیق هم برمی‌گرداند.
+
+تمرکز:
+- **Hardcoded secrets**: API keys, tokens, passwords, JWT secrets,
+  database URLs با password، AWS/GCP credentials
+  مثال‌های الگو: AKIA[0-9A-Z]{16}، sk_live_..., ghp_..., bearer tokens
+- **Sensitive files**: .env, .env.local, credentials.json, .pem, .key,
+  service-account*.json, secrets.yml, htpasswd
+- **License**: آیا LICENSE موجود است؟ سازگار با dependencies؟
+  مثلاً GPL در پروژه‌ای که می‌خواهد commercial باشد؟
+- **Vulnerable dependencies**: نسخه‌های قدیمی شناخته‌شده با CVE
+  (lodash <4.17.21, log4j <2.17, ...)
+- **CORS/Auth**: endpoint بدون auth، CORS=`*` در production،
+  cookie بدون Secure/HttpOnly
+- **Input validation**: SQL injection patterns، XSS، command injection
+
+# خروجی JSON اضافی (علاوه بر findings عادی)
+علاوه بر `findings[]`، یک کلید جدید `security_summary` هم برگردان:
+
+{
+  "findings": [...],
+  "security_summary": {
+    "secrets_count": 0,
+    "secrets_files": ["path/to/file.py:line"],
+    "license_status": "ok | missing | conflicting | unknown",
+    "license_name": "MIT | Apache-2.0 | ...",
+    "vulnerable_deps_count": 0,
+    "vulnerable_deps": [{"name": "lodash", "version": "4.0.0", "cve": "CVE-...", "severity": "high"}],
+    "sensitive_files_count": 0,
+    "sensitive_files": [".env", "credentials.json"],
+    "cors_open": false,
+    "endpoints_without_auth_count": 0,
+    "overall_security_score": 85
+  }
+}
+
+`overall_security_score` 0-100 بر اساس فرمول وزن‌دار:
+- 100 شروع، -20 برای هر secret، -10 برای هر vuln dep critical،
+  -5 برای هر sensitive file بدون gitignore، -15 اگر license missing،
+  -10 برای CORS باز.
+حداقل 0.
 """,
     }
 
@@ -961,6 +1010,10 @@ async def run_deep_scan(
         all_findings: List[Dict[str, Any]] = []
         passes_done = 0
         critical_count = 0
+        # 🆕 خلاصه‌های ساختاریافته از هر pass (مثلاً security_summary از
+        # security_deep، coverage_summary از coverage). در structure scan
+        # ذخیره می‌شوند تا UI /oversight بدون reparse findings نمایش دهد.
+        pass_summaries: Dict[str, Any] = {}
 
         for pass_id, pass_label in PASSES:
             if pass_id not in enabled:
@@ -992,6 +1045,11 @@ async def run_deep_scan(
                     if f.get("priority") == "critical":
                         critical_count += 1
                 all_findings.extend(findings)
+                # 🆕 ذخیرهٔ summaries ساختاریافته از هر pass (security_summary,
+                # coverage_summary, ...) — برای UI بدون reparsing findings
+                for sum_key in ("security_summary", "coverage_summary"):
+                    if isinstance(parsed.get(sum_key), dict):
+                        pass_summaries[sum_key] = parsed[sum_key]
                 write_progress(
                     watched_id,
                     findings_count=len(all_findings),
@@ -1132,6 +1190,9 @@ async def run_deep_scan(
                     "passes_run": passes_done,
                     "findings": unique,
                     "tasks_created": [t["id"] for t in created_tasks],
+                    # 🆕 خلاصه‌های ساختاریافته از passes تخصصی
+                    # (security_summary, coverage_summary, ...) برای UI
+                    "pass_summaries": pass_summaries,
                 },
             )
         except Exception:
