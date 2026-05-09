@@ -3,10 +3,113 @@ Strong Prompt Builder
 =====================
 سازندهٔ template پرامپت اجرایی فوق‌العاده دقیق برای تسک‌های oversight.
 این template در همهٔ مسیرها (scan، idea_to_prompt، deep scan، ...) استفاده می‌شود.
+
+ساختار خروجی:
+  🎯 هدف
+  📍 موقعیت دقیق در پروژه (با file:line و snippet)
+  🧭 هدف اصلی پروژه (یادداشت کاربر)
+  🧱 پشتهٔ فناوری و معماری
+  🔗 فایل‌های مرتبط (cross-references)
+  🌐 نقشهٔ وابستگی‌ها
+  🔍 Context و وضعیت فعلی
+  ✅ معیار پذیرش (Acceptance Criteria)
+  🪜 مراحل اجرایی پیشنهادی
+  💡 نمونه‌های قبل/بعد (اختیاری)
+  📤 خروجی مورد انتظار
+  🧪 دستورات اعتبارسنجی
+  ⚠️ ریسک‌ها و موارد احتیاط
+  🔗 وابستگی‌های تسکی
+  🏷 دسته‌بندی
 """
 
 from __future__ import annotations
-from typing import List, Optional
+from typing import List, Optional, Dict, Any, Union
+
+
+def _normalize_locations(
+    target_locations: Optional[List[Union[Dict[str, Any], str]]],
+    legacy_target_files: Optional[List[str]],
+) -> List[Dict[str, Any]]:
+    """ادغام target_locations جدید (dict) و target_files قدیمی (str) به ساختار یکسان."""
+    out: List[Dict[str, Any]] = []
+    if target_locations:
+        for item in target_locations:
+            if isinstance(item, str):
+                out.append({"path": item})
+            elif isinstance(item, dict) and item.get("path"):
+                out.append({k: v for k, v in item.items() if v not in (None, "")})
+    if legacy_target_files:
+        existing = {o.get("path") for o in out}
+        for p in legacy_target_files:
+            if p and p not in existing:
+                out.append({"path": p})
+    return out
+
+
+def _format_location(loc: Dict[str, Any]) -> str:
+    """فرمت یک ردیف موقعیت با مسیر:خط، نام تابع/کلاس، و snippet کد."""
+    path = (loc.get("path") or "").strip()
+    if not path:
+        return ""
+    lines = (loc.get("lines") or loc.get("line_range") or "").strip()
+    line_start = loc.get("line_start")
+    line_end = loc.get("line_end")
+    if not lines and line_start:
+        lines = str(line_start) + (f"-{line_end}" if line_end and line_end != line_start else "")
+    symbol = (loc.get("symbol") or loc.get("function") or loc.get("class") or "").strip()
+    snippet = (loc.get("snippet") or loc.get("code_snippet") or "").strip()
+    note = (loc.get("note") or loc.get("reason") or "").strip()
+
+    label = f"`{path}"
+    if lines:
+        label += f":{lines}"
+    label += "`"
+    if symbol:
+        label += f" — `{symbol}`"
+    if note:
+        label += f" — {note}"
+
+    out = f"- {label}"
+    if snippet:
+        # detect language for fence
+        lang = ""
+        low = path.lower()
+        if low.endswith((".ts", ".tsx")):
+            lang = "tsx"
+        elif low.endswith(".js") or low.endswith(".jsx"):
+            lang = "jsx"
+        elif low.endswith(".py"):
+            lang = "python"
+        elif low.endswith((".json",)):
+            lang = "json"
+        elif low.endswith((".sql",)):
+            lang = "sql"
+        elif low.endswith((".md",)):
+            lang = "markdown"
+        out += f"\n  ```{lang}\n  " + snippet.replace("\n", "\n  ") + "\n  ```"
+    return out
+
+
+def _format_related_files(related: List[Dict[str, Any]]) -> str:
+    """فرمت لیست فایل‌های مرتبط با ذکر دلیل (imports / imported_by / calls / shares_state)."""
+    lines: List[str] = []
+    for r in related:
+        if isinstance(r, str):
+            lines.append(f"- `{r}`")
+            continue
+        path = (r.get("path") or "").strip()
+        if not path:
+            continue
+        reason = (r.get("reason") or r.get("relation") or "").strip()
+        ref_line = (r.get("at_line") or r.get("line") or "").strip() if isinstance(r.get("at_line") or r.get("line"), str) else r.get("at_line") or r.get("line")
+        suffix = ""
+        if ref_line:
+            suffix += f" (سطر {ref_line})"
+        if reason:
+            lines.append(f"- `{path}`{suffix} — {reason}")
+        else:
+            lines.append(f"- `{path}`{suffix}")
+    return "\n".join(lines)
 
 
 def build_strong_prompt(
@@ -17,8 +120,14 @@ def build_strong_prompt(
     proposed_action: str = "",
     context_snippet: str = "",
     target_files: Optional[List[str]] = None,
+    target_locations: Optional[List[Union[Dict[str, Any], str]]] = None,
+    related_files: Optional[List[Union[Dict[str, Any], str]]] = None,
+    dependency_summary: str = "",
+    tech_context: str = "",
+    before_after_examples: Optional[List[Dict[str, str]]] = None,
     acceptance_criteria: Optional[List[str]] = None,
     steps: Optional[List[str]] = None,
+    validation_commands: Optional[List[str]] = None,
     expected_output: str = "",
     risks: str = "",
     dependencies: Optional[List[str]] = None,
@@ -26,22 +135,43 @@ def build_strong_prompt(
     priority: str = "medium",
     estimate: str = "medium",
 ) -> str:
-    """ساخت پرامپت اجرایی با ساختار استاندارد."""
+    """ساخت پرامپت اجرایی با ساختار استاندارد و عمق بالا برای ابزارهای کدنویس خارجی.
+
+    پارامترهای کلیدی:
+    - target_locations: لیست dictهای {"path","lines","line_start","line_end","symbol","snippet","note"}
+      جایگزین قوی‌تر برای target_files (که فقط مسیر می‌گیرد).
+    - related_files: لیست dictهای {"path","reason","at_line"} — برای راهنمایی به فایل‌های اطراف
+      که این تسک با آنها در ارتباط است (importها، callerها، state share).
+    - dependency_summary: متن کوتاه دربارهٔ نقش این بخش در نقشهٔ وابستگی‌های پروژه.
+    - tech_context: پشتهٔ فناوری/معماری مرتبط (مثل "Next.js 14 App Router + FastAPI + SQLAlchemy").
+    - before_after_examples: لیست {"label","before","after"} — نمونه قبل/بعد کد.
+    - validation_commands: دستورات shell که برای verify باید موفق اجرا شوند.
+    """
     target_files = target_files or []
     acceptance_criteria = acceptance_criteria or []
     steps = steps or []
     dependencies = dependencies or []
+    validation_commands = validation_commands or []
+    before_after_examples = before_after_examples or []
+
+    locations = _normalize_locations(target_locations, target_files)
 
     parts: List[str] = []
 
     parts.append(f"## 🎯 هدف\n{title.strip()}")
 
-    if target_files:
-        loc_lines = "\n".join(f"- `{p}`" for p in target_files if p)
-        parts.append(f"## 📍 موقعیت در پروژه\n{loc_lines}")
+    # === موقعیت دقیق ===
+    if locations:
+        loc_lines = "\n".join(_format_location(l) for l in locations if l.get("path"))
+        parts.append(
+            "## 📍 موقعیت دقیق در پروژه\n"
+            "_(file:line — symbol — snippet)_\n\n"
+            f"{loc_lines}"
+        )
     else:
         parts.append(
-            "## 📍 موقعیت در پروژه\n_(فایل‌های دقیق هنگام اجرا شناسایی شوند)_"
+            "## 📍 موقعیت دقیق در پروژه\n"
+            "_(فایل‌های دقیق توسط مجری شناسایی شوند — هیچ موقعیت مشخصی استخراج نشد)_"
         )
 
     parts.append(
@@ -49,6 +179,28 @@ def build_strong_prompt(
         f"{(user_goal or '(کاربر یادداشتی ثبت نکرده است)').strip()}"
     )
 
+    if tech_context:
+        parts.append(f"## 🧱 پشتهٔ فناوری و معماری\n{tech_context.strip()}")
+
+    # === فایل‌های مرتبط (cross-references) ===
+    related_norm: List[Dict[str, Any]] = []
+    if related_files:
+        for r in related_files:
+            if isinstance(r, str):
+                related_norm.append({"path": r})
+            elif isinstance(r, dict):
+                related_norm.append(r)
+    if related_norm:
+        parts.append(
+            "## 🔗 فایل‌های مرتبط (Cross-references)\n"
+            "_(فایل‌هایی که با موقعیت‌های هدف در ارتباط هستند — import، caller، shared state)_\n\n"
+            f"{_format_related_files(related_norm)}"
+        )
+
+    if dependency_summary:
+        parts.append(f"## 🌐 نقشهٔ وابستگی‌ها\n{dependency_summary.strip()}")
+
+    # === Context ===
     ctx_block = description.strip()
     if context_snippet:
         ctx_block = f"{ctx_block}\n\n```\n{context_snippet.strip()}\n```"
@@ -56,6 +208,7 @@ def build_strong_prompt(
         f"## 🔍 Context و وضعیت فعلی\n{ctx_block or '_(وضعیت فعلی توسط مجری بررسی شود)_'}"
     )
 
+    # === Acceptance criteria ===
     ac_lines: List[str] = []
     for c in acceptance_criteria:
         c = c.strip()
@@ -71,6 +224,7 @@ def build_strong_prompt(
             ac_lines.append(s)
     parts.append("## ✅ معیار پذیرش (Acceptance Criteria)\n" + "\n".join(ac_lines))
 
+    # === Steps ===
     if not steps and proposed_action:
         steps = [proposed_action]
     if steps:
@@ -81,9 +235,29 @@ def build_strong_prompt(
             "## 🪜 مراحل اجرایی پیشنهادی\n_(مجری بر اساس Context و معیارهای پذیرش، مراحل را تعیین کند)_"
         )
 
+    # === Before/after examples ===
+    if before_after_examples:
+        ex_chunks: List[str] = []
+        for i, ex in enumerate(before_after_examples, 1):
+            label = (ex.get("label") or f"نمونه {i}").strip()
+            before = (ex.get("before") or "").strip()
+            after = (ex.get("after") or "").strip()
+            block = f"**{label}**"
+            if before:
+                block += f"\n\n_قبل:_\n```\n{before}\n```"
+            if after:
+                block += f"\n\n_بعد:_\n```\n{after}\n```"
+            ex_chunks.append(block)
+        parts.append("## 💡 نمونه‌های قبل/بعد\n" + "\n\n".join(ex_chunks))
+
     parts.append(
         f"## 📤 خروجی مورد انتظار\n{(expected_output or 'تغییر کد در فایل‌های مرتبط، commit یا PR جدید با پیام واضح، و عبور تمام معیارهای پذیرش.').strip()}"
     )
+
+    # === Validation commands ===
+    if validation_commands:
+        cmd_lines = "\n".join(f"- `{c.strip()}`" for c in validation_commands if c.strip())
+        parts.append(f"## 🧪 دستورات اعتبارسنجی\n{cmd_lines}")
 
     parts.append(
         f"## ⚠️ ریسک‌ها و موارد احتیاط\n"
@@ -92,9 +266,9 @@ def build_strong_prompt(
 
     if dependencies:
         dep_lines = "\n".join(f"- {d}" for d in dependencies if d)
-        parts.append(f"## 🔗 وابستگی‌ها\n{dep_lines}")
+        parts.append(f"## 🔗 وابستگی‌های تسکی\n{dep_lines}")
     else:
-        parts.append("## 🔗 وابستگی‌ها\n_(مستقل)_")
+        parts.append("## 🔗 وابستگی‌های تسکی\n_(مستقل)_")
 
     parts.append(
         f"## 🏷 دسته‌بندی\n- نوع: {type_}\n- اولویت: {priority}\n- تخمین زمان: {estimate}"
@@ -104,33 +278,117 @@ def build_strong_prompt(
 
 
 def extract_target_files(prompt: str) -> List[str]:
-    """استخراج فایل‌های موقعیت از یک پرامپت قوی."""
+    """استخراج فایل‌های موقعیت از یک پرامپت قوی (فقط path، حتی اگر `path:line` باشد).
+
+    سازگار با هر دو فرمت:
+      ## 📍 موقعیت دقیق در پروژه       (نسخهٔ جدید)
+      ## 📍 موقعیت در پروژه               (نسخهٔ قدیمی)
+    """
     import re
 
     files: List[str] = []
     match = re.search(
-        r"##\s*\S*\s*موقعیت در پروژه\s*\n(.+?)(?=\n##|\Z)",
+        r"##\s*\S*\s*موقعیت(?:\s+دقیق)?\s+در پروژه[^\n]*\n(.+?)(?=\n##|\Z)",
         prompt,
         re.DOTALL,
     )
     if not match:
         return files
     block = match.group(1)
-    for line in block.splitlines():
-        line = line.strip().lstrip("-").strip()
-        line = line.strip("`").strip()
-        if not line or line.startswith("_") or line.startswith("("):
+    # فقط خط‌های اصلی (نه snippetهای داخل code-fence)
+    in_fence = False
+    for raw in block.splitlines():
+        line = raw.strip()
+        if line.startswith("```"):
+            in_fence = not in_fence
             continue
-        if ":" in line and "/" not in line.split(":", 1)[1]:
-            line = line.split(":", 1)[0]
-        if "/" in line or "." in line:
-            files.append(line.strip())
+        if in_fence:
+            continue
+        line = line.lstrip("-").strip()
+        # اولین قطعه‌ای که داخل backtick است معمولاً path یا path:line است
+        m = re.search(r"`([^`]+)`", line)
+        if m:
+            tok = m.group(1).strip()
+        else:
+            tok = line
+        if not tok or tok.startswith("_") or tok.startswith("("):
+            continue
+        # تفکیک path:line — فقط path را نگه می‌داریم
+        if ":" in tok:
+            head, tail = tok.split(":", 1)
+            # اگر دم رشته شامل "/" نیست → احتمالاً line range است → فقط head
+            if "/" not in tail:
+                tok = head
+        # حذف symbol بعد از path (مثل `path` — `func`)
+        tok = tok.split(" ")[0].strip("`").strip()
+        if "/" in tok or "." in tok:
+            files.append(tok)
     seen = set()
     out = []
     for f in files:
         if f not in seen:
             seen.add(f)
             out.append(f)
+    return out
+
+
+def extract_target_locations(prompt: str) -> List[Dict[str, Any]]:
+    """استخراج موقعیت‌های دقیق (path + line range + symbol) از پرامپت — برای استفادهٔ verifier."""
+    import re
+
+    locations: List[Dict[str, Any]] = []
+    match = re.search(
+        r"##\s*\S*\s*موقعیت(?:\s+دقیق)?\s+در پروژه[^\n]*\n(.+?)(?=\n##|\Z)",
+        prompt,
+        re.DOTALL,
+    )
+    if not match:
+        return locations
+    block = match.group(1)
+    in_fence = False
+    for raw in block.splitlines():
+        line = raw.strip()
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if not line.startswith("-"):
+            continue
+        rest = line.lstrip("-").strip()
+        # اول backtick: path[:line]
+        m = re.search(r"`([^`]+)`", rest)
+        if not m:
+            continue
+        tok = m.group(1).strip()
+        path = tok
+        lines_str = ""
+        if ":" in tok:
+            head, tail = tok.split(":", 1)
+            if "/" not in tail:
+                path = head
+                lines_str = tail
+        # دوم backtick (اگر بود): symbol
+        rest_after = rest[m.end():]
+        sym = ""
+        m2 = re.search(r"`([^`]+)`", rest_after)
+        if m2:
+            sym = m2.group(1).strip()
+        if "/" in path or "." in path:
+            loc = {"path": path}
+            if lines_str:
+                loc["lines"] = lines_str
+            if sym:
+                loc["symbol"] = sym
+            locations.append(loc)
+    # dedup
+    seen = set()
+    out: List[Dict[str, Any]] = []
+    for l in locations:
+        key = (l.get("path"), l.get("lines"), l.get("symbol"))
+        if key not in seen:
+            seen.add(key)
+            out.append(l)
     return out
 
 

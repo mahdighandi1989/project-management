@@ -218,6 +218,135 @@ async def _fetch_file_content(
 # File scoring (Phase 2)
 # =====================================================================
 
+# =====================================================================
+# Import graph (Phase 2.5) — parse Python/JS/TS imports to build a real
+# dependency map. Used both to (a) score files (hubs ranked higher) and
+# (b) enrich each finding with `related_files` so external tools know
+# which neighbours to also inspect.
+# =====================================================================
+
+_PY_IMPORT_RE = re.compile(
+    r"^\s*(?:from\s+([\w\.]+)\s+import|import\s+([\w\.]+))",
+    re.MULTILINE,
+)
+_JS_IMPORT_RE = re.compile(
+    r"""(?:import\s+(?:[^'"\n]+?\s+from\s+)?["']([^"']+)["']|require\(\s*["']([^"']+)["']\s*\))""",
+    re.MULTILINE,
+)
+
+
+def _resolve_py_import(module: str, all_paths: List[str]) -> Optional[str]:
+    """تبدیل `app.services.foo` → `backend/app/services/foo.py` (best-effort)."""
+    if not module:
+        return None
+    parts = module.split(".")
+    candidates = [
+        "/".join(parts) + ".py",
+        "/".join(parts) + "/__init__.py",
+        parts[-1] + ".py",
+    ]
+    for c in candidates:
+        for p in all_paths:
+            if p.endswith("/" + c) or p == c:
+                return p
+    return None
+
+
+def _resolve_js_import(spec: str, importer_path: str, all_paths: List[str]) -> Optional[str]:
+    """تبدیل import نسبی (./X, ../Y) به مسیر کامل پروژه."""
+    if not spec or spec.startswith(("http://", "https://")):
+        return None
+    if not (spec.startswith(".") or spec.startswith("/")):
+        return None  # bare module (npm package) — out of scope
+    base = "/".join(importer_path.split("/")[:-1])
+    parts = (base + "/" + spec).split("/") if not spec.startswith("/") else spec.split("/")
+    stack: List[str] = []
+    for seg in parts:
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            if stack:
+                stack.pop()
+            continue
+        stack.append(seg)
+    target = "/".join(stack)
+    exts = ("", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", "/index.ts", "/index.tsx", "/index.js", "/index.jsx")
+    for e in exts:
+        cand = target + e
+        if cand in all_paths:
+            return cand
+    return None
+
+
+def _build_import_graph(
+    deep_contents: Dict[str, str], all_paths: List[str]
+) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, int]]:
+    """ساخت گراف وابستگی از فایل‌های deep-read شده.
+
+    خروجی:
+      imports[file] -> List[file]   فایل‌هایی که file آنها را import می‌کند
+      imported_by[file] -> List[file]   فایل‌هایی که file را import می‌کنند
+      import_counts[file] -> int         تعداد imported_by (برای scoring)
+    """
+    imports: Dict[str, List[str]] = {}
+    imported_by: Dict[str, List[str]] = {}
+    path_set = set(all_paths)
+
+    for fpath, content in deep_contents.items():
+        if not content:
+            continue
+        deps: List[str] = []
+        if fpath.endswith(".py"):
+            for m in _PY_IMPORT_RE.finditer(content):
+                mod = m.group(1) or m.group(2) or ""
+                if mod.startswith("."):
+                    # relative import — best-effort skip (rare in this codebase)
+                    continue
+                resolved = _resolve_py_import(mod, list(path_set))
+                if resolved and resolved != fpath:
+                    deps.append(resolved)
+        elif fpath.endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")):
+            for m in _JS_IMPORT_RE.finditer(content):
+                spec = m.group(1) or m.group(2) or ""
+                resolved = _resolve_js_import(spec, fpath, list(path_set))
+                if resolved and resolved != fpath:
+                    deps.append(resolved)
+        # dedup
+        deps = list(dict.fromkeys(deps))
+        if deps:
+            imports[fpath] = deps
+            for d in deps:
+                imported_by.setdefault(d, []).append(fpath)
+
+    import_counts = {k: len(v) for k, v in imported_by.items()}
+    return imports, imported_by, import_counts
+
+
+def _related_for_paths(
+    paths: List[str],
+    imports: Dict[str, List[str]],
+    imported_by: Dict[str, List[str]],
+    limit: int = 6,
+) -> List[Dict[str, str]]:
+    """برای یک یا چند فایل هدف، لیست فایل‌های مرتبط (importer/importee) برمی‌گرداند."""
+    out: List[Dict[str, str]] = []
+    seen: set = set()
+    for p in paths:
+        for dep in imports.get(p, [])[:4]:
+            if dep in seen:
+                continue
+            seen.add(dep)
+            out.append({"path": dep, "reason": f"`{p.split('/')[-1]}` این فایل را import می‌کند"})
+        for dep in imported_by.get(p, [])[:4]:
+            if dep in seen:
+                continue
+            seen.add(dep)
+            out.append({"path": dep, "reason": f"این فایل `{p.split('/')[-1]}` را import می‌کند (caller)"})
+        if len(out) >= limit:
+            break
+    return out[:limit]
+
+
 def _score_files(
     paths: List[str],
     sizes: Dict[str, int],
@@ -281,9 +410,11 @@ def _build_pass_prompt(
     files_summary: str,
     deep_files_blob: str,
     package_files_blob: str,
+    import_graph_summary: str = "",
     extra: str = "",
 ) -> str:
     base = f"""تو یک تحلیلگر senior software هستی. این یک فاز از یک اسکن چندفازی روی پروژهٔ زیر است.
+خروجی تو پرامپت‌های اجرایی برای ابزار کدنویس (Cursor/Copilot) خواهد ساخت — پس باید **کاملاً مشخص و قابل اعمال** باشد.
 
 # 🎯 هدف اصلی پروژه (از زبان کاربر)
 {user_goal or '(کاربر یادداشتی ثبت نکرده است)'}
@@ -292,15 +423,17 @@ def _build_pass_prompt(
 {repo}
 Stack تشخیص داده شده: {', '.join(stacks) or '(نامشخص)'}
 
-# فایل‌ها (نمونه)
+# فایل‌ها (نمونه — مسیر کامل از ریشهٔ ریپو)
 {files_summary}
 
-# محتوای فایل‌های کلیدی
+# محتوای فایل‌های کلیدی (هر فایل با شمارهٔ خط)
 {deep_files_blob}
 
 # فایل‌های Dependency
 {package_files_blob}
 """
+    if import_graph_summary:
+        base += f"\n# نقشهٔ Importهای داخلی (هاب‌ها و وابستگی‌ها)\n{import_graph_summary}\n"
 
     pass_specs = {
         "frontend": """
@@ -364,21 +497,70 @@ Stack تشخیص داده شده: {', '.join(stacks) or '(نامشخص)'}
     }
 
     output = """
-# خروجی فقط JSON (بدون متن اضافی، بدون ```)
+# خروجی فقط JSON خالص (بدون متن اضافی، بدون ```، بدون commentary)
+
+برای **هر یافته**، باید این فیلدها را با حداکثر دقت پر کنی — وگرنه تسکی که از آن ساخته می‌شود برای ابزار کدنویس قابل اعمال نخواهد بود:
+
 {
   "findings": [
     {
-      "title": "عنوان کوتاه",
+      "title": "عنوان کوتاه ۱ جمله‌ای و قابل سنجش",
       "type": "bug | refactor | docs | feature_request | security | other",
       "priority": "low | medium | high | critical",
-      "description": "پاراگراف کامل توضیح",
-      "proposed_action": "پیشنهاد عملی برای رفع",
-      "target_files": ["path/to/file1", "path/to/file2"],
-      "acceptance_criteria": ["معیار تستی ۱", "معیار تستی ۲"]
+
+      "description": "پاراگراف کامل: چرا این مشکل/نیاز است، چه تأثیری دارد، شواهد دیده‌شده در کد",
+
+      "proposed_action": "پیشنهاد عملی دقیق برای رفع — چه کد/پیکربندی تغییر کند",
+
+      "target_locations": [
+        {
+          "path": "backend/app/services/foo.py",
+          "lines": "245-289",
+          "symbol": "validate_token",
+          "snippet": "def validate_token(t):\\n    return True  # ⚠️ هیچ بررسی expiry ندارد",
+          "note": "تابع اصلی که باید اصلاح شود"
+        }
+      ],
+
+      "related_files": [
+        {"path": "backend/app/api/routes/auth.py", "reason": "این endpoint از validate_token استفاده می‌کند", "at_line": 67},
+        {"path": "frontend/src/lib/api.ts", "reason": "client که login را call می‌کند"}
+      ],
+
+      "dependency_summary": "این تابع توسط ۳ روتر و یک hook فرانت‌اند استفاده می‌شود؛ تغییر آن روی کل auth flow اثر می‌گذارد.",
+
+      "tech_context": "FastAPI + JWT + Next.js 14 App Router",
+
+      "before_after_examples": [
+        {"label": "نمونه expiry check",
+         "before": "if token: return user",
+         "after":  "if token and not is_expired(token): return user\\nelse: raise HTTPException(401)"}
+      ],
+
+      "acceptance_criteria": [
+        "endpoint /api/login برای توکن منقضی ۴۰۱ برمی‌گرداند",
+        "تابع validate_token پارامتر exp را چک می‌کند",
+        "تست واحد جدید برای expiry اضافه شود"
+      ],
+
+      "validation_commands": [
+        "pytest backend/tests/test_auth.py -k expiry",
+        "npm run test -- login"
+      ],
+
+      "estimated_complexity": "small | medium | large",
+      "risks": "احتمال شکستن sessionهای فعال؛ نیاز به migration کوتاه"
     }
   ]
 }
-حداکثر ۸ یافتهٔ مهم. تمرکز روی فاز فعلی باشد.
+
+# قوانین مهم:
+1. **path** را همیشه از ریشهٔ ریپو بنویس (مثل `backend/app/...` یا `frontend/src/...`).
+2. **lines** باید واقعی باشد — از شمارهٔ خط‌های نمایش‌داده‌شده در «محتوای فایل‌های کلیدی» استفاده کن.
+3. **snippet** باید دقیقاً همان کدی باشد که در فایل اصلی آمده (می‌توانی truncate کنی با `...` ولی مسئلهٔ مورد نظر حتماً پیدا باشد).
+4. **related_files** را از روی importهای واقعی پیدا کن — اگر در «نقشهٔ Importهای داخلی» نشان داده شده، آن را استفاده کن.
+5. **acceptance_criteria** باید قابل تست باشد (نه تعریف کلی).
+6. **حداکثر ۶ یافتهٔ مهم** برای این فاز. کیفیت > کمیت.
 """
     return base + (pass_specs.get(pass_id, "") + extra) + output
 
@@ -502,37 +684,94 @@ async def run_deep_scan(
         )
 
         # ----- فاز ۲ -----
-        # تخمین ساده‌ای از import_counts: فایل‌هایی که نام‌شان در سایر فایل‌ها زیاد به‌عنوان import می‌آید
-        # اینجا برای صرفه‌جویی، صفر گذاشته می‌شود؛ scoring همچنان روی نوع/حجم/critical path کار می‌کند
-        import_counts: Dict[str, int] = {}
-        ranked = _score_files(all_files, sizes, recent_changed, import_counts)
-        deep_paths = [p for p, s in ranked[: max(deep_read_count, 5)] if s > 0]
+        # ابتدا یک sweep سبک: top-N اولیه را با نوع/حجم/critical path رتبه‌بندی کن
+        ranked0 = _score_files(all_files, sizes, recent_changed, {})
+        initial_deep_paths = [p for p, s in ranked0[: max(deep_read_count, 5) * 2] if s > 0]
 
+        # خواندن این فایل‌ها (محتوای کامل ولی truncate شده)
         deep_contents: Dict[str, str] = {}
-        for i, p in enumerate(deep_paths):
+        for i, p in enumerate(initial_deep_paths):
             write_progress(
                 watched_id,
                 phase="phase2_reading",
-                message=f"خواندن فایل‌های کلیدی ({i + 1}/{len(deep_paths)})",
+                message=f"خواندن فایل‌های کلیدی ({i + 1}/{len(initial_deep_paths)})",
                 files_analyzed=i + 1,
             )
             try:
-                c = await _fetch_file_content(session, repo, p, headers, branch, 50000)
+                c = await _fetch_file_content(session, repo, p, headers, branch, 60000)
                 if c:
                     deep_contents[p] = c
             except Exception:
                 continue
 
-        # ساخت context
+        # حالا گراف Importهای واقعی را روی محتوای deep بسازیم
+        write_progress(watched_id, phase="phase2_imports", message="ساخت نقشهٔ Importها")
+        imports, imported_by, real_import_counts = _build_import_graph(deep_contents, all_files)
+
+        # rerank با import_counts واقعی
+        ranked = _score_files(all_files, sizes, recent_changed, real_import_counts)
+        final_deep_paths = [p for p, s in ranked[: max(deep_read_count, 5)] if s > 0]
+        # هر فایل جدیدی که در sweep اول نخوانده‌ایم را الان بخوان
+        for p in final_deep_paths:
+            if p not in deep_contents:
+                try:
+                    c = await _fetch_file_content(session, repo, p, headers, branch, 60000)
+                    if c:
+                        deep_contents[p] = c
+                except Exception:
+                    continue
+
+        # خواندن فایل‌های context ویژه: README، docs، config
+        special_files = [
+            f for f in all_files
+            if f.split("/")[-1].lower() in ("readme.md", "readme", "changelog.md")
+            or f.startswith(("docs/", "documentation/"))
+            or f in ("tsconfig.json", "next.config.js", "next.config.mjs", "vite.config.ts", ".env.example")
+        ][:8]
+        special_contents: Dict[str, str] = {}
+        for sp in special_files:
+            try:
+                c = await _fetch_file_content(session, repo, sp, headers, branch, 20000)
+                if c:
+                    special_contents[sp] = c
+            except Exception:
+                continue
+
+        # ساخت context — files_summary با kind برای راهنمایی AI
         files_summary = "\n".join(
-            f"{kinds.get(p, 'other'):>10}  {p}" for p in all_files[:200]
+            f"{kinds.get(p, 'other'):>10}  {p}" for p in all_files[:300]
         )
+
+        def _with_line_numbers(content: str, max_lines: int = 400) -> str:
+            """افزودن شمارهٔ خط برای هر سطر — تا AI بتواند line range دقیق برگرداند."""
+            lines = content.splitlines()
+            if len(lines) > max_lines:
+                lines = lines[:max_lines] + [f"... [TRUNCATED at line {max_lines} of {len(content.splitlines())}]"]
+            width = len(str(len(lines)))
+            return "\n".join(f"{str(i + 1).rjust(width)}: {ln}" for i, ln in enumerate(lines))
+
+        # هر فایل تا ۴۰۰ خط با line numbers — حداکثر ۲۵ فایل deep
         deep_files_blob = "\n\n".join(
-            f"=== {p} ===\n{c[:8000]}" for p, c in list(deep_contents.items())[:25]
+            f"=== {p} ===\n{_with_line_numbers(c, 400)}"
+            for p, c in list(deep_contents.items())[:25]
         )
         package_files_blob = "\n\n".join(
-            f"=== {n} ===\n{c[:3000]}" for n, c in dep_contents.items()
+            f"=== {n} ===\n{c[:4000]}" for n, c in dep_contents.items()
         )
+        if special_contents:
+            package_files_blob += "\n\n" + "\n\n".join(
+                f"=== {p} ===\n{c[:4000]}" for p, c in special_contents.items()
+            )
+
+        # خلاصهٔ گراف Imports برای پاس به AI (فقط top hubs)
+        top_hubs = sorted(real_import_counts.items(), key=lambda x: x[1], reverse=True)[:15]
+        import_graph_summary = ""
+        if top_hubs:
+            hub_lines = []
+            for path, cnt in top_hubs:
+                callers = imported_by.get(path, [])[:5]
+                hub_lines.append(f"- `{path}` — {cnt} فایل آن را import می‌کنند: {', '.join(f'`{c}`' for c in callers)}")
+            import_graph_summary = "\n".join(hub_lines)
 
         # ----- فاز ۳ -----
         all_findings: List[Dict[str, Any]] = []
@@ -556,10 +795,11 @@ async def run_deep_scan(
                 files_summary=files_summary,
                 deep_files_blob=deep_files_blob,
                 package_files_blob=package_files_blob,
+                import_graph_summary=import_graph_summary,
             )
             try:
                 response = await service._ai_generate(
-                    prompt, model_id=model_id, max_tokens=3000, temperature=0.2
+                    prompt, model_id=model_id, max_tokens=4500, temperature=0.2
                 )
                 parsed = service._extract_json(response) or {}
                 findings = parsed.get("findings") or []
@@ -590,30 +830,87 @@ async def run_deep_scan(
             seen_titles.add(t)
             unique.append(f)
 
-        # ساخت تسک با پرامپت قوی
+        # ساخت تسک با پرامپت قوی غنی‌شده
         created_tasks: List[Dict[str, Any]] = []
         execution_mode_default = (watched.default_execution_mode or "manual")
+        tech_context_default = (
+            f"Stack: {', '.join(stacks)}." if stacks else ""
+        )
         for f in unique[:30]:
             try:
                 title = (f.get("title") or "").strip()[:200]
                 if not title:
                     continue
-                target_files = f.get("target_files") or []
+
+                # === locations: ترجیح با target_locations جدید (dict) و fallback به target_files ===
+                target_locations = f.get("target_locations") or []
+                target_files: List[str] = list(f.get("target_files") or [])
+                if not target_locations and target_files:
+                    target_locations = [{"path": p} for p in target_files]
+                if target_locations and not target_files:
+                    target_files = [
+                        l.get("path") for l in target_locations
+                        if isinstance(l, dict) and l.get("path")
+                    ]
+
+                # === related_files: از پاسخ AI + غنی‌سازی از گراف import ===
+                ai_related = f.get("related_files") or []
+                if not isinstance(ai_related, list):
+                    ai_related = []
+                graph_related = _related_for_paths(
+                    [p for p in target_files if p],
+                    imports, imported_by, limit=6,
+                )
+                # ادغام بدون تکرار
+                seen_related: set = set()
+                merged_related: List[Dict[str, Any]] = []
+                for r in ai_related + graph_related:
+                    if isinstance(r, str):
+                        r = {"path": r}
+                    p = (r.get("path") or "").strip() if isinstance(r, dict) else ""
+                    if p and p not in seen_related:
+                        seen_related.add(p)
+                        merged_related.append(r)
+
+                # === acceptance criteria ===
                 ac = f.get("acceptance_criteria") or [
                     "اعمال تغییر بدون شکستن تست‌های موجود",
                     "linter بدون warning عبور می‌کند",
                     "type-check موفق است",
                 ]
+
+                # === before/after examples ===
+                examples = f.get("before_after_examples") or []
+                if not isinstance(examples, list):
+                    examples = []
+
+                # === validation commands — اگر AI نداد، defaults بر اساس stack بساز ===
+                vcmds = f.get("validation_commands") or []
+                if not isinstance(vcmds, list):
+                    vcmds = []
+                if not vcmds:
+                    if "fastapi" in stacks or "django" in stacks or "flask" in stacks:
+                        vcmds.append("pytest")
+                    if "nextjs" in stacks or "react" in stacks or "vue" in stacks:
+                        vcmds.extend(["npm run build", "npm run lint"])
+
                 full_prompt = build_strong_prompt(
                     title=title,
                     user_goal=watched.user_notes,
                     description=f.get("description", ""),
                     proposed_action=f.get("proposed_action", ""),
                     target_files=target_files,
+                    target_locations=target_locations,
+                    related_files=merged_related,
+                    dependency_summary=(f.get("dependency_summary") or "").strip(),
+                    tech_context=(f.get("tech_context") or tech_context_default),
+                    before_after_examples=examples,
+                    validation_commands=vcmds,
                     acceptance_criteria=ac,
+                    risks=(f.get("risks") or "").strip(),
                     type_=f.get("type", "other"),
                     priority=f.get("priority", "medium"),
-                    estimate="medium",
+                    estimate=(f.get("estimated_complexity") or "medium"),
                 )
                 t = OversightTask(
                     id=str(uuid.uuid4()),
@@ -633,7 +930,8 @@ async def run_deep_scan(
                 async with service._lock:
                     service.tasks.append(t)
                 created_tasks.append(t.to_dict())
-            except Exception:
+            except Exception as _e:
+                logger.warning(f"deep_scan: building task failed: {_e}")
                 continue
 
         async with service._lock:
