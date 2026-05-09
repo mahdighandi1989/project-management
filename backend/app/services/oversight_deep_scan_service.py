@@ -1119,6 +1119,98 @@ async def run_deep_scan(
             seen_titles.add(t)
             unique.append(f)
 
+        # ----- فاز ۴.۵: محاسبهٔ per-file health map -----
+        # (مهاجرت از Health analysis file_health_map)
+        # برای هر فایل deep-read شده، یک score 0-100 محاسبه می‌شود بر اساس:
+        #   - تعداد findings مرتبط (severity weighted)
+        #   - وزن‌های کاربر (scan_criteria_weights)
+        # خروجی در structure ذخیره می‌شود تا UI heatmap نمایش دهد.
+        weights = getattr(watched, "scan_criteria_weights", None) or {
+            "security": 1.5, "quality": 1.0, "tests": 1.2, "completeness": 1.0,
+        }
+        SEVERITY_PENALTY = {"critical": 25, "high": 12, "medium": 5, "low": 2}
+        # mapping pass_id → criteria key برای weight lookup
+        PASS_TO_CRITERIA = {
+            "security": "security", "security_deep": "security",
+            "quality": "quality", "coverage": "tests",
+            "completeness": "completeness",
+            "frontend": "quality", "backend": "quality",
+            "cross_stack": "quality", "integrity": "quality",
+            "dependency": "quality",
+        }
+
+        file_health_map: Dict[str, Dict[str, Any]] = {}
+        # ابتدا برای هر فایل deep-read شده، یک ورودی اولیه با score=100
+        for path in deep_contents.keys():
+            file_health_map[path] = {
+                "score": 100.0,
+                "findings_count": 0,
+                "severity_weighted": 0.0,
+                "passes_touched": [],
+            }
+
+        # حالا findings را پردازش کن
+        for f in unique:
+            target_files: List[str] = []
+            # از target_locations اول، fallback به target_files
+            for loc in (f.get("target_locations") or []):
+                if isinstance(loc, dict) and loc.get("path"):
+                    target_files.append(loc["path"])
+            if not target_files:
+                target_files = [p for p in (f.get("target_files") or []) if isinstance(p, str)]
+
+            severity = (f.get("priority") or "medium").lower()
+            pass_id = f.get("_pass", "quality")
+            criteria_key = PASS_TO_CRITERIA.get(pass_id, "quality")
+            weight = float(weights.get(criteria_key, 1.0))
+            penalty = SEVERITY_PENALTY.get(severity, 5) * weight
+
+            for path in target_files:
+                if path not in file_health_map:
+                    # فایل deep-read نشده — initialize کن
+                    file_health_map[path] = {
+                        "score": 100.0, "findings_count": 0,
+                        "severity_weighted": 0.0, "passes_touched": [],
+                    }
+                fh = file_health_map[path]
+                fh["score"] = max(0.0, fh["score"] - penalty)
+                fh["findings_count"] = int(fh["findings_count"]) + 1
+                fh["severity_weighted"] = float(fh["severity_weighted"]) + penalty
+                if pass_id not in fh["passes_touched"]:
+                    fh["passes_touched"].append(pass_id)
+
+        # color/hex مشتق از score
+        def _color_for_score(s: float) -> tuple:
+            if s >= 70:
+                return ("green", "#22C55E")
+            elif s >= 40:
+                return ("yellow", "#FBBF24")
+            else:
+                return ("red", "#EF4444")
+        for path, fh in file_health_map.items():
+            color, hex_code = _color_for_score(fh["score"])
+            fh["color"] = color
+            fh["hex"] = hex_code
+            fh["score"] = round(fh["score"], 1)
+
+        # محاسبهٔ overall_health_score (میانگین وزنی روی همه فایل‌ها)
+        if file_health_map:
+            overall_health_score = round(
+                sum(fh["score"] for fh in file_health_map.values()) / len(file_health_map), 1
+            )
+        else:
+            overall_health_score = 100.0
+        # ذخیره در pass_summaries
+        pass_summaries["health_summary"] = {
+            "overall_health_score": overall_health_score,
+            "files_analyzed_count": len(file_health_map),
+            "red_files_count": sum(1 for fh in file_health_map.values() if fh["color"] == "red"),
+            "yellow_files_count": sum(1 for fh in file_health_map.values() if fh["color"] == "yellow"),
+            "green_files_count": sum(1 for fh in file_health_map.values() if fh["color"] == "green"),
+            "criteria_weights_used": weights,
+        }
+        pass_summaries["file_health_map"] = file_health_map
+
         # ساخت تسک با پرامپت قوی غنی‌شده
         created_tasks: List[Dict[str, Any]] = []
         execution_mode_default = (watched.default_execution_mode or "manual")

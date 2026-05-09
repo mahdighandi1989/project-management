@@ -159,6 +159,16 @@ class WatchedProject:
     last_verify_at: Optional[str] = None
     next_verify_at: Optional[str] = None
     verify_interval_hours: float = 12.0
+    # 🆕 وزن‌های قابل تنظیم برای محاسبهٔ per-file health score
+    # (مهاجرت از Health analysis criteria_weights)
+    # default values متعادل — کاربر می‌تواند override کند تا محاسبه
+    # به اولویت‌های پروژهٔ خودش حساس‌تر شود
+    scan_criteria_weights: Dict[str, float] = field(default_factory=lambda: {
+        "security": 1.5,
+        "quality": 1.0,
+        "tests": 1.2,
+        "completeness": 1.0,
+    })
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
 
