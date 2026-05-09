@@ -354,6 +354,21 @@ export default function ProjectDetailPage() {
     'console-error': true,
     'error-overlay': true,
   });
+
+  // 🛡️ Inspector hardening: dedup + verify retry tracking + console log cap
+  // dedup map: کلید = action_type:timestamp:digest(target+content) → مقدار = Date.now()
+  // entryهای قدیمی‌تر از window×۵ هر ۳۰ ثانیه پاک می‌شوند (در WebSocket useEffect)
+  const inspectorSeenEventsRef = useRef<Map<string, number>>(new Map());
+  const INSPECTOR_DEDUP_WINDOW_MS = 2000;
+  const [inspectorDuplicatesDroppedCount, setInspectorDuplicatesDroppedCount] = useState(0);
+  const [inspectorVerifyPendingCount, setInspectorVerifyPendingCount] = useState(0);
+  const inspectorPowerOnRef = useRef(false);
+  // console log cap قابل تنظیم (پیش‌فرض ۲۰۰۰، به جای ۵۰۰)
+  const [consoleLogCap, setConsoleLogCap] = useState(2000);
+  const [consoleLogDroppedCount, setConsoleLogDroppedCount] = useState(0);
+  const consoleLogCapRef = useRef(consoleLogCap);
+  consoleLogCapRef.current = consoleLogCap;
+
   const [inspectorReplyTo, setInspectorReplyTo] = useState<{
     id: string;
     content: string;
@@ -938,6 +953,11 @@ export default function ProjectDetailPage() {
     inspectorActionFiltersRef.current = inspectorActionFilters;
   }, [inspectorActionFilters]);
 
+  // 🔧 همگام‌سازی ref وضعیت روشنی Inspector — برای abort کردن retry های در جریان
+  useEffect(() => {
+    inspectorPowerOnRef.current = inspectorPowerOn;
+  }, [inspectorPowerOn]);
+
   // 🌉 تابع مشترک برای پردازش event های Bridge (postMessage و WebSocket)
   const actionLabelsRef = useRef<Record<string, string>>({
     'click': 'کلیک کردی',
@@ -953,7 +973,34 @@ export default function ProjectDetailPage() {
   const handleBridgeEvent = useCallback((data: any, sourceLabel: string) => {
     const { action, target, elementInfo, level, source } = data;
 
-    // 📋 ذخیره لاگ‌های کنسول (تفکیک شده)
+    // 🛡️ DEDUP — جلوگیری از log شدن دوبارهٔ یک event که از هر دو کانال
+    // (postMessage و WebSocket) رسیده است. کلید بر اساس نوع+timestamp+محتوا.
+    // window پیش‌فرض ۲ ثانیه — اگر در این بازه همان کلید دیده شد، drop می‌شود.
+    try {
+      const evtTs = data.timestamp || Date.now();
+      const digestSrc = `${target || ''}|${elementInfo || ''}|${level || ''}`.slice(0, 200);
+      const dedupKey = `${action}:${evtTs}:${digestSrc}`;
+      const seen = inspectorSeenEventsRef.current;
+      const lastSeen = seen.get(dedupKey);
+      const now = Date.now();
+      if (lastSeen !== undefined && now - lastSeen < INSPECTOR_DEDUP_WINDOW_MS) {
+        // این رویداد تکراری است — drop کن و شمارنده را بالا ببر
+        setInspectorDuplicatesDroppedCount(c => c + 1);
+        return;
+      }
+      seen.set(dedupKey, now);
+      // محدودیت اندازهٔ map (در صورت رشد بیش از حد — معمولاً cleanup interval کافی است)
+      if (seen.size > 5000) {
+        const cutoff = now - INSPECTOR_DEDUP_WINDOW_MS * 5;
+        const toDelete: string[] = [];
+        seen.forEach((t, k) => { if (t < cutoff) toDelete.push(k); });
+        toDelete.forEach(k => seen.delete(k));
+      }
+    } catch (e) {
+      // dedup نباید critical باشد — اگر چیزی شکست، event را مثل قبل پردازش کن
+    }
+
+    // 📋 ذخیره لاگ‌های کنسول (تفکیک شده) — با cap قابل تنظیم + شمارش drop ها
     if (action === 'console-log' || action === 'console-error') {
       setImportedProjectConsoleLogs(prev => {
         const newLog = {
@@ -963,20 +1010,35 @@ export default function ProjectDetailPage() {
           timestamp: data.timestamp || Date.now(),
           source: source || 'imported-project',
         };
-        return [...prev, newLog].slice(-500);
+        const cap = consoleLogCapRef.current || 2000;
+        const merged = [...prev, newLog];
+        if (merged.length > cap) {
+          // logها silently drop می‌شوند ولی شمارنده را بالا می‌بریم تا کاربر مطلع شود
+          setConsoleLogDroppedCount(c => c + (merged.length - cap));
+          return merged.slice(-cap);
+        }
+        return merged;
       });
       if (action === 'console-log') return;
     }
 
     // 🔍 لایه خطا (Error Overlay) شناسایی شده
     if (action === 'error-overlay') {
-      setImportedProjectConsoleLogs(prev => [...prev, {
-        id: `overlay_${sourceLabel}_${Date.now()}`,
-        level: 'error',
-        message: `[Error Overlay] ${elementInfo || ''}`,
-        timestamp: data.timestamp || Date.now(),
-        source: 'imported-project',
-      }]);
+      setImportedProjectConsoleLogs(prev => {
+        const cap = consoleLogCapRef.current || 2000;
+        const merged = [...prev, {
+          id: `overlay_${sourceLabel}_${Date.now()}`,
+          level: 'error',
+          message: `[Error Overlay] ${elementInfo || ''}`,
+          timestamp: data.timestamp || Date.now(),
+          source: 'imported-project',
+        }];
+        if (merged.length > cap) {
+          setConsoleLogDroppedCount(c => c + (merged.length - cap));
+          return merged.slice(-cap);
+        }
+        return merged;
+      });
     }
 
     // 🔧 فیلتر اکشن: اگر این نوع غیرفعال باشد، در چت ثبت نشود
@@ -996,7 +1058,7 @@ export default function ProjectDetailPage() {
       backend_verified: null,
     }]);
 
-    // ذخیره در DB و verify (از ref استفاده میکنیم چون closure ممکنه قدیمی باشه)
+    // ذخیره در DB و verify (از ref استفاده می‌کنیم چون closure ممکنه قدیمی باشه)
     const currentSessionId = inspectorSessionIdRef.current;
     if (currentSessionId) {
       (async () => {
@@ -1017,16 +1079,34 @@ export default function ProjectDetailPage() {
             setInspectorChatMessages(prev =>
               prev.map(m => m.id === msgId ? { ...m, db_id: dbId } : m)
             );
-            // تابع verify با قابلیت retry + ارسال لاگ‌های کنسول بریدج
+            // 🔁 verify با backoff نمایی + jitter (تا ۵ تلاش) + abort روی خاموش‌شدن
+            // -----------------------------------------------------------------
+            // STALE-CLOSURE FIX: قبل از await یک snapshot logها می‌گیریم و
+            // بعد از await هم snapshot دوم — union دو نسخه به backend می‌رود
+            // تا اگر در حین await لاگ‌های جدیدی از bridge رسیده‌اند گم نشوند.
+            // (دلیل: importedConsoleLogsRef.current ممکن است در بازهٔ async
+            // به‌روز شده باشد، ولی نسخهٔ closure قدیمی شود.)
+            // -----------------------------------------------------------------
             const actionTimestamp = Date.now();
+            setInspectorVerifyPendingCount(c => c + 1);
+            let pendingCounted = true;
+
             const doVerify = async (attempt: number = 1) => {
+              // اگر کاربر inspector را خاموش کرد، تلاش‌های در جریان را abort کن
+              if (!inspectorPowerOnRef.current) {
+                if (pendingCounted) {
+                  setInspectorVerifyPendingCount(c => Math.max(0, c - 1));
+                  pendingCounted = false;
+                }
+                return;
+              }
               try {
                 const pId = params?.id as string;
-                // 📦 Snapshot console logs around this action's time (±5 seconds)
-                const nearbyConsoleLogs = importedConsoleLogsRef.current
+
+                // snapshot قبل از await (نسخهٔ اول)
+                const snapBefore = importedConsoleLogsRef.current
                   .filter(l => Math.abs(l.timestamp - actionTimestamp) < 5000)
-                  .slice(-20)
-                  .map(l => ({ level: l.level, message: l.message, timestamp: l.timestamp }));
+                  .map(l => ({ level: l.level, message: l.message, timestamp: l.timestamp, _id: l.id }));
 
                 const verifyRes = await fetch(
                   `${API_BASE}/api/render/inspector/message/${dbId}/verify?project_id=${pId}&force=${attempt > 1 ? 'true' : 'false'}`,
@@ -1034,7 +1114,22 @@ export default function ProjectDetailPage() {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                      console_logs: nearbyConsoleLogs,
+                      // snapshot دوم بعد از await (در همین تابع، قبل از send)
+                      // — union دو نسخه با dedup روی timestamp+message
+                      console_logs: (() => {
+                        const snapAfter = importedConsoleLogsRef.current
+                          .filter(l => Math.abs(l.timestamp - actionTimestamp) < 5000)
+                          .map(l => ({ level: l.level, message: l.message, timestamp: l.timestamp, _id: l.id }));
+                        const seenKeys = new Set<string>();
+                        const out: Array<{level: string; message: string; timestamp: number}> = [];
+                        for (const l of [...snapBefore, ...snapAfter]) {
+                          const k = `${l.timestamp}|${l.message}`;
+                          if (seenKeys.has(k)) continue;
+                          seenKeys.add(k);
+                          out.push({ level: l.level, message: l.message, timestamp: l.timestamp });
+                        }
+                        return out.slice(-30);
+                      })(),
                     }),
                   }
                 );
@@ -1051,15 +1146,38 @@ export default function ProjectDetailPage() {
                       checked_logs: verifyData.checked_logs,
                     } : m)
                   );
-                  // اگر لاگی نبود یا pending برگشت، دوباره تلاش کن (حداکثر ۳ بار)
-                  if (attempt < 3 && (verifyData.logs_checked === 0 || verifyData.pending)) {
-                    const delays = [6000, 10000, 15000]; // تلاش‌های بعدی با فاصله بیشتر
-                    setTimeout(() => doVerify(attempt + 1), delays[attempt] || 10000);
+                  // اگر هنوز pending یا logs_checked=0 → تلاش بعدی با backoff نمایی
+                  if (attempt < 5 && (verifyData.logs_checked === 0 || verifyData.pending)) {
+                    // base 2000ms × 2^attempt  →  2,4,8,16,32 ثانیه + jitter 0..400ms
+                    const delay = 2000 * Math.pow(2, attempt) + Math.floor(Math.random() * 400);
+                    setTimeout(() => doVerify(attempt + 1), delay);
+                  } else {
+                    if (pendingCounted) {
+                      setInspectorVerifyPendingCount(c => Math.max(0, c - 1));
+                      pendingCounted = false;
+                    }
+                  }
+                } else {
+                  if (pendingCounted) {
+                    setInspectorVerifyPendingCount(c => Math.max(0, c - 1));
+                    pendingCounted = false;
                   }
                 }
-              } catch (err) { /* verify failed - non-critical */ }
+              } catch (err) {
+                // verify failed - retry با backoff
+                if (attempt < 5 && inspectorPowerOnRef.current) {
+                  const delay = 2000 * Math.pow(2, attempt) + Math.floor(Math.random() * 400);
+                  setTimeout(() => doVerify(attempt + 1), delay);
+                } else {
+                  if (pendingCounted) {
+                    setInspectorVerifyPendingCount(c => Math.max(0, c - 1));
+                    pendingCounted = false;
+                  }
+                }
+              }
             };
-            setTimeout(() => doVerify(1), 5000);
+            // اولین تلاش بعد از ۲ ثانیه (به جای ۵) چون backoff خودش فاصله ایجاد می‌کند
+            setTimeout(() => doVerify(1), 2000);
           }
         } catch (err) { /* save message failed - non-critical */ }
       })();
@@ -1124,6 +1242,17 @@ export default function ProjectDetailPage() {
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     let isCancelled = false;
+
+    // 🛡️ Cleanup interval: هر ۳۰ ثانیه entry های قدیمی dedup map را پاک می‌کند
+    const dedupCleanupTimer: ReturnType<typeof setInterval> = setInterval(() => {
+      try {
+        const seen = inspectorSeenEventsRef.current;
+        const cutoff = Date.now() - INSPECTOR_DEDUP_WINDOW_MS * 5; // ۱۰ ثانیه
+        const toDelete: string[] = [];
+        seen.forEach((t, k) => { if (t < cutoff) toDelete.push(k); });
+        toDelete.forEach(k => seen.delete(k));
+      } catch (e) { /* non-critical */ }
+    }, 30000);
 
     const connectBridgeWs = () => {
       if (isCancelled) return;
@@ -1241,6 +1370,7 @@ export default function ProjectDetailPage() {
       isCancelled = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (dedupCleanupTimer) clearInterval(dedupCleanupTimer);
       if (ws) {
         try { ws.close(); } catch(e) {}
       }
