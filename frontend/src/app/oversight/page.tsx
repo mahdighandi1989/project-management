@@ -207,6 +207,18 @@ export default function OversightPage() {
         if (single) setSelectedModelIds([single]);
       }
     } catch {}
+
+    // بازیابی لیست مخازن از کش localStorage
+    try {
+      const cached = localStorage.getItem('oversight_repos_cache');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed && Array.isArray(parsed.repos)) {
+          setRepos(parsed.repos);
+          setReposSyncedAt(parsed.synced_at || null);
+        }
+      }
+    } catch {}
   }, []);
 
   // پیشرفت زنده هنگام تولید
@@ -296,15 +308,33 @@ export default function OversightPage() {
 
   // ============================ Repos ============================
 
-  const loadRepos = async () => {
+  const loadRepos = async (forceRefresh: boolean = false) => {
     setReposLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/oversight/repos`);
+      const url = `${API_BASE}/api/oversight/repos${forceRefresh ? '?refresh=true' : ''}`;
+      const res = await fetch(url);
       const data = await res.json();
       if (data.success) {
-        setRepos(data.repos || []);
+        const list = data.repos || [];
+        setRepos(list);
         setReposSyncedAt(data.synced_at || new Date().toISOString());
-        showSuccess(`${data.count} مخزن بارگذاری شد`);
+        // ذخیره در localStorage
+        try {
+          localStorage.setItem(
+            'oversight_repos_cache',
+            JSON.stringify({
+              repos: list,
+              synced_at: data.synced_at || new Date().toISOString(),
+              cached_at: Date.now(),
+            }),
+          );
+        } catch {}
+        if (data.from_cache) {
+          showSuccess(`${data.count} مخزن (از کش) — برای بازخوانی روی «بارگذاری مجدد» کلیک کنید`);
+        } else {
+          showSuccess(`${data.count} مخزن از GitHub بارگذاری شد`);
+        }
+        if (data.warning) showError(data.warning);
       } else {
         showError(data.error || 'خطا در دریافت مخازن');
         setRepos(data.repos || []);
@@ -315,6 +345,14 @@ export default function OversightPage() {
       setReposLoading(false);
     }
   };
+
+  // اگر تب repos باز شد و لیست خالی است، خودکار از کش/GitHub بارگذاری کن
+  useEffect(() => {
+    if (tab === 'repos' && repos.length === 0 && !reposLoading) {
+      loadRepos(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
 
   const addToWatch = async (repo: Repo) => {
     try {
@@ -966,11 +1004,12 @@ export default function OversightPage() {
                   </button>
                 )}
                 <button
-                  onClick={loadRepos}
+                  onClick={() => loadRepos(true)}
                   disabled={reposLoading || !status?.github_token}
                   className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50"
+                  title="بازخوانی تازه از GitHub (cache نادیده گرفته می‌شود)"
                 >
-                  {reposLoading ? '⏳ در حال بارگذاری...' : '🔄 بارگذاری از GitHub'}
+                  {reposLoading ? '⏳ در حال بارگذاری...' : '🔄 بازخوانی از GitHub'}
                 </button>
               </div>
             </div>

@@ -126,10 +126,13 @@ async def update_settings(payload: SettingsUpdate):
 # ============================================================
 
 @router.get("/repos")
-async def list_user_repos(max_pages: int = Query(default=5, ge=1, le=20)):
-    """لیست تمام مخازن گیت‌هاب کاربر (با paging)."""
+async def list_user_repos(
+    max_pages: int = Query(default=5, ge=1, le=20),
+    refresh: bool = Query(default=False),
+):
+    """لیست تمام مخازن گیت‌هاب کاربر (با cache 6 ساعته). refresh=true → بازخوانی از GitHub."""
     service = get_oversight_service()
-    return await service.list_user_repos(max_pages=max_pages)
+    return await service.list_user_repos(max_pages=max_pages, force_refresh=refresh)
 
 
 # ============================================================
