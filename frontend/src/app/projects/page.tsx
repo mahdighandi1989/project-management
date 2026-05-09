@@ -37,11 +37,83 @@ function ProjectsContent() {
   const [hasGlobalToken, setHasGlobalToken] = useState(false);
   const [useGlobalToken, setUseGlobalToken] = useState(true);
 
+  // 🔄 Smart sync from GitHub state
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<any | null>(null);
+  const [showSyncModal, setShowSyncModal] = useState(false);
+
+  // 🔍 Duplicates detection state
+  const [showDuplicatesModal, setShowDuplicatesModal] = useState(false);
+  const [duplicatesLoading, setDuplicatesLoading] = useState(false);
+  const [duplicatesData, setDuplicatesData] = useState<any | null>(null);
+  const [mergingPair, setMergingPair] = useState<string | null>(null);
+
   useEffect(() => {
     loadProjects();
     loadGitHubProjects();
     checkGlobalGithubToken();
   }, []);
+
+  // 🔄 اجرای smart sync
+  const runSmartSync = async () => {
+    setSyncing(true);
+    setSyncResult(null);
+    setShowSyncModal(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/sync/github`, { method: 'POST' });
+      const data = await res.json();
+      setSyncResult(data);
+      // refresh لیست پس از sync
+      await loadProjects();
+      await loadGitHubProjects();
+    } catch (e: any) {
+      setSyncResult({ success: false, error: e?.message || 'خطای ناشناخته' });
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  // 🔍 شناسایی پروژه‌های تکراری
+  const loadDuplicates = async () => {
+    setDuplicatesLoading(true);
+    setShowDuplicatesModal(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/duplicates`);
+      const data = await res.json();
+      setDuplicatesData(data);
+    } catch (e: any) {
+      setDuplicatesData({ success: false, error: e?.message || 'خطای ناشناخته' });
+    } finally {
+      setDuplicatesLoading(false);
+    }
+  };
+
+  // ادغام دو پروژه
+  const mergeProjectPair = async (keepId: string, deleteId: string) => {
+    if (!confirm(`آیا از ادغام مطمئنید؟ پروژهٔ "${deleteId}" حذف و داده‌هایش به "${keepId}" منتقل خواهد شد.`)) return;
+    const pairKey = `${keepId}|${deleteId}`;
+    setMergingPair(pairKey);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/projects/merge?keep_id=${encodeURIComponent(keepId)}&delete_id=${encodeURIComponent(deleteId)}`,
+        { method: 'POST' }
+      );
+      const data = await res.json();
+      if (!res.ok || data?.detail) {
+        alert('خطا: ' + (data?.detail || data?.error || 'ادغام ناموفق'));
+      } else {
+        setSuccess('✅ ادغام موفق');
+        // refresh duplicates و لیست
+        await loadDuplicates();
+        await loadProjects();
+        setTimeout(() => setSuccess(''), 3000);
+      }
+    } catch (e: any) {
+      alert('خطا: ' + (e?.message || 'ناشناخته'));
+    } finally {
+      setMergingPair(null);
+    }
+  };
 
   // بررسی اینکه توکن سراسری GitHub ذخیره شده یا نه
   const checkGlobalGithubToken = async () => {
@@ -288,7 +360,22 @@ function ProjectsContent() {
             <h1 className="text-2xl font-bold">پروژه‌ها</h1>
             <p className="text-gray-500 text-sm">مدیریت پروژه‌های شما</p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
+            <button
+              onClick={runSmartSync}
+              disabled={syncing}
+              className="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 flex items-center gap-1 text-sm"
+              title="بارگذاری پروژه‌های جدید از GitHub و تشخیص تکراری‌ها"
+            >
+              {syncing ? '⏳' : '🔄'} Smart Sync
+            </button>
+            <button
+              onClick={loadDuplicates}
+              className="px-3 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 flex items-center gap-1 text-sm"
+              title="یافتن پروژه‌های تکراری/مشابه و ادغام آن‌ها"
+            >
+              🔍 Duplicates
+            </button>
             <button
               onClick={() => setShowGitHubImport(true)}
               className="px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-900 flex items-center gap-2"
@@ -312,6 +399,144 @@ function ProjectsContent() {
             </Link>
           </div>
         </div>
+
+        {/* 🔄 Smart Sync Modal */}
+        {showSyncModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => !syncing && setShowSyncModal(false)}>
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-5 max-w-md w-full mx-4" onClick={e => e.stopPropagation()}>
+              <h3 className="text-lg font-bold mb-3">🔄 Smart Sync from GitHub</h3>
+              {syncing ? (
+                <div className="text-sm text-gray-600 dark:text-gray-300 py-4">
+                  ⏳ در حال بارگذاری پروژه‌ها از GitHub...
+                </div>
+              ) : syncResult ? (
+                syncResult.success !== false ? (
+                  <div className="space-y-2 text-sm">
+                    <div className="bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300 p-2 rounded">
+                      ✅ Sync موفق
+                    </div>
+                    {typeof syncResult.added !== 'undefined' && (
+                      <div>پروژه‌های اضافه‌شده: <strong>{syncResult.added}</strong></div>
+                    )}
+                    {typeof syncResult.skipped !== 'undefined' && (
+                      <div>رد شده (قبلاً موجود): <strong>{syncResult.skipped}</strong></div>
+                    )}
+                    {typeof syncResult.duplicates_detected !== 'undefined' && (
+                      <div>تکراری‌های شناسایی‌شده: <strong>{syncResult.duplicates_detected}</strong></div>
+                    )}
+                    {syncResult.message && (
+                      <div className="text-gray-600 dark:text-gray-400">{syncResult.message}</div>
+                    )}
+                    {syncResult.details && (
+                      <pre className="bg-gray-50 dark:bg-gray-900 p-2 rounded text-xs max-h-48 overflow-auto">
+                        {JSON.stringify(syncResult.details, null, 2)}
+                      </pre>
+                    )}
+                  </div>
+                ) : (
+                  <div className="bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 p-2 rounded text-sm">
+                    ❌ خطا: {syncResult.error || syncResult.detail || 'ناشناخته'}
+                  </div>
+                )
+              ) : null}
+              <div className="flex justify-end mt-4">
+                <button
+                  onClick={() => setShowSyncModal(false)}
+                  disabled={syncing}
+                  className="px-3 py-1.5 text-sm bg-gray-200 dark:bg-gray-700 rounded disabled:opacity-50"
+                >
+                  بستن
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 🔍 Duplicates Modal */}
+        {showDuplicatesModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowDuplicatesModal(false)}>
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-5 max-w-2xl w-full mx-4 max-h-[80vh] overflow-auto" onClick={e => e.stopPropagation()}>
+              <h3 className="text-lg font-bold mb-3">🔍 پروژه‌های تکراری/مشابه</h3>
+              {duplicatesLoading ? (
+                <div className="text-sm text-gray-600 dark:text-gray-300 py-4">⏳ در حال شناسایی...</div>
+              ) : duplicatesData ? (
+                duplicatesData.success === false ? (
+                  <div className="bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 p-2 rounded text-sm">
+                    ❌ خطا: {duplicatesData.error || 'ناشناخته'}
+                  </div>
+                ) : (
+                  (() => {
+                    const pairs = duplicatesData.duplicates || duplicatesData.pairs || duplicatesData.items || [];
+                    if (!pairs || pairs.length === 0) {
+                      return (
+                        <div className="bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300 p-3 rounded text-sm">
+                          ✅ هیچ پروژهٔ تکراری شناسایی نشد
+                        </div>
+                      );
+                    }
+                    return (
+                      <div className="space-y-2">
+                        <div className="text-xs text-gray-500 dark:text-gray-400 mb-2">
+                          {pairs.length} جفت تکراری شناسایی شد. روی «ادغام» کلیک کنید تا یکی به دیگری منتقل شود.
+                        </div>
+                        {pairs.map((pair: any, idx: number) => {
+                          // پایداری: pair ممکن است از یکی از این فرم‌ها باشد:
+                          // {a, b, similarity} | {keep, delete} | {project1, project2}
+                          const pa = pair.a || pair.keep || pair.project1 || pair[0] || {};
+                          const pb = pair.b || pair.delete || pair.project2 || pair[1] || {};
+                          const similarity = pair.similarity ?? pair.score ?? null;
+                          const keepId = pa.id || pa.project_id || '';
+                          const deleteId = pb.id || pb.project_id || '';
+                          const pairKey = `${keepId}|${deleteId}`;
+                          return (
+                            <div key={idx} className="border border-gray-200 dark:border-gray-700 rounded-lg p-3">
+                              <div className="flex items-center justify-between mb-2">
+                                <div className="text-xs text-gray-500 dark:text-gray-400">
+                                  {similarity !== null && (
+                                    <span className="bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 px-2 py-0.5 rounded">
+                                      شباهت: {typeof similarity === 'number' ? Math.round(similarity * 100) + '٪' : similarity}
+                                    </span>
+                                  )}
+                                </div>
+                                <button
+                                  onClick={() => mergeProjectPair(keepId, deleteId)}
+                                  disabled={!keepId || !deleteId || mergingPair === pairKey}
+                                  className="px-3 py-1 text-xs bg-orange-500 text-white rounded hover:bg-orange-600 disabled:opacity-50"
+                                >
+                                  {mergingPair === pairKey ? '⏳ در حال ادغام...' : '🔗 ادغام (نگه‌داری اولی)'}
+                                </button>
+                              </div>
+                              <div className="grid grid-cols-2 gap-2 text-sm">
+                                <div className="bg-green-50 dark:bg-green-900/20 p-2 rounded">
+                                  <div className="text-xs font-medium text-green-700 dark:text-green-300 mb-0.5">نگه داشته شود</div>
+                                  <div className="font-medium">{pa.name || pa.title || pa.id || '(نامشخص)'}</div>
+                                  {pa.description && <div className="text-xs text-gray-500 truncate">{pa.description}</div>}
+                                </div>
+                                <div className="bg-red-50 dark:bg-red-900/20 p-2 rounded">
+                                  <div className="text-xs font-medium text-red-700 dark:text-red-300 mb-0.5">حذف شود</div>
+                                  <div className="font-medium">{pb.name || pb.title || pb.id || '(نامشخص)'}</div>
+                                  {pb.description && <div className="text-xs text-gray-500 truncate">{pb.description}</div>}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()
+                )
+              ) : null}
+              <div className="flex justify-end mt-4">
+                <button
+                  onClick={() => setShowDuplicatesModal(false)}
+                  className="px-3 py-1.5 text-sm bg-gray-200 dark:bg-gray-700 rounded"
+                >
+                  بستن
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="grid lg:grid-cols-3 gap-6">
           {/* لیست پروژه‌ها */}

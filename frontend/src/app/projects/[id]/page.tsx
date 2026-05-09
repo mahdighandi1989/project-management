@@ -309,7 +309,17 @@ export default function ProjectDetailPage() {
     model_id?: string;
     timestamp: Date;
     tokens_used?: number;
-    action_type?: 'click' | 'type' | 'navigate' | 'edit' | 'read' | 'log' | 'scroll' | 'focus' | 'hover' | 'error' | 'console-error';
+    action_type?: 'click' | 'type' | 'navigate' | 'edit' | 'read' | 'log' | 'scroll' | 'focus' | 'hover' | 'error' | 'console-error' | 'network-request' | 'network-response' | 'network-error';
+    network_meta?: {
+      reqId?: string;
+      method?: string;
+      url?: string;
+      status?: number;
+      durationMs?: number;
+      ok?: boolean;
+      errorMessage?: string;
+      startedAt?: number;
+    } | null;
     backend_verified?: boolean | null;  // null=pending, true=ok, false=error
     backend_log_summary?: string;
     verified_by_model?: string;
@@ -333,7 +343,7 @@ export default function ProjectDetailPage() {
   const [inspectorChatInput, setInspectorChatInput] = useState('');
   const [inspectorChatLoading, setInspectorChatLoading] = useState(false);
   const [inspectorShowModelSelector, setInspectorShowModelSelector] = useState(false);
-  // 🔧 فیلتر انواع اکشن‌ها - همه فعال بجز scroll
+  // 🔧 فیلتر انواع اکشن‌ها - همه فعال بجز scroll و network-request پرسر و صدا
   const [inspectorActionFilters, setInspectorActionFilters] = useState<Record<string, boolean>>({
     'click': true,
     'scroll': false,
@@ -343,6 +353,10 @@ export default function ProjectDetailPage() {
     'error': true,
     'console-error': true,
     'error-overlay': true,
+    // 🌐 Network events — پاسخ‌ها و خطاها به‌صورت پیش‌فرض روشن، شروع درخواست خاموش
+    'network-request': false,
+    'network-response': true,
+    'network-error': true,
   });
   const inspectorActionFiltersRef = useRef<Record<string, boolean>>({
     'click': true,
@@ -353,7 +367,30 @@ export default function ProjectDetailPage() {
     'error': true,
     'console-error': true,
     'error-overlay': true,
+    'network-request': false,
+    'network-response': true,
+    'network-error': true,
   });
+
+  // 🛡️ Inspector hardening: dedup + verify retry tracking + console log cap
+  // dedup map: کلید = action_type:timestamp:digest(target+content) → مقدار = Date.now()
+  // entryهای قدیمی‌تر از window×۵ هر ۳۰ ثانیه پاک می‌شوند (در WebSocket useEffect)
+  const inspectorSeenEventsRef = useRef<Map<string, number>>(new Map());
+  const INSPECTOR_DEDUP_WINDOW_MS = 2000;
+  const [inspectorDuplicatesDroppedCount, setInspectorDuplicatesDroppedCount] = useState(0);
+  const [inspectorVerifyPendingCount, setInspectorVerifyPendingCount] = useState(0);
+  const inspectorPowerOnRef = useRef(false);
+  // console log cap قابل تنظیم (پیش‌فرض ۲۰۰۰، به جای ۵۰۰)
+  const [consoleLogCap, setConsoleLogCap] = useState(2000);
+  const [consoleLogDroppedCount, setConsoleLogDroppedCount] = useState(0);
+  const consoleLogCapRef = useRef(consoleLogCap);
+  consoleLogCapRef.current = consoleLogCap;
+
+  // 🔄 Restore chat from DB on mount + manual reload control
+  const [inspectorChatRestored, setInspectorChatRestored] = useState(false);
+  const [inspectorChatRestoring, setInspectorChatRestoring] = useState(false);
+  const [inspectorRestoreError, setInspectorRestoreError] = useState<string | null>(null);
+
   const [inspectorReplyTo, setInspectorReplyTo] = useState<{
     id: string;
     content: string;
@@ -938,6 +975,463 @@ export default function ProjectDetailPage() {
     inspectorActionFiltersRef.current = inspectorActionFilters;
   }, [inspectorActionFilters]);
 
+  // 🔧 همگام‌سازی ref وضعیت روشنی Inspector — برای abort کردن retry های در جریان
+  useEffect(() => {
+    inspectorPowerOnRef.current = inspectorPowerOn;
+  }, [inspectorPowerOn]);
+
+  // 🔄 Restore chat from DB
+  // وقتی session ست می‌شود (یا کاربر force می‌کند) آخرین پیام‌ها از DB pull می‌شوند
+  // و در ابتدای chat قرار می‌گیرند. dedup با id تضمین می‌کند تکراری نشوند.
+  const restoreInspectorChatFromDb = useCallback(async (force: boolean = false) => {
+    const sid = inspectorSessionIdRef.current;
+    if (!sid) return;
+    if (inspectorChatRestored && !force) return;
+    setInspectorChatRestoring(true);
+    setInspectorRestoreError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/session/${sid}/messages`);
+      const data = await res.json();
+      if (data.success && Array.isArray(data.messages)) {
+        const restored = data.messages.map((m: any) => {
+          // extract network_meta from extra_data if present
+          let networkMeta: any = null;
+          try {
+            const ed = typeof m.extra_data === 'string' ? JSON.parse(m.extra_data) : m.extra_data;
+            if (ed && ed.network_meta) networkMeta = ed.network_meta;
+          } catch (e) { /* parse failed - non-critical */ }
+          return {
+            id: `restored_${m.id}`,
+            db_id: m.id,
+            role: m.role,
+            content: m.content,
+            timestamp: new Date(m.timestamp || m.created_at || Date.now()),
+            action_type: m.action_type || undefined,
+            backend_verified: m.backend_verified ?? null,
+            backend_log_summary: m.backend_log_summary,
+            verified_by_model: m.verified_by_model,
+            logs_checked: m.logs_checked,
+            error_logs_count: m.error_logs_count,
+            checked_logs: m.checked_logs,
+            network_meta: networkMeta,
+            ...(m.model_id ? { model_id: m.model_id } : {}),
+            ...(m.tokens_used ? { tokens_used: m.tokens_used } : {}),
+          };
+        });
+        // dedup: اگر پیامی با همان db_id در state موجود است، آن را skip کن
+        setInspectorChatMessages(prev => {
+          const existingDbIds = new Set(prev.map((p: any) => p.db_id).filter(Boolean));
+          const filtered = restored.filter((r: any) => !existingDbIds.has(r.db_id));
+          // مرتب‌سازی بر اساس timestamp برای حفظ ترتیب چرونولوژیک
+          const merged = [...filtered, ...prev];
+          merged.sort((a: any, b: any) => {
+            const ta = a.timestamp instanceof Date ? a.timestamp.getTime() : new Date(a.timestamp).getTime();
+            const tb = b.timestamp instanceof Date ? b.timestamp.getTime() : new Date(b.timestamp).getTime();
+            return ta - tb;
+          });
+          return merged;
+        });
+        setInspectorChatRestored(true);
+      } else {
+        setInspectorRestoreError(data.error || 'بارگذاری ناموفق');
+      }
+    } catch (e: any) {
+      setInspectorRestoreError(e?.message || 'خطا در ارتباط با backend');
+    } finally {
+      setInspectorChatRestoring(false);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inspectorChatRestored]);
+
+  // trigger خودکار وقتی session_id جدید ست می‌شود (و قبلاً restore نشده)
+  useEffect(() => {
+    if (inspectorSessionId && !inspectorChatRestored && activeTab === 'inspector') {
+      // small debounce: بگذار session آماده شود
+      const t = setTimeout(() => { restoreInspectorChatFromDb(false); }, 400);
+      return () => clearTimeout(t);
+    }
+  }, [inspectorSessionId, inspectorChatRestored, activeTab, restoreInspectorChatFromDb]);
+
+  // 🧹 Clear chat (فقط state فرانت — DB دست‌نخورده می‌ماند)
+  const clearInspectorChatLocally = useCallback(() => {
+    setInspectorChatMessages([]);
+    setInspectorChatRestored(false);  // اجازه بده دفعه بعد دوباره از DB بخواند
+  }, []);
+
+  // 🔁 Reload from DB (force) — کاربر دستی تاریخچه را از DB می‌کشد
+  const reloadInspectorChatFromDb = useCallback(async () => {
+    setInspectorChatMessages([]);
+    setInspectorChatRestored(false);
+    await restoreInspectorChatFromDb(true);
+  }, [restoreInspectorChatFromDb]);
+
+  // 📋 Build strong external prompt for a prompt-field (client-side)
+  // ساختار خروجی هم‌تراز با oversight_strong_prompt است تا کاربر بتواند آن را
+  // در ابزار کدنویس خارجی (Cursor/Copilot) paste کند و دقیقاً بداند چه فایل‌هایی
+  // باید لمس شوند. بدون نیاز به API call — همه context را از state موجود می‌سازد.
+  const buildStrongPromptForField = useCallback((field: any): string => {
+    const lines: string[] = [];
+    const projectName = project?.name || 'Project';
+    const projectDesc = (project as any)?.description || '';
+    const technologies: string[] = ((project as any)?.technologies || []) as string[];
+    const features: any[] = ((project as any)?.features || []) as any[];
+    const memInst: string = ((project as any)?.memory_instructions?.content || '') as string;
+
+    lines.push(`## 🎯 هدف`);
+    lines.push(field?.title || 'فیلد بدون عنوان');
+    lines.push('');
+    lines.push(`## 🧭 هدف اصلی پروژه (از یادداشت کاربر)`);
+    lines.push(memInst || projectDesc || '(کاربر یادداشتی ثبت نکرده است)');
+    lines.push('');
+    if (technologies && technologies.length) {
+      lines.push(`## 🧱 پشتهٔ فناوری و معماری`);
+      lines.push(`Technologies: ${technologies.slice(0, 12).join(', ')}`);
+      if (features && features.length) {
+        lines.push('');
+        const featTitles = features.slice(0, 6).map((f: any) => typeof f === 'string' ? f : (f?.title || f?.name || JSON.stringify(f).slice(0, 60)));
+        lines.push(`Features: ${featTitles.join('؛ ')}`);
+      }
+      lines.push('');
+    }
+    lines.push(`## 📍 موقعیت دقیق در پروژه`);
+    lines.push(`_(file:line — symbol — snippet — توسط مجری بر اساس Context زیر شناسایی شود)_`);
+    lines.push('');
+    lines.push(`## 🔍 Context و وضعیت فعلی`);
+    lines.push(`Project: \`${projectName}\``);
+    if (projectDesc) {
+      lines.push('');
+      lines.push(`Description: ${projectDesc}`);
+    }
+    lines.push('');
+    lines.push(`### محتوای فیلد:`);
+    lines.push('');
+    lines.push(field?.content || '(محتوا خالی است)');
+    lines.push('');
+    if (field?.category) {
+      const catLabel = field.category === 'instruction' ? 'دستور' : field.category === 'memory' ? 'حافظه' : 'آموزش';
+      lines.push(`> دستهٔ این فیلد: **${catLabel}**`);
+      lines.push('');
+    }
+    lines.push(`## ✅ معیار پذیرش (Acceptance Criteria)`);
+    lines.push(`- [ ] نتیجهٔ اعمال این فیلد با مفاد آن مطابقت داشته باشد`);
+    lines.push(`- [ ] هیچ تستی fail نمی‌شود (\`npm run test\` / \`pytest\`)`);
+    lines.push(`- [ ] linter بدون warning عبور می‌کند`);
+    lines.push(`- [ ] type-check موفق است (\`tsc --noEmit\` / \`mypy\`)`);
+    lines.push('');
+    lines.push(`## 🪜 مراحل اجرایی پیشنهادی`);
+    lines.push(`_(مجری بر اساس Context و معیارهای پذیرش، مراحل را تعیین کند)_`);
+    lines.push('');
+    lines.push(`## 📤 خروجی مورد انتظار`);
+    lines.push(`تغییر کد در فایل‌های مرتبط، commit یا PR جدید با پیام واضح، و عبور تمام معیارهای پذیرش.`);
+    lines.push('');
+    lines.push(`## ⚠️ ریسک‌ها و موارد احتیاط`);
+    lines.push(`پیش از merge، تست‌های موجود اجرا شوند تا رگرشن ایجاد نشود.`);
+    lines.push('');
+    lines.push(`## 🏷 دسته‌بندی`);
+    const typeMap: Record<string, string> = { instruction: 'feature_request', memory: 'docs', training: 'docs' };
+    lines.push(`- نوع: ${typeMap[field?.category || ''] || 'other'}`);
+    lines.push(`- اولویت: ${(field?.priority ?? 0) > 5 ? 'high' : 'medium'}`);
+    lines.push(`- تخمین زمان: medium`);
+    return lines.join('\n');
+  }, [project]);
+
+  const [copyFieldFeedbackId, setCopyFieldFeedbackId] = useState<string | null>(null);
+  const copyStrongPromptForField = useCallback(async (field: any) => {
+    try {
+      const txt = buildStrongPromptForField(field);
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(txt);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = txt;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopyFieldFeedbackId(field.id);
+      setTimeout(() => setCopyFieldFeedbackId(null), 1500);
+    } catch (e) {
+      alert('کپی ناموفق: ' + (e as any)?.message);
+    }
+  }, [buildStrongPromptForField]);
+
+  // ===========================================================
+  // 📥 Export action timeline + 🔗 Send to Oversight
+  // ===========================================================
+
+  // Send to Oversight modal state
+  const [showSendToOversightModal, setShowSendToOversightModal] = useState(false);
+  const [oversightWatchedList, setOversightWatchedList] = useState<Array<{ id: string; repo_full_name: string; user_notes?: string }>>([]);
+  const [sendOversightForm, setSendOversightForm] = useState({
+    watched_id: '',
+    title: '',
+    type: 'bug',
+    priority: 'medium',
+  });
+  const [sendOversightSubmitting, setSendOversightSubmitting] = useState(false);
+
+  // ابزار کمکی: ساختار خروجی timeline
+  const buildTimelineSnapshot = useCallback(() => {
+    const filters: Record<string, boolean> = inspectorActionFiltersRef.current as Record<string, boolean>;
+    return {
+      session_id: inspectorSessionId,
+      project_id: projectId,
+      project_name: project?.name || '',
+      started_at:
+        inspectorChatMessages.length > 0
+          ? (inspectorChatMessages[0].timestamp instanceof Date
+              ? inspectorChatMessages[0].timestamp.toISOString()
+              : new Date(inspectorChatMessages[0].timestamp).toISOString())
+          : null,
+      exported_at: new Date().toISOString(),
+      total_messages: inspectorChatMessages.length,
+      filters_active: Object.keys(filters).filter(k => filters[k]),
+      counters: {
+        duplicates_dropped: inspectorDuplicatesDroppedCount,
+        verify_pending: inspectorVerifyPendingCount,
+        console_logs_dropped: consoleLogDroppedCount,
+        console_log_cap: consoleLogCap,
+      },
+      messages: inspectorChatMessages.map((m: any) => ({
+        id: m.id,
+        db_id: m.db_id || null,
+        role: m.role,
+        content: m.content,
+        timestamp: m.timestamp instanceof Date ? m.timestamp.toISOString() : new Date(m.timestamp).toISOString(),
+        action_type: m.action_type || null,
+        backend_verified: m.backend_verified ?? null,
+        backend_log_summary: m.backend_log_summary || null,
+        verified_by_model: m.verified_by_model || null,
+        logs_checked: m.logs_checked ?? null,
+        error_logs_count: m.error_logs_count ?? null,
+        network_meta: m.network_meta || null,
+        model_id: m.model_id || null,
+      })),
+    };
+  }, [inspectorSessionId, projectId, project, inspectorChatMessages, inspectorDuplicatesDroppedCount, inspectorVerifyPendingCount, consoleLogDroppedCount, consoleLogCap]);
+
+  const downloadBlob = (filename: string, content: string, mime: string) => {
+    try {
+      const blob = new Blob([content], { type: mime });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    } catch (e) {
+      console.warn('downloadBlob failed', e);
+    }
+  };
+
+  const exportInspectorTimelineJSON = useCallback(() => {
+    const snap = buildTimelineSnapshot();
+    const filename = `inspector-timeline-${(project?.name || 'project').replace(/[^a-zA-Z0-9-_]/g, '_')}-${Date.now()}.json`;
+    downloadBlob(filename, JSON.stringify(snap, null, 2), 'application/json');
+  }, [buildTimelineSnapshot, project]);
+
+  const exportInspectorTimelineMarkdown = useCallback(() => {
+    const snap = buildTimelineSnapshot();
+    const lines: string[] = [];
+    lines.push(`# 📋 Inspector Timeline — ${snap.project_name || 'Project'}`);
+    lines.push('');
+    lines.push(`- **Project ID:** \`${snap.project_id}\``);
+    lines.push(`- **Session ID:** \`${snap.session_id ?? 'N/A'}\``);
+    lines.push(`- **Started at:** ${snap.started_at || 'N/A'}`);
+    lines.push(`- **Exported at:** ${snap.exported_at}`);
+    lines.push(`- **Total messages:** ${snap.total_messages}`);
+    lines.push(`- **Active filters:** ${snap.filters_active.join(', ') || '(none)'}`);
+    lines.push(`- **Counters:** duplicates_dropped=${snap.counters.duplicates_dropped}, verify_pending=${snap.counters.verify_pending}, logs_dropped=${snap.counters.console_logs_dropped} (cap=${snap.counters.console_log_cap})`);
+    lines.push('');
+    lines.push('---');
+    lines.push('');
+    let lastDate = '';
+    for (const m of snap.messages) {
+      const d = new Date(m.timestamp);
+      const dateStr = d.toISOString().slice(0, 10);
+      if (dateStr !== lastDate) {
+        lines.push(`## 🗓️ ${dateStr}`);
+        lines.push('');
+        lastDate = dateStr;
+      }
+      const time = d.toISOString().slice(11, 19);
+      const emoji =
+        m.action_type === 'click' ? '🖱️' :
+        m.action_type === 'input' ? '⌨️' :
+        m.action_type === 'scroll' ? '🔃' :
+        m.action_type === 'focus' ? '🎯' :
+        m.action_type === 'hover' ? '👆' :
+        m.action_type === 'error' || m.action_type === 'console-error' ? '🔴' :
+        m.action_type === 'error-overlay' ? '🚨' :
+        m.action_type === 'network-request' ? '🌐' :
+        m.action_type === 'network-response' ? '✅' :
+        m.action_type === 'network-error' ? '🌐❌' :
+        m.role === 'user' ? '👤' :
+        m.role === 'assistant' ? '🤖' :
+        m.role === 'system' ? '⚙️' :
+        '•';
+      lines.push(`### ${emoji} ${time} — ${m.role}${m.action_type ? ` (\`${m.action_type}\`)` : ''}`);
+      lines.push('');
+      lines.push(`> ${m.content.replace(/\n/g, '\n> ')}`);
+      lines.push('');
+      const meta: string[] = [];
+      if (m.backend_verified !== null) meta.push(`verified: ${m.backend_verified ? '✅' : '❌'}`);
+      if (m.verified_by_model) meta.push(`model: \`${m.verified_by_model}\``);
+      if (m.logs_checked !== null) meta.push(`logs_checked: ${m.logs_checked}`);
+      if (m.error_logs_count !== null && m.error_logs_count !== 0) meta.push(`errors: ${m.error_logs_count}`);
+      if (m.network_meta) {
+        const nm = m.network_meta;
+        meta.push(`network: ${nm.method || ''} ${nm.url || ''} → ${nm.status || ''} (${nm.durationMs || 0}ms)`);
+      }
+      if (meta.length) {
+        lines.push(`<sub>${meta.join(' · ')}</sub>`);
+        lines.push('');
+      }
+      if (m.backend_log_summary) {
+        lines.push(`**Backend log summary:**`);
+        lines.push('```');
+        lines.push(m.backend_log_summary);
+        lines.push('```');
+        lines.push('');
+      }
+    }
+    const filename = `inspector-timeline-${(project?.name || 'project').replace(/[^a-zA-Z0-9-_]/g, '_')}-${Date.now()}.md`;
+    downloadBlob(filename, lines.join('\n'), 'text/markdown');
+  }, [buildTimelineSnapshot, project]);
+
+  // 🔗 Send to Oversight — یک تسک جدید در سیستم نظارت می‌سازد
+  const openSendToOversightModal = useCallback(async () => {
+    try {
+      // pre-load watched list
+      const res = await fetch(`${API_BASE}/api/oversight/watched`);
+      const data = await res.json();
+      const items = (data && data.items) ? data.items : [];
+      setOversightWatchedList(items);
+      // default title از خطای آخر یا "گزارش مانیتورینگ"
+      const lastError = [...inspectorChatMessages].reverse().find((m: any) =>
+        m.action_type === 'error' || m.action_type === 'console-error' || m.action_type === 'network-error'
+      ) as any;
+      setSendOversightForm({
+        watched_id: items[0]?.id || '',
+        title: lastError ? `بررسی: ${(lastError.content || '').slice(0, 80)}` : `گزارش Inspector — ${project?.name || 'پروژه'}`,
+        type: lastError ? 'bug' : 'other',
+        priority: lastError ? 'high' : 'medium',
+      });
+      setShowSendToOversightModal(true);
+    } catch (e: any) {
+      alert('خطا در بارگذاری watched projects: ' + (e?.message || ''));
+    }
+  }, [inspectorChatMessages, project]);
+
+  const submitSendToOversight = useCallback(async () => {
+    if (!sendOversightForm.watched_id) {
+      alert('لطفاً یک پروژهٔ watched انتخاب کنید');
+      return;
+    }
+    setSendOversightSubmitting(true);
+    try {
+      const snap = buildTimelineSnapshot();
+      const watched = oversightWatchedList.find(w => w.id === sendOversightForm.watched_id);
+
+      // استخراج فایل‌های هدف از URL های network requests (مسیر بدون پارامتر)
+      const targetFilesSet = new Set<string>();
+      for (const m of snap.messages) {
+        if (m.network_meta && m.network_meta.url) {
+          try {
+            const u = new URL(m.network_meta.url, 'http://x');
+            if (u.pathname && u.pathname !== '/') targetFilesSet.add(u.pathname);
+          } catch (_) {}
+        }
+      }
+      const targetFiles = Array.from(targetFilesSet).slice(0, 10);
+
+      // ساخت Markdown خلاصه به‌عنوان prompt
+      const errorMsgs = snap.messages.filter((m: any) =>
+        m.action_type === 'error' || m.action_type === 'console-error' || m.action_type === 'network-error'
+      );
+      const promptParts: string[] = [];
+      promptParts.push(`## 🎯 هدف`);
+      promptParts.push(sendOversightForm.title);
+      promptParts.push('');
+      promptParts.push(`## 🧭 هدف اصلی پروژه (از یادداشت کاربر)`);
+      promptParts.push(watched?.user_notes || '(کاربر یادداشتی ثبت نکرده است)');
+      promptParts.push('');
+      promptParts.push(`## 📍 موقعیت‌های مرتبط`);
+      if (targetFiles.length) {
+        targetFiles.forEach(f => promptParts.push(`- \`${f}\``));
+      } else {
+        promptParts.push('_(هیچ مسیر network مشخصی شناسایی نشد)_');
+      }
+      promptParts.push('');
+      promptParts.push(`## 🔍 Context — خلاصهٔ Inspector Timeline`);
+      promptParts.push(`Project: \`${snap.project_name}\` (ID: \`${snap.project_id}\`)`);
+      promptParts.push(`Session: \`${snap.session_id ?? 'N/A'}\` · Total messages: ${snap.total_messages}`);
+      promptParts.push(`Exported at: ${snap.exported_at}`);
+      promptParts.push('');
+      if (errorMsgs.length > 0) {
+        promptParts.push(`### 🔴 خطاهای دیده‌شده (${errorMsgs.length})`);
+        for (const e of errorMsgs.slice(-15)) {
+          const t = new Date(e.timestamp).toISOString().slice(11, 19);
+          promptParts.push(`- [${t}] **${e.action_type}**: ${e.content.slice(0, 200)}`);
+          if (e.backend_log_summary) {
+            promptParts.push(`  - log summary: ${e.backend_log_summary.slice(0, 200)}`);
+          }
+        }
+        promptParts.push('');
+      }
+      const lastActions = snap.messages.filter((m: any) => m.role === 'action').slice(-20);
+      if (lastActions.length > 0) {
+        promptParts.push(`### 🪜 آخرین ${lastActions.length} اکشن کاربر`);
+        for (const a of lastActions) {
+          const t = new Date(a.timestamp).toISOString().slice(11, 19);
+          promptParts.push(`- [${t}] ${a.action_type || 'event'}: ${a.content.slice(0, 150)}`);
+        }
+        promptParts.push('');
+      }
+      promptParts.push(`## ✅ معیار پذیرش`);
+      promptParts.push('- [ ] خطاهای ذکر شده دیگر در Inspector تکرار نمی‌شوند');
+      promptParts.push('- [ ] هیچ تستی fail نمی‌شود (`npm run test` / `pytest`)');
+      promptParts.push('- [ ] linter بدون warning عبور می‌کند');
+      promptParts.push('');
+      promptParts.push(`## 🏷 دسته‌بندی`);
+      promptParts.push(`- نوع: ${sendOversightForm.type}`);
+      promptParts.push(`- اولویت: ${sendOversightForm.priority}`);
+
+      const promptText = promptParts.join('\n');
+
+      const body = {
+        watched_id: sendOversightForm.watched_id,
+        project_full_name: watched?.repo_full_name || '',
+        title: sendOversightForm.title,
+        prompt: promptText,
+        raw_idea: 'Generated from Inspector timeline',
+        type: sendOversightForm.type,
+        priority: sendOversightForm.priority,
+        status: 'pending',
+        source: 'inspector',
+      };
+      const res = await fetch(`${API_BASE}/api/oversight/tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok || (data && data.detail)) {
+        throw new Error(data?.detail || 'ساخت تسک نظارت ناموفق بود');
+      }
+      setShowSendToOversightModal(false);
+      // toast ساده — alert موقتی
+      alert('✅ تسک با موفقیت در سیستم نظارت ساخته شد');
+    } catch (e: any) {
+      alert('خطا: ' + (e?.message || 'ناشناخته'));
+    } finally {
+      setSendOversightSubmitting(false);
+    }
+  }, [sendOversightForm, oversightWatchedList, buildTimelineSnapshot]);
+
   // 🌉 تابع مشترک برای پردازش event های Bridge (postMessage و WebSocket)
   const actionLabelsRef = useRef<Record<string, string>>({
     'click': 'کلیک کردی',
@@ -947,13 +1441,46 @@ export default function ProjectDetailPage() {
     'hover': 'موس بردی روی',
     'error': '🔴 خطای JS',
     'console-error': '🔴 console.error',
-    'error-overlay': '🔴 لایه خطا شناسایی شد'
+    'error-overlay': '🔴 لایه خطا شناسایی شد',
+    'network-request': '🌐 درخواست شبکه',
+    'network-response': '✅ پاسخ شبکه',
+    'network-error': '🔴 خطای شبکه',
   });
 
   const handleBridgeEvent = useCallback((data: any, sourceLabel: string) => {
     const { action, target, elementInfo, level, source } = data;
 
-    // 📋 ذخیره لاگ‌های کنسول (تفکیک شده)
+    // 🛡️ DEDUP — جلوگیری از log شدن دوبارهٔ یک event که از هر دو کانال
+    // (postMessage و WebSocket) رسیده است. کلید بر اساس نوع+timestamp+محتوا.
+    // window پیش‌فرض ۲ ثانیه — اگر در این بازه همان کلید دیده شد، drop می‌شود.
+    try {
+      const evtTs = data.timestamp || Date.now();
+      const digestSrc = `${target || ''}|${elementInfo || ''}|${level || ''}`.slice(0, 200);
+      // برای network events، reqId را در کلید قرار می‌دهیم تا response/error هر
+      // request منحصر به فرد بماند حتی اگر URL یکسان باشد
+      const reqIdPart = (data.networkMeta && data.networkMeta.reqId) ? `:${data.networkMeta.reqId}` : '';
+      const dedupKey = `${action}:${evtTs}:${digestSrc}${reqIdPart}`;
+      const seen = inspectorSeenEventsRef.current;
+      const lastSeen = seen.get(dedupKey);
+      const now = Date.now();
+      if (lastSeen !== undefined && now - lastSeen < INSPECTOR_DEDUP_WINDOW_MS) {
+        // این رویداد تکراری است — drop کن و شمارنده را بالا ببر
+        setInspectorDuplicatesDroppedCount(c => c + 1);
+        return;
+      }
+      seen.set(dedupKey, now);
+      // محدودیت اندازهٔ map (در صورت رشد بیش از حد — معمولاً cleanup interval کافی است)
+      if (seen.size > 5000) {
+        const cutoff = now - INSPECTOR_DEDUP_WINDOW_MS * 5;
+        const toDelete: string[] = [];
+        seen.forEach((t, k) => { if (t < cutoff) toDelete.push(k); });
+        toDelete.forEach(k => seen.delete(k));
+      }
+    } catch (e) {
+      // dedup نباید critical باشد — اگر چیزی شکست، event را مثل قبل پردازش کن
+    }
+
+    // 📋 ذخیره لاگ‌های کنسول (تفکیک شده) — با cap قابل تنظیم + شمارش drop ها
     if (action === 'console-log' || action === 'console-error') {
       setImportedProjectConsoleLogs(prev => {
         const newLog = {
@@ -963,20 +1490,35 @@ export default function ProjectDetailPage() {
           timestamp: data.timestamp || Date.now(),
           source: source || 'imported-project',
         };
-        return [...prev, newLog].slice(-500);
+        const cap = consoleLogCapRef.current || 2000;
+        const merged = [...prev, newLog];
+        if (merged.length > cap) {
+          // logها silently drop می‌شوند ولی شمارنده را بالا می‌بریم تا کاربر مطلع شود
+          setConsoleLogDroppedCount(c => c + (merged.length - cap));
+          return merged.slice(-cap);
+        }
+        return merged;
       });
       if (action === 'console-log') return;
     }
 
     // 🔍 لایه خطا (Error Overlay) شناسایی شده
     if (action === 'error-overlay') {
-      setImportedProjectConsoleLogs(prev => [...prev, {
-        id: `overlay_${sourceLabel}_${Date.now()}`,
-        level: 'error',
-        message: `[Error Overlay] ${elementInfo || ''}`,
-        timestamp: data.timestamp || Date.now(),
-        source: 'imported-project',
-      }]);
+      setImportedProjectConsoleLogs(prev => {
+        const cap = consoleLogCapRef.current || 2000;
+        const merged = [...prev, {
+          id: `overlay_${sourceLabel}_${Date.now()}`,
+          level: 'error',
+          message: `[Error Overlay] ${elementInfo || ''}`,
+          timestamp: data.timestamp || Date.now(),
+          source: 'imported-project',
+        }];
+        if (merged.length > cap) {
+          setConsoleLogDroppedCount(c => c + (merged.length - cap));
+          return merged.slice(-cap);
+        }
+        return merged;
+      });
     }
 
     // 🔧 فیلتر اکشن: اگر این نوع غیرفعال باشد، در چت ثبت نشود
@@ -987,16 +1529,19 @@ export default function ProjectDetailPage() {
 
     // اضافه کردن به پیام‌های دائمی چت
     const msgId = `action_${sourceLabel}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    // برای network events، content را بدون «روی» می‌سازیم — فقط label + targetInfo
+    const isNetworkEvt = action === 'network-request' || action === 'network-response' || action === 'network-error';
     setInspectorChatMessages(prev => [...prev, {
       id: msgId,
       role: 'action' as const,
-      content: `${actionLabel} روی ${targetInfo}`,
+      content: isNetworkEvt ? `${actionLabel}: ${targetInfo}` : `${actionLabel} روی ${targetInfo}`,
       timestamp: new Date(),
       action_type: action as any,
       backend_verified: null,
+      network_meta: data.networkMeta || null,
     }]);
 
-    // ذخیره در DB و verify (از ref استفاده میکنیم چون closure ممکنه قدیمی باشه)
+    // ذخیره در DB و verify (از ref استفاده می‌کنیم چون closure ممکنه قدیمی باشه)
     const currentSessionId = inspectorSessionIdRef.current;
     if (currentSessionId) {
       (async () => {
@@ -1007,8 +1552,11 @@ export default function ProjectDetailPage() {
             body: JSON.stringify({
               session_id: currentSessionId,
               role: 'action',
-              content: `${actionLabel} روی ${targetInfo}`,
+              content: isNetworkEvt ? `${actionLabel}: ${targetInfo}` : `${actionLabel} روی ${targetInfo}`,
               action_type: action,
+              // 🌐 network_meta را داخل extra_data می‌گذاریم تا توسط
+              // backend واقعاً persist شود (extra_data یک JSON column است)
+              extra_data: data.networkMeta ? { network_meta: data.networkMeta } : undefined,
             })
           });
           const saveData = await saveRes.json();
@@ -1017,16 +1565,34 @@ export default function ProjectDetailPage() {
             setInspectorChatMessages(prev =>
               prev.map(m => m.id === msgId ? { ...m, db_id: dbId } : m)
             );
-            // تابع verify با قابلیت retry + ارسال لاگ‌های کنسول بریدج
+            // 🔁 verify با backoff نمایی + jitter (تا ۵ تلاش) + abort روی خاموش‌شدن
+            // -----------------------------------------------------------------
+            // STALE-CLOSURE FIX: قبل از await یک snapshot logها می‌گیریم و
+            // بعد از await هم snapshot دوم — union دو نسخه به backend می‌رود
+            // تا اگر در حین await لاگ‌های جدیدی از bridge رسیده‌اند گم نشوند.
+            // (دلیل: importedConsoleLogsRef.current ممکن است در بازهٔ async
+            // به‌روز شده باشد، ولی نسخهٔ closure قدیمی شود.)
+            // -----------------------------------------------------------------
             const actionTimestamp = Date.now();
+            setInspectorVerifyPendingCount(c => c + 1);
+            let pendingCounted = true;
+
             const doVerify = async (attempt: number = 1) => {
+              // اگر کاربر inspector را خاموش کرد، تلاش‌های در جریان را abort کن
+              if (!inspectorPowerOnRef.current) {
+                if (pendingCounted) {
+                  setInspectorVerifyPendingCount(c => Math.max(0, c - 1));
+                  pendingCounted = false;
+                }
+                return;
+              }
               try {
                 const pId = params?.id as string;
-                // 📦 Snapshot console logs around this action's time (±5 seconds)
-                const nearbyConsoleLogs = importedConsoleLogsRef.current
+
+                // snapshot قبل از await (نسخهٔ اول)
+                const snapBefore = importedConsoleLogsRef.current
                   .filter(l => Math.abs(l.timestamp - actionTimestamp) < 5000)
-                  .slice(-20)
-                  .map(l => ({ level: l.level, message: l.message, timestamp: l.timestamp }));
+                  .map(l => ({ level: l.level, message: l.message, timestamp: l.timestamp, _id: l.id }));
 
                 const verifyRes = await fetch(
                   `${API_BASE}/api/render/inspector/message/${dbId}/verify?project_id=${pId}&force=${attempt > 1 ? 'true' : 'false'}`,
@@ -1034,7 +1600,22 @@ export default function ProjectDetailPage() {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                      console_logs: nearbyConsoleLogs,
+                      // snapshot دوم بعد از await (در همین تابع، قبل از send)
+                      // — union دو نسخه با dedup روی timestamp+message
+                      console_logs: (() => {
+                        const snapAfter = importedConsoleLogsRef.current
+                          .filter(l => Math.abs(l.timestamp - actionTimestamp) < 5000)
+                          .map(l => ({ level: l.level, message: l.message, timestamp: l.timestamp, _id: l.id }));
+                        const seenKeys = new Set<string>();
+                        const out: Array<{level: string; message: string; timestamp: number}> = [];
+                        for (const l of [...snapBefore, ...snapAfter]) {
+                          const k = `${l.timestamp}|${l.message}`;
+                          if (seenKeys.has(k)) continue;
+                          seenKeys.add(k);
+                          out.push({ level: l.level, message: l.message, timestamp: l.timestamp });
+                        }
+                        return out.slice(-30);
+                      })(),
                     }),
                   }
                 );
@@ -1051,15 +1632,38 @@ export default function ProjectDetailPage() {
                       checked_logs: verifyData.checked_logs,
                     } : m)
                   );
-                  // اگر لاگی نبود یا pending برگشت، دوباره تلاش کن (حداکثر ۳ بار)
-                  if (attempt < 3 && (verifyData.logs_checked === 0 || verifyData.pending)) {
-                    const delays = [6000, 10000, 15000]; // تلاش‌های بعدی با فاصله بیشتر
-                    setTimeout(() => doVerify(attempt + 1), delays[attempt] || 10000);
+                  // اگر هنوز pending یا logs_checked=0 → تلاش بعدی با backoff نمایی
+                  if (attempt < 5 && (verifyData.logs_checked === 0 || verifyData.pending)) {
+                    // base 2000ms × 2^attempt  →  2,4,8,16,32 ثانیه + jitter 0..400ms
+                    const delay = 2000 * Math.pow(2, attempt) + Math.floor(Math.random() * 400);
+                    setTimeout(() => doVerify(attempt + 1), delay);
+                  } else {
+                    if (pendingCounted) {
+                      setInspectorVerifyPendingCount(c => Math.max(0, c - 1));
+                      pendingCounted = false;
+                    }
+                  }
+                } else {
+                  if (pendingCounted) {
+                    setInspectorVerifyPendingCount(c => Math.max(0, c - 1));
+                    pendingCounted = false;
                   }
                 }
-              } catch (err) { /* verify failed - non-critical */ }
+              } catch (err) {
+                // verify failed - retry با backoff
+                if (attempt < 5 && inspectorPowerOnRef.current) {
+                  const delay = 2000 * Math.pow(2, attempt) + Math.floor(Math.random() * 400);
+                  setTimeout(() => doVerify(attempt + 1), delay);
+                } else {
+                  if (pendingCounted) {
+                    setInspectorVerifyPendingCount(c => Math.max(0, c - 1));
+                    pendingCounted = false;
+                  }
+                }
+              }
             };
-            setTimeout(() => doVerify(1), 5000);
+            // اولین تلاش بعد از ۲ ثانیه (به جای ۵) چون backoff خودش فاصله ایجاد می‌کند
+            setTimeout(() => doVerify(1), 2000);
           }
         } catch (err) { /* save message failed - non-critical */ }
       })();
@@ -1124,6 +1728,17 @@ export default function ProjectDetailPage() {
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     let isCancelled = false;
+
+    // 🛡️ Cleanup interval: هر ۳۰ ثانیه entry های قدیمی dedup map را پاک می‌کند
+    const dedupCleanupTimer: ReturnType<typeof setInterval> = setInterval(() => {
+      try {
+        const seen = inspectorSeenEventsRef.current;
+        const cutoff = Date.now() - INSPECTOR_DEDUP_WINDOW_MS * 5; // ۱۰ ثانیه
+        const toDelete: string[] = [];
+        seen.forEach((t, k) => { if (t < cutoff) toDelete.push(k); });
+        toDelete.forEach(k => seen.delete(k));
+      } catch (e) { /* non-critical */ }
+    }, 30000);
 
     const connectBridgeWs = () => {
       if (isCancelled) return;
@@ -1241,6 +1856,7 @@ export default function ProjectDetailPage() {
       isCancelled = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (dedupCleanupTimer) clearInterval(dedupCleanupTimer);
       if (ws) {
         try { ws.close(); } catch(e) {}
       }
@@ -11633,6 +12249,220 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     </div>
                   )}
 
+                  {/* 🛡️ Live Indicator (chips) — وضعیت زندهٔ Inspector */}
+                  {inspectorPowerOn && (
+                    <div className="flex flex-wrap gap-1.5 items-center px-2 py-1.5 mb-2 bg-gray-50 dark:bg-gray-800/50 rounded border border-gray-200 dark:border-gray-700 text-[11px]">
+                      {/* وضعیت WebSocket */}
+                      <span
+                        className={`px-2 py-0.5 rounded-full font-medium ${
+                          bridgeWsConnected && bridgePeerConnected
+                            ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
+                            : bridgeWsConnected
+                            ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300'
+                            : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+                        }`}
+                        title={
+                          bridgeWsConnected && bridgePeerConnected
+                            ? 'WebSocket فعال و bridge داخل پروژه متصل است'
+                            : bridgeWsConnected
+                            ? 'WebSocket فعال است ولی bridge هنوز متصل نشده — منتظر می‌مانیم'
+                            : 'WebSocket قطع — تلاش برای اتصال مجدد در جریان است'
+                        }
+                      >
+                        ●{' '}
+                        {bridgeWsConnected && bridgePeerConnected
+                          ? 'WS متصل'
+                          : bridgeWsConnected
+                          ? 'منتظر bridge'
+                          : 'WS قطع'}
+                      </span>
+                      {/* Verify pending */}
+                      <span
+                        className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
+                        title="تعداد عملیات verify که هنوز پاسخ نهایی نگرفته‌اند (با backoff تلاش می‌کنند)"
+                      >
+                        ⏳ verify pending: {inspectorVerifyPendingCount}
+                      </span>
+                      {/* Duplicates dropped */}
+                      <span
+                        className="px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
+                        title="رویدادهای تکراری که از هر دو کانال (postMessage و WebSocket) رسیده و dedup شده‌اند"
+                      >
+                        🔁 duplicate dropped: {inspectorDuplicatesDroppedCount}
+                      </span>
+                      {/* Console logs dropped */}
+                      <span
+                        className="px-2 py-0.5 rounded-full bg-orange-50 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300"
+                        title={`لاگ‌های کنسولی که به دلیل سقف (${consoleLogCap}) از ابتدای buffer حذف شده‌اند`}
+                      >
+                        📉 logs dropped: {consoleLogDroppedCount}
+                      </span>
+                      {/* Network filter status */}
+                      <span
+                        className={`px-2 py-0.5 rounded-full ${
+                          inspectorActionFilters['network-response'] || inspectorActionFilters['network-error']
+                            ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+                            : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300'
+                        }`}
+                        title="نمایش/مخفی‌سازی درخواست‌های شبکه (fetch + XHR) — کلیک کن تا toggle شود"
+                        onClick={() => {
+                          // toggle همه‌ی network filterها با هم
+                          const newVal = !(inspectorActionFilters['network-response'] || inspectorActionFilters['network-error']);
+                          setInspectorActionFilters(prev => ({
+                            ...prev,
+                            'network-request': newVal && prev['network-request'],
+                            'network-response': newVal,
+                            'network-error': newVal,
+                          }));
+                        }}
+                        style={{ cursor: 'pointer' }}
+                      >
+                        🌐 network: {inspectorActionFilters['network-response'] || inspectorActionFilters['network-error'] ? 'ON' : 'OFF'}
+                      </span>
+                      {/* Restore status / Reload / Clear */}
+                      {inspectorChatRestoring && (
+                        <span className="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300" title="در حال بارگذاری تاریخچه از DB">
+                          ⏳ بارگذاری چت...
+                        </span>
+                      )}
+                      {inspectorRestoreError && (
+                        <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300" title={`خطای بارگذاری: ${inspectorRestoreError}`}>
+                          ⚠️ restore failed
+                        </span>
+                      )}
+                      <div className="ml-auto flex gap-1 flex-wrap">
+                        <button
+                          onClick={exportInspectorTimelineJSON}
+                          disabled={inspectorChatMessages.length === 0}
+                          className="px-2 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-900/50 transition disabled:opacity-50"
+                          title="دانلود کامل timeline به‌صورت JSON (شامل network_meta و verification metadata)"
+                        >
+                          📥 JSON
+                        </button>
+                        <button
+                          onClick={exportInspectorTimelineMarkdown}
+                          disabled={inspectorChatMessages.length === 0}
+                          className="px-2 py-0.5 rounded bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 hover:bg-purple-200 dark:hover:bg-purple-900/50 transition disabled:opacity-50"
+                          title="دانلود timeline به‌صورت Markdown با headerهای زمانی"
+                        >
+                          📝 Markdown
+                        </button>
+                        <button
+                          onClick={openSendToOversightModal}
+                          disabled={inspectorChatMessages.length === 0}
+                          className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 hover:bg-emerald-200 dark:hover:bg-emerald-900/50 transition disabled:opacity-50"
+                          title="ساخت یک تسک جدید در سیستم نظارت با خلاصهٔ این timeline"
+                        >
+                          🔗 Oversight
+                        </button>
+                        <button
+                          onClick={reloadInspectorChatFromDb}
+                          disabled={inspectorChatRestoring}
+                          className="px-2 py-0.5 rounded bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-200 hover:bg-gray-300 dark:hover:bg-gray-500 transition disabled:opacity-50"
+                          title="پاک کردن state و بارگذاری مجدد از DB"
+                        >
+                          🔁 Reload
+                        </button>
+                        <button
+                          onClick={clearInspectorChatLocally}
+                          className="px-2 py-0.5 rounded bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-200 hover:bg-red-100 hover:text-red-700 dark:hover:bg-red-900/30 dark:hover:text-red-300 transition"
+                          title="فقط state فرانت پاک می‌شود — DB دست‌نخورده می‌ماند"
+                        >
+                          🧹 Clear
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 🔗 Send to Oversight Modal */}
+                  {showSendToOversightModal && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => !sendOversightSubmitting && setShowSendToOversightModal(false)}>
+                      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-5 max-w-lg w-full mx-4 border border-gray-200 dark:border-gray-700" onClick={e => e.stopPropagation()}>
+                        <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
+                          🔗 ارسال timeline به سیستم نظارت
+                        </h3>
+                        <div className="space-y-3">
+                          <div>
+                            <label className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-1 block">پروژهٔ تحت نظارت (watched)</label>
+                            {oversightWatchedList.length === 0 ? (
+                              <div className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-900/20 p-2 rounded">
+                                هیچ پروژه‌ای در سیستم نظارت ثبت نشده — ابتدا از صفحهٔ /oversight یک پروژه به watched list اضافه کنید
+                              </div>
+                            ) : (
+                              <select
+                                value={sendOversightForm.watched_id}
+                                onChange={e => setSendOversightForm(f => ({ ...f, watched_id: e.target.value }))}
+                                className="w-full text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-2 py-1.5"
+                              >
+                                {oversightWatchedList.map(w => (
+                                  <option key={w.id} value={w.id}>{w.repo_full_name}</option>
+                                ))}
+                              </select>
+                            )}
+                          </div>
+                          <div>
+                            <label className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-1 block">عنوان تسک</label>
+                            <input
+                              type="text"
+                              value={sendOversightForm.title}
+                              onChange={e => setSendOversightForm(f => ({ ...f, title: e.target.value }))}
+                              className="w-full text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-2 py-1.5"
+                            />
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-1 block">نوع</label>
+                              <select
+                                value={sendOversightForm.type}
+                                onChange={e => setSendOversightForm(f => ({ ...f, type: e.target.value }))}
+                                className="w-full text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-2 py-1.5"
+                              >
+                                <option value="bug">bug</option>
+                                <option value="feature_request">feature_request</option>
+                                <option value="refactor">refactor</option>
+                                <option value="security">security</option>
+                                <option value="docs">docs</option>
+                                <option value="other">other</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-1 block">اولویت</label>
+                              <select
+                                value={sendOversightForm.priority}
+                                onChange={e => setSendOversightForm(f => ({ ...f, priority: e.target.value }))}
+                                className="w-full text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-2 py-1.5"
+                              >
+                                <option value="low">low</option>
+                                <option value="medium">medium</option>
+                                <option value="high">high</option>
+                                <option value="critical">critical</option>
+                              </select>
+                            </div>
+                          </div>
+                          <div className="text-xs text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50 p-2 rounded border border-gray-200 dark:border-gray-700">
+                            خلاصهٔ {inspectorChatMessages.length} پیام (شامل خطاها، اکشن‌ها، network requests) به‌عنوان prompt در تسک قرار می‌گیرد. می‌توانید بعداً در صفحهٔ /oversight ویرایش کنید.
+                          </div>
+                        </div>
+                        <div className="flex gap-2 justify-end mt-4">
+                          <button
+                            onClick={() => setShowSendToOversightModal(false)}
+                            disabled={sendOversightSubmitting}
+                            className="px-3 py-1.5 text-sm rounded bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-200 hover:bg-gray-300 dark:hover:bg-gray-500 disabled:opacity-50"
+                          >
+                            انصراف
+                          </button>
+                          <button
+                            onClick={submitSendToOversight}
+                            disabled={sendOversightSubmitting || oversightWatchedList.length === 0 || !sendOversightForm.watched_id}
+                            className="px-3 py-1.5 text-sm rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                          >
+                            {sendOversightSubmitting ? '⏳ در حال ارسال...' : '🚀 ارسال به نظارت'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* پیام‌های چت */}
                   {inspectorChatMessages.map(msg => (
                     <div key={msg.id} className={`group flex gap-2 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
@@ -13120,6 +13950,18 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                     title="تست زنده - بررسی اینکه مدل واقعاً این فیلد را می‌خواند"
                                   >
                                     {isTesting ? <span className="animate-spin text-sm">⏳</span> : <span className="text-sm">🧪</span>}
+                                  </button>
+                                  {/* 📋 کپی پرامپت قوی — برای ابزار کدنویس خارجی */}
+                                  <button
+                                    onClick={() => copyStrongPromptForField(field)}
+                                    className={`p-1.5 rounded-lg transition-colors ${
+                                      copyFieldFeedbackId === field.id
+                                        ? 'text-green-600 bg-green-50 dark:bg-green-900/30'
+                                        : 'text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20'
+                                    }`}
+                                    title="کپی پرامپت قوی - این پرامپت با ساختار scan_strong + موقعیت فایل‌ها قابل اعمال در ابزار خارجی (Cursor/Copilot) است"
+                                  >
+                                    <span className="text-sm">{copyFieldFeedbackId === field.id ? '✅' : '📋'}</span>
                                   </button>
                                   {/* دکمه ویرایش */}
                                   <button
