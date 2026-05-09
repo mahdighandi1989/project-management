@@ -242,7 +242,25 @@ export default function ProjectDetailPage() {
   const [deploying, setDeploying] = useState(false);
 
   // تب فعال
-  const [activeTab, setActiveTab] = useState<'files' | 'memory' | 'structure' | 'journal' | 'health' | 'inspector'>('files');
+  const [activeTab, setActiveTab] = useState<'files' | 'memory' | 'structure' | 'journal' | 'health' | 'inspector' | 'external'>('files');
+
+  // 🔗 External Projects state — اتصال به GitHub/Render خارجی
+  const [externalConnected, setExternalConnected] = useState(false);
+  const [externalProjectId, setExternalProjectId] = useState<string>('');
+  const [externalRepoUrl, setExternalRepoUrl] = useState('');
+  const [externalToken, setExternalToken] = useState('');
+  const [externalBranch, setExternalBranch] = useState('main');
+  const [externalConnecting, setExternalConnecting] = useState(false);
+  const [externalConnectError, setExternalConnectError] = useState<string | null>(null);
+  const [externalProjectInfo, setExternalProjectInfo] = useState<any>(null);
+  const [externalFiles, setExternalFiles] = useState<any[]>([]);
+  const [externalFilesLoading, setExternalFilesLoading] = useState(false);
+  const [externalSelectedFile, setExternalSelectedFile] = useState<string | null>(null);
+  const [externalFileContent, setExternalFileContent] = useState<string>('');
+  const [externalFileLoading, setExternalFileLoading] = useState(false);
+  const [externalReadme, setExternalReadme] = useState<string>('');
+  const [externalAnalysis, setExternalAnalysis] = useState<any>(null);
+  const [externalAnalyzing, setExternalAnalyzing] = useState(false);
 
   // Journal & Reports State
   const [journalLogs, setJournalLogs] = useState<ActivityLog[]>([]);
@@ -849,6 +867,52 @@ export default function ProjectDetailPage() {
   const [showCreateRenderService, setShowCreateRenderService] = useState(false);
   const [createRenderLoading, setCreateRenderLoading] = useState(false);
 
+  // ==========================================================
+  // 🔗 Oversight bridge — وضعیت تسک‌های مرکز نظارت برای این پروژه
+  // ==========================================================
+  const [oversightBridgeSummary, setOversightBridgeSummary] = useState<{
+    project_id: string;
+    project_full_name: string;
+    total: number;
+    pending: number;
+    in_review: number;
+    done: number;
+  } | null>(null);
+  const [oversightExternalCount, setOversightExternalCount] = useState<number>(0);
+
+  const loadOversightBridge = useCallback(async () => {
+    if (!projectId) return;
+    // 1) /projects → /oversight: تسک‌های نظارتی که برای این پروژه ساخته شده‌اند
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(projectId)}/oversight-summary`);
+      if (res.ok) {
+        const data = await res.json();
+        setOversightBridgeSummary({
+          project_id: data.project_id,
+          project_full_name: data.project_full_name,
+          total: data.total || 0,
+          pending: data.pending || 0,
+          in_review: data.in_review || 0,
+          done: data.done || 0,
+        });
+      }
+    } catch (e) { /* non-critical */ }
+    // 2) /oversight → /projects: dynamic_fields این پروژه که در /oversight قابل verify هستند
+    try {
+      const res2 = await fetch(`${API_BASE}/api/oversight/external-tasks?project_id=${encodeURIComponent(projectId)}`);
+      if (res2.ok) {
+        const data2 = await res2.json();
+        setOversightExternalCount(Array.isArray(data2?.items) ? data2.items.length : 0);
+      }
+    } catch (e) { /* non-critical */ }
+  }, [projectId]);
+
+  useEffect(() => {
+    if (projectId) {
+      loadOversightBridge();
+    }
+  }, [projectId, loadOversightBridge]);
+
   useEffect(() => {
     if (projectId) {
       loadProject();
@@ -1065,6 +1129,132 @@ export default function ProjectDetailPage() {
     await restoreInspectorChatFromDb(true);
   }, [restoreInspectorChatFromDb]);
 
+  // ===========================================================
+  // 🔗 External Projects — اتصال به GitHub/Render خارجی
+  // ===========================================================
+
+  const connectExternalGithub = useCallback(async () => {
+    if (!externalRepoUrl.trim()) {
+      setExternalConnectError('آدرس repo الزامی است');
+      return;
+    }
+    setExternalConnecting(true);
+    setExternalConnectError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/external-projects/connect/github`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repo_url: externalRepoUrl.trim(),
+          token: externalToken.trim() || null,
+          branch: externalBranch.trim() || 'main',
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (res.status === 401) {
+          setExternalConnectError('توکن لازم است (repo خصوصی) — یک Personal Access Token با scope repo وارد کنید');
+        } else {
+          setExternalConnectError(data?.detail || 'اتصال ناموفق');
+        }
+        return;
+      }
+      // success — extract project info
+      const pid = data?.project_id || data?.id || data?.project?.id || '';
+      setExternalProjectId(pid);
+      setExternalProjectInfo(data?.project || data);
+      setExternalConnected(true);
+    } catch (e: any) {
+      setExternalConnectError(e?.message || 'خطای ناشناخته');
+    } finally {
+      setExternalConnecting(false);
+    }
+  }, [externalRepoUrl, externalToken, externalBranch]);
+
+  const loadExternalFiles = useCallback(async () => {
+    if (!externalProjectId) return;
+    setExternalFilesLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/external-projects/${externalProjectId}/files`);
+      const data = await res.json();
+      const files = data?.files || data?.items || [];
+      setExternalFiles(Array.isArray(files) ? files : []);
+    } catch (e) {
+      setExternalFiles([]);
+    } finally {
+      setExternalFilesLoading(false);
+    }
+  }, [externalProjectId]);
+
+  const loadExternalReadme = useCallback(async () => {
+    if (!externalProjectId) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/external-projects/${externalProjectId}/readme`);
+      const data = await res.json();
+      setExternalReadme(data?.readme || data?.content || '');
+    } catch (e) {
+      setExternalReadme('');
+    }
+  }, [externalProjectId]);
+
+  const loadExternalFileContent = useCallback(async (filePath: string) => {
+    if (!externalProjectId || !filePath) return;
+    setExternalFileLoading(true);
+    setExternalSelectedFile(filePath);
+    try {
+      const res = await fetch(`${API_BASE}/api/external-projects/${externalProjectId}/file/${encodeURIComponent(filePath)}`);
+      const data = await res.json();
+      setExternalFileContent(data?.content || data?.file_content || '');
+    } catch (e) {
+      setExternalFileContent('(خطا در بارگذاری فایل)');
+    } finally {
+      setExternalFileLoading(false);
+    }
+  }, [externalProjectId]);
+
+  const analyzeExternalProject = useCallback(async () => {
+    if (!externalProjectId) return;
+    setExternalAnalyzing(true);
+    setExternalAnalysis(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/external-projects/${externalProjectId}/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      setExternalAnalysis(data);
+    } catch (e: any) {
+      setExternalAnalysis({ success: false, error: e?.message || 'تحلیل ناموفق' });
+    } finally {
+      setExternalAnalyzing(false);
+    }
+  }, [externalProjectId]);
+
+  const disconnectExternal = useCallback(async () => {
+    if (!externalProjectId) return;
+    if (!confirm('قطع اتصال از پروژهٔ خارجی؟ داده‌های local پاک می‌شوند ولی پروژهٔ منبع دست‌نخورده می‌ماند.')) return;
+    try {
+      await fetch(`${API_BASE}/api/external-projects/${externalProjectId}`, { method: 'DELETE' });
+    } catch (e) { /* non-critical */ }
+    setExternalConnected(false);
+    setExternalProjectId('');
+    setExternalProjectInfo(null);
+    setExternalFiles([]);
+    setExternalSelectedFile(null);
+    setExternalFileContent('');
+    setExternalReadme('');
+    setExternalAnalysis(null);
+  }, [externalProjectId]);
+
+  // وقتی تب External روشن می‌شود و قبلاً connect شده، فایل‌ها را load کن
+  useEffect(() => {
+    if (activeTab === 'external' && externalConnected && externalProjectId && externalFiles.length === 0) {
+      loadExternalFiles();
+      loadExternalReadme();
+    }
+  }, [activeTab, externalConnected, externalProjectId, externalFiles.length, loadExternalFiles, loadExternalReadme]);
+
   // 📋 Build strong external prompt for a prompt-field (client-side)
   // ساختار خروجی هم‌تراز با oversight_strong_prompt است تا کاربر بتواند آن را
   // در ابزار کدنویس خارجی (Cursor/Copilot) paste کند و دقیقاً بداند چه فایل‌هایی
@@ -1138,7 +1328,12 @@ export default function ProjectDetailPage() {
   const [copyFieldFeedbackId, setCopyFieldFeedbackId] = useState<string | null>(null);
   const copyStrongPromptForField = useCallback(async (field: any) => {
     try {
-      const txt = buildStrongPromptForField(field);
+      // اولویت: اگر backend خود external_prompt را تولید کرده باشد (از طریق
+      // build_strong_prompt واقعی با context کامل پروژه)، آن را استفاده کن.
+      // در غیر این صورت rollback به client-side render (با context محدودتر).
+      const txt: string = (field?.external_prompt && typeof field.external_prompt === 'string' && field.external_prompt.trim().length > 50)
+        ? field.external_prompt
+        : buildStrongPromptForField(field);
       if (navigator?.clipboard?.writeText) {
         await navigator.clipboard.writeText(txt);
       } else {
@@ -7471,6 +7666,32 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 </svg>
               )}
               <h1 className="text-2xl font-bold">{project.name}</h1>
+              {/* 🔗 Oversight bridge indicator — تعداد تسک‌های نظارتی این پروژه */}
+              {((oversightBridgeSummary?.total || 0) + oversightExternalCount) > 0 && (
+                <a
+                  href={`/oversight?project=${encodeURIComponent(projectId)}`}
+                  className="ml-2 px-3 py-1 bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300 rounded-full text-xs flex items-center gap-1.5 hover:bg-cyan-200 dark:hover:bg-cyan-900/50 transition-colors"
+                  title={
+                    `🔗 تسک‌های نظارتی این پروژه:\n` +
+                    `• ${oversightBridgeSummary?.pending || 0} در انتظار\n` +
+                    `• ${oversightBridgeSummary?.in_review || 0} در حال بررسی\n` +
+                    `• ${oversightBridgeSummary?.done || 0} تکمیل‌شده\n` +
+                    `• ${oversightExternalCount} فیلد قابل verify در مرکز نظارت\n\n` +
+                    `کلیک: باز کردن /oversight با فیلتر این پروژه`
+                  }
+                >
+                  <span>🔗</span>
+                  <span>
+                    {oversightBridgeSummary?.total || 0} نظارت
+                    {oversightExternalCount > 0 && ` + ${oversightExternalCount} فیلد`}
+                  </span>
+                  {(oversightBridgeSummary?.pending || 0) > 0 && (
+                    <span className="px-1.5 py-0 bg-orange-200 dark:bg-orange-900/50 text-orange-800 dark:text-orange-300 rounded-full text-xs">
+                      {oversightBridgeSummary?.pending} pending
+                    </span>
+                  )}
+                </a>
+              )}
             </div>
             {project.description && (
               <p className="text-gray-500 mt-1">{project.description}</p>
@@ -7610,6 +7831,17 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             }`}
           >
             🔍 بازرس ویژه
+          </button>
+          <button
+            onClick={() => setActiveTab('external')}
+            className={`px-6 py-3 font-medium ${
+              activeTab === 'external'
+                ? 'border-b-2 border-cyan-500 text-cyan-600'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+            title="اتصال به repo خارجی GitHub با URL + توکن جداگانه برای تحلیل و مرور فایل‌ها"
+          >
+            🔗 External
           </button>
         </div>
 
@@ -14112,6 +14344,214 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {/* 🔗 External Projects Panel */}
+        {activeTab === 'external' && (
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
+            {!externalConnected ? (
+              // ─── حالت اتصال ───
+              <div className="max-w-2xl mx-auto">
+                <div className="flex items-center gap-3 mb-6">
+                  <span className="text-3xl">🔗</span>
+                  <div>
+                    <h2 className="text-xl font-bold text-gray-800 dark:text-gray-100">اتصال به پروژهٔ خارجی</h2>
+                    <p className="text-sm text-gray-500 dark:text-gray-400">
+                      یک repo GitHub خارجی را با URL + توکن مستقل وصل کن — مستقل از پروژهٔ فعلی
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                      🌐 URL ریپو GitHub <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={externalRepoUrl}
+                      onChange={e => setExternalRepoUrl(e.target.value)}
+                      placeholder="https://github.com/owner/repo"
+                      className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                      disabled={externalConnecting}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                      🔑 Personal Access Token (اختیاری برای repo عمومی، الزامی برای خصوصی)
+                    </label>
+                    <input
+                      type="password"
+                      value={externalToken}
+                      onChange={e => setExternalToken(e.target.value)}
+                      placeholder="ghp_..."
+                      className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono text-sm"
+                      disabled={externalConnecting}
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      توکن فقط برای این اتصال استفاده می‌شود و در DB رمزنگاری ذخیره می‌شود
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                      🌿 شاخه (branch)
+                    </label>
+                    <input
+                      type="text"
+                      value={externalBranch}
+                      onChange={e => setExternalBranch(e.target.value)}
+                      placeholder="main"
+                      className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                      disabled={externalConnecting}
+                    />
+                  </div>
+
+                  {externalConnectError && (
+                    <div className="bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 p-3 rounded-lg text-sm">
+                      ❌ {externalConnectError}
+                    </div>
+                  )}
+
+                  <button
+                    onClick={connectExternalGithub}
+                    disabled={externalConnecting || !externalRepoUrl.trim()}
+                    className="w-full px-4 py-2.5 bg-cyan-600 text-white rounded-lg hover:bg-cyan-700 disabled:opacity-50 flex items-center justify-center gap-2 font-medium"
+                  >
+                    {externalConnecting ? (
+                      <>⏳ در حال اتصال...</>
+                    ) : (
+                      <>🔗 اتصال به repo خارجی</>
+                    )}
+                  </button>
+                </div>
+
+                <div className="mt-8 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg text-sm text-blue-700 dark:text-blue-300">
+                  <strong>💡 توضیح:</strong> این تب به شما اجازه می‌دهد یک repo GitHub <em>خارج از</em> سیستم
+                  مدیریت پروژه را وصل کرده، فایل‌هایش را مرور و با AI تحلیل کنید — بدون اینکه آن repo
+                  به‌صورت پروژهٔ کامل import شود.
+                </div>
+              </div>
+            ) : (
+              // ─── حالت متصل: نمایش فایل‌ها و تحلیل ───
+              <div>
+                <div className="flex items-center justify-between mb-4 pb-4 border-b dark:border-gray-700">
+                  <div className="flex items-center gap-3">
+                    <span className="text-2xl">🔗</span>
+                    <div>
+                      <h2 className="text-lg font-bold text-gray-800 dark:text-gray-100">
+                        {externalProjectInfo?.name || externalProjectInfo?.repo_name || externalRepoUrl.split('/').slice(-2).join('/')}
+                      </h2>
+                      <p className="text-xs text-gray-500 dark:text-gray-400">
+                        Project ID: <code className="bg-gray-100 dark:bg-gray-700 px-1 rounded">{externalProjectId}</code>
+                        {externalProjectInfo?.branch && <> · branch: <code>{externalProjectInfo.branch}</code></>}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={analyzeExternalProject}
+                      disabled={externalAnalyzing}
+                      className="px-3 py-1.5 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 text-sm"
+                      title="تحلیل AI روی این پروژهٔ خارجی"
+                    >
+                      {externalAnalyzing ? '⏳' : '🧠'} Analyze
+                    </button>
+                    <button
+                      onClick={loadExternalFiles}
+                      disabled={externalFilesLoading}
+                      className="px-3 py-1.5 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 disabled:opacity-50 text-sm"
+                    >
+                      🔄 Refresh
+                    </button>
+                    <button
+                      onClick={disconnectExternal}
+                      className="px-3 py-1.5 bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 rounded-lg hover:bg-red-200 dark:hover:bg-red-900/50 text-sm"
+                    >
+                      ✕ Disconnect
+                    </button>
+                  </div>
+                </div>
+
+                {/* 2-column layout: files | content */}
+                <div className="grid lg:grid-cols-3 gap-4">
+                  {/* فایل‌ها */}
+                  <div className="lg:col-span-1 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+                    <div className="bg-gray-50 dark:bg-gray-900/50 px-3 py-2 border-b dark:border-gray-700 text-sm font-medium">
+                      📁 فایل‌ها {externalFiles.length > 0 && `(${externalFiles.length})`}
+                    </div>
+                    <div className="max-h-96 overflow-auto">
+                      {externalFilesLoading ? (
+                        <div className="p-4 text-sm text-gray-500">⏳ در حال بارگذاری...</div>
+                      ) : externalFiles.length === 0 ? (
+                        <div className="p-4 text-sm text-gray-500">هیچ فایلی یافت نشد</div>
+                      ) : (
+                        <ul className="text-sm">
+                          {externalFiles.slice(0, 200).map((f: any, idx: number) => {
+                            const fpath = typeof f === 'string' ? f : (f.path || f.name || '');
+                            return (
+                              <li key={idx}>
+                                <button
+                                  onClick={() => loadExternalFileContent(fpath)}
+                                  className={`w-full text-right px-3 py-1.5 hover:bg-cyan-50 dark:hover:bg-cyan-900/20 truncate ${
+                                    externalSelectedFile === fpath ? 'bg-cyan-100 dark:bg-cyan-900/30 font-medium' : ''
+                                  }`}
+                                  title={fpath}
+                                >
+                                  <code className="text-xs">{fpath}</code>
+                                </button>
+                              </li>
+                            );
+                          })}
+                          {externalFiles.length > 200 && (
+                            <li className="px-3 py-2 text-xs text-gray-500 italic">
+                              +{externalFiles.length - 200} فایل دیگر — refresh کنید برای فیلتر
+                            </li>
+                          )}
+                        </ul>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* محتوای فایل / README / تحلیل */}
+                  <div className="lg:col-span-2 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+                    <div className="bg-gray-50 dark:bg-gray-900/50 px-3 py-2 border-b dark:border-gray-700 text-sm font-medium flex items-center justify-between">
+                      <span>
+                        {externalSelectedFile ? `📄 ${externalSelectedFile}` : externalAnalysis ? '🧠 تحلیل AI' : '📖 README'}
+                      </span>
+                    </div>
+                    <div className="max-h-96 overflow-auto p-3">
+                      {externalAnalyzing && (
+                        <div className="text-sm text-gray-500">⏳ در حال تحلیل با AI...</div>
+                      )}
+                      {externalAnalysis && !externalAnalyzing && (
+                        <div className="bg-purple-50 dark:bg-purple-900/20 p-3 rounded mb-3">
+                          <div className="text-xs font-medium text-purple-700 dark:text-purple-300 mb-1">🧠 نتیجهٔ تحلیل</div>
+                          <pre className="text-xs whitespace-pre-wrap text-gray-700 dark:text-gray-300 font-mono">
+                            {typeof externalAnalysis === 'string' ? externalAnalysis : JSON.stringify(externalAnalysis, null, 2).slice(0, 4000)}
+                          </pre>
+                        </div>
+                      )}
+                      {externalSelectedFile ? (
+                        externalFileLoading ? (
+                          <div className="text-sm text-gray-500">⏳ در حال بارگذاری فایل...</div>
+                        ) : (
+                          <pre className="text-xs whitespace-pre-wrap text-gray-700 dark:text-gray-300 font-mono">
+                            {externalFileContent || '(فایل خالی است)'}
+                          </pre>
+                        )
+                      ) : (
+                        <pre className="text-xs whitespace-pre-wrap text-gray-700 dark:text-gray-300">
+                          {externalReadme || '(README موجود نیست — یک فایل از لیست انتخاب کنید)'}
+                        </pre>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

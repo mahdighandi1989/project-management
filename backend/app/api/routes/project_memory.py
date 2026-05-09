@@ -2366,6 +2366,58 @@ async def parse_response_to_dynamic_fields(content: str, model_id: str, auto_det
     return fields
 
 
+def _render_external_prompt_for_field(
+    title: str,
+    content: str,
+    action_type: str = "display",
+    target_locations: Optional[List[Dict[str, Any]]] = None,
+    priority_int: int = 5,
+) -> str:
+    """رندر یک پرامپت قوی قابل کپی به ابزار خارجی (Cursor/Copilot/ChatGPT).
+
+    این تابع helper مشترک است بین `create_field_from_section` (پارس مستقیم)
+    و `IntelligentFieldCreator.create_intelligent_field` (مسیر پیشرفته‌تر) —
+    تا منطق رندر در یک جا متمرکز بماند و خروجی هر دو یکدست باشد.
+    """
+    target_locations = target_locations or []
+    type_map = {
+        "github_commit": "bug",
+        "github_multi_commit": "refactor",
+        "file_edit": "refactor",
+        "display": "other",
+    }
+    task_type = type_map.get(action_type, "other")
+    priority_str = (
+        "critical" if priority_int == 1
+        else ("high" if priority_int <= 3
+              else ("medium" if priority_int <= 6 else "low"))
+    )
+    try:
+        from ...services.oversight_strong_prompt import build_strong_prompt
+        return build_strong_prompt(
+            title=(title or "")[:100],
+            description=(content or "")[:2000],
+            target_locations=target_locations,
+            acceptance_criteria=["نتیجهٔ این فیلد با مفاد آن مطابقت کند"],
+            type_=task_type,
+            priority=priority_str,
+            estimate="medium",
+        )
+    except Exception:
+        # fallback render
+        loc_block = (
+            "\n".join(f"- `{l.get('path', '')}`" for l in target_locations if isinstance(l, dict) and l.get("path"))
+            or "_(فایل‌های دقیق توسط مجری شناسایی شوند)_"
+        )
+        return (
+            f"## 🎯 هدف\n{(title or '')[:100]}\n\n"
+            f"## 📍 موقعیت در پروژه\n{loc_block}\n\n"
+            f"## 🔍 Context\n{(content or '')[:2000]}\n\n"
+            f"## ✅ معیار پذیرش\n- [ ] نتیجه با مفاد فیلد مطابقت داشته باشد\n"
+            f"- [ ] هیچ تستی fail نمی‌شود\n- [ ] linter بدون warning عبور می‌کند\n"
+        )
+
+
 def create_field_from_section(title: str, content: str, patterns: dict, auto_detect: bool) -> Optional[dict]:
     """ساخت فیلد از یک بخش"""
     import logging
@@ -2412,16 +2464,33 @@ def create_field_from_section(title: str, content: str, patterns: dict, auto_det
             logger.warning(f"[create_field] No target_path found for {action_type}, changing to display")
             action_type = "display"
 
+    # 📍 target_locations — سازگار با schema غنی Oversight (لیست از dictها)
+    target_locations: List[Dict[str, Any]] = (
+        [{"path": target_path}] if target_path else []
+    )
+
+    # 📋 external_prompt — رندر شده با build_strong_prompt برای کپی به ابزار
+    # کدنویس خارجی (Cursor/Copilot/ChatGPT). اختیاری برای backwards compat.
+    external_prompt = _render_external_prompt_for_field(
+        title=title,
+        content=content,
+        action_type=action_type,
+        target_locations=target_locations,
+        priority_int=priority,
+    )
+
     return {
         "name": title[:100],
         "value": content[:2000],
         "target_models": ["all"],
         "action_type": action_type,
         "target_path": target_path,
+        "target_locations": target_locations,
         "priority": priority,
         "field_type": field_type,
         "archived": False,
         "archive_after_run": True,  # 🔴 همیشه بایگانی بشه بعد از اجرا
+        "external_prompt": external_prompt,
         "trigger": {
             "enabled": False,
             "interval_minutes": 60,

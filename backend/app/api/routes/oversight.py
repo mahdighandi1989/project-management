@@ -4,11 +4,13 @@ Oversight API
 API routes برای مرکز نظارت و مدیریت پروژه‌های گیت‌هاب.
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
+from sqlalchemy.orm import Session
 
 from ...services.oversight_service import get_oversight_service
+from ...core.database import get_db
 
 router = APIRouter(prefix="/oversight", tags=["Oversight"])
 
@@ -537,6 +539,88 @@ async def refresh_codex(watched_id: str, payload: Optional[CodexRefreshRequest] 
             model_id=payload.model_id,
             max_files=payload.max_files,
             only_changed=payload.only_changed,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# 🔗 External Project Tasks Bridge — wiring /projects ↔ /oversight
+# ============================================================
+# هدف: dynamic_fields از پروژه‌های local که action_type='github_commit' دارند
+# را در /oversight به‌عنوان «تسک قابل verify» نمایش دهیم — بدون ذخیرهٔ
+# duplicate. این API فقط READ + verify-now است.
+
+@router.get("/external-tasks")
+async def list_external_project_tasks(
+    project_id: Optional[str] = Query(default=None, description="فیلتر بر اساس project_id خاص"),
+    include_archived: bool = Query(default=False),
+    db: Session = Depends(get_db),
+):
+    """لیست dynamic_fields از پروژه‌های local که قابلیت اجرا/verify دارند.
+
+    این endpoint برای نمایش در تب جدید «تسک‌های پروژه‌ها» در صفحهٔ /oversight
+    استفاده می‌شود.
+    """
+    service = get_oversight_service()
+    items = service.list_external_project_tasks(
+        db_session=db,
+        project_id_filter=project_id,
+        include_archived=include_archived,
+    )
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/external-tasks/summary")
+async def external_project_tasks_summary(
+    db: Session = Depends(get_db),
+):
+    """خلاصهٔ تعداد تسک‌های external به تفکیک پروژه — برای indicator سراسری."""
+    service = get_oversight_service()
+    items = service.list_external_project_tasks(db_session=db)
+    by_project: Dict[str, Dict[str, Any]] = {}
+    for it in items:
+        pid = it.get("origin_project_id", "")
+        if pid not in by_project:
+            by_project[pid] = {
+                "project_id": pid,
+                "project_name": it.get("origin_project_name", ""),
+                "total": 0,
+                "pending": 0,
+                "archived": 0,
+            }
+        by_project[pid]["total"] += 1
+        if it.get("status") == "archived":
+            by_project[pid]["archived"] += 1
+        else:
+            by_project[pid]["pending"] += 1
+    return {
+        "total": len(items),
+        "by_project": list(by_project.values()),
+    }
+
+
+@router.post("/external-tasks/{project_id}/{field_id}/verify-now")
+async def verify_external_project_field(
+    project_id: str,
+    field_id: str,
+    payload: Optional[RunTaskRequest] = None,
+    db: Session = Depends(get_db),
+):
+    """verify فوری یک dynamic_field از /projects با همان موتور verifier.
+
+    بدون اهمیت دادن به اینکه چه کسی فیلد را اعمال کرده (AI، کاربر، ابزار خارجی)،
+    وضعیت فعلی repo را با acceptance criteria مقایسه می‌کند.
+    """
+    service = get_oversight_service()
+    try:
+        return await service.verify_external_project_field(
+            db_session=db,
+            project_id=project_id,
+            field_id=field_id,
+            model_id=payload.model_id if payload else None,
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
