@@ -730,6 +730,11 @@ export default function ProjectDetailPage() {
     analyzed_at: string;
   }>>({});
   const [healthDataLoaded, setHealthDataLoaded] = useState(false);
+  // 🔁 Cross-tab sync versions — هر بار analyze جدید Health یا اجرای
+  // موفق Memory field، این versionها افزایش می‌یابند تا تب‌های
+  // وابسته (Structure, Journal) خود را invalidate کنند.
+  const [healthDataVersion, setHealthDataVersion] = useState(0);
+  const [journalDataVersion, setJournalDataVersion] = useState(0);
   const [hoveredNode, setHoveredNode] = useState<string | null>(null);
 
   // Memory Box State
@@ -973,13 +978,20 @@ export default function ProjectDetailPage() {
   }, [syncSettings.auto_sync_enabled, syncSettings.sync_interval_minutes, project?.project_type]);
 
   // بارگذاری ساختار وقتی تب ساختار باز میشه
+  // 🔁 Cross-tab sync: healthDataVersion هم dependency است — اگر Health
+  // analyze موفق شود (در تب Health)، این effect دوباره fire می‌شود و
+  // structure با fresh health-map رنگ‌بندی می‌شود.
   useEffect(() => {
     if (activeTab === 'structure' && projectId) {
       loadStructure();
     }
-  }, [activeTab, projectId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, projectId, healthDataVersion]);
 
   // بارگذاری ژورنال وقتی تب ژورنال باز میشه
+  // 🔁 Cross-tab sync: journalDataVersion هم dependency — اگر Memory
+  // field موفق execute شود، این effect دوباره fire می‌شود تا activity
+  // log جدید (که توسط backend ثبت شده) نمایش داده شود.
   useEffect(() => {
     if (activeTab === 'journal' && projectId) {
       loadJournal();
@@ -987,7 +999,8 @@ export default function ProjectDetailPage() {
       loadReports();
       loadReportTrigger();
     }
-  }, [activeTab, projectId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, projectId, journalDataVersion]);
 
   // بارگذاری پروفایل مدل‌ها وقتی سابتب تغییر کنه
   useEffect(() => {
@@ -7006,6 +7019,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
         showSuccess(successMsg);
         loadMemory();
+        // 🔁 Cross-tab sync: backend یک activity log در journal ثبت می‌کند،
+        // پس Journal tab باید stale نباشد. این version افزایش journal effect
+        // را trigger می‌کند هنگام بازشدن مجدد آن تب.
+        setJournalDataVersion(v => v + 1);
 
         // نمایش نتایج در console
         console.log('Trigger execution results:', data.results);
@@ -11538,7 +11555,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         {/* محتوای تب تحلیل سلامت */}
         {activeTab === 'health' && (
           <div className="space-y-6">
-            <ProjectHealthPanel projectId={projectId as string} onHealthUpdate={loadProject} />
+            <ProjectHealthPanel
+              projectId={projectId as string}
+              onHealthUpdate={() => {
+                loadProject();
+                // 🔁 Health analyze موفق → Structure tab باید refresh شود
+                // (file_health_map ممکن است تغییر کرده باشد)
+                setHealthDataVersion(v => v + 1);
+                setHealthDataLoaded(false); // باعث می‌شود loadStructure در باز شدن مجدد، fresh fetch کند
+              }}
+            />
           </div>
         )}
 
