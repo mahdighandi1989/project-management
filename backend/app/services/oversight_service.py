@@ -63,6 +63,7 @@ WATCHED_FILE = STORAGE_DIR / "watched_projects.json"
 TASKS_FILE = STORAGE_DIR / "tasks.json"
 REPORTS_FILE = STORAGE_DIR / "reports.json"
 SETTINGS_FILE = STORAGE_DIR / "settings.json"
+REPOS_CACHE_FILE = STORAGE_DIR / "repos_cache.json"
 
 GITHUB_API = "https://api.github.com"
 
@@ -327,10 +328,55 @@ class OversightService:
     # GitHub: لیست repos کاربر
     # ====================================================================
 
-    async def list_user_repos(self, max_pages: int = 5) -> Dict[str, Any]:
-        """دریافت repos کاربر (شامل private)."""
+    def _read_repos_cache(self) -> Optional[Dict[str, Any]]:
+        """خواندن کش لیست مخازن از دیسک."""
+        try:
+            data = _read_json(REPOS_CACHE_FILE, None)
+            if data and isinstance(data, dict) and isinstance(data.get("repos"), list):
+                return data
+        except Exception as e:
+            logger.debug(f"repos cache read failed: {e}")
+        return None
+
+    async def list_user_repos(
+        self, max_pages: int = 5, force_refresh: bool = False, max_cache_age_seconds: int = 21600
+    ) -> Dict[str, Any]:
+        """دریافت repos کاربر (شامل private). با cache روی دیسک تا 6 ساعت."""
+        # سرو از cache در حالت غیر-force
+        if not force_refresh:
+            cached = self._read_repos_cache()
+            if cached:
+                synced_at_str = cached.get("synced_at")
+                fresh = False
+                if synced_at_str:
+                    try:
+                        synced_dt = datetime.fromisoformat(synced_at_str)
+                        age = (datetime.now(timezone.utc) - synced_dt).total_seconds()
+                        fresh = age <= max_cache_age_seconds
+                    except Exception:
+                        pass
+                if fresh:
+                    return {
+                        "success": True,
+                        "repos": cached["repos"],
+                        "count": len(cached["repos"]),
+                        "synced_at": synced_at_str,
+                        "from_cache": True,
+                    }
+
         token = get_github_token()
         if not token:
+            # حتی بدون توکن، اگر کش داریم همان را برگردان
+            cached = self._read_repos_cache()
+            if cached:
+                return {
+                    "success": True,
+                    "repos": cached.get("repos", []),
+                    "count": len(cached.get("repos", [])),
+                    "synced_at": cached.get("synced_at"),
+                    "from_cache": True,
+                    "warning": "توکن گیت‌هاب تنظیم نشده — از کش قبلی استفاده شد",
+                }
             return {
                 "success": False,
                 "error": "توکن گیت‌هاب تنظیم نشده است. از صفحه تنظیمات وارد کنید.",
@@ -391,15 +437,47 @@ class OversightService:
                     if len(data) < per_page:
                         break
         except asyncio.TimeoutError:
+            # در صورت timeout، اگر cache داریم همان را برگردان
+            cached = self._read_repos_cache()
+            if cached:
+                return {
+                    "success": True,
+                    "repos": cached.get("repos", []),
+                    "count": len(cached.get("repos", [])),
+                    "synced_at": cached.get("synced_at"),
+                    "from_cache": True,
+                    "warning": "Timeout در ارتباط با GitHub — از کش قبلی استفاده شد",
+                }
             return {"success": False, "error": "Timeout در ارتباط با GitHub", "repos": all_repos}
         except aiohttp.ClientError as e:
+            cached = self._read_repos_cache()
+            if cached:
+                return {
+                    "success": True,
+                    "repos": cached.get("repos", []),
+                    "count": len(cached.get("repos", [])),
+                    "synced_at": cached.get("synced_at"),
+                    "from_cache": True,
+                    "warning": f"خطای شبکه — از کش قبلی استفاده شد ({e})",
+                }
             return {"success": False, "error": f"خطای شبکه: {str(e)}", "repos": all_repos}
+
+        # ذخیرهٔ cache
+        synced_at = now_iso()
+        try:
+            _write_json(
+                REPOS_CACHE_FILE,
+                {"repos": all_repos, "synced_at": synced_at, "count": len(all_repos)},
+            )
+        except Exception as e:
+            logger.debug(f"repos cache write failed: {e}")
 
         return {
             "success": True,
             "repos": all_repos,
             "count": len(all_repos),
-            "synced_at": now_iso(),
+            "synced_at": synced_at,
+            "from_cache": False,
         }
 
     # ====================================================================
