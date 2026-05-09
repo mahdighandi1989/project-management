@@ -867,6 +867,52 @@ export default function ProjectDetailPage() {
   const [showCreateRenderService, setShowCreateRenderService] = useState(false);
   const [createRenderLoading, setCreateRenderLoading] = useState(false);
 
+  // ==========================================================
+  // 🔗 Oversight bridge — وضعیت تسک‌های مرکز نظارت برای این پروژه
+  // ==========================================================
+  const [oversightBridgeSummary, setOversightBridgeSummary] = useState<{
+    project_id: string;
+    project_full_name: string;
+    total: number;
+    pending: number;
+    in_review: number;
+    done: number;
+  } | null>(null);
+  const [oversightExternalCount, setOversightExternalCount] = useState<number>(0);
+
+  const loadOversightBridge = useCallback(async () => {
+    if (!projectId) return;
+    // 1) /projects → /oversight: تسک‌های نظارتی که برای این پروژه ساخته شده‌اند
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(projectId)}/oversight-summary`);
+      if (res.ok) {
+        const data = await res.json();
+        setOversightBridgeSummary({
+          project_id: data.project_id,
+          project_full_name: data.project_full_name,
+          total: data.total || 0,
+          pending: data.pending || 0,
+          in_review: data.in_review || 0,
+          done: data.done || 0,
+        });
+      }
+    } catch (e) { /* non-critical */ }
+    // 2) /oversight → /projects: dynamic_fields این پروژه که در /oversight قابل verify هستند
+    try {
+      const res2 = await fetch(`${API_BASE}/api/oversight/external-tasks?project_id=${encodeURIComponent(projectId)}`);
+      if (res2.ok) {
+        const data2 = await res2.json();
+        setOversightExternalCount(Array.isArray(data2?.items) ? data2.items.length : 0);
+      }
+    } catch (e) { /* non-critical */ }
+  }, [projectId]);
+
+  useEffect(() => {
+    if (projectId) {
+      loadOversightBridge();
+    }
+  }, [projectId, loadOversightBridge]);
+
   useEffect(() => {
     if (projectId) {
       loadProject();
@@ -7620,6 +7666,32 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 </svg>
               )}
               <h1 className="text-2xl font-bold">{project.name}</h1>
+              {/* 🔗 Oversight bridge indicator — تعداد تسک‌های نظارتی این پروژه */}
+              {((oversightBridgeSummary?.total || 0) + oversightExternalCount) > 0 && (
+                <a
+                  href={`/oversight?project=${encodeURIComponent(projectId)}`}
+                  className="ml-2 px-3 py-1 bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300 rounded-full text-xs flex items-center gap-1.5 hover:bg-cyan-200 dark:hover:bg-cyan-900/50 transition-colors"
+                  title={
+                    `🔗 تسک‌های نظارتی این پروژه:\n` +
+                    `• ${oversightBridgeSummary?.pending || 0} در انتظار\n` +
+                    `• ${oversightBridgeSummary?.in_review || 0} در حال بررسی\n` +
+                    `• ${oversightBridgeSummary?.done || 0} تکمیل‌شده\n` +
+                    `• ${oversightExternalCount} فیلد قابل verify در مرکز نظارت\n\n` +
+                    `کلیک: باز کردن /oversight با فیلتر این پروژه`
+                  }
+                >
+                  <span>🔗</span>
+                  <span>
+                    {oversightBridgeSummary?.total || 0} نظارت
+                    {oversightExternalCount > 0 && ` + ${oversightExternalCount} فیلد`}
+                  </span>
+                  {(oversightBridgeSummary?.pending || 0) > 0 && (
+                    <span className="px-1.5 py-0 bg-orange-200 dark:bg-orange-900/50 text-orange-800 dark:text-orange-300 rounded-full text-xs">
+                      {oversightBridgeSummary?.pending} pending
+                    </span>
+                  )}
+                </a>
+              )}
             </div>
             {project.description && (
               <p className="text-gray-500 mt-1">{project.description}</p>
