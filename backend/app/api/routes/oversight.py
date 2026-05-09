@@ -955,6 +955,40 @@ async def list_general_archive(
     }
 
 
+@router.post("/migration/import-from-project/{project_id}")
+async def import_from_project_endpoint(project_id: str, db: Session = Depends(get_db)):
+    """مهاجرت data یک پروژهٔ Health → Oversight (دستی، per-project).
+
+    معادل صدا زدن migrate_one_project از script CLI ولی از طریق API.
+    این endpoint قبل از حذف نهایی Health به کاربران اجازه می‌دهد
+    داده‌های پروژه را به Oversight منتقل کنند.
+    """
+    from ...models.project import Project
+    proj = db.query(Project).filter(Project.id == project_id).first()
+    if not proj:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # delegate به script (که async است)
+    try:
+        from ...scripts_migration_helper import migrate_one_project_async
+    except Exception:
+        # fallback: import مستقیم از scripts
+        import importlib.util
+        from pathlib import Path
+        script_path = Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "migrate_health_to_oversight.py"
+        if not script_path.exists():
+            raise HTTPException(status_code=500, detail="migration script یافت نشد")
+        spec = importlib.util.spec_from_file_location("migrate_h2o", str(script_path))
+        if spec is None or spec.loader is None:
+            raise HTTPException(status_code=500, detail="بارگذاری migration script ناموفق")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        migrate_one_project_async = module.migrate_one_project
+
+    result = await migrate_one_project_async(proj, dry_run=False)
+    return result
+
+
 @router.delete("/archive/{item_type}/{item_id}")
 async def delete_archive_item(item_type: str, item_id: str):
     """حذف یک item از archive (task یا report)."""

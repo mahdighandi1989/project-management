@@ -14,6 +14,7 @@ import json
 import asyncio
 import logging
 from datetime import datetime
+from datetime import timezone as _tz_health
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import StreamingResponse
@@ -46,6 +47,70 @@ journal = get_journal_service()
 _active_progress_managers: dict = {}
 
 router = APIRouter(prefix="/api/projects", tags=["project-health"])
+
+
+# =====================================================================
+# 🆕 Data export endpoint — Phase 3 deprecation pre-step
+# (مهاجرت Health → Oversight: قبل از حذف، export کامل data ضروری است)
+# =====================================================================
+
+@router.get("/{project_id}/health/export")
+async def export_health_data(project_id: str, db: Session = Depends(get_db)):
+    """خروجی JSON کامل از تمام health data یک پروژه برای backup یا migration.
+
+    این endpoint قبل از حذف نهایی Health analysis اضافه شد تا کاربران
+    بتوانند data خود را قبل از deprecation حفظ یا به Oversight منتقل کنند.
+
+    خروجی شامل:
+    - health_scores
+    - file_health_map
+    - issues_found (با converted_to_field flag)
+    - roadmap_content + ideal_state
+    - readme_content
+    - analysis_settings
+    - general_archive
+    - last_analysis metadata
+    """
+    from ...models.project import Project
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    def _safe_json_load(field_value, default):
+        if not field_value:
+            return default
+        if isinstance(field_value, str):
+            try:
+                return json.loads(field_value)
+            except Exception:
+                return default
+        return field_value
+
+    return {
+        "project_id": project_id,
+        "project_name": project.name,
+        "github_path": project.github_path,
+        "github_url": getattr(project, "github_url", None),
+        "exported_at": datetime.now(_tz_health.utc).isoformat(),
+        "health_scores": _safe_json_load(getattr(project, "health_scores", None), {}),
+        "file_health_map": _safe_json_load(getattr(project, "file_health_map", None), {}),
+        "issues_found": _safe_json_load(getattr(project, "issues_found", None), []),
+        "roadmap_content": getattr(project, "roadmap_content", "") or "",
+        "ideal_state": getattr(project, "ideal_state", "") or "",
+        "readme_content": getattr(project, "readme_content", "") or "",
+        "analysis_settings": _safe_json_load(getattr(project, "analysis_settings", None), {}),
+        "general_archive": _safe_json_load(getattr(project, "general_archive", None), []),
+        "last_analysis_id": getattr(project, "last_analysis_id", None),
+        "last_analysis_at": str(getattr(project, "last_analysis_at", None) or ""),
+        "_export_version": "1.0",
+        "_migration_target": "/oversight (codex + scan_results + tasks)",
+        "_note": (
+            "این data از Health analysis (که در حال deprecation است) export شده. "
+            "برای استفاده در Oversight، watched project متناظر را اضافه کنید "
+            "و یک Deep Scan اجرا کنید — تمام این قابلیت‌ها در /oversight "
+            "تب «🏥 سلامت پروژه» در دسترس‌اند."
+        ),
+    }
 
 
 # =====================================
