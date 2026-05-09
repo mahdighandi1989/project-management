@@ -681,6 +681,8 @@ export default function ProjectDetailPage() {
 
   // Roadmap State (در تب ژورنال)
   const [roadmapContent, setRoadmapContent] = useState<string>('');
+  // 🆕 پیام هشدار اگر roadmap parse نشد ولی content موجود است
+  const [roadmapParseWarning, setRoadmapParseWarning] = useState<string>('');
   const [roadmapItems, setRoadmapItems] = useState<Array<{
     id: string;
     text: string;
@@ -6192,20 +6194,52 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             currentPriority = 'long_term';
           }
 
-          // پیدا کردن آیتم‌ها
+          // پیدا کردن آیتم‌ها — پشتیبانی از فرمت‌های مختلف:
+          //   - [ ] item / - [x] item   (markdown استاندارد)
+          //   * [X] item                (markdown با ستاره)
+          //   1. item                   (لیست عددی)
+          //   - ✅ item / - ☑ item       (Unicode checkbox پر)
+          //   - ☐ item / - 🔲 item      (Unicode checkbox خالی)
+          //   - ✓ item                  (تأیید ساده)
           if (trimmed.startsWith('- ') || trimmed.startsWith('* ') || trimmed.match(/^\d+\./)) {
-            const text = trimmed.replace(/^[-*]\s*/, '').replace(/^\d+\.\s*/, '');
-            const isCompleted = trimmed.includes('[x]') || trimmed.includes('✅') || trimmed.includes('✓');
-
-            items.push({
-              id: `roadmap_${index}`,
-              text: text.replace(/\[x\]|\[✓\]|\[✅\]/gi, '').trim(),
-              completed: isCompleted,
-              priority: currentPriority,
-              has_field: false,
-            });
+            let text = trimmed.replace(/^[-*]\s*/, '').replace(/^\d+\.\s*/, '');
+            // تشخیص completion با هر فرمتی
+            const isCompleted =
+              /\[\s*[xX✓✅]\s*\]/.test(trimmed) ||
+              /[✅✓☑]/.test(trimmed) ||
+              /^\s*-?\s*\[X\]/i.test(trimmed);
+            // پاک کردن همهٔ markerها از text — هم checked هم unchecked
+            text = text
+              .replace(/\[\s*[xX✓✅]\s*\]/g, '') // [x], [X], [✓], [✅]
+              .replace(/\[\s*\]/g, '')             // [ ]
+              .replace(/[✅☑]/g, '')                 // unicode checked
+              .replace(/[☐🔲]/g, '')                // unicode unchecked
+              .replace(/^\s*✓\s*/, '')             // leading ✓
+              .trim();
+            if (text) { // skip lines with only markers and no text
+              items.push({
+                id: `roadmap_${index}`,
+                text,
+                completed: isCompleted,
+                priority: currentPriority,
+                has_field: false,
+              });
+            }
           }
         });
+
+        // 🆕 اگر content غیر خالی است ولی هیچ آیتمی پارس نشد، یک پیام
+        // راهنما به کاربر بدهیم. content همچنان به‌صورت raw در بخش raw
+        // (text area در همان تب) قابل مشاهده است.
+        if (items.length === 0 && content.trim().length > 50) {
+          setRoadmapParseWarning(
+            'ساختار roadmap قابل تشخیص نیست — برای پارس صحیح از فرمت ' +
+            '`- [ ] item` یا `- [x] item` استفاده کنید. محتوای کامل ' +
+            'در بخش پایین قابل مشاهده است.'
+          );
+        } else {
+          setRoadmapParseWarning('');
+        }
 
         setRoadmapItems(items);
       }
@@ -10747,6 +10781,22 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     <div className="text-4xl mb-2">📭</div>
                     <p>نقشه راه تعریف نشده</p>
                     <p className="text-sm mt-2">از تب تحلیل سلامت، گزارش مهندسی را اجرا کنید تا نقشه راه تولید شود</p>
+                    {/* 🆕 اگر content موجود است ولی parse نشد، هشدار + raw view */}
+                    {roadmapParseWarning && roadmapContent && (
+                      <div className="mt-6 text-right max-w-2xl mx-auto">
+                        <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40 rounded-lg p-3 text-amber-800 dark:text-amber-200 text-sm mb-3">
+                          ⚠️ {roadmapParseWarning}
+                        </div>
+                        <details className="bg-gray-50 dark:bg-gray-900/40 rounded-lg p-3 text-xs">
+                          <summary className="cursor-pointer text-gray-700 dark:text-gray-300 font-medium">
+                            📄 محتوای raw روadmap ({roadmapContent.length} کاراکتر)
+                          </summary>
+                          <pre className="mt-3 whitespace-pre-wrap font-mono text-gray-700 dark:text-gray-300 text-right max-h-96 overflow-auto">
+                            {roadmapContent}
+                          </pre>
+                        </details>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="space-y-4">
