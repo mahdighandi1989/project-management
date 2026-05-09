@@ -149,6 +149,16 @@ class WatchedProject:
     last_scan_at: Optional[str] = None
     scan_interval_hours: float = 168.0  # هفتگی
     next_scan_at: Optional[str] = None
+    # 🆕 تنظیمات autonomy گسترش‌یافته
+    default_execution_mode: str = "manual"  # manual | auto_via_projects_page | auto_via_pr
+    verify_only_mode: bool = False
+    confirmation_streak_required: int = 2
+    max_apply_retries: int = 2
+    auto_create_pr_instead_of_commit: bool = True
+    notify_user_before_apply: bool = False
+    last_verify_at: Optional[str] = None
+    next_verify_at: Optional[str] = None
+    verify_interval_hours: float = 12.0
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
 
@@ -174,6 +184,20 @@ class OversightTask:
     last_summary: str = ""
     deadline: Optional[str] = None
     source: str = "user"  # user | auto_scan
+    # 🆕 جداسازی execution از verification
+    execution_mode: str = "manual"  # manual | auto_via_projects_page | auto_via_pr
+    verification_status: str = "pending"
+    # pending | applied_externally_pending_verify | partial | done | regressed | needs_clarification
+    verification_history: List[Dict[str, Any]] = field(default_factory=list)
+    applied_evidence: Dict[str, Any] = field(default_factory=dict)
+    manually_marked_applied_at: Optional[str] = None
+    last_verified_at: Optional[str] = None
+    confirmation_streak: int = 0
+    last_verification_report_id: Optional[str] = None
+    apply_retries: int = 0
+    # location hints (extracted from prompt for faster verify)
+    target_files: List[str] = field(default_factory=list)
+    acceptance_criteria: List[str] = field(default_factory=list)
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
 
@@ -198,6 +222,9 @@ class OversightReport:
     model_id: str = ""
     read: bool = False
     flagged: bool = False
+    # 🆕 معیار راهنما + Codex
+    user_goal: str = ""
+    touched_codex: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -762,6 +789,13 @@ class OversightService:
                         "allow_push",
                         "allow_create_issue",
                         "scan_interval_hours",
+                        "default_execution_mode",
+                        "verify_only_mode",
+                        "confirmation_streak_required",
+                        "max_apply_retries",
+                        "auto_create_pr_instead_of_commit",
+                        "notify_user_before_apply",
+                        "verify_interval_hours",
                     }
                     for k, v in updates.items():
                         if k in allowed:
@@ -812,6 +846,8 @@ class OversightService:
         return [t.to_dict() for t in items]
 
     async def create_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        from .oversight_strong_prompt import extract_target_files, extract_acceptance_criteria
+
         watched_id = payload.get("watched_id")
         watched = self._find_watched(watched_id) if watched_id else None
         if watched_id and not watched:
@@ -821,6 +857,16 @@ class OversightService:
         prompt = payload.get("prompt", "").strip()
         if not prompt:
             raise ValueError("prompt خالی است")
+
+        # استخراج target_files و acceptance_criteria از پرامپت در صورت نبودن
+        target_files = payload.get("target_files") or extract_target_files(prompt)
+        acceptance_criteria = (
+            payload.get("acceptance_criteria") or extract_acceptance_criteria(prompt)
+        )
+
+        execution_mode = payload.get("execution_mode")
+        if not execution_mode:
+            execution_mode = (watched.default_execution_mode if watched else "manual") or "manual"
 
         t = OversightTask(
             id=str(uuid.uuid4()),
@@ -834,6 +880,9 @@ class OversightService:
             status=payload.get("status", "pending"),
             deadline=payload.get("deadline"),
             source=payload.get("source", "user"),
+            execution_mode=execution_mode,
+            target_files=target_files,
+            acceptance_criteria=acceptance_criteria,
         )
         async with self._lock:
             self.tasks.append(t)
@@ -841,6 +890,8 @@ class OversightService:
         return t.to_dict()
 
     async def update_task(self, task_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        from .oversight_strong_prompt import extract_target_files, extract_acceptance_criteria
+
         async with self._lock:
             for t in self.tasks:
                 if t.id == task_id:
@@ -853,10 +904,20 @@ class OversightService:
                         "deadline",
                         "last_summary",
                         "next_run_at",
+                        "execution_mode",
+                        "target_files",
+                        "acceptance_criteria",
+                        "verification_status",
                     }
                     for k, v in updates.items():
                         if k in allowed:
                             setattr(t, k, v)
+                    # اگر prompt تغییر کرده، target_files و AC را هم به‌روز کن
+                    if "prompt" in updates and updates["prompt"]:
+                        if not updates.get("target_files"):
+                            t.target_files = extract_target_files(t.prompt)
+                        if not updates.get("acceptance_criteria"):
+                            t.acceptance_criteria = extract_acceptance_criteria(t.prompt)
                     t.updated_at = now_iso()
                     self._save_tasks()
                     return t.to_dict()
@@ -889,7 +950,9 @@ class OversightService:
 
         watched = self._find_watched(watched_id) if watched_id else None
         ctx_text = ""
+        user_goal = ""
         if watched:
+            user_goal = (watched.user_notes or "").strip()
             try:
                 ctx = await self.build_project_context(watched.repo_full_name)
                 summary_lines = []
@@ -922,7 +985,10 @@ class OversightService:
             except Exception as e:
                 logger.warning(f"context build failed: {e}")
 
-        system_prompt = f"""تو یک معمار ارشد نرم‌افزاری. وظیفه‌ات این است که ایده/مشکل/درخواست خام کاربر را به یک پرامپت کاملاً اجرایی، دقیق و ساختار یافته تبدیل کنی.
+        system_prompt = f"""تو یک معمار ارشد نرم‌افزاری. وظیفه‌ات این است که ایده/مشکل/درخواست خام کاربر را به یک پرامپت کاملاً اجرایی، دقیق و ساختار یافته (با قالب الزامی زیر) تبدیل کنی.
+
+# 🎯 هدف اصلی پروژه (از زبان کاربر)
+{user_goal or '(کاربر یادداشتی ثبت نکرده است)'}
 
 # Context پروژه
 {ctx_text or 'پروژه مشخص نیست'}
@@ -940,10 +1006,58 @@ class OversightService:
 
 {{
   "title": "عنوان کوتاه و گویا تسک",
-  "prompt": "پرامپت کامل و قدرتمند اجرایی با این ساختار:\\n## هدف\\n...\\n## Context\\n...\\n## مراحل اجرا\\n1. ...\\n2. ...\\n## معیارهای پذیرش (Acceptance Criteria)\\n- ...\\n## خروجی مورد انتظار\\n..."
+  "prompt": "پرامپت کامل با قالب الزامی زیر",
+  "target_files": ["لیست فایل‌های مرتبط که باید لمس/بررسی شوند"],
+  "acceptance_criteria": ["معیار قابل تست ۱", "معیار قابل تست ۲", "..."],
+  "type": "bug | feature | refactor | docs | security | other",
+  "priority": "low | medium | high | critical",
+  "estimate": "small | medium | large"
 }}
 
-پرامپت باید به فارسی، طولانی، عملی، با مراحل قابل اجرا، معیار پذیرش، و خروجی مشخص باشد."""
+# قالب الزامی پرامپت (همین ساختار را در فیلد prompt بگذار):
+
+## 🎯 هدف
+<عنوان دقیق و قابل سنجش — یک جمله>
+
+## 📍 موقعیت در پروژه
+<file_path>:<line_range یا کل فایل>
+<file_path_2>:<...>
+
+## 🧭 هدف اصلی پروژه (از یادداشت کاربر)
+{user_goal or '(کاربر یادداشتی ثبت نکرده است)'}
+
+## 🔍 Context و وضعیت فعلی
+- توضیح کوتاه از کد فعلی (snippet اگر مفید)
+- چرا این یک مشکل/نیاز است
+- چه تأثیری بر کاربر/امنیت/پایداری دارد
+
+## ✅ معیار پذیرش (Acceptance Criteria)
+- [ ] <معیار قابل تست ۱>
+- [ ] <معیار قابل تست ۲>
+- [ ] هیچ تستی fail نمی‌شود (npm test / pytest)
+- [ ] linter بدون warning عبور می‌کند
+- [ ] type-check موفق است
+
+## 🪜 مراحل اجرایی پیشنهادی
+1. <مرحله ۱ با فایل/تابع مشخص>
+2. <مرحله ۲>
+...
+
+## 📤 خروجی مورد انتظار
+<diff/PR/فایل ساخته‌شده/تغییر مشخص — قابل لمس>
+
+## ⚠️ ریسک‌ها و موارد احتیاط
+<چه چیزهایی ممکن است بشکند/رگرشن>
+
+## 🔗 وابستگی‌ها
+<task_idهای دیگر یا قطعات بیرونی>
+
+## 🏷 دسته‌بندی
+- نوع: <type>
+- اولویت: <priority>
+- تخمین زمان: <estimate>
+
+پرامپت باید به فارسی، طولانی، عملی، و کاملاً قابل اجرا باشد."""
 
         try:
             effective_models = model_ids or ([model_id] if model_id else None)
@@ -974,12 +1088,22 @@ class OversightService:
             return {
                 "title": (idea.strip().split("\n")[0])[:80],
                 "prompt": response.strip(),
+                "target_files": [],
+                "acceptance_criteria": [],
+                "type": type_,
+                "priority": priority,
+                "estimate": "medium",
                 "raw_response": response,
             }
 
         return {
             "title": parsed.get("title") or (idea.strip().split("\n")[0])[:80],
             "prompt": parsed.get("prompt") or response.strip(),
+            "target_files": parsed.get("target_files") or [],
+            "acceptance_criteria": parsed.get("acceptance_criteria") or [],
+            "type": parsed.get("type") or type_,
+            "priority": parsed.get("priority") or priority,
+            "estimate": parsed.get("estimate") or "medium",
             "raw_response": response,
         }
 
@@ -1010,6 +1134,7 @@ class OversightService:
         try:
             ctx = {}
             ctx_text = ""
+            user_goal = (watched.user_notes or "").strip() if watched else ""
             if watched:
                 try:
                     ctx = await self.build_project_context(watched.repo_full_name)
@@ -1043,6 +1168,9 @@ class OversightService:
                     logger.warning(f"build_project_context failed: {e}")
 
             evaluation_prompt = f"""تو ناظر فنی و QA حرفه‌ای هستی. وظیفه‌ات بررسی این تسک در پروژه گیت‌هاب است.
+
+# 🎯 هدف اصلی پروژه (از زبان کاربر)
+{user_goal or '(کاربر یادداشتی ثبت نکرده است)'}
 
 # تسک
 عنوان: {task.title}
@@ -1133,6 +1261,25 @@ class OversightService:
             if evidence_extra:
                 evidence.update(evidence_extra)
 
+            # شناسایی فایل‌های لمس‌شده برای ضمیمه کردن Codex
+            touched_paths: List[str] = list(task.target_files or [])
+            try:
+                from .oversight_strong_prompt import extract_target_files as _extract_tf
+
+                if not touched_paths and task.prompt:
+                    touched_paths = _extract_tf(task.prompt)
+            except Exception:
+                pass
+
+            touched_codex: Dict[str, Any] = {}
+            if watched and touched_paths:
+                try:
+                    from .oversight_codex_service import get_codex_for_files
+
+                    touched_codex = get_codex_for_files(watched.id, touched_paths) or {}
+                except Exception:
+                    touched_codex = {}
+
             report = OversightReport(
                 id=str(uuid.uuid4()),
                 task_id=task.id,
@@ -1147,6 +1294,8 @@ class OversightService:
                 confidence_score=float(parsed.get("confidence_score") or 0.0),
                 raw_response=response[:8000],
                 model_id=used_model,
+                user_goal=(watched.user_notes if watched else "") or "",
+                touched_codex=touched_codex,
             )
 
             # وضعیت نهایی
@@ -1248,9 +1397,11 @@ class OversightService:
 
         scan_prompt = f"""تو یک Senior Code Auditor و Security Engineer هستی. این پروژه را با دقت بررسی کن و یک فهرست کامل از «نیازها، ایرادات، تناقضات، آسیب‌پذیری‌ها و پیشنهادات بهبود» تهیه کن.
 
+# 🎯 هدف اصلی پروژه (از زبان کاربر)
+{(watched.user_notes or '(کاربر یادداشتی ثبت نکرده است)').strip()}
+
 # پروژه
 {watched.repo_full_name}
-{watched.user_notes or ''}
 
 # وضعیت
 {json.dumps(
@@ -1283,15 +1434,17 @@ class OversightService:
 
 هر مورد شامل:
 - title (کوتاه)
-- type (bug | refactor | docs | feature_request | other)
+- type (bug | refactor | docs | feature_request | security | other)
 - priority (low | medium | high | critical)
 - description (پاراگراف کامل)
 - proposed_action (پیشنهاد عملی)
+- target_files (لیست فایل‌های مرتبط با این یافته - اگر مشخص نیست خالی)
+- acceptance_criteria (۲ تا ۴ معیار قابل سنجش که نشان می‌دهد یافته رفع شده)
 
 # خروجی فقط JSON
 {{
   "needs": [
-    {{ "title": "...", "type": "...", "priority": "...", "description": "...", "proposed_action": "..." }}
+    {{ "title": "...", "type": "...", "priority": "...", "description": "...", "proposed_action": "...", "target_files": [], "acceptance_criteria": [] }}
   ]
 }}"""
 
@@ -1305,18 +1458,32 @@ class OversightService:
         parsed = self._extract_json(response) or {}
         needs = parsed.get("needs") or []
 
+        from .oversight_strong_prompt import build_strong_prompt
+
         created_tasks: List[Dict[str, Any]] = []
         for n in needs:
             try:
                 title = (n.get("title") or "").strip()[:200]
                 if not title:
                     continue
-                full_prompt = (
-                    f"## هدف\n{title}\n\n"
-                    f"## توضیح\n{n.get('description', '')}\n\n"
-                    f"## اقدام پیشنهادی\n{n.get('proposed_action', '')}\n\n"
-                    f"## معیارهای پذیرش\n- اعمال تغییر در پروژه\n- بدون شکست تست‌ها\n"
-                    f"- مستندسازی تغییر در README یا CHANGELOG"
+                target_files = n.get("target_files") or []
+                ac = n.get("acceptance_criteria") or []
+                if not ac:
+                    ac = [
+                        "اعمال تغییر بدون شکستن تست‌های موجود",
+                        "linter بدون warning عبور می‌کند",
+                        "type-check موفق است",
+                    ]
+                full_prompt = build_strong_prompt(
+                    title=title,
+                    user_goal=watched.user_notes,
+                    description=n.get("description", ""),
+                    proposed_action=n.get("proposed_action", ""),
+                    target_files=target_files,
+                    acceptance_criteria=ac,
+                    type_=n.get("type", "other"),
+                    priority=n.get("priority", "medium"),
+                    estimate="medium",
                 )
                 t = OversightTask(
                     id=str(uuid.uuid4()),
@@ -1329,6 +1496,9 @@ class OversightService:
                     priority=n.get("priority", "medium"),
                     status="suggested",
                     source="auto_scan",
+                    target_files=target_files,
+                    acceptance_criteria=ac,
+                    execution_mode=watched.default_execution_mode or "manual",
                 )
                 async with self._lock:
                     self.tasks.append(t)
@@ -1504,14 +1674,15 @@ class OversightService:
     # ====================================================================
 
     async def scheduler_tick(self) -> Dict[str, Any]:
-        """یک نوبت اجرای scheduler. تسک‌های موعد‌رسیده را اجرا می‌کند، scan دوره‌ای انجام می‌دهد."""
+        """یک نوبت اجرای scheduler. سه نوع کار: scan، run، verify."""
         now = datetime.now(timezone.utc)
         ran: List[str] = []
         scanned: List[str] = []
+        verified: List[str] = []
         max_runs = int(self.settings.get("max_parallel_runs") or 2)
 
         for w in list(self.watched):
-            # 1) Scan دوره‌ای (حتی اگر schedule_enabled نباشد، تا scan_interval خودش جدا باشد)
+            # ----- 1) Scan دوره‌ای -----
             try:
                 if w.scan_interval_hours and w.scan_interval_hours > 0:
                     last_scan = (
@@ -1519,20 +1690,69 @@ class OversightService:
                         if w.last_scan_at
                         else None
                     )
-                    if last_scan is None or (now - last_scan) >= timedelta(hours=w.scan_interval_hours):
-                        if w.schedule_enabled:  # فقط اگر زمان‌بندی فعال است auto-scan شود
+                    if last_scan is None or (now - last_scan) >= timedelta(
+                        hours=w.scan_interval_hours
+                    ):
+                        if w.schedule_enabled:
                             try:
                                 await self.scan_project(w.id, model_id=None)
                                 w.last_scan_at = now.isoformat()
-                                w.next_scan_at = (now + timedelta(hours=w.scan_interval_hours)).isoformat()
+                                w.next_scan_at = (
+                                    now + timedelta(hours=w.scan_interval_hours)
+                                ).isoformat()
                                 scanned.append(w.id)
                             except Exception as e:
                                 logger.warning(f"auto-scan {w.id} failed: {e}")
             except Exception as e:
                 logger.warning(f"scan check {w.id} failed: {e}")
 
-            # 2) اجرای تسک‌های pending در زمان‌بندی
+            # ----- 2) Verify دوره‌ای (مستقل از execution) -----
+            try:
+                vh = float(getattr(w, "verify_interval_hours", 0) or 0)
+                if vh > 0:
+                    last_verify = (
+                        datetime.fromisoformat(w.last_verify_at)
+                        if getattr(w, "last_verify_at", None)
+                        else None
+                    )
+                    if last_verify is None or (now - last_verify) >= timedelta(hours=vh):
+                        # تسک‌های نیازمند verify
+                        candidates = [
+                            t for t in self.tasks
+                            if t.watched_id == w.id
+                            and t.verification_status
+                            in (
+                                "pending",
+                                "applied_externally_pending_verify",
+                                "partial",
+                                "regressed",
+                            )
+                            and t.status not in ("done", "cancelled")
+                        ]
+                        # اولویت: applied_externally_pending_verify اول
+                        candidates.sort(
+                            key=lambda t: (
+                                0 if t.verification_status == "applied_externally_pending_verify" else 1,
+                                {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(t.priority, 9),
+                            )
+                        )
+                        for t in candidates[:max_runs]:
+                            try:
+                                from .oversight_verifier import verify_task as _verify_task
+                                await _verify_task(t.id, model_id=None, triggered_by="scheduler")
+                                verified.append(t.id)
+                            except Exception as e:
+                                logger.warning(f"scheduled verify {t.id} failed: {e}")
+                        w.last_verify_at = now.isoformat()
+                        w.next_verify_at = (now + timedelta(hours=vh)).isoformat()
+            except Exception as e:
+                logger.warning(f"verify tick {w.id} failed: {e}")
+
+            # ----- 3) اجرای تسک‌های pending (مسیر A — auto execution) -----
             if not w.schedule_enabled:
+                continue
+            # فقط اگر autonomy_level=auto و execution_mode auto_via_*
+            if w.autonomy_level != "auto" or getattr(w, "verify_only_mode", False):
                 continue
             try:
                 next_dt = (
@@ -1545,7 +1765,11 @@ class OversightService:
             if next_dt > now:
                 continue
 
-            pending = [t for t in self.tasks if t.watched_id == w.id and t.status == "pending"]
+            pending = [
+                t for t in self.tasks
+                if t.watched_id == w.id and t.status == "pending"
+                and t.execution_mode in ("auto_via_projects_page", "auto_via_pr")
+            ]
             if not pending:
                 w.next_run_at = (now + timedelta(hours=w.interval_hours)).isoformat()
                 w.last_run_at = now.isoformat()
@@ -1569,6 +1793,8 @@ class OversightService:
             "ran_count": len(ran),
             "scanned": scanned,
             "scanned_count": len(scanned),
+            "verified": verified,
+            "verified_count": len(verified),
             "tick_at": now.isoformat(),
         }
 

@@ -1,0 +1,384 @@
+"""
+Oversight Verifier
+==================
+موتور verification مستقل از execution.
+
+این موتور **نمی‌داند** کار از چه طریق انجام شده — فقط وضعیت فعلی پروژه را
+با acceptance criteria تسک مقایسه می‌کند و یک Report می‌سازد.
+
+اگر done در چند verify متوالی تأیید شد (`confirmation_streak`)، به‌صورت نهایی done.
+"""
+
+from __future__ import annotations
+
+import uuid
+import logging
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional
+
+import aiohttp
+
+from .oversight_service import (
+    GITHUB_API,
+    get_oversight_service,
+    OversightTask,
+    OversightReport,
+    WatchedProject,
+    now_iso,
+    get_github_token,
+)
+
+logger = logging.getLogger(__name__)
+
+VERIFICATION_DONE = "done"
+VERIFICATION_PARTIAL = "partial"
+VERIFICATION_NOT_DONE = "not_done"
+VERIFICATION_REGRESSED = "regressed"
+VERIFICATION_ERROR = "error"
+
+
+def _gh_headers(token: str) -> Dict[str, str]:
+    return {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "ai-creator-verifier/1.0",
+        **({"Authorization": f"Bearer {token}"} if token else {}),
+    }
+
+
+async def _fetch_file(
+    session: aiohttp.ClientSession,
+    repo: str,
+    path: str,
+    headers: Dict[str, str],
+    branch: Optional[str] = None,
+    max_bytes: int = 40000,
+) -> Optional[str]:
+    import base64
+
+    url = f"{GITHUB_API}/repos/{repo}/contents/{path}"
+    if branch:
+        url += f"?ref={branch}"
+    try:
+        async with session.get(url, headers=headers, timeout=30) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+        if not isinstance(data, dict) or data.get("type") != "file" or not data.get("content"):
+            return None
+        try:
+            decoded = base64.b64decode(data["content"]).decode("utf-8", errors="ignore")
+        except Exception:
+            return None
+        if len(decoded) > max_bytes:
+            decoded = decoded[:max_bytes] + "\n... [TRUNCATED]"
+        return decoded
+    except Exception:
+        return None
+
+
+async def _fetch_target_files(
+    repo: str, paths: List[str], branch: Optional[str], token: str
+) -> Dict[str, Optional[str]]:
+    if not paths:
+        return {}
+    out: Dict[str, Optional[str]] = {}
+    headers = _gh_headers(token)
+    async with aiohttp.ClientSession() as session:
+        for p in paths[:20]:  # حداکثر ۲۰ فایل
+            content = await _fetch_file(session, repo, p, headers, branch)
+            out[p] = content
+    return out
+
+
+async def _fetch_recent_commits(
+    repo: str, branch: Optional[str], token: str, limit: int = 15
+) -> List[Dict[str, Any]]:
+    headers = _gh_headers(token)
+    url = f"{GITHUB_API}/repos/{repo}/commits?per_page={limit}"
+    if branch:
+        url += f"&sha={branch}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=30) as r:
+                if r.status != 200:
+                    return []
+                data = await r.json()
+                if not isinstance(data, list):
+                    return []
+                return [
+                    {
+                        "sha": c.get("sha", "")[:7],
+                        "message": (c.get("commit", {}).get("message") or "").split("\n")[0][:200],
+                        "date": (c.get("commit", {}).get("author") or {}).get("date", ""),
+                    }
+                    for c in data
+                ]
+    except Exception:
+        return []
+
+
+async def verify_task(
+    task_id: str,
+    *,
+    model_id: Optional[str] = None,
+    triggered_by: str = "manual",
+) -> Dict[str, Any]:
+    """اجرای verify روی یک تسک — مستقل از execution."""
+    service = get_oversight_service()
+    task = next((t for t in service.tasks if t.id == task_id), None)
+    if task is None:
+        raise ValueError("تسک یافت نشد")
+    watched = service._find_watched(task.watched_id) if task.watched_id else None
+    if watched is None and task.project_full_name:
+        # fallback: شاید watched id ندارد ولی full_name دارد
+        watched = next(
+            (w for w in service.watched if w.repo_full_name == task.project_full_name),
+            None,
+        )
+
+    token = get_github_token()
+
+    # 1) فایل‌های هدف
+    target_files = list(task.target_files or [])
+    if not target_files and task.prompt:
+        from .oversight_strong_prompt import extract_target_files
+        target_files = extract_target_files(task.prompt)
+
+    # 2) معیارها
+    acceptance_criteria = list(task.acceptance_criteria or [])
+    if not acceptance_criteria and task.prompt:
+        from .oversight_strong_prompt import extract_acceptance_criteria
+        acceptance_criteria = extract_acceptance_criteria(task.prompt)
+
+    if not acceptance_criteria:
+        acceptance_criteria = [
+            "تغییرات لازم در پروژه اعمال شده باشد",
+            "هیچ تستی fail نشود",
+            "linter بدون warning عبور کند",
+        ]
+
+    # 3) محتوای فعلی فایل‌ها
+    file_contents: Dict[str, Optional[str]] = {}
+    recent_commits: List[Dict[str, Any]] = []
+    branch = (watched.default_branch if watched else None) or "main"
+    repo_full_name = watched.repo_full_name if watched else task.project_full_name
+
+    if token and repo_full_name and "/" in repo_full_name:
+        try:
+            file_contents = await _fetch_target_files(
+                repo_full_name, target_files, branch, token
+            )
+        except Exception as e:
+            logger.warning(f"verify: fetch files failed: {e}")
+        try:
+            recent_commits = await _fetch_recent_commits(repo_full_name, branch, token)
+        except Exception as e:
+            logger.warning(f"verify: fetch commits failed: {e}")
+
+    # 4) ساخت پرامپت verifier
+    files_blob_parts: List[str] = []
+    for p in target_files:
+        c = file_contents.get(p)
+        if c is None:
+            files_blob_parts.append(f"=== {p} ===\n[فایل یافت نشد یا قابل خواندن نبود]")
+        else:
+            files_blob_parts.append(f"=== {p} ===\n{c[:8000]}")
+    files_blob = "\n\n".join(files_blob_parts) or "(فایل هدفی مشخص نیست — بر اساس کل پرامپت بررسی کن)"
+
+    commits_blob = "\n".join(
+        f"- {c['sha']} ({c['date'][:10]}) {c['message']}" for c in recent_commits[:10]
+    ) or "(کامیتی یافت نشد)"
+
+    user_goal = (watched.user_notes if watched else "") or ""
+
+    ac_lines = "\n".join(f"- {c}" for c in acceptance_criteria)
+
+    verify_prompt = f"""تو یک QA حرفه‌ای هستی. وظیفه‌ات بررسی این است که آیا کارهای خواسته‌شده در پرامپت تسک واقعاً در وضعیت فعلی پروژه انجام شده‌اند یا نه — **بدون اهمیت دادن به اینکه چه کسی یا با چه ابزاری انجام داده**. فقط وضعیت فعلی را با معیارهای پذیرش مقایسه کن.
+
+# 🎯 هدف اصلی پروژه (از زبان کاربر — معیار راهنما)
+{user_goal or '(کاربر یادداشتی ثبت نکرده)'}
+
+# تسک
+عنوان: {task.title}
+نوع: {task.type}
+اولویت: {task.priority}
+
+پرامپت کامل تسک:
+\"\"\"
+{task.prompt[:6000]}
+\"\"\"
+
+# معیارهای پذیرش (Acceptance Criteria)
+{ac_lines}
+
+# محتوای فعلی فایل‌های مرتبط (از repository)
+{files_blob[:20000]}
+
+# کامیت‌های اخیر
+{commits_blob}
+
+# وظیفه
+هر معیار پذیرش را جداگانه بررسی کن:
+- آیا در وضعیت فعلی پروژه برآورده شده؟ (بله/خیر/تا حدی)
+
+سپس وضعیت کلی را تعیین کن:
+- "done" = همهٔ معیارها برآورده شده
+- "partial" = بخشی از معیارها برآورده شده
+- "not_done" = هیچ تغییر معناداری انجام نشده
+- "regressed" = نسبت به قبل بدتر شده
+- "error" = در بررسی خطا داشتی
+
+# خروجی فقط JSON
+{{
+  "status": "done | partial | not_done | regressed | error",
+  "criteria_results": [
+    {{ "criterion": "...", "met": true, "evidence": "..." }}
+  ],
+  "done_parts": ["..."],
+  "remaining_parts": ["..."],
+  "evidence": {{ "commits": ["sha"], "files": ["path"], "issues": [] }},
+  "next_actions": ["پیشنهاد قدم‌های بعدی اگر done نباشد"],
+  "confidence_score": 0.0,
+  "summary": "خلاصه یک‌پاراگرافی"
+}}"""
+
+    try:
+        response = await service._ai_generate(
+            verify_prompt, model_id=model_id, max_tokens=2500, temperature=0.1
+        )
+    except Exception as e:
+        logger.exception("verify ai_generate failed")
+        # ذخیرهٔ گزارش error
+        report = OversightReport(
+            id=str(uuid.uuid4()),
+            task_id=task.id,
+            watched_id=task.watched_id,
+            project_full_name=task.project_full_name,
+            run_at=now_iso(),
+            status=VERIFICATION_ERROR,
+            done_parts=[],
+            remaining_parts=acceptance_criteria,
+            evidence={"error": str(e)},
+            next_actions=["تلاش مجدد در دور verify بعدی"],
+            confidence_score=0.0,
+            raw_response="",
+            model_id=model_id or "",
+        )
+        async with service._lock:
+            service.reports.insert(0, report)
+            service._save_reports()
+        return {"task": task.to_dict(), "report": report.to_dict()}
+
+    parsed = service._extract_json(response) or {}
+    status_val = parsed.get("status") or VERIFICATION_PARTIAL
+    if status_val not in (
+        VERIFICATION_DONE,
+        VERIFICATION_PARTIAL,
+        VERIFICATION_NOT_DONE,
+        VERIFICATION_REGRESSED,
+        VERIFICATION_ERROR,
+    ):
+        status_val = VERIFICATION_PARTIAL
+
+    touched_codex: Dict[str, Any] = {}
+    if watched and target_files:
+        try:
+            from .oversight_codex_service import get_codex_for_files
+
+            touched_codex = get_codex_for_files(watched.id, target_files) or {}
+        except Exception:
+            touched_codex = {}
+
+    report = OversightReport(
+        id=str(uuid.uuid4()),
+        task_id=task.id,
+        watched_id=task.watched_id,
+        project_full_name=task.project_full_name,
+        run_at=now_iso(),
+        status=status_val,
+        done_parts=parsed.get("done_parts") or [],
+        remaining_parts=parsed.get("remaining_parts") or [],
+        evidence=parsed.get("evidence") or {},
+        next_actions=parsed.get("next_actions") or [],
+        confidence_score=float(parsed.get("confidence_score") or 0.0),
+        raw_response=response[:8000],
+        model_id=model_id or "",
+        user_goal=user_goal,
+        touched_codex=touched_codex,
+    )
+
+    # ذخیرهٔ نتایج معیارها در evidence
+    if parsed.get("criteria_results"):
+        report.evidence["criteria_results"] = parsed["criteria_results"]
+    if parsed.get("summary"):
+        report.evidence["summary"] = parsed["summary"]
+
+    # به‌روزرسانی task
+    streak_required = 2
+    if watched and getattr(watched, "confirmation_streak_required", None):
+        streak_required = max(1, int(watched.confirmation_streak_required))
+
+    async with service._lock:
+        service.reports.insert(0, report)
+        task.last_verification_report_id = report.id
+        task.last_verified_at = now_iso()
+        task.verification_history.append(
+            {
+                "report_id": report.id,
+                "verified_at": report.run_at,
+                "status": status_val,
+                "triggered_by": triggered_by,
+                "summary": parsed.get("summary") or "",
+            }
+        )
+        # محدودیت تاریخچه
+        if len(task.verification_history) > 30:
+            task.verification_history = task.verification_history[-30:]
+
+        if status_val == VERIFICATION_DONE:
+            task.confirmation_streak += 1
+            if task.confirmation_streak >= streak_required:
+                task.verification_status = "done"
+                task.status = "done"
+            else:
+                task.verification_status = "partial"
+                task.status = "awaiting_review"
+        elif status_val == VERIFICATION_PARTIAL:
+            task.confirmation_streak = 0
+            task.verification_status = "partial"
+            task.status = "awaiting_review"
+        elif status_val == VERIFICATION_REGRESSED:
+            task.confirmation_streak = 0
+            task.verification_status = "regressed"
+            task.status = "pending"
+        elif status_val == VERIFICATION_NOT_DONE:
+            task.confirmation_streak = 0
+            task.verification_status = "pending"
+            # اگر کاربر گفته بود externally applied ولی نتیجه not_done → برگرد به pending
+            if task.manually_marked_applied_at:
+                task.verification_status = "needs_clarification"
+            task.status = "pending" if task.status not in ("running", "cancelled") else task.status
+        else:
+            task.verification_status = "needs_clarification"
+
+        task.updated_at = now_iso()
+        service._save_reports()
+        service._save_tasks()
+
+    # event hook
+    try:
+        await service._emit(
+            "task.verified",
+            {"task": task.to_dict(), "report": report.to_dict(), "triggered_by": triggered_by},
+        )
+    except Exception:
+        pass
+
+    return {
+        "task": task.to_dict(),
+        "report": report.to_dict(),
+        "streak": task.confirmation_streak,
+        "streak_required": streak_required,
+        "final": task.verification_status == "done",
+    }

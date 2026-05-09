@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import Link from 'next/link';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -44,10 +44,19 @@ interface Watched {
   allow_push: boolean;
   allow_create_issue?: boolean;
   scan_interval_hours?: number;
+  verify_interval_hours?: number;
+  default_execution_mode?: 'manual' | 'auto_via_projects_page' | 'auto_via_pr';
+  verify_only_mode?: boolean;
+  confirmation_streak_required?: number;
+  max_apply_retries?: number;
+  auto_create_pr_instead_of_commit?: boolean;
+  notify_user_before_apply?: boolean;
   last_run_at?: string | null;
   next_run_at?: string | null;
   last_scan_at?: string | null;
   next_scan_at?: string | null;
+  last_verify_at?: string | null;
+  next_verify_at?: string | null;
 }
 
 interface Task {
@@ -67,6 +76,20 @@ interface Task {
   deadline?: string | null;
   source: string;
   created_at?: string;
+  execution_mode?: 'manual' | 'auto_via_projects_page' | 'auto_via_pr';
+  verification_status?: string;
+  verification_history?: Array<{
+    report_id: string;
+    verified_at: string;
+    status: string;
+    triggered_by?: string;
+    summary?: string;
+  }>;
+  manually_marked_applied_at?: string | null;
+  last_verified_at?: string | null;
+  confirmation_streak?: number;
+  target_files?: string[];
+  acceptance_criteria?: string[];
 }
 
 interface Report {
@@ -75,7 +98,7 @@ interface Report {
   watched_id?: string | null;
   project_full_name: string;
   run_at: string;
-  status: 'done' | 'partial' | 'not_done' | 'error';
+  status: 'done' | 'partial' | 'not_done' | 'error' | 'regressed';
   done_parts: string[];
   remaining_parts: string[];
   evidence: Record<string, any>;
@@ -85,6 +108,8 @@ interface Report {
   model_id?: string;
   read?: boolean;
   flagged?: boolean;
+  user_goal?: string;
+  touched_codex?: Record<string, any>;
 }
 
 interface Status {
@@ -178,6 +203,21 @@ export default function OversightPage() {
 
   const [runningTaskIds, setRunningTaskIds] = useState<Set<string>>(new Set());
 
+  // Deep scan progress
+  const [deepScanWatchedId, setDeepScanWatchedId] = useState<string | null>(null);
+  const [deepScanProgress, setDeepScanProgress] = useState<any>(null);
+  const deepScanPollRef = useRef<any>(null);
+
+  // Codex modal
+  const [codexWatchedId, setCodexWatchedId] = useState<string | null>(null);
+  const [codexData, setCodexData] = useState<any>(null);
+  const [codexLoading, setCodexLoading] = useState(false);
+  const [codexSearch, setCodexSearch] = useState('');
+
+  // Verification history modal
+  const [verifyHistoryTaskId, setVerifyHistoryTaskId] = useState<string | null>(null);
+  const [verifyHistoryData, setVerifyHistoryData] = useState<any>(null);
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -193,6 +233,10 @@ export default function OversightPage() {
 
   useEffect(() => {
     init();
+    return () => {
+      if (deepScanPollRef.current) clearInterval(deepScanPollRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -626,6 +670,180 @@ export default function OversightPage() {
     }
   };
 
+  // ============================ Deep Scan ============================
+  const startDeepScan = async (watchedId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/scan/${watchedId}/deep`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_id: selectedModelIds[0] || undefined }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showError(err.detail || 'شروع deep scan ناموفق');
+        return;
+      }
+      setDeepScanWatchedId(watchedId);
+      setDeepScanProgress({ status: 'queued', message: 'در انتظار شروع' });
+      // شروع polling
+      if (deepScanPollRef.current) clearInterval(deepScanPollRef.current);
+      deepScanPollRef.current = setInterval(async () => {
+        try {
+          const pr = await fetch(`${API_BASE}/api/oversight/scan/${watchedId}/progress`);
+          if (pr.ok) {
+            const data = await pr.json();
+            setDeepScanProgress(data);
+            if (data.status === 'completed' || data.status === 'error') {
+              clearInterval(deepScanPollRef.current);
+              deepScanPollRef.current = null;
+              await reloadTasks();
+              if (data.status === 'completed') {
+                showSuccess(
+                  `Deep scan تمام شد - ${data.tasks_created || 0} تسک ساخته شد`,
+                );
+              } else {
+                showError(`خطا در deep scan: ${data.message || ''}`);
+              }
+            }
+          }
+        } catch {}
+      }, 2000);
+    } catch (e: any) {
+      showError(e.message);
+    }
+  };
+
+  const closeDeepScan = () => {
+    if (deepScanPollRef.current) clearInterval(deepScanPollRef.current);
+    deepScanPollRef.current = null;
+    setDeepScanWatchedId(null);
+    setDeepScanProgress(null);
+  };
+
+  // ============================ Codex ============================
+  const openCodex = async (watchedId: string) => {
+    setCodexWatchedId(watchedId);
+    setCodexLoading(true);
+    setCodexData(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/codex/${watchedId}`);
+      if (res.ok) {
+        const data = await res.json();
+        setCodexData(data);
+      }
+    } catch {}
+    setCodexLoading(false);
+  };
+
+  const refreshCodex = async () => {
+    if (!codexWatchedId) return;
+    setCodexLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/codex/${codexWatchedId}/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_id: selectedModelIds[0] || undefined, only_changed: false }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        showSuccess(`${data.files_documented || 0} فایل مستند شد`);
+        // reload codex
+        const reload = await fetch(`${API_BASE}/api/oversight/codex/${codexWatchedId}`);
+        if (reload.ok) setCodexData(await reload.json());
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showError(err.detail || 'به‌روزرسانی Codex ناموفق');
+      }
+    } catch (e: any) {
+      showError(e.message);
+    }
+    setCodexLoading(false);
+  };
+
+  // ============================ Verifier / Manual external ============================
+  const verifyTaskNow = async (id: string) => {
+    setRunningTaskIds((p) => new Set(p).add(id));
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/tasks/${id}/verify-now`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_id: selectedModelIds[0] || undefined }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.task) setTasks((prev) => prev.map((t) => (t.id === id ? data.task : t)));
+        if (data.report) setReports((prev) => [data.report, ...prev]);
+        if (data.final) {
+          showSuccess('✅ تأیید نهایی! تسک done شد.');
+        } else {
+          showSuccess(
+            `Verify تمام شد - وضعیت: ${data.report?.status || 'partial'} (streak ${data.streak}/${data.streak_required})`,
+          );
+        }
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showError(err.detail || 'verify ناموفق');
+      }
+    } catch (e: any) {
+      showError(e.message);
+    } finally {
+      setRunningTaskIds((p) => {
+        const next = new Set(p);
+        next.delete(id);
+        return next;
+      });
+    }
+  };
+
+  const markTaskAppliedExternally = async (id: string) => {
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/oversight/tasks/${id}/mark-applied-externally`,
+        { method: 'POST' },
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setTasks((prev) => prev.map((t) => (t.id === id ? data : t)));
+        showSuccess('علامت زده شد - در دور verify بعدی بررسی می‌شود (یا الان verify کنید)');
+      }
+    } catch (e: any) {
+      showError(e.message);
+    }
+  };
+
+  const copyFullPrompt = async (id: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/tasks/${id}/full-prompt`);
+      if (!res.ok) {
+        showError('دریافت پرامپت ناموفق');
+        return;
+      }
+      const data = await res.json();
+      const text = data.prompt || '';
+      try {
+        await navigator.clipboard.writeText(text);
+        showSuccess('پرامپت کامل در کلیپ‌بورد کپی شد');
+      } catch {
+        // fallback: show in modal
+        showError('کپی خودکار ناموفق - پرامپت در console چاپ شد');
+        console.log(text);
+      }
+    } catch (e: any) {
+      showError(e.message);
+    }
+  };
+
+  const openVerifyHistory = async (id: string) => {
+    setVerifyHistoryTaskId(id);
+    setVerifyHistoryData(null);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/oversight/tasks/${id}/verification-history`,
+      );
+      if (res.ok) setVerifyHistoryData(await res.json());
+    } catch {}
+  };
+
   const updateTask = async (id: string, updates: Partial<Task>) => {
     try {
       const res = await fetch(`${API_BASE}/api/oversight/tasks/${id}`, {
@@ -964,6 +1182,7 @@ export default function OversightPage() {
                   onChange={(u) => updateWatched(w.id, u)}
                   onRemove={() => removeWatched(w.id, w.repo_full_name)}
                   onScan={() => scanProject(w.id)}
+                  onDeepScan={() => startDeepScan(w.id)}
                   onRunNow={() => runAllPendingForWatched(w.id)}
                   onWriteIdea={() => {
                     setIdeaWatchedIds([w.id]);
@@ -979,6 +1198,7 @@ export default function OversightPage() {
                     setReportStatusFilter('all');
                     setTab('reports');
                   }}
+                  onOpenCodex={() => openCodex(w.id)}
                 />
               ))
             )}
@@ -1313,6 +1533,10 @@ export default function OversightPage() {
             onUpdate={updateTask}
             onDelete={deleteTask}
             onView={(t) => setViewingTask(t)}
+            onVerify={verifyTaskNow}
+            onMarkExternal={markTaskAppliedExternally}
+            onCopyPrompt={copyFullPrompt}
+            onShowHistory={openVerifyHistory}
             fmtDate={fmtDate}
           />
         ) : (
@@ -1413,6 +1637,15 @@ export default function OversightPage() {
                 </span>
               </div>
 
+              {viewingReport.user_goal && (
+                <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded text-sm border border-blue-200 dark:border-blue-800">
+                  <p className="text-xs text-blue-700 dark:text-blue-300 font-medium mb-1">
+                    🎯 معیار راهنمای ارزیابی (یادداشت کاربر)
+                  </p>
+                  <p className="dark:text-blue-100">{viewingReport.user_goal}</p>
+                </div>
+              )}
+
               {viewingReport.evidence?.github_issue && (
                 <div className="p-2 bg-blue-50 dark:bg-blue-900/30 rounded text-sm">
                   <a
@@ -1425,6 +1658,66 @@ export default function OversightPage() {
                   </a>
                 </div>
               )}
+
+              {viewingReport.evidence?.criteria_results && (
+                <div>
+                  <h4 className="text-sm font-medium mb-2 dark:text-gray-200">
+                    ✅ نتیجهٔ هر معیار پذیرش
+                  </h4>
+                  <ul className="space-y-1">
+                    {(viewingReport.evidence.criteria_results as any[]).map((cr, i) => (
+                      <li
+                        key={i}
+                        className={`text-sm p-2 rounded ${
+                          cr.met
+                            ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300'
+                            : 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300'
+                        }`}
+                      >
+                        <strong>{cr.met ? '✓' : '✗'}</strong> {cr.criterion}
+                        {cr.evidence && (
+                          <div className="text-xs opacity-80 mt-1">{cr.evidence}</div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {viewingReport.touched_codex &&
+                Object.keys(viewingReport.touched_codex).length > 0 && (
+                  <details>
+                    <summary className="cursor-pointer text-sm font-medium dark:text-gray-200">
+                      📚 شناسنامهٔ بخش‌های لمس‌شده
+                    </summary>
+                    <div className="mt-2 space-y-2">
+                      {Object.keys(viewingReport.touched_codex).map((path) => {
+                        const f = viewingReport.touched_codex![path];
+                        if (!f) return null;
+                        return (
+                          <div
+                            key={path}
+                            className="p-2 bg-gray-50 dark:bg-gray-700/50 rounded text-xs"
+                          >
+                            <p className="font-medium dark:text-white" dir="ltr">
+                              {path}
+                            </p>
+                            {f.what_is_it && (
+                              <p className="dark:text-gray-300 mt-1">
+                                <strong>این چیست:</strong> {f.what_is_it}
+                              </p>
+                            )}
+                            {f.what_it_does && (
+                              <p className="dark:text-gray-300">
+                                <strong>چه می‌کند:</strong> {f.what_it_does}
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </details>
+                )}
 
               {viewingReport.done_parts.length > 0 && (
                 <Section title="✅ انجام شده" items={viewingReport.done_parts} />
@@ -1495,6 +1788,36 @@ export default function OversightPage() {
                 </button>
               </div>
             </div>
+          </Modal>
+        )}
+
+        {/* مودال Deep Scan progress */}
+        {deepScanWatchedId && (
+          <Modal onClose={closeDeepScan} title="🔬 Deep Scan در حال اجرا">
+            <DeepScanProgressView progress={deepScanProgress} />
+          </Modal>
+        )}
+
+        {/* مودال Codex */}
+        {codexWatchedId && (
+          <Modal onClose={() => setCodexWatchedId(null)} title="📚 شناسنامهٔ پروژه (Codex)">
+            <CodexView
+              data={codexData}
+              loading={codexLoading}
+              onRefresh={refreshCodex}
+              search={codexSearch}
+              onSearch={setCodexSearch}
+            />
+          </Modal>
+        )}
+
+        {/* مودال Verification History */}
+        {verifyHistoryTaskId && (
+          <Modal
+            onClose={() => setVerifyHistoryTaskId(null)}
+            title="🕐 تاریخچهٔ verification"
+          >
+            <VerifyHistoryView data={verifyHistoryData} />
           </Modal>
         )}
       </div>
@@ -1600,19 +1923,23 @@ function WatchedCard({
   onChange,
   onRemove,
   onScan,
+  onDeepScan,
   onRunNow,
   onWriteIdea,
   onViewTasks,
   onViewReports,
+  onOpenCodex,
 }: {
   w: Watched;
   onChange: (updates: Partial<Watched>) => void;
   onRemove: () => void;
   onScan: () => void;
+  onDeepScan: () => void;
   onRunNow: () => void;
   onWriteIdea: () => void;
   onViewTasks: () => void;
   onViewReports: () => void;
+  onOpenCodex: () => void;
 }) {
   const [notes, setNotes] = useState(w.user_notes);
   const [tagInput, setTagInput] = useState('');
@@ -1688,8 +2015,14 @@ function WatchedCard({
       </div>
 
       <div className="mb-3">
-        <label className="text-xs text-gray-500 dark:text-gray-400 mb-1 block">
+        <label className="text-xs text-gray-500 dark:text-gray-400 mb-1 block flex items-center gap-1">
           📝 یادداشت من (هدف این پروژه چی بود؟)
+          <span
+            title="AI این متن را به‌عنوان «هدف اصلی پروژه» در همهٔ تحلیل‌ها، scan‌ها، تولید تسک، verify و گزارش‌ها استفاده می‌کند."
+            className="cursor-help text-blue-400"
+          >
+            ⓘ
+          </span>
         </label>
         <textarea
           value={notes}
@@ -1737,7 +2070,15 @@ function WatchedCard({
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
         <label className="text-xs">
-          <span className="block text-gray-500 dark:text-gray-400 mb-1">سطح خودمختاری</span>
+          <span className="block text-gray-500 dark:text-gray-400 mb-1 flex items-center gap-1">
+            سطح خودمختاری
+            <span
+              title="manual: AI فقط بررسی و گزارش می‌دهد. assist: پیشنهاد می‌دهد ولی اعمال نمی‌کند. auto: اجازهٔ اعمال خودکار با opt-in جداگانه (allow_push)"
+              className="cursor-help text-blue-400"
+            >
+              ⓘ
+            </span>
+          </span>
           <select
             value={w.autonomy_level}
             onChange={(e) => onChange({ autonomy_level: e.target.value as any })}
@@ -1749,7 +2090,15 @@ function WatchedCard({
           </select>
         </label>
         <label className="text-xs">
-          <span className="block text-gray-500 dark:text-gray-400 mb-1">بازه run (ساعت)</span>
+          <span className="block text-gray-500 dark:text-gray-400 mb-1 flex items-center gap-1">
+            بازه run (ساعت)
+            <span
+              title="هر چند ساعت، تسک‌های pending شما اجرا و گزارش‌گیری می‌شوند (فقط در حالت auto)"
+              className="cursor-help text-blue-400"
+            >
+              ⓘ
+            </span>
+          </span>
           <input
             type="number"
             min="1"
@@ -1762,7 +2111,15 @@ function WatchedCard({
           />
         </label>
         <label className="text-xs">
-          <span className="block text-gray-500 dark:text-gray-400 mb-1">بازه scan (ساعت)</span>
+          <span className="block text-gray-500 dark:text-gray-400 mb-1 flex items-center gap-1">
+            بازه scan (ساعت)
+            <span
+              title="هر چند ساعت، AI خود پروژه را از صفر بررسی می‌کند تا نیازها/مشکلات جدید پیدا کند"
+              className="cursor-help text-blue-400"
+            >
+              ⓘ
+            </span>
+          </span>
           <input
             type="number"
             min="1"
@@ -1783,6 +2140,68 @@ function WatchedCard({
             className="w-4 h-4"
           />
           <span className="dark:text-gray-200">زمان‌بندی فعال</span>
+        </label>
+      </div>
+
+      {/* execution mode + verify interval + verify_only_mode */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-3">
+        <label className="text-xs">
+          <span className="block text-gray-500 dark:text-gray-400 mb-1 flex items-center gap-1">
+            مسیر اجرا
+            <span
+              title="manual: تسک‌ها را خودتان بیرون اعمال می‌کنید (با Cursor/ChatGPT/...) و سیستم فقط verify می‌کند. auto_via_projects_page: از طریق صفحهٔ /projects اعمال شود. auto_via_pr: AI خودش PR می‌سازد."
+              className="cursor-help text-blue-400"
+            >
+              ⓘ
+            </span>
+          </span>
+          <select
+            value={w.default_execution_mode || 'manual'}
+            onChange={(e) =>
+              onChange({ default_execution_mode: e.target.value as any })
+            }
+            className="w-full p-1.5 border rounded text-sm dark:bg-gray-700 dark:text-white dark:border-gray-600"
+          >
+            <option value="manual">manual (اعمال بیرونی)</option>
+            <option value="auto_via_projects_page">auto via /projects</option>
+            <option value="auto_via_pr">auto via PR</option>
+          </select>
+        </label>
+        <label className="text-xs">
+          <span className="block text-gray-500 dark:text-gray-400 mb-1 flex items-center gap-1">
+            بازه verify (ساعت)
+            <span
+              title="هر چند ساعت، تسک‌های اعمال‌شده (یا نشده) دوباره بررسی می‌شوند تا تأیید نهایی - مستقل از روش اعمال"
+              className="cursor-help text-blue-400"
+            >
+              ⓘ
+            </span>
+          </span>
+          <input
+            type="number"
+            min="1"
+            defaultValue={w.verify_interval_hours ?? 12}
+            onBlur={(e) => {
+              const v = parseFloat(e.target.value) || 12;
+              if (v !== (w.verify_interval_hours ?? 12))
+                onChange({ verify_interval_hours: v });
+            }}
+            className="w-full p-1.5 border rounded text-sm dark:bg-gray-700 dark:text-white dark:border-gray-600"
+          />
+        </label>
+        <label className="text-xs flex items-center gap-2 mt-5">
+          <input
+            type="checkbox"
+            checked={!!w.verify_only_mode}
+            onChange={(e) => onChange({ verify_only_mode: e.target.checked })}
+            className="w-4 h-4"
+          />
+          <span
+            className="dark:text-gray-200"
+            title="اگر فعال باشد، scheduler هرگز apply نمی‌کند، فقط verify می‌کند"
+          >
+            فقط verify (هرگز apply نکن)
+          </span>
         </label>
       </div>
 
@@ -1815,22 +2234,37 @@ function WatchedCard({
 
       <div className="flex gap-2 flex-wrap">
         <button
+          onClick={onDeepScan}
+          title="اسکن چندفازی عمیق روی همهٔ فایل‌ها/صفحات/روتها با progress زنده"
+          className="px-3 py-1.5 bg-indigo-500 text-white rounded text-sm hover:bg-indigo-600"
+        >
+          🔬 Deep Scan
+        </button>
+        <button
+          onClick={onScan}
+          title="اسکن سادهٔ سریع (تک پاس) برای یافتن نیازهای کلی"
+          className="px-3 py-1.5 bg-cyan-500 text-white rounded text-sm hover:bg-cyan-600"
+        >
+          🔎 اسکن سریع
+        </button>
+        <button
           onClick={onRunNow}
           className="px-3 py-1.5 bg-blue-500 text-white rounded text-sm hover:bg-blue-600"
         >
           ▶ بررسی فوری
         </button>
         <button
-          onClick={onScan}
-          className="px-3 py-1.5 bg-cyan-500 text-white rounded text-sm hover:bg-cyan-600"
-        >
-          🔎 اسکن نیازها
-        </button>
-        <button
           onClick={onWriteIdea}
           className="px-3 py-1.5 bg-purple-500 text-white rounded text-sm hover:bg-purple-600"
         >
           💡 نوشتن ایده
+        </button>
+        <button
+          onClick={onOpenCodex}
+          title="شناسنامهٔ خودکار پروژه - توضیح هر فایل/فیچر"
+          className="px-3 py-1.5 bg-amber-500 text-white rounded text-sm hover:bg-amber-600"
+        >
+          📚 شناسنامه
         </button>
         <button
           onClick={onViewTasks}
@@ -1873,6 +2307,10 @@ function TasksPanel({
   onUpdate,
   onDelete,
   onView,
+  onVerify,
+  onMarkExternal,
+  onCopyPrompt,
+  onShowHistory,
   fmtDate,
 }: {
   tasks: Task[];
@@ -1892,6 +2330,10 @@ function TasksPanel({
   onUpdate: (id: string, u: Partial<Task>) => void;
   onDelete: (id: string) => void;
   onView: (t: Task) => void;
+  onVerify: (id: string) => void;
+  onMarkExternal: (id: string) => void;
+  onCopyPrompt: (id: string) => void;
+  onShowHistory: (id: string) => void;
   fmtDate: (d?: string | null) => string;
 }) {
   const tasksByCol = useMemo(() => {
@@ -1966,11 +2408,38 @@ function TasksPanel({
           </div>
           <div className="flex gap-1 flex-wrap">
             <button
-              onClick={() => onRun(t.id)}
-              disabled={isRunning}
-              className="px-3 py-1 bg-blue-500 text-white rounded text-xs hover:bg-blue-600 disabled:opacity-50"
+              onClick={() => onCopyPrompt(t.id)}
+              title="کپی پرامپت کامل برای استفاده در ابزار خارجی (Cursor، ChatGPT، ...)"
+              className="px-3 py-1 bg-purple-500 text-white rounded text-xs hover:bg-purple-600"
             >
-              {isRunning ? '⏳' : '▶'} اجرا
+              📋 کپی پرامپت
+            </button>
+            {t.execution_mode !== 'manual' ? (
+              <button
+                onClick={() => onRun(t.id)}
+                disabled={isRunning}
+                title="apply خودکار توسط AI"
+                className="px-3 py-1 bg-blue-500 text-white rounded text-xs hover:bg-blue-600 disabled:opacity-50"
+              >
+                {isRunning ? '⏳' : '▶'} اعمال خودکار
+              </button>
+            ) : (
+              <button
+                onClick={() => onMarkExternal(t.id)}
+                disabled={!!t.manually_marked_applied_at}
+                title="من این تسک را بیرون از سیستم اعمال کرده‌ام"
+                className="px-3 py-1 bg-emerald-500 text-white rounded text-xs hover:bg-emerald-600 disabled:opacity-50"
+              >
+                🔖 من اعمال کردم
+              </button>
+            )}
+            <button
+              onClick={() => onVerify(t.id)}
+              disabled={isRunning}
+              title="بررسی الان: آیا کار انجام شده؟ مستقل از روش execution"
+              className="px-3 py-1 bg-cyan-500 text-white rounded text-xs hover:bg-cyan-600 disabled:opacity-50"
+            >
+              🔍 verify
             </button>
             {t.status === 'suggested' && (
               <button
@@ -1980,6 +2449,13 @@ function TasksPanel({
                 ✓ تأیید
               </button>
             )}
+            <button
+              onClick={() => onShowHistory(t.id)}
+              title="تاریخچهٔ verification"
+              className="px-3 py-1 bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 rounded text-xs hover:bg-amber-200"
+            >
+              🕐
+            </button>
             <button
               onClick={() => onView(t)}
               className="px-3 py-1 bg-gray-200 dark:bg-gray-600 dark:text-white rounded text-xs hover:bg-gray-300"
@@ -1993,6 +2469,42 @@ function TasksPanel({
               🗑
             </button>
           </div>
+        </div>
+        {/* نشانگر execution mode + verification status + streak */}
+        <div className="flex items-center gap-2 mt-2 text-xs text-gray-500 dark:text-gray-400 flex-wrap">
+          <span
+            className={`px-1.5 py-0.5 rounded ${
+              t.execution_mode === 'manual'
+                ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
+                : 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
+            }`}
+            title={
+              t.execution_mode === 'manual'
+                ? 'manual: کاربر بیرون اعمال می‌کند، فقط verify می‌شود'
+                : 'auto: AI خودش اعمال می‌کند'
+            }
+          >
+            {t.execution_mode === 'manual'
+              ? '✋ manual'
+              : t.execution_mode === 'auto_via_pr'
+              ? '🔀 auto-PR'
+              : '⚡ auto'}
+          </span>
+          {t.verification_status && t.verification_status !== 'pending' && (
+            <span className="px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300">
+              verify: {t.verification_status}
+            </span>
+          )}
+          {(t.confirmation_streak ?? 0) > 0 && (
+            <span className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300">
+              ✓ streak {t.confirmation_streak}
+            </span>
+          )}
+          {t.manually_marked_applied_at && (
+            <span className="px-1.5 py-0.5 rounded bg-yellow-100 dark:bg-yellow-900/40 text-yellow-700 dark:text-yellow-300">
+              🔖 منتظر verify بعدی
+            </span>
+          )}
         </div>
       </div>
     );
@@ -2270,6 +2782,337 @@ function ReportsPanel({
               )}
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const PASS_LABELS: Record<string, string> = {
+  init: 'آماده‌سازی',
+  phase1_structure: 'بارگذاری ساختار پروژه',
+  phase2_scoring: 'انتخاب فایل‌های کلیدی',
+  phase2_reading: 'خواندن فایل‌های کلیدی',
+  phase3_frontend: 'A — تحلیل Frontend',
+  phase3_backend: 'B — تحلیل Backend',
+  phase3_cross_stack: 'C — سازگاری Frontend↔Backend',
+  phase3_security: 'D — امنیت',
+  phase3_integrity: 'E — یکپارچگی Cross-cutting',
+  phase3_quality: 'F — کیفیت کد',
+  phase3_dependency: 'G — Dependency',
+  phase3_completeness: 'H — Completeness',
+  phase4_aggregate: 'تجمیع و dedup',
+  completed: '✅ کامل شد',
+  queued: 'در صف',
+};
+
+function DeepScanProgressView({ progress }: { progress: any }) {
+  if (!progress) {
+    return <p className="text-center text-gray-400 py-4">در حال شروع...</p>;
+  }
+  const phase = progress.phase || 'init';
+  const passes_total = progress.passes_total || 8;
+  const passes_done = progress.passes_done || 0;
+  const pct = Math.min(
+    100,
+    Math.max(
+      progress.status === 'completed' ? 100 : 0,
+      Math.round((passes_done / Math.max(passes_total, 1)) * 100),
+    ),
+  );
+  const isError = progress.status === 'error';
+  const isDone = progress.status === 'completed';
+
+  return (
+    <div className="space-y-3">
+      <div className="text-center">
+        <div className="text-2xl mb-1">
+          {isDone ? '✅' : isError ? '❌' : '🔬'}
+        </div>
+        <p className="font-bold dark:text-white">
+          {PASS_LABELS[phase] || phase}
+        </p>
+        <p className="text-sm text-gray-500 dark:text-gray-400">
+          {progress.message || ''}
+        </p>
+      </div>
+
+      <div className="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+        <div
+          className={`h-full transition-all duration-500 ${
+            isError ? 'bg-red-500' : isDone ? 'bg-green-500' : 'bg-indigo-500'
+          }`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 text-sm">
+        <div className="p-2 bg-gray-50 dark:bg-gray-700/50 rounded">
+          <div className="text-xs text-gray-500">فایل‌ها</div>
+          <div className="font-bold dark:text-white">
+            {progress.files_analyzed ?? 0} / {progress.files_total ?? 0}
+          </div>
+        </div>
+        <div className="p-2 bg-gray-50 dark:bg-gray-700/50 rounded">
+          <div className="text-xs text-gray-500">فازها</div>
+          <div className="font-bold dark:text-white">
+            {passes_done} / {passes_total}
+          </div>
+        </div>
+        <div className="p-2 bg-cyan-50 dark:bg-cyan-900/20 rounded">
+          <div className="text-xs text-gray-500">یافته</div>
+          <div className="font-bold dark:text-white">
+            {progress.findings_count ?? 0}
+          </div>
+        </div>
+        <div className="p-2 bg-red-50 dark:bg-red-900/20 rounded">
+          <div className="text-xs text-gray-500">critical</div>
+          <div className="font-bold text-red-600 dark:text-red-300">
+            {progress.critical_count ?? 0}
+          </div>
+        </div>
+      </div>
+
+      {progress.stacks && progress.stacks.length > 0 && (
+        <div>
+          <p className="text-xs text-gray-500 mb-1">Stack تشخیص داده شده:</p>
+          <div className="flex flex-wrap gap-1">
+            {progress.stacks.map((s: string) => (
+              <span
+                key={s}
+                className="text-xs px-2 py-0.5 bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 rounded"
+              >
+                {s}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isDone && (
+        <div className="p-3 bg-green-50 dark:bg-green-900/20 rounded text-sm dark:text-green-200">
+          ✅ {progress.tasks_created ?? 0} تسک پیشنهادی ساخته شد. به تب «تسک‌ها» بروید.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CodexView({
+  data,
+  loading,
+  onRefresh,
+  search,
+  onSearch,
+}: {
+  data: any;
+  loading: boolean;
+  onRefresh: () => void;
+  search: string;
+  onSearch: (s: string) => void;
+}) {
+  const files = data?.files || {};
+  const filtered = Object.keys(files).filter(
+    (p) => !search || p.toLowerCase().includes(search.toLowerCase()),
+  );
+
+  const exportMd = () => {
+    const lines: string[] = [];
+    lines.push(`# 📚 Codex — ${data?.repo || ''}`);
+    if (data?.user_goal) lines.push(`\n> 🎯 ${data.user_goal}\n`);
+    if (data?.stacks?.length) lines.push(`Stack: ${data.stacks.join(', ')}\n`);
+    Object.keys(files).forEach((path) => {
+      const f = files[path];
+      lines.push(`\n## ${path}`);
+      lines.push(`- **این چیست؟** ${f.what_is_it || ''}`);
+      lines.push(`- **چه می‌کند؟** ${f.what_it_does || ''}`);
+      if (f.use_cases?.length)
+        lines.push(`- **کاربردها:**\n${f.use_cases.map((u: string) => `  - ${u}`).join('\n')}`);
+      lines.push(`- **روابط:** ${f.relations || ''}`);
+      lines.push(`- **در صورت حذف:** ${f.breaks_if_removed || ''}`);
+    });
+    const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `codex-${(data?.repo || 'project').replace('/', '-')}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div>
+          <h3 className="font-bold dark:text-white" dir="ltr">
+            {data?.repo || ''}
+          </h3>
+          {data?.user_goal && (
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              🎯 {data.user_goal}
+            </p>
+          )}
+          <p className="text-xs text-gray-400 mt-1">
+            {Object.keys(files).length} فایل مستند شده
+            {data?.updated_at ? ` · ${new Date(data.updated_at).toLocaleString('fa-IR')}` : ''}
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={onRefresh}
+            disabled={loading}
+            className="px-3 py-1 bg-amber-500 text-white rounded text-sm hover:bg-amber-600 disabled:opacity-50"
+          >
+            {loading ? '⏳ در حال ساخت...' : '🪄 به‌روزرسانی با AI'}
+          </button>
+          <button
+            onClick={exportMd}
+            disabled={!Object.keys(files).length}
+            className="px-3 py-1 bg-blue-500 text-white rounded text-sm hover:bg-blue-600 disabled:opacity-50"
+          >
+            ↓ Markdown
+          </button>
+        </div>
+      </div>
+
+      {Object.keys(files).length > 0 && (
+        <input
+          type="text"
+          placeholder="🔍 جستجو در فایل‌ها..."
+          value={search}
+          onChange={(e) => onSearch(e.target.value)}
+          className="w-full p-2 border rounded dark:bg-gray-700 dark:text-white dark:border-gray-600"
+        />
+      )}
+
+      {Object.keys(files).length === 0 ? (
+        <div className="text-center py-8 text-gray-400">
+          <div className="text-4xl mb-2">📭</div>
+          <p>Codex هنوز ساخته نشده</p>
+          <p className="text-xs mt-1">روی «به‌روزرسانی با AI» کلیک کنید</p>
+        </div>
+      ) : (
+        <div className="space-y-2 max-h-[60vh] overflow-auto">
+          {filtered.map((path) => {
+            const f = files[path];
+            return (
+              <details
+                key={path}
+                className="bg-gray-50 dark:bg-gray-700/50 rounded p-2"
+              >
+                <summary className="cursor-pointer text-sm font-medium dark:text-white" dir="ltr">
+                  {path}
+                </summary>
+                <div className="mt-2 text-xs space-y-1 dark:text-gray-200" dir="rtl">
+                  {f?.what_is_it && (
+                    <div>
+                      <strong>این چیست؟</strong> {f.what_is_it}
+                    </div>
+                  )}
+                  {f?.what_it_does && (
+                    <div>
+                      <strong>چه می‌کند؟</strong> {f.what_it_does}
+                    </div>
+                  )}
+                  {f?.use_cases?.length > 0 && (
+                    <div>
+                      <strong>کاربردها:</strong>
+                      <ul className="list-disc mr-4">
+                        {f.use_cases.map((u: string, i: number) => (
+                          <li key={i}>{u}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {f?.relations && (
+                    <div>
+                      <strong>روابط:</strong> {f.relations}
+                    </div>
+                  )}
+                  {f?.breaks_if_removed && (
+                    <div>
+                      <strong>در صورت حذف:</strong> {f.breaks_if_removed}
+                    </div>
+                  )}
+                </div>
+              </details>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VerifyHistoryView({ data }: { data: any }) {
+  if (!data) return <p className="text-center text-gray-400">در حال بارگذاری...</p>;
+  const history = data.history || [];
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-3 gap-2 text-center text-sm">
+        <div className="p-2 bg-gray-50 dark:bg-gray-700/50 rounded">
+          <div className="text-xs text-gray-500">وضعیت</div>
+          <div className="font-bold dark:text-white">{data.verification_status}</div>
+        </div>
+        <div className="p-2 bg-green-50 dark:bg-green-900/20 rounded">
+          <div className="text-xs text-gray-500">streak</div>
+          <div className="font-bold text-green-700 dark:text-green-300">
+            {data.confirmation_streak || 0}
+          </div>
+        </div>
+        <div className="p-2 bg-blue-50 dark:bg-blue-900/20 rounded">
+          <div className="text-xs text-gray-500">verify ها</div>
+          <div className="font-bold text-blue-700 dark:text-blue-300">
+            {history.length}
+          </div>
+        </div>
+      </div>
+
+      {data.manually_marked_applied_at && (
+        <div className="p-2 bg-purple-50 dark:bg-purple-900/20 text-sm rounded">
+          🔖 کاربر گفته اعمال شده در:{' '}
+          {new Date(data.manually_marked_applied_at).toLocaleString('fa-IR')}
+        </div>
+      )}
+
+      {history.length === 0 ? (
+        <p className="text-center text-gray-400 py-4">هنوز verify انجام نشده</p>
+      ) : (
+        <div className="space-y-2">
+          {history
+            .slice()
+            .reverse()
+            .map((h: any, i: number) => (
+              <div
+                key={i}
+                className="border-r-2 border-blue-400 pr-3 py-1 bg-gray-50 dark:bg-gray-700/40 rounded text-sm"
+              >
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span
+                    className={`text-xs px-2 py-0.5 rounded ${
+                      h.status === 'done'
+                        ? 'bg-green-100 text-green-700'
+                        : h.status === 'partial'
+                        ? 'bg-yellow-100 text-yellow-700'
+                        : 'bg-red-100 text-red-700'
+                    }`}
+                  >
+                    {h.status}
+                  </span>
+                  <span className="text-xs text-gray-500">
+                    {new Date(h.verified_at).toLocaleString('fa-IR')}
+                  </span>
+                  {h.triggered_by && (
+                    <span className="text-xs px-1.5 py-0.5 bg-gray-200 dark:bg-gray-600 dark:text-gray-200 rounded">
+                      {h.triggered_by}
+                    </span>
+                  )}
+                </div>
+                {h.summary && (
+                  <p className="text-xs mt-1 dark:text-gray-300">{h.summary}</p>
+                )}
+              </div>
+            ))}
         </div>
       )}
     </div>
