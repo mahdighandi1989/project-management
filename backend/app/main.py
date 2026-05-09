@@ -25,7 +25,16 @@ from .api.routes import project_health  # 🆕 Project Health Analysis (تحلی
 from .api.routes import render_logs  # 🆕 Render Logs (لاگ‌های رندر)
 from .api.routes import security_analysis  # 🆕 Security Analysis (تحلیل امنیتی)
 from .api.routes import system_prompts  # 🆕 System Prompts (مدیریت پرامپت‌ها)
-from .api.routes import oversight  # 🆕 Oversight (مرکز نظارت پروژه‌های GitHub)
+
+# Defensive import for oversight (mustn't block app boot if storage/AI deps misbehave)
+try:
+    from .api.routes import oversight  # 🆕 Oversight (مرکز نظارت پروژه‌های GitHub)
+    OVERSIGHT_AVAILABLE = True
+except Exception as _e:
+    import logging as _logging
+    _logging.error(f"Could not import oversight (skipping): {_e}", exc_info=True)
+    OVERSIGHT_AVAILABLE = False
+    oversight = None
 
 # Defensive import for model_profiles
 try:
@@ -75,14 +84,19 @@ async def lifespan(app: FastAPI):
     # 🆕 Start Background Scheduler
     await start_background_scheduler()
 
-    # 🆕 Start Oversight scheduler loop
-    import asyncio
-    from .services.oversight_service import oversight_scheduler_loop
-    app.state.oversight_stop_event = asyncio.Event()
-    app.state.oversight_task = asyncio.create_task(
-        oversight_scheduler_loop(app.state.oversight_stop_event, interval_seconds=60)
-    )
-    logger.info("🛰️ Oversight scheduler started")
+    # 🆕 Start Oversight scheduler loop (defensively — never block app startup)
+    try:
+        import asyncio
+        from .services.oversight_service import oversight_scheduler_loop
+        app.state.oversight_stop_event = asyncio.Event()
+        app.state.oversight_task = asyncio.create_task(
+            oversight_scheduler_loop(app.state.oversight_stop_event, interval_seconds=60)
+        )
+        logger.info("🛰️ Oversight scheduler started")
+    except Exception as e:
+        logger.error(f"Oversight scheduler failed to start (app continues): {e}", exc_info=True)
+        app.state.oversight_stop_event = None
+        app.state.oversight_task = None
 
     yield
 
@@ -94,10 +108,12 @@ async def lifespan(app: FastAPI):
 
     # Stop oversight loop
     try:
-        if hasattr(app.state, "oversight_stop_event"):
-            app.state.oversight_stop_event.set()
-        if hasattr(app.state, "oversight_task"):
-            await asyncio.wait_for(app.state.oversight_task, timeout=5)
+        stop_evt = getattr(app.state, "oversight_stop_event", None)
+        task = getattr(app.state, "oversight_task", None)
+        if stop_evt:
+            stop_evt.set()
+        if task:
+            await asyncio.wait_for(task, timeout=5)
     except Exception as e:
         logger.warning(f"Oversight stop error: {e}")
 
@@ -480,7 +496,8 @@ app.include_router(project_health.router)  # 🆕 Project Health Analysis (تح�
 app.include_router(render_logs.router)  # 🆕 Render Logs (لاگ‌های رندر)
 app.include_router(security_analysis.router)  # 🆕 Security Analysis (تحلیل امنیتی)
 app.include_router(system_prompts.router)  # 🆕 System Prompts (مدیریت پرامپت‌ها)
-app.include_router(oversight.router, prefix="/api")  # 🆕 Oversight (مرکز نظارت GitHub)
+if OVERSIGHT_AVAILABLE and oversight is not None:
+    app.include_router(oversight.router, prefix="/api")  # 🆕 Oversight (مرکز نظارت GitHub)
 
 # Conditionally include model_profiles router
 if MODEL_PROFILES_AVAILABLE and model_profiles:
