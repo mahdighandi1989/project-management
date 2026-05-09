@@ -198,6 +198,15 @@ class OversightTask:
     # location hints (extracted from prompt for faster verify)
     target_files: List[str] = field(default_factory=list)
     acceptance_criteria: List[str] = field(default_factory=list)
+    # 🆕 followup prompt — وقتی verify نتیجهٔ partial/not_done/regressed/error
+    # داد، AI یک پرامپت ادامه (focused on remaining_parts) تولید می‌کند که
+    # کاربر می‌تواند کپی یا با دکمهٔ "اجرای بعدی با AI" اعمال کند.
+    # وقتی verify='done' شد، این فیلدها reset می‌شوند.
+    followup_prompt: str = ""
+    followup_generated_at: Optional[str] = None
+    followup_target_locations: List[Dict[str, Any]] = field(default_factory=list)
+    followup_acceptance_criteria: List[str] = field(default_factory=list)
+    followup_round: int = 0  # 0=هیچ، 1=دور اول follow-up، 2=...
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
 
@@ -2077,6 +2086,250 @@ class OversightService:
 
             self._save_tasks()
             return task.to_dict()
+
+    # ====================================================================
+    # 🔁 Follow-up prompt generation — وقتی verify نتیجهٔ partial/not_done
+    # داد، یک پرامپت قوی جدید focused on remaining_parts تولید می‌کنیم
+    # که در دور بعدی به AI داده شود
+    # ====================================================================
+
+    async def generate_followup_prompt_for_task(
+        self,
+        task: "OversightTask",
+        report: "OversightReport",
+        watched: Optional["WatchedProject"] = None,
+    ) -> Optional[str]:
+        """تولید پرامپت قوی برای دور بعدی، focused on AC های ناموفق.
+
+        شرایط:
+          - فقط برای status ∈ {partial, not_done, regressed, error}
+          - اگر done است → None برمی‌گرداند
+          - title جدید: "ادامه (دور N): <عنوان قبلی>"
+          - description: لیست done_parts + remaining_parts + summary
+            verifier + لینک PR قبلی (اگر آرشیو شده در applied_evidence)
+          - acceptance_criteria: فقط remaining_parts (اگر خالی،
+            از next_actions استفاده می‌کند)
+          - target_locations: همان قبلی + پاث‌های جدید از evidence.files
+          - related_files: همان قبلی (از task.prompt استخراج)
+          - validation_commands: همان قبلی (از task.prompt استخراج)
+          - risks: next_actions به‌عنوان hint
+          - tech_context: از watched.user_notes یا task.prompt
+        """
+        if report.status == "done":
+            return None
+
+        from .oversight_strong_prompt import (
+            build_strong_prompt,
+            extract_target_files,
+            extract_target_locations,
+            extract_acceptance_criteria,
+        )
+
+        # شمارهٔ دور بعدی
+        next_round = (task.followup_round or 0) + 1
+
+        # عنوان جدید
+        original_title = task.title.strip()
+        new_title = f"ادامه (دور {next_round}): {original_title}"[:200]
+
+        # تجمیع done/remaining/next_actions
+        done_parts = report.done_parts or []
+        remaining = report.remaining_parts or []
+        next_actions = report.next_actions or []
+        verifier_summary = (report.summary or "").strip()
+
+        # اگر remaining خالی است، از next_actions به‌عنوان AC استفاده کن
+        new_ac = list(remaining) if remaining else list(next_actions)
+        if not new_ac:
+            # fallback: AC های قبلی task که هنوز برآورده نشده‌اند
+            new_ac = list(task.acceptance_criteria or [])
+        if not new_ac:
+            new_ac = ["تکمیل کامل خواسته‌های اصلی تسک"]
+
+        # description مفصل
+        desc_parts: List[str] = []
+        desc_parts.append(
+            f"این پرامپت برای **دور {next_round}** ادامهٔ کار است. "
+            "verifier در دور قبلی نشان داد کار به‌طور کامل انجام نشده."
+        )
+        if done_parts:
+            desc_parts.append(
+                "✅ بخش‌هایی که در دور قبل انجام شد:\n"
+                + "\n".join(f"  - {p}" for p in done_parts[:10])
+            )
+        if remaining:
+            desc_parts.append(
+                "⏳ بخش‌هایی که هنوز باقی مانده (تمرکز روی این‌ها):\n"
+                + "\n".join(f"  - {p}" for p in remaining[:10])
+            )
+        if verifier_summary:
+            desc_parts.append(f"📝 خلاصهٔ verifier:\n{verifier_summary[:500]}")
+        if next_actions:
+            desc_parts.append(
+                "🪜 اقدامات بعدی پیشنهادی verifier:\n"
+                + "\n".join(f"  - {a}" for a in next_actions[:8])
+            )
+        # ارجاع به PR قبلی (اگر موجود)
+        prev_pr = (task.applied_evidence or {}).get("pr_url") if task.applied_evidence else ""
+        prev_branch = (task.applied_evidence or {}).get("pr_branch") if task.applied_evidence else ""
+        if prev_pr:
+            desc_parts.append(
+                f"🔗 PR قبلی: {prev_pr}"
+                + (f" (شاخه: `{prev_branch}`)" if prev_branch else "")
+                + "\nاگر منطقی است، کار را روی همان شاخه ادامه بده "
+                "(یا commit جدید روی main اگر merge شده)."
+            )
+        new_description = "\n\n".join(desc_parts)
+
+        # target_locations: قبلی + جدیدها از evidence.files
+        old_locations: List[Dict[str, Any]] = []
+        try:
+            old_locations = extract_target_locations(task.prompt or "") or []
+        except Exception:
+            old_locations = []
+        if not old_locations and task.target_files:
+            old_locations = [{"path": p} for p in task.target_files]
+
+        # paths جدید از evidence
+        evidence_files: List[str] = []
+        try:
+            ef = (report.evidence or {}).get("files") if isinstance(report.evidence, dict) else None
+            if isinstance(ef, list):
+                evidence_files = [p for p in ef if isinstance(p, str) and "/" in p]
+        except Exception:
+            evidence_files = []
+
+        # ادغام بدون duplicate
+        seen_paths = {l.get("path") for l in old_locations if isinstance(l, dict)}
+        merged_locations = list(old_locations)
+        for ep in evidence_files:
+            if ep not in seen_paths:
+                merged_locations.append({
+                    "path": ep,
+                    "note": f"از evidence verifier در دور {next_round - 1}",
+                })
+                seen_paths.add(ep)
+
+        # related_files از پرامپت قبلی (best-effort — استخراج ساده)
+        # build_strong_prompt آن را بدون ساختار rich می‌گیرد ولی اگر هیچ
+        # نداشتیم کافی است
+        related_files: List[Dict[str, Any]] = []
+
+        # tech_context: از description یا watched.user_notes
+        tech_context = ""
+        if watched and watched.user_notes:
+            tech_context = (watched.user_notes or "").strip()[:300]
+
+        # validation_commands: از پرامپت قبلی استخراج کن (regex ساده)
+        validation_commands: List[str] = []
+        try:
+            import re as _re
+            m = _re.search(
+                r"##\s*\S*\s*دستورات اعتبارسنجی[^\n]*\n(.+?)(?=\n##|\Z)",
+                task.prompt or "",
+                _re.DOTALL,
+            )
+            if m:
+                for ln in m.group(1).splitlines():
+                    s = ln.strip().lstrip("-").strip().strip("`").strip()
+                    if s and not s.startswith("_") and len(s) < 200:
+                        validation_commands.append(s)
+        except Exception:
+            pass
+
+        # risks: next_actions به‌عنوان hint چه چیزی ممکن است بشکند
+        risks_text = ""
+        if next_actions:
+            risks_text = (
+                "موارد زیر در دور قبل ناقص ماندند — مراقب رگرشن باش:\n"
+                + "\n".join(f"  - {a}" for a in next_actions[:5])
+            )
+
+        # ساخت پرامپت قوی با ساختار غنی
+        try:
+            new_prompt = build_strong_prompt(
+                title=new_title,
+                user_goal=(watched.user_notes if watched else "") or "",
+                description=new_description,
+                proposed_action="پیاده‌سازی AC های باقی‌مانده با حفظ کارهای انجام‌شدهٔ دور قبل.",
+                target_locations=merged_locations,
+                related_files=related_files,
+                dependency_summary="",
+                tech_context=tech_context,
+                before_after_examples=[],
+                validation_commands=validation_commands,
+                acceptance_criteria=new_ac,
+                risks=risks_text,
+                type_=task.type or "other",
+                priority=task.priority or "medium",
+                estimate="medium",
+            )
+        except Exception as _e:
+            logger.warning(f"build_strong_prompt for follow-up failed: {_e}")
+            return None
+
+        return new_prompt
+
+    async def apply_followup_after_verify(
+        self,
+        task_id: str,
+        report: "OversightReport",
+    ) -> None:
+        """پس از verify، followup prompt را روی task ست (یا پاک) می‌کند.
+
+        این تابع از verifier بعد از append history فراخوانی می‌شود.
+        مسئول _save_tasks هم خودش است (atomic).
+        """
+        async with self._lock:
+            task = next((t for t in self.tasks if t.id == task_id), None)
+            if task is None:
+                return
+            watched = self._find_watched(task.watched_id) if task.watched_id else None
+
+        # generate (خارج از lock چون می‌تواند طولانی باشد — ولی build_strong_prompt
+        # سریع است؛ با این حال احتیاط)
+        if report.status == "done":
+            # موفق — followup را reset کن
+            async with self._lock:
+                task.followup_prompt = ""
+                task.followup_generated_at = None
+                task.followup_target_locations = []
+                task.followup_acceptance_criteria = []
+                task.followup_round = 0
+                task.updated_at = now_iso()
+                self._save_tasks()
+            return
+
+        # غیر-done: followup بساز
+        try:
+            new_prompt = await self.generate_followup_prompt_for_task(task, report, watched)
+        except Exception as _e:
+            logger.warning(f"generate_followup_prompt failed: {_e}")
+            new_prompt = None
+
+        if not new_prompt:
+            return
+
+        # extract معیارها و locations از پرامپت تولید شده
+        try:
+            from .oversight_strong_prompt import (
+                extract_target_locations,
+                extract_acceptance_criteria,
+            )
+            extracted_locs = extract_target_locations(new_prompt) or []
+            extracted_ac = extract_acceptance_criteria(new_prompt) or []
+        except Exception:
+            extracted_locs = []
+            extracted_ac = []
+
+        async with self._lock:
+            task.followup_prompt = new_prompt
+            task.followup_generated_at = now_iso()
+            task.followup_target_locations = extracted_locs
+            task.followup_acceptance_criteria = extracted_ac
+            task.followup_round = (task.followup_round or 0) + 1
+            task.updated_at = now_iso()
+            self._save_tasks()
 
     # ====================================================================
     # Settings
