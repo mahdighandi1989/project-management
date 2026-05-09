@@ -1615,6 +1615,189 @@ class OversightService:
         return [t.to_dict() for t in self.tasks if t.project_full_name == project_full_name]
 
     # ====================================================================
+    # 🔗 External project tasks bridge — wiring /projects ↔ /oversight
+    # ====================================================================
+    # هدف: dynamic_fields از پروژه‌های local که action_type='github_commit'
+    # دارند را به‌عنوان «تسک قابل verify» در /oversight نمایش دهیم — بدون
+    # duplicate کردن داده. این تابع فقط READ است؛ هیچ فیلدی را تغییر نمی‌دهد.
+
+    def list_external_project_tasks(
+        self,
+        db_session,
+        project_id_filter: Optional[str] = None,
+        include_archived: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """خواندن dynamic_fields از تمام پروژه‌های local و تبدیل آنها به ساختار
+        تسک‌مانند برای نمایش در مرکز نظارت.
+
+        فیلدهایی که شرط دارند:
+          - action_type ∈ {'github_commit', 'github_multi_commit', 'file_edit'}
+          - archived = false (مگر include_archived=True)
+
+        خروجی شکل تسک Oversight را تقلید می‌کند با فیلدهای اضافی:
+          - source = 'project_field'
+          - origin_project_id, origin_project_name, origin_field_id
+          - external_prompt (اگر روی فیلد ذخیره شده — از Commit 7)
+        """
+        try:
+            from ..models.project import Project as _Project
+        except Exception:
+            return []
+        out: List[Dict[str, Any]] = []
+        try:
+            q = db_session.query(_Project)
+            if project_id_filter:
+                q = q.filter(_Project.id == project_id_filter)
+            for proj in q.all():
+                raw = proj.dynamic_fields
+                if not raw:
+                    continue
+                try:
+                    fields = json.loads(raw) if isinstance(raw, str) else raw
+                except Exception:
+                    continue
+                if not isinstance(fields, list):
+                    continue
+                for f in fields:
+                    if not isinstance(f, dict):
+                        continue
+                    action_type = f.get("action_type", "display")
+                    if action_type not in ("github_commit", "github_multi_commit", "file_edit"):
+                        continue
+                    if not include_archived and f.get("archived"):
+                        continue
+                    # map priority int → string
+                    p_int = int(f.get("priority", 5)) if str(f.get("priority", 5)).isdigit() else 5
+                    priority_str = (
+                        "critical" if p_int == 1
+                        else ("high" if p_int <= 3
+                              else ("medium" if p_int <= 6 else "low"))
+                    )
+                    type_map = {
+                        "github_commit": "bug",
+                        "github_multi_commit": "refactor",
+                        "file_edit": "refactor",
+                    }
+                    # last_run derived from trigger.last_executed if exists
+                    trig = f.get("trigger") if isinstance(f.get("trigger"), dict) else {}
+                    out.append({
+                        "id": f"projfield_{proj.id}_{f.get('id', '')}",
+                        "source": "project_field",
+                        "origin_project_id": proj.id,
+                        "origin_project_name": proj.name,
+                        "origin_field_id": f.get("id", ""),
+                        "watched_id": None,  # not tied to a watched repo
+                        "project_full_name": proj.github_path or proj.name,
+                        "title": f.get("name", "بدون عنوان")[:200],
+                        "type": type_map.get(action_type, "other"),
+                        "priority": priority_str,
+                        "status": "archived" if f.get("archived") else "pending",
+                        "prompt": f.get("external_prompt") or f.get("value", "")[:4000],
+                        "raw_idea": f.get("value", "")[:1000],
+                        "target_files": [f["target_path"]] if f.get("target_path") else [],
+                        "target_locations": f.get("target_locations") or (
+                            [{"path": f["target_path"]}] if f.get("target_path") else []
+                        ),
+                        "external_prompt": f.get("external_prompt", ""),
+                        "execution_mode": "manual",
+                        "verification_status": "pending",
+                        "confirmation_streak": 0,
+                        "last_run_at": trig.get("last_executed"),
+                        "next_run_at": trig.get("next_run"),
+                        "created_at": f.get("created_at", ""),
+                        "field_type": f.get("field_type", "temporary"),
+                        "action_type": action_type,
+                    })
+        except Exception as _e:
+            logger.warning(f"list_external_project_tasks failed: {_e}")
+        return out
+
+    async def verify_external_project_field(
+        self,
+        db_session,
+        project_id: str,
+        field_id: str,
+        model_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """verify یک dynamic_field از /projects با همان موتور verifier.
+
+        برای این کار یک OversightTask transient (بدون ذخیره در tasks لیست)
+        می‌سازیم که verifier بتواند روی آن کار کند، سپس فقط report را
+        برمی‌گردانیم (تسک به storage اضافه نمی‌شود).
+        """
+        from ..models.project import Project as _Project
+        from .oversight_strong_prompt import (
+            extract_target_files as _extract_files,
+            extract_acceptance_criteria as _extract_ac,
+        )
+
+        proj = db_session.query(_Project).filter(_Project.id == project_id).first()
+        if not proj:
+            raise ValueError("پروژه یافت نشد")
+
+        raw = proj.dynamic_fields
+        fields = []
+        if raw:
+            try:
+                fields = json.loads(raw) if isinstance(raw, str) else raw
+            except Exception:
+                fields = []
+        target_field = None
+        for f in (fields or []):
+            if isinstance(f, dict) and f.get("id") == field_id:
+                target_field = f
+                break
+        if not target_field:
+            raise ValueError("فیلد یافت نشد")
+
+        repo_full_name = proj.github_path or ""
+        if "/" not in repo_full_name:
+            # try to derive from github_url
+            gh_url = getattr(proj, "github_url", "") or ""
+            if "github.com/" in gh_url:
+                repo_full_name = gh_url.split("github.com/")[-1].rstrip("/").replace(".git", "")
+
+        prompt_text = target_field.get("external_prompt") or target_field.get("value", "")
+        target_files = list(target_field.get("target_locations") and [
+            l.get("path") for l in target_field["target_locations"] if isinstance(l, dict) and l.get("path")
+        ] or [])
+        if not target_files and target_field.get("target_path"):
+            target_files = [target_field["target_path"]]
+        if not target_files and prompt_text:
+            target_files = _extract_files(prompt_text)
+
+        acceptance_criteria = _extract_ac(prompt_text) if prompt_text else []
+        if not acceptance_criteria:
+            acceptance_criteria = ["نتیجهٔ این فیلد با مفاد آن مطابقت کند"]
+
+        # ساخت transient task — هرگز ذخیره نمی‌شود
+        task = OversightTask(
+            id=f"transient_projfield_{project_id}_{field_id}",
+            watched_id=None,
+            project_full_name=repo_full_name,
+            title=target_field.get("name", "field")[:200],
+            prompt=prompt_text,
+            raw_idea=target_field.get("value", "")[:1000],
+            type="bug",
+            priority="medium",
+            status="pending",
+            source="project_field_bridge",
+            target_files=target_files,
+            acceptance_criteria=acceptance_criteria,
+            execution_mode="manual",
+        )
+        # موقتاً به لیست اضافه می‌کنیم تا verifier پیدا کند، بعد حذف می‌کنیم
+        async with self._lock:
+            self.tasks.append(task)
+        try:
+            from .oversight_verifier import verify_task as _verify
+            result = await _verify(task.id, model_id=model_id, triggered_by="project_field_bridge")
+        finally:
+            async with self._lock:
+                self.tasks = [t for t in self.tasks if t.id != task.id]
+        return result
+
+    # ====================================================================
     # Settings
     # ====================================================================
 
