@@ -25,6 +25,7 @@ from .api.routes import project_health  # 🆕 Project Health Analysis (تحلی
 from .api.routes import render_logs  # 🆕 Render Logs (لاگ‌های رندر)
 from .api.routes import security_analysis  # 🆕 Security Analysis (تحلیل امنیتی)
 from .api.routes import system_prompts  # 🆕 System Prompts (مدیریت پرامپت‌ها)
+from .api.routes import oversight  # 🆕 Oversight (مرکز نظارت پروژه‌های GitHub)
 
 # Defensive import for model_profiles
 try:
@@ -74,6 +75,15 @@ async def lifespan(app: FastAPI):
     # 🆕 Start Background Scheduler
     await start_background_scheduler()
 
+    # 🆕 Start Oversight scheduler loop
+    import asyncio
+    from .services.oversight_service import oversight_scheduler_loop
+    app.state.oversight_stop_event = asyncio.Event()
+    app.state.oversight_task = asyncio.create_task(
+        oversight_scheduler_loop(app.state.oversight_stop_event, interval_seconds=60)
+    )
+    logger.info("🛰️ Oversight scheduler started")
+
     yield
 
     # Shutdown
@@ -81,6 +91,22 @@ async def lifespan(app: FastAPI):
 
     # 🆕 Stop Background Scheduler
     stop_background_scheduler()
+
+    # Stop oversight loop
+    try:
+        if hasattr(app.state, "oversight_stop_event"):
+            app.state.oversight_stop_event.set()
+        if hasattr(app.state, "oversight_task"):
+            await asyncio.wait_for(app.state.oversight_task, timeout=5)
+    except Exception as e:
+        logger.warning(f"Oversight stop error: {e}")
+
+    # close oversight session
+    try:
+        from .services.oversight_service import get_oversight_service
+        await get_oversight_service().close()
+    except Exception:
+        pass
 
     # Stop all running project containers
     try:
@@ -454,6 +480,7 @@ app.include_router(project_health.router)  # 🆕 Project Health Analysis (تح�
 app.include_router(render_logs.router)  # 🆕 Render Logs (لاگ‌های رندر)
 app.include_router(security_analysis.router)  # 🆕 Security Analysis (تحلیل امنیتی)
 app.include_router(system_prompts.router)  # 🆕 System Prompts (مدیریت پرامپت‌ها)
+app.include_router(oversight.router, prefix="/api")  # 🆕 Oversight (مرکز نظارت GitHub)
 
 # Conditionally include model_profiles router
 if MODEL_PROFILES_AVAILABLE and model_profiles:
