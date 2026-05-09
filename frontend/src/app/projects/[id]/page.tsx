@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import ProjectHealthPanel from '@/components/ProjectHealthPanel';
+// ProjectHealthPanel در commit 3.3a حذف شد — همهٔ قابلیت‌ها در /oversight
 import PromptManager from '@/components/PromptManager';
 import ExecutingPromptsPanel from '@/components/ExecutingPromptsPanel';
 import ReactFlow, {
@@ -242,7 +242,7 @@ export default function ProjectDetailPage() {
   const [deploying, setDeploying] = useState(false);
 
   // تب فعال
-  const [activeTab, setActiveTab] = useState<'files' | 'memory' | 'structure' | 'journal' | 'health' | 'inspector' | 'external'>('files');
+  const [activeTab, setActiveTab] = useState<'files' | 'memory' | 'structure' | 'journal' | 'inspector' | 'external'>('files');
 
   // 🔗 External Projects state — اتصال به GitHub/Render خارجی
   const [externalConnected, setExternalConnected] = useState(false);
@@ -7918,16 +7918,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           >
             📊 ژورنال و گزارشات
           </button>
-          <button
-            onClick={() => setActiveTab('health')}
-            className={`px-6 py-3 font-medium ${
-              activeTab === 'health'
-                ? 'border-b-2 border-teal-500 text-teal-600'
-                : 'text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            🏥 تحلیل سلامت
-          </button>
+          {/* تب «تحلیل سلامت» قبلاً اینجا بود — حذف شد در commit 3.3a.
+              قابلیت‌هایش به /oversight (تب «🏥 سلامت پروژه») منتقل شدند.
+              تب Inspector بدون تغییر است. */}
           <button
             onClick={() => setActiveTab('inspector')}
             className={`px-6 py-3 font-medium ${
@@ -11668,86 +11661,13 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           </div>
         )}
 
-        {/* محتوای تب تحلیل سلامت */}
-        {/* ====================================================================
-          * TAB: HEALTH ANALYSIS — تحلیل سلامت پروژه (bug detection + score)
-          * Data: ProjectHealthPanel کامپوننت مستقل (در components/)
-          * Endpoints: داخل کامپوننت ProjectHealthPanel
-          * Cross-deps:
-          *   • onHealthUpdate callback → loadProject + setHealthDataVersion
-          *     → Structure tab fresh شود در باز شدن مجدد (Commit 3)
-          *   • Potential overlap با /oversight/scan_project & deep_scan:
-          *     این موضوع هنوز تصمیم‌گیری نشده — جداگانه audit خواهد شد
-          * ==================================================================== */}
-        {activeTab === 'health' && (
-          <div className="space-y-6">
-            {/* 🆕 (commit 3.2) Deprecation banner — این تب در حال مهاجرت به /oversight است */}
-            <div className="bg-amber-50 dark:bg-amber-900/20 border-2 border-amber-300 dark:border-amber-700 rounded-xl p-4">
-              <div className="flex items-start gap-3 flex-wrap">
-                <span className="text-3xl">⚠️</span>
-                <div className="flex-1 min-w-[280px]">
-                  <h3 className="font-bold text-amber-900 dark:text-amber-100 mb-1">
-                    این بخش به مرکز نظارت منتقل شد
-                  </h3>
-                  <p className="text-sm text-amber-800 dark:text-amber-200 mb-2">
-                    تب «تحلیل سلامت» به‌زودی حذف خواهد شد. تمام قابلیت‌های آن (security، coverage، file health map، roadmap/README، chain status) به <a href="/oversight" className="font-semibold underline hover:text-amber-600">/oversight ← تب «🏥 سلامت پروژه»</a> منتقل شده.
-                  </p>
-                  <div className="flex gap-2 flex-wrap mt-3">
-                    <a
-                      href="/oversight"
-                      className="px-3 py-1.5 bg-cyan-600 text-white rounded-lg hover:bg-cyan-700 text-xs font-medium"
-                    >
-                      🏥 رفتن به مرکز نظارت
-                    </a>
-                    <a
-                      href={`${API_BASE}/api/projects/${encodeURIComponent(projectId as string)}/health/export`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-xs font-medium"
-                    >
-                      📥 export داده‌های فعلی (JSON)
-                    </a>
-                    <button
-                      onClick={async () => {
-                        try {
-                          const res = await fetch(
-                            `${API_BASE}/api/oversight/migration/import-from-project/${encodeURIComponent(projectId as string)}`,
-                            { method: 'POST', headers: { 'Content-Type': 'application/json' } }
-                          );
-                          const data = await res.json();
-                          if (data?.matched) {
-                            alert(`✅ migration موفق بود!\n\nمراحل:\n${(data.steps || []).join('\n')}`);
-                          } else {
-                            alert(`⚠️ migration ممکن نشد:\n${(data.warnings || ['نامشخص']).join('\n')}`);
-                          }
-                        } catch (e: any) {
-                          alert(`خطا در migration: ${e?.message || e}`);
-                        }
-                      }}
-                      className="px-3 py-1.5 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-xs font-medium"
-                    >
-                      🔄 migrate به Oversight
-                    </button>
-                  </div>
-                  <p className="text-xs text-amber-700 dark:text-amber-300 mt-3 italic">
-                    تا زمان حذف نهایی، این تب همچنان کار می‌کند. توصیه: ابتدا «migrate به Oversight» را بزنید (یک بار)، سپس از تب جدید استفاده کنید.
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            <ProjectHealthPanel
-              projectId={projectId as string}
-              onHealthUpdate={() => {
-                loadProject();
-                // 🔁 Health analyze موفق → Structure tab باید refresh شود
-                // (file_health_map ممکن است تغییر کرده باشد)
-                setHealthDataVersion(v => v + 1);
-                setHealthDataLoaded(false); // باعث می‌شود loadStructure در باز شدن مجدد، fresh fetch کند
-              }}
-            />
-          </div>
-        )}
+        {/* تب «تحلیل سلامت» (Health analysis) در commit 3.3a حذف شد.
+            تمام قابلیت‌هایش (security/coverage/file-health-map/roadmap/
+            README/chain-status) به /oversight ← تب «🏥 سلامت پروژه»
+            منتقل شده‌اند. backend (project_health.py) فعلاً نگه داشته
+            شده چون سرویس‌های مشترک (model_profiler و غیره) توسط
+            ai_manager، deep_analysis، project_analyzer، report_validator
+            استفاده می‌شوند. */}
 
         {/* محتوای تب بازرس ویژه */}
         {/* ====================================================================
