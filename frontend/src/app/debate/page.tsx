@@ -73,6 +73,7 @@ export default function DebatePage() {
 
   const [prompt, setPrompt] = useState('');
   const [selectedMode, setSelectedMode] = useState('auto');
+  const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
   const [running, setRunning] = useState(false);
   const [phase, setPhase] = useState('');
   const [phasePct, setPhasePct] = useState(0);
@@ -86,6 +87,53 @@ export default function DebatePage() {
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, []);
+
+  // بازیابی انتخاب مدل از localStorage
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const saved = localStorage.getItem('debate_selected_models');
+      if (saved) {
+        const arr = JSON.parse(saved);
+        if (Array.isArray(arr)) setSelectedModelIds(arr);
+      }
+    } catch {}
+  }, []);
+
+  // وقتی مدل‌ها برای اولین بار لود شدند، اگر چیزی انتخاب نشده باشد همه را انتخاب کن
+  useEffect(() => {
+    if (models.length > 0 && selectedModelIds.length === 0) {
+      const saved = (() => {
+        try {
+          return JSON.parse(localStorage.getItem('debate_selected_models') || '[]');
+        } catch {
+          return [];
+        }
+      })();
+      if (!saved.length) {
+        setSelectedModelIds(models.map((m) => m.id));
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [models]);
+
+  const persistModelChoice = (ids: string[]) => {
+    setSelectedModelIds(ids);
+    try {
+      localStorage.setItem('debate_selected_models', JSON.stringify(ids));
+    } catch {}
+  };
+
+  const toggleModel = (id: string) => {
+    if (selectedModelIds.includes(id)) {
+      persistModelChoice(selectedModelIds.filter((x) => x !== id));
+    } else {
+      persistModelChoice([...selectedModelIds, id]);
+    }
+  };
+
+  const selectAllModels = () => persistModelChoice(models.map((m) => m.id));
+  const deselectAllModels = () => persistModelChoice([]);
 
   const showError = (msg: string) => {
     setError(msg);
@@ -207,6 +255,10 @@ export default function DebatePage() {
       showError('هیچ مدلی فعال نیست. به تنظیمات بروید.');
       return;
     }
+    if (selectedModelIds.length === 0) {
+      showError('حداقل یک مدل برای مناظره انتخاب کنید');
+      return;
+    }
 
     setRunning(true);
     setActiveDebate(null);
@@ -220,6 +272,7 @@ export default function DebatePage() {
         body: JSON.stringify({
           prompt: prompt.trim(),
           mode: selectedMode,
+          models: selectedModelIds,
         }),
       });
 
@@ -347,7 +400,7 @@ export default function DebatePage() {
         <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6 mb-6">
           <h2 className="font-bold mb-4 dark:text-white">مناظره جدید</h2>
 
-          {/* وضعیت مدل‌ها */}
+          {/* انتخاب مدل‌ها */}
           {loading ? (
             <p className="text-gray-400 mb-4">در حال بارگذاری مدل‌ها...</p>
           ) : models.length === 0 ? (
@@ -360,24 +413,58 @@ export default function DebatePage() {
             </div>
           ) : (
             <div className="mb-4">
-              <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">
-                مدل‌های فعال ({models.length}):
-              </p>
-              <div className="flex flex-wrap gap-2">
-                {models.slice(0, 6).map((m) => (
-                  <span
-                    key={m.id}
-                    className="px-3 py-1 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 rounded-full text-xs"
+              <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  مدل‌های شرکت‌کننده در مناظره ({selectedModelIds.length} از {models.length}):
+                </p>
+                <div className="flex gap-1">
+                  <button
+                    type="button"
+                    onClick={selectAllModels}
+                    className="text-xs px-2 py-0.5 bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 rounded hover:bg-blue-200"
                   >
-                    ✓ {m.name}
-                  </span>
-                ))}
-                {models.length > 6 && (
-                  <span className="px-3 py-1 bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-300 rounded-full text-xs">
-                    +{models.length - 6} دیگر
-                  </span>
-                )}
+                    انتخاب همه
+                  </button>
+                  <button
+                    type="button"
+                    onClick={deselectAllModels}
+                    className="text-xs px-2 py-0.5 bg-gray-200 dark:bg-gray-700 dark:text-gray-200 rounded hover:bg-gray-300"
+                  >
+                    لغو همه
+                  </button>
+                </div>
               </div>
+              <div className="flex flex-wrap gap-2">
+                {models.map((m) => {
+                  const checked = selectedModelIds.includes(m.id);
+                  return (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => toggleModel(m.id)}
+                      className={`px-3 py-1 rounded-full text-xs border transition ${
+                        checked
+                          ? 'bg-green-500 text-white border-green-500'
+                          : 'bg-gray-50 dark:bg-gray-700 dark:text-gray-200 border-gray-200 dark:border-gray-600 hover:bg-gray-100'
+                      }`}
+                      title={m.provider ? `${m.name} · ${m.provider}` : m.name}
+                    >
+                      {checked ? '✓ ' : ''}
+                      {m.name}
+                    </button>
+                  );
+                })}
+              </div>
+              {selectedModelIds.length === 0 && (
+                <p className="text-xs text-red-500 mt-2">
+                  ⚠️ هیچ مدلی انتخاب نشده — حداقل یک مدل برای شروع مناظره لازم است
+                </p>
+              )}
+              {selectedModelIds.length === 1 && (
+                <p className="text-xs text-yellow-600 dark:text-yellow-400 mt-2">
+                  ℹ️ با یک مدل، مناظره به پاسخ تکی تبدیل می‌شود — برای مناظره واقعی ۲ مدل یا بیشتر انتخاب کنید
+                </p>
+              )}
             </div>
           )}
 
