@@ -566,6 +566,190 @@ Stack تشخیص داده شده: {', '.join(stacks) or '(نامشخص)'}
 
 
 # =====================================================================
+# Reusable deep-context builder — برای استفاده از سایر مسیرها (مثل
+# idea_to_prompt) که نیاز به context عمیق پروژه دارند بدون اجرای کامل
+# اسکن چندفازی.
+# =====================================================================
+
+def _with_line_numbers(content: str, max_lines: int = 400) -> str:
+    """افزودن شمارهٔ خط به محتوای فایل."""
+    lines = content.splitlines()
+    if len(lines) > max_lines:
+        lines = lines[:max_lines] + [f"... [TRUNCATED at line {max_lines} of {len(content.splitlines())}]"]
+    width = len(str(len(lines)))
+    return "\n".join(f"{str(i + 1).rjust(width)}: {ln}" for i, ln in enumerate(lines))
+
+
+async def build_deep_context_for_idea(
+    repo_full_name: str,
+    *,
+    branch: Optional[str] = None,
+    token: Optional[str] = None,
+    max_deep_read: int = 18,
+    max_files_summary: int = 200,
+    max_file_lines: int = 350,
+    max_file_bytes: int = 50000,
+) -> Dict[str, Any]:
+    """ساخت context عمیق پروژه — برای استفاده در idea_to_prompt و سایر
+    مسیرهایی که نیاز به محتوای واقعی فایل‌ها (با شمارهٔ خط) و گراف import
+    دارند، نه صرفاً لیست نام فایل‌ها.
+
+    این تابع همان منطق Phase 1 + Phase 2 از run_deep_scan را اجرا می‌کند
+    ولی بدون شروع scan کامل (no progress file، no AI passes، فقط fetch
+    و scoring و import graph).
+
+    خروجی:
+        {
+          "ok": bool,
+          "error": str,           # در صورت خطا
+          "stacks": List[str],
+          "files_count": int,
+          "files_summary": str,    # "kind   path" برای 200 فایل اول
+          "deep_files_blob": str,  # محتوای 18 فایل برتر با شمارهٔ خط
+          "package_files_blob": str,
+          "special_files_blob": str,  # README، CHANGELOG، docs
+          "import_graph_summary": str,
+          "deep_paths": List[str],  # مسیرهایی که deep-read شده‌اند
+          "default_branch": str,
+        }
+    """
+    if not token:
+        return {"ok": False, "error": "توکن GitHub تنظیم نشده"}
+    if not repo_full_name or "/" not in repo_full_name:
+        return {"ok": False, "error": "repo_full_name نامعتبر"}
+
+    headers = _gh_headers(token)
+
+    async with aiohttp.ClientSession() as session:
+        # Phase 1: tree + repo info
+        info = await _gh_get_json(session, f"{GITHUB_API}/repos/{repo_full_name}", headers)
+        default_branch = (info or {}).get("default_branch") or branch or "main"
+        active_branch = branch or default_branch
+
+        tree_data = await _gh_get_json(
+            session,
+            f"{GITHUB_API}/repos/{repo_full_name}/git/trees/{active_branch}?recursive=1",
+            headers,
+        )
+        if not tree_data or "tree" not in tree_data:
+            return {"ok": False, "error": "عدم دسترسی به ساختار پروژه"}
+
+        all_files: List[str] = []
+        sizes: Dict[str, int] = {}
+        for item in tree_data["tree"]:
+            if item.get("type") != "blob":
+                continue
+            p = item.get("path", "")
+            if not p:
+                continue
+            low = p.lower()
+            if any(low.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svg", ".woff", ".woff2", ".ttf", ".otf", ".pdf", ".zip", ".tar", ".gz", ".mp4", ".mp3")):
+                continue
+            if any(seg in low for seg in ("/node_modules/", "/.next/", "/dist/", "/build/", "/.git/", "/__pycache__/", "/.venv/", "/venv/")):
+                continue
+            all_files.append(p)
+            sizes[p] = item.get("size", 0)
+
+        kinds: Dict[str, str] = {p: _classify_file(p) for p in all_files}
+
+        # خواندن dependency files
+        dep_contents: Dict[str, str] = {}
+        for fname in all_files:
+            base = fname.split("/")[-1]
+            if base in DEPENDENCY_FILES:
+                content = await _fetch_file_content(session, repo_full_name, fname, headers, active_branch, 10000)
+                if content:
+                    dep_contents[base] = content
+
+        stacks = _detect_stack(all_files, dep_contents)
+
+        # Phase 2: ابتدا rank سبک، سپس rerank با import graph
+        ranked0 = _score_files(all_files, sizes, [], {})
+        initial_paths = [p for p, s in ranked0[: max_deep_read * 2] if s > 0][: max_deep_read * 2]
+
+        deep_contents: Dict[str, str] = {}
+        for p in initial_paths:
+            try:
+                c = await _fetch_file_content(session, repo_full_name, p, headers, active_branch, max_file_bytes)
+                if c:
+                    deep_contents[p] = c
+            except Exception:
+                continue
+
+        # Import graph روی فایل‌های خوانده‌شده
+        imports, imported_by, real_import_counts = _build_import_graph(deep_contents, all_files)
+
+        # rerank با import_counts واقعی، انتخاب نهایی max_deep_read
+        ranked = _score_files(all_files, sizes, [], real_import_counts)
+        final_paths = [p for p, s in ranked[: max_deep_read] if s > 0]
+        for p in final_paths:
+            if p not in deep_contents:
+                try:
+                    c = await _fetch_file_content(session, repo_full_name, p, headers, active_branch, max_file_bytes)
+                    if c:
+                        deep_contents[p] = c
+                except Exception:
+                    continue
+
+        # Special context: README، CHANGELOG، tsconfig، next.config، ...
+        special_files = [
+            f for f in all_files
+            if f.split("/")[-1].lower() in ("readme.md", "readme", "changelog.md")
+            or f.startswith(("docs/", "documentation/"))
+            or f in ("tsconfig.json", "next.config.js", "next.config.mjs", "vite.config.ts", ".env.example")
+        ][:6]
+        special_contents: Dict[str, str] = {}
+        for sp in special_files:
+            try:
+                c = await _fetch_file_content(session, repo_full_name, sp, headers, active_branch, 15000)
+                if c:
+                    special_contents[sp] = c
+            except Exception:
+                continue
+
+        # ساخت blobها
+        files_summary = "\n".join(
+            f"{kinds.get(p, 'other'):>10}  {p}" for p in all_files[:max_files_summary]
+        )
+        deep_files_blob = "\n\n".join(
+            f"=== {p} ===\n{_with_line_numbers(c, max_file_lines)}"
+            for p, c in list(deep_contents.items())[:max_deep_read]
+        )
+        package_files_blob = "\n\n".join(
+            f"=== {n} ===\n{c[:4000]}" for n, c in dep_contents.items()
+        )
+        special_files_blob = "\n\n".join(
+            f"=== {p} ===\n{c[:4000]}" for p, c in special_contents.items()
+        )
+
+        top_hubs = sorted(real_import_counts.items(), key=lambda x: x[1], reverse=True)[:12]
+        import_graph_summary = ""
+        if top_hubs:
+            hub_lines = []
+            for path, cnt in top_hubs:
+                callers = imported_by.get(path, [])[:5]
+                hub_lines.append(
+                    f"- `{path}` — {cnt} فایل آن را import می‌کنند: "
+                    + ", ".join(f"`{c}`" for c in callers)
+                )
+            import_graph_summary = "\n".join(hub_lines)
+
+        return {
+            "ok": True,
+            "error": "",
+            "stacks": stacks,
+            "files_count": len(all_files),
+            "files_summary": files_summary,
+            "deep_files_blob": deep_files_blob,
+            "package_files_blob": package_files_blob,
+            "special_files_blob": special_files_blob,
+            "import_graph_summary": import_graph_summary,
+            "deep_paths": list(deep_contents.keys()),
+            "default_branch": default_branch,
+        }
+
+
+# =====================================================================
 # Main deep scan function
 # =====================================================================
 
