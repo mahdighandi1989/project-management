@@ -357,6 +357,69 @@ async def get_verification_history(task_id: str):
     raise HTTPException(status_code=404, detail="تسک یافت نشد")
 
 
+# ============================================================
+# 🚀 Inspector apply-action bridge — حلقهٔ اتصال OversightTask به مسیر
+# اجرای واقعی روی پروژهٔ محلی
+# ============================================================
+
+class RecordExecutionRequest(BaseModel):
+    pr_url: str
+    pr_branch: Optional[str] = ""
+    files_committed: Optional[List[str]] = []
+    model_ids: Optional[List[str]] = []
+    action_plan_summary: Optional[str] = ""
+    executed_via: Optional[str] = "inspector_apply_action"
+
+
+@router.get("/tasks/{task_id}/resolve-project")
+async def resolve_project_for_task_endpoint(
+    task_id: str,
+    db: Session = Depends(get_db),
+):
+    """نگاشت OversightTask → Project محلی (DB) برای فاز preflight اجرا.
+
+    قبل از فراخوانی smart-chat / apply-action (که project_id محلی می‌خواهند)،
+    UI این endpoint را call می‌کند تا از تطابق مطمئن شود و در صورت نبود،
+    راهنمایی فارسی به کاربر بدهد.
+    """
+    service = get_oversight_service()
+    # check task existence ابتدا (resolve خودش هم چک می‌کند ولی برای 404 صریح‌تر)
+    task = next((t for t in service.tasks if t.id == task_id), None)
+    if task is None:
+        raise HTTPException(status_code=404, detail="تسک یافت نشد")
+    return service.resolve_project_for_task(db, task_id)
+
+
+@router.post("/tasks/{task_id}/record-execution")
+async def record_task_execution_endpoint(
+    task_id: str,
+    payload: RecordExecutionRequest,
+):
+    """ثبت اجرای موفق یک تسک از طریق Inspector apply-action.
+
+    این endpoint بعد از موفقیت apply-action (که PR ساخته شد) از فرانت‌اند
+    صدا زده می‌شود تا applied_evidence و verification_history به‌روز شوند.
+    """
+    service = get_oversight_service()
+    if not payload.pr_url and not payload.pr_branch:
+        raise HTTPException(
+            status_code=400,
+            detail="حداقل یکی از pr_url یا pr_branch باید پر باشد",
+        )
+    result = await service.record_task_execution(
+        task_id,
+        pr_url=payload.pr_url or "",
+        pr_branch=payload.pr_branch or "",
+        files_committed=payload.files_committed or [],
+        model_ids=payload.model_ids or [],
+        action_plan_summary=payload.action_plan_summary or "",
+        executed_via=payload.executed_via or "inspector_apply_action",
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="تسک یافت نشد")
+    return result
+
+
 @router.post("/watched/{watched_id}/run-now")
 async def run_all_pending(watched_id: str, payload: Optional[RunTaskRequest] = None):
     """اجرای فوری همه‌ی تسک‌های pending یک پروژه (برای دکمهٔ «بررسی فوری»)."""
