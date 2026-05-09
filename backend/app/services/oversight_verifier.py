@@ -408,6 +408,16 @@ async def verify_task(
         service._save_reports()
         service._save_tasks()
 
+    # 🔁 Follow-up prompt: پس از append تاریخچه، اگر status != done
+    # یک پرامپت "ادامه" ساخته و روی task ست می‌شود تا کاربر در دور
+    # بعدی بتواند آن را copy/apply کند. اگر done شد، followup reset می‌شود.
+    try:
+        await service.apply_followup_after_verify(task.id, report)
+        # تسک به‌روزشده را دوباره بخوان (followup_prompt حالا ست شده)
+        task = next((t for t in service.tasks if t.id == task.id), task)
+    except Exception as _e:
+        logger.warning(f"apply_followup_after_verify failed: {_e}")
+
     # event hook
     try:
         await service._emit(
@@ -423,4 +433,6 @@ async def verify_task(
         "streak": task.confirmation_streak,
         "streak_required": streak_required,
         "final": task.verification_status == "done",
+        "followup_available": bool(task.followup_prompt),
+        "followup_round": task.followup_round,
     }
