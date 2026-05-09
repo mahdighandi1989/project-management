@@ -38,6 +38,8 @@ class WatchedUpdate(BaseModel):
     interval_hours: Optional[float] = None
     autonomy_level: Optional[str] = None
     allow_push: Optional[bool] = None
+    allow_create_issue: Optional[bool] = None
+    scan_interval_hours: Optional[float] = None
 
 
 class IdeaToPromptRequest(BaseModel):
@@ -46,6 +48,7 @@ class IdeaToPromptRequest(BaseModel):
     type: str = "other"
     priority: str = "medium"
     model_id: Optional[str] = None
+    model_ids: Optional[List[str]] = None
 
 
 class TaskCreate(BaseModel):
@@ -74,10 +77,17 @@ class TaskUpdate(BaseModel):
 
 class RunTaskRequest(BaseModel):
     model_id: Optional[str] = None
+    model_ids: Optional[List[str]] = None
 
 
 class ScanRequest(BaseModel):
     model_id: Optional[str] = None
+    model_ids: Optional[List[str]] = None
+
+
+class WatchedUpdateExtra(BaseModel):
+    """فقط برای پشتیبانی از فیلدهای جدید (allow_create_issue, scan_interval_hours)"""
+    pass
 
 
 class SettingsUpdate(BaseModel):
@@ -206,6 +216,7 @@ async def task_from_idea(payload: IdeaToPromptRequest):
             type_=payload.type,
             priority=payload.priority,
             model_id=payload.model_id,
+            model_ids=payload.model_ids,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -238,13 +249,45 @@ async def run_task(task_id: str, payload: Optional[RunTaskRequest] = None):
     service = get_oversight_service()
     try:
         result = await service.run_task(
-            task_id, model_id=payload.model_id if payload else None
+            task_id,
+            model_id=payload.model_id if payload else None,
+            model_ids=payload.model_ids if payload else None,
         )
         return result
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/watched/{watched_id}/run-now")
+async def run_all_pending(watched_id: str, payload: Optional[RunTaskRequest] = None):
+    """اجرای فوری همه‌ی تسک‌های pending یک پروژه (برای دکمهٔ «بررسی فوری»)."""
+    service = get_oversight_service()
+    try:
+        return await service.run_all_pending_for_watched(
+            watched_id, model_id=payload.model_id if payload else None
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class BulkApproveRequest(BaseModel):
+    task_ids: List[str]
+
+
+@router.post("/tasks/bulk-approve")
+async def bulk_approve(payload: BulkApproveRequest):
+    """تأیید گروهی تسک‌های suggested (تبدیل به pending)."""
+    service = get_oversight_service()
+    updated = []
+    for tid in payload.task_ids:
+        result = await service.update_task(tid, {"status": "pending"})
+        if result:
+            updated.append(result)
+    return {"success": True, "updated_count": len(updated), "tasks": updated}
 
 
 # ============================================================
@@ -255,14 +298,45 @@ async def run_task(task_id: str, payload: Optional[RunTaskRequest] = None):
 async def list_reports(
     task_id: Optional[str] = None,
     watched_id: Optional[str] = None,
+    status: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    flagged: Optional[bool] = None,
+    read: Optional[bool] = None,
     limit: int = Query(default=100, le=500),
 ):
     service = get_oversight_service()
-    return {
-        "items": await service.list_reports(
-            task_id=task_id, watched_id=watched_id, limit=limit
-        )
-    }
+    items = await service.list_reports(
+        task_id=task_id, watched_id=watched_id, limit=500
+    )
+
+    # فیلترهای پیشرفته
+    def _ok(r: dict) -> bool:
+        if status and r.get("status") != status:
+            return False
+        if flagged is not None and bool(r.get("flagged")) != flagged:
+            return False
+        if read is not None and bool(r.get("read")) != read:
+            return False
+        run_at = r.get("run_at") or ""
+        if since and run_at < since:
+            return False
+        if until and run_at > until:
+            return False
+        return True
+
+    items = [r for r in items if _ok(r)]
+    return {"items": items[:limit], "total": len(items)}
+
+
+@router.get("/reports/{report_id}")
+async def get_report(report_id: str):
+    """جزئیات یک گزارش."""
+    service = get_oversight_service()
+    r = await service.get_report(report_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="گزارش یافت نشد")
+    return r
 
 
 @router.patch("/reports/{report_id}/mark")
@@ -285,9 +359,13 @@ async def scan_project(watched_id: str, payload: Optional[ScanRequest] = None):
     """اسکن خودکار پروژه برای یافتن نیازها/ایرادات."""
     service = get_oversight_service()
     try:
-        return await service.scan_project(
-            watched_id, model_id=payload.model_id if payload else None
-        )
+        # اگر model_ids ارائه شده فقط model_id اول را به scan می‌فرستیم (scan فعلاً single-model است)
+        chosen_model = None
+        if payload:
+            chosen_model = payload.model_id or (
+                payload.model_ids[0] if payload.model_ids else None
+            )
+        return await service.scan_project(watched_id, model_id=chosen_model)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:

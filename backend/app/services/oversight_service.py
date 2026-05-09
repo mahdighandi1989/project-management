@@ -117,8 +117,12 @@ class WatchedProject:
     interval_hours: float = 24.0
     autonomy_level: str = "manual"  # manual | assist | auto
     allow_push: bool = False  # opt-in جداگانه
+    allow_create_issue: bool = False  # اجازه ساخت issue حتی در manual
     last_run_at: Optional[str] = None
     next_run_at: Optional[str] = None
+    last_scan_at: Optional[str] = None
+    scan_interval_hours: float = 168.0  # هفتگی
+    next_scan_at: Optional[str] = None
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
 
@@ -221,23 +225,31 @@ class OversightService:
 
     # ---------- بارگذاری/ذخیره ----------
 
+    @staticmethod
+    def _filter_known_fields(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+        """فیلتر کردن دادهٔ ذخیره‌شده تا فقط فیلدهای موجود در dataclass باقی بماند (سازگاری رو به جلو)."""
+        from dataclasses import fields as _fields
+
+        allowed = {f.name for f in _fields(cls)}
+        return {k: v for k, v in data.items() if k in allowed}
+
     def _load_all(self) -> None:
         for w in _read_json(WATCHED_FILE, []):
             try:
-                self.watched.append(WatchedProject(**w))
-            except TypeError:
+                self.watched.append(WatchedProject(**self._filter_known_fields(WatchedProject, w)))
+            except (TypeError, KeyError):
                 logger.warning(f"Ignoring malformed watched entry: {w}")
 
         for t in _read_json(TASKS_FILE, []):
             try:
-                self.tasks.append(OversightTask(**t))
-            except TypeError:
+                self.tasks.append(OversightTask(**self._filter_known_fields(OversightTask, t)))
+            except (TypeError, KeyError):
                 logger.warning(f"Ignoring malformed task: {t}")
 
         for r in _read_json(REPORTS_FILE, []):
             try:
-                self.reports.append(OversightReport(**r))
-            except TypeError:
+                self.reports.append(OversightReport(**self._filter_known_fields(OversightReport, r)))
+            except (TypeError, KeyError):
                 logger.warning(f"Ignoring malformed report: {r}")
 
         saved_settings = _read_json(SETTINGS_FILE, {})
@@ -460,6 +472,32 @@ class OversightService:
                 for i in issues
             ]
 
+        # Package / dependency files (برای تحلیل امنیتی/سلامت)
+        package_files: Dict[str, str] = {}
+        candidates = [
+            "package.json",
+            "requirements.txt",
+            "pyproject.toml",
+            "Pipfile",
+            "go.mod",
+            "Cargo.toml",
+            "Gemfile",
+            "composer.json",
+            "pom.xml",
+        ]
+        for fname in candidates:
+            data = await self._fetch_json(
+                f"{GITHUB_API}/repos/{repo_full_name}/contents/{fname}", headers
+            )
+            if data and data.get("type") == "file" and data.get("content"):
+                try:
+                    decoded = base64.b64decode(data["content"]).decode("utf-8", errors="ignore")[:5000]
+                    package_files[fname] = decoded
+                except Exception:
+                    pass
+        if package_files:
+            ctx["package_files"] = package_files
+
         return ctx
 
     # ====================================================================
@@ -469,7 +507,7 @@ class OversightService:
     async def _ai_generate(
         self, prompt: str, model_id: Optional[str] = None, max_tokens: int = 3000, temperature: float = 0.3
     ) -> str:
-        """تولید پاسخ با AI Manager موجود."""
+        """تولید پاسخ با AI Manager موجود (یک مدل)."""
         from .ai_manager import get_ai_manager
         from .ai_base import Message
 
@@ -494,6 +532,46 @@ class OversightService:
             temperature=temperature,
         )
         return response.content if hasattr(response, "content") else str(response)
+
+    async def _ai_generate_multi(
+        self,
+        prompt: str,
+        model_ids: List[str],
+        max_tokens: int = 3000,
+        temperature: float = 0.3,
+    ) -> List[Dict[str, str]]:
+        """اجرای چند مدل به‌صورت موازی و برگرداندن همه پاسخ‌ها."""
+        from .ai_manager import get_ai_manager
+        from .ai_base import Message
+
+        manager = get_ai_manager()
+        available = {m.id: m for m in manager.get_available_models()}
+        if not available:
+            raise RuntimeError("هیچ مدل AI فعالی نیست.")
+
+        targets: List[str] = []
+        for mid in model_ids or []:
+            if mid in available:
+                targets.append(mid)
+        if not targets:
+            # fallback: اولین مدل
+            targets = [next(iter(available))]
+
+        async def _run_one(mid: str) -> Dict[str, str]:
+            try:
+                resp = await manager.generate(
+                    model_id=mid,
+                    messages=[Message(role="user", content=prompt)],
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                content = resp.content if hasattr(resp, "content") else str(resp)
+                return {"model_id": mid, "content": content, "error": ""}
+            except Exception as e:
+                return {"model_id": mid, "content": "", "error": str(e)}
+
+        results = await asyncio.gather(*[_run_one(m) for m in targets])
+        return list(results)
 
     @staticmethod
     def _extract_json(text: str) -> Optional[Dict[str, Any]]:
@@ -571,6 +649,8 @@ class OversightService:
                         "interval_hours",
                         "autonomy_level",
                         "allow_push",
+                        "allow_create_issue",
+                        "scan_interval_hours",
                     }
                     for k, v in updates.items():
                         if k in allowed:
@@ -691,6 +771,7 @@ class OversightService:
         type_: str = "other",
         priority: str = "medium",
         model_id: Optional[str] = None,
+        model_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         if not idea.strip():
             raise ValueError("ایده خالی است")
@@ -754,7 +835,25 @@ class OversightService:
 پرامپت باید به فارسی، طولانی، عملی، با مراحل قابل اجرا، معیار پذیرش، و خروجی مشخص باشد."""
 
         try:
-            response = await self._ai_generate(system_prompt, model_id=model_id, max_tokens=2500, temperature=0.4)
+            effective_models = model_ids or ([model_id] if model_id else None)
+            if effective_models and len(effective_models) > 1:
+                multi = await self._ai_generate_multi(
+                    system_prompt, model_ids=effective_models, max_tokens=2500, temperature=0.4
+                )
+                # برای idea_to_prompt، طولانی‌ترین پاسخ معتبر را انتخاب می‌کنیم
+                best = max(
+                    (m for m in multi if not m.get("error") and m.get("content")),
+                    key=lambda m: len(m["content"]),
+                    default=None,
+                )
+                response = best["content"] if best else (multi[0]["content"] if multi else "")
+            else:
+                response = await self._ai_generate(
+                    system_prompt,
+                    model_id=(effective_models[0] if effective_models else None),
+                    max_tokens=2500,
+                    temperature=0.4,
+                )
         except Exception as e:
             raise RuntimeError(f"خطا در تولید پرامپت: {e}")
 
@@ -777,7 +876,12 @@ class OversightService:
     # Run task -> evaluate via AI
     # ====================================================================
 
-    async def run_task(self, task_id: str, model_id: Optional[str] = None) -> Dict[str, Any]:
+    async def run_task(
+        self,
+        task_id: str,
+        model_id: Optional[str] = None,
+        model_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         task = next((t for t in self.tasks if t.id == task_id), None)
         if task is None:
             raise ValueError("تسک یافت نشد")
@@ -864,17 +968,59 @@ class OversightService:
   "summary": "خلاصه یک‌پاراگرافی"
 }}"""
 
-            response = await self._ai_generate(
-                evaluation_prompt,
-                model_id=model_id,
-                max_tokens=3000,
-                temperature=0.2,
-            )
+            # حالت چند-مدل (consensus)
+            effective_models = model_ids or ([model_id] if model_id else None)
+            if effective_models and len(effective_models) > 1:
+                multi = await self._ai_generate_multi(
+                    evaluation_prompt,
+                    model_ids=effective_models,
+                    max_tokens=3000,
+                    temperature=0.2,
+                )
+                # consensus: انتخاب پاسخ معتبرترین (بیشترین confidence_score)
+                best_parsed: Dict[str, Any] = {}
+                best_score = -1.0
+                best_response = ""
+                best_model = ""
+                all_responses: List[Dict[str, Any]] = []
+                for r in multi:
+                    parsed_r = self._extract_json(r["content"]) or {}
+                    all_responses.append(
+                        {
+                            "model_id": r["model_id"],
+                            "status": parsed_r.get("status"),
+                            "summary": parsed_r.get("summary"),
+                            "error": r.get("error", ""),
+                        }
+                    )
+                    score = float(parsed_r.get("confidence_score") or 0.0)
+                    if score > best_score and not r.get("error"):
+                        best_score = score
+                        best_parsed = parsed_r
+                        best_response = r["content"]
+                        best_model = r["model_id"]
+                parsed = best_parsed
+                response = best_response or (multi[0]["content"] if multi else "")
+                used_model = best_model
+                evidence_extra = {"consensus": all_responses}
+            else:
+                response = await self._ai_generate(
+                    evaluation_prompt,
+                    model_id=(effective_models[0] if effective_models else None),
+                    max_tokens=3000,
+                    temperature=0.2,
+                )
+                parsed = self._extract_json(response) or {}
+                used_model = effective_models[0] if effective_models else ""
+                evidence_extra = {}
 
-            parsed = self._extract_json(response) or {}
             status_val = parsed.get("status") or "partial"
             if status_val not in ("done", "partial", "not_done", "error"):
                 status_val = "partial"
+
+            evidence = parsed.get("evidence") or {}
+            if evidence_extra:
+                evidence.update(evidence_extra)
 
             report = OversightReport(
                 id=str(uuid.uuid4()),
@@ -885,11 +1031,11 @@ class OversightService:
                 status=status_val,
                 done_parts=parsed.get("done_parts") or [],
                 remaining_parts=parsed.get("remaining_parts") or [],
-                evidence=parsed.get("evidence") or {},
+                evidence=evidence,
                 next_actions=parsed.get("next_actions") or [],
                 confidence_score=float(parsed.get("confidence_score") or 0.0),
                 raw_response=response[:8000],
-                model_id=model_id or "",
+                model_id=used_model,
             )
 
             # وضعیت نهایی
@@ -903,12 +1049,33 @@ class OversightService:
             async with self._lock:
                 task.status = final_status
                 task.last_summary = parsed.get("summary") or response[:300]
-                if model_id and model_id not in task.models_used:
-                    task.models_used.append(model_id)
+                for mid in (effective_models or []):
+                    if mid and mid not in task.models_used:
+                        task.models_used.append(mid)
                 task.updated_at = now_iso()
                 self.reports.insert(0, report)
                 self._save_reports()
                 self._save_tasks()
+
+            # ساخت GitHub issue در حالت auto یا allow_create_issue
+            if watched and final_status != "done":
+                try:
+                    issue_result = await self._create_github_issue_for_action(watched, task, report)
+                    if issue_result and issue_result.get("success"):
+                        report.evidence["github_issue"] = {
+                            "number": issue_result.get("issue_number"),
+                            "url": issue_result.get("issue_url"),
+                        }
+                        async with self._lock:
+                            self._save_reports()
+                except Exception as e:
+                    logger.warning(f"github issue creation skipped: {e}")
+
+            # event
+            await self._emit(
+                "task.completed",
+                {"task": task.to_dict(), "report": report.to_dict()},
+            )
 
             return {"task": task.to_dict(), "report": report.to_dict()}
 
@@ -960,7 +1127,15 @@ class OversightService:
 
         ctx = await self.build_project_context(watched.repo_full_name)
 
-        scan_prompt = f"""تو یک Senior Code Auditor هستی. این پروژه را به دقت بررسی کن و فهرستی از «نیازها و ایرادات» پیدا کن.
+        # خلاصهٔ فایل‌های package برای تحلیل dependency
+        package_summary = ""
+        if ctx.get("package_files"):
+            parts: List[str] = []
+            for fname, content in (ctx["package_files"] or {}).items():
+                parts.append(f"=== {fname} ===\n{content[:1500]}")
+            package_summary = "\n\n".join(parts)
+
+        scan_prompt = f"""تو یک Senior Code Auditor و Security Engineer هستی. این پروژه را با دقت بررسی کن و یک فهرست کامل از «نیازها، ایرادات، تناقضات، آسیب‌پذیری‌ها و پیشنهادات بهبود» تهیه کن.
 
 # پروژه
 {watched.repo_full_name}
@@ -983,13 +1158,24 @@ class OversightService:
 # README (بخشی)
 {(ctx.get('readme') or '')[:3000]}
 
+# فایل‌های Dependency
+{package_summary or '(فایل package یافت نشد)'}
+
 # وظیفه
-حداکثر ۸ نیاز/ایراد/پیشنهاد بهبود مهم پیدا کن. هر کدام شامل:
+حداکثر ۸ نیاز مهم پیدا کن. حتماً بررسی کن:
+- **آسیب‌پذیری‌های امنیتی** (وابستگی‌های قدیمی، secret در کد، endpointهای ناامن)
+- **تناقضات کد** (anti-pattern، dead code، duplicate logic)
+- **Issues باز قدیمی** که مدت‌ها لمس نشده‌اند
+- **مستندات ناقص یا قدیمی** (README, CHANGELOG, نبود examples)
+- **تست‌های گم‌شده یا ناکافی**
+- **پیشرفت ناقص قابلیت‌ها**
+
+هر مورد شامل:
 - title (کوتاه)
 - type (bug | refactor | docs | feature_request | other)
 - priority (low | medium | high | critical)
-- description (یک پاراگراف توضیح کامل)
-- proposed_action (پیشنهاد عملی برای رفع آن)
+- description (پاراگراف کامل)
+- proposed_action (پیشنهاد عملی)
 
 # خروجی فقط JSON
 {{
@@ -1100,17 +1286,143 @@ class OversightService:
         }
 
     # ====================================================================
-    # Scheduler tick
+    # Run-now for an entire watched (همه‌ی pendingها)
+    # ====================================================================
+
+    async def run_all_pending_for_watched(
+        self, watched_id: str, model_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """اجرای فوری همهٔ تسک‌های pending یک پروژه."""
+        watched = self._find_watched(watched_id)
+        if not watched:
+            raise ValueError("پروژه یافت نشد")
+
+        pending = [t for t in self.tasks if t.watched_id == watched_id and t.status == "pending"]
+        if not pending:
+            return {"success": True, "ran_count": 0, "message": "تسک pending برای اجرا نیست"}
+
+        ran: List[Dict[str, Any]] = []
+        for t in pending:
+            try:
+                result = await self.run_task(t.id, model_id=model_id)
+                ran.append({"task_id": t.id, "status": "ok", "report_id": result["report"]["id"]})
+            except Exception as e:
+                logger.warning(f"run_all_pending: task {t.id} failed: {e}")
+                ran.append({"task_id": t.id, "status": "error", "error": str(e)})
+
+        return {"success": True, "ran_count": len(ran), "results": ran}
+
+    # ====================================================================
+    # GitHub issue / PR creation (auto mode)
+    # ====================================================================
+
+    async def _create_github_issue_for_action(
+        self, watched: WatchedProject, task: OversightTask, report: OversightReport
+    ) -> Optional[Dict[str, Any]]:
+        """ساخت issue روی GitHub بر اساس next_actions گزارش."""
+        if not (watched.allow_create_issue or (watched.autonomy_level == "auto" and watched.allow_push)):
+            return None
+        if report.status == "done":
+            return None
+        if not report.next_actions and not report.remaining_parts:
+            return None
+
+        token = get_github_token()
+        if not token:
+            return None
+
+        owner, _, repo = watched.repo_full_name.partition("/")
+        if not owner or not repo:
+            return None
+
+        # عنوان و بدنه
+        title = f"[oversight] {task.title[:100]}"
+
+        body_parts: List[str] = []
+        body_parts.append(f"## درخواست\n{task.raw_idea or task.title}")
+        if report.remaining_parts:
+            body_parts.append("## باقی‌مانده\n" + "\n".join(f"- {p}" for p in report.remaining_parts))
+        if report.next_actions:
+            body_parts.append("## اقدامات بعدی پیشنهادی\n" + "\n".join(f"- {a}" for a in report.next_actions))
+        body_parts.append(f"\n---\n*این Issue توسط oversight (تسک `{task.id}`، اعتماد {int(report.confidence_score * 100)}%) ایجاد شده است.*")
+        body = "\n\n".join(body_parts)
+
+        labels = ["oversight", f"priority: {task.priority}", f"type: {task.type}"]
+
+        try:
+            from .github_pr_service import get_github_pr_service
+
+            pr_service = get_github_pr_service()
+            return await pr_service.create_issue(
+                owner=owner, repo=repo, title=title, body=body, labels=labels, token=token
+            )
+        except Exception as e:
+            logger.warning(f"create_github_issue failed: {e}")
+            return None
+
+    # ====================================================================
+    # Event hooks (for cross-page integration)
+    # ====================================================================
+
+    _subscribers: List[Any] = []  # callbacks: (event_name: str, payload: dict) -> awaitable|None
+
+    def subscribe(self, callback) -> None:
+        """ثبت یک callback برای دریافت رویدادهای oversight."""
+        if callback not in self._subscribers:
+            self._subscribers.append(callback)
+
+    def unsubscribe(self, callback) -> None:
+        if callback in self._subscribers:
+            self._subscribers.remove(callback)
+
+    async def _emit(self, event: str, payload: Dict[str, Any]) -> None:
+        for cb in list(self._subscribers):
+            try:
+                res = cb(event, payload)
+                if asyncio.iscoroutine(res):
+                    await res
+            except Exception as e:
+                logger.warning(f"subscriber error on {event}: {e}")
+
+    async def get_report(self, report_id: str) -> Optional[Dict[str, Any]]:
+        for r in self.reports:
+            if r.id == report_id:
+                return r.to_dict()
+        return None
+
+    # ====================================================================
+    # Scheduler tick (با scan دوره‌ای)
     # ====================================================================
 
     async def scheduler_tick(self) -> Dict[str, Any]:
-        """یک نوبت اجرای scheduler. تسک‌های موعد‌رسیده را اجرا می‌کند."""
+        """یک نوبت اجرای scheduler. تسک‌های موعد‌رسیده را اجرا می‌کند، scan دوره‌ای انجام می‌دهد."""
         now = datetime.now(timezone.utc)
         ran: List[str] = []
+        scanned: List[str] = []
         max_runs = int(self.settings.get("max_parallel_runs") or 2)
 
-        # برای هر watched با schedule فعال
         for w in list(self.watched):
+            # 1) Scan دوره‌ای (حتی اگر schedule_enabled نباشد، تا scan_interval خودش جدا باشد)
+            try:
+                if w.scan_interval_hours and w.scan_interval_hours > 0:
+                    last_scan = (
+                        datetime.fromisoformat(w.last_scan_at)
+                        if w.last_scan_at
+                        else None
+                    )
+                    if last_scan is None or (now - last_scan) >= timedelta(hours=w.scan_interval_hours):
+                        if w.schedule_enabled:  # فقط اگر زمان‌بندی فعال است auto-scan شود
+                            try:
+                                await self.scan_project(w.id, model_id=None)
+                                w.last_scan_at = now.isoformat()
+                                w.next_scan_at = (now + timedelta(hours=w.scan_interval_hours)).isoformat()
+                                scanned.append(w.id)
+                            except Exception as e:
+                                logger.warning(f"auto-scan {w.id} failed: {e}")
+            except Exception as e:
+                logger.warning(f"scan check {w.id} failed: {e}")
+
+            # 2) اجرای تسک‌های pending در زمان‌بندی
             if not w.schedule_enabled:
                 continue
             try:
@@ -1124,15 +1436,12 @@ class OversightService:
             if next_dt > now:
                 continue
 
-            # تسک‌های pending این پروژه
             pending = [t for t in self.tasks if t.watched_id == w.id and t.status == "pending"]
             if not pending:
-                # اگر چیزی برای اجرا نیست، فقط زمان بعدی را تنظیم کن
                 w.next_run_at = (now + timedelta(hours=w.interval_hours)).isoformat()
                 w.last_run_at = now.isoformat()
                 continue
 
-            # اجرای حداکثر max_runs تسک
             for t in pending[:max_runs]:
                 try:
                     await self.run_task(t.id, model_id=None)
@@ -1146,7 +1455,13 @@ class OversightService:
         async with self._lock:
             self._save_watched()
 
-        return {"ran": ran, "ran_count": len(ran), "tick_at": now.isoformat()}
+        return {
+            "ran": ran,
+            "ran_count": len(ran),
+            "scanned": scanned,
+            "scanned_count": len(scanned),
+            "tick_at": now.isoformat(),
+        }
 
 
 # ====================================================================
