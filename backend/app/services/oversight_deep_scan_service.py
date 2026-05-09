@@ -846,6 +846,132 @@ async def build_deep_context_for_idea(
 
 
 # =====================================================================
+# Smart finding merger (مهاجرت از Health analysis _merge_similar_issues)
+# =====================================================================
+
+def _normalize_title(title: str) -> str:
+    """نرمال‌سازی title برای similarity comparison."""
+    import re as _re
+    s = (title or "").strip().lower()
+    # حذف کلمات stop رایج
+    for stop in ["the", "a", "an", "is", "are", "to", "of", "for", "in",
+                 "و", "در", "از", "به", "که", "یک", "این", "آن"]:
+        s = _re.sub(rf"\b{stop}\b", " ", s)
+    # حذف punctuation و normalize whitespace
+    s = _re.sub(r"[^\w\s]", " ", s)
+    s = _re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _title_similarity(a: str, b: str) -> float:
+    """محاسبهٔ similarity سادهٔ Jaccard روی tokens (سریع، بدون dependencies)."""
+    na = _normalize_title(a)
+    nb = _normalize_title(b)
+    if not na or not nb:
+        return 0.0
+    if na == nb:
+        return 1.0
+    sa = set(na.split())
+    sb = set(nb.split())
+    if not sa or not sb:
+        return 0.0
+    inter = len(sa & sb)
+    union = len(sa | sb)
+    return inter / union if union > 0 else 0.0
+
+
+def _merge_similar_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """ادغام هوشمند findings مشابه — مهاجرت از Health analysis.
+
+    منطق:
+    1. findings با title exactly یکسان → ادغام
+    2. findings با similarity > 0.8 + همان type → ادغام
+    3. findings با target_files مشترک + همان type + پایه‌های مشابه → ادغام
+    parent finding اول (highest priority، یا اول در ترتیب) باقی می‌ماند.
+    دیگران در parent.merged_findings ذخیره می‌شوند.
+
+    خروجی: لیست unique findings با merged_findings field.
+    """
+    if not findings:
+        return []
+
+    SIMILARITY_THRESHOLD = 0.8
+    PRIORITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+    # ابتدا بر اساس priority sort کن (critical اول)
+    sorted_findings = sorted(
+        findings,
+        key=lambda f: PRIORITY_ORDER.get((f.get("priority") or "medium").lower(), 2),
+    )
+
+    unique: List[Dict[str, Any]] = []
+
+    for f in sorted_findings:
+        title = (f.get("title") or "").strip()
+        if not title:
+            continue
+
+        ftype = (f.get("type") or "").lower()
+        f_files: set = set()
+        for loc in (f.get("target_locations") or []):
+            if isinstance(loc, dict) and loc.get("path"):
+                f_files.add(loc["path"])
+        for p in (f.get("target_files") or []):
+            if isinstance(p, str):
+                f_files.add(p)
+
+        merged_into: Optional[Dict[str, Any]] = None
+
+        # دنبال parent مناسب در unique بگرد
+        for u in unique:
+            u_title = (u.get("title") or "").strip()
+            u_type = (u.get("type") or "").lower()
+            sim = _title_similarity(title, u_title)
+
+            # شرط ۱: exact match (sim=1.0)
+            if sim >= 1.0:
+                merged_into = u
+                break
+
+            # شرط ۲: similarity بالا و type یکسان
+            if sim >= SIMILARITY_THRESHOLD and ftype == u_type and ftype:
+                merged_into = u
+                break
+
+            # شرط ۳: target_files زیاد مشترک + type یکسان (target_files
+            # similarity > 0.6 یعنی ادغام منطقی است)
+            if ftype == u_type and ftype and f_files:
+                u_files: set = set()
+                for loc in (u.get("target_locations") or []):
+                    if isinstance(loc, dict) and loc.get("path"):
+                        u_files.add(loc["path"])
+                for p in (u.get("target_files") or []):
+                    if isinstance(p, str):
+                        u_files.add(p)
+                if u_files:
+                    file_overlap = len(f_files & u_files) / len(f_files | u_files)
+                    if file_overlap > 0.6:
+                        merged_into = u
+                        break
+
+        if merged_into is not None:
+            # اضافه کن به merged_findings parent
+            mf = merged_into.setdefault("merged_findings", [])
+            mf.append({
+                "title": title,
+                "type": ftype,
+                "priority": f.get("priority"),
+                "_pass": f.get("_pass"),
+                "description": (f.get("description") or "")[:500],
+            })
+        else:
+            # finding مستقل — به unique اضافه کن
+            unique.append(f)
+
+    return unique
+
+
+# =====================================================================
 # Main deep scan function
 # =====================================================================
 
@@ -1108,16 +1234,12 @@ async def run_deep_scan(
             passes_done += 1
             write_progress(watched_id, passes_done=passes_done)
 
-        # ----- فاز ۴: تجمیع، dedup، اولویت‌بندی -----
-        write_progress(watched_id, phase="phase4_aggregate", message="dedup و اولویت‌بندی")
-        unique: List[Dict[str, Any]] = []
-        seen_titles: set = set()
-        for f in all_findings:
-            t = (f.get("title") or "").strip().lower()
-            if not t or t in seen_titles:
-                continue
-            seen_titles.add(t)
-            unique.append(f)
+        # ----- فاز ۴: تجمیع، dedup هوشمند، اولویت‌بندی -----
+        # (مهاجرت از Health analysis _merge_similar_issues — قبلاً فقط
+        # exact-match dedup روی title بود؛ حالا با similarity score و
+        # ادغام target_files مشترک)
+        write_progress(watched_id, phase="phase4_aggregate", message="dedup هوشمند و ادغام")
+        unique = _merge_similar_findings(all_findings)
 
         # ----- فاز ۴.۵: محاسبهٔ per-file health map -----
         # (مهاجرت از Health analysis file_health_map)
@@ -1307,6 +1429,8 @@ async def run_deep_scan(
                     target_files=target_files,
                     acceptance_criteria=ac,
                     execution_mode=execution_mode_default,
+                    # 🆕 finding های ادغام‌شده در این task (از smart merger)
+                    merged_findings=(f.get("merged_findings") or []),
                 )
                 async with service._lock:
                     service.tasks.append(t)

@@ -744,6 +744,111 @@ async def update_readme_endpoint(watched_id: str, payload: UpdateReadmeRequest):
 
 
 # ============================================================
+# 🆕 General Archive (مهاجرت از Health analysis general_archive)
+# ============================================================
+
+@router.get("/archive")
+async def list_general_archive(
+    item_type: Optional[str] = Query(default=None, description="task | report"),
+    project_full_name: Optional[str] = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+):
+    """آرشیو سراسری: تسک‌های done/archived + گزارش‌های قدیمی.
+
+    این endpoint جایگزین Health analysis /general-archive است.
+    به‌صورت paginated و قابل فیلتر بر اساس type و پروژه.
+    """
+    service = get_oversight_service()
+    items: List[Dict[str, Any]] = []
+    type_breakdown: Dict[str, int] = {}
+    status_breakdown: Dict[str, int] = {}
+
+    # tasks: status ∈ {done, archived, cancelled}
+    if item_type in (None, "task"):
+        for t in service.tasks:
+            if t.status not in ("done", "archived", "cancelled"):
+                continue
+            if project_full_name and t.project_full_name != project_full_name:
+                continue
+            items.append({
+                "item_type": "task",
+                "id": t.id,
+                "title": t.title,
+                "status": t.status,
+                "type": t.type,
+                "priority": t.priority,
+                "project_full_name": t.project_full_name,
+                "created_at": t.created_at,
+                "updated_at": t.updated_at,
+                "merged_findings_count": len(t.merged_findings or []),
+                "preview": (t.raw_idea or "")[:200],
+            })
+            status_breakdown[t.status] = status_breakdown.get(t.status, 0) + 1
+            type_breakdown[t.type] = type_breakdown.get(t.type, 0) + 1
+
+    # reports
+    if item_type in (None, "report"):
+        for r in service.reports:
+            if project_full_name and r.project_full_name != project_full_name:
+                continue
+            items.append({
+                "item_type": "report",
+                "id": r.id,
+                "task_id": r.task_id,
+                "status": r.status,
+                "project_full_name": r.project_full_name,
+                "run_at": r.run_at,
+                "model_id": r.model_id,
+                "preview": (r.raw_response or "")[:200],
+            })
+            status_breakdown[r.status] = status_breakdown.get(r.status, 0) + 1
+            type_breakdown["report"] = type_breakdown.get("report", 0) + 1
+
+    # sort by date desc
+    items.sort(key=lambda x: x.get("updated_at") or x.get("run_at") or "", reverse=True)
+
+    total = len(items)
+    start = (page - 1) * page_size
+    end = start + page_size
+    paginated = items[start:end]
+
+    return {
+        "items": paginated,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": (total + page_size - 1) // page_size if page_size else 1,
+        "type_breakdown": type_breakdown,
+        "status_breakdown": status_breakdown,
+    }
+
+
+@router.delete("/archive/{item_type}/{item_id}")
+async def delete_archive_item(item_type: str, item_id: str):
+    """حذف یک item از archive (task یا report)."""
+    service = get_oversight_service()
+    if item_type == "task":
+        async with service._lock:
+            before = len(service.tasks)
+            service.tasks = [t for t in service.tasks if t.id != item_id]
+            if len(service.tasks) == before:
+                raise HTTPException(status_code=404, detail="task یافت نشد")
+            service._save_tasks()
+        return {"success": True, "deleted": "task", "id": item_id}
+    elif item_type == "report":
+        async with service._lock:
+            before = len(service.reports)
+            service.reports = [r for r in service.reports if r.id != item_id]
+            if len(service.reports) == before:
+                raise HTTPException(status_code=404, detail="report یافت نشد")
+            service._save_reports()
+        return {"success": True, "deleted": "report", "id": item_id}
+    else:
+        raise HTTPException(status_code=400, detail="item_type باید 'task' یا 'report' باشد")
+
+
+# ============================================================
 # 🔗 External Project Tasks Bridge — wiring /projects ↔ /oversight
 # ============================================================
 # هدف: dynamic_fields از پروژه‌های local که action_type='github_commit' دارند

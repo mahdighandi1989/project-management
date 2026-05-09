@@ -217,6 +217,9 @@ class OversightTask:
     followup_target_locations: List[Dict[str, Any]] = field(default_factory=list)
     followup_acceptance_criteria: List[str] = field(default_factory=list)
     followup_round: int = 0  # 0=هیچ، 1=دور اول follow-up، 2=...
+    # 🆕 findings که در این task ادغام شده‌اند (از smart merger در deep_scan)
+    # هر merged finding شامل: title, type, priority, _pass, description (snippet)
+    merged_findings: List[Dict[str, Any]] = field(default_factory=list)
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
 
