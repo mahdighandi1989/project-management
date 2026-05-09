@@ -1065,6 +1065,282 @@ export default function ProjectDetailPage() {
     await restoreInspectorChatFromDb(true);
   }, [restoreInspectorChatFromDb]);
 
+  // ===========================================================
+  // 📥 Export action timeline + 🔗 Send to Oversight
+  // ===========================================================
+
+  // Send to Oversight modal state
+  const [showSendToOversightModal, setShowSendToOversightModal] = useState(false);
+  const [oversightWatchedList, setOversightWatchedList] = useState<Array<{ id: string; repo_full_name: string; user_notes?: string }>>([]);
+  const [sendOversightForm, setSendOversightForm] = useState({
+    watched_id: '',
+    title: '',
+    type: 'bug',
+    priority: 'medium',
+  });
+  const [sendOversightSubmitting, setSendOversightSubmitting] = useState(false);
+
+  // ابزار کمکی: ساختار خروجی timeline
+  const buildTimelineSnapshot = useCallback(() => {
+    const filters: Record<string, boolean> = inspectorActionFiltersRef.current as Record<string, boolean>;
+    return {
+      session_id: inspectorSessionId,
+      project_id: projectId,
+      project_name: project?.name || '',
+      started_at:
+        inspectorChatMessages.length > 0
+          ? (inspectorChatMessages[0].timestamp instanceof Date
+              ? inspectorChatMessages[0].timestamp.toISOString()
+              : new Date(inspectorChatMessages[0].timestamp).toISOString())
+          : null,
+      exported_at: new Date().toISOString(),
+      total_messages: inspectorChatMessages.length,
+      filters_active: Object.keys(filters).filter(k => filters[k]),
+      counters: {
+        duplicates_dropped: inspectorDuplicatesDroppedCount,
+        verify_pending: inspectorVerifyPendingCount,
+        console_logs_dropped: consoleLogDroppedCount,
+        console_log_cap: consoleLogCap,
+      },
+      messages: inspectorChatMessages.map((m: any) => ({
+        id: m.id,
+        db_id: m.db_id || null,
+        role: m.role,
+        content: m.content,
+        timestamp: m.timestamp instanceof Date ? m.timestamp.toISOString() : new Date(m.timestamp).toISOString(),
+        action_type: m.action_type || null,
+        backend_verified: m.backend_verified ?? null,
+        backend_log_summary: m.backend_log_summary || null,
+        verified_by_model: m.verified_by_model || null,
+        logs_checked: m.logs_checked ?? null,
+        error_logs_count: m.error_logs_count ?? null,
+        network_meta: m.network_meta || null,
+        model_id: m.model_id || null,
+      })),
+    };
+  }, [inspectorSessionId, projectId, project, inspectorChatMessages, inspectorDuplicatesDroppedCount, inspectorVerifyPendingCount, consoleLogDroppedCount, consoleLogCap]);
+
+  const downloadBlob = (filename: string, content: string, mime: string) => {
+    try {
+      const blob = new Blob([content], { type: mime });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    } catch (e) {
+      console.warn('downloadBlob failed', e);
+    }
+  };
+
+  const exportInspectorTimelineJSON = useCallback(() => {
+    const snap = buildTimelineSnapshot();
+    const filename = `inspector-timeline-${(project?.name || 'project').replace(/[^a-zA-Z0-9-_]/g, '_')}-${Date.now()}.json`;
+    downloadBlob(filename, JSON.stringify(snap, null, 2), 'application/json');
+  }, [buildTimelineSnapshot, project]);
+
+  const exportInspectorTimelineMarkdown = useCallback(() => {
+    const snap = buildTimelineSnapshot();
+    const lines: string[] = [];
+    lines.push(`# 📋 Inspector Timeline — ${snap.project_name || 'Project'}`);
+    lines.push('');
+    lines.push(`- **Project ID:** \`${snap.project_id}\``);
+    lines.push(`- **Session ID:** \`${snap.session_id ?? 'N/A'}\``);
+    lines.push(`- **Started at:** ${snap.started_at || 'N/A'}`);
+    lines.push(`- **Exported at:** ${snap.exported_at}`);
+    lines.push(`- **Total messages:** ${snap.total_messages}`);
+    lines.push(`- **Active filters:** ${snap.filters_active.join(', ') || '(none)'}`);
+    lines.push(`- **Counters:** duplicates_dropped=${snap.counters.duplicates_dropped}, verify_pending=${snap.counters.verify_pending}, logs_dropped=${snap.counters.console_logs_dropped} (cap=${snap.counters.console_log_cap})`);
+    lines.push('');
+    lines.push('---');
+    lines.push('');
+    let lastDate = '';
+    for (const m of snap.messages) {
+      const d = new Date(m.timestamp);
+      const dateStr = d.toISOString().slice(0, 10);
+      if (dateStr !== lastDate) {
+        lines.push(`## 🗓️ ${dateStr}`);
+        lines.push('');
+        lastDate = dateStr;
+      }
+      const time = d.toISOString().slice(11, 19);
+      const emoji =
+        m.action_type === 'click' ? '🖱️' :
+        m.action_type === 'input' ? '⌨️' :
+        m.action_type === 'scroll' ? '🔃' :
+        m.action_type === 'focus' ? '🎯' :
+        m.action_type === 'hover' ? '👆' :
+        m.action_type === 'error' || m.action_type === 'console-error' ? '🔴' :
+        m.action_type === 'error-overlay' ? '🚨' :
+        m.action_type === 'network-request' ? '🌐' :
+        m.action_type === 'network-response' ? '✅' :
+        m.action_type === 'network-error' ? '🌐❌' :
+        m.role === 'user' ? '👤' :
+        m.role === 'assistant' ? '🤖' :
+        m.role === 'system' ? '⚙️' :
+        '•';
+      lines.push(`### ${emoji} ${time} — ${m.role}${m.action_type ? ` (\`${m.action_type}\`)` : ''}`);
+      lines.push('');
+      lines.push(`> ${m.content.replace(/\n/g, '\n> ')}`);
+      lines.push('');
+      const meta: string[] = [];
+      if (m.backend_verified !== null) meta.push(`verified: ${m.backend_verified ? '✅' : '❌'}`);
+      if (m.verified_by_model) meta.push(`model: \`${m.verified_by_model}\``);
+      if (m.logs_checked !== null) meta.push(`logs_checked: ${m.logs_checked}`);
+      if (m.error_logs_count !== null && m.error_logs_count !== 0) meta.push(`errors: ${m.error_logs_count}`);
+      if (m.network_meta) {
+        const nm = m.network_meta;
+        meta.push(`network: ${nm.method || ''} ${nm.url || ''} → ${nm.status || ''} (${nm.durationMs || 0}ms)`);
+      }
+      if (meta.length) {
+        lines.push(`<sub>${meta.join(' · ')}</sub>`);
+        lines.push('');
+      }
+      if (m.backend_log_summary) {
+        lines.push(`**Backend log summary:**`);
+        lines.push('```');
+        lines.push(m.backend_log_summary);
+        lines.push('```');
+        lines.push('');
+      }
+    }
+    const filename = `inspector-timeline-${(project?.name || 'project').replace(/[^a-zA-Z0-9-_]/g, '_')}-${Date.now()}.md`;
+    downloadBlob(filename, lines.join('\n'), 'text/markdown');
+  }, [buildTimelineSnapshot, project]);
+
+  // 🔗 Send to Oversight — یک تسک جدید در سیستم نظارت می‌سازد
+  const openSendToOversightModal = useCallback(async () => {
+    try {
+      // pre-load watched list
+      const res = await fetch(`${API_BASE}/api/oversight/watched`);
+      const data = await res.json();
+      const items = (data && data.items) ? data.items : [];
+      setOversightWatchedList(items);
+      // default title از خطای آخر یا "گزارش مانیتورینگ"
+      const lastError = [...inspectorChatMessages].reverse().find((m: any) =>
+        m.action_type === 'error' || m.action_type === 'console-error' || m.action_type === 'network-error'
+      ) as any;
+      setSendOversightForm({
+        watched_id: items[0]?.id || '',
+        title: lastError ? `بررسی: ${(lastError.content || '').slice(0, 80)}` : `گزارش Inspector — ${project?.name || 'پروژه'}`,
+        type: lastError ? 'bug' : 'other',
+        priority: lastError ? 'high' : 'medium',
+      });
+      setShowSendToOversightModal(true);
+    } catch (e: any) {
+      alert('خطا در بارگذاری watched projects: ' + (e?.message || ''));
+    }
+  }, [inspectorChatMessages, project]);
+
+  const submitSendToOversight = useCallback(async () => {
+    if (!sendOversightForm.watched_id) {
+      alert('لطفاً یک پروژهٔ watched انتخاب کنید');
+      return;
+    }
+    setSendOversightSubmitting(true);
+    try {
+      const snap = buildTimelineSnapshot();
+      const watched = oversightWatchedList.find(w => w.id === sendOversightForm.watched_id);
+
+      // استخراج فایل‌های هدف از URL های network requests (مسیر بدون پارامتر)
+      const targetFilesSet = new Set<string>();
+      for (const m of snap.messages) {
+        if (m.network_meta && m.network_meta.url) {
+          try {
+            const u = new URL(m.network_meta.url, 'http://x');
+            if (u.pathname && u.pathname !== '/') targetFilesSet.add(u.pathname);
+          } catch (_) {}
+        }
+      }
+      const targetFiles = Array.from(targetFilesSet).slice(0, 10);
+
+      // ساخت Markdown خلاصه به‌عنوان prompt
+      const errorMsgs = snap.messages.filter((m: any) =>
+        m.action_type === 'error' || m.action_type === 'console-error' || m.action_type === 'network-error'
+      );
+      const promptParts: string[] = [];
+      promptParts.push(`## 🎯 هدف`);
+      promptParts.push(sendOversightForm.title);
+      promptParts.push('');
+      promptParts.push(`## 🧭 هدف اصلی پروژه (از یادداشت کاربر)`);
+      promptParts.push(watched?.user_notes || '(کاربر یادداشتی ثبت نکرده است)');
+      promptParts.push('');
+      promptParts.push(`## 📍 موقعیت‌های مرتبط`);
+      if (targetFiles.length) {
+        targetFiles.forEach(f => promptParts.push(`- \`${f}\``));
+      } else {
+        promptParts.push('_(هیچ مسیر network مشخصی شناسایی نشد)_');
+      }
+      promptParts.push('');
+      promptParts.push(`## 🔍 Context — خلاصهٔ Inspector Timeline`);
+      promptParts.push(`Project: \`${snap.project_name}\` (ID: \`${snap.project_id}\`)`);
+      promptParts.push(`Session: \`${snap.session_id ?? 'N/A'}\` · Total messages: ${snap.total_messages}`);
+      promptParts.push(`Exported at: ${snap.exported_at}`);
+      promptParts.push('');
+      if (errorMsgs.length > 0) {
+        promptParts.push(`### 🔴 خطاهای دیده‌شده (${errorMsgs.length})`);
+        for (const e of errorMsgs.slice(-15)) {
+          const t = new Date(e.timestamp).toISOString().slice(11, 19);
+          promptParts.push(`- [${t}] **${e.action_type}**: ${e.content.slice(0, 200)}`);
+          if (e.backend_log_summary) {
+            promptParts.push(`  - log summary: ${e.backend_log_summary.slice(0, 200)}`);
+          }
+        }
+        promptParts.push('');
+      }
+      const lastActions = snap.messages.filter((m: any) => m.role === 'action').slice(-20);
+      if (lastActions.length > 0) {
+        promptParts.push(`### 🪜 آخرین ${lastActions.length} اکشن کاربر`);
+        for (const a of lastActions) {
+          const t = new Date(a.timestamp).toISOString().slice(11, 19);
+          promptParts.push(`- [${t}] ${a.action_type || 'event'}: ${a.content.slice(0, 150)}`);
+        }
+        promptParts.push('');
+      }
+      promptParts.push(`## ✅ معیار پذیرش`);
+      promptParts.push('- [ ] خطاهای ذکر شده دیگر در Inspector تکرار نمی‌شوند');
+      promptParts.push('- [ ] هیچ تستی fail نمی‌شود (`npm run test` / `pytest`)');
+      promptParts.push('- [ ] linter بدون warning عبور می‌کند');
+      promptParts.push('');
+      promptParts.push(`## 🏷 دسته‌بندی`);
+      promptParts.push(`- نوع: ${sendOversightForm.type}`);
+      promptParts.push(`- اولویت: ${sendOversightForm.priority}`);
+
+      const promptText = promptParts.join('\n');
+
+      const body = {
+        watched_id: sendOversightForm.watched_id,
+        project_full_name: watched?.repo_full_name || '',
+        title: sendOversightForm.title,
+        prompt: promptText,
+        raw_idea: 'Generated from Inspector timeline',
+        type: sendOversightForm.type,
+        priority: sendOversightForm.priority,
+        status: 'pending',
+        source: 'inspector',
+      };
+      const res = await fetch(`${API_BASE}/api/oversight/tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok || (data && data.detail)) {
+        throw new Error(data?.detail || 'ساخت تسک نظارت ناموفق بود');
+      }
+      setShowSendToOversightModal(false);
+      // toast ساده — alert موقتی
+      alert('✅ تسک با موفقیت در سیستم نظارت ساخته شد');
+    } catch (e: any) {
+      alert('خطا: ' + (e?.message || 'ناشناخته'));
+    } finally {
+      setSendOversightSubmitting(false);
+    }
+  }, [sendOversightForm, oversightWatchedList, buildTimelineSnapshot]);
+
   // 🌉 تابع مشترک برای پردازش event های Bridge (postMessage و WebSocket)
   const actionLabelsRef = useRef<Record<string, string>>({
     'click': 'کلیک کردی',
@@ -11963,7 +12239,31 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           ⚠️ restore failed
                         </span>
                       )}
-                      <div className="ml-auto flex gap-1">
+                      <div className="ml-auto flex gap-1 flex-wrap">
+                        <button
+                          onClick={exportInspectorTimelineJSON}
+                          disabled={inspectorChatMessages.length === 0}
+                          className="px-2 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-900/50 transition disabled:opacity-50"
+                          title="دانلود کامل timeline به‌صورت JSON (شامل network_meta و verification metadata)"
+                        >
+                          📥 JSON
+                        </button>
+                        <button
+                          onClick={exportInspectorTimelineMarkdown}
+                          disabled={inspectorChatMessages.length === 0}
+                          className="px-2 py-0.5 rounded bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 hover:bg-purple-200 dark:hover:bg-purple-900/50 transition disabled:opacity-50"
+                          title="دانلود timeline به‌صورت Markdown با headerهای زمانی"
+                        >
+                          📝 Markdown
+                        </button>
+                        <button
+                          onClick={openSendToOversightModal}
+                          disabled={inspectorChatMessages.length === 0}
+                          className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 hover:bg-emerald-200 dark:hover:bg-emerald-900/50 transition disabled:opacity-50"
+                          title="ساخت یک تسک جدید در سیستم نظارت با خلاصهٔ این timeline"
+                        >
+                          🔗 Oversight
+                        </button>
                         <button
                           onClick={reloadInspectorChatFromDb}
                           disabled={inspectorChatRestoring}
@@ -11979,6 +12279,95 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         >
                           🧹 Clear
                         </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 🔗 Send to Oversight Modal */}
+                  {showSendToOversightModal && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => !sendOversightSubmitting && setShowSendToOversightModal(false)}>
+                      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-5 max-w-lg w-full mx-4 border border-gray-200 dark:border-gray-700" onClick={e => e.stopPropagation()}>
+                        <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
+                          🔗 ارسال timeline به سیستم نظارت
+                        </h3>
+                        <div className="space-y-3">
+                          <div>
+                            <label className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-1 block">پروژهٔ تحت نظارت (watched)</label>
+                            {oversightWatchedList.length === 0 ? (
+                              <div className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-900/20 p-2 rounded">
+                                هیچ پروژه‌ای در سیستم نظارت ثبت نشده — ابتدا از صفحهٔ /oversight یک پروژه به watched list اضافه کنید
+                              </div>
+                            ) : (
+                              <select
+                                value={sendOversightForm.watched_id}
+                                onChange={e => setSendOversightForm(f => ({ ...f, watched_id: e.target.value }))}
+                                className="w-full text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-2 py-1.5"
+                              >
+                                {oversightWatchedList.map(w => (
+                                  <option key={w.id} value={w.id}>{w.repo_full_name}</option>
+                                ))}
+                              </select>
+                            )}
+                          </div>
+                          <div>
+                            <label className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-1 block">عنوان تسک</label>
+                            <input
+                              type="text"
+                              value={sendOversightForm.title}
+                              onChange={e => setSendOversightForm(f => ({ ...f, title: e.target.value }))}
+                              className="w-full text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-2 py-1.5"
+                            />
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-1 block">نوع</label>
+                              <select
+                                value={sendOversightForm.type}
+                                onChange={e => setSendOversightForm(f => ({ ...f, type: e.target.value }))}
+                                className="w-full text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-2 py-1.5"
+                              >
+                                <option value="bug">bug</option>
+                                <option value="feature_request">feature_request</option>
+                                <option value="refactor">refactor</option>
+                                <option value="security">security</option>
+                                <option value="docs">docs</option>
+                                <option value="other">other</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-1 block">اولویت</label>
+                              <select
+                                value={sendOversightForm.priority}
+                                onChange={e => setSendOversightForm(f => ({ ...f, priority: e.target.value }))}
+                                className="w-full text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-2 py-1.5"
+                              >
+                                <option value="low">low</option>
+                                <option value="medium">medium</option>
+                                <option value="high">high</option>
+                                <option value="critical">critical</option>
+                              </select>
+                            </div>
+                          </div>
+                          <div className="text-xs text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50 p-2 rounded border border-gray-200 dark:border-gray-700">
+                            خلاصهٔ {inspectorChatMessages.length} پیام (شامل خطاها، اکشن‌ها، network requests) به‌عنوان prompt در تسک قرار می‌گیرد. می‌توانید بعداً در صفحهٔ /oversight ویرایش کنید.
+                          </div>
+                        </div>
+                        <div className="flex gap-2 justify-end mt-4">
+                          <button
+                            onClick={() => setShowSendToOversightModal(false)}
+                            disabled={sendOversightSubmitting}
+                            className="px-3 py-1.5 text-sm rounded bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-200 hover:bg-gray-300 dark:hover:bg-gray-500 disabled:opacity-50"
+                          >
+                            انصراف
+                          </button>
+                          <button
+                            onClick={submitSendToOversight}
+                            disabled={sendOversightSubmitting || oversightWatchedList.length === 0 || !sendOversightForm.watched_id}
+                            className="px-3 py-1.5 text-sm rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                          >
+                            {sendOversightSubmitting ? '⏳ در حال ارسال...' : '🚀 ارسال به نظارت'}
+                          </button>
+                        </div>
                       </div>
                     </div>
                   )}
