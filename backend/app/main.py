@@ -498,6 +498,12 @@ app.include_router(security_analysis.router)  # 🆕 Security Analysis (تحلی
 app.include_router(system_prompts.router)  # 🆕 System Prompts (مدیریت پرامپت‌ها)
 if OVERSIGHT_AVAILABLE and oversight is not None:
     app.include_router(oversight.router, prefix="/api")  # 🆕 Oversight (مرکز نظارت GitHub)
+    # bridge endpoints under /api/projects/{project_id}/{apply-oversight-task,verify-task,oversight-summary}
+    try:
+        app.include_router(oversight.projects_bridge_router, prefix="/api")
+    except AttributeError:
+        # backwards-compatible: older oversight module without bridge router
+        pass
 
 # Conditionally include model_profiles router
 if MODEL_PROFILES_AVAILABLE and model_profiles:

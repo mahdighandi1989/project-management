@@ -553,3 +553,130 @@ async def manual_tick():
     """اجرای دستی یک نوبت scheduler (مفید برای تست)."""
     service = get_oversight_service()
     return await service.scheduler_tick()
+
+
+# ============================================================
+# Bridge router → /api/projects/{project_id}/...
+# اتصال صفحهٔ /projects به سیستم Oversight (بخش ۷.۳ و ۱۱.۳ اسپک)
+# ============================================================
+
+projects_bridge_router = APIRouter(prefix="/projects", tags=["Oversight Bridge"])
+
+
+class ApplyOversightTaskRequest(BaseModel):
+    task_id: str
+    model_id: Optional[str] = None
+    model_ids: Optional[List[str]] = None
+
+
+def _resolve_project_full_name(project_id: str) -> str:
+    """project_id از /projects page ممکن است full_name (owner/repo) یا UUID محلی باشد.
+    اگر '/' داشته باشد، همان full_name است. در غیر این صورت تلاش می‌کنیم از simple_creator
+    آن را پیدا کنیم؛ و اگر نشد، خود project_id را برمی‌گردانیم تا lookup در tasks fallback شود.
+    """
+    if "/" in project_id:
+        return project_id
+    try:
+        from ...services.simple_creator import SimpleProjectCreator  # type: ignore
+        # best-effort lookup; if not available, just return as-is
+        creator = SimpleProjectCreator()
+        proj = creator.get_project(project_id)
+        if proj and getattr(proj, "name", None):
+            # simple projects don't store full_name, fall back to id
+            return project_id
+    except Exception:
+        pass
+    return project_id
+
+
+@projects_bridge_router.get("/{project_id:path}/oversight-summary")
+async def project_oversight_summary(project_id: str):
+    """خلاصهٔ تسک‌های نظارت برای پروژه‌ای که در صفحهٔ /projects نمایش داده می‌شود.
+
+    project_id می‌تواند full_name (مثل owner/repo) یا id محلی باشد.
+    در صورت full_name، مستقیماً tasks مرتبط برمی‌گردند؛ در غیر این صورت لیست خالی.
+    """
+    service = get_oversight_service()
+    full_name = _resolve_project_full_name(project_id)
+    items = await service.list_tasks_by_project(full_name)
+    counts: Dict[str, int] = {}
+    for t in items:
+        s = t.get("status", "pending")
+        counts[s] = counts.get(s, 0) + 1
+    return {
+        "project_id": project_id,
+        "project_full_name": full_name,
+        "total": len(items),
+        "by_status": counts,
+        "pending": counts.get("pending", 0) + counts.get("suggested", 0),
+        "in_review": counts.get("awaiting_review", 0),
+        "done": counts.get("done", 0),
+        "items": items,
+    }
+
+
+@projects_bridge_router.post("/{project_id:path}/apply-oversight-task")
+async def apply_oversight_task(project_id: str, payload: ApplyOversightTaskRequest):
+    """اعمال یک تسک نظارت روی یک پروژه (مسیر A — متصل).
+
+    این endpoint thin-wrapper روی `service.run_task` است؛ پرامپت را به مدل کدنویس می‌دهد
+    و طبق `auto_create_pr_instead_of_commit` و `allow_push` تصمیم می‌گیرد PR بسازد یا commit مستقیم.
+    """
+    service = get_oversight_service()
+    # validate task exists and (if possible) belongs to this project
+    target_full_name = _resolve_project_full_name(project_id)
+    found = None
+    for t in service.tasks:
+        if t.id == payload.task_id:
+            found = t
+            break
+    if not found:
+        raise HTTPException(status_code=404, detail="تسک یافت نشد")
+    # soft-validate project association (don't hard-fail if simple-project id is opaque)
+    if "/" in target_full_name and found.project_full_name and found.project_full_name != target_full_name:
+        raise HTTPException(
+            status_code=400,
+            detail=f"این تسک به پروژهٔ '{found.project_full_name}' تعلق دارد، نه '{target_full_name}'",
+        )
+    try:
+        result = await service.run_task(
+            payload.task_id,
+            model_id=payload.model_id,
+            model_ids=payload.model_ids,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@projects_bridge_router.post("/{project_id:path}/verify-task/{task_id}")
+async def verify_project_task(project_id: str, task_id: str, payload: Optional[RunTaskRequest] = None):
+    """verify فوری یک تسک از طریق مسیر /projects — مستقل از execution path."""
+    from ...services.oversight_verifier import verify_task as _verify_task
+
+    service = get_oversight_service()
+    target_full_name = _resolve_project_full_name(project_id)
+    found = None
+    for t in service.tasks:
+        if t.id == task_id:
+            found = t
+            break
+    if not found:
+        raise HTTPException(status_code=404, detail="تسک یافت نشد")
+    if "/" in target_full_name and found.project_full_name and found.project_full_name != target_full_name:
+        raise HTTPException(
+            status_code=400,
+            detail=f"این تسک به پروژهٔ '{found.project_full_name}' تعلق دارد، نه '{target_full_name}'",
+        )
+    try:
+        return await _verify_task(
+            task_id,
+            model_id=payload.model_id if payload else None,
+            triggered_by="projects_page",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
