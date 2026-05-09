@@ -386,6 +386,11 @@ export default function ProjectDetailPage() {
   const consoleLogCapRef = useRef(consoleLogCap);
   consoleLogCapRef.current = consoleLogCap;
 
+  // 🔄 Restore chat from DB on mount + manual reload control
+  const [inspectorChatRestored, setInspectorChatRestored] = useState(false);
+  const [inspectorChatRestoring, setInspectorChatRestoring] = useState(false);
+  const [inspectorRestoreError, setInspectorRestoreError] = useState<string | null>(null);
+
   const [inspectorReplyTo, setInspectorReplyTo] = useState<{
     id: string;
     content: string;
@@ -975,6 +980,91 @@ export default function ProjectDetailPage() {
     inspectorPowerOnRef.current = inspectorPowerOn;
   }, [inspectorPowerOn]);
 
+  // 🔄 Restore chat from DB
+  // وقتی session ست می‌شود (یا کاربر force می‌کند) آخرین پیام‌ها از DB pull می‌شوند
+  // و در ابتدای chat قرار می‌گیرند. dedup با id تضمین می‌کند تکراری نشوند.
+  const restoreInspectorChatFromDb = useCallback(async (force: boolean = false) => {
+    const sid = inspectorSessionIdRef.current;
+    if (!sid) return;
+    if (inspectorChatRestored && !force) return;
+    setInspectorChatRestoring(true);
+    setInspectorRestoreError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/session/${sid}/messages`);
+      const data = await res.json();
+      if (data.success && Array.isArray(data.messages)) {
+        const restored = data.messages.map((m: any) => {
+          // extract network_meta from extra_data if present
+          let networkMeta: any = null;
+          try {
+            const ed = typeof m.extra_data === 'string' ? JSON.parse(m.extra_data) : m.extra_data;
+            if (ed && ed.network_meta) networkMeta = ed.network_meta;
+          } catch (e) { /* parse failed - non-critical */ }
+          return {
+            id: `restored_${m.id}`,
+            db_id: m.id,
+            role: m.role,
+            content: m.content,
+            timestamp: new Date(m.timestamp || m.created_at || Date.now()),
+            action_type: m.action_type || undefined,
+            backend_verified: m.backend_verified ?? null,
+            backend_log_summary: m.backend_log_summary,
+            verified_by_model: m.verified_by_model,
+            logs_checked: m.logs_checked,
+            error_logs_count: m.error_logs_count,
+            checked_logs: m.checked_logs,
+            network_meta: networkMeta,
+            ...(m.model_id ? { model_id: m.model_id } : {}),
+            ...(m.tokens_used ? { tokens_used: m.tokens_used } : {}),
+          };
+        });
+        // dedup: اگر پیامی با همان db_id در state موجود است، آن را skip کن
+        setInspectorChatMessages(prev => {
+          const existingDbIds = new Set(prev.map((p: any) => p.db_id).filter(Boolean));
+          const filtered = restored.filter((r: any) => !existingDbIds.has(r.db_id));
+          // مرتب‌سازی بر اساس timestamp برای حفظ ترتیب چرونولوژیک
+          const merged = [...filtered, ...prev];
+          merged.sort((a: any, b: any) => {
+            const ta = a.timestamp instanceof Date ? a.timestamp.getTime() : new Date(a.timestamp).getTime();
+            const tb = b.timestamp instanceof Date ? b.timestamp.getTime() : new Date(b.timestamp).getTime();
+            return ta - tb;
+          });
+          return merged;
+        });
+        setInspectorChatRestored(true);
+      } else {
+        setInspectorRestoreError(data.error || 'بارگذاری ناموفق');
+      }
+    } catch (e: any) {
+      setInspectorRestoreError(e?.message || 'خطا در ارتباط با backend');
+    } finally {
+      setInspectorChatRestoring(false);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inspectorChatRestored]);
+
+  // trigger خودکار وقتی session_id جدید ست می‌شود (و قبلاً restore نشده)
+  useEffect(() => {
+    if (inspectorSessionId && !inspectorChatRestored && activeTab === 'inspector') {
+      // small debounce: بگذار session آماده شود
+      const t = setTimeout(() => { restoreInspectorChatFromDb(false); }, 400);
+      return () => clearTimeout(t);
+    }
+  }, [inspectorSessionId, inspectorChatRestored, activeTab, restoreInspectorChatFromDb]);
+
+  // 🧹 Clear chat (فقط state فرانت — DB دست‌نخورده می‌ماند)
+  const clearInspectorChatLocally = useCallback(() => {
+    setInspectorChatMessages([]);
+    setInspectorChatRestored(false);  // اجازه بده دفعه بعد دوباره از DB بخواند
+  }, []);
+
+  // 🔁 Reload from DB (force) — کاربر دستی تاریخچه را از DB می‌کشد
+  const reloadInspectorChatFromDb = useCallback(async () => {
+    setInspectorChatMessages([]);
+    setInspectorChatRestored(false);
+    await restoreInspectorChatFromDb(true);
+  }, [restoreInspectorChatFromDb]);
+
   // 🌉 تابع مشترک برای پردازش event های Bridge (postMessage و WebSocket)
   const actionLabelsRef = useRef<Record<string, string>>({
     'click': 'کلیک کردی',
@@ -1097,8 +1187,9 @@ export default function ProjectDetailPage() {
               role: 'action',
               content: isNetworkEvt ? `${actionLabel}: ${targetInfo}` : `${actionLabel} روی ${targetInfo}`,
               action_type: action,
-              // 🌐 network_meta — backend که این فیلد را ندارد آن را نادیده می‌گیرد
-              network_meta: data.networkMeta || null,
+              // 🌐 network_meta را داخل extra_data می‌گذاریم تا توسط
+              // backend واقعاً persist شود (extra_data یک JSON column است)
+              extra_data: data.networkMeta ? { network_meta: data.networkMeta } : undefined,
             })
           });
           const saveData = await saveRes.json();
@@ -11787,6 +11878,107 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             <div key={log.id} className="truncate">• {log.message?.slice(0, 60)}</div>
                           ))}
                         </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 🛡️ Live Indicator (chips) — وضعیت زندهٔ Inspector */}
+                  {inspectorPowerOn && (
+                    <div className="flex flex-wrap gap-1.5 items-center px-2 py-1.5 mb-2 bg-gray-50 dark:bg-gray-800/50 rounded border border-gray-200 dark:border-gray-700 text-[11px]">
+                      {/* وضعیت WebSocket */}
+                      <span
+                        className={`px-2 py-0.5 rounded-full font-medium ${
+                          bridgeWsConnected && bridgePeerConnected
+                            ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
+                            : bridgeWsConnected
+                            ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300'
+                            : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+                        }`}
+                        title={
+                          bridgeWsConnected && bridgePeerConnected
+                            ? 'WebSocket فعال و bridge داخل پروژه متصل است'
+                            : bridgeWsConnected
+                            ? 'WebSocket فعال است ولی bridge هنوز متصل نشده — منتظر می‌مانیم'
+                            : 'WebSocket قطع — تلاش برای اتصال مجدد در جریان است'
+                        }
+                      >
+                        ●{' '}
+                        {bridgeWsConnected && bridgePeerConnected
+                          ? 'WS متصل'
+                          : bridgeWsConnected
+                          ? 'منتظر bridge'
+                          : 'WS قطع'}
+                      </span>
+                      {/* Verify pending */}
+                      <span
+                        className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
+                        title="تعداد عملیات verify که هنوز پاسخ نهایی نگرفته‌اند (با backoff تلاش می‌کنند)"
+                      >
+                        ⏳ verify pending: {inspectorVerifyPendingCount}
+                      </span>
+                      {/* Duplicates dropped */}
+                      <span
+                        className="px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
+                        title="رویدادهای تکراری که از هر دو کانال (postMessage و WebSocket) رسیده و dedup شده‌اند"
+                      >
+                        🔁 duplicate dropped: {inspectorDuplicatesDroppedCount}
+                      </span>
+                      {/* Console logs dropped */}
+                      <span
+                        className="px-2 py-0.5 rounded-full bg-orange-50 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300"
+                        title={`لاگ‌های کنسولی که به دلیل سقف (${consoleLogCap}) از ابتدای buffer حذف شده‌اند`}
+                      >
+                        📉 logs dropped: {consoleLogDroppedCount}
+                      </span>
+                      {/* Network filter status */}
+                      <span
+                        className={`px-2 py-0.5 rounded-full ${
+                          inspectorActionFilters['network-response'] || inspectorActionFilters['network-error']
+                            ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+                            : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300'
+                        }`}
+                        title="نمایش/مخفی‌سازی درخواست‌های شبکه (fetch + XHR) — کلیک کن تا toggle شود"
+                        onClick={() => {
+                          // toggle همه‌ی network filterها با هم
+                          const newVal = !(inspectorActionFilters['network-response'] || inspectorActionFilters['network-error']);
+                          setInspectorActionFilters(prev => ({
+                            ...prev,
+                            'network-request': newVal && prev['network-request'],
+                            'network-response': newVal,
+                            'network-error': newVal,
+                          }));
+                        }}
+                        style={{ cursor: 'pointer' }}
+                      >
+                        🌐 network: {inspectorActionFilters['network-response'] || inspectorActionFilters['network-error'] ? 'ON' : 'OFF'}
+                      </span>
+                      {/* Restore status / Reload / Clear */}
+                      {inspectorChatRestoring && (
+                        <span className="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300" title="در حال بارگذاری تاریخچه از DB">
+                          ⏳ بارگذاری چت...
+                        </span>
+                      )}
+                      {inspectorRestoreError && (
+                        <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300" title={`خطای بارگذاری: ${inspectorRestoreError}`}>
+                          ⚠️ restore failed
+                        </span>
+                      )}
+                      <div className="ml-auto flex gap-1">
+                        <button
+                          onClick={reloadInspectorChatFromDb}
+                          disabled={inspectorChatRestoring}
+                          className="px-2 py-0.5 rounded bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-200 hover:bg-gray-300 dark:hover:bg-gray-500 transition disabled:opacity-50"
+                          title="پاک کردن state و بارگذاری مجدد از DB"
+                        >
+                          🔁 Reload
+                        </button>
+                        <button
+                          onClick={clearInspectorChatLocally}
+                          className="px-2 py-0.5 rounded bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-200 hover:bg-red-100 hover:text-red-700 dark:hover:bg-red-900/30 dark:hover:text-red-300 transition"
+                          title="فقط state فرانت پاک می‌شود — DB دست‌نخورده می‌ماند"
+                        >
+                          🧹 Clear
+                        </button>
                       </div>
                     </div>
                   )}
