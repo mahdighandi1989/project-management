@@ -822,6 +822,9 @@ class OversightService:
                         "auto_create_pr_instead_of_commit",
                         "notify_user_before_apply",
                         "verify_interval_hours",
+                        # 🆕 (commit 2.3) — مهاجرت از Health analysis settings
+                        "scan_depth",
+                        "scan_criteria_weights",
                     }
                     for k, v in updates.items():
                         if k in allowed:

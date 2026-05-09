@@ -42,6 +42,9 @@ class WatchedUpdate(BaseModel):
     allow_push: Optional[bool] = None
     allow_create_issue: Optional[bool] = None
     scan_interval_hours: Optional[float] = None
+    # 🆕 (commit 2.3) عمق scan + وزن‌های معیار — مهاجرت از Health
+    scan_depth: Optional[str] = None  # quick | standard | deep | thorough
+    scan_criteria_weights: Optional[Dict[str, float]] = None
 
 
 class IdeaToPromptRequest(BaseModel):

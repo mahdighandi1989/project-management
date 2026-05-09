@@ -51,6 +51,9 @@ interface Watched {
   max_apply_retries?: number;
   auto_create_pr_instead_of_commit?: boolean;
   notify_user_before_apply?: boolean;
+  // 🆕 (commit 2.3) عمق scan + criteria weights — مهاجرت از Health
+  scan_depth?: 'quick' | 'standard' | 'deep' | 'thorough';
+  scan_criteria_weights?: { security?: number; quality?: number; tests?: number; completeness?: number };
   last_run_at?: string | null;
   next_run_at?: string | null;
   last_scan_at?: string | null;
@@ -4002,6 +4005,63 @@ function WatchedCard({
           <span className="dark:text-gray-200">زمان‌بندی فعال</span>
         </label>
       </div>
+
+      {/* 🆕 (commit 2.3) Scan settings — مهاجرت از Health analysis */}
+      <details className="mt-3 bg-cyan-50 dark:bg-cyan-900/20 border border-cyan-200 dark:border-cyan-800/40 rounded-lg p-3 text-xs">
+        <summary className="cursor-pointer font-medium text-cyan-800 dark:text-cyan-200">
+          ⚙️ تنظیمات پیشرفتهٔ scan (عمق + وزن‌های معیار)
+        </summary>
+        <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <label className="block">
+            <span className="block text-gray-600 dark:text-gray-300 mb-1">
+              عمق scan <span className="text-blue-400" title="quick: 3 pass، standard: 5 pass، deep: همه (default)، thorough: همه + per-file scoring">ⓘ</span>
+            </span>
+            <select
+              value={w.scan_depth || 'deep'}
+              onChange={(e) => onChange({ scan_depth: e.target.value as any })}
+              className="w-full p-1.5 border rounded text-sm dark:bg-gray-700 dark:text-white dark:border-gray-600"
+            >
+              <option value="quick">⚡ quick (3 pass — سریع)</option>
+              <option value="standard">⚖ standard (5 pass — متعادل)</option>
+              <option value="deep">🔍 deep (10 pass — کامل، پیش‌فرض)</option>
+              <option value="thorough">🔬 thorough (10 pass + اولویت‌بندی)</option>
+            </select>
+          </label>
+          <div className="text-xs text-gray-500 dark:text-gray-400 self-end">
+            وزن‌های معیار را تنظیم کنید تا scoring per-file به اولویت‌های شما حساس باشد:
+          </div>
+          {(['security', 'quality', 'tests', 'completeness'] as const).map(key => {
+            const weights = w.scan_criteria_weights || {};
+            const value = weights[key] ?? (key === 'security' ? 1.5 : key === 'tests' ? 1.2 : 1.0);
+            const labels: Record<string, string> = {
+              security: '🔒 امنیت', quality: '🛠 کیفیت',
+              tests: '🧪 تست', completeness: '✅ کامل بودن',
+            };
+            return (
+              <label key={key} className="block">
+                <span className="block text-gray-600 dark:text-gray-300 mb-1">
+                  {labels[key]}: <strong>{value.toFixed(1)}×</strong>
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={2}
+                  step={0.1}
+                  value={value}
+                  onChange={(e) => {
+                    const newWeights = { ...weights, [key]: parseFloat(e.target.value) };
+                    onChange({ scan_criteria_weights: newWeights });
+                  }}
+                  className="w-full"
+                />
+              </label>
+            );
+          })}
+        </div>
+        <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+          💡 این تنظیمات روی scan های آینده اعمال می‌شوند. scan فعلی (اگر در حال اجراست) تأثیر نمی‌گیرد.
+        </div>
+      </details>
 
       {/* execution mode + verify interval + verify_only_mode */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-3">
