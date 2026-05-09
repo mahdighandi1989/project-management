@@ -1798,6 +1798,208 @@ class OversightService:
         return result
 
     # ====================================================================
+    # 🚀 Inspector apply-action bridge — اتصال OversightTask به مسیر اجرای
+    #    واقعی روی پروژهٔ محلی (smart-chat → apply-action → PR)
+    # ====================================================================
+
+    def resolve_project_for_task(
+        self, db_session, task_id: str
+    ) -> Dict[str, Any]:
+        """نگاشت OversightTask → Project محلی (DB).
+
+        استراتژی:
+          الف) اگر task.watched_id موجود است، watched.repo_full_name را
+               بگیر (مثل "owner/repo")
+          ب) در DB دنبال Project بگرد که github_path == repo_full_name
+               یا github_url حاوی این string است یا
+               extra_data.owner+repo match شود
+          ج) اگر پیدا نشد، matched=False با reason
+
+        خروجی:
+            {
+              matched: bool,
+              project_id: str,
+              project_name: str,
+              repo_full_name: str,
+              reason: str,
+            }
+        """
+        task = next((t for t in self.tasks if t.id == task_id), None)
+        if task is None:
+            return {
+                "matched": False,
+                "project_id": "",
+                "project_name": "",
+                "repo_full_name": "",
+                "reason": "تسک یافت نشد",
+            }
+
+        repo_full_name = ""
+        watched = self._find_watched(task.watched_id) if task.watched_id else None
+        if watched and watched.repo_full_name:
+            repo_full_name = watched.repo_full_name
+        elif task.project_full_name and "/" in task.project_full_name:
+            repo_full_name = task.project_full_name
+
+        if not repo_full_name or "/" not in repo_full_name:
+            return {
+                "matched": False,
+                "project_id": "",
+                "project_name": "",
+                "repo_full_name": repo_full_name,
+                "reason": "این تسک به یک repo GitHub معتبر (owner/repo) متصل نیست",
+            }
+
+        try:
+            from ..models.project import Project as _Project
+        except Exception as e:
+            return {
+                "matched": False,
+                "project_id": "",
+                "project_name": "",
+                "repo_full_name": repo_full_name,
+                "reason": f"بارگذاری مدل Project ناموفق: {e}",
+            }
+
+        # 1) match مستقیم روی github_path
+        try:
+            proj = (
+                db_session.query(_Project)
+                .filter(_Project.github_path == repo_full_name)
+                .first()
+            )
+            if proj:
+                return {
+                    "matched": True,
+                    "project_id": proj.id,
+                    "project_name": proj.name,
+                    "repo_full_name": repo_full_name,
+                    "reason": "",
+                }
+        except Exception as _e:
+            logger.warning(f"resolve_project: github_path query failed: {_e}")
+
+        # 2) match روی github_url (substring)
+        try:
+            proj = (
+                db_session.query(_Project)
+                .filter(_Project.github_url.like(f"%{repo_full_name}%"))
+                .first()
+            )
+            if proj:
+                return {
+                    "matched": True,
+                    "project_id": proj.id,
+                    "project_name": proj.name,
+                    "repo_full_name": repo_full_name,
+                    "reason": "",
+                }
+        except Exception as _e:
+            logger.warning(f"resolve_project: github_url query failed: {_e}")
+
+        # 3) match روی extra_data.owner + extra_data.repo
+        try:
+            owner, repo = repo_full_name.split("/", 1)
+            for p in db_session.query(_Project).all():
+                if not p.extra_data:
+                    continue
+                try:
+                    ed = json.loads(p.extra_data) if isinstance(p.extra_data, str) else p.extra_data
+                except Exception:
+                    continue
+                if isinstance(ed, dict) and ed.get("owner") == owner and ed.get("repo") == repo:
+                    return {
+                        "matched": True,
+                        "project_id": p.id,
+                        "project_name": p.name,
+                        "repo_full_name": repo_full_name,
+                        "reason": "",
+                    }
+        except Exception as _e:
+            logger.warning(f"resolve_project: extra_data scan failed: {_e}")
+
+        return {
+            "matched": False,
+            "project_id": "",
+            "project_name": "",
+            "repo_full_name": repo_full_name,
+            "reason": (
+                f"پروژه‌ای با repo='{repo_full_name}' در DB محلی پیدا نشد. "
+                "این repo را ابتدا در صفحهٔ /projects (GitHub Import) اضافه کنید."
+            ),
+        }
+
+    async def record_task_execution(
+        self,
+        task_id: str,
+        *,
+        pr_url: str,
+        pr_branch: str = "",
+        files_committed: Optional[List[str]] = None,
+        model_ids: Optional[List[str]] = None,
+        action_plan_summary: str = "",
+        executed_via: str = "inspector_apply_action",
+    ) -> Optional[Dict[str, Any]]:
+        """ثبت اجرای موفق یک تسک از طریق Inspector apply-action.
+
+        تغییرات روی task (همگی additive — کلیدهای موجود حفظ می‌شوند):
+          - applied_evidence به‌روز می‌شود (pr_url, pr_branch, files_committed,
+            model_ids, executed_via, executed_at, action_plan_summary)
+          - manually_marked_applied_at = اکنون
+          - verification_status = applied_externally_pending_verify
+          - status = awaiting_review (اگر pending/suggested بود — وگرنه
+            دست‌نخورده؛ مثلاً done نباید reset شود)
+          - verification_history += یک entry نوع 'executed'
+
+        دلیل additive: اگر کاربر این تسک را قبلاً به‌صورت دستی هم اعمال
+        کرده، نباید آن evidence را پاک کنیم — هر دو ثبت می‌شوند.
+        """
+        files_committed = files_committed or []
+        model_ids = model_ids or []
+
+        async with self._lock:
+            task = next((t for t in self.tasks if t.id == task_id), None)
+            if task is None:
+                return None
+
+            now = now_iso()
+            # merge additive
+            ev = dict(task.applied_evidence or {})
+            ev["pr_url"] = pr_url
+            if pr_branch:
+                ev["pr_branch"] = pr_branch
+            if files_committed:
+                ev["files_committed"] = files_committed
+            if model_ids:
+                ev["model_ids"] = model_ids
+            ev["executed_via"] = executed_via
+            ev["executed_at"] = now
+            if action_plan_summary:
+                ev["action_plan_summary"] = action_plan_summary[:1000]
+            task.applied_evidence = ev
+
+            task.manually_marked_applied_at = now
+            task.verification_status = "applied_externally_pending_verify"
+            if task.status in ("pending", "suggested"):
+                task.status = "awaiting_review"
+            task.updated_at = now
+
+            history = list(task.verification_history or [])
+            history.append({
+                "ts": now,
+                "status": "executed",
+                "triggered_by": executed_via,
+                "summary": (action_plan_summary or f"اجرا با {executed_via}")[:500],
+                "pr_url": pr_url,
+                "pr_branch": pr_branch,
+                "files_committed_count": len(files_committed),
+            })
+            task.verification_history = history[-50:]
+
+            self._save_tasks()
+            return task.to_dict()
+
+    # ====================================================================
     # Settings
     # ====================================================================
 

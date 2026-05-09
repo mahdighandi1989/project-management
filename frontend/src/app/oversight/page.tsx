@@ -90,6 +90,16 @@ interface Task {
   confirmation_streak?: number;
   target_files?: string[];
   acceptance_criteria?: string[];
+  applied_evidence?: {
+    pr_url?: string;
+    pr_branch?: string;
+    files_committed?: string[];
+    model_ids?: string[];
+    executed_via?: string;
+    executed_at?: string;
+    action_plan_summary?: string;
+    [key: string]: any;
+  };
 }
 
 interface Report {
@@ -189,6 +199,57 @@ export default function OversightPage() {
   const [externalVerifyResult, setExternalVerifyResult] = useState<Record<string, any>>({});
   const [externalCopyFeedbackId, setExternalCopyFeedbackId] = useState<string | null>(null);
 
+  // 🚀 Inspector apply-action bridge — modal state (declarations only here;
+  // توابع و logic بعد از selectedModelIds تعریف می‌شوند تا closure سالم باشد)
+  const [executeModalOpen, setExecuteModalOpen] = useState(false);
+  const [executeModalTask, setExecuteModalTask] = useState<any | null>(null);
+  type ExecuteStage =
+    | 'idle' | 'resolving' | 'planning' | 'preview'
+    | 'applying' | 'recording' | 'done' | 'error';
+  type ActionFile = {
+    path: string;
+    operation?: 'modify' | 'create' | 'delete' | 'modify_sections';
+    content?: string;
+    sections?: Array<{ find?: string; replace?: string }>;
+    description?: string;
+  };
+  type ActionPlan = { files: ActionFile[]; commit_message?: string };
+  const [executeStage, setExecuteStage] = useState<ExecuteStage>('idle');
+  const [executeProjectInfo, setExecuteProjectInfo] = useState<{
+    matched: boolean;
+    project_id: string;
+    project_name: string;
+    repo_full_name: string;
+    reason: string;
+  } | null>(null);
+  const [executeActionPlan, setExecuteActionPlan] = useState<ActionPlan | null>(null);
+  const [executePrUrl, setExecutePrUrl] = useState<string | null>(null);
+  const [executePrBranch, setExecutePrBranch] = useState<string | null>(null);
+  const [executeFilesCommitted, setExecuteFilesCommitted] = useState<string[]>([]);
+  const [executeProgress, setExecuteProgress] = useState<string[]>([]);
+  const [executeError, setExecuteError] = useState<string | null>(null);
+  const [executeStartedAt, setExecuteStartedAt] = useState<number | null>(null);
+  const executeReaderRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
+
+  const closeExecuteModal = useCallback(() => {
+    // اگر stream در جریان است، abort کن
+    if (executeReaderRef.current) {
+      try { executeReaderRef.current.cancel(); } catch {}
+      executeReaderRef.current = null;
+    }
+    setExecuteModalOpen(false);
+    setExecuteModalTask(null);
+    setExecuteStage('idle');
+    setExecuteProjectInfo(null);
+    setExecuteActionPlan(null);
+    setExecutePrUrl(null);
+    setExecutePrBranch(null);
+    setExecuteFilesCommitted([]);
+    setExecuteProgress([]);
+    setExecuteError(null);
+    setExecuteStartedAt(null);
+  }, []);
+
   const loadExternalTasks = useCallback(async (projectId?: string) => {
     setExternalTasksLoading(true);
     try {
@@ -269,6 +330,204 @@ export default function OversightPage() {
   const [status, setStatus] = useState<Status | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
+
+  // ======================================================================
+  // 🚀 Inspector apply-action bridge — توابع SSE/orchestration
+  // (state ها در ابتدای کامپوننت تعریف شده‌اند؛ این توابع به selectedModelIds
+  //  وابسته‌اند پس باید بعد از آن قرار گیرند)
+  // ======================================================================
+  const consumeSSEStream = useCallback(async (
+    res: Response,
+    onEvent: (eventName: string | null, dataObj: any) => void
+  ): Promise<void> => {
+    if (!res.body) throw new Error('پاسخ SSE خالی است');
+    const reader = res.body.getReader();
+    executeReaderRef.current = reader;
+    const decoder = new TextDecoder();
+    let buf = '';
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          const block = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          let eventName: string | null = null;
+          let dataLine = '';
+          for (const ln of block.split('\n')) {
+            if (ln.startsWith('event:')) eventName = ln.slice(6).trim();
+            else if (ln.startsWith('data:')) dataLine += ln.slice(5).trim();
+          }
+          if (!dataLine) continue;
+          let parsed: any = null;
+          try { parsed = JSON.parse(dataLine); } catch { parsed = { raw: dataLine }; }
+          onEvent(eventName, parsed);
+        }
+      }
+    } finally {
+      try { reader.releaseLock(); } catch {}
+      if (executeReaderRef.current === reader) executeReaderRef.current = null;
+    }
+  }, []);
+
+  // فاز ۲: smart-chat برای تولید action_plan
+  const startSmartChat = useCallback(async (task: any, projectId: string) => {
+    if (!task || !projectId) return;
+    setExecuteStage('planning');
+    setExecuteProgress(prev => [...prev, '🧠 ارسال پرامپت به مدل برای تولید action_plan...']);
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: projectId,
+          model_ids: selectedModelIds.length > 0 ? selectedModelIds : ['claude'],
+          message: task.prompt || task.title || '',
+          chat_history: [],
+          previously_read_files: [],
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(`smart-chat HTTP ${res.status}: ${await res.text().catch(() => '')}`);
+      }
+      let extractedPlan: ActionPlan | null = null;
+      await consumeSSEStream(res, (eventName, data) => {
+        if (eventName === 'progress' && data?.message) {
+          setExecuteProgress(prev => [...prev.slice(-30), `… ${data.message}`]);
+        } else if (eventName === 'response') {
+          if (data?.action_plan && Array.isArray(data.action_plan?.files) && data.action_plan.files.length > 0) {
+            extractedPlan = data.action_plan as ActionPlan;
+          }
+        } else if (eventName === 'error') {
+          throw new Error(data?.message || 'خطا در smart-chat');
+        }
+      });
+      if (!extractedPlan) {
+        throw new Error('مدل action_plan تولید نکرد — احتمالاً سؤال شما نیاز به تغییر کد ندارد. پرامپت را بازنویسی کنید یا مدل دیگری انتخاب کنید.');
+      }
+      setExecuteActionPlan(extractedPlan);
+      setExecuteStage('preview');
+      setExecuteProgress(prev => [...prev, `✅ action_plan آماده شد: ${(extractedPlan as ActionPlan).files.length} فایل`]);
+    } catch (e: any) {
+      setExecuteError(e?.message || 'خطای ناشناخته در smart-chat');
+      setExecuteStage('error');
+    }
+  }, [selectedModelIds, consumeSSEStream]);
+
+  const openExecuteModal = useCallback(async (task: any) => {
+    if (!task) return;
+    closeExecuteModal();
+    setExecuteModalOpen(true);
+    setExecuteModalTask(task);
+    setExecuteStage('resolving');
+    setExecuteProgress(['🔍 یافتن پروژهٔ محلی برای این تسک...']);
+    setExecuteStartedAt(Date.now());
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/tasks/${encodeURIComponent(task.id)}/resolve-project`);
+      if (!res.ok) {
+        throw new Error(`resolve-project HTTP ${res.status}: ${await res.text().catch(() => '')}`);
+      }
+      const info = await res.json();
+      setExecuteProjectInfo(info);
+      if (!info.matched) {
+        setExecuteError(info.reason || 'پروژه پیدا نشد');
+        setExecuteStage('error');
+        return;
+      }
+      setExecuteProgress(prev => [...prev, `✅ پروژه پیدا شد: ${info.project_name} (${info.project_id})`]);
+      if (selectedModelIds.length === 0) {
+        setExecuteError('حداقل یک مدل فعال انتخاب کنید (در بالای صفحه /oversight)');
+        setExecuteStage('error');
+        return;
+      }
+      await startSmartChat(task, info.project_id);
+    } catch (e: any) {
+      setExecuteError(e?.message || 'خطای ناشناخته در resolve-project');
+      setExecuteStage('error');
+    }
+  }, [closeExecuteModal, selectedModelIds, startSmartChat]);
+
+  // فاز ۳: confirm + apply-action + record-execution
+  const confirmAndApply = useCallback(async () => {
+    const task = executeModalTask;
+    const info = executeProjectInfo;
+    const plan = executeActionPlan;
+    if (!task || !info || !plan) return;
+    setExecuteStage('applying');
+    setExecuteProgress(prev => [...prev, '🚀 ارسال action_plan به apply-action...']);
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/apply-action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: info.project_id,
+          model_ids: selectedModelIds.length > 0 ? selectedModelIds : ['claude'],
+          action_description: task.title || 'اعمال از /oversight',
+          action_files: plan.files || [],
+          commit_message: plan.commit_message || `oversight: ${task.title || task.id}`,
+          original_message: task.prompt?.slice(0, 1000) || task.title || '',
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(`apply-action HTTP ${res.status}: ${await res.text().catch(() => '')}`);
+      }
+      let prUrl = '';
+      let prBranch = '';
+      let filesCommitted: string[] = [];
+      await consumeSSEStream(res, (eventName, data) => {
+        if (eventName === 'progress' && data?.message) {
+          setExecuteProgress(prev => [...prev.slice(-30), `… ${data.message}`]);
+        } else if (eventName === 'apply_complete') {
+          if (data?.pr_url) prUrl = data.pr_url;
+          if (data?.branch) prBranch = data.branch;
+          if (Array.isArray(data?.files_committed)) filesCommitted = data.files_committed;
+        } else if (eventName === 'error') {
+          throw new Error(data?.message || 'خطا در apply-action');
+        }
+      });
+      if (!prUrl && !prBranch) {
+        throw new Error('apply-action کامل شد ولی PR/branch ساخته نشد. لاگ‌ها را بررسی کنید.');
+      }
+      setExecutePrUrl(prUrl);
+      setExecutePrBranch(prBranch);
+      setExecuteFilesCommitted(filesCommitted);
+
+      // فاز ۴: record-execution در Oversight
+      setExecuteStage('recording');
+      setExecuteProgress(prev => [...prev, '📝 ثبت نتیجه در Oversight...']);
+      try {
+        const recRes = await fetch(`${API_BASE}/api/oversight/tasks/${encodeURIComponent(task.id)}/record-execution`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            pr_url: prUrl,
+            pr_branch: prBranch,
+            files_committed: filesCommitted,
+            model_ids: selectedModelIds,
+            action_plan_summary: (plan.commit_message || '').slice(0, 500),
+            executed_via: 'inspector_apply_action',
+          }),
+        });
+        if (!recRes.ok) {
+          setExecuteProgress(prev => [...prev, `⚠️ ثبت در Oversight ناموفق (HTTP ${recRes.status}) — ولی PR ساخته شد`]);
+        } else {
+          setExecuteProgress(prev => [...prev, '✅ ثبت در Oversight موفق']);
+          // refresh تسک‌ها تا badge PR نمایش داده شود
+          try { await reloadTasks?.(); } catch {}
+        }
+      } catch (recErr: any) {
+        setExecuteProgress(prev => [...prev, `⚠️ ثبت در Oversight شکست خورد: ${recErr?.message}`]);
+      }
+
+      setExecuteStage('done');
+    } catch (e: any) {
+      setExecuteError(e?.message || 'خطای ناشناخته در apply-action');
+      setExecuteStage('error');
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [executeModalTask, executeProjectInfo, executeActionPlan, selectedModelIds, consumeSSEStream]);
 
   const [repos, setRepos] = useState<Repo[]>([]);
   const [reposSyncedAt, setReposSyncedAt] = useState<string | null>(null);
@@ -1643,6 +1902,8 @@ export default function OversightPage() {
             onMarkExternal={markTaskAppliedExternally}
             onCopyPrompt={copyFullPrompt}
             onShowHistory={openVerifyHistory}
+            onExecuteWithAi={openExecuteModal}
+            executeDisabledReason={selectedModelIds.length === 0 ? 'حداقل یک مدل انتخاب کنید' : ''}
             fmtDate={fmtDate}
           />
         ) : tab === 'project_tasks' ? (
@@ -1812,6 +2073,184 @@ export default function OversightPage() {
             onMark={markReport}
             fmtDate={fmtDate}
           />
+        )}
+
+        {/* 🚀 مودال اجرا با AI روی پروژه — Inspector apply-action bridge */}
+        {executeModalOpen && (
+          <Modal onClose={closeExecuteModal} title="🚀 اجرا با AI روی پروژه (PR ساخته می‌شود)">
+            <div className="space-y-4">
+              {/* عنوان تسک */}
+              {executeModalTask && (
+                <div className="bg-gray-50 dark:bg-gray-900/40 rounded-lg p-3">
+                  <div className="text-xs text-gray-500 mb-1">تسک</div>
+                  <div className="font-medium text-gray-800 dark:text-gray-100">{executeModalTask.title}</div>
+                </div>
+              )}
+
+              {/* اطلاعات پروژه */}
+              {executeProjectInfo && (
+                <div className={`p-3 rounded-lg text-sm ${
+                  executeProjectInfo.matched
+                    ? 'bg-green-50 dark:bg-green-900/20 text-green-800 dark:text-green-200'
+                    : 'bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200'
+                }`}>
+                  {executeProjectInfo.matched ? (
+                    <>✅ پروژه: <strong>{executeProjectInfo.project_name}</strong> · <code className="bg-white/40 dark:bg-black/20 px-1 rounded">{executeProjectInfo.repo_full_name}</code></>
+                  ) : (
+                    <>❌ {executeProjectInfo.reason}</>
+                  )}
+                </div>
+              )}
+
+              {/* مدل‌های فعال */}
+              <div className="text-xs text-gray-500 dark:text-gray-400">
+                مدل‌های انتخاب‌شده: {selectedModelIds.length === 0 ? <span className="text-red-600">هیچ — یکی انتخاب کنید</span> : selectedModelIds.join('، ')}
+              </div>
+
+              {/* Progress log */}
+              {executeProgress.length > 0 && (
+                <div className="bg-gray-900 dark:bg-black/50 rounded-lg p-3 max-h-48 overflow-auto">
+                  {executeProgress.map((line, i) => (
+                    <div key={i} className="text-xs font-mono text-gray-300 leading-relaxed">{line}</div>
+                  ))}
+                </div>
+              )}
+
+              {/* State: preview */}
+              {executeStage === 'preview' && executeActionPlan && (
+                <div className="border border-purple-200 dark:border-purple-700 rounded-lg p-3">
+                  <div className="text-sm font-semibold text-purple-800 dark:text-purple-200 mb-2">
+                    📋 پیش‌نمایش تغییرات ({executeActionPlan.files.length} فایل)
+                  </div>
+                  {executeActionPlan.commit_message && (
+                    <div className="text-xs text-gray-600 dark:text-gray-400 mb-3">
+                      <strong>پیام commit:</strong> {executeActionPlan.commit_message}
+                    </div>
+                  )}
+                  <div className="space-y-2 max-h-72 overflow-auto">
+                    {executeActionPlan.files.map((f, i) => (
+                      <details key={i} className="bg-gray-50 dark:bg-gray-900/40 rounded p-2">
+                        <summary className="cursor-pointer text-xs">
+                          <span className={`px-1.5 py-0.5 rounded mr-2 text-xs ${
+                            f.operation === 'create' ? 'bg-green-100 text-green-800 dark:bg-green-900/40' :
+                            f.operation === 'delete' ? 'bg-red-100 text-red-800 dark:bg-red-900/40' :
+                            f.operation === 'modify_sections' ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40' :
+                            'bg-blue-100 text-blue-800 dark:bg-blue-900/40'
+                          }`}>{f.operation || 'modify'}</span>
+                          <code className="text-xs">{f.path}</code>
+                        </summary>
+                        <pre className="text-xs whitespace-pre-wrap font-mono bg-white dark:bg-black/30 p-2 rounded mt-2 max-h-40 overflow-auto">
+                          {f.sections
+                            ? f.sections.map((s, si) => `--- بخش ${si + 1} ---\n[find] ${(s.find || '').slice(0, 400)}\n[replace] ${(s.replace || '').slice(0, 400)}`).join('\n\n')
+                            : (f.content || '').slice(0, 2000) + ((f.content || '').length > 2000 ? '\n... [TRUNCATED]' : '')}
+                        </pre>
+                      </details>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* State: done */}
+              {executeStage === 'done' && (
+                <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-700 rounded-lg p-4">
+                  <div className="text-2xl mb-2">✅</div>
+                  <div className="font-semibold text-green-800 dark:text-green-200 mb-1">اعمال موفقیت‌آمیز</div>
+                  <div className="text-xs text-gray-600 dark:text-gray-400 space-y-1">
+                    <div>📁 فایل‌های commit شده: <strong>{executeFilesCommitted.length}</strong></div>
+                    {executePrBranch && <div>🌿 branch: <code className="bg-white/40 dark:bg-black/20 px-1 rounded">{executePrBranch}</code></div>}
+                    {executeStartedAt && <div>⏱ زمان: {Math.round((Date.now() - executeStartedAt) / 1000)} ثانیه</div>}
+                    <div>🤖 مدل‌ها: {selectedModelIds.join('، ')}</div>
+                  </div>
+                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400 italic">
+                    💡 verify خودکار بعد از merge شدن PR اجرا می‌شود (یا الان دستی verify کنید).
+                  </div>
+                </div>
+              )}
+
+              {/* State: error */}
+              {executeStage === 'error' && executeError && (
+                <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-lg p-3 text-sm text-red-800 dark:text-red-200">
+                  ❌ {executeError}
+                </div>
+              )}
+
+              {/* دکمه‌ها بر اساس state */}
+              <div className="flex gap-2 justify-end pt-2 border-t dark:border-gray-700">
+                {executeStage === 'preview' && (
+                  <>
+                    <button
+                      onClick={closeExecuteModal}
+                      className="px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 text-sm"
+                    >
+                      ❌ لغو
+                    </button>
+                    <button
+                      onClick={confirmAndApply}
+                      className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium"
+                    >
+                      🚀 تأیید و اعمال (PR ساخته می‌شود)
+                    </button>
+                  </>
+                )}
+                {executeStage === 'done' && (
+                  <>
+                    {executePrUrl && (
+                      <a
+                        href={executePrUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm"
+                      >
+                        🔗 مشاهدهٔ PR
+                      </a>
+                    )}
+                    {executeModalTask && (
+                      <button
+                        onClick={() => {
+                          const taskId = executeModalTask.id;
+                          closeExecuteModal();
+                          verifyTaskNow(taskId);
+                        }}
+                        className="px-4 py-2 bg-cyan-600 text-white rounded-lg hover:bg-cyan-700 text-sm"
+                      >
+                        🔍 verify الان
+                      </button>
+                    )}
+                    <button
+                      onClick={closeExecuteModal}
+                      className="px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 text-sm"
+                    >
+                      بستن
+                    </button>
+                  </>
+                )}
+                {executeStage === 'error' && (
+                  <>
+                    <button
+                      onClick={() => executeModalTask && openExecuteModal(executeModalTask)}
+                      className="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 text-sm"
+                    >
+                      🔁 تلاش مجدد
+                    </button>
+                    <button
+                      onClick={closeExecuteModal}
+                      className="px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 text-sm"
+                    >
+                      بستن
+                    </button>
+                  </>
+                )}
+                {(executeStage === 'resolving' || executeStage === 'planning' || executeStage === 'applying' || executeStage === 'recording') && (
+                  <button
+                    onClick={closeExecuteModal}
+                    className="px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 text-sm"
+                  >
+                    لغو
+                  </button>
+                )}
+              </div>
+            </div>
+          </Modal>
         )}
 
         {/* مودال تسک */}
@@ -2567,6 +3006,8 @@ function TasksPanel({
   onMarkExternal,
   onCopyPrompt,
   onShowHistory,
+  onExecuteWithAi,
+  executeDisabledReason,
   fmtDate,
 }: {
   tasks: Task[];
@@ -2590,6 +3031,8 @@ function TasksPanel({
   onMarkExternal: (id: string) => void;
   onCopyPrompt: (id: string) => void;
   onShowHistory: (id: string) => void;
+  onExecuteWithAi: (t: Task) => void;
+  executeDisabledReason: string;
   fmtDate: (d?: string | null) => string;
 }) {
   const tasksByCol = useMemo(() => {
@@ -2697,6 +3140,18 @@ function TasksPanel({
             >
               🔍 verify
             </button>
+            <button
+              onClick={() => onExecuteWithAi(t)}
+              disabled={!!executeDisabledReason}
+              title={
+                executeDisabledReason
+                  ? executeDisabledReason
+                  : 'این تسک را به Inspector پروژه می‌فرستد، AI کد تولید می‌کند، PR ساخته می‌شود'
+              }
+              className="px-3 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700 disabled:opacity-50"
+            >
+              🚀 اجرا با AI
+            </button>
             {t.status === 'suggested' && (
               <button
                 onClick={() => onUpdate(t.id, { status: 'pending' })}
@@ -2754,6 +3209,34 @@ function TasksPanel({
           {(t.confirmation_streak ?? 0) > 0 && (
             <span className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300">
               ✓ streak {t.confirmation_streak}
+            </span>
+          )}
+          {/* 🔗 PR badge — تسک از طریق Inspector apply-action اجرا شده */}
+          {t.applied_evidence?.pr_url && (
+            <a
+              href={t.applied_evidence.pr_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-200 dark:hover:bg-emerald-900/60"
+              title={
+                `PR ساخته شده توسط ${t.applied_evidence.executed_via || 'inspector_apply_action'}\n` +
+                `branch: ${t.applied_evidence.pr_branch || '(نامشخص)'}\n` +
+                `${(t.applied_evidence.files_committed || []).length} فایل commit شده\n` +
+                `زمان: ${t.applied_evidence.executed_at || '(نامشخص)'}\n` +
+                `کلیک: باز کردن PR در GitHub`
+              }
+            >
+              🔗 PR
+            </a>
+          )}
+          {/* در انتظار merge / verify */}
+          {t.verification_status === 'applied_externally_pending_verify' && t.applied_evidence?.pr_url && (
+            <span
+              className="px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300"
+              title="PR ساخته شده ولی هنوز merge/verify نشده. پس از merge، verify خودکار اجرا می‌شود."
+            >
+              ⏳ در انتظار merge
             </span>
           )}
           {t.manually_marked_applied_at && (
