@@ -50,6 +50,37 @@ router = APIRouter(prefix="/api/projects", tags=["project-health"])
 
 
 # =====================================================================
+# 🆕 (commit 3.2) Deprecation dependency — اضافه کردن header های
+# Deprecation/Sunset/Link به پاسخ‌ها + log warning
+# (FastAPI APIRouter middleware ساپورت نمی‌کند، پس از Depends استفاده
+# می‌کنیم. این dependency در هر endpoint Health به‌صورت Depends اضافه
+# می‌شود؛ هر تغییری در منطق endpoints لازم نیست — فقط هنگام برگشت
+# response این header ها set می‌شوند.)
+# =====================================================================
+
+from fastapi import Response as _DepResp, Request as _DepReq
+
+def deprecated_health_endpoint(request: _DepReq, response: _DepResp):
+    """Dependency برای علامت‌گذاری endpoint های Health به‌عنوان deprecated."""
+    try:
+        response.headers["Deprecation"] = "true"
+        response.headers["Sunset"] = "Wed, 31 Dec 2026 23:59:59 GMT"
+        response.headers["Link"] = (
+            '</api/oversight/scan>; rel="successor-version", '
+            '</api/oversight/codex>; rel="successor-version"'
+        )
+        response.headers["X-Migration-Note"] = (
+            "Health analysis is deprecated. Use /oversight (Deep Scan + Codex)."
+        )
+        logger.info(
+            f"[deprecated] Health endpoint called: "
+            f"{request.method} {request.url.path} — migrate to /oversight"
+        )
+    except Exception:
+        pass
+
+
+# =====================================================================
 # 🆕 Data export endpoint — Phase 3 deprecation pre-step
 # (مهاجرت Health → Oversight: قبل از حذف، export کامل data ضروری است)
 # =====================================================================

@@ -11681,6 +11681,61 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           * ==================================================================== */}
         {activeTab === 'health' && (
           <div className="space-y-6">
+            {/* 🆕 (commit 3.2) Deprecation banner — این تب در حال مهاجرت به /oversight است */}
+            <div className="bg-amber-50 dark:bg-amber-900/20 border-2 border-amber-300 dark:border-amber-700 rounded-xl p-4">
+              <div className="flex items-start gap-3 flex-wrap">
+                <span className="text-3xl">⚠️</span>
+                <div className="flex-1 min-w-[280px]">
+                  <h3 className="font-bold text-amber-900 dark:text-amber-100 mb-1">
+                    این بخش به مرکز نظارت منتقل شد
+                  </h3>
+                  <p className="text-sm text-amber-800 dark:text-amber-200 mb-2">
+                    تب «تحلیل سلامت» به‌زودی حذف خواهد شد. تمام قابلیت‌های آن (security، coverage، file health map، roadmap/README، chain status) به <a href="/oversight" className="font-semibold underline hover:text-amber-600">/oversight ← تب «🏥 سلامت پروژه»</a> منتقل شده.
+                  </p>
+                  <div className="flex gap-2 flex-wrap mt-3">
+                    <a
+                      href="/oversight"
+                      className="px-3 py-1.5 bg-cyan-600 text-white rounded-lg hover:bg-cyan-700 text-xs font-medium"
+                    >
+                      🏥 رفتن به مرکز نظارت
+                    </a>
+                    <a
+                      href={`${API_BASE}/api/projects/${encodeURIComponent(projectId as string)}/health/export`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-xs font-medium"
+                    >
+                      📥 export داده‌های فعلی (JSON)
+                    </a>
+                    <button
+                      onClick={async () => {
+                        try {
+                          const res = await fetch(
+                            `${API_BASE}/api/oversight/migration/import-from-project/${encodeURIComponent(projectId as string)}`,
+                            { method: 'POST', headers: { 'Content-Type': 'application/json' } }
+                          );
+                          const data = await res.json();
+                          if (data?.matched) {
+                            alert(`✅ migration موفق بود!\n\nمراحل:\n${(data.steps || []).join('\n')}`);
+                          } else {
+                            alert(`⚠️ migration ممکن نشد:\n${(data.warnings || ['نامشخص']).join('\n')}`);
+                          }
+                        } catch (e: any) {
+                          alert(`خطا در migration: ${e?.message || e}`);
+                        }
+                      }}
+                      className="px-3 py-1.5 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-xs font-medium"
+                    >
+                      🔄 migrate به Oversight
+                    </button>
+                  </div>
+                  <p className="text-xs text-amber-700 dark:text-amber-300 mt-3 italic">
+                    تا زمان حذف نهایی، این تب همچنان کار می‌کند. توصیه: ابتدا «migrate به Oversight» را بزنید (یک بار)، سپس از تب جدید استفاده کنید.
+                  </p>
+                </div>
+              </div>
+            </div>
+
             <ProjectHealthPanel
               projectId={projectId as string}
               onHealthUpdate={() => {
