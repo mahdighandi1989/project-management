@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import ProjectHealthPanel from '@/components/ProjectHealthPanel';
+// ProjectHealthPanel در commit 3.3a حذف شد — به /oversight منتقل شد
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -289,10 +289,8 @@ export default function ProjectPage() {
           </div>
         )}
 
-        {/* پنل تحلیل سلامت پروژه */}
-        <div className="mb-6">
-          <ProjectHealthPanel projectId={projectId} onHealthUpdate={loadProject} />
-        </div>
+        {/* پنل تحلیل سلامت در commit 3.3a حذف شد. کاربران باید برای
+            تحلیل پروژه به /oversight بروند. */}
 
         <div className="grid lg:grid-cols-4 gap-6">
           {/* لیست فایل‌ها */}
