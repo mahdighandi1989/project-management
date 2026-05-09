@@ -453,6 +453,35 @@ async def log_requests(request: Request, call_next):
     # اضافه کردن header های CORS به همه پاسخ‌ها (اطمینان از وجود)
     response.headers["X-Process-Time"] = str(process_time)
     response.headers["Access-Control-Allow-Origin"] = "*"
+
+    # 🆕 (commit 3.2) Deprecation headers برای endpoint های Health analysis
+    # که در حال migration به Oversight هستند. /health/export استثناست
+    # (خودش راهکار migration است).
+    try:
+        path = request.url.path or ""
+        is_deprecated = (
+            ("/health/" in path and "/health/export" not in path)
+            or "/security/scan" in path or "/security/secrets" in path
+            or "/security/license" in path or "/security/dependencies" in path
+            or "/test-coverage" in path
+            or path.endswith("/roadmap") or "/roadmap/items/" in path
+            or path.endswith("/readme")
+            or path.endswith("/ideal-state")
+        )
+        if is_deprecated:
+            response.headers["Deprecation"] = "true"
+            response.headers["Sunset"] = "Wed, 31 Dec 2026 23:59:59 GMT"
+            response.headers["Link"] = (
+                '</api/oversight/scan>; rel="successor-version", '
+                '</api/oversight/codex>; rel="successor-version"'
+            )
+            response.headers["X-Migration-Note"] = (
+                "Deprecated: Health analysis is migrating to /oversight (Deep Scan + Codex). "
+                "See /api/projects/{id}/health/export for data backup."
+            )
+    except Exception:
+        pass  # هرگز نباید response را بشکند
+
     return response
 
 

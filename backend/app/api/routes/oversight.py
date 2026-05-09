@@ -42,6 +42,9 @@ class WatchedUpdate(BaseModel):
     allow_push: Optional[bool] = None
     allow_create_issue: Optional[bool] = None
     scan_interval_hours: Optional[float] = None
+    # 🆕 (commit 2.3) عمق scan + وزن‌های معیار — مهاجرت از Health
+    scan_depth: Optional[str] = None  # quick | standard | deep | thorough
+    scan_criteria_weights: Optional[Dict[str, float]] = None
 
 
 class IdeaToPromptRequest(BaseModel):
@@ -572,6 +575,158 @@ async def scan_progress(watched_id: str):
     return read_progress(watched_id)
 
 
+@router.get("/scan/{watched_id}/summaries")
+async def scan_summaries(watched_id: str):
+    """خواندن خلاصه‌های ساختاریافته از آخرین deep scan.
+
+    شامل: security_summary (از Pass I) + coverage_summary (از Pass J — بعداً)
+    + هر summary ساختاریافته دیگری که passes تخصصی تولید کرده‌اند.
+
+    این endpoint برای UI تب «🏥 سلامت پروژه» در /oversight استفاده می‌شود
+    تا metrics را بدون reparse کردن کل findings نمایش دهد.
+    """
+    from ...services.oversight_deep_scan_service import SCAN_RESULTS_DIR
+    from ...services.oversight_service import _read_json
+
+    data = _read_json(SCAN_RESULTS_DIR / f"{watched_id}.json", {}) or {}
+    return {
+        "watched_id": watched_id,
+        "ran_at": data.get("ran_at", ""),
+        "passes_run": data.get("passes_run", 0),
+        "pass_summaries": data.get("pass_summaries", {}),
+        "findings_count": len(data.get("findings") or []),
+        "tasks_created_count": len(data.get("tasks_created") or []),
+    }
+
+
+# 🆕 Pause / Resume / Stop scan (مهاجرت از Health analysis)
+# state در progress JSON ذخیره می‌شود تا run_deep_scan در شروع چک کند
+
+@router.post("/scan/{watched_id}/pause")
+async def pause_scan(watched_id: str):
+    """درخواست pause یک scan در حال اجرا.
+
+    state در progress JSON ست می‌شود. scan در iteration بعدی چک می‌کند
+    و متوقف می‌شود (graceful, not abort).
+    """
+    from ...services.oversight_deep_scan_service import write_progress, read_progress
+    progress = read_progress(watched_id)
+    if not progress:
+        raise HTTPException(status_code=404, detail="هیچ scan فعالی برای این پروژه نیست")
+    write_progress(
+        watched_id,
+        pause_requested=True,
+        paused_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+    )
+    return {"success": True, "status": "pause_requested"}
+
+
+@router.post("/scan/{watched_id}/resume")
+async def resume_scan(watched_id: str):
+    """clear pause flag — scan در iteration بعدی ادامه می‌دهد."""
+    from ...services.oversight_deep_scan_service import write_progress, read_progress
+    progress = read_progress(watched_id)
+    if not progress:
+        raise HTTPException(status_code=404, detail="هیچ scan در حال اجرا نیست")
+    write_progress(
+        watched_id,
+        pause_requested=False,
+        resumed_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+    )
+    return {"success": True, "status": "resumed"}
+
+
+@router.post("/scan/{watched_id}/stop")
+async def stop_scan(watched_id: str):
+    """درخواست توقف کامل scan (cancel).
+
+    scan در iteration بعدی چک می‌کند و خارج می‌شود.
+    """
+    from ...services.oversight_deep_scan_service import write_progress, read_progress
+    progress = read_progress(watched_id)
+    if not progress:
+        raise HTTPException(status_code=404, detail="هیچ scan فعالی برای این پروژه نیست")
+    write_progress(
+        watched_id,
+        stop_requested=True,
+        status="stopping",
+        stopped_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+    )
+    return {"success": True, "status": "stop_requested"}
+
+
+# 🆕 Validation chain status (مهاجرت از Health chain-status)
+
+@router.get("/watched/{watched_id}/chain-status")
+async def get_chain_status(watched_id: str):
+    """وضعیت کامل chain یک watched project: scan → verify → roadmap → tasks.
+
+    این endpoint جایگزین Health analysis chain-status است.
+    """
+    from ...services.oversight_deep_scan_service import (
+        STRUCTURE_DIR, SCAN_RESULTS_DIR
+    )
+    from ...services.oversight_codex_service import read_codex, read_roadmap
+    from ...services.oversight_service import _read_json
+
+    service = get_oversight_service()
+    watched = service._find_watched(watched_id)
+    if watched is None:
+        raise HTTPException(status_code=404, detail="watched project یافت نشد")
+
+    structure = _read_json(STRUCTURE_DIR / f"{watched_id}.json", {}) or {}
+    scan_results = _read_json(SCAN_RESULTS_DIR / f"{watched_id}.json", {}) or {}
+    codex = read_codex(watched_id)
+    roadmap = read_roadmap(watched_id)
+
+    # تسک‌های مرتبط
+    related_tasks = [t for t in service.tasks if t.watched_id == watched_id]
+    pending_count = sum(1 for t in related_tasks if t.status in ("pending", "suggested"))
+    done_count = sum(1 for t in related_tasks if t.status == "done")
+    rejected_count = sum(1 for t in related_tasks if t.status in ("cancelled", "archived"))
+    verified_count = sum(1 for t in related_tasks if t.verification_status == "done")
+    partial_count = sum(1 for t in related_tasks if t.verification_status == "partial")
+
+    return {
+        "watched_id": watched_id,
+        "repo": watched.repo_full_name,
+        # Phase 1: Scan
+        "scan": {
+            "status": "done" if scan_results.get("ran_at") else "never",
+            "last_at": scan_results.get("ran_at"),
+            "passes_run": scan_results.get("passes_run", 0),
+            "findings_count": len(scan_results.get("findings") or []),
+        },
+        # Phase 2: Codex
+        "codex": {
+            "status": "done" if codex.get("updated_at") else "never",
+            "last_at": codex.get("updated_at"),
+            "files_documented": codex.get("files_count", 0),
+        },
+        # Phase 3: Roadmap & Ideal State
+        "roadmap": {
+            "status": "done" if roadmap.get("generated_at") else "never",
+            "last_at": roadmap.get("generated_at") or roadmap.get("updated_at"),
+            "ideal_state_set": bool(roadmap.get("ideal_state", "").strip()),
+            "phases_count": len(roadmap.get("phases") or []),
+        },
+        # Phase 4: Tasks
+        "tasks": {
+            "total": len(related_tasks),
+            "pending": pending_count,
+            "done": done_count,
+            "rejected": rejected_count,
+        },
+        # Phase 5: Verification
+        "verification": {
+            "verified_count": verified_count,
+            "partial_count": partial_count,
+        },
+        # Last full chain run timestamp (most recent of scan_results)
+        "last_full_chain_at": scan_results.get("ran_at"),
+    }
+
+
 # ============================================================
 # Codex
 # ============================================================
@@ -607,6 +762,255 @@ async def refresh_codex(watched_id: str, payload: Optional[CodexRefreshRequest] 
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# 🆕 Roadmap & README management (مهاجرت از Health analysis)
+# ============================================================
+
+class GenerateRoadmapRequest(BaseModel):
+    model_id: Optional[str] = None
+    tone: str = "professional"
+
+
+class GenerateReadmeRequest(BaseModel):
+    model_id: Optional[str] = None
+    sections: Optional[List[str]] = None
+
+
+class UpdateRoadmapRequest(BaseModel):
+    """ویرایش دستی روadmap — فقط markdown یا کل ساختار."""
+    roadmap_markdown: Optional[str] = None
+    ideal_state: Optional[str] = None
+    phases: Optional[List[Dict[str, Any]]] = None
+
+
+class UpdateReadmeRequest(BaseModel):
+    readme_markdown: str
+
+
+@router.get("/codex/{watched_id}/roadmap")
+async def get_roadmap(watched_id: str):
+    """خواندن روadmap ذخیره شده. اگر تولید نشده، dict خالی."""
+    from ...services.oversight_codex_service import read_roadmap
+    return read_roadmap(watched_id)
+
+
+@router.post("/codex/{watched_id}/generate-roadmap")
+async def generate_roadmap_endpoint(watched_id: str, payload: Optional[GenerateRoadmapRequest] = None):
+    """تولید روadmap با AI از structure + scan findings + user_notes."""
+    from ...services.oversight_codex_service import generate_roadmap_for_watched
+    payload = payload or GenerateRoadmapRequest()
+    try:
+        return await generate_roadmap_for_watched(
+            watched_id, model_id=payload.model_id, tone=payload.tone,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/codex/{watched_id}/roadmap")
+async def update_roadmap_endpoint(watched_id: str, payload: UpdateRoadmapRequest):
+    """ویرایش دستی روadmap (markdown یا phases)."""
+    from ...services.oversight_codex_service import read_roadmap, write_roadmap, now_iso
+    data = read_roadmap(watched_id) or {"watched_id": watched_id}
+    if payload.roadmap_markdown is not None:
+        data["roadmap_markdown"] = payload.roadmap_markdown
+    if payload.ideal_state is not None:
+        data["ideal_state"] = payload.ideal_state
+    if payload.phases is not None:
+        data["phases"] = payload.phases
+    data["updated_at"] = now_iso()
+    if not data.get("generated_at"):
+        data["generated_at"] = data["updated_at"]
+    write_roadmap(watched_id, data)
+    return data
+
+
+@router.patch("/codex/{watched_id}/roadmap/items/{item_id}")
+async def toggle_roadmap_item_endpoint(watched_id: str, item_id: str):
+    """تاگل completed یک item. item_id فرمت 'phase_idx:item_idx'."""
+    from ...services.oversight_codex_service import toggle_roadmap_item
+    result = toggle_roadmap_item(watched_id, item_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="item یا روadmap یافت نشد")
+    return result
+
+
+@router.get("/codex/{watched_id}/readme")
+async def get_readme(watched_id: str):
+    """خواندن README ذخیره شده."""
+    from ...services.oversight_codex_service import read_readme_doc
+    return read_readme_doc(watched_id)
+
+
+@router.post("/codex/{watched_id}/generate-readme")
+async def generate_readme_endpoint(watched_id: str, payload: Optional[GenerateReadmeRequest] = None):
+    """تولید README با AI."""
+    from ...services.oversight_codex_service import generate_readme_for_watched
+    payload = payload or GenerateReadmeRequest()
+    try:
+        return await generate_readme_for_watched(
+            watched_id, model_id=payload.model_id, sections=payload.sections,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/codex/{watched_id}/readme")
+async def update_readme_endpoint(watched_id: str, payload: UpdateReadmeRequest):
+    """ویرایش دستی README."""
+    from ...services.oversight_codex_service import read_readme_doc, write_readme_doc, now_iso
+    data = read_readme_doc(watched_id) or {"watched_id": watched_id}
+    data["readme_markdown"] = payload.readme_markdown
+    data["updated_at"] = now_iso()
+    if not data.get("generated_at"):
+        data["generated_at"] = data["updated_at"]
+    write_readme_doc(watched_id, data)
+    return data
+
+
+# ============================================================
+# 🆕 General Archive (مهاجرت از Health analysis general_archive)
+# ============================================================
+
+@router.get("/archive")
+async def list_general_archive(
+    item_type: Optional[str] = Query(default=None, description="task | report"),
+    project_full_name: Optional[str] = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+):
+    """آرشیو سراسری: تسک‌های done/archived + گزارش‌های قدیمی.
+
+    این endpoint جایگزین Health analysis /general-archive است.
+    به‌صورت paginated و قابل فیلتر بر اساس type و پروژه.
+    """
+    service = get_oversight_service()
+    items: List[Dict[str, Any]] = []
+    type_breakdown: Dict[str, int] = {}
+    status_breakdown: Dict[str, int] = {}
+
+    # tasks: status ∈ {done, archived, cancelled}
+    if item_type in (None, "task"):
+        for t in service.tasks:
+            if t.status not in ("done", "archived", "cancelled"):
+                continue
+            if project_full_name and t.project_full_name != project_full_name:
+                continue
+            items.append({
+                "item_type": "task",
+                "id": t.id,
+                "title": t.title,
+                "status": t.status,
+                "type": t.type,
+                "priority": t.priority,
+                "project_full_name": t.project_full_name,
+                "created_at": t.created_at,
+                "updated_at": t.updated_at,
+                "merged_findings_count": len(t.merged_findings or []),
+                "preview": (t.raw_idea or "")[:200],
+            })
+            status_breakdown[t.status] = status_breakdown.get(t.status, 0) + 1
+            type_breakdown[t.type] = type_breakdown.get(t.type, 0) + 1
+
+    # reports
+    if item_type in (None, "report"):
+        for r in service.reports:
+            if project_full_name and r.project_full_name != project_full_name:
+                continue
+            items.append({
+                "item_type": "report",
+                "id": r.id,
+                "task_id": r.task_id,
+                "status": r.status,
+                "project_full_name": r.project_full_name,
+                "run_at": r.run_at,
+                "model_id": r.model_id,
+                "preview": (r.raw_response or "")[:200],
+            })
+            status_breakdown[r.status] = status_breakdown.get(r.status, 0) + 1
+            type_breakdown["report"] = type_breakdown.get("report", 0) + 1
+
+    # sort by date desc
+    items.sort(key=lambda x: x.get("updated_at") or x.get("run_at") or "", reverse=True)
+
+    total = len(items)
+    start = (page - 1) * page_size
+    end = start + page_size
+    paginated = items[start:end]
+
+    return {
+        "items": paginated,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": (total + page_size - 1) // page_size if page_size else 1,
+        "type_breakdown": type_breakdown,
+        "status_breakdown": status_breakdown,
+    }
+
+
+@router.post("/migration/import-from-project/{project_id}")
+async def import_from_project_endpoint(project_id: str, db: Session = Depends(get_db)):
+    """مهاجرت data یک پروژهٔ Health → Oversight (دستی، per-project).
+
+    معادل صدا زدن migrate_one_project از script CLI ولی از طریق API.
+    این endpoint قبل از حذف نهایی Health به کاربران اجازه می‌دهد
+    داده‌های پروژه را به Oversight منتقل کنند.
+    """
+    from ...models.project import Project
+    proj = db.query(Project).filter(Project.id == project_id).first()
+    if not proj:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # delegate به script (که async است)
+    try:
+        from ...scripts_migration_helper import migrate_one_project_async
+    except Exception:
+        # fallback: import مستقیم از scripts
+        import importlib.util
+        from pathlib import Path
+        script_path = Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "migrate_health_to_oversight.py"
+        if not script_path.exists():
+            raise HTTPException(status_code=500, detail="migration script یافت نشد")
+        spec = importlib.util.spec_from_file_location("migrate_h2o", str(script_path))
+        if spec is None or spec.loader is None:
+            raise HTTPException(status_code=500, detail="بارگذاری migration script ناموفق")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        migrate_one_project_async = module.migrate_one_project
+
+    result = await migrate_one_project_async(proj, dry_run=False)
+    return result
+
+
+@router.delete("/archive/{item_type}/{item_id}")
+async def delete_archive_item(item_type: str, item_id: str):
+    """حذف یک item از archive (task یا report)."""
+    service = get_oversight_service()
+    if item_type == "task":
+        async with service._lock:
+            before = len(service.tasks)
+            service.tasks = [t for t in service.tasks if t.id != item_id]
+            if len(service.tasks) == before:
+                raise HTTPException(status_code=404, detail="task یافت نشد")
+            service._save_tasks()
+        return {"success": True, "deleted": "task", "id": item_id}
+    elif item_type == "report":
+        async with service._lock:
+            before = len(service.reports)
+            service.reports = [r for r in service.reports if r.id != item_id]
+            if len(service.reports) == before:
+                raise HTTPException(status_code=404, detail="report یافت نشد")
+            service._save_reports()
+        return {"success": True, "deleted": "report", "id": item_id}
+    else:
+        raise HTTPException(status_code=400, detail="item_type باید 'task' یا 'report' باشد")
 
 
 # ============================================================

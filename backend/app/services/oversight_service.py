@@ -159,6 +159,20 @@ class WatchedProject:
     last_verify_at: Optional[str] = None
     next_verify_at: Optional[str] = None
     verify_interval_hours: float = 12.0
+    # 🆕 وزن‌های قابل تنظیم برای محاسبهٔ per-file health score
+    # (مهاجرت از Health analysis criteria_weights)
+    # default values متعادل — کاربر می‌تواند override کند تا محاسبه
+    # به اولویت‌های پروژهٔ خودش حساس‌تر شود
+    scan_criteria_weights: Dict[str, float] = field(default_factory=lambda: {
+        "security": 1.5,
+        "quality": 1.0,
+        "tests": 1.2,
+        "completeness": 1.0,
+    })
+    # 🆕 عمق scan قابل تنظیم (مهاجرت از Health depth parameter)
+    # quick: 3 pass، standard: 5 pass، deep: همه ۱۰ pass،
+    # thorough: همه ۱۰ + per-file scoring + roadmap auto-gen
+    scan_depth: str = "deep"  # quick | standard | deep | thorough
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
 
@@ -207,6 +221,9 @@ class OversightTask:
     followup_target_locations: List[Dict[str, Any]] = field(default_factory=list)
     followup_acceptance_criteria: List[str] = field(default_factory=list)
     followup_round: int = 0  # 0=هیچ، 1=دور اول follow-up، 2=...
+    # 🆕 findings که در این task ادغام شده‌اند (از smart merger در deep_scan)
+    # هر merged finding شامل: title, type, priority, _pass, description (snippet)
+    merged_findings: List[Dict[str, Any]] = field(default_factory=list)
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
 
@@ -805,6 +822,9 @@ class OversightService:
                         "auto_create_pr_instead_of_commit",
                         "notify_user_before_apply",
                         "verify_interval_hours",
+                        # 🆕 (commit 2.3) — مهاجرت از Health analysis settings
+                        "scan_depth",
+                        "scan_criteria_weights",
                     }
                     for k, v in updates.items():
                         if k in allowed:

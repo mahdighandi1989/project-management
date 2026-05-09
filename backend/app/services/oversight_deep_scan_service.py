@@ -398,6 +398,12 @@ PASSES = [
     ("quality", "کیفیت کد و dead code"),
     ("dependency", "ناسازگاری‌های runtime و dependency"),
     ("completeness", "کامل بودن نسبت به هدف کاربر"),
+    # 🆕 Pass I — اسکن امنیتی عمیق با خروجی ساختاریافته
+    # (مهاجرت از /projects/[id]/health/security)
+    ("security_deep", "اسکن امنیتی عمیق: secrets + license + dependencies"),
+    # 🆕 Pass J — تحلیل پوشش تست
+    # (مهاجرت از /projects/[id]/health/coverage)
+    ("coverage", "تحلیل پوشش تست — فایل‌های untested و gap detection"),
 ]
 
 
@@ -493,6 +499,96 @@ Stack تشخیص داده شده: {', '.join(stacks) or '(نامشخص)'}
 - آیا تمام بخش‌های لازم برای رسیدن به «هدف اصلی پروژه» پیاده شده‌اند؟
 - فیچرهای half-done که شروع شده ولی تمام نشده‌اند
 - placeholderها، mock dataهای جامانده، endpointهایی که فقط dummy response برمی‌گردانند
+""",
+        "security_deep": """
+فاز فعلی: **I — اسکن امنیتی عمیق (مهاجرت از Health analysis)**
+
+این pass تخصصی‌تر از pass D (security) است — علاوه بر findings عادی،
+یک خلاصهٔ ساختاریافته با شمارش دقیق هم برمی‌گرداند.
+
+تمرکز:
+- **Hardcoded secrets**: API keys, tokens, passwords, JWT secrets,
+  database URLs با password، AWS/GCP credentials
+  مثال‌های الگو: AKIA[0-9A-Z]{16}، sk_live_..., ghp_..., bearer tokens
+- **Sensitive files**: .env, .env.local, credentials.json, .pem, .key,
+  service-account*.json, secrets.yml, htpasswd
+- **License**: آیا LICENSE موجود است؟ سازگار با dependencies؟
+  مثلاً GPL در پروژه‌ای که می‌خواهد commercial باشد؟
+- **Vulnerable dependencies**: نسخه‌های قدیمی شناخته‌شده با CVE
+  (lodash <4.17.21, log4j <2.17, ...)
+- **CORS/Auth**: endpoint بدون auth، CORS=`*` در production،
+  cookie بدون Secure/HttpOnly
+- **Input validation**: SQL injection patterns، XSS، command injection
+
+# خروجی JSON اضافی (علاوه بر findings عادی)
+علاوه بر `findings[]`، یک کلید جدید `security_summary` هم برگردان:
+
+{
+  "findings": [...],
+  "security_summary": {
+    "secrets_count": 0,
+    "secrets_files": ["path/to/file.py:line"],
+    "license_status": "ok | missing | conflicting | unknown",
+    "license_name": "MIT | Apache-2.0 | ...",
+    "vulnerable_deps_count": 0,
+    "vulnerable_deps": [{"name": "lodash", "version": "4.0.0", "cve": "CVE-...", "severity": "high"}],
+    "sensitive_files_count": 0,
+    "sensitive_files": [".env", "credentials.json"],
+    "cors_open": false,
+    "endpoints_without_auth_count": 0,
+    "overall_security_score": 85
+  }
+}
+
+`overall_security_score` 0-100 بر اساس فرمول وزن‌دار:
+- 100 شروع، -20 برای هر secret، -10 برای هر vuln dep critical،
+  -5 برای هر sensitive file بدون gitignore، -15 اگر license missing،
+  -10 برای CORS باز.
+حداقل 0.
+""",
+        "coverage": """
+فاز فعلی: **J — تحلیل پوشش تست (مهاجرت از Health analysis)**
+
+این pass شناسایی می‌کند فایل‌های source که فایل test متناظر ندارند یا
+دارای پوشش ضعیف‌اند، و untested critical paths را پیشنهاد می‌دهد.
+
+تشخیص فایل‌های test (الگوها):
+- Python: `tests/`, `test_*.py`, `*_test.py`, `conftest.py`
+- JS/TS: `__tests__/`, `*.test.{ts,tsx,js,jsx}`, `*.spec.*`,
+  `cypress/`, `e2e/`, `tests/`
+- جاوا: `src/test/`, `*Test.java`, `*Tests.java`
+- سایر: `spec/`, `test/`
+
+تمرکز:
+- فایل‌های source که فایل test متناظر ندارند
+- Critical paths (auth, payment, security) untested
+- محاسبهٔ تخمینی coverage = (فایل‌های با test متناظر) / (کل source)
+- پیشنهاد test cases مشخص برای ۳-۵ فایل critical untested
+
+# خروجی JSON اضافی (علاوه بر findings عادی)
+علاوه بر `findings[]` (هر کدام برای یک untested critical file)،
+یک کلید جدید `coverage_summary` هم برگردان:
+
+{
+  "findings": [...],
+  "coverage_summary": {
+    "total_source_files": 0,
+    "total_test_files": 0,
+    "test_to_source_ratio": 0.0,
+    "coverage_estimate_percent": 0,
+    "untested_files_count": 0,
+    "untested_files": ["path/to/file.py"],
+    "critical_untested": [{"path": "...", "reason": "auth flow", "suggested_tests": ["test_login_invalid", "..."]}],
+    "coverage_score": 75
+  }
+}
+
+`coverage_score` 0-100:
+- 100 اگر >80% فایل‌های source تست دارند
+- proportional decrease تا 0 اگر هیچ تستی نیست
+
+نکته: critical_untested فقط برای فایل‌هایی که در نقشهٔ Importهای داخلی
+hub هستند یا critical_path (/auth/, /payment/, /security/) را شامل می‌شوند.
 """,
     }
 
@@ -750,6 +846,132 @@ async def build_deep_context_for_idea(
 
 
 # =====================================================================
+# Smart finding merger (مهاجرت از Health analysis _merge_similar_issues)
+# =====================================================================
+
+def _normalize_title(title: str) -> str:
+    """نرمال‌سازی title برای similarity comparison."""
+    import re as _re
+    s = (title or "").strip().lower()
+    # حذف کلمات stop رایج
+    for stop in ["the", "a", "an", "is", "are", "to", "of", "for", "in",
+                 "و", "در", "از", "به", "که", "یک", "این", "آن"]:
+        s = _re.sub(rf"\b{stop}\b", " ", s)
+    # حذف punctuation و normalize whitespace
+    s = _re.sub(r"[^\w\s]", " ", s)
+    s = _re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _title_similarity(a: str, b: str) -> float:
+    """محاسبهٔ similarity سادهٔ Jaccard روی tokens (سریع، بدون dependencies)."""
+    na = _normalize_title(a)
+    nb = _normalize_title(b)
+    if not na or not nb:
+        return 0.0
+    if na == nb:
+        return 1.0
+    sa = set(na.split())
+    sb = set(nb.split())
+    if not sa or not sb:
+        return 0.0
+    inter = len(sa & sb)
+    union = len(sa | sb)
+    return inter / union if union > 0 else 0.0
+
+
+def _merge_similar_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """ادغام هوشمند findings مشابه — مهاجرت از Health analysis.
+
+    منطق:
+    1. findings با title exactly یکسان → ادغام
+    2. findings با similarity > 0.8 + همان type → ادغام
+    3. findings با target_files مشترک + همان type + پایه‌های مشابه → ادغام
+    parent finding اول (highest priority، یا اول در ترتیب) باقی می‌ماند.
+    دیگران در parent.merged_findings ذخیره می‌شوند.
+
+    خروجی: لیست unique findings با merged_findings field.
+    """
+    if not findings:
+        return []
+
+    SIMILARITY_THRESHOLD = 0.8
+    PRIORITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+    # ابتدا بر اساس priority sort کن (critical اول)
+    sorted_findings = sorted(
+        findings,
+        key=lambda f: PRIORITY_ORDER.get((f.get("priority") or "medium").lower(), 2),
+    )
+
+    unique: List[Dict[str, Any]] = []
+
+    for f in sorted_findings:
+        title = (f.get("title") or "").strip()
+        if not title:
+            continue
+
+        ftype = (f.get("type") or "").lower()
+        f_files: set = set()
+        for loc in (f.get("target_locations") or []):
+            if isinstance(loc, dict) and loc.get("path"):
+                f_files.add(loc["path"])
+        for p in (f.get("target_files") or []):
+            if isinstance(p, str):
+                f_files.add(p)
+
+        merged_into: Optional[Dict[str, Any]] = None
+
+        # دنبال parent مناسب در unique بگرد
+        for u in unique:
+            u_title = (u.get("title") or "").strip()
+            u_type = (u.get("type") or "").lower()
+            sim = _title_similarity(title, u_title)
+
+            # شرط ۱: exact match (sim=1.0)
+            if sim >= 1.0:
+                merged_into = u
+                break
+
+            # شرط ۲: similarity بالا و type یکسان
+            if sim >= SIMILARITY_THRESHOLD and ftype == u_type and ftype:
+                merged_into = u
+                break
+
+            # شرط ۳: target_files زیاد مشترک + type یکسان (target_files
+            # similarity > 0.6 یعنی ادغام منطقی است)
+            if ftype == u_type and ftype and f_files:
+                u_files: set = set()
+                for loc in (u.get("target_locations") or []):
+                    if isinstance(loc, dict) and loc.get("path"):
+                        u_files.add(loc["path"])
+                for p in (u.get("target_files") or []):
+                    if isinstance(p, str):
+                        u_files.add(p)
+                if u_files:
+                    file_overlap = len(f_files & u_files) / len(f_files | u_files)
+                    if file_overlap > 0.6:
+                        merged_into = u
+                        break
+
+        if merged_into is not None:
+            # اضافه کن به merged_findings parent
+            mf = merged_into.setdefault("merged_findings", [])
+            mf.append({
+                "title": title,
+                "type": ftype,
+                "priority": f.get("priority"),
+                "_pass": f.get("_pass"),
+                "description": (f.get("description") or "")[:500],
+            })
+        else:
+            # finding مستقل — به unique اضافه کن
+            unique.append(f)
+
+    return unique
+
+
+# =====================================================================
 # Main deep scan function
 # =====================================================================
 
@@ -766,7 +988,26 @@ async def run_deep_scan(
     if watched is None:
         raise ValueError("پروژه یافت نشد")
 
-    enabled = set(enabled_passes or [p[0] for p in PASSES])
+    # 🆕 Mapping scan_depth → enabled_passes (مهاجرت از Health depth)
+    # اگر enabled_passes صریحاً پاس داده شده، آن را استفاده کن
+    # وگرنه از watched.scan_depth بخوان
+    if enabled_passes is None:
+        depth = getattr(watched, "scan_depth", "deep") or "deep"
+        if depth == "quick":
+            # سریع: فقط ۳ pass essential
+            enabled_passes = ["frontend", "backend", "security_deep"]
+        elif depth == "standard":
+            # متعادل: ۵ pass
+            enabled_passes = ["frontend", "backend", "security_deep",
+                              "quality", "completeness"]
+        elif depth == "thorough":
+            # کامل + per-file scoring + roadmap (همه)
+            enabled_passes = [p[0] for p in PASSES]
+        else:  # "deep" (default)
+            # عمیق: همه passes
+            enabled_passes = [p[0] for p in PASSES]
+
+    enabled = set(enabled_passes)
 
     write_progress(
         watched_id,
@@ -961,10 +1202,53 @@ async def run_deep_scan(
         all_findings: List[Dict[str, Any]] = []
         passes_done = 0
         critical_count = 0
+        # 🆕 خلاصه‌های ساختاریافته از هر pass (مثلاً security_summary از
+        # security_deep، coverage_summary از coverage). در structure scan
+        # ذخیره می‌شوند تا UI /oversight بدون reparse findings نمایش دهد.
+        pass_summaries: Dict[str, Any] = {}
 
         for pass_id, pass_label in PASSES:
             if pass_id not in enabled:
                 continue
+            # 🆕 چک pause/stop در شروع هر pass (graceful interruption)
+            current_progress = read_progress(watched_id) or {}
+            if current_progress.get("stop_requested"):
+                write_progress(
+                    watched_id, status="stopped",
+                    message=f"scan با درخواست کاربر متوقف شد (پس از {passes_done} pass)",
+                )
+                logger.info(f"deep_scan stopped by user at pass={pass_id}")
+                # خروج زودهنگام — هیچ task ساخته نمی‌شود
+                return {
+                    "success": False,
+                    "stopped": True,
+                    "passes_run": passes_done,
+                    "findings": len(all_findings),
+                    "tasks_created": 0,
+                }
+            # pause: تا زمان clear، صبر می‌کنیم (با timeout عمومی ۱۰ دقیقه)
+            if current_progress.get("pause_requested"):
+                pause_start = asyncio.get_event_loop().time()
+                while True:
+                    await asyncio.sleep(2)
+                    cp = read_progress(watched_id) or {}
+                    if not cp.get("pause_requested") or cp.get("stop_requested"):
+                        break
+                    if asyncio.get_event_loop().time() - pause_start > 600:
+                        # timeout — خودکار resume
+                        logger.warning(f"deep_scan pause timeout at pass={pass_id}")
+                        break
+                # دوباره stop چک کن (ممکن است در حین pause رسیده باشد)
+                if (read_progress(watched_id) or {}).get("stop_requested"):
+                    write_progress(
+                        watched_id, status="stopped",
+                        message=f"scan متوقف شد (پس از pause)",
+                    )
+                    return {
+                        "success": False, "stopped": True,
+                        "passes_run": passes_done,
+                        "findings": len(all_findings), "tasks_created": 0,
+                    }
             write_progress(
                 watched_id,
                 phase=f"phase3_{pass_id}",
@@ -992,6 +1276,11 @@ async def run_deep_scan(
                     if f.get("priority") == "critical":
                         critical_count += 1
                 all_findings.extend(findings)
+                # 🆕 ذخیرهٔ summaries ساختاریافته از هر pass (security_summary,
+                # coverage_summary, ...) — برای UI بدون reparsing findings
+                for sum_key in ("security_summary", "coverage_summary"):
+                    if isinstance(parsed.get(sum_key), dict):
+                        pass_summaries[sum_key] = parsed[sum_key]
                 write_progress(
                     watched_id,
                     findings_count=len(all_findings),
@@ -1003,16 +1292,104 @@ async def run_deep_scan(
             passes_done += 1
             write_progress(watched_id, passes_done=passes_done)
 
-        # ----- فاز ۴: تجمیع، dedup، اولویت‌بندی -----
-        write_progress(watched_id, phase="phase4_aggregate", message="dedup و اولویت‌بندی")
-        unique: List[Dict[str, Any]] = []
-        seen_titles: set = set()
-        for f in all_findings:
-            t = (f.get("title") or "").strip().lower()
-            if not t or t in seen_titles:
-                continue
-            seen_titles.add(t)
-            unique.append(f)
+        # ----- فاز ۴: تجمیع، dedup هوشمند، اولویت‌بندی -----
+        # (مهاجرت از Health analysis _merge_similar_issues — قبلاً فقط
+        # exact-match dedup روی title بود؛ حالا با similarity score و
+        # ادغام target_files مشترک)
+        write_progress(watched_id, phase="phase4_aggregate", message="dedup هوشمند و ادغام")
+        unique = _merge_similar_findings(all_findings)
+
+        # ----- فاز ۴.۵: محاسبهٔ per-file health map -----
+        # (مهاجرت از Health analysis file_health_map)
+        # برای هر فایل deep-read شده، یک score 0-100 محاسبه می‌شود بر اساس:
+        #   - تعداد findings مرتبط (severity weighted)
+        #   - وزن‌های کاربر (scan_criteria_weights)
+        # خروجی در structure ذخیره می‌شود تا UI heatmap نمایش دهد.
+        weights = getattr(watched, "scan_criteria_weights", None) or {
+            "security": 1.5, "quality": 1.0, "tests": 1.2, "completeness": 1.0,
+        }
+        SEVERITY_PENALTY = {"critical": 25, "high": 12, "medium": 5, "low": 2}
+        # mapping pass_id → criteria key برای weight lookup
+        PASS_TO_CRITERIA = {
+            "security": "security", "security_deep": "security",
+            "quality": "quality", "coverage": "tests",
+            "completeness": "completeness",
+            "frontend": "quality", "backend": "quality",
+            "cross_stack": "quality", "integrity": "quality",
+            "dependency": "quality",
+        }
+
+        file_health_map: Dict[str, Dict[str, Any]] = {}
+        # ابتدا برای هر فایل deep-read شده، یک ورودی اولیه با score=100
+        for path in deep_contents.keys():
+            file_health_map[path] = {
+                "score": 100.0,
+                "findings_count": 0,
+                "severity_weighted": 0.0,
+                "passes_touched": [],
+            }
+
+        # حالا findings را پردازش کن
+        for f in unique:
+            target_files: List[str] = []
+            # از target_locations اول، fallback به target_files
+            for loc in (f.get("target_locations") or []):
+                if isinstance(loc, dict) and loc.get("path"):
+                    target_files.append(loc["path"])
+            if not target_files:
+                target_files = [p for p in (f.get("target_files") or []) if isinstance(p, str)]
+
+            severity = (f.get("priority") or "medium").lower()
+            pass_id = f.get("_pass", "quality")
+            criteria_key = PASS_TO_CRITERIA.get(pass_id, "quality")
+            weight = float(weights.get(criteria_key, 1.0))
+            penalty = SEVERITY_PENALTY.get(severity, 5) * weight
+
+            for path in target_files:
+                if path not in file_health_map:
+                    # فایل deep-read نشده — initialize کن
+                    file_health_map[path] = {
+                        "score": 100.0, "findings_count": 0,
+                        "severity_weighted": 0.0, "passes_touched": [],
+                    }
+                fh = file_health_map[path]
+                fh["score"] = max(0.0, fh["score"] - penalty)
+                fh["findings_count"] = int(fh["findings_count"]) + 1
+                fh["severity_weighted"] = float(fh["severity_weighted"]) + penalty
+                if pass_id not in fh["passes_touched"]:
+                    fh["passes_touched"].append(pass_id)
+
+        # color/hex مشتق از score
+        def _color_for_score(s: float) -> tuple:
+            if s >= 70:
+                return ("green", "#22C55E")
+            elif s >= 40:
+                return ("yellow", "#FBBF24")
+            else:
+                return ("red", "#EF4444")
+        for path, fh in file_health_map.items():
+            color, hex_code = _color_for_score(fh["score"])
+            fh["color"] = color
+            fh["hex"] = hex_code
+            fh["score"] = round(fh["score"], 1)
+
+        # محاسبهٔ overall_health_score (میانگین وزنی روی همه فایل‌ها)
+        if file_health_map:
+            overall_health_score = round(
+                sum(fh["score"] for fh in file_health_map.values()) / len(file_health_map), 1
+            )
+        else:
+            overall_health_score = 100.0
+        # ذخیره در pass_summaries
+        pass_summaries["health_summary"] = {
+            "overall_health_score": overall_health_score,
+            "files_analyzed_count": len(file_health_map),
+            "red_files_count": sum(1 for fh in file_health_map.values() if fh["color"] == "red"),
+            "yellow_files_count": sum(1 for fh in file_health_map.values() if fh["color"] == "yellow"),
+            "green_files_count": sum(1 for fh in file_health_map.values() if fh["color"] == "green"),
+            "criteria_weights_used": weights,
+        }
+        pass_summaries["file_health_map"] = file_health_map
 
         # ساخت تسک با پرامپت قوی غنی‌شده
         created_tasks: List[Dict[str, Any]] = []
@@ -1110,6 +1487,8 @@ async def run_deep_scan(
                     target_files=target_files,
                     acceptance_criteria=ac,
                     execution_mode=execution_mode_default,
+                    # 🆕 finding های ادغام‌شده در این task (از smart merger)
+                    merged_findings=(f.get("merged_findings") or []),
                 )
                 async with service._lock:
                     service.tasks.append(t)
@@ -1132,6 +1511,9 @@ async def run_deep_scan(
                     "passes_run": passes_done,
                     "findings": unique,
                     "tasks_created": [t["id"] for t in created_tasks],
+                    # 🆕 خلاصه‌های ساختاریافته از passes تخصصی
+                    # (security_summary, coverage_summary, ...) برای UI
+                    "pass_summaries": pass_summaries,
                 },
             )
         except Exception:
