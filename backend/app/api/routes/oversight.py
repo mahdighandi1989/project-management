@@ -199,6 +199,25 @@ async def list_tasks_by_project(project_full_name: str):
     return {"items": await service.list_tasks_by_project(project_full_name)}
 
 
+@router.get("/summary/by-project/{project_full_name:path}")
+async def oversight_summary_by_project(project_full_name: str):
+    """خلاصهٔ سبک تسک‌ها برای استفاده در /projects (count به تفکیک وضعیت)."""
+    service = get_oversight_service()
+    items = await service.list_tasks_by_project(project_full_name)
+    counts: Dict[str, int] = {}
+    for t in items:
+        s = t.get("status", "pending")
+        counts[s] = counts.get(s, 0) + 1
+    return {
+        "project_full_name": project_full_name,
+        "total": len(items),
+        "by_status": counts,
+        "pending": counts.get("pending", 0) + counts.get("suggested", 0),
+        "in_review": counts.get("awaiting_review", 0),
+        "done": counts.get("done", 0),
+    }
+
+
 @router.post("/tasks")
 async def create_task(payload: TaskCreate):
     service = get_oversight_service()
@@ -261,6 +280,79 @@ async def run_task(task_id: str, payload: Optional[RunTaskRequest] = None):
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/tasks/{task_id}/verify-now")
+async def verify_task_now(task_id: str, payload: Optional[RunTaskRequest] = None):
+    """اجرای فوری verifier روی یک تسک — مستقل از execution."""
+    from ...services.oversight_verifier import verify_task as _verify_task
+
+    try:
+        return await _verify_task(
+            task_id,
+            model_id=payload.model_id if payload else None,
+            triggered_by="manual",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/tasks/{task_id}/mark-applied-externally")
+async def mark_applied_externally(task_id: str):
+    """کاربر صریحاً می‌گوید این تسک را بیرون از سیستم اعمال کردم."""
+    service = get_oversight_service()
+    async with service._lock:
+        for t in service.tasks:
+            if t.id == task_id:
+                t.manually_marked_applied_at = (
+                    __import__("datetime").datetime.now(
+                        __import__("datetime").timezone.utc
+                    ).isoformat()
+                )
+                t.verification_status = "applied_externally_pending_verify"
+                t.updated_at = t.manually_marked_applied_at
+                service._save_tasks()
+                return t.to_dict()
+    raise HTTPException(status_code=404, detail="تسک یافت نشد")
+
+
+@router.get("/tasks/{task_id}/full-prompt")
+async def get_full_prompt(task_id: str):
+    """برمی‌گرداند پرامپت کامل تسک — برای کپی به ابزار خارجی."""
+    service = get_oversight_service()
+    for t in service.tasks:
+        if t.id == task_id:
+            return {
+                "task_id": t.id,
+                "title": t.title,
+                "prompt": t.prompt,
+                "target_files": t.target_files,
+                "acceptance_criteria": t.acceptance_criteria,
+                "type": t.type,
+                "priority": t.priority,
+                "execution_mode": t.execution_mode,
+                "project_full_name": t.project_full_name,
+            }
+    raise HTTPException(status_code=404, detail="تسک یافت نشد")
+
+
+@router.get("/tasks/{task_id}/verification-history")
+async def get_verification_history(task_id: str):
+    """تاریخچهٔ verification یک تسک."""
+    service = get_oversight_service()
+    for t in service.tasks:
+        if t.id == task_id:
+            return {
+                "task_id": t.id,
+                "verification_status": t.verification_status,
+                "confirmation_streak": t.confirmation_streak,
+                "manually_marked_applied_at": t.manually_marked_applied_at,
+                "last_verified_at": t.last_verified_at,
+                "history": t.verification_history,
+            }
+    raise HTTPException(status_code=404, detail="تسک یافت نشد")
 
 
 @router.post("/watched/{watched_id}/run-now")
@@ -359,10 +451,9 @@ async def mark_report(
 
 @router.post("/scan/{watched_id}")
 async def scan_project(watched_id: str, payload: Optional[ScanRequest] = None):
-    """اسکن خودکار پروژه برای یافتن نیازها/ایرادات."""
+    """اسکن سریع پروژه برای یافتن نیازها/ایرادات (حالت سادهٔ قبلی)."""
     service = get_oversight_service()
     try:
-        # اگر model_ids ارائه شده فقط model_id اول را به scan می‌فرستیم (scan فعلاً single-model است)
         chosen_model = None
         if payload:
             chosen_model = payload.model_id or (
@@ -372,6 +463,84 @@ async def scan_project(watched_id: str, payload: Optional[ScanRequest] = None):
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class DeepScanRequest(BaseModel):
+    model_id: Optional[str] = None
+    enabled_passes: Optional[List[str]] = None
+    deep_read_count: int = 35
+
+
+@router.post("/scan/{watched_id}/deep")
+async def deep_scan_project(watched_id: str, payload: Optional[DeepScanRequest] = None):
+    """اجرای deep scan در پس‌زمینه. progress قابل polling از /scan/{id}/progress است."""
+    import asyncio as _aio
+    from ...services.oversight_deep_scan_service import run_deep_scan, write_progress
+
+    payload = payload or DeepScanRequest()
+
+    # ست کردن وضعیت اولیه
+    write_progress(watched_id, status="queued", phase="queued", message="در انتظار شروع")
+
+    async def _bg():
+        try:
+            await run_deep_scan(
+                watched_id,
+                model_id=payload.model_id,
+                enabled_passes=payload.enabled_passes,
+                deep_read_count=payload.deep_read_count,
+            )
+        except Exception as e:
+            from ...services.oversight_deep_scan_service import write_progress as _wp
+            _wp(watched_id, status="error", message=str(e))
+
+    _aio.create_task(_bg())
+    return {"success": True, "status": "queued", "watched_id": watched_id}
+
+
+@router.get("/scan/{watched_id}/progress")
+async def scan_progress(watched_id: str):
+    """خواندن progress جاری deep scan (برای polling از UI)."""
+    from ...services.oversight_deep_scan_service import read_progress
+
+    return read_progress(watched_id)
+
+
+# ============================================================
+# Codex
+# ============================================================
+
+class CodexRefreshRequest(BaseModel):
+    model_id: Optional[str] = None
+    max_files: int = 40
+    only_changed: bool = True
+
+
+@router.get("/codex/{watched_id}")
+async def get_codex(watched_id: str):
+    """خواندن Codex (شناسنامهٔ خودکار) یک پروژه."""
+    from ...services.oversight_codex_service import read_codex
+
+    return read_codex(watched_id)
+
+
+@router.post("/codex/{watched_id}/refresh")
+async def refresh_codex(watched_id: str, payload: Optional[CodexRefreshRequest] = None):
+    """به‌روزرسانی Codex (delta-based)."""
+    from ...services.oversight_codex_service import refresh_codex as _refresh_codex
+
+    payload = payload or CodexRefreshRequest()
+    try:
+        return await _refresh_codex(
+            watched_id,
+            model_id=payload.model_id,
+            max_files=payload.max_files,
+            only_changed=payload.only_changed,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
