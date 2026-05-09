@@ -596,6 +596,134 @@ async def scan_summaries(watched_id: str):
     }
 
 
+# 🆕 Pause / Resume / Stop scan (مهاجرت از Health analysis)
+# state در progress JSON ذخیره می‌شود تا run_deep_scan در شروع چک کند
+
+@router.post("/scan/{watched_id}/pause")
+async def pause_scan(watched_id: str):
+    """درخواست pause یک scan در حال اجرا.
+
+    state در progress JSON ست می‌شود. scan در iteration بعدی چک می‌کند
+    و متوقف می‌شود (graceful, not abort).
+    """
+    from ...services.oversight_deep_scan_service import write_progress, read_progress
+    progress = read_progress(watched_id)
+    if not progress:
+        raise HTTPException(status_code=404, detail="هیچ scan فعالی برای این پروژه نیست")
+    write_progress(
+        watched_id,
+        pause_requested=True,
+        paused_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+    )
+    return {"success": True, "status": "pause_requested"}
+
+
+@router.post("/scan/{watched_id}/resume")
+async def resume_scan(watched_id: str):
+    """clear pause flag — scan در iteration بعدی ادامه می‌دهد."""
+    from ...services.oversight_deep_scan_service import write_progress, read_progress
+    progress = read_progress(watched_id)
+    if not progress:
+        raise HTTPException(status_code=404, detail="هیچ scan در حال اجرا نیست")
+    write_progress(
+        watched_id,
+        pause_requested=False,
+        resumed_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+    )
+    return {"success": True, "status": "resumed"}
+
+
+@router.post("/scan/{watched_id}/stop")
+async def stop_scan(watched_id: str):
+    """درخواست توقف کامل scan (cancel).
+
+    scan در iteration بعدی چک می‌کند و خارج می‌شود.
+    """
+    from ...services.oversight_deep_scan_service import write_progress, read_progress
+    progress = read_progress(watched_id)
+    if not progress:
+        raise HTTPException(status_code=404, detail="هیچ scan فعالی برای این پروژه نیست")
+    write_progress(
+        watched_id,
+        stop_requested=True,
+        status="stopping",
+        stopped_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+    )
+    return {"success": True, "status": "stop_requested"}
+
+
+# 🆕 Validation chain status (مهاجرت از Health chain-status)
+
+@router.get("/watched/{watched_id}/chain-status")
+async def get_chain_status(watched_id: str):
+    """وضعیت کامل chain یک watched project: scan → verify → roadmap → tasks.
+
+    این endpoint جایگزین Health analysis chain-status است.
+    """
+    from ...services.oversight_deep_scan_service import (
+        STRUCTURE_DIR, SCAN_RESULTS_DIR
+    )
+    from ...services.oversight_codex_service import read_codex, read_roadmap
+    from ...services.oversight_service import _read_json
+
+    service = get_oversight_service()
+    watched = service._find_watched(watched_id)
+    if watched is None:
+        raise HTTPException(status_code=404, detail="watched project یافت نشد")
+
+    structure = _read_json(STRUCTURE_DIR / f"{watched_id}.json", {}) or {}
+    scan_results = _read_json(SCAN_RESULTS_DIR / f"{watched_id}.json", {}) or {}
+    codex = read_codex(watched_id)
+    roadmap = read_roadmap(watched_id)
+
+    # تسک‌های مرتبط
+    related_tasks = [t for t in service.tasks if t.watched_id == watched_id]
+    pending_count = sum(1 for t in related_tasks if t.status in ("pending", "suggested"))
+    done_count = sum(1 for t in related_tasks if t.status == "done")
+    rejected_count = sum(1 for t in related_tasks if t.status in ("cancelled", "archived"))
+    verified_count = sum(1 for t in related_tasks if t.verification_status == "done")
+    partial_count = sum(1 for t in related_tasks if t.verification_status == "partial")
+
+    return {
+        "watched_id": watched_id,
+        "repo": watched.repo_full_name,
+        # Phase 1: Scan
+        "scan": {
+            "status": "done" if scan_results.get("ran_at") else "never",
+            "last_at": scan_results.get("ran_at"),
+            "passes_run": scan_results.get("passes_run", 0),
+            "findings_count": len(scan_results.get("findings") or []),
+        },
+        # Phase 2: Codex
+        "codex": {
+            "status": "done" if codex.get("updated_at") else "never",
+            "last_at": codex.get("updated_at"),
+            "files_documented": codex.get("files_count", 0),
+        },
+        # Phase 3: Roadmap & Ideal State
+        "roadmap": {
+            "status": "done" if roadmap.get("generated_at") else "never",
+            "last_at": roadmap.get("generated_at") or roadmap.get("updated_at"),
+            "ideal_state_set": bool(roadmap.get("ideal_state", "").strip()),
+            "phases_count": len(roadmap.get("phases") or []),
+        },
+        # Phase 4: Tasks
+        "tasks": {
+            "total": len(related_tasks),
+            "pending": pending_count,
+            "done": done_count,
+            "rejected": rejected_count,
+        },
+        # Phase 5: Verification
+        "verification": {
+            "verified_count": verified_count,
+            "partial_count": partial_count,
+        },
+        # Last full chain run timestamp (most recent of scan_results)
+        "last_full_chain_at": scan_results.get("ran_at"),
+    }
+
+
 # ============================================================
 # Codex
 # ============================================================

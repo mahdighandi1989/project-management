@@ -169,6 +169,10 @@ class WatchedProject:
         "tests": 1.2,
         "completeness": 1.0,
     })
+    # 🆕 عمق scan قابل تنظیم (مهاجرت از Health depth parameter)
+    # quick: 3 pass، standard: 5 pass، deep: همه ۱۰ pass،
+    # thorough: همه ۱۰ + per-file scoring + roadmap auto-gen
+    scan_depth: str = "deep"  # quick | standard | deep | thorough
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
 

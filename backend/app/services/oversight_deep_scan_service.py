@@ -988,7 +988,26 @@ async def run_deep_scan(
     if watched is None:
         raise ValueError("پروژه یافت نشد")
 
-    enabled = set(enabled_passes or [p[0] for p in PASSES])
+    # 🆕 Mapping scan_depth → enabled_passes (مهاجرت از Health depth)
+    # اگر enabled_passes صریحاً پاس داده شده، آن را استفاده کن
+    # وگرنه از watched.scan_depth بخوان
+    if enabled_passes is None:
+        depth = getattr(watched, "scan_depth", "deep") or "deep"
+        if depth == "quick":
+            # سریع: فقط ۳ pass essential
+            enabled_passes = ["frontend", "backend", "security_deep"]
+        elif depth == "standard":
+            # متعادل: ۵ pass
+            enabled_passes = ["frontend", "backend", "security_deep",
+                              "quality", "completeness"]
+        elif depth == "thorough":
+            # کامل + per-file scoring + roadmap (همه)
+            enabled_passes = [p[0] for p in PASSES]
+        else:  # "deep" (default)
+            # عمیق: همه passes
+            enabled_passes = [p[0] for p in PASSES]
+
+    enabled = set(enabled_passes)
 
     write_progress(
         watched_id,
@@ -1191,6 +1210,45 @@ async def run_deep_scan(
         for pass_id, pass_label in PASSES:
             if pass_id not in enabled:
                 continue
+            # 🆕 چک pause/stop در شروع هر pass (graceful interruption)
+            current_progress = read_progress(watched_id) or {}
+            if current_progress.get("stop_requested"):
+                write_progress(
+                    watched_id, status="stopped",
+                    message=f"scan با درخواست کاربر متوقف شد (پس از {passes_done} pass)",
+                )
+                logger.info(f"deep_scan stopped by user at pass={pass_id}")
+                # خروج زودهنگام — هیچ task ساخته نمی‌شود
+                return {
+                    "success": False,
+                    "stopped": True,
+                    "passes_run": passes_done,
+                    "findings": len(all_findings),
+                    "tasks_created": 0,
+                }
+            # pause: تا زمان clear، صبر می‌کنیم (با timeout عمومی ۱۰ دقیقه)
+            if current_progress.get("pause_requested"):
+                pause_start = asyncio.get_event_loop().time()
+                while True:
+                    await asyncio.sleep(2)
+                    cp = read_progress(watched_id) or {}
+                    if not cp.get("pause_requested") or cp.get("stop_requested"):
+                        break
+                    if asyncio.get_event_loop().time() - pause_start > 600:
+                        # timeout — خودکار resume
+                        logger.warning(f"deep_scan pause timeout at pass={pass_id}")
+                        break
+                # دوباره stop چک کن (ممکن است در حین pause رسیده باشد)
+                if (read_progress(watched_id) or {}).get("stop_requested"):
+                    write_progress(
+                        watched_id, status="stopped",
+                        message=f"scan متوقف شد (پس از pause)",
+                    )
+                    return {
+                        "success": False, "stopped": True,
+                        "passes_run": passes_done,
+                        "findings": len(all_findings), "tasks_created": 0,
+                    }
             write_progress(
                 watched_id,
                 phase=f"phase3_{pass_id}",
