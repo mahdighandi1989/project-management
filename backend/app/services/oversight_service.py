@@ -28,11 +28,36 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 # ====================================================================
-# مسیرها
+# مسیرها (lazy initialization — هرگز در زمان import crash نمی‌کند)
 # ====================================================================
 
-STORAGE_DIR = Path(os.environ.get("OVERSIGHT_STORAGE", "./storage/oversight"))
-STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+def _resolve_storage_dir() -> Path:
+    """تعیین مسیر قابل نوشتن برای ذخیره. اگر مسیر اصلی قابل دسترس نبود، fallback به /tmp."""
+    candidates = [
+        os.environ.get("OVERSIGHT_STORAGE", "").strip(),
+        "./storage/oversight",
+        "/tmp/oversight",
+    ]
+    for c in candidates:
+        if not c:
+            continue
+        try:
+            p = Path(c)
+            p.mkdir(parents=True, exist_ok=True)
+            # تست نوشتنی بودن
+            test = p / ".write_test"
+            test.write_text("ok", encoding="utf-8")
+            test.unlink(missing_ok=True)
+            return p
+        except Exception as e:
+            logger.warning(f"oversight storage path '{c}' not writable: {e}")
+            continue
+    # آخرین fallback: in-memory only (هیچ‌چیز ذخیره نمی‌شود)
+    logger.warning("oversight: no writable storage path - using ephemeral in-memory only")
+    return Path("/tmp")  # برای جلوگیری از None اما write_json در try/except است
+
+
+STORAGE_DIR = _resolve_storage_dir()
 
 WATCHED_FILE = STORAGE_DIR / "watched_projects.json"
 TASKS_FILE = STORAGE_DIR / "tasks.json"
@@ -193,10 +218,14 @@ def _read_json(path: Path, default: Any) -> Any:
 
 
 def _write_json(path: Path, data: Any) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2, default=str)
-    tmp.replace(path)
+    try:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+        tmp.replace(path)
+    except Exception as e:
+        # نباید هرگز کل اپ را به خاطر یک نوشتن disk به مشکل بیندازد
+        logger.warning(f"oversight: failed to write {path}: {e}")
 
 
 # ====================================================================
@@ -209,6 +238,7 @@ class OversightService:
     def __init__(self):
         self._lock = asyncio.Lock()
         self._session: Optional[aiohttp.ClientSession] = None
+        self._subscribers: List[Any] = []
 
         # cache در حافظه
         self.watched: List[WatchedProject] = []
@@ -221,7 +251,10 @@ class OversightService:
             "scan_interval_hours": 24,
         }
 
-        self._load_all()
+        try:
+            self._load_all()
+        except Exception as e:
+            logger.warning(f"oversight: load failed (continuing with empty state): {e}")
 
     # ---------- بارگذاری/ذخیره ----------
 
@@ -1363,8 +1396,6 @@ class OversightService:
     # ====================================================================
     # Event hooks (for cross-page integration)
     # ====================================================================
-
-    _subscribers: List[Any] = []  # callbacks: (event_name: str, payload: dict) -> awaitable|None
 
     def subscribe(self, callback) -> None:
         """ثبت یک callback برای دریافت رویدادهای oversight."""
