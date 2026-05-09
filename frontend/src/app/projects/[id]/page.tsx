@@ -2088,6 +2088,39 @@ export default function ProjectDetailPage() {
     return false;
   };
 
+  // 🛡️ Defensive fetch wrapper — برای جلوگیری از stale state وقتی endpoint
+  // 4xx/5xx برمی‌گرداند ولی .ok چک نمی‌شده. هر تابعی که از این استفاده کند
+  // نتیجهٔ ساختاریافته با ok/data/error می‌گیرد و state موجود را reset
+  // نمی‌کند مگر اینکه data معتبر باشد. هیچ side-effect مستقیم — فقط داده.
+  // مصرف‌کنندگان می‌توانند showError را خود صدا بزنند.
+  const safeFetch = useCallback(async <T = any,>(
+    url: string,
+    init?: RequestInit,
+    options?: { silent?: boolean; defaultErrorMessage?: string }
+  ): Promise<{ ok: boolean; status: number; data: T | null; error: string }> => {
+    try {
+      const res = await fetch(url, init);
+      const text = await res.text().catch(() => '');
+      let parsed: any = null;
+      try { parsed = text ? JSON.parse(text) : null; } catch { parsed = text; }
+      if (!res.ok) {
+        const msg = (parsed && typeof parsed === 'object' && (parsed.detail || parsed.error || parsed.message))
+          || options?.defaultErrorMessage
+          || `HTTP ${res.status}`;
+        if (!options?.silent) {
+          // فقط console — تصمیم با مصرف‌کننده برای toast/UX
+          console.error('[safeFetch]', url, msg);
+        }
+        return { ok: false, status: res.status, data: null, error: String(msg) };
+      }
+      return { ok: true, status: res.status, data: parsed as T, error: '' };
+    } catch (e: any) {
+      const msg = e?.message || 'network error';
+      if (!options?.silent) console.error('[safeFetch]', url, msg);
+      return { ok: false, status: 0, data: null, error: msg };
+    }
+  }, []);
+
   const showError = (msg: string) => {
     setError(msg);
     setTimeout(() => setError(''), 5000);
@@ -5547,56 +5580,59 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     }
   };
 
-  // 🆕 تایید سریع فیلد
+  // 🆕 تایید سریع فیلد — با safeFetch تا در 4xx/5xx، state قبلی (memory)
+  // و pendingApprovals بدون reload نشوند و دکمه drift نشود.
   const quickApproveField = async (fieldId: string, note?: string) => {
     setApprovingField(fieldId);
-    try {
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/quick-approval/approve/${fieldId}`, {
+    const result = await safeFetch<{ success: boolean; message?: string; error?: string }>(
+      `${API_BASE}/api/projects/${projectId}/quick-approval/approve/${fieldId}`,
+      {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ approver_note: note }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        showSuccess(data.message || 'فیلد با موفقیت تایید شد');
-        loadMemory();
-        loadPendingApprovals();
-      } else {
-        showError(data.error || 'خطا در تایید فیلد');
-      }
-    } catch (e) {
-      showError('خطا در ارتباط با سرور');
-    } finally {
-      setApprovingField(null);
+      },
+    );
+    setApprovingField(null);
+    if (!result.ok) {
+      showError(`خطا در تایید فیلد: ${result.error}`);
+      return;
+    }
+    if (result.data?.success) {
+      showSuccess(result.data.message || 'فیلد با موفقیت تایید شد');
+      loadMemory();
+      loadPendingApprovals();
+    } else {
+      showError(result.data?.error || 'خطا در تایید فیلد');
     }
   };
 
-  // 🆕 رد کردن فیلد
+  // 🆕 رد کردن فیلد — مشابه approve، با safeFetch
   const rejectField = async (fieldId: string, reason: string) => {
     if (!reason.trim()) {
       showError('لطفاً دلیل رد را وارد کنید');
       return;
     }
     setRejectingField(fieldId);
-    try {
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/quick-approval/reject/${fieldId}`, {
+    const result = await safeFetch<{ success: boolean; message?: string; error?: string }>(
+      `${API_BASE}/api/projects/${projectId}/quick-approval/reject/${fieldId}`,
+      {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rejection_reason: reason }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        showSuccess(data.message || 'فیلد رد و آرشیو شد');
-        loadMemory();
-        loadPendingApprovals();
-        setRejectionReason('');
-      } else {
-        showError(data.error || 'خطا در رد فیلد');
-      }
-    } catch (e) {
-      showError('خطا در ارتباط با سرور');
-    } finally {
-      setRejectingField(null);
+      },
+    );
+    setRejectingField(null);
+    if (!result.ok) {
+      showError(`خطا در رد فیلد: ${result.error}`);
+      return;
+    }
+    if (result.data?.success) {
+      showSuccess(result.data.message || 'فیلد رد و آرشیو شد');
+      loadMemory();
+      loadPendingApprovals();
+      setRejectionReason('');
+    } else {
+      showError(result.data?.error || 'خطا در رد فیلد');
     }
   };
 
@@ -5788,37 +5824,36 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     }
   };
 
-  // بارگذاری ساختار پروژه
+  // بارگذاری ساختار پروژه — با safeFetch، هر کدام مستقل fail می‌توانند بشوند
+  // و state قبلی structure یا fileHealthMap reset نمی‌شود.
   const loadStructure = async () => {
     setStructureLoading(true);
     try {
-      // بارگذاری همزمان ساختار و داده‌های سلامت
-      const [structureRes, healthRes] = await Promise.all([
-        fetch(`${API_BASE}/api/projects/${projectId}/structure`),
-        fetch(`${API_BASE}/api/projects/${projectId}/health/file-map`)
+      const [structureResult, healthResult] = await Promise.all([
+        safeFetch<{ success: boolean; structure?: any; settings?: any }>(
+          `${API_BASE}/api/projects/${projectId}/structure`,
+          undefined,
+          { silent: true },
+        ),
+        safeFetch<{ success: boolean; file_map?: Record<string, any> }>(
+          `${API_BASE}/api/projects/${projectId}/health/file-map`,
+          undefined,
+          { silent: true },
+        ),
       ]);
 
       let healthMap: Record<string, any> = {};
-      if (healthRes.ok) {
-        const healthData = await healthRes.json();
-        if (healthData.success && healthData.file_map) {
-          healthMap = healthData.file_map;
-          setFileHealthMap(healthMap);
-          setHealthDataLoaded(true);
-        }
+      if (healthResult.ok && healthResult.data?.success && healthResult.data.file_map) {
+        healthMap = healthResult.data.file_map;
+        setFileHealthMap(healthMap);
+        setHealthDataLoaded(true);
       }
 
-      if (structureRes.ok) {
-        const data = await structureRes.json();
-        if (data.success) {
-          setStructureData(data.structure);
-          setStructureSettings(data.settings);
-          // تبدیل به فرمت React Flow با رنگ‌بندی سلامت
-          convertToReactFlow(data.structure, healthMap);
-        }
+      if (structureResult.ok && structureResult.data?.success) {
+        setStructureData(structureResult.data.structure);
+        setStructureSettings(structureResult.data.settings);
+        convertToReactFlow(structureResult.data.structure, healthMap);
       }
-    } catch (e) {
-      console.error('Error loading structure:', e);
     } finally {
       setStructureLoading(false);
     }
@@ -6059,45 +6094,39 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
   // ===================== توابع ژورنال =====================
 
-  // بارگذاری لاگ‌های فعالیت
+  // بارگذاری لاگ‌های فعالیت — با safeFetch تا در صورت 4xx/5xx، logs قبلی
+  // (state) دست‌نخورده بمانند. silent چون stale data بهتر از empty list است.
   const loadJournal = async () => {
     setJournalLoading(true);
-    try {
-      const params = new URLSearchParams({
-        page: journalPage.toString(),
-        page_size: '20',
-      });
-      if (journalFilter.type) params.append('activity_type', journalFilter.type);
-      if (journalFilter.model) params.append('model_id', journalFilter.model);
-      if (journalFilter.success !== undefined) params.append('success', journalFilter.success.toString());
-
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/journal?${params}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          setJournalLogs(data.journal);
-          setJournalTotal(data.pagination?.total ?? 0);
-        }
-      }
-    } catch (e) {
-      console.error('Error loading journal:', e);
-    } finally {
-      setJournalLoading(false);
+    const params = new URLSearchParams({
+      page: journalPage.toString(),
+      page_size: '20',
+    });
+    if (journalFilter.type) params.append('activity_type', journalFilter.type);
+    if (journalFilter.model) params.append('model_id', journalFilter.model);
+    if (journalFilter.success !== undefined) params.append('success', journalFilter.success.toString());
+    const result = await safeFetch<{ success: boolean; journal?: any[]; pagination?: { total?: number } }>(
+      `${API_BASE}/api/projects/${projectId}/journal?${params}`,
+      undefined,
+      { silent: true },
+    );
+    setJournalLoading(false);
+    if (result.ok && result.data?.success) {
+      setJournalLogs(result.data.journal || []);
+      setJournalTotal(result.data.pagination?.total ?? 0);
     }
+    // در غیر این صورت، state قبلی حفظ می‌شود
   };
 
-  // بارگذاری آمار ژورنال
+  // بارگذاری آمار ژورنال — silent fail تا UI flicker نشود
   const loadJournalStats = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/journal/stats?days=30`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          setJournalStats(data.stats);
-        }
-      }
-    } catch (e) {
-      console.error('Error loading stats:', e);
+    const result = await safeFetch<{ success: boolean; stats?: any }>(
+      `${API_BASE}/api/projects/${projectId}/journal/stats?days=30`,
+      undefined,
+      { silent: true },
+    );
+    if (result.ok && result.data?.success) {
+      setJournalStats(result.data.stats);
     }
   };
 
@@ -6825,20 +6854,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
   const deleteDynamicField = async (fieldId: string) => {
     if (!confirm('حذف شود؟')) return;
-
-    try {
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/fields/${fieldId}`, {
-        method: 'DELETE',
-      });
-      const data = await res.json();
-      if (data.success) {
-        showSuccess('فیلد حذف شد');
-        loadMemory();
-      } else {
-        showError(data.detail || 'خطا');
-      }
-    } catch (e) {
-      showError('خطا در ارتباط');
+    const result = await safeFetch<{ success: boolean; detail?: string; error?: string }>(
+      `${API_BASE}/api/projects/${projectId}/memory/fields/${fieldId}`,
+      { method: 'DELETE' },
+    );
+    if (!result.ok) {
+      showError(`خطا در حذف فیلد: ${result.error}`);
+      return;
+    }
+    if (result.data?.success) {
+      showSuccess('فیلد حذف شد');
+      loadMemory();
+    } else {
+      showError(result.data?.detail || result.data?.error || 'خطا');
     }
   };
 
@@ -7205,26 +7233,22 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   };
 
   const loadFileContent = async (filePath: string) => {
-    try {
-      let res;
-      if (projectId.startsWith('gh_')) {
-        res = await fetch(`${API_BASE}/api/github/imported/${projectId}/file?path=${encodeURIComponent(filePath)}`);
-      } else {
-        res = await fetch(`${API_BASE}/api/projects/${projectId}/files/${encodeURIComponent(filePath)}`);
-      }
-
-      if (res.ok) {
-        const data = await res.json();
-        setSelectedFile({
-          path: filePath,
-          content: data.content,
-          github_url: data.github_url,
-        });
-      } else {
-        showError('فایل یافت نشد');
-      }
-    } catch (e) {
-      showError('خطا در خواندن فایل');
+    // 🛡️ از safeFetch استفاده می‌کنیم تا در صورت 404/500، state قبلی
+    // (selectedFile) دست‌نخورده بماند و فایل از list حذف نشود.
+    const url = projectId.startsWith('gh_')
+      ? `${API_BASE}/api/github/imported/${projectId}/file?path=${encodeURIComponent(filePath)}`
+      : `${API_BASE}/api/projects/${projectId}/files/${encodeURIComponent(filePath)}`;
+    const result = await safeFetch<{ content: string; github_url?: string }>(url);
+    if (!result.ok) {
+      showError(result.status === 404 ? 'فایل یافت نشد' : `خطا در خواندن فایل: ${result.error}`);
+      return;
+    }
+    if (result.data) {
+      setSelectedFile({
+        path: filePath,
+        content: result.data.content,
+        github_url: result.data.github_url,
+      });
     }
   };
 
