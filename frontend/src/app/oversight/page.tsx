@@ -187,7 +187,9 @@ export default function OversightPage() {
 
   // 🆕 تب «🏥 سلامت پروژه» — مهاجرت از Health analysis در /projects
   type HealthSubTab = 'overview' | 'files' | 'security' | 'coverage' | 'validation' | 'docs';
+  type HealthGroup = 'metrics' | 'docs' | 'pipeline';
   const [selectedHealthWatchedId, setSelectedHealthWatchedId] = useState<string>('');
+  const [healthGroup, setHealthGroup] = useState<HealthGroup>('metrics');
   const [healthSubTab, setHealthSubTab] = useState<HealthSubTab>('overview');
   const [healthSummaries, setHealthSummaries] = useState<{
     pass_summaries?: {
@@ -2663,29 +2665,53 @@ export default function OversightPage() {
               </div>
             ) : (
               <>
-                {/* Sub-tabs */}
-                <div className="flex gap-2 mb-4 flex-wrap border-b dark:border-gray-700 pb-2">
+                {/* Group selector — سطح اول */}
+                <div className="flex gap-2 mb-3 flex-wrap">
                   {([
-                    { id: 'overview', label: 'مرور کلی', icon: '📊' },
-                    { id: 'files', label: 'نقشهٔ سلامت فایل‌ها', icon: '🗺️' },
-                    { id: 'security', label: 'امنیت', icon: '🔒' },
-                    { id: 'coverage', label: 'پوشش تست', icon: '🧪' },
-                    { id: 'docs', label: 'Roadmap & README', icon: '📋' },
-                    { id: 'validation', label: 'Chain Status', icon: '⛓️' },
-                  ] as const).map(st => (
+                    { id: 'metrics', label: 'سنجه‌ها', icon: '📊', defaultSub: 'overview' as HealthSubTab },
+                    { id: 'docs', label: 'مستندات', icon: '📋', defaultSub: 'docs' as HealthSubTab },
+                    { id: 'pipeline', label: 'Pipeline', icon: '⛓️', defaultSub: 'validation' as HealthSubTab },
+                  ] as const).map(g => (
                     <button
-                      key={st.id}
-                      onClick={() => setHealthSubTab(st.id as HealthSubTab)}
-                      className={`px-3 py-1.5 rounded-lg text-sm transition ${
-                        healthSubTab === st.id
-                          ? 'bg-cyan-600 text-white'
+                      key={g.id}
+                      onClick={() => {
+                        setHealthGroup(g.id as HealthGroup);
+                        setHealthSubTab(g.defaultSub);
+                      }}
+                      className={`px-4 py-2 rounded-lg text-sm font-semibold transition ${
+                        healthGroup === g.id
+                          ? 'bg-cyan-600 text-white shadow'
                           : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600'
                       }`}
                     >
-                      {st.icon} {st.label}
+                      {g.icon} {g.label}
                     </button>
                   ))}
                 </div>
+
+                {/* Sub-tabs — سطح دوم (فقط برای Metrics چندتایی است) */}
+                {healthGroup === 'metrics' && (
+                  <div className="flex gap-2 mb-4 flex-wrap border-b dark:border-gray-700 pb-2">
+                    {([
+                      { id: 'overview', label: 'مرور کلی', icon: '📊' },
+                      { id: 'files', label: 'نقشهٔ سلامت فایل‌ها', icon: '🗺️' },
+                      { id: 'security', label: 'امنیت', icon: '🔒' },
+                      { id: 'coverage', label: 'پوشش تست', icon: '🧪' },
+                    ] as const).map(st => (
+                      <button
+                        key={st.id}
+                        onClick={() => setHealthSubTab(st.id as HealthSubTab)}
+                        className={`px-3 py-1.5 rounded-lg text-sm transition ${
+                          healthSubTab === st.id
+                            ? 'bg-cyan-500 text-white'
+                            : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600'
+                        }`}
+                      >
+                        {st.icon} {st.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
 
                 {/* Sub-tab: overview */}
                 {healthSubTab === 'overview' && (
