@@ -176,7 +176,57 @@ const TYPE_ICONS: Record<string, string> = {
 type RepoSort = 'pushed_desc' | 'pushed_asc' | 'name' | 'stars';
 
 export default function OversightPage() {
-  const [tab, setTab] = useState<'watched' | 'repos' | 'ideas' | 'tasks' | 'reports' | 'project_tasks'>('watched');
+  const [tab, setTab] = useState<'watched' | 'repos' | 'ideas' | 'tasks' | 'reports' | 'project_tasks' | 'health'>('watched');
+
+  // 🆕 تب «🏥 سلامت پروژه» — مهاجرت از Health analysis در /projects
+  type HealthSubTab = 'overview' | 'files' | 'security' | 'coverage' | 'validation';
+  const [selectedHealthWatchedId, setSelectedHealthWatchedId] = useState<string>('');
+  const [healthSubTab, setHealthSubTab] = useState<HealthSubTab>('overview');
+  const [healthSummaries, setHealthSummaries] = useState<{
+    pass_summaries?: {
+      health_summary?: any;
+      file_health_map?: Record<string, any>;
+      security_summary?: any;
+      coverage_summary?: any;
+    };
+    findings_count?: number;
+    tasks_created_count?: number;
+    ran_at?: string;
+    passes_run?: number;
+  } | null>(null);
+  const [healthChainStatus, setHealthChainStatus] = useState<any | null>(null);
+  const [healthLoading, setHealthLoading] = useState(false);
+  const [healthError, setHealthError] = useState<string | null>(null);
+  const [healthSelectedFile, setHealthSelectedFile] = useState<string | null>(null);
+
+  const loadHealthData = useCallback(async (watchedId: string) => {
+    if (!watchedId) return;
+    setHealthLoading(true);
+    setHealthError(null);
+    try {
+      // fetch موازی سه endpoint
+      const [summariesRes, chainRes] = await Promise.all([
+        fetch(`${API_BASE}/api/oversight/scan/${encodeURIComponent(watchedId)}/summaries`),
+        fetch(`${API_BASE}/api/oversight/watched/${encodeURIComponent(watchedId)}/chain-status`),
+      ]);
+      const summaries = summariesRes.ok ? await summariesRes.json() : null;
+      const chain = chainRes.ok ? await chainRes.json() : null;
+      setHealthSummaries(summaries);
+      setHealthChainStatus(chain);
+    } catch (e: any) {
+      setHealthError(e?.message || 'خطا در بارگذاری data سلامت');
+    } finally {
+      setHealthLoading(false);
+    }
+  }, []);
+
+  // وقتی selectedHealthWatchedId تغییر می‌کند، fresh load
+  // (auto-select effect در ادامه — بعد از تعریف watched state)
+  useEffect(() => {
+    if (tab === 'health' && selectedHealthWatchedId) {
+      loadHealthData(selectedHealthWatchedId);
+    }
+  }, [tab, selectedHealthWatchedId, loadHealthData]);
 
   // 🔗 External project tasks bridge — تسک‌های /projects که در /oversight نمایش داده می‌شوند
   const [externalTasks, setExternalTasks] = useState<Array<{
@@ -838,6 +888,14 @@ export default function OversightPage() {
   const [selectedRepoNames, setSelectedRepoNames] = useState<Set<string>>(new Set());
 
   const [watched, setWatched] = useState<Watched[]>([]);
+
+  // 🆕 (commit 2.1) auto-select اولین watched برای تب health
+  // اینجا قرار دارد چون به watched state وابسته است
+  useEffect(() => {
+    if (tab === 'health' && !selectedHealthWatchedId && watched.length > 0) {
+      setSelectedHealthWatchedId(watched[0].id);
+    }
+  }, [tab, selectedHealthWatchedId, watched]);
 
   const [tasks, setTasks] = useState<Task[]>([]);
   const [taskFilterStatus, setTaskFilterStatus] = useState<string>('all');
@@ -1795,6 +1853,7 @@ export default function OversightPage() {
               { id: 'ideas', label: 'ایده/مشکل', icon: '💡', count: 0 },
               { id: 'tasks', label: 'تسک‌ها', icon: '📋', count: tasks.length },
               { id: 'project_tasks', label: 'تسک‌های پروژه‌ها', icon: '🔗', count: externalTasks.length },
+              { id: 'health', label: 'سلامت پروژه', icon: '🏥', count: 0 },
               { id: 'reports', label: 'گزارش‌ها', icon: '📊', count: reports.length },
             ] as const
           ).map((t) => (
@@ -2362,6 +2421,344 @@ export default function OversightPage() {
                 })}
               </div>
             )}
+          </div>
+        ) : tab === 'health' ? (
+          // ─── 🏥 تب سلامت پروژه (مهاجرت از Health analysis) ───
+          <div>
+            <div className="flex items-center justify-between mb-4 pb-3 border-b dark:border-gray-700 flex-wrap gap-3">
+              <div>
+                <h2 className="text-lg font-bold text-gray-800 dark:text-gray-100 flex items-center gap-2">
+                  <span>🏥</span> سلامت پروژه
+                </h2>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  متریک‌های سلامت کد، امنیت، پوشش تست و chain status — بر اساس آخرین Deep Scan
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <select
+                  value={selectedHealthWatchedId}
+                  onChange={e => setSelectedHealthWatchedId(e.target.value)}
+                  className="px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm"
+                >
+                  <option value="">— پروژه را انتخاب کنید —</option>
+                  {watched.map(w => (
+                    <option key={w.id} value={w.id}>{w.repo_full_name}</option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => loadHealthData(selectedHealthWatchedId)}
+                  disabled={!selectedHealthWatchedId || healthLoading}
+                  className="px-3 py-1.5 bg-cyan-600 text-white rounded-lg hover:bg-cyan-700 disabled:opacity-50 text-sm"
+                >
+                  {healthLoading ? '⏳' : '🔄'} بروزرسانی
+                </button>
+              </div>
+            </div>
+
+            {!selectedHealthWatchedId ? (
+              <div className="text-center py-12 text-gray-500 dark:text-gray-400">
+                <div className="text-4xl mb-2">🏥</div>
+                <p>یک پروژهٔ تحت نظارت انتخاب کنید</p>
+              </div>
+            ) : healthError ? (
+              <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 rounded-lg p-4 text-red-800 dark:text-red-200 text-sm">
+                ❌ {healthError}
+              </div>
+            ) : !healthSummaries && !healthChainStatus ? (
+              <div className="text-center py-12 text-gray-500">
+                {healthLoading ? '⏳ در حال بارگذاری...' : 'data موجود نیست — ابتدا یک Deep Scan اجرا کنید'}
+              </div>
+            ) : (
+              <>
+                {/* Sub-tabs */}
+                <div className="flex gap-2 mb-4 flex-wrap border-b dark:border-gray-700 pb-2">
+                  {([
+                    { id: 'overview', label: 'مرور کلی', icon: '📊' },
+                    { id: 'files', label: 'نقشهٔ سلامت فایل‌ها', icon: '🗺️' },
+                    { id: 'security', label: 'امنیت', icon: '🔒' },
+                    { id: 'coverage', label: 'پوشش تست', icon: '🧪' },
+                    { id: 'validation', label: 'Chain Status', icon: '⛓️' },
+                  ] as const).map(st => (
+                    <button
+                      key={st.id}
+                      onClick={() => setHealthSubTab(st.id as HealthSubTab)}
+                      className={`px-3 py-1.5 rounded-lg text-sm transition ${
+                        healthSubTab === st.id
+                          ? 'bg-cyan-600 text-white'
+                          : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600'
+                      }`}
+                    >
+                      {st.icon} {st.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Sub-tab: overview */}
+                {healthSubTab === 'overview' && (
+                  <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+                    {(() => {
+                      const hs = healthSummaries?.pass_summaries?.health_summary;
+                      const score = hs?.overall_health_score;
+                      return (
+                        <>
+                          <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg p-4 text-center">
+                            <div className="text-3xl mb-1">
+                              {score >= 70 ? '🟢' : score >= 40 ? '🟡' : '🔴'}
+                            </div>
+                            <div className="text-2xl font-bold text-gray-800 dark:text-gray-100">
+                              {score != null ? Math.round(score) : '—'}
+                            </div>
+                            <div className="text-xs text-gray-500">overall_health_score</div>
+                          </div>
+                          <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg p-4 text-center">
+                            <div className="text-3xl mb-1">📁</div>
+                            <div className="text-2xl font-bold text-gray-800 dark:text-gray-100">
+                              {hs?.files_analyzed_count ?? 0}
+                            </div>
+                            <div className="text-xs text-gray-500">فایل‌های تحلیل‌شده</div>
+                          </div>
+                          <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg p-4 text-center">
+                            <div className="text-3xl mb-1">🚨</div>
+                            <div className="text-2xl font-bold text-red-700 dark:text-red-300">
+                              {hs?.red_files_count ?? 0}
+                            </div>
+                            <div className="text-xs text-gray-500">فایل‌های قرمز (نیاز فوری)</div>
+                          </div>
+                          <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg p-4 text-center">
+                            <div className="text-3xl mb-1">📋</div>
+                            <div className="text-2xl font-bold text-gray-800 dark:text-gray-100">
+                              {healthSummaries?.findings_count ?? 0}
+                            </div>
+                            <div className="text-xs text-gray-500">findings از scan</div>
+                          </div>
+                        </>
+                      );
+                    })()}
+                    {healthSummaries?.ran_at && (
+                      <div className="md:col-span-2 lg:col-span-4 text-xs text-gray-500 dark:text-gray-400 text-center mt-2">
+                        🕐 آخرین scan: {fmtDate(healthSummaries.ran_at)} · {healthSummaries.passes_run} pass اجرا شد
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Sub-tab: files (heatmap) */}
+                {healthSubTab === 'files' && (
+                  <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg p-4">
+                    {(() => {
+                      const fhm = healthSummaries?.pass_summaries?.file_health_map || {};
+                      const entries = Object.entries(fhm).sort((a: any, b: any) => (a[1].score || 0) - (b[1].score || 0));
+                      if (entries.length === 0) {
+                        return <div className="text-center text-gray-500 py-8">file_health_map تولید نشده — یک scan اجرا کنید</div>;
+                      }
+                      return (
+                        <div className="space-y-2 max-h-[500px] overflow-auto">
+                          {entries.map(([path, fh]: any) => (
+                            <button
+                              key={path}
+                              onClick={() => setHealthSelectedFile(path)}
+                              className="w-full text-right flex items-center gap-3 p-2 rounded hover:bg-gray-50 dark:hover:bg-gray-900/40"
+                            >
+                              <div
+                                className="w-3 h-8 rounded flex-shrink-0"
+                                style={{ backgroundColor: fh.hex || '#888' }}
+                                title={`${fh.color} · score=${fh.score}`}
+                              />
+                              <code className="text-xs flex-1 text-gray-800 dark:text-gray-200 truncate">{path}</code>
+                              <span className={`text-xs font-bold ${
+                                fh.color === 'red' ? 'text-red-600' :
+                                fh.color === 'yellow' ? 'text-yellow-600' : 'text-green-600'
+                              }`}>
+                                {Math.round(fh.score || 0)}
+                              </span>
+                              <span className="text-xs text-gray-500">
+                                {fh.findings_count || 0} finding
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {/* Sub-tab: security */}
+                {healthSubTab === 'security' && (
+                  <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg p-4">
+                    {(() => {
+                      const ss = healthSummaries?.pass_summaries?.security_summary;
+                      if (!ss) return <div className="text-center text-gray-500 py-8">security_summary موجود نیست — Pass I (security_deep) اجرا نشده</div>;
+                      return (
+                        <div className="space-y-3">
+                          <div className="flex items-center gap-3 mb-3 pb-3 border-b dark:border-gray-700">
+                            <div className={`text-4xl ${
+                              (ss.overall_security_score || 0) >= 70 ? 'text-green-500' :
+                              (ss.overall_security_score || 0) >= 40 ? 'text-yellow-500' : 'text-red-500'
+                            }`}>🔒</div>
+                            <div>
+                              <div className="text-2xl font-bold">{ss.overall_security_score || 0}/100</div>
+                              <div className="text-xs text-gray-500">overall_security_score</div>
+                            </div>
+                          </div>
+                          <div className="grid sm:grid-cols-2 gap-3 text-sm">
+                            <div>🔑 secrets: <strong>{ss.secrets_count || 0}</strong></div>
+                            <div>📜 license: <strong>{ss.license_status || '?'}</strong> ({ss.license_name || '—'})</div>
+                            <div>📦 vulnerable deps: <strong>{ss.vulnerable_deps_count || 0}</strong></div>
+                            <div>🔐 sensitive files: <strong>{ss.sensitive_files_count || 0}</strong></div>
+                            <div>🌐 CORS open: <strong>{ss.cors_open ? 'بله ⚠️' : 'خیر ✓'}</strong></div>
+                            <div>🔓 endpoints بدون auth: <strong>{ss.endpoints_without_auth_count || 0}</strong></div>
+                          </div>
+                          {Array.isArray(ss.secrets_files) && ss.secrets_files.length > 0 && (
+                            <details className="mt-3">
+                              <summary className="cursor-pointer text-sm font-medium">🔑 secrets یافت‌شده ({ss.secrets_files.length})</summary>
+                              <ul className="mt-2 text-xs space-y-1 list-disc pr-5">
+                                {ss.secrets_files.map((f: string, i: number) => <li key={i}><code>{f}</code></li>)}
+                              </ul>
+                            </details>
+                          )}
+                          {Array.isArray(ss.vulnerable_deps) && ss.vulnerable_deps.length > 0 && (
+                            <details className="mt-3">
+                              <summary className="cursor-pointer text-sm font-medium">📦 dependencies آسیب‌پذیر</summary>
+                              <ul className="mt-2 text-xs space-y-1 list-disc pr-5">
+                                {ss.vulnerable_deps.map((d: any, i: number) => (
+                                  <li key={i}>{d.name}@{d.version} - {d.cve} ({d.severity})</li>
+                                ))}
+                              </ul>
+                            </details>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {/* Sub-tab: coverage */}
+                {healthSubTab === 'coverage' && (
+                  <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg p-4">
+                    {(() => {
+                      const cs = healthSummaries?.pass_summaries?.coverage_summary;
+                      if (!cs) return <div className="text-center text-gray-500 py-8">coverage_summary موجود نیست — Pass J (coverage) اجرا نشده</div>;
+                      return (
+                        <div className="space-y-3">
+                          <div className="flex items-center gap-3 mb-3 pb-3 border-b dark:border-gray-700">
+                            <div className="text-4xl">🧪</div>
+                            <div>
+                              <div className="text-2xl font-bold">{cs.coverage_estimate_percent || 0}%</div>
+                              <div className="text-xs text-gray-500">coverage_estimate · score: {cs.coverage_score || 0}/100</div>
+                            </div>
+                          </div>
+                          <div className="grid sm:grid-cols-3 gap-3 text-sm text-center">
+                            <div className="bg-gray-50 dark:bg-gray-900/40 p-3 rounded">
+                              <div className="text-xl font-bold">{cs.total_source_files || 0}</div>
+                              <div className="text-xs text-gray-500">source files</div>
+                            </div>
+                            <div className="bg-gray-50 dark:bg-gray-900/40 p-3 rounded">
+                              <div className="text-xl font-bold">{cs.total_test_files || 0}</div>
+                              <div className="text-xs text-gray-500">test files</div>
+                            </div>
+                            <div className="bg-gray-50 dark:bg-gray-900/40 p-3 rounded">
+                              <div className="text-xl font-bold text-orange-600">{cs.untested_files_count || 0}</div>
+                              <div className="text-xs text-gray-500">untested files</div>
+                            </div>
+                          </div>
+                          {Array.isArray(cs.critical_untested) && cs.critical_untested.length > 0 && (
+                            <details className="mt-3">
+                              <summary className="cursor-pointer text-sm font-medium text-red-700 dark:text-red-300">
+                                🚨 critical untested ({cs.critical_untested.length})
+                              </summary>
+                              <ul className="mt-2 text-xs space-y-2">
+                                {cs.critical_untested.map((c: any, i: number) => (
+                                  <li key={i} className="border-r-2 border-red-500 pr-2">
+                                    <code>{c.path}</code> — <em>{c.reason}</em>
+                                    {Array.isArray(c.suggested_tests) && c.suggested_tests.length > 0 && (
+                                      <ul className="mt-1 list-disc pr-5 text-gray-600 dark:text-gray-400">
+                                        {c.suggested_tests.map((t: string, j: number) => <li key={j}>{t}</li>)}
+                                      </ul>
+                                    )}
+                                  </li>
+                                ))}
+                              </ul>
+                            </details>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {/* Sub-tab: validation chain */}
+                {healthSubTab === 'validation' && (
+                  <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg p-4">
+                    {!healthChainStatus ? (
+                      <div className="text-center text-gray-500 py-8">chain status بارگذاری نشد</div>
+                    ) : (
+                      <div className="space-y-3">
+                        {([
+                          { key: 'scan', label: 'Phase 1: Deep Scan', icon: '🔍' },
+                          { key: 'codex', label: 'Phase 2: Project Codex', icon: '📚' },
+                          { key: 'roadmap', label: 'Phase 3: Roadmap & Ideal State', icon: '🗺️' },
+                          { key: 'tasks', label: 'Phase 4: Tasks', icon: '📋' },
+                          { key: 'verification', label: 'Phase 5: Verification', icon: '✅' },
+                        ] as const).map(p => {
+                          const data = healthChainStatus[p.key] || {};
+                          const status = data.status || (data.total != null ? 'has_data' : 'never');
+                          return (
+                            <div key={p.key} className="flex items-center gap-3 p-3 border dark:border-gray-700 rounded">
+                              <div className="text-2xl">{p.icon}</div>
+                              <div className="flex-1">
+                                <div className="font-medium text-gray-800 dark:text-gray-100">{p.label}</div>
+                                <div className="text-xs text-gray-500 mt-1">
+                                  {p.key === 'scan' && `${data.findings_count || 0} finding · ${data.passes_run || 0} pass`}
+                                  {p.key === 'codex' && `${data.files_documented || 0} فایل documented`}
+                                  {p.key === 'roadmap' && `${data.phases_count || 0} فاز · ideal state: ${data.ideal_state_set ? 'تعریف شده' : 'تعریف نشده'}`}
+                                  {p.key === 'tasks' && `total=${data.total || 0} · pending=${data.pending || 0} · done=${data.done || 0}`}
+                                  {p.key === 'verification' && `verified=${data.verified_count || 0} · partial=${data.partial_count || 0}`}
+                                </div>
+                              </div>
+                              <span className={`px-2 py-1 rounded text-xs ${
+                                status === 'done' || status === 'has_data' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'
+                              }`}>
+                                {status === 'done' || status === 'has_data' ? '✓' : '○'}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* Modal جزئیات فایل (heatmap drill-down) */}
+            {healthSelectedFile && (() => {
+              const fh = healthSummaries?.pass_summaries?.file_health_map?.[healthSelectedFile];
+              return (
+                <Modal onClose={() => setHealthSelectedFile(null)} title={`📄 ${healthSelectedFile}`}>
+                  <div className="space-y-3 text-sm">
+                    {fh ? (
+                      <>
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded" style={{ backgroundColor: fh.hex }} />
+                          <div>
+                            <div className="text-2xl font-bold">{Math.round(fh.score)}/100</div>
+                            <div className="text-xs text-gray-500">color: {fh.color} · {fh.findings_count} finding</div>
+                          </div>
+                        </div>
+                        <div>
+                          <strong>severity weighted:</strong> {fh.severity_weighted?.toFixed(2)}
+                        </div>
+                        <div>
+                          <strong>passes touched:</strong> {(fh.passes_touched || []).join(', ') || 'هیچ'}
+                        </div>
+                      </>
+                    ) : (
+                      <p>data این فایل در نقشهٔ سلامت موجود نیست.</p>
+                    )}
+                  </div>
+                </Modal>
+              );
+            })()}
           </div>
         ) : (
           <ReportsPanel
