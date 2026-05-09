@@ -100,6 +100,13 @@ interface Task {
     action_plan_summary?: string;
     [key: string]: any;
   };
+  // 🆕 follow-up prompt — وقتی verify نتیجهٔ partial/not_done داد
+  followup_prompt?: string;
+  followup_generated_at?: string | null;
+  followup_target_locations?: Array<{path: string; lines?: string; symbol?: string; snippet?: string; note?: string}>;
+  followup_acceptance_criteria?: string[];
+  followup_round?: number;
+  last_verification_report_id?: string | null;
 }
 
 interface Report {
@@ -248,6 +255,8 @@ export default function OversightPage() {
     setExecuteProgress([]);
     setExecuteError(null);
     setExecuteStartedAt(null);
+    setExecutePromptOverride(null);
+    setExecuteIsFollowup(false);
   }, []);
 
   const loadExternalTasks = useCallback(async (projectId?: string) => {
@@ -372,19 +381,31 @@ export default function OversightPage() {
     }
   }, []);
 
+  // 🆕 وقتی modal روی followup باز می‌شود، promptOverride را به جای task.prompt
+  // به smart-chat می‌فرستیم. این state بدون ذخیرهٔ دائمی روی task است.
+  const [executePromptOverride, setExecutePromptOverride] = useState<string | null>(null);
+  const [executeIsFollowup, setExecuteIsFollowup] = useState(false);
+
   // فاز ۲: smart-chat برای تولید action_plan
   const startSmartChat = useCallback(async (task: any, projectId: string) => {
     if (!task || !projectId) return;
     setExecuteStage('planning');
-    setExecuteProgress(prev => [...prev, '🧠 ارسال پرامپت به مدل برای تولید action_plan...']);
+    const isFollowup = !!executePromptOverride;
+    setExecuteProgress(prev => [
+      ...prev,
+      isFollowup
+        ? `🔁 دور ${task.followup_round || '?'}: ارسال پرامپت ادامه به مدل...`
+        : '🧠 ارسال پرامپت به مدل برای تولید action_plan...',
+    ]);
     try {
+      const messageToSend = executePromptOverride || task.prompt || task.title || '';
       const res = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           project_id: projectId,
           model_ids: selectedModelIds.length > 0 ? selectedModelIds : ['claude'],
-          message: task.prompt || task.title || '',
+          message: messageToSend,
           chat_history: [],
           previously_read_files: [],
         }),
@@ -414,7 +435,7 @@ export default function OversightPage() {
       setExecuteError(e?.message || 'خطای ناشناخته در smart-chat');
       setExecuteStage('error');
     }
-  }, [selectedModelIds, consumeSSEStream]);
+  }, [selectedModelIds, consumeSSEStream, executePromptOverride]);
 
   const openExecuteModal = useCallback(async (task: any) => {
     if (!task) return;
@@ -448,6 +469,104 @@ export default function OversightPage() {
       setExecuteStage('error');
     }
   }, [closeExecuteModal, selectedModelIds, startSmartChat]);
+
+  // 🔁 باز کردن execute modal با followup_prompt به جای task.prompt
+  // (بدون تغییر دائمی روی task — فقط برای این modal)
+  const openExecuteModalWithFollowup = useCallback(async (task: any) => {
+    if (!task) return;
+    if (!task.followup_prompt || !task.followup_prompt.trim()) {
+      alert('پرامپت بعدی موجود نیست. ابتدا verify انجام دهید.');
+      return;
+    }
+    closeExecuteModal();
+    setExecuteModalOpen(true);
+    setExecuteModalTask(task);
+    setExecutePromptOverride(task.followup_prompt);
+    setExecuteIsFollowup(true);
+    setExecuteStage('resolving');
+    setExecuteProgress([
+      `🔁 دور ${task.followup_round || 1}: شروع پردازش پرامپت ادامه...`,
+      '🔍 یافتن پروژهٔ محلی برای این تسک...',
+    ]);
+    setExecuteStartedAt(Date.now());
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/tasks/${encodeURIComponent(task.id)}/resolve-project`);
+      if (!res.ok) {
+        throw new Error(`resolve-project HTTP ${res.status}: ${await res.text().catch(() => '')}`);
+      }
+      const info = await res.json();
+      setExecuteProjectInfo(info);
+      if (!info.matched) {
+        setExecuteError(info.reason || 'پروژه پیدا نشد');
+        setExecuteStage('error');
+        return;
+      }
+      setExecuteProgress(prev => [...prev, `✅ پروژه پیدا شد: ${info.project_name} (${info.project_id})`]);
+      if (selectedModelIds.length === 0) {
+        setExecuteError('حداقل یک مدل فعال انتخاب کنید (در بالای صفحه /oversight)');
+        setExecuteStage('error');
+        return;
+      }
+      // smart-chat با followup_prompt اجرا می‌شود (به‌خاطر executePromptOverride)
+      await startSmartChat(task, info.project_id);
+    } catch (e: any) {
+      setExecuteError(e?.message || 'خطای ناشناخته در resolve-project');
+      setExecuteStage('error');
+    }
+  }, [closeExecuteModal, selectedModelIds, startSmartChat]);
+
+  // 📋 کپی پرامپت بعدی
+  const [followupCopyFeedbackId, setFollowupCopyFeedbackId] = useState<string | null>(null);
+  const copyFollowupPrompt = useCallback(async (task: any) => {
+    if (!task?.followup_prompt) {
+      alert('پرامپت بعدی موجود نیست. ابتدا verify انجام دهید.');
+      return;
+    }
+    try {
+      const txt = task.followup_prompt;
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(txt);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = txt;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setFollowupCopyFeedbackId(task.id);
+      setTimeout(() => setFollowupCopyFeedbackId(null), 1500);
+    } catch (e: any) {
+      alert('کپی ناموفق: ' + e?.message);
+    }
+  }, []);
+
+  // 👁 مشاهدهٔ پرامپت بعدی در modal
+  const [viewingFollowupTask, setViewingFollowupTask] = useState<any | null>(null);
+  const viewFollowupPrompt = useCallback((task: any) => {
+    setViewingFollowupTask(task);
+  }, []);
+
+  // 📂 cache گزارش‌ها برای نمایش inline (per task_id → آخرین Report)
+  const [taskReportCache, setTaskReportCache] = useState<Record<string, any>>({});
+  const [taskReportLoading, setTaskReportLoading] = useState<Record<string, boolean>>({});
+  const fetchLatestReportForTask = useCallback(async (taskId: string) => {
+    if (taskReportCache[taskId] || taskReportLoading[taskId]) return;
+    setTaskReportLoading(prev => ({ ...prev, [taskId]: true }));
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/reports?task_id=${encodeURIComponent(taskId)}&limit=1`);
+      if (res.ok) {
+        const data = await res.json();
+        const reports = Array.isArray(data) ? data : (data?.items || data?.reports || []);
+        if (reports.length > 0) {
+          setTaskReportCache(prev => ({ ...prev, [taskId]: reports[0] }));
+        }
+      }
+    } catch (e) { /* non-critical */ }
+    finally {
+      setTaskReportLoading(prev => ({ ...prev, [taskId]: false }));
+    }
+  }, [taskReportCache, taskReportLoading]);
 
   // فاز ۳: confirm + apply-action + record-execution
   const confirmAndApply = useCallback(async () => {
@@ -506,8 +625,12 @@ export default function OversightPage() {
             pr_branch: prBranch,
             files_committed: filesCommitted,
             model_ids: selectedModelIds,
-            action_plan_summary: (plan.commit_message || '').slice(0, 500),
-            executed_via: 'inspector_apply_action',
+            action_plan_summary: (
+              executeIsFollowup
+                ? `[round ${executeModalTask?.followup_round || '?'}] ${plan.commit_message || ''}`
+                : (plan.commit_message || '')
+            ).slice(0, 500),
+            executed_via: executeIsFollowup ? 'inspector_apply_action_followup' : 'inspector_apply_action',
           }),
         });
         if (!recRes.ok) {
@@ -1904,6 +2027,13 @@ export default function OversightPage() {
             onCopyPrompt={copyFullPrompt}
             onShowHistory={openVerifyHistory}
             onExecuteWithAi={openExecuteModal}
+            onCopyFollowup={copyFollowupPrompt}
+            onExecuteFollowupWithAi={openExecuteModalWithFollowup}
+            onViewFollowup={viewFollowupPrompt}
+            followupCopyFeedbackId={followupCopyFeedbackId}
+            taskReportCache={taskReportCache}
+            taskReportLoading={taskReportLoading}
+            fetchLatestReportForTask={fetchLatestReportForTask}
             executeDisabledReason={selectedModelIds.length === 0 ? 'حداقل یک مدل انتخاب کنید' : ''}
             fmtDate={fmtDate}
           />
@@ -2249,6 +2379,48 @@ export default function OversightPage() {
                     لغو
                   </button>
                 )}
+              </div>
+            </div>
+          </Modal>
+        )}
+
+        {/* 📄 مودال مشاهدهٔ پرامپت بعدی (followup) */}
+        {viewingFollowupTask && (
+          <Modal onClose={() => setViewingFollowupTask(null)} title={`📄 پرامپت ادامه (دور ${viewingFollowupTask.followup_round || 1})`}>
+            <div className="space-y-3">
+              <div className="text-xs text-gray-600 dark:text-gray-400">
+                این پرامپت پس از verify آخر (status={viewingFollowupTask.verification_status || '?'}) به‌طور خودکار توسط AI ساخته شده. تمرکز آن روی AC هایی است که هنوز برآورده نشده‌اند.
+                {viewingFollowupTask.followup_generated_at && (
+                  <> · 🕐 تولید: {fmtDate(viewingFollowupTask.followup_generated_at)}</>
+                )}
+              </div>
+              <pre className="text-xs whitespace-pre-wrap font-mono bg-gray-50 dark:bg-gray-900/40 p-3 rounded max-h-[60vh] overflow-auto text-gray-800 dark:text-gray-200">
+                {viewingFollowupTask.followup_prompt}
+              </pre>
+              <div className="flex gap-2 justify-end pt-2 border-t dark:border-gray-700">
+                <button
+                  onClick={() => copyFollowupPrompt(viewingFollowupTask)}
+                  className="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 text-sm"
+                >
+                  📋 کپی
+                </button>
+                <button
+                  onClick={() => {
+                    const t = viewingFollowupTask;
+                    setViewingFollowupTask(null);
+                    openExecuteModalWithFollowup(t);
+                  }}
+                  disabled={selectedModelIds.length === 0}
+                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm disabled:opacity-50"
+                >
+                  🚀 اجرا با AI
+                </button>
+                <button
+                  onClick={() => setViewingFollowupTask(null)}
+                  className="px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 text-sm"
+                >
+                  بستن
+                </button>
               </div>
             </div>
           </Modal>
@@ -3008,6 +3180,13 @@ function TasksPanel({
   onCopyPrompt,
   onShowHistory,
   onExecuteWithAi,
+  onCopyFollowup,
+  onExecuteFollowupWithAi,
+  onViewFollowup,
+  followupCopyFeedbackId,
+  taskReportCache,
+  taskReportLoading,
+  fetchLatestReportForTask,
   executeDisabledReason,
   fmtDate,
 }: {
@@ -3033,6 +3212,13 @@ function TasksPanel({
   onCopyPrompt: (id: string) => void;
   onShowHistory: (id: string) => void;
   onExecuteWithAi: (t: Task) => void;
+  onCopyFollowup: (t: Task) => void;
+  onExecuteFollowupWithAi: (t: Task) => void;
+  onViewFollowup: (t: Task) => void;
+  followupCopyFeedbackId: string | null;
+  taskReportCache: Record<string, any>;
+  taskReportLoading: Record<string, boolean>;
+  fetchLatestReportForTask: (taskId: string) => void;
   executeDisabledReason: string;
   fmtDate: (d?: string | null) => string;
 }) {
@@ -3245,7 +3431,136 @@ function TasksPanel({
               🔖 منتظر verify بعدی
             </span>
           )}
+          {/* 🔁 followup badge — وقتی پرامپت ادامه آماده است */}
+          {t.followup_prompt && t.followup_prompt.length > 50 && (
+            <span
+              className="px-1.5 py-0.5 rounded bg-orange-100 dark:bg-orange-900/40 text-orange-700 dark:text-orange-300"
+              title="پرامپت ادامه (با تمرکز روی AC های ناموفق) آماده است. پایین‌تر دکمه‌های کپی/اجرا را ببینید."
+            >
+              📄 پرامپت بعدی (دور {t.followup_round || 1})
+            </span>
+          )}
         </div>
+
+        {/* 📋 جزئیات آخرین verify — expandable */}
+        {t.last_verification_report_id && (
+          <details
+            className="mt-3 bg-gray-50 dark:bg-gray-900/40 rounded-lg p-2"
+            onToggle={(e) => {
+              const el = e.currentTarget as HTMLDetailsElement;
+              if (el.open && !taskReportCache[t.id] && !taskReportLoading[t.id]) {
+                fetchLatestReportForTask(t.id);
+              }
+            }}
+          >
+            <summary className="cursor-pointer text-xs text-gray-700 dark:text-gray-300 font-medium select-none">
+              📋 جزئیات آخرین verify
+              {taskReportCache[t.id]?.status && (
+                <span className={`mr-2 px-1.5 py-0.5 rounded text-xs ${
+                  taskReportCache[t.id].status === 'done' ? 'bg-green-100 text-green-700 dark:bg-green-900/40' :
+                  taskReportCache[t.id].status === 'partial' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40' :
+                  taskReportCache[t.id].status === 'regressed' ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/40' :
+                  'bg-red-100 text-red-700 dark:bg-red-900/40'
+                }`}>
+                  {taskReportCache[t.id].status}
+                  {typeof taskReportCache[t.id].confidence_score === 'number' && (
+                    <> · {Math.round((taskReportCache[t.id].confidence_score || 0) * 100)}%</>
+                  )}
+                </span>
+              )}
+              <span className="text-gray-500 mr-1 text-[10px]">(کلیک برای جزئیات)</span>
+            </summary>
+            <div className="mt-2 space-y-2 text-xs">
+              {taskReportLoading[t.id] && <div className="text-gray-500">⏳ در حال بارگذاری گزارش...</div>}
+              {taskReportCache[t.id] && (() => {
+                const r = taskReportCache[t.id];
+                return (
+                  <>
+                    {r.summary && (
+                      <div>
+                        <div className="font-semibold text-gray-800 dark:text-gray-200 mb-1">📝 خلاصه:</div>
+                        <div className="text-gray-700 dark:text-gray-300 whitespace-pre-wrap leading-relaxed">{r.summary}</div>
+                      </div>
+                    )}
+                    {Array.isArray(r.done_parts) && r.done_parts.length > 0 && (
+                      <div>
+                        <div className="font-semibold text-green-700 dark:text-green-300 mb-1">✅ انجام‌شده ({r.done_parts.length}):</div>
+                        <ul className="list-disc pr-5 space-y-0.5 text-gray-700 dark:text-gray-300">
+                          {r.done_parts.map((p: string, i: number) => <li key={i}>{p}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                    {Array.isArray(r.remaining_parts) && r.remaining_parts.length > 0 && (
+                      <div>
+                        <div className="font-semibold text-orange-700 dark:text-orange-300 mb-1">⏳ باقی‌مانده ({r.remaining_parts.length}):</div>
+                        <ul className="list-disc pr-5 space-y-0.5 text-gray-700 dark:text-gray-300">
+                          {r.remaining_parts.map((p: string, i: number) => <li key={i}>{p}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                    {Array.isArray(r.next_actions) && r.next_actions.length > 0 && (
+                      <div>
+                        <div className="font-semibold text-blue-700 dark:text-blue-300 mb-1">🪜 اقدامات بعدی پیشنهادی:</div>
+                        <ul className="list-disc pr-5 space-y-0.5 text-gray-700 dark:text-gray-300">
+                          {r.next_actions.map((p: string, i: number) => <li key={i}>{p}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                    {r.evidence && (Object.keys(r.evidence).length > 0) && (
+                      <div>
+                        <div className="font-semibold text-gray-700 dark:text-gray-300 mb-1">📁 شواهد:</div>
+                        <pre className="text-[10px] bg-white dark:bg-black/30 p-2 rounded font-mono whitespace-pre-wrap max-h-32 overflow-auto">
+                          {JSON.stringify(r.evidence, null, 2).slice(0, 1000)}
+                        </pre>
+                      </div>
+                    )}
+                    {r.model_id && (
+                      <div className="text-[10px] text-gray-500 dark:text-gray-400">
+                        🤖 verifier model: <code className="bg-white dark:bg-black/30 px-1 rounded">{r.model_id}</code>
+                        {r.run_at && <> · 🕐 {fmtDate(r.run_at)}</>}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
+              {!taskReportLoading[t.id] && !taskReportCache[t.id] && (
+                <div className="text-gray-500">گزارش هنوز fetch نشده — کلیک کنید.</div>
+              )}
+            </div>
+          </details>
+        )}
+
+        {/* 🔁 ردیف دکمه‌های follow-up — فقط در حالت partial/not_done/regressed */}
+        {t.followup_prompt && t.followup_prompt.length > 50 &&
+         ['partial', 'not_done', 'regressed', 'error', 'needs_clarification'].includes(t.verification_status || '') && (
+          <div className="mt-3 pt-2 border-t border-orange-200 dark:border-orange-800/40 flex flex-wrap gap-1.5">
+            <span className="text-xs text-orange-700 dark:text-orange-300 font-medium ml-2">
+              🔁 پرامپت ادامه آماده (دور {t.followup_round || 1}):
+            </span>
+            <button
+              onClick={() => onCopyFollowup(t)}
+              title="کپی پرامپت ادامه — برای اعمال در ابزار خارجی (Cursor / ChatGPT) و رفع AC های باقی‌مانده"
+              className="px-3 py-1 bg-orange-500 text-white rounded text-xs hover:bg-orange-600"
+            >
+              📋 {followupCopyFeedbackId === t.id ? 'کپی شد ✓' : 'کپی پرامپت بعدی'}
+            </button>
+            <button
+              onClick={() => onExecuteFollowupWithAi(t)}
+              disabled={!!executeDisabledReason}
+              title={executeDisabledReason || 'اجرای دور بعدی با AI — PR جدید روی همان repo ساخته می‌شود'}
+              className="px-3 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700 disabled:opacity-50"
+            >
+              🚀 اجرای پرامپت بعدی با AI
+            </button>
+            <button
+              onClick={() => onViewFollowup(t)}
+              title="مشاهدهٔ متن کامل پرامپت ادامه"
+              className="px-3 py-1 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded text-xs hover:bg-gray-300 dark:hover:bg-gray-600"
+            >
+              👁 مشاهده
+            </button>
+          </div>
+        )}
       </div>
     );
   };
