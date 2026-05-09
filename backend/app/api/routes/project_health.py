@@ -19,6 +19,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from ...core.database import get_db
 from ...core.logging_utils import StructuredLogger
