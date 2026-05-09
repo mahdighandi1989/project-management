@@ -96,6 +96,24 @@ interface DiagramHistory {
   createdAt: number;
 }
 
+interface ProjectSource {
+  source: 'local' | 'github';
+  id: string;
+  name: string;
+  description?: string;
+  language?: string;
+  files_count?: number;
+  url?: string;
+}
+
+const AUTO_DIAGRAM_TYPES = [
+  { id: 'tree', label: '🌲 ساختار فایل‌ها', desc: 'بدون AI - سریع' },
+  { id: 'class', label: '🏗️ کلاس‌ها', desc: 'با AI' },
+  { id: 'architecture', label: '🏛️ معماری', desc: 'با AI' },
+  { id: 'flowchart', label: '📊 جریان اجرا', desc: 'با AI' },
+  { id: 'sequence', label: '📋 توالی', desc: 'با AI' },
+];
+
 export default function DiagramsPage() {
   const [selectedType, setSelectedType] = useState('flowchart');
   const [diagram, setDiagram] = useState('');
@@ -114,7 +132,14 @@ export default function DiagramsPage() {
   const [svgContent, setSvgContent] = useState('');
   const previewRef = useRef<HTMLDivElement>(null);
 
-  // بارگذاری history
+  // اتصال خودکار به پروژه‌ها
+  const [projects, setProjects] = useState<ProjectSource[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [selectedProjectKey, setSelectedProjectKey] = useState<string>('');
+  const [autoDiagramType, setAutoDiagramType] = useState('tree');
+  const [autoGenerating, setAutoGenerating] = useState(false);
+
+  // بارگذاری history و پروژه‌ها
   useEffect(() => {
     if (typeof window === 'undefined') return;
     try {
@@ -122,7 +147,72 @@ export default function DiagramsPage() {
       if (saved) setHistory(JSON.parse(saved).slice(0, 10));
     } catch (e) {}
     loadExample('flowchart');
+    loadProjects();
   }, []);
+
+  const loadProjects = async () => {
+    setProjectsLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/diagrams/projects`);
+      if (res.ok) {
+        const data = await res.json();
+        setProjects(data.items || []);
+      }
+    } catch (e) {
+      console.error('loadProjects', e);
+    } finally {
+      setProjectsLoading(false);
+    }
+  };
+
+  const generateFromProject = async () => {
+    if (!selectedProjectKey) {
+      showError('یک پروژه انتخاب کنید');
+      return;
+    }
+    const [source, ...rest] = selectedProjectKey.split(':');
+    const id = rest.join(':');
+    if (!source || !id) {
+      showError('انتخاب پروژه نامعتبر است');
+      return;
+    }
+    setAutoGenerating(true);
+    setLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/diagrams/auto-from-project`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source,
+          id,
+          diagram_type: autoDiagramType,
+          max_files: 80,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.mermaid) {
+          setDiagram(data.mermaid);
+          // نگاشت نوع برای انتخاب در type selector
+          if (autoDiagramType === 'tree' || autoDiagramType === 'flowchart') setSelectedType('flowchart');
+          else if (autoDiagramType === 'class') setSelectedType('class');
+          else if (autoDiagramType === 'sequence') setSelectedType('sequence');
+          saveHistory(autoDiagramType, data.mermaid);
+          showSuccess(`نمودار ${data.project_name || ''} تولید شد`);
+        } else {
+          showError('کد Mermaid برگردانده نشد');
+        }
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showError(err.detail || 'خطا در تولید خودکار');
+      }
+    } catch (e: any) {
+      showError(e.message);
+    } finally {
+      setAutoGenerating(false);
+      setLoading(false);
+    }
+  };
 
   // ذخیره history
   const saveHistory = (type: string, code: string) => {
@@ -398,9 +488,101 @@ export default function DiagramsPage() {
         <div className="grid lg:grid-cols-2 gap-6">
           {/* انتخاب و ویرایش */}
           <div className="space-y-6">
-            {/* انواع نمودار */}
+            {/* اتصال خودکار به پروژه‌ها */}
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6 border-2 border-purple-200 dark:border-purple-800">
+              <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                <h2 className="font-bold dark:text-white flex items-center gap-2">
+                  🤖 رسم خودکار از پروژه
+                </h2>
+                <button
+                  onClick={loadProjects}
+                  disabled={projectsLoading}
+                  className="text-xs px-2 py-1 bg-gray-100 dark:bg-gray-700 dark:text-gray-200 rounded hover:bg-gray-200"
+                >
+                  🔄 بروزرسانی
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs mb-1 dark:text-gray-300">پروژه</label>
+                  <select
+                    value={selectedProjectKey}
+                    onChange={(e) => setSelectedProjectKey(e.target.value)}
+                    disabled={projectsLoading || projects.length === 0}
+                    className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600 disabled:opacity-50"
+                  >
+                    <option value="">
+                      {projectsLoading
+                        ? 'در حال بارگذاری...'
+                        : projects.length === 0
+                        ? 'پروژه‌ای پیدا نشد'
+                        : '— یک پروژه انتخاب کنید —'}
+                    </option>
+                    {projects.length > 0 && (
+                      <optgroup label="📦 محلی (از موتور خالق)">
+                        {projects
+                          .filter((p) => p.source === 'local')
+                          .map((p) => (
+                            <option key={`local:${p.id}`} value={`local:${p.id}`}>
+                              {p.name} {p.language ? `· ${p.language}` : ''}
+                            </option>
+                          ))}
+                      </optgroup>
+                    )}
+                    {projects.some((p) => p.source === 'github') && (
+                      <optgroup label="🛰️ تحت نظارت (GitHub)">
+                        {projects
+                          .filter((p) => p.source === 'github')
+                          .map((p) => (
+                            <option key={`github:${p.id}`} value={`github:${p.id}`}>
+                              {p.name} {p.language ? `· ${p.language}` : ''}
+                            </option>
+                          ))}
+                      </optgroup>
+                    )}
+                  </select>
+                  {projects.length === 0 && !projectsLoading && (
+                    <p className="text-xs text-gray-500 mt-1">
+                      ابتدا یک پروژه در «موتور خالق» بسازید یا در «مرکز نظارت» مخزنی را تحت نظارت بگیرید.
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-xs mb-1 dark:text-gray-300">نوع نمودار</label>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {AUTO_DIAGRAM_TYPES.map((t) => (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => setAutoDiagramType(t.id)}
+                        className={`p-2 rounded border text-right transition ${
+                          autoDiagramType === t.id
+                            ? 'bg-purple-500 text-white border-purple-500'
+                            : 'bg-gray-50 dark:bg-gray-700 dark:text-gray-200 border-gray-200 dark:border-gray-600 hover:bg-gray-100'
+                        }`}
+                      >
+                        <div className="text-sm font-medium">{t.label}</div>
+                        <div className="text-[10px] opacity-70">{t.desc}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <button
+                  onClick={generateFromProject}
+                  disabled={autoGenerating || !selectedProjectKey}
+                  className="w-full py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 disabled:opacity-50 transition"
+                >
+                  {autoGenerating ? '⏳ در حال تولید نمودار...' : '🪄 رسم خودکار نمودار'}
+                </button>
+              </div>
+            </div>
+
+            {/* انواع نمودار (دستی) */}
             <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
-              <h2 className="font-bold mb-4 dark:text-white">نوع نمودار</h2>
+              <h2 className="font-bold mb-4 dark:text-white">نوع نمودار (نمونه دستی)</h2>
               <div className="grid grid-cols-4 gap-2">
                 {DIAGRAM_TYPES.map((type) => (
                   <button
