@@ -793,6 +793,11 @@ export default function ProjectDetailPage() {
   const [loadingApprovals, setLoadingApprovals] = useState(false);
   const [approvingField, setApprovingField] = useState<string | null>(null);
   const [rejectingField, setRejectingField] = useState<string | null>(null);
+  // 🆕 Race-condition fix: lock per field for delete + global lock for
+  // saveMemoryInstructions/runAutoSetup. تضمین می‌کند کاربر همزمان روی
+  // یک field دو عمل (مثل approve+delete) اجرا نمی‌کند.
+  const [deletingField, setDeletingField] = useState<string | null>(null);
+  const [memoryBusyGlobal, setMemoryBusyGlobal] = useState(false);
   const [rejectionReason, setRejectionReason] = useState('');
   const [autoConvertingIssues, setAutoConvertingIssues] = useState(false);
 
@@ -923,6 +928,20 @@ export default function ProjectDetailPage() {
       checkBatchStatusOnLoad();
     }
   }, [projectId]);
+
+  // 🆕 Polling pendingApprovals وقتی panel باز است — برای sync با /oversight
+  // (که از همان endpoint استفاده می‌کند). فقط در حالت باز بودن panel
+  // فعال است تا network noise اضافه ایجاد نکند.
+  useEffect(() => {
+    if (!showQuickApprovalPanel || !projectId) return;
+    const interval = setInterval(() => {
+      // اگر کاربر در حال approve/reject است، skip تا state درست بماند
+      if (approvingField || rejectingField || deletingField) return;
+      loadPendingApprovals();
+    }, 30000); // هر ۳۰ ثانیه
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showQuickApprovalPanel, projectId]);
 
   // 🔴 چک کردن وضعیت اجرای گروهی هنگام لود صفحه
   const checkBatchStatusOnLoad = async () => {
@@ -6670,7 +6689,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   // ===================== پایان توابع ژورنال و پروفایل =====================
 
   const saveMemoryInstructions = async () => {
+    if (memoryBusyGlobal) return; // در حین auto-setup یا save دیگر، این بلاک می‌شود
     setSavingMemory(true);
+    setMemoryBusyGlobal(true);
     try {
       const res = await fetch(`${API_BASE}/api/projects/${projectId}/memory/instructions`, {
         method: 'PUT',
@@ -6687,6 +6708,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       showError('خطا در ارتباط');
     } finally {
       setSavingMemory(false);
+      setMemoryBusyGlobal(false);
     }
   };
 
@@ -6706,7 +6728,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       return;
     }
 
+    if (memoryBusyGlobal) {
+      showError('عملیات سراسری دیگری در جریان است — لطفاً صبر کنید');
+      return;
+    }
     setRunningAutoSetup(true);
+    setMemoryBusyGlobal(true);
     try {
       const res = await fetch(
         `${API_BASE}/api/projects/${projectId}/memory/auto-setup?use_ai=true&sync_github=true&clean_invalid=true`,
@@ -6777,6 +6804,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       showError(`خطا در ارتباط: ${e.message || e}`);
     } finally {
       setRunningAutoSetup(false);
+      setMemoryBusyGlobal(false);
     }
   };
 
@@ -6854,10 +6882,13 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
   const deleteDynamicField = async (fieldId: string) => {
     if (!confirm('حذف شود؟')) return;
+    if (deletingField || approvingField === fieldId || rejectingField === fieldId) return; // جلوگیری از race
+    setDeletingField(fieldId);
     const result = await safeFetch<{ success: boolean; detail?: string; error?: string }>(
       `${API_BASE}/api/projects/${projectId}/memory/fields/${fieldId}`,
       { method: 'DELETE' },
     );
+    setDeletingField(null);
     if (!result.ok) {
       showError(`خطا در حذف فیلد: ${result.error}`);
       return;
@@ -8294,7 +8325,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   </button>
                   <button
                     onClick={runAutoSetup}
-                    disabled={runningAutoSetup}
+                    disabled={runningAutoSetup || memoryBusyGlobal}
                     className="px-6 py-3 bg-white text-purple-600 rounded-xl font-bold hover:bg-gray-100 disabled:opacity-50 shadow-lg transform hover:scale-105 transition-all flex items-center gap-2"
                   >
                     {runningAutoSetup ? (
@@ -8355,7 +8386,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
               <button
                 onClick={saveMemoryInstructions}
-                disabled={savingMemory}
+                disabled={savingMemory || memoryBusyGlobal}
                 className="mt-4 w-full py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 disabled:opacity-50"
               >
                 {savingMemory ? '⏳ در حال ذخیره...' : '💾 ذخیره باکس حافظه'}
@@ -9277,10 +9308,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               )}
                               <button
                                 onClick={() => deleteDynamicField(field.id)}
-                                className="p-1 text-red-500 hover:bg-red-100 rounded"
-                                title="حذف"
+                                disabled={!!deletingField || approvingField === field.id || rejectingField === field.id || memoryBusyGlobal}
+                                className="p-1 text-red-500 hover:bg-red-100 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                                title={deletingField === field.id ? 'در حال حذف...' : 'حذف'}
                               >
-                                🗑️
+                                {deletingField === field.id ? '⏳' : '🗑️'}
                               </button>
                             </div>
                           </div>
