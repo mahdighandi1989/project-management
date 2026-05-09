@@ -179,7 +179,7 @@ export default function OversightPage() {
   const [tab, setTab] = useState<'watched' | 'repos' | 'ideas' | 'tasks' | 'reports' | 'project_tasks' | 'health'>('watched');
 
   // 🆕 تب «🏥 سلامت پروژه» — مهاجرت از Health analysis در /projects
-  type HealthSubTab = 'overview' | 'files' | 'security' | 'coverage' | 'validation';
+  type HealthSubTab = 'overview' | 'files' | 'security' | 'coverage' | 'validation' | 'docs';
   const [selectedHealthWatchedId, setSelectedHealthWatchedId] = useState<string>('');
   const [healthSubTab, setHealthSubTab] = useState<HealthSubTab>('overview');
   const [healthSummaries, setHealthSummaries] = useState<{
@@ -198,6 +198,160 @@ export default function OversightPage() {
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [healthSelectedFile, setHealthSelectedFile] = useState<string | null>(null);
+
+  // 🆕 (commit 2.2) state برای روadmap/README/ideal_state
+  const [healthRoadmap, setHealthRoadmap] = useState<{
+    roadmap_markdown?: string;
+    ideal_state?: string;
+    phases?: Array<{name?: string; eta?: string; items?: Array<{text?: string; completed?: boolean; priority?: string}>}>;
+    generated_at?: string;
+    updated_at?: string;
+  } | null>(null);
+  const [healthReadme, setHealthReadme] = useState<{
+    readme_markdown?: string;
+    generated_at?: string;
+    updated_at?: string;
+  } | null>(null);
+  const [healthRoadmapEditing, setHealthRoadmapEditing] = useState(false);
+  const [healthRoadmapDraft, setHealthRoadmapDraft] = useState({ markdown: '', ideal: '' });
+  const [healthReadmeEditing, setHealthReadmeEditing] = useState(false);
+  const [healthReadmeDraft, setHealthReadmeDraft] = useState('');
+  const [healthDocsLoading, setHealthDocsLoading] = useState<string>('');  // 'roadmap' | 'readme' | ''
+
+  const loadHealthDocs = useCallback(async (watchedId: string) => {
+    if (!watchedId) return;
+    try {
+      const [rm, rd] = await Promise.all([
+        fetch(`${API_BASE}/api/oversight/codex/${encodeURIComponent(watchedId)}/roadmap`),
+        fetch(`${API_BASE}/api/oversight/codex/${encodeURIComponent(watchedId)}/readme`),
+      ]);
+      setHealthRoadmap(rm.ok ? await rm.json() : null);
+      setHealthReadme(rd.ok ? await rd.json() : null);
+    } catch (e) { /* non-critical */ }
+  }, []);
+
+  const generateRoadmap = useCallback(async () => {
+    if (!selectedHealthWatchedId) return;
+    setHealthDocsLoading('roadmap');
+    try {
+      // model_id را undefined می‌فرستیم تا backend default را انتخاب کند
+      // (selectedModelIds در ادامهٔ component تعریف شده ولی این callback
+      // قبل از آن render می‌شود؛ برای جلوگیری از use-before-declaration،
+      // backend خود model را پیدا می‌کند)
+      const res = await fetch(
+        `${API_BASE}/api/oversight/codex/${encodeURIComponent(selectedHealthWatchedId)}/generate-roadmap`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tone: 'professional' }),
+        }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setHealthRoadmap(data);
+      } else {
+        alert(`خطا در تولید روadmap: ${await res.text().catch(() => '')}`);
+      }
+    } catch (e: any) {
+      alert(`خطا: ${e?.message}`);
+    } finally {
+      setHealthDocsLoading('');
+    }
+  }, [selectedHealthWatchedId]);
+
+  const generateReadme = useCallback(async () => {
+    if (!selectedHealthWatchedId) return;
+    setHealthDocsLoading('readme');
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/oversight/codex/${encodeURIComponent(selectedHealthWatchedId)}/generate-readme`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setHealthReadme(data);
+      } else {
+        alert(`خطا در تولید README: ${await res.text().catch(() => '')}`);
+      }
+    } catch (e: any) {
+      alert(`خطا: ${e?.message}`);
+    } finally {
+      setHealthDocsLoading('');
+    }
+  }, [selectedHealthWatchedId]);
+
+  const saveRoadmapManual = useCallback(async () => {
+    if (!selectedHealthWatchedId) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/oversight/codex/${encodeURIComponent(selectedHealthWatchedId)}/roadmap`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            roadmap_markdown: healthRoadmapDraft.markdown,
+            ideal_state: healthRoadmapDraft.ideal,
+          }),
+        }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setHealthRoadmap(data);
+        setHealthRoadmapEditing(false);
+      }
+    } catch (e) { /* non-critical */ }
+  }, [selectedHealthWatchedId, healthRoadmapDraft]);
+
+  const saveReadmeManual = useCallback(async () => {
+    if (!selectedHealthWatchedId) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/oversight/codex/${encodeURIComponent(selectedHealthWatchedId)}/readme`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ readme_markdown: healthReadmeDraft }),
+        }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setHealthReadme(data);
+        setHealthReadmeEditing(false);
+      }
+    } catch (e) { /* non-critical */ }
+  }, [selectedHealthWatchedId, healthReadmeDraft]);
+
+  const toggleRoadmapItemHandler = useCallback(async (phaseIdx: number, itemIdx: number) => {
+    if (!selectedHealthWatchedId) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/oversight/codex/${encodeURIComponent(selectedHealthWatchedId)}/roadmap/items/${phaseIdx}:${itemIdx}`,
+        { method: 'PATCH' }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setHealthRoadmap(data);
+      }
+    } catch (e) { /* non-critical */ }
+  }, [selectedHealthWatchedId]);
+
+  const downloadReadme = useCallback(() => {
+    const md = healthReadme?.readme_markdown || '';
+    if (!md) return;
+    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `README_${selectedHealthWatchedId}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [healthReadme, selectedHealthWatchedId]);
 
   const loadHealthData = useCallback(async (watchedId: string) => {
     if (!watchedId) return;
@@ -225,8 +379,9 @@ export default function OversightPage() {
   useEffect(() => {
     if (tab === 'health' && selectedHealthWatchedId) {
       loadHealthData(selectedHealthWatchedId);
+      loadHealthDocs(selectedHealthWatchedId);
     }
-  }, [tab, selectedHealthWatchedId, loadHealthData]);
+  }, [tab, selectedHealthWatchedId, loadHealthData, loadHealthDocs]);
 
   // 🔗 External project tasks bridge — تسک‌های /projects که در /oversight نمایش داده می‌شوند
   const [externalTasks, setExternalTasks] = useState<Array<{
@@ -2477,6 +2632,7 @@ export default function OversightPage() {
                     { id: 'files', label: 'نقشهٔ سلامت فایل‌ها', icon: '🗺️' },
                     { id: 'security', label: 'امنیت', icon: '🔒' },
                     { id: 'coverage', label: 'پوشش تست', icon: '🧪' },
+                    { id: 'docs', label: 'Roadmap & README', icon: '📋' },
                     { id: 'validation', label: 'Chain Status', icon: '⛓️' },
                   ] as const).map(st => (
                     <button
@@ -2683,6 +2839,203 @@ export default function OversightPage() {
                         </div>
                       );
                     })()}
+                  </div>
+                )}
+
+                {/* Sub-tab: docs (Roadmap + README + Ideal State) */}
+                {healthSubTab === 'docs' && (
+                  <div className="space-y-4">
+                    {/* بخش Ideal State */}
+                    <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg p-4">
+                      <div className="flex items-center justify-between mb-3 pb-2 border-b dark:border-gray-700">
+                        <h3 className="font-bold text-gray-800 dark:text-gray-100 flex items-center gap-2">
+                          🎯 Ideal State
+                        </h3>
+                        <span className="text-xs text-gray-500">توصیف وضعیت مطلوب پروژه — استفاده در Pass H (completeness)</span>
+                      </div>
+                      {healthRoadmapEditing ? (
+                        <textarea
+                          value={healthRoadmapDraft.ideal}
+                          onChange={e => setHealthRoadmapDraft(d => ({ ...d, ideal: e.target.value }))}
+                          rows={4}
+                          className="w-full p-2 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-sm font-mono"
+                          placeholder="پروژه در حالت ایده‌آل به چه شکل است؟"
+                        />
+                      ) : (
+                        <div className="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap min-h-[3em]">
+                          {healthRoadmap?.ideal_state || <em className="text-gray-400">هنوز تعریف نشده — با AI تولید کنید یا دستی ویرایش کنید.</em>}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* بخش Roadmap */}
+                    <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg p-4">
+                      <div className="flex items-center justify-between mb-3 pb-2 border-b dark:border-gray-700 flex-wrap gap-2">
+                        <h3 className="font-bold text-gray-800 dark:text-gray-100 flex items-center gap-2">
+                          📋 Roadmap
+                          {healthRoadmap?.generated_at && (
+                            <span className="text-xs text-gray-500 font-normal">
+                              ({fmtDate(healthRoadmap.generated_at)})
+                            </span>
+                          )}
+                        </h3>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={generateRoadmap}
+                            disabled={!!healthDocsLoading}
+                            className="px-3 py-1 bg-purple-600 text-white rounded text-xs hover:bg-purple-700 disabled:opacity-50"
+                          >
+                            {healthDocsLoading === 'roadmap' ? '⏳ در حال تولید...' : '🤖 تولید با AI'}
+                          </button>
+                          {!healthRoadmapEditing ? (
+                            <button
+                              onClick={() => {
+                                setHealthRoadmapDraft({
+                                  markdown: healthRoadmap?.roadmap_markdown || '',
+                                  ideal: healthRoadmap?.ideal_state || '',
+                                });
+                                setHealthRoadmapEditing(true);
+                              }}
+                              className="px-3 py-1 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded text-xs hover:bg-gray-300 dark:hover:bg-gray-600"
+                            >
+                              ✏️ ویرایش
+                            </button>
+                          ) : (
+                            <>
+                              <button
+                                onClick={saveRoadmapManual}
+                                className="px-3 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700"
+                              >
+                                💾 ذخیره
+                              </button>
+                              <button
+                                onClick={() => setHealthRoadmapEditing(false)}
+                                className="px-3 py-1 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded text-xs hover:bg-gray-300 dark:hover:bg-gray-600"
+                              >
+                                لغو
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      {healthRoadmapEditing ? (
+                        <textarea
+                          value={healthRoadmapDraft.markdown}
+                          onChange={e => setHealthRoadmapDraft(d => ({ ...d, markdown: e.target.value }))}
+                          rows={20}
+                          className="w-full p-2 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-sm font-mono"
+                          placeholder="## فاز اول&#10;- [ ] task 1&#10;- [x] task done"
+                        />
+                      ) : healthRoadmap?.phases && healthRoadmap.phases.length > 0 ? (
+                        <div className="space-y-3">
+                          {healthRoadmap.phases.map((phase, pi) => (
+                            <div key={pi} className="border-r-4 border-cyan-500 pr-3">
+                              <h4 className="font-medium text-gray-800 dark:text-gray-100 mb-1">
+                                {phase.name || `فاز ${pi + 1}`}
+                                {phase.eta && <span className="text-xs text-gray-500 mr-2">({phase.eta})</span>}
+                              </h4>
+                              <ul className="space-y-1">
+                                {(phase.items || []).map((item, ii) => (
+                                  <li key={ii} className="flex items-start gap-2 text-sm">
+                                    <input
+                                      type="checkbox"
+                                      checked={!!item.completed}
+                                      onChange={() => toggleRoadmapItemHandler(pi, ii)}
+                                      className="mt-1"
+                                    />
+                                    <span className={`flex-1 ${item.completed ? 'line-through text-gray-500' : 'text-gray-700 dark:text-gray-300'}`}>
+                                      {item.text}
+                                      {item.priority === 'high' && <span className="mr-2 text-xs text-red-600">[high]</span>}
+                                    </span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          ))}
+                        </div>
+                      ) : healthRoadmap?.roadmap_markdown ? (
+                        <pre className="text-sm whitespace-pre-wrap bg-gray-50 dark:bg-gray-900/40 p-3 rounded font-mono max-h-96 overflow-auto">
+                          {healthRoadmap.roadmap_markdown}
+                        </pre>
+                      ) : (
+                        <div className="text-center py-6 text-gray-500 text-sm">
+                          روadmap موجود نیست — کلیک «🤖 تولید با AI»
+                        </div>
+                      )}
+                    </div>
+
+                    {/* بخش README */}
+                    <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg p-4">
+                      <div className="flex items-center justify-between mb-3 pb-2 border-b dark:border-gray-700 flex-wrap gap-2">
+                        <h3 className="font-bold text-gray-800 dark:text-gray-100 flex items-center gap-2">
+                          📖 README
+                          {healthReadme?.generated_at && (
+                            <span className="text-xs text-gray-500 font-normal">
+                              ({fmtDate(healthReadme.generated_at)})
+                            </span>
+                          )}
+                        </h3>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={generateReadme}
+                            disabled={!!healthDocsLoading}
+                            className="px-3 py-1 bg-purple-600 text-white rounded text-xs hover:bg-purple-700 disabled:opacity-50"
+                          >
+                            {healthDocsLoading === 'readme' ? '⏳ در حال تولید...' : '🤖 تولید با AI'}
+                          </button>
+                          {healthReadme?.readme_markdown && (
+                            <button
+                              onClick={downloadReadme}
+                              className="px-3 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700"
+                            >
+                              📥 دانلود
+                            </button>
+                          )}
+                          {!healthReadmeEditing ? (
+                            <button
+                              onClick={() => {
+                                setHealthReadmeDraft(healthReadme?.readme_markdown || '');
+                                setHealthReadmeEditing(true);
+                              }}
+                              className="px-3 py-1 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded text-xs hover:bg-gray-300 dark:hover:bg-gray-600"
+                            >
+                              ✏️ ویرایش
+                            </button>
+                          ) : (
+                            <>
+                              <button
+                                onClick={saveReadmeManual}
+                                className="px-3 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700"
+                              >
+                                💾 ذخیره
+                              </button>
+                              <button
+                                onClick={() => setHealthReadmeEditing(false)}
+                                className="px-3 py-1 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded text-xs hover:bg-gray-300 dark:hover:bg-gray-600"
+                              >
+                                لغو
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      {healthReadmeEditing ? (
+                        <textarea
+                          value={healthReadmeDraft}
+                          onChange={e => setHealthReadmeDraft(e.target.value)}
+                          rows={25}
+                          className="w-full p-2 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-sm font-mono"
+                        />
+                      ) : healthReadme?.readme_markdown ? (
+                        <pre className="text-sm whitespace-pre-wrap bg-gray-50 dark:bg-gray-900/40 p-3 rounded font-mono max-h-[500px] overflow-auto">
+                          {healthReadme.readme_markdown}
+                        </pre>
+                      ) : (
+                        <div className="text-center py-6 text-gray-500 text-sm">
+                          README موجود نیست — کلیک «🤖 تولید با AI»
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
 
