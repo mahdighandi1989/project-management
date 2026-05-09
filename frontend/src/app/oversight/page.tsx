@@ -90,6 +90,16 @@ interface Task {
   confirmation_streak?: number;
   target_files?: string[];
   acceptance_criteria?: string[];
+  applied_evidence?: {
+    pr_url?: string;
+    pr_branch?: string;
+    files_committed?: string[];
+    model_ids?: string[];
+    executed_via?: string;
+    executed_at?: string;
+    action_plan_summary?: string;
+    [key: string]: any;
+  };
 }
 
 interface Report {
@@ -3199,6 +3209,34 @@ function TasksPanel({
           {(t.confirmation_streak ?? 0) > 0 && (
             <span className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300">
               ✓ streak {t.confirmation_streak}
+            </span>
+          )}
+          {/* 🔗 PR badge — تسک از طریق Inspector apply-action اجرا شده */}
+          {t.applied_evidence?.pr_url && (
+            <a
+              href={t.applied_evidence.pr_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-200 dark:hover:bg-emerald-900/60"
+              title={
+                `PR ساخته شده توسط ${t.applied_evidence.executed_via || 'inspector_apply_action'}\n` +
+                `branch: ${t.applied_evidence.pr_branch || '(نامشخص)'}\n` +
+                `${(t.applied_evidence.files_committed || []).length} فایل commit شده\n` +
+                `زمان: ${t.applied_evidence.executed_at || '(نامشخص)'}\n` +
+                `کلیک: باز کردن PR در GitHub`
+              }
+            >
+              🔗 PR
+            </a>
+          )}
+          {/* در انتظار merge / verify */}
+          {t.verification_status === 'applied_externally_pending_verify' && t.applied_evidence?.pr_url && (
+            <span
+              className="px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300"
+              title="PR ساخته شده ولی هنوز merge/verify نشده. پس از merge، verify خودکار اجرا می‌شود."
+            >
+              ⏳ در انتظار merge
             </span>
           )}
           {t.manually_marked_applied_at && (

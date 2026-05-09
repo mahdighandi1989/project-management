@@ -159,18 +159,51 @@ async def verify_task(
         ]
 
     # 3) محتوای فعلی فایل‌ها
+    # PR-aware mode: اگر تسک از طریق Inspector apply-action اجرا شده و PR
+    # هنوز merge نشده، فایل‌ها باید از branch همان PR خوانده شوند تا verify
+    # **قبل از merge** هم امکان‌پذیر باشد. اگر pr_branch دیگر روی repo
+    # موجود نباشد (delete شده پس از merge)، fallback به branch اصلی و
+    # از آنجا fetch می‌شود.
     file_contents: Dict[str, Optional[str]] = {}
     recent_commits: List[Dict[str, Any]] = []
-    branch = (watched.default_branch if watched else None) or "main"
+    default_branch = (watched.default_branch if watched else None) or "main"
     repo_full_name = watched.repo_full_name if watched else task.project_full_name
+
+    # تشخیص branch مورد استفاده برای verify
+    applied_evidence = task.applied_evidence or {}
+    pr_branch = applied_evidence.get("pr_branch") or ""
+    pr_url = applied_evidence.get("pr_url") or ""
+    branch = pr_branch or default_branch
+    branch_source = "pr_branch" if pr_branch else "default"
 
     if token and repo_full_name and "/" in repo_full_name:
         try:
             file_contents = await _fetch_target_files(
                 repo_full_name, target_files, branch, token
             )
+            # اگر pr_branch ست بود ولی هیچ فایلی fetch نشد، احتمالاً branch
+            # دیگر موجود نیست (merge + delete). به default fallback می‌کنیم.
+            if pr_branch and (not file_contents or all(v is None for v in file_contents.values())):
+                logger.info(
+                    f"verify: pr_branch '{pr_branch}' بدون نتیجه — fallback به '{default_branch}'"
+                )
+                branch = default_branch
+                branch_source = "default_fallback_after_pr_branch_missing"
+                file_contents = await _fetch_target_files(
+                    repo_full_name, target_files, branch, token
+                )
         except Exception as e:
             logger.warning(f"verify: fetch files failed: {e}")
+            # تلاش fallback اگر pr_branch fetch ناموفق بود
+            if pr_branch and branch == pr_branch:
+                try:
+                    branch = default_branch
+                    branch_source = "default_fallback_after_pr_error"
+                    file_contents = await _fetch_target_files(
+                        repo_full_name, target_files, branch, token
+                    )
+                except Exception as e2:
+                    logger.warning(f"verify: default branch fetch هم شکست خورد: {e2}")
         try:
             recent_commits = await _fetch_recent_commits(repo_full_name, branch, token)
         except Exception as e:
@@ -211,6 +244,7 @@ async def verify_task(
 عنوان: {task.title}
 نوع: {task.type}
 اولویت: {task.priority}
+{('سوابق اجرا: این تسک از طریق Inspector apply-action اجرا شده — PR: ' + pr_url + (' (شاخه: ' + pr_branch + ')' if pr_branch else '') + f'. فایل‌های مرتبط از branch `{branch}` خوانده شده‌اند (منبع: {branch_source}).') if pr_url else ('شاخه‌ای که فایل‌ها از آن خوانده شده: `' + branch + '`.')}
 
 پرامپت کامل تسک:
 \"\"\"
