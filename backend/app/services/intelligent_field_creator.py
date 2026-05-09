@@ -475,6 +475,46 @@ class IntelligentFieldCreator:
         if field["action_type"] in ["github_commit"] and not field.get("target_path"):
             field["action_type"] = "display"
 
+        # 📍 target_locations — سازگار با schema غنی Oversight (لیست از dictها).
+        # اگر AI فقط یک target_path داد، آن را به یک location تبدیل می‌کنیم.
+        if field.get("target_path"):
+            field["target_locations"] = [{"path": field["target_path"]}]
+        else:
+            field["target_locations"] = []
+
+        # 📋 external_prompt — رندر شده با build_strong_prompt برای کپی به ابزار
+        # کدنویس خارجی (Cursor/Copilot/ChatGPT). defensive: اگر سرویس در دسترس
+        # نباشد، خالی می‌ماند و رفتار قبلی حفظ می‌شود.
+        try:
+            from ..api.routes.project_memory import _render_external_prompt_for_field  # type: ignore
+            field["external_prompt"] = _render_external_prompt_for_field(
+                title=field["name"],
+                content=field["value"],
+                action_type=field["action_type"],
+                target_locations=field["target_locations"],
+                priority_int=5,  # priority پس از calculate_priority به‌روز می‌شود
+            )
+        except Exception:
+            try:
+                from .oversight_strong_prompt import build_strong_prompt  # type: ignore
+                type_map = {
+                    "github_commit": "bug",
+                    "github_multi_commit": "refactor",
+                    "file_edit": "refactor",
+                    "display": "other",
+                }
+                field["external_prompt"] = build_strong_prompt(
+                    title=field["name"],
+                    description=field["value"],
+                    target_locations=field["target_locations"],
+                    acceptance_criteria=["نتیجهٔ این فیلد با مفاد آن مطابقت کند"],
+                    type_=type_map.get(field["action_type"], "other"),
+                    priority="medium",
+                    estimate="medium",
+                )
+            except Exception:
+                field["external_prompt"] = ""
+
         # 5. تحلیل وابستگی‌ها
         dependencies = self.analyze_dependencies(value, self.existing_fields)
         if dependencies:

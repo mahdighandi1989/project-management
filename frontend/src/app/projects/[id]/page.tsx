@@ -1138,7 +1138,12 @@ export default function ProjectDetailPage() {
   const [copyFieldFeedbackId, setCopyFieldFeedbackId] = useState<string | null>(null);
   const copyStrongPromptForField = useCallback(async (field: any) => {
     try {
-      const txt = buildStrongPromptForField(field);
+      // اولویت: اگر backend خود external_prompt را تولید کرده باشد (از طریق
+      // build_strong_prompt واقعی با context کامل پروژه)، آن را استفاده کن.
+      // در غیر این صورت rollback به client-side render (با context محدودتر).
+      const txt: string = (field?.external_prompt && typeof field.external_prompt === 'string' && field.external_prompt.trim().length > 50)
+        ? field.external_prompt
+        : buildStrongPromptForField(field);
       if (navigator?.clipboard?.writeText) {
         await navigator.clipboard.writeText(txt);
       } else {
