@@ -957,11 +957,17 @@ class NotificationService:
         state = _chat_state.get(chat_id_str)
         if state and state.get("phase") == "awaiting_idea":
             return await self._receive_idea_text(chat_id_str, state, text)
-        # 🆕 Creator phase handlers — text-based phases
+        # 🆕 Creator phase handlers — text-based phases (v1 — legacy)
         if state and state.get("phase") in (
             "creator_awaiting_name", "creator_awaiting_desc", "creator_awaiting_tech",
         ):
             return await self._handle_creator_phase(chat_id_str, state, text)
+        # 🆕 (Creator v2) phase awaiting_idea — text کاربر = ایدهٔ پروژه
+        if state and state.get("phase") == "creator_awaiting_idea":
+            return await self._receive_creator_idea(chat_id_str, state, text)
+        # 🆕 (Creator v2) phase awaiting_custom_name — text کاربر = نام دلخواه
+        if state and state.get("phase") == "creator_awaiting_custom_name":
+            return await self._receive_creator_custom_name(chat_id_str, state, text)
         # 🆕 phase awaiting_type: کاربر باید دکمهٔ inline کلیک کند، نه متن
         if state and state.get("phase") == "creator_awaiting_type":
             tg = self._telegram()
@@ -972,6 +978,14 @@ class NotificationService:
                 reply_markup=kb,
             )
             return {"ok": True, "handled": "type_needs_button"}
+        # 🆕 (Creator v2) phase awaiting_model_choice — text رد می‌شود
+        if state and state.get("phase") == "creator_awaiting_model_choice":
+            tg = self._telegram()
+            await tg.send(
+                "⚠️ لطفاً مدل را از دکمه‌های inline انتخاب کنید (نه متن):",
+                silent=True,
+            )
+            return await self._show_creator_model_picker(chat_id_str)
 
         if text in ("/start", "/help"):
             reply = (
@@ -1232,7 +1246,138 @@ class NotificationService:
         if data == "menu:new_task":
             return await self._start_new_task_flow(chat_id_str)
 
-        # 🆕 Creator callbacks
+        # 🆕 (Creator v2) name selection callbacks
+        if data == "creator_use_suggested_name":
+            state = _chat_state.get(chat_id_str)
+            if not state or state.get("phase") != "creator_awaiting_name_or_skip":
+                await tg.send("⚠️ flow منقضی شده.", silent=True)
+                return {"ok": True, "handled": "name_pick_expired"}
+            cdata = state.get("creator_data", {})
+            cdata["name"] = cdata.get("suggested_name", "my-project")
+            # transition به type picker
+            state["phase"] = "creator_awaiting_type"
+            state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+            kb = self._render_project_type_picker()
+            await tg.send(
+                f"✅ نام: `{cdata['name']}`\n\n"
+                f"📁 *مرحلهٔ ۴/۵: نوع پروژه*",
+                silent=True,
+                reply_markup=kb,
+            )
+            return {"ok": True, "handled": "use_suggested_name"}
+
+        if data == "creator_custom_name":
+            state = _chat_state.get(chat_id_str)
+            if not state or state.get("phase") != "creator_awaiting_name_or_skip":
+                await tg.send("⚠️ flow منقضی شده.", silent=True)
+                return {"ok": True, "handled": "name_pick_expired"}
+            state["phase"] = "creator_awaiting_custom_name"
+            state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+            await tg.send(
+                "✏️ *نام دلخواه پروژه را وارد کنید*\n"
+                "(انگلیسی، 3+ کاراکتر، فقط a-z A-Z 0-9 - _)",
+                silent=True,
+            )
+            return {"ok": True, "handled": "ask_custom_name"}
+
+        # 🆕 (Creator v2) model selection callbacks
+        if data.startswith("creator_model:"):
+            mid = data.split(":", 1)[1]
+            state = _chat_state.get(chat_id_str)
+            if not state or state.get("phase") != "creator_awaiting_model_choice":
+                await tg.send("⚠️ flow منقضی شده. /new\\_project بزنید.", silent=True)
+                return {"ok": True, "handled": "model_pick_expired"}
+            cdata = state.setdefault("creator_data", {})
+            sel: List[str] = list(cdata.get("model_ids", []) or [])
+            if mid in sel:
+                sel.remove(mid)
+            else:
+                sel.append(mid)
+            cdata["model_ids"] = sel
+            state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+            # نمایش مجدد keyboard با وضعیت جدید
+            return await self._show_creator_model_picker(chat_id_str)
+
+        if data == "creator_models_confirm":
+            state = _chat_state.get(chat_id_str)
+            if not state or state.get("phase") != "creator_awaiting_model_choice":
+                await tg.send("⚠️ flow منقضی شده.", silent=True)
+                return {"ok": True, "handled": "confirm_expired"}
+            cdata = state.get("creator_data", {})
+            sel: List[str] = list(cdata.get("model_ids", []) or [])
+            if not sel:
+                await tg.send(
+                    "⚠️ حداقل یک مدل انتخاب کنید — بدون مدل پیش‌روی ممکن نیست.",
+                    silent=True,
+                )
+                return {"ok": True, "handled": "no_model_selected"}
+            # transition به phase بعدی: awaiting_idea
+            state["phase"] = "creator_awaiting_idea"
+            state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+            await tg.send(
+                f"✅ *{len(sel)} مدل انتخاب شد*\n"
+                + "\n".join(f"  {i+1}. `{m}`" for i, m in enumerate(sel[:5]))
+                + (f"\n  ... و {len(sel) - 5} مدل دیگر" if len(sel) > 5 else "")
+                + "\n\n💡 *مرحلهٔ ۲/۵: ایده پروژه را وارد کن*\n"
+                + "(به زبان طبیعی — هرچه دقیق‌تر، بهتر)\n\n"
+                + "مثال:\n"
+                + "_«ربات تلگرام برای مدیریت لیست خرید با SQLite، شامل دستورات\n"
+                + "/add /list /remove و گزارش هفتگی»_",
+                silent=True,
+            )
+            return {"ok": True, "handled": "models_confirmed"}
+
+        # creator_regenerate_prompt: بازتولید پرامپت با مدل بعدی
+        if data.startswith("creator_regenerate_prompt:"):
+            token = data.split(":", 1)[1]
+            draft = _idea_drafts.get(token)
+            if not draft:
+                await tg.send("⚠️ draft منقضی شده.", silent=True)
+                return {"ok": True, "handled": "regen_expired"}
+            # rotate model_ids
+            mids = list(draft.get("creator_data", {}).get("model_ids", []) or [])
+            if len(mids) > 1:
+                draft["creator_data"]["model_ids"] = mids[1:] + [mids[0]]
+            await tg.send(
+                f"🔄 *بازتولید با مدل بعدی*: `{draft['creator_data']['model_ids'][0]}`\n"
+                f"⏳ در حال تولید پرامپت جدید...",
+                silent=True,
+            )
+            return await self._generate_creator_preview(chat_id_str, token)
+
+        # creator_edit_idea: بازگشت به phase awaiting_idea برای ویرایش
+        if data.startswith("creator_edit_idea:"):
+            token = data.split(":", 1)[1]
+            draft = _idea_drafts.get(token)
+            if not draft:
+                await tg.send("⚠️ draft منقضی شده.", silent=True)
+                return {"ok": True, "handled": "edit_expired"}
+            # state را به awaiting_idea برگردان با حفظ model_ids و name (اگر بود)
+            _chat_state[chat_id_str] = {
+                "phase": "creator_awaiting_idea",
+                "creator_data": {
+                    "model_ids": draft.get("creator_data", {}).get("model_ids", []),
+                },
+                "expires_at": _now_epoch() + _STATE_TTL_SECONDS,
+            }
+            del _idea_drafts[token]
+            await tg.send(
+                "✏️ *ویرایش ایده*\n\nمتن جدید ایده را بنویس:",
+                silent=True,
+            )
+            return {"ok": True, "handled": "edit_idea_back"}
+
+        # creator_confirm_final:<token> — تأیید نهایی و execute
+        if data.startswith("creator_confirm_final:"):
+            token = data.split(":", 1)[1]
+            draft = _idea_drafts.get(token)
+            if not draft:
+                await tg.send("⚠️ draft منقضی شده.", silent=True)
+                return {"ok": True, "handled": "final_expired"}
+            del _idea_drafts[token]
+            return await self._execute_creator_v2(chat_id_str, draft)
+
+        # 🆕 Creator callbacks (v1 — backward compat)
         # creator_type:<value> — انتخاب نوع پروژه
         if data.startswith("creator_type:"):
             value = data.split(":", 1)[1]
@@ -1243,6 +1388,23 @@ class NotificationService:
             data_ = state.get("creator_data", {})
             data_["project_type"] = value
             state["creator_data"] = data_
+            # 🆕 v2 flow: اگر idea موجود است، مستقیم به preview generation
+            if data_.get("idea"):
+                # ساخت token برای draft
+                token = _short_token()
+                _idea_drafts[token] = {
+                    "creator_data": dict(data_),
+                    "expires_at": _now_epoch() + _STATE_TTL_SECONDS,
+                }
+                _chat_state.pop(chat_id_str, None)
+                await tg.send(
+                    f"✅ نوع: `{value}`\n\n"
+                    f"⏳ *مرحلهٔ ۵/۵: تولید پرامپت قوی با AI*\n"
+                    f"این فرآیند ۱۵-۳۰ ثانیه طول می‌کشد...",
+                    silent=True,
+                )
+                return await self._generate_creator_preview(chat_id_str, token)
+            # v1 legacy fallback
             state["phase"] = "creator_awaiting_tech"
             state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
             await tg.send(
@@ -1347,20 +1509,61 @@ class NotificationService:
     # -----------------------------------------------------------------------
 
     async def _start_new_project_flow(self, chat_id_str: str) -> Dict[str, Any]:
-        """مرحلهٔ ۱: شروع flow ساخت پروژه — پرسش نام."""
+        """🆕 مرحلهٔ ۰ flow جدید: ابتدا انتخاب مدل (اجباری)."""
         _chat_state[chat_id_str] = {
-            "phase": "creator_awaiting_name",
-            "creator_data": {},
+            "phase": "creator_awaiting_model_choice",
+            "creator_data": {"model_ids": []},
             "expires_at": _now_epoch() + _STATE_TTL_SECONDS,
         }
+        # نمایش لیست مدل‌های available
+        return await self._show_creator_model_picker(chat_id_str)
+
+    async def _show_creator_model_picker(self, chat_id_str: str) -> Dict[str, Any]:
+        """نمایش inline keyboard برای انتخاب مدل‌های creator (multi-select)."""
         tg = self._telegram()
+        try:
+            from .ai_manager import get_ai_manager
+            ai_mgr = get_ai_manager()
+            available = ai_mgr.get_available_models() or []
+        except Exception as e:
+            logger.warning(f"creator: failed to get models: {e}")
+            available = []
+
+        if not available:
+            await tg.send(
+                "⚠️ هیچ مدل AI فعالی نیست. ابتدا از /settings کلید API را وارد کنید.\n"
+                "/cancel برای لغو",
+                silent=True,
+            )
+            return {"ok": True, "handled": "no_models"}
+
+        state = _chat_state.get(chat_id_str, {})
+        selected = (state.get("creator_data", {}) or {}).get("model_ids", []) or []
+
+        # سطح کلیپ: حداکثر ۱۲ مدل نمایش داده می‌شود
+        rows: List[List[Dict[str, str]]] = []
+        for i in range(0, min(len(available), 12), 2):
+            row: List[Dict[str, str]] = []
+            for m in available[i:i + 2]:
+                is_selected = m.id in selected
+                label = ("✅ " if is_selected else "") + m.name[:30]
+                row.append({"text": label, "callback_data": f"creator_model:{m.id}"})
+            rows.append(row)
+        # کنترل‌های پایین
+        rows.append([
+            {"text": f"✅ تأیید ({len(selected)} مدل)", "callback_data": "creator_models_confirm"},
+            {"text": "❌ لغو", "callback_data": "flow:cancel"},
+        ])
+
         await tg.send(
-            "🚀 *ساخت پروژهٔ جدید*\n\n"
-            "📝 *نام پروژه را وارد کن*\n"
-            "(انگلیسی، 3+ کاراکتر، شامل a-z A-Z 0-9 - _)\n\n"
-            "/cancel برای لغو",
+            "🤖 *مرحلهٔ ۱/۵: انتخاب مدل AI*\n\n"
+            "حداقل یک مدل انتخاب کنید. اگر چند مدل انتخاب شد، اولی primary است و\n"
+            "بقیه به ترتیب برای fallback استفاده می‌شوند.\n\n"
+            f"الان انتخاب شده: *{len(selected)} مدل*",
             silent=True,
+            reply_markup={"inline_keyboard": rows},
         )
+        return {"ok": True, "handled": "model_picker_shown"}
         return {"ok": True, "handled": "new_project_start"}
 
     async def _handle_creator_phase(
@@ -1617,6 +1820,306 @@ class NotificationService:
             except Exception:
                 pass
             return {"ok": True, "handled": "creator_failed", "error": err_msg}
+
+
+    # -----------------------------------------------------------------------
+    # 🆕 (Creator v2) flow جدید با idea → strong prompt → preview → execute
+    # -----------------------------------------------------------------------
+
+    async def _receive_creator_custom_name(
+        self, chat_id_str: str, state: Dict[str, Any], text: str,
+    ) -> Dict[str, Any]:
+        """phase awaiting_custom_name: کاربر نام دلخواه نوشته."""
+        import re
+        tg = self._telegram()
+        name = text.strip()
+        if not re.match(r"^[a-zA-Z][a-zA-Z0-9_-]{2,}$", name):
+            await tg.send(
+                "⚠️ نام نامعتبر. باید با حرف شروع شود و فقط a-z A-Z 0-9 - _ بپذیرد (3+ کاراکتر).\n"
+                "دوباره وارد کن یا /cancel:",
+                silent=True,
+            )
+            return {"ok": True, "handled": "name_invalid"}
+        cdata = state.setdefault("creator_data", {})
+        cdata["name"] = name
+        state["phase"] = "creator_awaiting_type"
+        state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+        kb = self._render_project_type_picker()
+        await tg.send(
+            f"✅ نام: `{name}`\n\n"
+            f"📁 *مرحلهٔ ۴/۵: نوع پروژه*",
+            silent=True,
+            reply_markup=kb,
+        )
+        return {"ok": True, "handled": "custom_name_ok"}
+
+    async def _receive_creator_idea(
+        self, chat_id_str: str, state: Dict[str, Any], text: str,
+    ) -> Dict[str, Any]:
+        """phase awaiting_idea: کاربر idea نوشته → name را بپرس یا auto-generate."""
+        tg = self._telegram()
+        idea = text.strip()
+        if len(idea) < 15:
+            await tg.send(
+                "⚠️ ایده خیلی کوتاه است. حداقل ۱۵ کاراکتر — جزئیات بیشتر بنویس:",
+                silent=True,
+            )
+            return {"ok": True, "handled": "idea_too_short"}
+
+        cdata = state.setdefault("creator_data", {})
+        cdata["idea"] = idea
+        # نام را از ایده استخراج کن (ساده) یا از کاربر بپرس
+        # فعلاً auto-generate و بپرس
+        import re
+        # استخراج کلمات کلیدی از ایده برای name suggestion
+        words = re.findall(r"[a-zA-Z]+", idea.lower())[:3]
+        if not words:
+            # transliterate ساده — fallback
+            suggested = "my-project"
+        else:
+            suggested = "-".join(words)
+        cdata["suggested_name"] = suggested
+
+        # transition to awaiting_name (یا اگر کاربر فقط suggested را خواست، skip)
+        state["phase"] = "creator_awaiting_name_or_skip"
+        state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+
+        kb = {
+            "inline_keyboard": [
+                [
+                    {"text": f"✅ استفاده از: {suggested}", "callback_data": "creator_use_suggested_name"},
+                ],
+                [
+                    {"text": "✏️ نام دلخواه", "callback_data": "creator_custom_name"},
+                ],
+                [
+                    {"text": "❌ لغو", "callback_data": "flow:cancel"},
+                ],
+            ]
+        }
+        await tg.send(
+            f"💡 *ایده ثبت شد*\n\n"
+            f"📋 طول: {len(idea)} کاراکتر\n\n"
+            f"📦 *مرحلهٔ ۳/۵: نام پروژه*\n"
+            f"پیشنهاد بر اساس ایده: `{suggested}`",
+            silent=True,
+            reply_markup=kb,
+        )
+        return {"ok": True, "handled": "idea_received"}
+
+    async def _generate_creator_preview(
+        self, chat_id_str: str, draft_token: str,
+    ) -> Dict[str, Any]:
+        """phase awaiting_prompt_preview: تولید preview prompt با مدل انتخابی."""
+        tg = self._telegram()
+        draft = _idea_drafts.get(draft_token)
+        if not draft:
+            await tg.send("⚠️ draft منقضی شده.", silent=True)
+            return {"ok": True, "handled": "draft_expired"}
+
+        cdata = draft.get("creator_data", {})
+        idea = cdata.get("idea", "")
+        name = cdata.get("name", "")
+        project_type = cdata.get("project_type", "auto")
+        model_ids = cdata.get("model_ids", [])
+
+        try:
+            from .creator_idea_to_prompt import idea_to_strong_prompt_for_creator
+            from ..api.routes.simple_projects import ai_generate
+            result = await idea_to_strong_prompt_for_creator(
+                idea=idea,
+                name=name,
+                project_type=project_type,
+                technologies=cdata.get("technologies", []),
+                ai_generate=ai_generate,
+                model_ids=model_ids,
+            )
+            cdata["structured_prompt"] = result
+            _idea_drafts[draft_token] = draft
+        except Exception as e:
+            logger.exception(f"creator preview generation failed: {e}")
+            await tg.send(
+                f"💥 *خطا در تولید پرامپت*\n\n`{str(e)[:300]}`\n\n"
+                f"احتمالاً مدل‌های انتخابی fail شدند. /new\\_project برای شروع مجدد.",
+                silent=False,
+            )
+            return {"ok": True, "handled": "preview_gen_failed", "error": str(e)}
+
+        # نمایش preview با ۴ دکمه
+        full_text = result.get("full_prompt_text", "")
+        preview_text = full_text[:1500] + ("\n…[truncated — متن کامل در پنل]" if len(full_text) > 1500 else "")
+        warnings = result.get("warnings", [])
+        warn_section = ""
+        if warnings:
+            warn_section = "\n⚠️ *هشدارهای AI:*\n" + "\n".join(f"• {_safe_md(w)}" for w in warnings[:3])
+
+        kb = {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ تأیید و ساخت پروژه", "callback_data": f"creator_confirm_final:{draft_token}"},
+                ],
+                [
+                    {"text": "🔄 بازتولید با مدل بعدی", "callback_data": f"creator_regenerate_prompt:{draft_token}"},
+                    {"text": "✏️ ویرایش ایده", "callback_data": f"creator_edit_idea:{draft_token}"},
+                ],
+                [
+                    {"text": "❌ لغو", "callback_data": "flow:cancel"},
+                ],
+            ]
+        }
+        await tg.send(
+            f"🪄 *پرامپت قوی تولید شد*\n\n"
+            f"🤖 با مدل: `{result.get('model_used', '?')}`\n"
+            f"📦 پروژه: `{name}` ({project_type})\n"
+            f"{warn_section}\n\n"
+            f"📋 *پیش‌نمایش:*\n```\n{preview_text}\n```\n"
+            f"✅ آماده برای ساخت پروژه؟",
+            silent=True,
+            reply_markup=kb,
+        )
+        return {"ok": True, "handled": "preview_generated", "token": draft_token}
+
+    async def _execute_creator_v2(
+        self, chat_id_str: str, draft: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """phase نهایی: ساخت پروژه با structured_prompt + push to GitHub + auto-watch."""
+        tg = self._telegram()
+        cdata = draft.get("creator_data", {})
+        name = cdata.get("name", "")
+        idea = cdata.get("idea", "")
+        project_type = cdata.get("project_type", "auto")
+        model_ids = cdata.get("model_ids", [])
+        structured = cdata.get("structured_prompt", {})
+        technologies = (structured.get("tech_stack") or cdata.get("technologies") or [])[:15]
+        if project_type == "auto":
+            # از structured_prompt سعی کن detect کنی
+            project_type = "python"  # fallback
+
+        # 📊 progress message
+        import time
+        t0 = time.time()
+        await tg.send(
+            f"⏳ *در حال ساخت پروژه*\n\n"
+            f"📦 نام: `{name}`\n"
+            f"🤖 مدل اصلی: `{model_ids[0]}`\n"
+            f"⏱ تخمین: ۱-۳ دقیقه\n\n"
+            f"📋 مراحل: 1) تولید ساختار 2) ساخت فایل‌ها 3) push GitHub 4) auto-watch",
+            silent=True,
+        )
+
+        try:
+            from .simple_creator import get_simple_creator
+            from ..api.routes.simple_projects import ai_generate, push_to_github, PushToGitHubRequest
+
+            creator = get_simple_creator()
+
+            # closure برای ai_generate با model_ids
+            async def _gen(prompt: str) -> str:
+                return await ai_generate(prompt, model_ids=model_ids)
+
+            # ساخت پروژه با structured prompt
+            full_desc = structured.get("full_prompt_text") or structured.get("structured_description") or idea
+            project = await creator.create_project(
+                name=name,
+                description=full_desc,
+                project_type=project_type,
+                technologies=technologies,
+                ai_generate=_gen,
+            )
+            project_id = project.id if hasattr(project, "id") else None
+            if not project_id:
+                raise RuntimeError("project.id خالی است")
+
+            # push to GitHub (always private)
+            push_result = await push_to_github(project_id, PushToGitHubRequest(private=True))
+            if not push_result.get("success"):
+                # failure with detail
+                err = push_result.get("primary_error", "unknown")
+                cat = push_result.get("error_category", "unknown")
+                actions = push_result.get("suggested_actions", [])
+                detail = push_result.get("error_detail", "")
+                await tg.send(
+                    f"💥 *خطا در ساخت پروژه*\n\n"
+                    f"📦 پروژه: `{name}`\n"
+                    f"🤖 مدل مصرفی: `{model_ids[0]}`\n"
+                    f"🔍 مرحلهٔ شکست: *push_to_github*\n\n"
+                    f"❌ *علت اصلی:*\n{err}\n\n"
+                    + (f"📋 *جزئیات:*\n```\n{detail[:400]}\n```\n\n" if detail else "")
+                    + (f"🛠 *اقدامات پیشنهادی:*\n" + "\n".join(f"• {a}" for a in actions[:3]) if actions else "")
+                    + f"\n\n📊 *آنچه انجام شد:*\n"
+                    f"✓ idea_to_prompt: موفق\n"
+                    f"✓ create_files: موفق ({push_result.get('uploaded', 0) + len(push_result.get('failed', []))} فایل)\n"
+                    f"✗ push_to_github: شکست\n\n"
+                    f"📁 پروژهٔ local موجود — بعد از fix می‌توانید push کنید.\n"
+                    f"#creator_failed #{cat}",
+                    silent=False,
+                )
+                return {"ok": True, "handled": "push_failed"}
+
+            # موفقیت
+            full_name = push_result.get("full_name") or f"{push_result.get('owner')}/{push_result.get('repo')}"
+            repo_url = push_result.get("repo_url", "")
+            files_count = push_result.get("uploaded", 0)
+            elapsed = int(time.time() - t0)
+            elapsed_str = f"{elapsed // 60}m {elapsed % 60}s" if elapsed >= 60 else f"{elapsed}s"
+
+            prefs = _read_prefs()
+            base = (prefs.get("app_base_url", "") or "").rstrip("/")
+            kb_rows = []
+            if repo_url:
+                kb_rows.append([{"text": "👁 GitHub repo", "url": repo_url}])
+            if base:
+                kb_rows.append([
+                    {"text": "🏠 مرکز نظارت", "url": f"{base}/oversight"},
+                    {"text": "📋 تسک‌ها", "url": f"{base}/oversight?tab=tasks"},
+                ])
+            kb = {"inline_keyboard": kb_rows} if kb_rows else None
+
+            tech_label = ", ".join(technologies) or "(پیش‌فرض)"
+            await tg.send(
+                f"✅ *پروژه با موفقیت ساخته شد*\n\n"
+                f"📦 نام: `{full_name}`\n"
+                f"🤖 مدل پرامپت: `{structured.get('model_used', '?')}`\n"
+                f"🤖 مدل ساخت: `{model_ids[0]}`\n"
+                f"🔗 GitHub: {repo_url} (🔒 private)\n\n"
+                f"📁 نوع: `{project_type}`\n"
+                f"🔧 تکنولوژی: {tech_label}\n\n"
+                f"📊 *آمار ساخت:*\n"
+                f"• فایل‌های تولیدشده: *{files_count}*\n"
+                f"• مدت زمان: *{elapsed_str}*\n\n"
+                f"💡 *کارکرد:*\n_{(structured.get('structured_description') or idea)[:300]}_\n\n"
+                f"👁 *وضعیت در مرکز نظارت:*\n"
+                f"✓ خودکار به watched اضافه شد\n"
+                f"✓ autonomy: auto · execution: manual\n\n"
+                f"#project_created #{project_type} #{name.replace('-', '_')} #{elapsed_str.replace(' ', '')}",
+                silent=False,
+                reply_markup=kb,
+            )
+            return {"ok": True, "handled": "creator_v2_done", "project_id": project_id}
+
+        except Exception as e:
+            logger.exception(f"creator v2 flow failed: {e}")
+            err_msg = str(e)[:300]
+            await tg.send(
+                f"💥 *خطا در ساخت پروژه*\n\n"
+                f"📦 نام: `{name}`\n"
+                f"🤖 مدل: `{model_ids[0] if model_ids else '?'}`\n"
+                f"❌ علت: `{err_msg}`\n\n"
+                f"از پنل وب امتحان کنید: /settings\n"
+                f"#creator_failed",
+                silent=False,
+            )
+            try:
+                await self.notify_event(
+                    "creator_failed",
+                    f"💥 creator v2 (Telegram): {name}\n{err_msg}",
+                    subject="Creator v2 failed",
+                    priority="high",
+                    project_name=name,
+                )
+            except Exception:
+                pass
+            return {"ok": True, "handled": "creator_v2_failed", "error": err_msg}
 
 
 notification_service = NotificationService()

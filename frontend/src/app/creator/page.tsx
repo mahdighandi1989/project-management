@@ -274,13 +274,85 @@ export default function CreatorPage() {
     }
   };
 
-  const createProject = async () => {
+  // 🆕 preview state
+  const [structuredPrompt, setStructuredPrompt] = useState<any>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string>('');
+  const [editablePromptText, setEditablePromptText] = useState<string>('');
+
+  // 🆕 مرحلهٔ ۱: idea → strong prompt (preview)
+  const previewPromptFromIdea = async () => {
+    setPreviewError('');
     if (!name.trim()) {
       showError('نام پروژه را وارد کنید');
       return;
     }
     if (description.trim().length < 15) {
-      showError('توضیحات باید حداقل ۱۵ کاراکتر باشد - این برای AI مهم است!');
+      showError('ایده/توضیح حداقل ۱۵ کاراکتر');
+      return;
+    }
+    if (!aiReady) {
+      showError('ابتدا از تنظیمات کلید API را وارد کنید');
+      return;
+    }
+    // 🆕 enforce model selection
+    if (selectedModelIds.length === 0) {
+      showError('حداقل یک مدل AI انتخاب کنید — بدون مدل امکان تولید پرامپت نیست');
+      return;
+    }
+
+    setPreviewLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/simple/projects/idea-to-prompt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          idea: description.trim(),
+          name: name.trim(),
+          project_type: autoDetectType ? 'auto' : projectType,
+          technologies: technologies.split(',').map((t) => t.trim()).filter(Boolean),
+          model_ids: selectedModelIds,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        setPreviewError(
+          typeof data.detail === 'string' ? data.detail :
+          JSON.stringify(data.detail || data.error || 'خطا در تولید پرامپت')
+        );
+        return;
+      }
+      setStructuredPrompt(data);
+      setEditablePromptText(data.full_prompt_text || '');
+    } catch (e: any) {
+      setPreviewError(e.message || 'خطا در ارتباط با سرور');
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  // 🆕 بازتولید با مدل بعدی (rotation در selectedModelIds)
+  const regenerateWithNextModel = async () => {
+    if (selectedModelIds.length < 1) return;
+    // rotate
+    const rotated = [...selectedModelIds.slice(1), selectedModelIds[0]];
+    setSelectedModelIds(rotated);
+    await previewPromptFromIdea();
+  };
+
+  // مرحلهٔ ۲: confirm → ساخت پروژه با structured_prompt
+  const createProject = async () => {
+    if (!name.trim()) {
+      showError('نام پروژه را وارد کنید');
+      return;
+    }
+    // 🆕 اگر structured_prompt موجود نیست، اول preview بساز
+    if (!structuredPrompt) {
+      await previewPromptFromIdea();
+      return;
+    }
+    if (selectedModelIds.length === 0) {
+      showError('حداقل یک مدل AI انتخاب کنید');
       return;
     }
     if (!aiReady) {
@@ -289,12 +361,15 @@ export default function CreatorPage() {
     }
 
     setCreating(true);
-    setProgress('در حال آماده‌سازی...');
-    setProgressPct(5);
+    setProgress('در حال ساخت فایل‌ها با AI (1-3 دقیقه)...');
+    setProgressPct(10);
 
     try {
-      setProgress('AI در حال تحلیل و تولید ساختار پروژه...');
-
+      // اگر کاربر متن پرامپت را ادیت کرده، در structured_prompt جایگزین می‌کنیم
+      const finalStructured = {
+        ...structuredPrompt,
+        full_prompt_text: editablePromptText || structuredPrompt.full_prompt_text,
+      };
       const res = await fetch(`${API_BASE}/api/simple/projects/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -303,28 +378,35 @@ export default function CreatorPage() {
           description: description.trim(),
           project_type: projectType,
           technologies: technologies.split(',').map((t) => t.trim()).filter(Boolean),
-          model_ids: selectedModelIds.length > 0 ? selectedModelIds : undefined,
+          model_ids: selectedModelIds,
           auto_detect_type: autoDetectType,
+          structured_prompt: finalStructured,
         }),
       });
-
       const data = await res.json();
-
       if (res.ok && data.success) {
-        setProgress('پروژه با موفقیت ساخته شد!');
         setProgressPct(100);
+        setProgress('پروژه با موفقیت ساخته شد!');
         showSuccess(data.message || 'پروژه ساخته شد!');
-
         setName('');
         setDescription('');
         setTechnologies('');
+        setStructuredPrompt(null);
+        setEditablePromptText('');
         loadProjects();
-
         setTimeout(() => {
           router.push(`/project/${data.project.id}`);
         }, 800);
       } else {
-        showError(data.detail || data.error || 'خطا در ساخت پروژه');
+        // 🆕 error reporting پربار
+        const errObj = data.detail || data;
+        if (typeof errObj === 'object' && errObj.primary_error) {
+          showError(
+            `❌ ${errObj.primary_error}\n\nاقدامات: ${(errObj.suggested_actions || []).join(' | ')}`
+          );
+        } else {
+          showError(typeof errObj === 'string' ? errObj : JSON.stringify(errObj));
+        }
       }
     } catch (e: any) {
       showError(e.message || 'خطا در ارتباط با سرور');
@@ -648,21 +730,98 @@ export default function CreatorPage() {
                 </div>
               )}
 
-              {/* دکمه ساخت */}
-              <button
-                onClick={createProject}
-                disabled={creating || !aiReady}
-                className="w-full py-4 bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded-xl font-bold text-lg hover:from-blue-600 hover:to-purple-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-blue-500/20"
-              >
-                {creating ? (
-                  <span className="flex items-center justify-center gap-3">
-                    <span className="inline-block w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
-                    در حال ساخت...
-                  </span>
-                ) : (
-                  '🚀 ساخت پروژه با AI'
-                )}
-              </button>
+              {/* 🆕 enforcement: warning اگر مدل انتخاب نشده */}
+              {selectedModelIds.length === 0 && (
+                <div className="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded-lg text-sm text-amber-800 dark:text-amber-200">
+                  ⚠️ <b>حداقل یک مدل AI انتخاب کنید</b> — تا قبل از انتخاب، تولید پرامپت/پروژه ممکن نیست.
+                  مدل اول fallback اولیه و بقیه به ترتیب اولویت استفاده می‌شوند.
+                </div>
+              )}
+
+              {/* 🆕 دکمهٔ مرحلهٔ ۱: تولید پرامپت قوی (preview) */}
+              {!structuredPrompt && (
+                <button
+                  onClick={previewPromptFromIdea}
+                  disabled={previewLoading || !aiReady || selectedModelIds.length === 0 || !name.trim() || description.trim().length < 15}
+                  title={
+                    selectedModelIds.length === 0 ? 'حداقل یک مدل انتخاب کنید' :
+                    !name.trim() ? 'نام پروژه را وارد کنید' :
+                    description.trim().length < 15 ? 'ایده حداقل ۱۵ کاراکتر' :
+                    ''
+                  }
+                  className="w-full py-4 bg-gradient-to-r from-fuchsia-500 to-purple-500 text-white rounded-xl font-bold text-lg hover:from-fuchsia-600 hover:to-purple-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                >
+                  {previewLoading ? '⏳ در حال تولید پرامپت قوی...' : '🪄 تولید پرامپت قوی (مرحلهٔ ۱)'}
+                </button>
+              )}
+
+              {/* 🆕 preview prompt + dکمهٔ ساخت پروژه (مرحلهٔ ۲) */}
+              {structuredPrompt && (
+                <div className="space-y-3 p-4 bg-purple-50 dark:bg-purple-900/20 border-2 border-purple-300 dark:border-purple-700 rounded-xl">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <h3 className="font-bold text-lg dark:text-purple-200">
+                      🪄 پرامپت قوی تولید شد
+                    </h3>
+                    <span className="text-xs text-purple-700 dark:text-purple-300">
+                      🤖 با مدل: <code>{structuredPrompt.model_used}</code>
+                    </span>
+                  </div>
+
+                  {(structuredPrompt.warnings || []).length > 0 && (
+                    <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-300 rounded p-2 text-xs">
+                      <b className="dark:text-amber-200">⚠️ هشدارهای AI:</b>
+                      <ul className="list-disc list-inside text-amber-700 dark:text-amber-300 mt-1">
+                        {structuredPrompt.warnings.map((w: string, i: number) => (
+                          <li key={i}>{w}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="block text-sm font-medium mb-1 dark:text-purple-200">
+                      📋 متن پرامپت (می‌توانید ویرایش کنید):
+                    </label>
+                    <textarea
+                      value={editablePromptText}
+                      onChange={e => setEditablePromptText(e.target.value)}
+                      rows={12}
+                      className="w-full p-3 border rounded-lg dark:bg-gray-900 dark:text-white dark:border-gray-700 text-xs font-mono"
+                    />
+                  </div>
+
+                  <div className="flex gap-2 flex-wrap">
+                    <button
+                      onClick={createProject}
+                      disabled={creating}
+                      className="flex-1 py-3 bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded-lg font-bold hover:from-blue-600 hover:to-purple-600 disabled:opacity-50"
+                    >
+                      {creating ? '⏳ در حال ساخت...' : '✅ تأیید و ساخت پروژه'}
+                    </button>
+                    <button
+                      onClick={regenerateWithNextModel}
+                      disabled={previewLoading || creating}
+                      className="px-4 py-3 bg-fuchsia-500 text-white rounded-lg font-bold hover:bg-fuchsia-600 disabled:opacity-50"
+                      title="بازتولید با مدل بعدی در لیست (rotation)"
+                    >
+                      {previewLoading ? '⏳' : '🔄 بازتولید'}
+                    </button>
+                    <button
+                      onClick={() => { setStructuredPrompt(null); setEditablePromptText(''); }}
+                      disabled={creating}
+                      className="px-4 py-3 bg-gray-300 dark:bg-gray-700 dark:text-white rounded-lg hover:bg-gray-400 disabled:opacity-50"
+                    >
+                      ← برگشت
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {previewError && (
+                <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-300 rounded-lg text-sm text-red-700 dark:text-red-300">
+                  ❌ {previewError}
+                </div>
+              )}
             </div>
           </div>
 
@@ -795,15 +954,12 @@ export default function CreatorPage() {
               className="w-full p-2 bg-white/5 border border-white/20 rounded-lg mb-3 focus:border-blue-500 focus:outline-none resize-none"
             />
 
-            <label className="flex items-center gap-2 mb-4 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={pushPrivate}
-                onChange={(e) => setPushPrivate(e.target.checked)}
-                className="w-4 h-4"
-              />
-              <span className="text-sm">🔒 repo خصوصی باشد</span>
-            </label>
+            {/* 🆕 force private — checkbox locked */}
+            <div className="flex items-center gap-2 mb-4 p-2 bg-blue-50 dark:bg-blue-900/20 rounded">
+              <span className="text-sm text-blue-700 dark:text-blue-300">
+                🔒 <b>همیشه repo خصوصی (private)</b> ساخته می‌شود — سیاست امنیتی پروژه
+              </span>
+            </div>
 
             <div className="flex gap-2">
               <button

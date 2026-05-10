@@ -5,7 +5,7 @@ API ساده برای مدیریت پروژه‌ها
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
 import os
 import json
@@ -25,11 +25,22 @@ router = APIRouter(prefix="/api/simple", tags=["Simple Projects"])
 
 class CreateProjectRequest(BaseModel):
     name: str
-    description: str
+    description: str = ""  # legacy / fallback اگر structured_prompt نباشد
     project_type: str = "python"
     technologies: List[str] = []
-    model_ids: Optional[List[str]] = None  # 🆕 مدل(ها)ی انتخابی
-    auto_detect_type: bool = False  # 🆕 اگر True، نوع پروژه را خودش تشخیص می‌دهد
+    model_ids: List[str] = []  # 🆕 اجباری برای production flow (legacy خالی → 400)
+    auto_detect_type: bool = False
+    # 🆕 پرامپت ساختاریافته از idea-to-prompt — اولویت بر description
+    structured_prompt: Optional[Dict[str, Any]] = None
+
+
+class IdeaToPromptRequest(BaseModel):
+    """🆕 ورودی preview prompt — idea → strong prompt بدون ساخت پروژه."""
+    idea: str
+    name: str
+    project_type: str = "auto"
+    technologies: Optional[List[str]] = None
+    model_ids: List[str]  # اجباری
 
 
 class DetectTypeRequest(BaseModel):
@@ -39,8 +50,9 @@ class DetectTypeRequest(BaseModel):
 
 
 class PushToGitHubRequest(BaseModel):
-    repo_name: Optional[str] = None  # default: project name normalized
+    repo_name: Optional[str] = None
     description: Optional[str] = ""
+    # 🆕 force private — همیشه True (override در منطق هم enforce می‌شود)
     private: bool = True
     auto_init: bool = False
     commit_message: str = "Initial commit from AI Creator"
@@ -145,6 +157,54 @@ async def list_projects():
     }
 
 
+# 🆕 endpoint جدید: idea → strong prompt (preview بدون ساخت پروژه)
+@router.post("/projects/idea-to-prompt")
+async def idea_to_prompt_preview(request: IdeaToPromptRequest):
+    """مرحلهٔ ۱ از flow جدید: idea خام → strong prompt ساختاریافته.
+
+    خروجی شامل full_prompt_text + همه فیلدها برای نمایش در preview UI.
+    کاربر می‌تواند پرامپت را ویرایش کند و سپس به create_project بفرستد.
+    """
+    from ...services.creator_idea_to_prompt import idea_to_strong_prompt_for_creator
+
+    if not request.idea.strip():
+        raise HTTPException(status_code=400, detail="idea نمی‌تواند خالی باشد")
+    if not request.name.strip():
+        raise HTTPException(status_code=400, detail="name نمی‌تواند خالی باشد")
+    if not request.model_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="حداقل یک مدل AI انتخاب کنید (model_ids الزامی است)",
+        )
+
+    async def _gen(prompt: str, model_ids: Optional[List[str]] = None) -> str:
+        return await ai_generate(prompt, model_ids=model_ids)
+
+    try:
+        result = await idea_to_strong_prompt_for_creator(
+            idea=request.idea,
+            name=request.name,
+            project_type=request.project_type,
+            technologies=list(request.technologies or []),
+            ai_generate=_gen,
+            model_ids=request.model_ids,
+        )
+        return {"success": True, **result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"خطا در AI generate: {str(e)[:300]}",
+        )
+    except Exception as e:
+        logger.exception("idea_to_prompt_preview failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"خطای داخلی: {str(e)[:300]}",
+        )
+
+
 @router.post("/projects/create")
 async def create_project(request: CreateProjectRequest):
     """ساخت پروژه جدید با AI"""
@@ -152,26 +212,53 @@ async def create_project(request: CreateProjectRequest):
 
     creator = get_simple_creator()
 
+    # 🆕 enforce model_ids — حداقل یک مدل لازم است
+    if not request.model_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="حداقل یک مدل AI انتخاب کنید (model_ids الزامی است)",
+        )
+
     project_type = request.project_type
     technologies = list(request.technologies or [])
 
+    # 🆕 اگر structured_prompt ارسال شد، اولویت دارد
+    structured = request.structured_prompt
+    description = request.description
+    if structured and isinstance(structured, dict):
+        # از structured_prompt استفاده کن
+        if structured.get("full_prompt_text"):
+            description = structured["full_prompt_text"]
+        elif structured.get("structured_description"):
+            description = structured["structured_description"]
+        # technologies را از structured_prompt هم بگیر
+        st_tech = structured.get("tech_stack") or []
+        if isinstance(st_tech, list):
+            for t in st_tech:
+                if t and t not in technologies:
+                    technologies.append(t)
+
+    if not description.strip():
+        raise HTTPException(status_code=400, detail="description یا structured_prompt لازم است")
+
     # تشخیص خودکار نوع پروژه (اگر کاربر خواسته باشد)
-    if request.auto_detect_type:
+    if request.auto_detect_type or project_type == "auto":
         try:
             detection = await _detect_project_type(
-                description=request.description,
+                description=description,
                 name=request.name,
                 model_ids=request.model_ids,
             )
             if detection.get("primary_type"):
                 project_type = detection["primary_type"]
             if detection.get("technologies"):
-                # ترکیب با موارد دستی کاربر
                 for t in detection["technologies"]:
                     if t and t not in technologies:
                         technologies.append(t)
         except Exception as e:
             logger.warning(f"auto-detect failed (continuing with user choice): {e}")
+            if project_type == "auto":
+                project_type = "python"  # fallback
 
     # closure برای ai_generate که model_ids را capture می‌کند
     async def gen(prompt: str) -> str:
@@ -180,7 +267,7 @@ async def create_project(request: CreateProjectRequest):
     try:
         project = await creator.create_project(
             name=request.name,
-            description=request.description,
+            description=description,
             project_type=project_type,
             technologies=technologies,
             ai_generate=gen,
@@ -191,13 +278,48 @@ async def create_project(request: CreateProjectRequest):
             "project": project.to_dict(),
             "detected_type": project_type if request.auto_detect_type else None,
             "detected_technologies": technologies if request.auto_detect_type else None,
+            "model_ids_used": request.model_ids,
+            "used_structured_prompt": bool(structured),
             "message": f"پروژه {project.name} با {len(project.files)} فایل ساخته شد!",
         }
 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("create_project failed")
+        # 🆕 error reporting پربار
+        err_msg = str(e)[:500]
+        err_category = "unknown"
+        suggested: List[str] = []
+        if "model" in err_msg.lower() and ("not found" in err_msg.lower() or "unavailable" in err_msg.lower()):
+            err_category = "model_unavailable"
+            suggested = [
+                "بررسی کنید مدل انتخابی هنوز فعال است",
+                "مدل دیگری انتخاب کنید",
+                "توکن provider را بررسی کنید",
+            ]
+        elif "rate" in err_msg.lower() and "limit" in err_msg.lower():
+            err_category = "rate_limit"
+            suggested = ["چند دقیقه صبر کنید", "یک مدل از provider دیگر انتخاب کنید"]
+        elif "auth" in err_msg.lower() or "401" in err_msg or "403" in err_msg:
+            err_category = "auth_failed"
+            suggested = ["توکن provider در /settings بررسی کنید"]
+        else:
+            suggested = [
+                "بررسی logs برای جزئیات",
+                "مدل دیگری امتحان کنید",
+                "اگر مشکل ادامه دارد، error category را گزارش کنید",
+            ]
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "primary_error": err_msg[:200],
+                "error_category": err_category,
+                "detail": err_msg,
+                "suggested_actions": suggested,
+                "stage": "create_files",
+            },
+        )
 
 
 # ================================
@@ -666,10 +788,11 @@ async def push_to_github(project_id: str, request: Optional[PushToGitHubRequest]
                 )
 
         if not repo_exists:
+            # 🆕 force private — هیچ‌گاه public نسازیم
             create_payload = {
                 "name": desired_repo,
                 "description": repo_description,
-                "private": payload.private,
+                "private": True,  # FORCED
                 "auto_init": payload.auto_init,
             }
             async with session.post(
@@ -709,6 +832,25 @@ async def push_to_github(project_id: str, request: Optional[PushToGitHubRequest]
         uploaded: List[str] = []
         failed: List[dict] = []
 
+        def _classify_error(status: int, text: str) -> tuple:
+            """طبقه‌بندی خطا → (category, suggested_fix)"""
+            tl = (text or "").lower()
+            if status in (401, 403) or "bad credentials" in tl or "authentication" in tl:
+                return ("auth_failed", "توکن GitHub را در /settings بررسی کنید — احتمالاً منقضی یا scope ناکافی")
+            if status == 429 or "rate limit" in tl or "abuse" in tl:
+                return ("rate_limit", "GitHub API rate limit زده — چند دقیقه صبر کنید")
+            if status == 422 and ("too large" in tl or "size" in tl):
+                return ("file_too_large", "فایل >1MB — GitHub API محدودیت اندازه دارد (از LFS استفاده کنید)")
+            if "encoding" in tl or "base64" in tl:
+                return ("encoding_error", "محتوای فایل با UTF-8 سازگار نیست")
+            if status == 409 or "conflict" in tl:
+                return ("branch_conflict", "فایل با sha متفاوت موجود است — pull کنید سپس push")
+            if status == 404:
+                return ("not_found", "repo یا branch وجود ندارد")
+            if status >= 500:
+                return ("github_server_error", "GitHub API دچار مشکل سرور — بعداً تلاش کنید")
+            return ("unknown", "logs را بررسی کنید")
+
         async def _put_file(path: str, content: str, sha: Optional[str] = None):
             url = f"https://api.github.com/repos/{owner}/{desired_repo}/contents/{path}"
             content_b64 = base64.b64encode(content.encode("utf-8", errors="ignore")).decode("ascii")
@@ -721,9 +863,10 @@ async def push_to_github(project_id: str, request: Optional[PushToGitHubRequest]
                 body["sha"] = sha
             async with session.put(url, headers=headers, json=body) as r:
                 if r.status in (200, 201):
-                    return True, None
+                    return True, None, None, None
                 text = await r.text()
-                return False, f"{r.status}: {text[:200]}"
+                category, suggested = _classify_error(r.status, text)
+                return False, f"{r.status}: {text[:200]}", category, suggested
 
         for f in files:
             file_path = f.get("path") or ""
@@ -745,11 +888,17 @@ async def push_to_github(project_id: str, request: Optional[PushToGitHubRequest]
                         if isinstance(meta, dict):
                             sha = meta.get("sha")
 
-            ok, err = await _put_file(file_path, content, sha)
+            ok, err, err_category, suggested = await _put_file(file_path, content, sha)
             if ok:
                 uploaded.append(file_path)
             else:
-                failed.append({"path": file_path, "error": err})
+                # 🆕 schema جدید با error_category و suggested_fix
+                failed.append({
+                    "path": file_path,
+                    "error": err or "unknown",
+                    "error_category": err_category or "unknown",
+                    "suggested_fix": suggested or "logs را بررسی کنید",
+                })
 
     full_name = f"{owner}/{desired_repo}"
 
@@ -766,7 +915,7 @@ async def push_to_github(project_id: str, request: Optional[PushToGitHubRequest]
                 repo_url=repo_html_url,
                 default_branch=default_branch,
                 language=(project.project_type or ""),
-                private=bool(payload.private),
+                private=True,  # 🆕 forced — همه repo ها private
                 user_notes=(project.description or "")[:300],
             )
             # event project_created (موفقیت)
@@ -787,23 +936,54 @@ async def push_to_github(project_id: str, request: Optional[PushToGitHubRequest]
             )
         except Exception as _e:
             logger.warning(f"auto_register_watched/notification failed: {_e}")
-    else:
-        # event creator_failed (شکست در push)
+    # 🆕 محاسبهٔ خلاصهٔ پربار خطا
+    primary_error = ""
+    error_category = "none"
+    suggested_actions: List[str] = []
+    detail = ""
+    if failed:
+        first = failed[0] or {}
+        primary_error = first.get("error", "unknown")[:150]
+        error_category = first.get("error_category", "unknown")
+        suggested_actions = [first.get("suggested_fix", "logs را بررسی کنید")]
+        if len(failed) > 1:
+            suggested_actions.append(
+                f"در total {len(failed)} فایل fail شد — بقیه را پس از حل علت اصلی push کنید"
+            )
+        suggested_actions.append("از /settings توکن GitHub را بازبینی کنید")
+        detail = "\n".join(
+            f"• {f.get('path')}: {f.get('error', '')[:100]} ({f.get('error_category', '?')})"
+            for f in failed[:5]
+        )
+        if len(failed) > 5:
+            detail += f"\n… و {len(failed) - 5} فایل دیگر"
+
+    if failed:
+        # event creator_failed (شکست در push) — پربار
         try:
             from ...services.notification_service import notification_service
+            err_msg = (
+                f"💥 *خطا در push پروژه به GitHub*\n\n"
+                f"📦 پروژه: `{project.name}`\n"
+                f"🔍 مرحلهٔ شکست: *push_to_github*\n\n"
+                f"❌ *علت اصلی:*\n{primary_error}\n\n"
+                f"📋 *جزئیات فنی:*\n```\n{detail[:500]}\n```\n"
+                f"🛠 *اقدامات پیشنهادی:*\n"
+                + "\n".join(f"• {a}" for a in suggested_actions[:3])
+                + f"\n\n📊 *آنچه انجام شد:*\n"
+                f"✓ create_files: موفق ({len(uploaded) + len(failed)} فایل local)\n"
+                f"✗ push_to_github: شکست ({len(uploaded)}/{len(uploaded) + len(failed)} فایل push شد)"
+            )
             await notification_service.notify_event(
                 "creator_failed",
-                f"💥 *خطا در push پروژه به GitHub*\n"
-                f"📦 پروژه: `{project.name}`\n"
-                f"❌ تعداد خطا: *{len(failed)}*\n"
-                f"✅ موفق: *{len(uploaded)}* فایل\n\n"
-                f"اولین خطا: `{(failed[0] or {}).get('error', '')[:200]}`",
+                err_msg,
                 subject="Creator push failed",
                 priority="high",
                 project_name=project.name,
+                extra_hashtags=[error_category],
             )
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug(f"creator_failed notification skipped: {_e}")
 
     return {
         "success": len(failed) == 0,
@@ -814,8 +994,13 @@ async def push_to_github(project_id: str, request: Optional[PushToGitHubRequest]
         "default_branch": default_branch,
         "uploaded": len(uploaded),
         "failed": failed,
-        "private": payload.private,
+        "private": True,  # 🆕 always private
         "auto_watched": auto_watched_info,
+        # 🆕 پربار خطا برای UI/notification
+        "primary_error": primary_error,
+        "error_category": error_category,
+        "suggested_actions": suggested_actions,
+        "error_detail": detail,
         "message": (
             f"{len(uploaded)} فایل push شد"
             + (f" — {len(failed)} خطا" if failed else "")

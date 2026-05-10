@@ -5,9 +5,12 @@
 
 import os
 import json
+import logging
 import uuid
 import asyncio
 import threading
+
+logger = logging.getLogger(__name__)
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Any
@@ -209,6 +212,136 @@ class SimpleProjectCreator:
         # ساختار پیش‌فرض
         return self._get_default_structure(project_type)
 
+    @staticmethod
+    def _estimate_file_complexity(file_path: str, file_desc: str) -> int:
+        """🆕 تخمین تقریبی تعداد token‌های لازم برای تولید فایل.
+
+        بر اساس نوع فایل + طول توضیح + پیچیدگی نام:
+        - README/config ساده: ~800 token
+        - main.py / route ساده: ~2000 token
+        - full app file با چند function: ~4000-8000 token
+        - very complex (model + schema + business logic): ~10000+ token
+        """
+        base = 1500
+        ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+        fname = file_path.rsplit("/", 1)[-1].lower()
+        # نوع فایل
+        if ext in ("md", "txt", "yml", "yaml", "json", "toml", "ini", "cfg"):
+            base = 800
+        elif ext in ("env", "gitignore", "dockerfile") or fname.startswith("."):
+            base = 400
+        elif ext in ("py", "ts", "tsx", "js", "jsx", "go", "rs", "java"):
+            base = 2500
+        # پیچیدگی بر اساس توضیح
+        desc_len = len(file_desc or "")
+        base += int(desc_len * 2.5)  # توضیح طولانی‌تر = کد بیشتر
+        # کلمات کلیدی complex
+        for kw in ("auth", "api", "model", "schema", "service", "router", "main", "core"):
+            if kw in file_path.lower() or kw in file_desc.lower():
+                base += 500
+        return min(base, 16000)  # cap
+
+    async def _generate_file_in_chunks(
+        self,
+        project_name: str,
+        project_desc: str,
+        project_type: str,
+        file_path: str,
+        file_desc: str,
+        ai_generate: callable,
+        max_per_section: int = 3500,
+        num_sections: int = 3,
+    ) -> str:
+        """🆕 برای فایل‌های بزرگ: تقسیم به chunks → concatenate.
+
+        Strategy:
+        1. AI outline تولید کند (لیست section‌ها با هدر و توضیح)
+        2. هر section را با context outline تولید کن
+        3. concatenate + sanitize
+        """
+        # 1. outline
+        outline_prompt = f"""برای فایل `{file_path}` در پروژهٔ "{project_name}" (نوع: {project_type})،
+ساختار را به {num_sections} section تقسیم کن.
+
+توضیح فایل: {file_desc}
+توضیح پروژه: {project_desc[:500]}
+
+خروجی JSON:
+{{
+  "sections": [
+    {{"index": 1, "title": "imports + constants", "outline": "..."}},
+    {{"index": 2, "title": "core functions", "outline": "..."}},
+    ...
+  ]
+}}
+فقط JSON برگردان."""
+        try:
+            outline_resp = await ai_generate(outline_prompt)
+            start = outline_resp.find("{")
+            end = outline_resp.rfind("}") + 1
+            outline_data = json.loads(outline_resp[start:end]) if start >= 0 else {}
+        except Exception:
+            outline_data = {}
+        sections = outline_data.get("sections") or [
+            {"index": i, "title": f"section_{i}", "outline": ""} for i in range(1, num_sections + 1)
+        ]
+
+        # 2. هر section را تولید کن
+        parts: List[str] = []
+        outline_summary = "\n".join(
+            f"- section {s.get('index', '?')}: {s.get('title', '')} — {s.get('outline', '')[:100]}"
+            for s in sections
+        )
+        for s in sections:
+            sec_prompt = f"""فایل `{file_path}` در پروژهٔ "{project_name}" را در {len(sections)} section می‌نویسیم.
+این outline کلی است:
+{outline_summary}
+
+حالا فقط **section {s.get('index', '?')}: {s.get('title', '')}** را بنویس:
+{s.get('outline', '')}
+
+⚠️ مهم:
+- فقط کد همین section را خروجی بده (نه کل فایل)
+- اگر این section اول است، imports/headers بنویس
+- اگر section میانی است، فقط محتوا (بدون duplicate imports)
+- اگر آخر است، main block / footer بنویس
+- فقط کد، بدون توضیح، بدون ```"""
+            try:
+                resp = await ai_generate(sec_prompt)
+                parts.append(resp.strip())
+            except Exception as e:
+                logger.warning(f"chunk {s.get('index')} of {file_path} failed: {e}")
+                continue
+
+        # 3. concatenate
+        combined = "\n\n".join(parts)
+        # 4. sanitize
+        from .content_sanitizer import strip_reasoning_blocks, sanitize_file_content
+        combined = strip_reasoning_blocks(combined)
+        combined = sanitize_file_content(combined, file_path)
+
+        # 5. validate Python files با ast
+        if file_path.endswith(".py"):
+            try:
+                import ast
+                ast.parse(combined)
+            except SyntaxError as e:
+                logger.warning(f"chunked {file_path} syntactically invalid: {e} — retry once")
+                # one retry: full regeneration with warning
+                retry_prompt = (
+                    f"خروجی قبلی برای فایل `{file_path}` syntactically invalid بود ({e}).\n"
+                    f"فایل را به‌طور کامل و syntactically valid بنویس.\n"
+                    f"توضیح: {file_desc}"
+                )
+                try:
+                    retry = await ai_generate(retry_prompt)
+                    retry = strip_reasoning_blocks(retry.strip())
+                    retry = sanitize_file_content(retry, file_path)
+                    return retry
+                except Exception:
+                    return combined
+        return combined
+
     async def _generate_file(
         self,
         project_name: str,
@@ -216,10 +349,30 @@ class SimpleProjectCreator:
         project_type: str,
         file_path: str,
         file_desc: str,
-        ai_generate: callable
+        ai_generate: callable,
+        max_output_tokens: int = 16384,  # 🆕 budget مدل
     ) -> str:
-        """تولید محتوای یک فایل با AI"""
+        """تولید محتوای یک فایل با AI — با respect به token budget."""
+        # 🆕 تخمین complexity → تصمیم one-shot vs chunks
+        estimated = self._estimate_file_complexity(file_path, file_desc)
+        # اگر تخمین > 70% max_output → chunking
+        threshold = int(max_output_tokens * 0.7)
+        if estimated > threshold:
+            logger.info(
+                f"file {file_path}: estimated {estimated} > {threshold} → chunked generation"
+            )
+            num_sections = max(2, min(5, (estimated // threshold) + 1))
+            return await self._generate_file_in_chunks(
+                project_name=project_name,
+                project_desc=project_desc,
+                project_type=project_type,
+                file_path=file_path,
+                file_desc=file_desc,
+                ai_generate=ai_generate,
+                num_sections=num_sections,
+            )
 
+        # one-shot
         prompt = f"""برای پروژه "{project_name}" ({project_type}) این فایل رو بنویس:
 
 پروژه: {project_desc}
@@ -234,9 +387,7 @@ class SimpleProjectCreator:
         # 🛡️ پاکسازی کامل محتوا از آلودگی reasoning/markdown (ماژول مرکزی)
         from .content_sanitizer import strip_reasoning_blocks, sanitize_file_content
         content = response.strip()
-        # ابتدا orphan reasoning blocks رو حذف کن (شامل ناقص‌ها)
         content = strip_reasoning_blocks(content)
-        # سپس پاکسازی کامل فایل (فارسی، markdown، fence، trailing)
         content = sanitize_file_content(content, file_path)
 
         return content
