@@ -991,11 +991,13 @@ class OversightService:
                 token_for_deep = get_github_token()
                 if token_for_deep:
                     from .oversight_deep_scan_service import build_deep_context_for_idea
+                    # 🆕 (P2) max_deep_read از 18 به 30 افزایش یافت — context
+                    # پربارتر برای پرامپت تولیدشده (شامل manifests + tests + config)
                     deep_ctx = await build_deep_context_for_idea(
                         watched.repo_full_name,
                         branch=watched.default_branch or "main",
                         token=token_for_deep,
-                        max_deep_read=18,
+                        max_deep_read=30,
                     )
                     if not deep_ctx.get("ok"):
                         logger.warning(f"deep_context for idea failed: {deep_ctx.get('error')}")

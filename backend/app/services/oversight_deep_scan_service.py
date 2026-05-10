@@ -787,13 +787,21 @@ async def build_deep_context_for_idea(
                 except Exception:
                     continue
 
-        # Special context: README، CHANGELOG، tsconfig، next.config، ...
+        # Special context: README، CHANGELOG، tsconfig، next.config، Dockerfile، …
+        # 🆕 (P2) اضافه شد: Dockerfile, docker-compose, .env.example, Makefile,
+        # tests config, CI configs — برای پوشش بهتر context
+        _special_basenames = {
+            "readme.md", "readme", "changelog.md", "tsconfig.json", "tsconfig.base.json",
+            "next.config.js", "next.config.mjs", "vite.config.ts", "vite.config.js",
+            ".env.example", ".env.sample", "dockerfile", "docker-compose.yml",
+            "docker-compose.yaml", "makefile", "jest.config.js", "vitest.config.ts",
+            "pytest.ini", "tox.ini", "setup.cfg", ".eslintrc.json", ".prettierrc",
+        }
         special_files = [
             f for f in all_files
-            if f.split("/")[-1].lower() in ("readme.md", "readme", "changelog.md")
-            or f.startswith(("docs/", "documentation/"))
-            or f in ("tsconfig.json", "next.config.js", "next.config.mjs", "vite.config.ts", ".env.example")
-        ][:6]
+            if f.split("/")[-1].lower() in _special_basenames
+            or f.startswith(("docs/", "documentation/", ".github/workflows/"))
+        ][:12]  # 🆕 از 6 به 12 افزایش یافت
         special_contents: Dict[str, str] = {}
         for sp in special_files:
             try:
