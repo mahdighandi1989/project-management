@@ -10,6 +10,17 @@ type ChannelStatus = {
   ready: boolean;
 };
 
+type DailyReportPrefs = {
+  enabled: boolean;
+  hour_of_day: number;
+  timezone: string;
+  include_recommendations: boolean;
+  include_top_findings: boolean;
+  max_projects_in_report: number;
+  last_sent_at: string | null;
+  last_sent_status: string | null;
+};
+
 type Status = {
   prefs: {
     events: Record<string, boolean>;
@@ -19,6 +30,7 @@ type Status = {
     include_hashtags: boolean;
     include_inline_buttons: boolean;
     app_base_url: string;
+    daily_report?: DailyReportPrefs;
   };
   channels: Record<string, ChannelStatus>;
   events_registry: Record<string, { label: string; help: string; icon: string }>;
@@ -57,6 +69,12 @@ export default function NotificationSettingsPanel() {
   const [error, setError] = useState<string>('');
   const [appUrlDraft, setAppUrlDraft] = useState<string>('');
   const [webhookSetting, setWebhookSetting] = useState(false);
+  // 🆕 Daily Report state
+  const [reportPreviewLoading, setReportPreviewLoading] = useState(false);
+  const [reportPreviewText, setReportPreviewText] = useState<string>('');
+  const [reportPreviewSummary, setReportPreviewSummary] = useState<any>(null);
+  const [reportSending, setReportSending] = useState(false);
+  const [reportSendResult, setReportSendResult] = useState<string>('');
   const [webhookResult, setWebhookResult] = useState<string>('');
 
   const load = async () => {
@@ -160,6 +178,52 @@ export default function NotificationSettingsPanel() {
     } finally {
       setWebhookSetting(false);
     }
+  };
+
+  // 🆕 Daily Report handlers
+  const previewReport = async () => {
+    setReportPreviewLoading(true);
+    setReportPreviewText('');
+    setReportPreviewSummary(null);
+    setReportSendResult('');
+    try {
+      const res = await fetch(`${API_BASE}/api/notifications/daily-report/preview`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setReportPreviewText(data.preview_text || '');
+      setReportPreviewSummary(data.summary || null);
+    } catch (e: any) {
+      setReportPreviewText(`❌ خطا: ${e.message}`);
+    } finally {
+      setReportPreviewLoading(false);
+    }
+  };
+
+  const sendReportNow = async () => {
+    setReportSending(true);
+    setReportSendResult('');
+    try {
+      const res = await fetch(`${API_BASE}/api/notifications/daily-report/send-now`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      const lines = (data.results || []).map((r: any) =>
+        r.ok ? `✅ ${r.channel}: ارسال شد` : `❌ ${r.channel}: ${r.error || 'failed'}`
+      );
+      setReportSendResult(lines.join('\n') || (data.ok ? '✅ ارسال شد' : '❌ هیچ کانال آماده‌ای نبود'));
+      // refresh status to update last_sent_at
+      load();
+    } catch (e: any) {
+      setReportSendResult(`❌ خطا: ${e.message}`);
+    } finally {
+      setReportSending(false);
+    }
+  };
+
+  const updateDailyReport = (partial: Partial<DailyReportPrefs>) => {
+    if (!status?.prefs?.daily_report) return;
+    const merged = { ...status.prefs.daily_report, ...partial };
+    updatePrefs({ daily_report: merged });
   };
 
   const sendTestEvent = async (event: string) => {
@@ -469,6 +533,205 @@ export default function NotificationSettingsPanel() {
           </div>
         ))}
       </div>
+
+      {/* 🆕 Daily Report panel */}
+      {(() => {
+        const dr = status.prefs.daily_report || {
+          enabled: true, hour_of_day: 8, timezone: 'Asia/Tehran',
+          include_recommendations: true, include_top_findings: true,
+          max_projects_in_report: 20, last_sent_at: null, last_sent_status: null,
+        };
+        return (
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-5">
+            <h3 className="font-bold text-lg mb-2 dark:text-white">📊 گزارش دوره‌ای پروژه‌ها</h3>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
+              گزارش جامع از همهٔ پروژه‌های تحت نظارت — درصد سلامت، امنیت، تسک‌های
+              باقی‌مانده، رتبه‌بندی و توصیه‌ها — به‌صورت خودکار ارسال می‌شود.
+            </p>
+
+            <label className="flex items-start gap-2 mb-4 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={!!dr.enabled}
+                disabled={saving}
+                onChange={(e) => updateDailyReport({ enabled: e.target.checked })}
+                className="mt-1 w-4 h-4"
+              />
+              <div>
+                <div className="font-medium dark:text-gray-100">فعال‌سازی گزارش خودکار</div>
+                <div className="text-xs text-gray-500 dark:text-gray-400">
+                  ارسال خودکار طبق زمان‌بندی پایین. اگر خاموش، فقط با دکمهٔ «ارسال نمونه» می‌توانید بفرستید.
+                </div>
+              </div>
+            </label>
+
+            <div className="grid sm:grid-cols-2 gap-3 mb-3">
+              <label className="block text-sm">
+                <span className="block text-gray-700 dark:text-gray-200 mb-1">⏰ ساعت ارسال (روزانه):</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={23}
+                  defaultValue={dr.hour_of_day ?? 8}
+                  disabled={saving || !dr.enabled}
+                  onBlur={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    if (!isNaN(v) && v >= 0 && v <= 23 && v !== dr.hour_of_day) {
+                      updateDailyReport({ hour_of_day: v });
+                    }
+                  }}
+                  className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                />
+                <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  ۰ تا ۲۳ — پیش‌فرض: ۸ صبح
+                </div>
+              </label>
+              <label className="block text-sm">
+                <span className="block text-gray-700 dark:text-gray-200 mb-1">🌍 منطقهٔ زمانی:</span>
+                <select
+                  value={dr.timezone || 'Asia/Tehran'}
+                  disabled={saving || !dr.enabled}
+                  onChange={(e) => updateDailyReport({ timezone: e.target.value })}
+                  className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                >
+                  <option value="Asia/Tehran">Asia/Tehran (پیش‌فرض)</option>
+                  <option value="UTC">UTC</option>
+                  <option value="Europe/London">Europe/London</option>
+                  <option value="Europe/Berlin">Europe/Berlin</option>
+                  <option value="America/New_York">America/New_York</option>
+                  <option value="America/Los_Angeles">America/Los_Angeles</option>
+                  <option value="Asia/Dubai">Asia/Dubai</option>
+                  <option value="Asia/Tokyo">Asia/Tokyo</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="grid sm:grid-cols-2 gap-2 mb-3">
+              <label className="flex items-center gap-2 p-2 bg-gray-50 dark:bg-gray-700/30 rounded text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={dr.include_recommendations !== false}
+                  disabled={saving || !dr.enabled}
+                  onChange={(e) => updateDailyReport({ include_recommendations: e.target.checked })}
+                  className="w-4 h-4"
+                />
+                <span className="dark:text-gray-100">🪜 توصیه‌های اولویت‌دار</span>
+              </label>
+              <label className="flex items-center gap-2 p-2 bg-gray-50 dark:bg-gray-700/30 rounded text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={dr.include_top_findings !== false}
+                  disabled={saving || !dr.enabled}
+                  onChange={(e) => updateDailyReport({ include_top_findings: e.target.checked })}
+                  className="w-4 h-4"
+                />
+                <span className="dark:text-gray-100">🚨 برترین مشکلات (top 5)</span>
+              </label>
+            </div>
+
+            <label className="block mb-3 text-sm">
+              <span className="block text-gray-700 dark:text-gray-200 mb-1">📋 حداکثر تعداد پروژه در گزارش:</span>
+              <input
+                type="number"
+                min={1}
+                max={50}
+                defaultValue={dr.max_projects_in_report ?? 20}
+                disabled={saving || !dr.enabled}
+                onBlur={(e) => {
+                  const v = parseInt(e.target.value, 10);
+                  if (!isNaN(v) && v >= 1 && v <= 50 && v !== dr.max_projects_in_report) {
+                    updateDailyReport({ max_projects_in_report: v });
+                  }
+                }}
+                className="w-32 p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
+              />
+              <span className="text-xs text-gray-500 dark:text-gray-400 mr-2">
+                cap برای جلوگیری از پیام &gt; 4096 char در Telegram
+              </span>
+            </label>
+
+            <div className="flex gap-2 flex-wrap mt-4">
+              <button
+                onClick={previewReport}
+                disabled={reportPreviewLoading}
+                className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 text-sm"
+              >
+                {reportPreviewLoading ? '⏳ در حال آماده‌سازی...' : '👁 پیش‌نمایش گزارش'}
+              </button>
+              <button
+                onClick={sendReportNow}
+                disabled={reportSending}
+                className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 text-sm"
+              >
+                {reportSending ? '⏳ در حال ارسال...' : '🚀 ارسال نمونه الان'}
+              </button>
+            </div>
+
+            {reportSendResult && (
+              <pre className="mt-3 text-xs bg-gray-50 dark:bg-gray-900 dark:text-gray-200 p-3 rounded whitespace-pre-wrap border dark:border-gray-700">
+{reportSendResult}
+              </pre>
+            )}
+
+            {reportPreviewSummary && (
+              <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                <div className="bg-blue-50 dark:bg-blue-900/20 p-2 rounded">
+                  <div className="text-gray-500 dark:text-gray-400 text-[10px]">پروژه</div>
+                  <div className="font-bold dark:text-gray-100">
+                    {reportPreviewSummary.watched_count ?? 0}
+                  </div>
+                </div>
+                <div className="bg-cyan-50 dark:bg-cyan-900/20 p-2 rounded">
+                  <div className="text-gray-500 dark:text-gray-400 text-[10px]">تسک فعال</div>
+                  <div className="font-bold dark:text-gray-100">
+                    {reportPreviewSummary.total_active_tasks ?? 0}
+                  </div>
+                </div>
+                <div className="bg-red-50 dark:bg-red-900/20 p-2 rounded">
+                  <div className="text-gray-500 dark:text-gray-400 text-[10px]">critical</div>
+                  <div className="font-bold text-red-600 dark:text-red-300">
+                    {reportPreviewSummary.total_critical ?? 0}
+                  </div>
+                </div>
+                <div className="bg-green-50 dark:bg-green-900/20 p-2 rounded">
+                  <div className="text-gray-500 dark:text-gray-400 text-[10px]">سلامت میانگین</div>
+                  <div className="font-bold text-green-600 dark:text-green-300">
+                    {reportPreviewSummary.global_health_avg ?? 0}%
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {reportPreviewText && (
+              <details className="mt-3" open>
+                <summary className="cursor-pointer text-sm font-medium dark:text-gray-200">
+                  📄 پیش‌نمایش متن (کلیک برای باز/بسته)
+                </summary>
+                <pre className="mt-2 text-xs bg-gray-50 dark:bg-gray-900 dark:text-gray-200 p-3 rounded whitespace-pre-wrap max-h-96 overflow-auto border dark:border-gray-700">
+{reportPreviewText}
+                </pre>
+              </details>
+            )}
+
+            {dr.last_sent_at && (
+              <div className="mt-3 text-xs text-gray-500 dark:text-gray-400 border-t dark:border-gray-700 pt-2">
+                <div>
+                  🕐 آخرین ارسال: {new Date(dr.last_sent_at).toLocaleString('fa-IR')}
+                </div>
+                {dr.last_sent_status && (
+                  <div>
+                    وضعیت: <span className={
+                      dr.last_sent_status === 'ok' ? 'text-green-600 dark:text-green-400' :
+                      dr.last_sent_status?.startsWith('failed') ? 'text-red-600 dark:text-red-400' :
+                      'text-amber-600 dark:text-amber-400'
+                    }>{dr.last_sent_status}</span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Webhook setup */}
       <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-5">

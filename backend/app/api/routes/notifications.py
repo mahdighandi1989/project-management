@@ -27,6 +27,8 @@ class PrefsUpdate(BaseModel):
     include_hashtags: Optional[bool] = None
     include_inline_buttons: Optional[bool] = None
     app_base_url: Optional[str] = None
+    # 🆕 (Daily Report) — تنظیمات گزارش دوره‌ای
+    daily_report: Optional[Dict[str, Any]] = None
 
 
 class TestRequest(BaseModel):
@@ -70,6 +72,8 @@ async def update_prefs(payload: PrefsUpdate):
         partial["include_inline_buttons"] = payload.include_inline_buttons
     if payload.app_base_url is not None:
         partial["app_base_url"] = payload.app_base_url.strip()
+    if payload.daily_report is not None:
+        partial["daily_report"] = payload.daily_report
     updated = notification_service.update_prefs(partial)
     return {"ok": True, "prefs": updated}
 
@@ -121,3 +125,52 @@ async def set_webhook(payload: WebhookRequest):
 async def delete_webhook():
     tg = notification_service._telegram()
     return await tg.delete_webhook()
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 🆕 (Daily Report) endpoints برای preview + send-now
+# ──────────────────────────────────────────────────────────────────────────
+
+@router.get("/daily-report/preview")
+async def preview_daily_report():
+    """preview بدون ارسال — برای دیدن متن خروجی + summary در UI."""
+    from ...services.oversight_service import get_oversight_service
+    from ...services.notification_service import format_health_report_message
+    service = get_oversight_service()
+    summary = await service.compute_global_health_summary()
+    prefs = notification_service.get_prefs()
+    text, reply_markup = format_health_report_message(
+        summary, app_base_url=prefs.get("app_base_url", "")
+    )
+    return {
+        "summary": summary,
+        "preview_text": text,
+        "reply_markup": reply_markup,
+        "char_count": len(text),
+    }
+
+
+@router.post("/daily-report/send-now")
+async def send_daily_report_now():
+    """ارسال فوری گزارش — برای تست manual."""
+    from ...services.oversight_service import get_oversight_service
+    from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        prefs = notification_service.get_prefs()
+        tz_name = (prefs.get("daily_report", {}) or {}).get("timezone", "Asia/Tehran")
+        local_now = datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        local_now = datetime.now()
+
+    service = get_oversight_service()
+    summary = await service.compute_global_health_summary()
+    results = await notification_service.send_daily_report(summary)
+    ok = any(r.get("ok") for r in results) if results else False
+    notification_service.update_prefs({
+        "daily_report": {
+            "last_sent_at": local_now.isoformat(),
+            "last_sent_status": "ok" if ok else ("no_channel_ready" if not results else "failed"),
+        }
+    })
+    return {"ok": ok, "results": results, "channels_count": len(results)}

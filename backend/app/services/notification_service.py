@@ -159,6 +159,14 @@ EVENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "default_sound": True,
         "icon": "🧪",
     },
+    # 🆕 (Daily Report)
+    "daily_report": {
+        "label": "📊 گزارش روزانهٔ پروژه‌ها",
+        "help": "گزارش دوره‌ای جامع از وضعیت همهٔ پروژه‌ها (پیش‌فرض روزی یک‌بار صبح)",
+        "default_enabled": True,
+        "default_sound": False,
+        "icon": "📊",
+    },
 }
 
 
@@ -174,6 +182,17 @@ def _build_default_prefs() -> Dict[str, Any]:
         "include_hashtags": True,
         "include_inline_buttons": True,
         "app_base_url": "",  # مثل https://ai-creator-frontend.onrender.com
+        # 🆕 (Daily Report) تنظیمات گزارش دوره‌ای
+        "daily_report": {
+            "enabled": True,
+            "hour_of_day": 8,
+            "timezone": "Asia/Tehran",
+            "include_recommendations": True,
+            "include_top_findings": True,
+            "max_projects_in_report": 20,
+            "last_sent_at": None,
+            "last_sent_status": None,
+        },
     }
 
 
@@ -449,6 +468,194 @@ def _short_token() -> str:
     return secrets.token_urlsafe(8)
 
 
+# ---------------------------------------------------------------------------
+# 🆕 (Daily Report) قالب‌بندی گزارش دوره‌ای
+# ---------------------------------------------------------------------------
+
+def _to_jalali_date_str(iso_str: Optional[str] = None) -> str:
+    """تبدیل تاریخ به فرمت شمسی ساده برای نمایش (با fallback به Gregorian)."""
+    from datetime import datetime, timezone
+    if iso_str:
+        try:
+            dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        except Exception:
+            dt = datetime.now(timezone.utc)
+    else:
+        dt = datetime.now(timezone.utc)
+    # تلاش برای jalali — اگر کتابخانه jdatetime موجود است
+    try:
+        import jdatetime  # type: ignore
+        jdt = jdatetime.datetime.fromgregorian(datetime=dt)
+        return jdt.strftime("%Y/%m/%d")
+    except Exception:
+        return dt.strftime("%Y-%m-%d")
+
+
+def _attention_emoji(label: str) -> str:
+    return {
+        "CRITICAL": "🔴",
+        "HIGH": "🟠",
+        "MEDIUM": "🟡",
+        "LOW": "🟢",
+    }.get(label, "⚪")
+
+
+def _rank_emoji(idx: int) -> str:
+    """emoji ranking برای 10 پروژهٔ اول."""
+    medals = ["🥇", "🥈", "🥉"]
+    if idx < 3:
+        return medals[idx]
+    return f"#{idx + 1}"
+
+
+def _safe_md(text: str) -> str:
+    """escape محدود برای Markdown Telegram (فقط برای رشته‌های user-controlled)."""
+    if not text:
+        return ""
+    # escape فقط کاراکترهایی که Markdown V1 را می‌شکنند
+    return (
+        str(text)
+        .replace("_", " ")  # underscore در Markdown V1 = italic
+        .replace("*", " ")
+        .replace("`", "'")
+        .replace("[", "(")
+        .replace("]", ")")
+    )
+
+
+def format_health_report_message(
+    summary: Dict[str, Any], app_base_url: str = ""
+) -> tuple:
+    """قالب‌بندی متن گزارش روزانه + inline_keyboard.
+
+    خروجی: (text: str, reply_markup: dict|None)
+    """
+    # تاریخ شمسی
+    date_label = _to_jalali_date_str(summary.get("generated_at"))
+
+    lines: List[str] = []
+    lines.append(f"📊 *گزارش دوره‌ای پروژه‌ها — {date_label}*\n")
+    lines.append("📈 *وضعیت کلی:*")
+    lines.append(f"🗂 پروژه‌های تحت نظارت: *{summary.get('watched_count', 0)}*")
+    lines.append(f"📋 مجموع تسک‌های فعال: *{summary.get('total_active_tasks', 0)}*")
+    lines.append(
+        f"🚨 critical: *{summary.get('total_critical', 0)}* · "
+        f"⚠️ high: *{summary.get('total_high', 0)}*"
+    )
+    lines.append(f"✅ انجام‌شده در ۳۰ روز اخیر: *{summary.get('total_done_last_30d', 0)}*")
+    lines.append(f"🏥 میانگین سلامت: *{summary.get('global_health_avg', 0)}%*")
+    lines.append(f"🔒 میانگین امنیت: *{summary.get('global_security_avg', 0)}%*")
+
+    lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+    lines.append("🏆 *رتبه‌بندی پروژه‌ها (بر اساس نیاز به توجه):*\n")
+
+    projects = summary.get("projects", [])
+    for idx, p in enumerate(projects):
+        rank = _rank_emoji(idx)
+        emoji = _attention_emoji(p.get("attention_label", "LOW"))
+        proj_name_safe = _safe_md(p.get("project_full_name", ""))
+        breakdown = p.get("tasks_priority_breakdown", {}) or {}
+        last_scan = p.get("last_scan_at")
+        last_scan_short = _to_jalali_date_str(last_scan) if last_scan else "—"
+        depth = p.get("last_scan_depth", "—")
+
+        lines.append(f"{rank} *{proj_name_safe}*  •  {emoji} {p.get('attention_label', 'LOW')}")
+        lines.append(
+            f"   📈 سلامت: *{p.get('health_score', 0)}%*  |  "
+            f"🔒 امنیت: *{p.get('security_score', 0)}%*"
+        )
+        lines.append(
+            f"   ✅ پیشرفت: *{p.get('completeness_score', 0)}%*  |  "
+            f"📐 استاندارد: *{p.get('standard_score', 0)}%*"
+        )
+        lines.append(
+            f"   📋 فعال: *{p.get('tasks_active', 0)}*  |  "
+            f"✅ done: *{p.get('tasks_done', 0)}*"
+        )
+        lines.append(
+            f"   🚨 {breakdown.get('critical', 0)} critical · "
+            f"⚠️ {breakdown.get('high', 0)} high · "
+            f"🟡 {breakdown.get('medium', 0)} med · "
+            f"⚪ {breakdown.get('low', 0)} low"
+        )
+        # top critical finding (اگر موجود)
+        top_crit = p.get("top_critical_findings", []) or []
+        if top_crit:
+            t0 = top_crit[0]
+            t0_title = _safe_md(t0.get("title", "")[:80])
+            lines.append(f"   ⚠️ {t0_title}")
+        if p.get("scan_seen_top_count", 1) > 1:
+            lines.append(f"   🔁 بزرگ‌ترین scan_seen: *{p['scan_seen_top_count']}*")
+        lines.append(f"   🤖 آخرین scan: `{depth}` · {last_scan_short}")
+        lines.append("")  # خط خالی بین پروژه‌ها
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+    top_findings = summary.get("top_findings_global", []) or []
+    if top_findings:
+        lines.append("🚨 *برترین مشکلات حال حاضر (top 5):*")
+        for i, f in enumerate(top_findings, 1):
+            proj_name = _safe_md(f.get("project_full_name", ""))
+            title = _safe_md(f.get("title", "")[:100])
+            seen = f.get("scan_seen_count", 1)
+            seen_str = f" · scan_seen: *{seen}*" if seen > 1 else ""
+            lines.append(f"{i}. [{proj_name}] {title}{seen_str}")
+        lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+
+    recommendations = summary.get("recommendations", []) or []
+    if recommendations:
+        lines.append("🪜 *توصیه‌های اولویت‌دار:*")
+        for r in recommendations:
+            lines.append(f"• {r}")
+
+    # هشتگ‌ها
+    lines.append("")
+    date_tag = date_label.replace("/", "_").replace("-", "_")
+    hashtags = [
+        "#daily_report",
+        f"#{date_tag}",
+        f"#{summary.get('watched_count', 0)}_projects",
+    ]
+    if summary.get("total_critical", 0) > 0:
+        hashtags.append(f"#{summary['total_critical']}_critical")
+    lines.append(" ".join(hashtags))
+
+    text = "\n".join(lines)
+
+    # محدودیت Telegram: 4096 char
+    if len(text) > 4000:
+        text = text[:3990] + "\n…[truncated — تعداد پروژه‌ها را در تنظیمات کاهش دهید]"
+
+    # inline_keyboard
+    reply_markup = None
+    base = (app_base_url or "").rstrip("/")
+    if base:
+        rows: List[List[Dict[str, str]]] = [
+            [
+                {"text": "👁 باز کردن پنل", "url": f"{base}/oversight"},
+                {"text": "📋 تسک‌های Critical", "url": f"{base}/oversight?tab=tasks"},
+            ],
+            [
+                {"text": "📊 گزارش‌ها", "url": f"{base}/oversight?tab=reports"},
+                {"text": "👁 پروژه‌های تحت نظارت", "url": f"{base}/oversight?tab=watched"},
+            ],
+        ]
+        # یک ردیف per project (تا ۳ پروژهٔ critical)
+        for p in projects[:3]:
+            if p.get("attention_label") in ("CRITICAL", "HIGH"):
+                wid = p.get("watched_id", "")
+                pname = (p.get("project_full_name") or "")[:25]
+                rows.append([
+                    {
+                        "text": f"{_attention_emoji(p.get('attention_label'))} {pname}",
+                        "url": f"{base}/oversight?tab=tasks&watched={wid}",
+                    }
+                ])
+        rows.append([{"text": "🏠 پنل", "url": f"{base}/"}])
+        reply_markup = {"inline_keyboard": rows}
+
+    return text, reply_markup
+
+
 class NotificationService:
     def _build_channels(self) -> List[NotificationChannel]:
         return [
@@ -552,6 +759,57 @@ class NotificationService:
                 full_message, subject=subject, silent=silent, reply_markup=reply_markup,
             )
             results.append(res)
+        return results
+
+    async def send_daily_report(self, summary: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """ارسال گزارش روزانه به همه کانال‌های ready.
+
+        از format_health_report_message برای ساخت متن استفاده می‌کند.
+        silent بر اساس prefs.sound.daily_report تعیین می‌شود.
+        """
+        prefs = _read_prefs()
+        # رعایت تنظیمات کاربر برای cap project count
+        daily_prefs = prefs.get("daily_report", {}) or {}
+        max_projects = int(daily_prefs.get("max_projects_in_report", 20) or 20)
+        if "projects" in summary and isinstance(summary["projects"], list):
+            summary = {**summary, "projects": summary["projects"][:max_projects]}
+        # filter recommendations/top_findings بر اساس prefs
+        if not daily_prefs.get("include_recommendations", True):
+            summary = {**summary, "recommendations": []}
+        if not daily_prefs.get("include_top_findings", True):
+            summary = {**summary, "top_findings_global": []}
+
+        text, reply_markup = format_health_report_message(
+            summary, app_base_url=prefs.get("app_base_url", "")
+        )
+
+        # event check (می‌توان daily_report را کلاً off کرد از panel events)
+        events = prefs.get("events", {})
+        if not events.get("daily_report", True):
+            logger.info("daily_report event disabled — skipping send")
+            return []
+
+        sound = bool(prefs.get("sound", {}).get("daily_report", False))
+        silent = not sound
+
+        results: List[Dict[str, Any]] = []
+        for ch in self._build_channels():
+            if not ch.is_configured():
+                continue
+            ch_prefs = prefs.get("channels", {}).get(ch.name, {})
+            if not ch_prefs.get("enabled", True):
+                continue
+            res = await ch.send(
+                text,
+                subject=f"گزارش روزانه — {summary.get('watched_count', 0)} پروژه",
+                silent=silent,
+                reply_markup=reply_markup,
+            )
+            results.append(res)
+            if res.get("ok"):
+                logger.info(f"daily_report sent via {ch.name}")
+            else:
+                logger.warning(f"daily_report {ch.name} failed: {res.get('error')}")
         return results
 
     async def test_send(self, channel: Optional[str] = None) -> List[Dict[str, Any]]:
