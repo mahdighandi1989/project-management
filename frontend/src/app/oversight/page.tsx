@@ -53,7 +53,15 @@ interface Watched {
   notify_user_before_apply?: boolean;
   // 🆕 (commit 2.3) عمق scan + criteria weights — مهاجرت از Health
   scan_depth?: 'quick' | 'standard' | 'deep' | 'thorough';
-  scan_criteria_weights?: { security?: number; quality?: number; tests?: number; completeness?: number };
+  scan_criteria_weights?: {
+    security?: number;
+    quality?: number;
+    tests?: number;
+    completeness?: number;
+    // 🆕 (P3) dimensions جدید
+    logical_alignment?: number;
+    functional_correctness?: number;
+  };
   // 🆕 (auto-loop) ping-pong scheduler-driven
   auto_continue_until_done?: boolean;
   max_auto_loop_rounds?: number;
@@ -3255,33 +3263,52 @@ function WatchedCard({
         <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
           <label className="block">
             <span className="block text-gray-600 dark:text-gray-300 mb-1">
-              عمق scan <span className="text-blue-400" title="quick: 3 pass سبک، standard: 5 pass، deep: تمام pass ها، thorough: تمام pass ها + per-file health scoring">ⓘ</span>
+              عمق scan <span className="text-blue-400" title="quick: 3 pass سبک، standard: 6 pass، deep: تمام 12 pass، thorough: تمام 12 pass + per-file health scoring">ⓘ</span>
             </span>
             <select
               value={w.scan_depth || 'deep'}
               onChange={(e) => onChange({ scan_depth: e.target.value as any })}
               className="w-full p-1.5 border rounded text-sm dark:bg-gray-700 dark:text-white dark:border-gray-600"
             >
-              <option value="quick">⚡ quick (3 pass — سریع)</option>
-              <option value="standard">⚖ standard (5 pass — متعادل)</option>
-              <option value="deep">🔍 deep (تمام pass ها — کامل، پیش‌فرض)</option>
-              <option value="thorough">🔬 thorough (تمام pass ها + per-file scoring)</option>
+              <option value="quick">⚡ quick (3 pass — سریع: frontend + backend + security)</option>
+              <option value="standard">⚖ standard (6 pass — متعادل + logical_alignment)</option>
+              <option value="deep">🔍 deep (12 pass — کامل، پیش‌فرض)</option>
+              <option value="thorough">🔬 thorough (12 pass + per-file health scoring + roadmap)</option>
             </select>
           </label>
           <div className="text-xs text-gray-500 dark:text-gray-400 self-end">
             وزن‌های معیار را تنظیم کنید تا scoring per-file به اولویت‌های شما حساس باشد:
           </div>
-          {(['security', 'quality', 'tests', 'completeness'] as const).map(key => {
+          {(['security', 'quality', 'tests', 'completeness', 'logical_alignment', 'functional_correctness'] as const).map(key => {
             const weights = w.scan_criteria_weights || {};
-            const value = weights[key] ?? (key === 'security' ? 1.5 : key === 'tests' ? 1.2 : 1.0);
+            const defaultValue = (
+              key === 'security' ? 1.5 :
+              key === 'tests' ? 1.2 :
+              key === 'functional_correctness' ? 1.5 :
+              1.0
+            );
+            const value = weights[key] ?? defaultValue;
             const labels: Record<string, string> = {
-              security: '🔒 امنیت', quality: '🛠 کیفیت',
-              tests: '🧪 تست', completeness: '✅ کامل بودن',
+              security: '🔒 امنیت',
+              quality: '🛠 کیفیت',
+              tests: '🧪 تست',
+              completeness: '✅ کامل بودن',
+              logical_alignment: '🧩 منطق/هم‌راستایی',
+              functional_correctness: '⚙️ صحت رفتاری',
+            };
+            const tooltips: Record<string, string> = {
+              security: 'وزن یافته‌های امنیتی (XSS، SQL injection، secret leakage، ...) در health score هر فایل',
+              quality: 'وزن کد کیفیت پایین، dead code، duplicate logic',
+              tests: 'وزن فایل‌های بدون test یا coverage پایین',
+              completeness: 'وزن قابلیت‌های ناقص نسبت به user_goal',
+              logical_alignment: 'وزن orphan endpointها، duplicate logic، contract mismatch بین frontend و backend',
+              functional_correctness: 'وزن edge case‌های unhandled، exception swallowed، race conditions، failure modes',
             };
             return (
               <label key={key} className="block">
-                <span className="block text-gray-600 dark:text-gray-300 mb-1">
+                <span className="block text-gray-600 dark:text-gray-300 mb-1 flex items-center gap-1">
                   {labels[key]}: <strong>{value.toFixed(1)}×</strong>
+                  <span className="cursor-help text-blue-400" title={tooltips[key]}>ⓘ</span>
                 </span>
                 <input
                   type="range"

@@ -168,6 +168,9 @@ class WatchedProject:
         "quality": 1.0,
         "tests": 1.2,
         "completeness": 1.0,
+        # 🆕 (P3) وزن‌های جدید برای passهای logic + functional
+        "logical_alignment": 1.0,
+        "functional_correctness": 1.5,
     })
     # 🆕 عمق scan قابل تنظیم (مهاجرت از Health depth parameter)
     # quick: 3 pass، standard: 5 pass، deep: همه ۱۰ pass،

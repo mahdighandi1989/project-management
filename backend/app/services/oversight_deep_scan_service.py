@@ -404,6 +404,10 @@ PASSES = [
     # 🆕 Pass J — تحلیل پوشش تست
     # (مهاجرت از /projects/[id]/health/coverage)
     ("coverage", "تحلیل پوشش تست — فایل‌های untested و gap detection"),
+    # 🆕 (P3) Pass K — همراستایی منطقی فایل‌ها/قابلیت‌ها
+    ("logical_alignment", "همراستایی منطقی فایل‌ها/قابلیت‌ها + UI binding + conflict detection"),
+    # 🆕 (P3) Pass L — صحت رفتاری per-feature
+    ("functional_correctness", "صحت رفتاری: edge cases، error handling، runtime errors"),
 ]
 
 
@@ -589,6 +593,63 @@ Stack تشخیص داده شده: {', '.join(stacks) or '(نامشخص)'}
 
 نکته: critical_untested فقط برای فایل‌هایی که در نقشهٔ Importهای داخلی
 hub هستند یا critical_path (/auth/, /payment/, /security/) را شامل می‌شوند.
+""",
+        # 🆕 (P3) Pass K
+        "logical_alignment": """
+فاز فعلی: **K — همراستایی منطقی فایل‌ها/قابلیت‌ها**
+
+برای هر فایل اصلی پروژه، **سه سؤال** را به‌صورت explicit جواب بده:
+- (الف) **چه کاری می‌کند؟** نقش این فایل/قابلیت در کل پروژه چیست؟
+- (ب) **در frontend کجا نمایان می‌شود؟** اگر backend است، کدام UI آن را
+  مصرف می‌کند؟ اگر frontend است، چه داده‌ای را نمایش می‌دهد؟
+- (ج) **آیا با file دیگری تضاد دارد؟** آیا قابلیتی که این فایل ارائه
+  می‌دهد، در فایل دیگری duplicate شده؟ آیا با naming/contract فایل
+  دیگری ناسازگار است؟
+
+برای هر مورد ناسازگاری/تضاد/orphan، یک finding بساز:
+- Orphan: backend endpoint بدون frontend caller (یا برعکس) → severity high
+- Duplicate: همان قابلیت در دو فایل مختلف پیاده شده → severity medium
+- Naming conflict: دو endpoint با path یکسان → severity high
+- Contract mismatch: response shape backend با Type frontend match نمی‌کند → severity high
+- Stale code: کد ای که هیچ‌جا استفاده نمی‌شود → severity low
+
+مثال finding:
+- title: "duplicate prompt builder در runtime_executor و oversight_strong_prompt"
+- description: "هر دو فایل تابع build_prompt دارند با logic مختلف"
+- target_files: ["runtime_executor.py", "oversight_strong_prompt.py"]
+- type: "refactor"
+- priority: "medium"
+""",
+        # 🆕 (P3) Pass L
+        "functional_correctness": """
+فاز فعلی: **L — صحت رفتاری per-feature**
+
+برای هر قابلیت اصلی، edge case‌ها و failure modeها را شمارش کن:
+- **Edge cases**: ورودی خالی، null، negative، خیلی بزرگ، Unicode، RTL
+- **Error handling**: try/except missing، exception swallowed بدون log،
+  no user-facing error message
+- **Race conditions**: async که lock ندارد، shared state بدون mutex،
+  concurrent writes
+- **Failure modes**: API call بدون timeout، fetch بدون error handling،
+  DB transaction بدون rollback
+- **Security boundaries**: input validation missing، SQL injection vector،
+  XSS vector، path traversal
+
+برای هر مورد یک finding با severity بر اساس impact:
+- critical: شکست production در شرایط نسبتاً عادی (مثل null user input)
+- high: race condition یا exception swallowed در critical path
+- medium: edge case کمتر رایج
+- low: cosmetic یا rare edge case
+
+**مهم**: فقط با شواهد قابل استناد در کد finding بساز. حدس نزن. اگر
+احتمالی است، severity پایین بگذار با تذکر "نیاز به تأیید".
+
+مثال finding:
+- title: "exception swallowed در apply_followup_after_verify"
+- description: "خط 2410، try/except عام بدون log کافی — fail silent"
+- target_files: ["oversight_service.py:2410"]
+- type: "bug"
+- priority: "high"
 """,
     }
 
@@ -1055,20 +1116,21 @@ async def run_deep_scan(
     # 🆕 Mapping scan_depth → enabled_passes (مهاجرت از Health depth)
     # اگر enabled_passes صریحاً پاس داده شده، آن را استفاده کن
     # وگرنه از watched.scan_depth بخوان
+    # 🆕 (P3) به‌روز: حالا ۱۲ pass موجود است (logical_alignment + functional_correctness اضافه شدند)
     if enabled_passes is None:
         depth = getattr(watched, "scan_depth", "deep") or "deep"
         if depth == "quick":
             # سریع: فقط ۳ pass essential
             enabled_passes = ["frontend", "backend", "security_deep"]
         elif depth == "standard":
-            # متعادل: ۵ pass
+            # متعادل: ۶ pass (پنج تای قبلی + logical_alignment)
             enabled_passes = ["frontend", "backend", "security_deep",
-                              "quality", "completeness"]
+                              "quality", "completeness", "logical_alignment"]
         elif depth == "thorough":
-            # کامل + per-file scoring + roadmap (همه)
+            # کامل + per-file scoring + roadmap (همهٔ ۱۲)
             enabled_passes = [p[0] for p in PASSES]
         else:  # "deep" (default)
-            # عمیق: همه passes
+            # عمیق: همهٔ ۱۲ pass
             enabled_passes = [p[0] for p in PASSES]
 
     enabled = set(enabled_passes)
@@ -1405,6 +1467,8 @@ async def run_deep_scan(
         # خروجی در structure ذخیره می‌شود تا UI heatmap نمایش دهد.
         weights = getattr(watched, "scan_criteria_weights", None) or {
             "security": 1.5, "quality": 1.0, "tests": 1.2, "completeness": 1.0,
+            # 🆕 (P3) defaults برای dimensions جدید
+            "logical_alignment": 1.0, "functional_correctness": 1.5,
         }
         SEVERITY_PENALTY = {"critical": 25, "high": 12, "medium": 5, "low": 2}
         # mapping pass_id → criteria key برای weight lookup
@@ -1415,6 +1479,9 @@ async def run_deep_scan(
             "frontend": "quality", "backend": "quality",
             "cross_stack": "quality", "integrity": "quality",
             "dependency": "quality",
+            # 🆕 (P3) two new pass mappings
+            "logical_alignment": "logical_alignment",
+            "functional_correctness": "functional_correctness",
         }
 
         file_health_map: Dict[str, Dict[str, Any]] = {}
@@ -1719,6 +1786,19 @@ async def run_deep_scan(
                 )
             if critical_count:
                 msg_lines.append(f"🚨 *{critical_count}* مورد critical")
+            # 🆕 (P3) per-pass breakdown از findings
+            try:
+                pass_counts: Dict[str, int] = {}
+                for finding in unique:
+                    pid = finding.get("_pass") or "?"
+                    pass_counts[pid] = pass_counts.get(pid, 0) + 1
+                if pass_counts:
+                    breakdown = " · ".join(f"{p}:{n}" for p, n in sorted(
+                        pass_counts.items(), key=lambda x: -x[1]
+                    )[:6])
+                    msg_lines.append(f"📊 per-pass: {breakdown}")
+            except Exception:
+                pass
             done_priority = "high" if critical_count > 0 else ("medium" if len(created_tasks) > 0 else "low")
             await notification_service.notify_event(
                 "scan_done", "\n".join(msg_lines),
