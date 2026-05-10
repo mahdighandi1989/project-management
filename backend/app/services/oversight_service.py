@@ -2426,6 +2426,30 @@ class OversightService:
             extracted_ac = []
 
         async with self._lock:
+            # 🆕 (audit fix) integration با prompt_history:
+            # نسخهٔ قبلی task.prompt را به history منتقل کن (archive)
+            # و followup را به‌عنوان task.prompt جدید قرار بده — تا کاربر
+            # وقتی روی «📋 کپی پرامپت» کلیک کرد، نسخهٔ به‌روز شده را ببیند
+            # نه نسخهٔ اولیه که بخشی از آن قبلاً انجام شده.
+            history_entry = {
+                "prompt": task.prompt,
+                "raw_idea": task.raw_idea or "",
+                "model_id": (task.models_used[0] if task.models_used else "") or "",
+                "generated_at": task.updated_at or task.created_at,
+                "source": f"followup_round_{(task.followup_round or 0) + 1}",
+            }
+            task.prompt_history.insert(0, history_entry)
+            task.prompt_history = task.prompt_history[:10]  # cap
+            # جایگزین prompt اصلی با followup
+            task.prompt = new_prompt
+            if extracted_locs:
+                task.target_files = [
+                    l.get("path", "") for l in extracted_locs if l.get("path")
+                ] or task.target_files
+            if extracted_ac:
+                task.acceptance_criteria = extracted_ac
+            # field‌های followup همچنان نگه‌داشته می‌شوند برای backward compat
+            # با UI قدیمی (دکمهٔ «اجرای followup»)، ولی prompt اصلی به‌روز است.
             task.followup_prompt = new_prompt
             task.followup_generated_at = now_iso()
             task.followup_target_locations = extracted_locs
