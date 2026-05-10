@@ -230,6 +230,9 @@ class OversightTask:
     # backward-compat: اگر در JSON نباشد، False خوانده می‌شود
     archived: bool = False
     archived_at: Optional[str] = None
+    # 🆕 (P4) prompt history — وقتی پرامپت regenerate می‌شود، نسخهٔ قبلی اینجا
+    # ذخیره می‌شود (max 10 آیتم). هر آیتم: {prompt, raw_idea, model_id, generated_at}
+    prompt_history: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -971,6 +974,73 @@ class OversightService:
             if removed:
                 self._save_tasks()
             return removed
+
+    # 🆕 (P4) regenerate prompt با حفظ history — راه ارتقای پرامپت‌های قدیمی
+    async def regenerate_prompt_for_task(
+        self,
+        task_id: str,
+        *,
+        new_raw_idea: Optional[str] = None,
+        model_id: Optional[str] = None,
+        model_ids: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """پرامپت تسک را با raw_idea (جدید یا فعلی) بازتولید می‌کند.
+        نسخهٔ قبلی به prompt_history منتقل می‌شود (max 10 آیتم).
+        تسک جدیدی ساخته نمی‌شود — همان task به‌روز می‌شود.
+        """
+        # 1) پیدا کردن task
+        task = next((t for t in self.tasks if t.id == task_id), None)
+        if not task:
+            return None
+
+        # 2) raw_idea مورد استفاده
+        raw = (new_raw_idea or "").strip() or (task.raw_idea or "").strip() or task.title
+        if not raw:
+            raise ValueError("راه‌اندازی regenerate نیاز به raw_idea یا title دارد")
+
+        # 3) نسخهٔ فعلی را در history ذخیره کن (قبل از replace)
+        history_entry = {
+            "prompt": task.prompt,
+            "raw_idea": task.raw_idea or "",
+            "model_id": (task.models_used[0] if task.models_used else "") or "",
+            "generated_at": task.updated_at or task.created_at,
+        }
+
+        # 4) idea_to_prompt را صدا بزن
+        try:
+            new_data = await self.idea_to_prompt(
+                idea=raw,
+                watched_id=task.watched_id,
+                type_=task.type,
+                priority=task.priority,
+                model_id=model_id,
+                model_ids=model_ids,
+            )
+        except Exception as e:
+            # transaction-safe: اگر AI fail شد، چیزی تغییر نمی‌کند
+            raise RuntimeError(f"بازتولید پرامپت ناموفق: {e}")
+
+        # 5) فقط حالا history را push کن و تسک را به‌روز کن (atomic)
+        async with self._lock:
+            # دوباره پیدا کن چون async lock
+            task = next((t for t in self.tasks if t.id == task_id), None)
+            if not task:
+                return None
+            task.prompt_history.insert(0, history_entry)
+            task.prompt_history = task.prompt_history[:10]  # cap به 10
+            task.raw_idea = raw
+            task.prompt = new_data.get("prompt") or task.prompt
+            new_target_files = new_data.get("target_files") or []
+            new_ac = new_data.get("acceptance_criteria") or []
+            if new_target_files:
+                task.target_files = new_target_files
+            if new_ac:
+                task.acceptance_criteria = new_ac
+            if model_id:
+                task.models_used = [model_id]
+            task.updated_at = now_iso()
+            self._save_tasks()
+            return task.to_dict()
 
     # ====================================================================
     # Idea -> Strong Prompt

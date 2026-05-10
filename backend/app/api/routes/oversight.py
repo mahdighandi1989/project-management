@@ -302,6 +302,64 @@ async def unarchive_task(task_id: str):
     return {"success": True, "task": res}
 
 
+# 🆕 (P4) regenerate prompt — بازتولید پرامپت بدون ساخت تسک جدید
+class RegenPromptRequest(BaseModel):
+    raw_idea: Optional[str] = None  # اگر None، از task.raw_idea فعلی استفاده می‌شود
+    model_id: Optional[str] = None
+    model_ids: Optional[List[str]] = None
+
+
+@router.post("/tasks/{task_id}/regenerate-prompt")
+async def regenerate_prompt(task_id: str, payload: RegenPromptRequest):
+    service = get_oversight_service()
+    try:
+        res = await service.regenerate_prompt_for_task(
+            task_id,
+            new_raw_idea=payload.raw_idea,
+            model_id=payload.model_id,
+            model_ids=payload.model_ids,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    if not res:
+        raise HTTPException(status_code=404, detail="تسک یافت نشد")
+    return {"success": True, "task": res}
+
+
+# 🆕 (P4) rollback prompt — برگرداندن نسخهٔ قبلی از history
+@router.post("/tasks/{task_id}/rollback-prompt/{history_idx}")
+async def rollback_prompt(task_id: str, history_idx: int):
+    service = get_oversight_service()
+    async with service._lock:
+        task = next((t for t in service.tasks if t.id == task_id), None)
+        if not task:
+            raise HTTPException(status_code=404, detail="تسک یافت نشد")
+        history = list(task.prompt_history or [])
+        if history_idx < 0 or history_idx >= len(history):
+            raise HTTPException(status_code=400, detail="history_idx نامعتبر")
+        # نسخهٔ فعلی را به history منتقل کن
+        from datetime import datetime, timezone
+        now_iso_local = datetime.now(timezone.utc).isoformat()
+        current_entry = {
+            "prompt": task.prompt,
+            "raw_idea": task.raw_idea or "",
+            "model_id": (task.models_used[0] if task.models_used else "") or "",
+            "generated_at": task.updated_at or task.created_at,
+        }
+        # نسخهٔ هدف را restore کن
+        target = history[history_idx]
+        task.prompt = target.get("prompt") or task.prompt
+        task.raw_idea = target.get("raw_idea") or task.raw_idea
+        # current را push و target را pop
+        new_history = [current_entry] + [h for i, h in enumerate(history) if i != history_idx]
+        task.prompt_history = new_history[:10]
+        task.updated_at = now_iso_local
+        service._save_tasks()
+        return {"success": True, "task": task.to_dict()}
+
+
 @router.post("/tasks/{task_id}/run")
 async def run_task(task_id: str, payload: Optional[RunTaskRequest] = None):
     """اجرای فوری یک تسک."""
