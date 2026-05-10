@@ -67,6 +67,22 @@ interface Watched {
   max_auto_loop_rounds?: number;
   // 🆕 (P1) مدل‌های auto-scan
   selected_models?: string[];
+  // 🆕 (P4) خلاصهٔ آخرین scan
+  last_scan_metadata?: {
+    model_used?: string;
+    models_used_list?: string[];
+    scan_depth?: string;
+    passes_run?: number;
+    passes_total?: number;
+    files_analyzed_count?: number;
+    findings_count?: number;
+    tasks_created?: number;
+    duplicates_skipped?: number;
+    critical_count?: number;
+    scan_id?: string;
+    completed_at?: string;
+    pass_breakdown?: Record<string, number>;
+  } | null;
   last_run_at?: string | null;
   next_run_at?: string | null;
   last_scan_at?: string | null;
@@ -1851,6 +1867,8 @@ export default function OversightPage() {
                   archivedCount={wArchivedTasks.length}
                   reportCount={wReportCount}
                   availableModels={models}
+                  isScanning={deepScanWatchedId === w.id}
+                  scanProgress={deepScanWatchedId === w.id ? deepScanProgress : null}
                   onChange={(u) => updateWatched(w.id, u)}
                   onRemove={() => removeWatched(w.id, w.repo_full_name)}
                   onScan={() => scanProject(w.id)}
@@ -3026,6 +3044,8 @@ function WatchedCard({
   archivedCount,
   reportCount,
   availableModels,
+  isScanning,
+  scanProgress,
   onChange,
   onRemove,
   onScan,
@@ -3042,6 +3062,8 @@ function WatchedCard({
   archivedCount: number;
   reportCount: number;
   availableModels: ModelInfo[];
+  isScanning?: boolean;
+  scanProgress?: any;
   onChange: (updates: Partial<Watched>) => void;
   onRemove: () => void;
   onScan: () => void;
@@ -3077,7 +3099,33 @@ function WatchedCard({
   };
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-5">
+    <div className={`bg-white dark:bg-gray-800 rounded-xl shadow p-5 ${
+      isScanning ? 'ring-2 ring-orange-400 dark:ring-orange-500 animate-pulse' : ''
+    }`}>
+      {/* 🆕 (P4) banner در حین scan */}
+      {isScanning && scanProgress && (
+        <div className="mb-3 -mx-5 -mt-5 px-5 py-2 bg-orange-100 dark:bg-orange-900/30 border-b border-orange-300 dark:border-orange-800 rounded-t-xl text-xs flex items-center justify-between flex-wrap gap-2">
+          <div className="flex items-center gap-2 text-orange-800 dark:text-orange-200">
+            <span className="animate-spin">🔬</span>
+            <span className="font-semibold">scan در حال اجرا</span>
+            {scanProgress.phase && (
+              <span className="text-[10px]">
+                · {PASS_LABELS[scanProgress.phase] || scanProgress.phase}
+              </span>
+            )}
+            {scanProgress.passes_done != null && scanProgress.passes_total != null && (
+              <span className="text-[10px]">
+                · pass {scanProgress.passes_done}/{scanProgress.passes_total}
+              </span>
+            )}
+          </div>
+          {scanProgress.findings_count != null && (
+            <span className="text-[10px] text-orange-700 dark:text-orange-300">
+              🔎 {scanProgress.findings_count} finding تا کنون
+            </span>
+          )}
+        </div>
+      )}
       <div className="flex items-start justify-between gap-3 flex-wrap mb-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
@@ -3363,6 +3411,98 @@ function WatchedCard({
           </label>
         </div>
       </details>
+
+      {/* 🆕 (P4) accordion آخرین scan — فقط اگر metadata موجود باشد */}
+      {w.last_scan_metadata && (
+        <details className="mt-2 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800/40 rounded-lg p-3 text-xs">
+          <summary className="cursor-pointer font-medium text-emerald-800 dark:text-emerald-200 flex items-center justify-between">
+            <span>📊 آخرین scan</span>
+            <span className="text-[10px] text-gray-500 dark:text-gray-400">
+              {w.last_scan_metadata.completed_at && new Date(w.last_scan_metadata.completed_at).toLocaleString('fa-IR')}
+            </span>
+          </summary>
+          <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+            <div className="bg-white dark:bg-gray-900/40 p-2 rounded">
+              <div className="text-gray-500 dark:text-gray-400 text-[10px]">🤖 مدل</div>
+              <div className="font-mono text-gray-800 dark:text-gray-100 truncate">
+                {w.last_scan_metadata.model_used || '—'}
+              </div>
+              {(w.last_scan_metadata.models_used_list || []).length > 1 && (
+                <div className="text-[10px] text-gray-500">
+                  +{w.last_scan_metadata.models_used_list!.length - 1} consensus
+                </div>
+              )}
+            </div>
+            <div className="bg-white dark:bg-gray-900/40 p-2 rounded">
+              <div className="text-gray-500 dark:text-gray-400 text-[10px]">🔍 depth</div>
+              <div className="font-semibold text-gray-800 dark:text-gray-100">
+                {w.last_scan_metadata.scan_depth || '—'}
+              </div>
+            </div>
+            <div className="bg-white dark:bg-gray-900/40 p-2 rounded">
+              <div className="text-gray-500 dark:text-gray-400 text-[10px]">📊 passes</div>
+              <div className="font-semibold text-gray-800 dark:text-gray-100">
+                {w.last_scan_metadata.passes_run ?? '—'}/{w.last_scan_metadata.passes_total ?? '—'}
+              </div>
+            </div>
+            <div className="bg-white dark:bg-gray-900/40 p-2 rounded">
+              <div className="text-gray-500 dark:text-gray-400 text-[10px]">📄 files</div>
+              <div className="font-semibold text-gray-800 dark:text-gray-100">
+                {w.last_scan_metadata.files_analyzed_count ?? '—'}
+              </div>
+            </div>
+            <div className="bg-white dark:bg-gray-900/40 p-2 rounded">
+              <div className="text-gray-500 dark:text-gray-400 text-[10px]">🔎 findings</div>
+              <div className="font-semibold text-gray-800 dark:text-gray-100">
+                {w.last_scan_metadata.findings_count ?? '—'}
+              </div>
+            </div>
+            <div className="bg-white dark:bg-gray-900/40 p-2 rounded">
+              <div className="text-gray-500 dark:text-gray-400 text-[10px]">📝 tasks جدید</div>
+              <div className="font-semibold text-gray-800 dark:text-gray-100">
+                {w.last_scan_metadata.tasks_created ?? '—'}
+              </div>
+            </div>
+            {(w.last_scan_metadata.duplicates_skipped ?? 0) > 0 && (
+              <div className="bg-amber-50 dark:bg-amber-900/30 p-2 rounded">
+                <div className="text-amber-700 dark:text-amber-300 text-[10px]">🔁 تکراری</div>
+                <div className="font-semibold text-amber-700 dark:text-amber-300">
+                  {w.last_scan_metadata.duplicates_skipped}
+                </div>
+              </div>
+            )}
+            {(w.last_scan_metadata.critical_count ?? 0) > 0 && (
+              <div className="bg-red-50 dark:bg-red-900/30 p-2 rounded">
+                <div className="text-red-700 dark:text-red-300 text-[10px]">🚨 critical</div>
+                <div className="font-semibold text-red-700 dark:text-red-300">
+                  {w.last_scan_metadata.critical_count}
+                </div>
+              </div>
+            )}
+          </div>
+          {w.last_scan_metadata.pass_breakdown && Object.keys(w.last_scan_metadata.pass_breakdown).length > 0 && (
+            <div className="mt-3">
+              <div className="text-gray-500 dark:text-gray-400 text-[10px] mb-1">📊 per-pass breakdown:</div>
+              <div className="flex flex-wrap gap-1">
+                {Object.entries(w.last_scan_metadata.pass_breakdown).map(([p, n]) => (
+                  <span
+                    key={p}
+                    className="bg-white dark:bg-gray-900/40 px-1.5 py-0.5 rounded text-[10px] font-mono border border-gray-200 dark:border-gray-700"
+                    title={`${p}: ${n} finding`}
+                  >
+                    {p}: <strong>{n}</strong>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {w.next_scan_at && (
+            <div className="mt-3 text-[10px] text-gray-500 dark:text-gray-400">
+              🕐 next scan: {new Date(w.next_scan_at).toLocaleString('fa-IR')}
+            </div>
+          )}
+        </details>
+      )}
 
       {/* بازه verify — همیشه قابل تنظیم چون scheduler verify را مستقل از autonomy اجرا می‌کند */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-3">
@@ -4407,9 +4547,30 @@ const PASS_LABELS: Record<string, string> = {
   phase3_quality: 'F — کیفیت کد',
   phase3_dependency: 'G — Dependency',
   phase3_completeness: 'H — Completeness',
+  phase3_security_deep: 'I — امنیت عمیق',
+  phase3_coverage: 'J — پوشش تست',
+  // 🆕 (P3) دو pass جدید
+  phase3_logical_alignment: 'K — همراستایی منطقی + UI binding',
+  phase3_functional_correctness: 'L — صحت رفتاری',
   phase4_aggregate: 'تجمیع و dedup',
   completed: '✅ کامل شد',
   queued: 'در صف',
+};
+
+// 🆕 (P4) tooltip توضیحی برای هر pass — برای hover روی pass label
+const PASS_TOOLTIPS: Record<string, string> = {
+  frontend: 'تحلیل صفحات و کامپوننت‌های Frontend — چه می‌کنند، به کدام endpoint وصل‌اند، dead link/component undefined؟',
+  backend: 'تحلیل Routes و Endpointهای Backend — input/output، error handling، side effects',
+  cross_stack: 'سازگاری Frontend↔Backend — orphan endpoint، contract mismatch، missing API client',
+  security: 'آسیب‌پذیری‌های امنیتی پایه — XSS، CSRF، input validation، secret leakage در کد',
+  integrity: 'یکپارچگی Cross-cutting — naming conflict، شارپ‌سازی state، logic duplicate',
+  quality: 'کیفیت کد — dead code، complexity زیاد، magic numbers، comment‌های ناقص',
+  dependency: 'ناسازگاری‌های runtime — version mismatch، deprecated API، unused dep',
+  completeness: 'کامل بودن نسبت به user_goal — قابلیت‌های ذکرشده در یادداشت کاربر اجرا شده‌اند؟',
+  security_deep: 'اسکن امنیتی عمیق — secrets در history، license incompatible، CVE در dependencies',
+  coverage: 'پوشش تست — فایل‌های critical untested، gap detection، coverage_score',
+  logical_alignment: 'همراستایی منطقی — هر فایل چه می‌کند، کجا در UI نمایان می‌شود، تضاد با file دیگر؟',
+  functional_correctness: 'صحت رفتاری — edge cases، error handling، race conditions، failure modes',
 };
 
 function DeepScanProgressView({ progress }: { progress: any }) {
@@ -4417,7 +4578,7 @@ function DeepScanProgressView({ progress }: { progress: any }) {
     return <p className="text-center text-gray-400 py-4">در حال شروع...</p>;
   }
   const phase = progress.phase || 'init';
-  const passes_total = progress.passes_total || 8;
+  const passes_total = progress.passes_total || 12;
   const passes_done = progress.passes_done || 0;
   const pct = Math.min(
     100,
@@ -4428,6 +4589,9 @@ function DeepScanProgressView({ progress }: { progress: any }) {
   );
   const isError = progress.status === 'error';
   const isDone = progress.status === 'completed';
+  // 🆕 (P4) استخراج pass_id از phase (مثلاً phase3_logical_alignment → logical_alignment)
+  const currentPassId = phase.startsWith('phase3_') ? phase.replace('phase3_', '') : '';
+  const currentPassTooltip = currentPassId ? PASS_TOOLTIPS[currentPassId] : '';
 
   return (
     <div className="space-y-3">
@@ -4435,9 +4599,15 @@ function DeepScanProgressView({ progress }: { progress: any }) {
         <div className="text-2xl mb-1">
           {isDone ? '✅' : isError ? '❌' : '🔬'}
         </div>
-        <p className="font-bold dark:text-white">
+        <p className="font-bold dark:text-white" title={currentPassTooltip}>
           {PASS_LABELS[phase] || phase}
+          {currentPassTooltip && <span className="text-blue-400 mr-1 text-sm">ⓘ</span>}
         </p>
+        {!isDone && !isError && passes_total > 0 && (
+          <p className="text-xs text-gray-600 dark:text-gray-300">
+            pass {passes_done + 1} از {passes_total}
+          </p>
+        )}
         <p className="text-sm text-gray-500 dark:text-gray-400">
           {progress.message || ''}
         </p>

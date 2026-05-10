@@ -181,6 +181,11 @@ class WatchedProject:
     # اگر بیش از ۱ مدل، رفتار consensus اعمال می‌شود (هر pass با همهٔ مدل‌ها
     # و ادغام findings).
     selected_models: List[str] = field(default_factory=list)
+    # 🆕 (P4) خلاصهٔ آخرین scan — برای نمایش در UI WatchedCard accordion
+    # ست در پایان run_deep_scan. شامل: model_used, depth, passes_run,
+    # files_analyzed_count, findings_count, tasks_created, duplicates_skipped,
+    # critical_count, scan_id, completed_at, pass_breakdown
+    last_scan_metadata: Optional[Dict[str, Any]] = None
     # 🆕 (auto-loop) ping-pong scheduler-driven:
     # اگر فعال، پس از verify=partial scheduler خودکار:
     #   1. status تسک به pending برمی‌گردد

@@ -1736,6 +1736,11 @@ async def run_deep_scan(
             service._save_watched()
 
         # 🆕 (P1) metadata کامل scan برای نمایش در UI و notification
+        # 🆕 (P3) per-pass breakdown
+        pass_breakdown: Dict[str, int] = {}
+        for finding in unique:
+            pid = finding.get("_pass") or "?"
+            pass_breakdown[pid] = pass_breakdown.get(pid, 0) + 1
         scan_metadata = {
             "model_used": model_id or (model_ids[0] if model_ids else "default"),
             "models_used_list": list(model_ids) if model_ids else ([model_id] if model_id else []),
@@ -1754,8 +1759,27 @@ async def run_deep_scan(
             tasks_created=len(created_tasks),
             critical_count=critical_count,
             completed_at=now_iso(),
+            pass_breakdown=pass_breakdown,
+            duplicates_skipped=len(duplicates_skipped),
             **scan_metadata,
         )
+
+        # 🆕 (P4) ذخیره خلاصهٔ آخرین scan روی خود WatchedProject — برای نمایش
+        # دائمی در UI WatchedCard (مستقل از progress JSON که override می‌شود)
+        try:
+            async with service._lock:
+                watched.last_scan_metadata = {
+                    **scan_metadata,
+                    "findings_count": len(unique),
+                    "tasks_created": len(created_tasks),
+                    "duplicates_skipped": len(duplicates_skipped),
+                    "critical_count": critical_count,
+                    "completed_at": now_iso(),
+                    "pass_breakdown": pass_breakdown,
+                }
+                service._save_watched()
+        except Exception as _e:
+            logger.debug(f"failed to save last_scan_metadata: {_e}")
 
         # 🔔 notification — silent skip اگر env تنظیم نشده باشد
         try:
