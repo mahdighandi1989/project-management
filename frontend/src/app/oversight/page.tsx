@@ -109,6 +109,14 @@ interface Task {
   followup_target_locations?: Array<{path: string; lines?: string; symbol?: string; snippet?: string; note?: string}>;
   followup_acceptance_criteria?: string[];
   followup_round?: number;
+  archived?: boolean;
+  archived_at?: string | null;
+  prompt_history?: Array<{
+    prompt: string;
+    raw_idea: string;
+    model_id: string;
+    generated_at: string;
+  }>;
   last_verification_report_id?: string | null;
 }
 
@@ -742,6 +750,14 @@ export default function OversightPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [taskFilterStatus, setTaskFilterStatus] = useState<string>('all');
   const [taskFilterWatched, setTaskFilterWatched] = useState<string>('all');
+  // 🆕 (P3) فیلتر archived: 'active' | 'archived' | 'all' — default: active
+  const [taskFilterArchived, setTaskFilterArchived] = useState<'active' | 'archived' | 'all'>('active');
+  // 🆕 (P4) modal state برای regenerate prompt
+  const [regenTask, setRegenTask] = useState<Task | null>(null);
+  const [regenRawIdea, setRegenRawIdea] = useState<string>('');
+  const [regenLoading, setRegenLoading] = useState(false);
+  const [regenError, setRegenError] = useState<string>('');
+  const [historyTask, setHistoryTask] = useState<Task | null>(null);
   const [taskView, setTaskView] = useState<'list' | 'kanban'>('list');
   const [selectedSuggested, setSelectedSuggested] = useState<Set<string>>(new Set());
   const [viewingTask, setViewingTask] = useState<Task | null>(null);
@@ -1423,6 +1439,59 @@ export default function OversightPage() {
     }
   };
 
+  // 🆕 (P4) regenerate prompt
+  const openRegenModal = (t: Task) => {
+    setRegenTask(t);
+    setRegenRawIdea(t.raw_idea || '');
+    setRegenError('');
+  };
+  const closeRegenModal = () => {
+    setRegenTask(null);
+    setRegenRawIdea('');
+    setRegenError('');
+    setRegenLoading(false);
+  };
+  const submitRegenerate = async () => {
+    if (!regenTask) return;
+    setRegenLoading(true);
+    setRegenError('');
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/tasks/${regenTask.id}/regenerate-prompt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          raw_idea: regenRawIdea.trim() || null,
+          model_ids: selectedModelIds.length ? selectedModelIds : null,
+          model_id: selectedModelIds[0] || null,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setRegenError(data?.detail || `HTTP ${res.status}`);
+        return;
+      }
+      setTasks(prev => prev.map(x => (x.id === regenTask.id ? data.task : x)));
+      closeRegenModal();
+    } catch (e: any) {
+      setRegenError(e?.message || 'failed');
+    } finally {
+      setRegenLoading(false);
+    }
+  };
+  const rollbackPrompt = async (taskId: string, idx: number) => {
+    if (!confirm('این نسخهٔ پرامپت را برگردانم؟ (نسخهٔ فعلی به history منتقل می‌شود)')) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/tasks/${taskId}/rollback-prompt/${idx}`, {
+        method: 'POST',
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setTasks(prev => prev.map(x => (x.id === taskId ? data.task : x)));
+        setHistoryTask(data.task);
+      }
+    } catch (e) { console.error(e); }
+  };
+
   const deleteTask = async (id: string) => {
     if (!confirm('تسک حذف شود؟')) return;
     try {
@@ -1461,9 +1530,12 @@ export default function OversightPage() {
     return tasks.filter((t) => {
       if (taskFilterStatus !== 'all' && t.status !== taskFilterStatus) return false;
       if (taskFilterWatched !== 'all' && t.watched_id !== taskFilterWatched) return false;
+      // 🆕 (P3) archived filter
+      if (taskFilterArchived === 'active' && t.archived) return false;
+      if (taskFilterArchived === 'archived' && !t.archived) return false;
       return true;
     });
-  }, [tasks, taskFilterStatus, taskFilterWatched]);
+  }, [tasks, taskFilterStatus, taskFilterWatched, taskFilterArchived]);
 
   // ============================ Reports ============================
 
@@ -1739,13 +1811,15 @@ export default function OversightPage() {
               </div>
             ) : (
               watched.map((w) => {
-                const wTaskCount = tasks.filter(t => t.watched_id === w.id).length;
+                const wActiveTasks = tasks.filter(t => t.watched_id === w.id && !t.archived);
+                const wArchivedTasks = tasks.filter(t => t.watched_id === w.id && t.archived);
                 const wReportCount = reports.filter(r => r.watched_id === w.id).length;
                 return (
                 <WatchedCard
                   key={w.id}
                   w={w}
-                  taskCount={wTaskCount}
+                  taskCount={wActiveTasks.length}
+                  archivedCount={wArchivedTasks.length}
                   reportCount={wReportCount}
                   onChange={(u) => updateWatched(w.id, u)}
                   onRemove={() => removeWatched(w.id, w.repo_full_name)}
@@ -1759,6 +1833,13 @@ export default function OversightPage() {
                   onViewTasks={() => {
                     setTaskFilterWatched(w.id);
                     setTaskFilterStatus('all');
+                    setTaskFilterArchived('active');
+                    setTab('tasks');
+                  }}
+                  onViewArchive={() => {
+                    setTaskFilterWatched(w.id);
+                    setTaskFilterStatus('all');
+                    setTaskFilterArchived('archived');
                     setTab('tasks');
                   }}
                   onViewReports={() => {
@@ -2093,6 +2174,10 @@ export default function OversightPage() {
             setTaskFilterStatus={setTaskFilterStatus}
             taskFilterWatched={taskFilterWatched}
             setTaskFilterWatched={setTaskFilterWatched}
+            taskFilterArchived={taskFilterArchived}
+            setTaskFilterArchived={setTaskFilterArchived}
+            onOpenRegen={openRegenModal}
+            onOpenHistory={(t) => setHistoryTask(t)}
             taskView={taskView}
             setTaskView={setTaskView}
             selectedSuggested={selectedSuggested}
@@ -2663,6 +2748,108 @@ export default function OversightPage() {
           </Modal>
         )}
 
+        {/* 🆕 (P4) مودال بازتولید پرامپت */}
+        {regenTask && (
+          <Modal onClose={closeRegenModal} title="🔄 بازتولید پرامپت">
+            <div className="space-y-3">
+              <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded p-3 text-xs text-gray-700 dark:text-gray-200">
+                نسخهٔ فعلی پرامپت به <b>تاریخچه</b> منتقل می‌شود (max 10 نسخه قابل rollback).
+                AI با ایدهٔ خام زیر پرامپت جدید با کیفیت ارتقایافته می‌سازد —
+                هیچ تسک جدیدی ساخته نمی‌شود.
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-1 dark:text-gray-200">ایدهٔ خام (raw_idea):</label>
+                <textarea
+                  value={regenRawIdea}
+                  onChange={e => setRegenRawIdea(e.target.value)}
+                  rows={6}
+                  placeholder="ایده/مشکل را به زبان طبیعی توضیح دهید..."
+                  className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600 text-sm"
+                />
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  اگر خالی بگذارید، از raw_idea فعلی تسک استفاده می‌شود.
+                </p>
+              </div>
+              {selectedModelIds.length === 0 && (
+                <div className="text-xs text-amber-600 dark:text-amber-400">
+                  ⚠️ هیچ مدلی انتخاب نشده — backend default را استفاده می‌کند.
+                </div>
+              )}
+              {regenError && (
+                <div className="text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 p-2 rounded">
+                  ❌ {regenError}
+                </div>
+              )}
+              <div className="flex gap-2 justify-end">
+                <button onClick={closeRegenModal} className="px-4 py-2 bg-gray-300 dark:bg-gray-600 dark:text-white rounded-lg hover:bg-gray-400">
+                  لغو
+                </button>
+                <button
+                  onClick={submitRegenerate}
+                  disabled={regenLoading}
+                  className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50"
+                >
+                  {regenLoading ? '⏳ در حال بازتولید (15-30 ثانیه)...' : '🔄 بازتولید'}
+                </button>
+              </div>
+            </div>
+          </Modal>
+        )}
+
+        {/* 🆕 (P4) مودال history پرامپت */}
+        {historyTask && (
+          <Modal onClose={() => setHistoryTask(null)} title={`📜 تاریخچهٔ پرامپت — ${historyTask.title.slice(0, 50)}`}>
+            <div className="space-y-3 text-sm">
+              {(historyTask.prompt_history || []).length === 0 ? (
+                <div className="text-gray-500 dark:text-gray-400 text-center py-8">
+                  هنوز هیچ نسخهٔ قبلی ذخیره نشده. با اولین «بازتولید پرامپت» history ساخته می‌شود.
+                </div>
+              ) : (
+                <>
+                  <div className="text-xs text-gray-500 dark:text-gray-400">
+                    {historyTask.prompt_history!.length} نسخهٔ قبلی — newest first
+                  </div>
+                  {historyTask.prompt_history!.map((h, i) => (
+                    <div key={i} className="border dark:border-gray-700 rounded-lg p-3 bg-gray-50 dark:bg-gray-900/30">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="text-xs">
+                          <span className="font-semibold dark:text-gray-200">نسخه #{i + 1}</span>
+                          {h.generated_at && (
+                            <span className="text-gray-500 dark:text-gray-400 mr-2">
+                              {fmtDate(h.generated_at)}
+                            </span>
+                          )}
+                          {h.model_id && (
+                            <span className="bg-gray-200 dark:bg-gray-700 px-1.5 py-0.5 rounded mr-2 text-[10px] font-mono">
+                              {h.model_id}
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => rollbackPrompt(historyTask.id, i)}
+                          className="px-2 py-1 bg-amber-500 text-white rounded text-xs hover:bg-amber-600"
+                        >
+                          ↩️ بازگردانی این نسخه
+                        </button>
+                      </div>
+                      {h.raw_idea && (
+                        <details className="mb-1">
+                          <summary className="cursor-pointer text-xs text-gray-600 dark:text-gray-300">💭 raw_idea</summary>
+                          <div className="mt-1 p-2 bg-white dark:bg-black/30 rounded text-xs whitespace-pre-wrap">{h.raw_idea}</div>
+                        </details>
+                      )}
+                      <details>
+                        <summary className="cursor-pointer text-xs text-gray-600 dark:text-gray-300">📋 prompt</summary>
+                        <pre className="mt-1 p-2 bg-white dark:bg-black/30 rounded text-[10px] whitespace-pre-wrap max-h-48 overflow-auto font-mono">{h.prompt.slice(0, 3000)}{h.prompt.length > 3000 ? '\n... [truncated]' : ''}</pre>
+                      </details>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          </Modal>
+        )}
+
         {/* مودال Codex */}
         {codexWatchedId && (
           <Modal onClose={() => setCodexWatchedId(null)} title="📚 شناسنامهٔ پروژه (Codex)">
@@ -2786,6 +2973,7 @@ function Section({ title, items }: { title: string; items: string[] }) {
 function WatchedCard({
   w,
   taskCount,
+  archivedCount,
   reportCount,
   onChange,
   onRemove,
@@ -2794,11 +2982,13 @@ function WatchedCard({
   onRunNow,
   onWriteIdea,
   onViewTasks,
+  onViewArchive,
   onViewReports,
   onOpenCodex,
 }: {
   w: Watched;
   taskCount: number;
+  archivedCount: number;
   reportCount: number;
   onChange: (updates: Partial<Watched>) => void;
   onRemove: () => void;
@@ -2807,6 +2997,7 @@ function WatchedCard({
   onRunNow: () => void;
   onWriteIdea: () => void;
   onViewTasks: () => void;
+  onViewArchive: () => void;
   onViewReports: () => void;
   onOpenCodex: () => void;
 }) {
@@ -3213,11 +3404,20 @@ function WatchedCard({
         </button>
         <button
           onClick={onViewTasks}
-          title={`${taskCount} تسک برای این پروژه — کلیک: تب «تسک‌ها» با فیلتر همین پروژه`}
+          title={`${taskCount} تسک فعال برای این پروژه — کلیک: تب «تسک‌ها» با فیلتر همین پروژه`}
           className="px-3 py-1.5 bg-gray-200 dark:bg-gray-700 dark:text-white rounded text-sm hover:bg-gray-300"
         >
           📋 تسک‌ها ({taskCount})
         </button>
+        {archivedCount > 0 && (
+          <button
+            onClick={onViewArchive}
+            title={`${archivedCount} تسک آرشیوشده (done) — تسک‌هایی که verify شده‌اند و کامل تمام شده‌اند`}
+            className="px-3 py-1.5 bg-gray-200 dark:bg-gray-700 dark:text-white rounded text-sm hover:bg-gray-300"
+          >
+            📦 آرشیو ({archivedCount})
+          </button>
+        )}
         <button
           onClick={onViewReports}
           title={`${reportCount} گزارش verify برای این پروژه — کلیک: تب «گزارش‌ها» با فیلتر همین پروژه`}
@@ -3244,6 +3444,10 @@ function TasksPanel({
   setTaskFilterStatus,
   taskFilterWatched,
   setTaskFilterWatched,
+  taskFilterArchived,
+  setTaskFilterArchived,
+  onOpenRegen,
+  onOpenHistory,
   taskView,
   setTaskView,
   selectedSuggested,
@@ -3276,6 +3480,10 @@ function TasksPanel({
   setTaskFilterStatus: (s: string) => void;
   taskFilterWatched: string;
   setTaskFilterWatched: (s: string) => void;
+  taskFilterArchived: 'active' | 'archived' | 'all';
+  setTaskFilterArchived: (v: 'active' | 'archived' | 'all') => void;
+  onOpenRegen: (t: Task) => void;
+  onOpenHistory: (t: Task) => void;
   taskView: 'list' | 'kanban';
   setTaskView: (v: 'list' | 'kanban') => void;
   selectedSuggested: Set<string>;
@@ -3379,6 +3587,22 @@ function TasksPanel({
             >
               📋 کپی پرامپت
             </button>
+            <button
+              onClick={() => onOpenRegen(t)}
+              title="بازتولید پرامپت با کیفیت ارتقایافته (raw_idea را ویرایش کنید — تسک جدید ساخته نمی‌شود)"
+              className="px-3 py-1 bg-fuchsia-500 text-white rounded text-xs hover:bg-fuchsia-600"
+            >
+              🔄 بازتولید
+            </button>
+            {(t.prompt_history && t.prompt_history.length > 0) && (
+              <button
+                onClick={() => onOpenHistory(t)}
+                title={`${t.prompt_history!.length} نسخهٔ قبلی — قابل rollback`}
+                className="px-3 py-1 bg-gray-200 dark:bg-gray-700 dark:text-white text-gray-700 rounded text-xs hover:bg-gray-300"
+              >
+                📜 ({t.prompt_history!.length})
+              </button>
+            )}
             {t.execution_mode !== 'manual' ? (
               <button
                 onClick={() => onRun(t.id)}
@@ -3438,6 +3662,17 @@ function TasksPanel({
               className="px-3 py-1 bg-gray-200 dark:bg-gray-600 dark:text-white rounded text-xs hover:bg-gray-300"
             >
               👁
+            </button>
+            <button
+              onClick={() => {
+                if (confirm(t.archived ? 'این تسک را از آرشیو خارج کنم؟' : 'این تسک را آرشیو کنم؟')) {
+                  onUpdate(t.id, { archived: !t.archived });
+                }
+              }}
+              title={t.archived ? 'بازگردانی از آرشیو' : 'انتقال به آرشیو'}
+              className="px-3 py-1 bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 rounded text-xs hover:bg-amber-200"
+            >
+              {t.archived ? '↩️' : '📦'}
             </button>
             <button
               onClick={() => onDelete(t.id)}
@@ -3690,6 +3925,17 @@ function TasksPanel({
                 {w.repo_full_name}
               </option>
             ))}
+          </select>
+          {/* 🆕 (P3) archive filter */}
+          <select
+            value={taskFilterArchived}
+            onChange={(e) => setTaskFilterArchived(e.target.value as any)}
+            className="p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600 text-sm"
+            title="نمایش تسک‌های فعال یا آرشیوشده"
+          >
+            <option value="active">📋 فعال</option>
+            <option value="archived">📦 آرشیو</option>
+            <option value="all">همه</option>
           </select>
         </div>
       </div>
