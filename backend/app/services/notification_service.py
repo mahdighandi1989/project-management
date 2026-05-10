@@ -420,6 +420,35 @@ class EmailChannel(NotificationChannel):
 PRIORITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 
+# 🆕 (P5) state machine برای flow چند-مرحله‌ای ربات (/new_task)
+# in-memory state — اگر backend restart شود، session‌های فعال گم می‌شوند
+# (timeout 10 دقیقه شدید است → cleanup خودکار)
+_chat_state: Dict[str, Dict[str, Any]] = {}  # chat_id -> {phase, watched_id, idea?, expires_at}
+_idea_drafts: Dict[str, Dict[str, Any]] = {}  # token -> {watched_id, idea, expires_at}
+_STATE_TTL_SECONDS = 600  # 10 دقیقه
+
+
+def _now_epoch() -> float:
+    import time
+    return time.time()
+
+
+def _cleanup_expired_state() -> None:
+    """حذف state و draft های منقضی — هر بار update اجرا می‌شود."""
+    now = _now_epoch()
+    for k in list(_chat_state.keys()):
+        if _chat_state[k].get("expires_at", 0) < now:
+            del _chat_state[k]
+    for k in list(_idea_drafts.keys()):
+        if _idea_drafts[k].get("expires_at", 0) < now:
+            del _idea_drafts[k]
+
+
+def _short_token() -> str:
+    import secrets
+    return secrets.token_urlsafe(8)
+
+
 class NotificationService:
     def _build_channels(self) -> List[NotificationChannel]:
         return [
@@ -551,8 +580,31 @@ class NotificationService:
     # Webhook handler — برای commands /start /menu /status
     # -----------------------------------------------------------------------
 
+    async def _answer_callback(self, callback_query_id: str, text: str = "") -> None:
+        """پاسخ به callback_query (برای حذف loading state دکمه)."""
+        if not self._telegram().bot_token:
+            return
+        url = f"https://api.telegram.org/bot{self._telegram().bot_token}/answerCallbackQuery"
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                await session.post(url, json={
+                    "callback_query_id": callback_query_id,
+                    "text": text[:200] if text else None,
+                })
+        except Exception:
+            pass
+
     async def handle_telegram_update(self, update: Dict[str, Any]) -> Dict[str, Any]:
-        """پردازش update از Telegram webhook. فقط text commands را handle می‌کند."""
+        """پردازش update از Telegram webhook. text commands + callback_query."""
+        _cleanup_expired_state()
+
+        # ——— callback_query (دکمه‌های inline) ———
+        cq = update.get("callback_query")
+        if cq:
+            return await self._handle_callback_query(cq)
+
+        # ——— message ———
         msg = update.get("message") or {}
         text = (msg.get("text") or "").strip()
         chat = (msg.get("chat") or {})
@@ -568,14 +620,36 @@ class NotificationService:
         prefs = _read_prefs()
         base = (prefs.get("app_base_url", "") or "").rstrip("/")
         tg = self._telegram()
+        chat_id_str = str(chat_id)
+
+        # ——— /cancel (در هر زمان state را پاک می‌کند) ———
+        if text == "/cancel":
+            had = chat_id_str in _chat_state
+            _chat_state.pop(chat_id_str, None)
+            await tg.send(
+                "✅ flow لغو شد." if had else "هیچ flow فعالی نبود.",
+                silent=True,
+            )
+            return {"ok": True, "handled": "cancel"}
+
+        # ——— /new_task و /new_idea (شروع flow جدید) ———
+        if text in ("/new_task", "/new_idea"):
+            return await self._start_new_task_flow(chat_id_str)
+
+        # ——— state-aware: اگر در phase awaiting_idea هستیم، text = idea ———
+        state = _chat_state.get(chat_id_str)
+        if state and state.get("phase") == "awaiting_idea":
+            return await self._receive_idea_text(chat_id_str, state, text)
 
         if text in ("/start", "/help"):
             reply = (
                 "👋 *سلام!*\n\n"
                 "این ربات نوتیفیکیشن‌های سیستم نظارت پروژه است.\n\n"
                 "دستورات:\n"
+                "• /new\\_task یا /new\\_idea — ثبت تسک جدید با انتخاب پروژه\n"
                 "• /menu — منوی دسترسی سریع\n"
                 "• /status — وضعیت نوتیفیکیشن\n"
+                "• /cancel — لغو flow فعلی\n"
                 "• /help — این پیام"
             )
             kb = build_inline_keyboard(base, "manual_test") if base else None
@@ -583,7 +657,11 @@ class NotificationService:
             return {"ok": True, "handled": "start"}
 
         if text == "/menu":
-            reply = "📋 *منوی دسترسی سریع*\n\nاز دکمه‌های زیر برای رفتن به هر بخش استفاده کنید:"
+            reply = (
+                "📋 *منوی دسترسی سریع*\n\n"
+                "از دکمه‌های زیر برای رفتن به هر بخش استفاده کنید.\n"
+                "برای ثبت تسک از تلگرام: /new\\_task"
+            )
             if not base:
                 reply += "\n\n⚠️ `app_base_url` در پنل تنظیمات ست نشده — لینک‌ها در دسترس نیستند."
                 await tg.send(reply, silent=True)
@@ -629,10 +707,258 @@ class NotificationService:
 
         # ناشناخته
         await tg.send(
-            f"❓ دستور ناشناخته: `{text[:50]}`\nبا /menu شروع کنید.",
+            f"❓ دستور ناشناخته: `{text[:50]}`\nبا /menu یا /new\\_task شروع کنید.",
             silent=True,
         )
         return {"ok": True, "handled": "unknown"}
+
+    # -----------------------------------------------------------------------
+    # 🆕 (P5) /new_task flow — ثبت تسک از تلگرام با انتخاب پروژه
+    # -----------------------------------------------------------------------
+
+    async def _start_new_task_flow(self, chat_id_str: str) -> Dict[str, Any]:
+        """مرحلهٔ ۱: نمایش لیست watched ها به‌صورت inline keyboard."""
+        tg = self._telegram()
+        try:
+            from .oversight_service import get_oversight_service
+            _oversight = get_oversight_service()
+        except Exception as e:
+            await tg.send(f"❌ خطا در بارگذاری سرویس oversight: {e}", silent=True)
+            return {"ok": True, "handled": "new_task_fail"}
+
+        watched_list = list(_oversight.watched or [])
+        if not watched_list:
+            await tg.send(
+                "⚠️ هیچ پروژهٔ تحت نظارتی پیدا نشد.\n"
+                "ابتدا در پنل وب /oversight یک پروژه اضافه کنید.",
+                silent=True,
+            )
+            return {"ok": True, "handled": "no_watched"}
+
+        kb = self._render_watched_picker(watched_list)
+        await tg.send(
+            "🆕 *تسک جدید*\n\nپروژه را انتخاب کنید:",
+            silent=True,
+            reply_markup=kb,
+        )
+        return {"ok": True, "handled": "new_task_picker", "count": len(watched_list)}
+
+    def _render_watched_picker(
+        self, watched_list: List[Any], max_items: int = 12,
+    ) -> Dict[str, Any]:
+        """ساخت inline_keyboard برای انتخاب پروژه (max 12، 2 ستون)."""
+        items = watched_list[:max_items]
+        rows: List[List[Dict[str, str]]] = []
+        for i in range(0, len(items), 2):
+            row: List[Dict[str, str]] = []
+            for w in items[i:i + 2]:
+                # repo_full_name ممکن است طولانی باشد → برای دکمه truncate
+                label = (w.repo_full_name or w.id)[:30]
+                row.append({"text": f"📁 {label}", "callback_data": f"pick:{w.id}"})
+            rows.append(row)
+        rows.append([{"text": "❌ لغو", "callback_data": "flow:cancel"}])
+        return {"inline_keyboard": rows}
+
+    async def _receive_idea_text(
+        self, chat_id_str: str, state: Dict[str, Any], text: str,
+    ) -> Dict[str, Any]:
+        """مرحلهٔ ۳: کاربر متن idea را فرستاده — تأیید بخواه."""
+        tg = self._telegram()
+        if len(text) < 5:
+            await tg.send(
+                "⚠️ متن خیلی کوتاه است. لطفاً ایده را با جزئیات بیشتری بنویسید "
+                "(یا /cancel برای لغو).",
+                silent=True,
+            )
+            return {"ok": True, "handled": "idea_too_short"}
+
+        watched_id = state.get("watched_id")
+        # ساخت draft token
+        token = _short_token()
+        _idea_drafts[token] = {
+            "watched_id": watched_id,
+            "idea": text,
+            "expires_at": _now_epoch() + _STATE_TTL_SECONDS,
+        }
+        # حذف state — کاربر در مرحلهٔ تأیید است نه awaiting_idea
+        _chat_state.pop(chat_id_str, None)
+
+        # نام پروژه برای نمایش
+        repo_name = state.get("repo_name") or watched_id
+
+        preview = text[:300] + ("..." if len(text) > 300 else "")
+        kb = {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ ثبت کن", "callback_data": f"confirm:{token}"},
+                    {"text": "✏️ ویرایش", "callback_data": f"edit:{token}"},
+                ],
+                [{"text": "❌ لغو", "callback_data": "flow:cancel"}],
+            ]
+        }
+        await tg.send(
+            f"📝 *تأیید ثبت تسک*\n\n"
+            f"📁 پروژه: `{repo_name}`\n\n"
+            f"💭 ایده:\n{preview}\n\n"
+            f"تأیید می‌کنید؟",
+            silent=True,
+            reply_markup=kb,
+        )
+        return {"ok": True, "handled": "idea_confirm_pending", "token": token}
+
+    async def _handle_callback_query(self, cq: Dict[str, Any]) -> Dict[str, Any]:
+        """پردازش inline button clicks (callback_data)."""
+        data = (cq.get("data") or "").strip()
+        cq_id = cq.get("id") or ""
+        msg = cq.get("message") or {}
+        chat = msg.get("chat") or {}
+        chat_id = chat.get("id")
+        if not chat_id:
+            await self._answer_callback(cq_id)
+            return {"ok": True, "ignored": True}
+
+        configured_id = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+        if configured_id and str(chat_id) != configured_id:
+            await self._answer_callback(cq_id)
+            return {"ok": True, "ignored": True}
+
+        chat_id_str = str(chat_id)
+        tg = self._telegram()
+        await self._answer_callback(cq_id)  # دکمه را از loading state خارج کن
+
+        # flow:cancel
+        if data == "flow:cancel":
+            _chat_state.pop(chat_id_str, None)
+            await tg.send("❌ flow لغو شد.", silent=True)
+            return {"ok": True, "handled": "flow_cancel"}
+
+        # pick:<watched_id>
+        if data.startswith("pick:"):
+            watched_id = data.split(":", 1)[1]
+            try:
+                from .oversight_service import get_oversight_service
+                _oversight = get_oversight_service()
+                w = next((x for x in _oversight.watched if x.id == watched_id), None)
+            except Exception:
+                w = None
+            if not w:
+                await tg.send("⚠️ پروژه یافت نشد. /new\\_task بزنید.", silent=True)
+                return {"ok": True, "handled": "pick_not_found"}
+            _chat_state[chat_id_str] = {
+                "phase": "awaiting_idea",
+                "watched_id": watched_id,
+                "repo_name": w.repo_full_name,
+                "expires_at": _now_epoch() + _STATE_TTL_SECONDS,
+            }
+            await tg.send(
+                f"✅ پروژه: `{w.repo_full_name}`\n\n"
+                f"✏️ حالا متن ایده/مشکل را بنویسید (یا /cancel برای لغو):",
+                silent=True,
+            )
+            return {"ok": True, "handled": "pick_ok", "watched_id": watched_id}
+
+        # edit:<token> — کاربر می‌خواهد متن را عوض کند
+        if data.startswith("edit:"):
+            token = data.split(":", 1)[1]
+            draft = _idea_drafts.get(token)
+            if not draft:
+                await tg.send("⚠️ draft منقضی شده. /new\\_task بزنید.", silent=True)
+                return {"ok": True, "handled": "edit_expired"}
+            # برگشت به phase awaiting_idea
+            _chat_state[chat_id_str] = {
+                "phase": "awaiting_idea",
+                "watched_id": draft["watched_id"],
+                "expires_at": _now_epoch() + _STATE_TTL_SECONDS,
+            }
+            del _idea_drafts[token]
+            await tg.send("✏️ متن جدید را بنویسید:", silent=True)
+            return {"ok": True, "handled": "edit_back"}
+
+        # confirm:<token> — ثبت نهایی
+        if data.startswith("confirm:"):
+            token = data.split(":", 1)[1]
+            draft = _idea_drafts.get(token)
+            if not draft:
+                await tg.send("⚠️ draft منقضی شده. /new\\_task بزنید.", silent=True)
+                return {"ok": True, "handled": "confirm_expired"}
+            # حذف draft (یک‌بار مصرف)
+            del _idea_drafts[token]
+            await tg.send("⏳ در حال ساخت پرامپت با AI (15-30 ثانیه)...", silent=True)
+            return await self._call_idea_to_prompt(
+                chat_id_str, draft["watched_id"], draft["idea"],
+            )
+
+        # ناشناخته
+        await tg.send(f"❓ callback ناشناخته: `{data[:50]}`", silent=True)
+        return {"ok": True, "handled": "unknown_callback"}
+
+    async def _call_idea_to_prompt(
+        self, chat_id_str: str, watched_id: str, idea: str,
+    ) -> Dict[str, Any]:
+        """فراخوانی idea_to_prompt و گزارش نتیجه به کاربر."""
+        tg = self._telegram()
+        prefs = _read_prefs()
+        base = (prefs.get("app_base_url", "") or "").rstrip("/")
+        try:
+            from .oversight_service import get_oversight_service
+            _oversight = get_oversight_service()
+            data = await _oversight.idea_to_prompt(
+                idea=idea,
+                watched_id=watched_id,
+                type_="other",
+                priority="medium",
+            )
+            # data شامل title/prompt/... است؛ task واقعی باید ساخته شود
+            # idea_to_prompt تسک نمی‌سازد — فقط prompt تولید می‌کند
+            # برای ساخت task، service.create_task یا منطق مشابه
+            from .oversight_service import OversightTask
+            from datetime import datetime, timezone
+            import uuid as _uuid
+            new_task = OversightTask(
+                id=str(_uuid.uuid4()),
+                watched_id=watched_id,
+                project_full_name=next(
+                    (w.repo_full_name for w in _oversight.watched if w.id == watched_id), ""
+                ),
+                title=data.get("title") or idea[:80],
+                prompt=data.get("prompt") or "",
+                raw_idea=idea,
+                type=data.get("type") or "other",
+                priority=data.get("priority") or "medium",
+                source="telegram_bot",
+                target_files=data.get("target_files") or [],
+                acceptance_criteria=data.get("acceptance_criteria") or [],
+            )
+            async with _oversight._lock:
+                _oversight.tasks.insert(0, new_task)
+                _oversight._save_tasks()
+
+            # پاسخ به کاربر با لینک
+            kb = None
+            if base:
+                kb = {
+                    "inline_keyboard": [
+                        [{"text": "📋 دیدن تسک‌ها", "url": f"{base}/oversight?tab=tasks"}],
+                        [{"text": "👁 تحت نظارت", "url": f"{base}/oversight?tab=watched"}],
+                    ]
+                }
+            await tg.send(
+                f"✅ *تسک ساخته شد*\n\n"
+                f"📌 _{new_task.title[:120]}_\n"
+                f"📁 `{new_task.project_full_name}`\n"
+                f"🔖 {new_task.priority} • {new_task.type}\n\n"
+                f"در پنل قابل مشاهده، اجرا و verify است.",
+                silent=False,  # موفقیت با صدا
+                reply_markup=kb,
+            )
+            return {"ok": True, "handled": "task_created", "task_id": new_task.id}
+        except Exception as e:
+            logger.exception(f"telegram bot idea_to_prompt failed: {e}")
+            await tg.send(
+                f"❌ خطا در ساخت تسک:\n`{str(e)[:300]}`\n\nبعداً دوباره تلاش کنید یا از پنل وب استفاده کنید.",
+                silent=False,
+            )
+            return {"ok": True, "handled": "task_create_failed", "error": str(e)}
 
 
 notification_service = NotificationService()
