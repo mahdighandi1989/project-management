@@ -139,6 +139,104 @@ async def _fetch_repo_tree(
         return []
 
 
+def _extract_keywords_from_prompt(prompt: str, max_keywords: int = 5) -> List[str]:
+    """استخراج کلیدواژه‌های کلاس/تابع از prompt (CamelCase + snake_case طولانی)."""
+    import re
+    if not prompt:
+        return []
+    # CamelCase identifiers (کلاس‌ها)
+    camels = re.findall(r"\b([A-Z][a-zA-Z0-9]{4,})\b", prompt)
+    # snake_case identifiers با حداقل ۲ underscore یا طول > 8
+    snakes = re.findall(r"\b([a-z][a-z0-9_]{6,})\b", prompt)
+    # filter رایج‌ها
+    common = {
+        "function", "method", "endpoint", "service", "class", "object",
+        "request", "response", "result", "return", "param", "value",
+        "string", "number", "boolean", "array", "object", "import",
+        "export", "default", "async", "await", "promise", "callback",
+        "should", "would", "could", "thing", "stuff", "should_not",
+    }
+    seen: set = set()
+    out: List[str] = []
+    for kw in camels + snakes:
+        kw_low = kw.lower()
+        if kw_low in common or kw in seen:
+            continue
+        seen.add(kw)
+        out.append(kw)
+        if len(out) >= max_keywords:
+            break
+    return out
+
+
+async def _github_code_search(
+    repo: str, keywords: List[str], token: str, max_per_keyword: int = 3
+) -> Dict[str, List[str]]:
+    """GitHub Code Search برای کلیدواژه‌ها — برمی‌گرداند {keyword: [path,...]}."""
+    if not keywords or not token or "/" not in repo:
+        return {}
+    headers = _gh_headers(token)
+    results: Dict[str, List[str]] = {}
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        for kw in keywords[:5]:  # حداکثر ۵ keyword
+            try:
+                # GitHub Code Search syntax: <keyword>+repo:<owner>/<repo>
+                q = f"{kw}+repo:{repo}"
+                url = f"{GITHUB_API}/search/code?q={q}&per_page={max_per_keyword}"
+                async with session.get(url, headers=headers) as r:
+                    if r.status != 200:
+                        continue
+                    data = await r.json()
+                items = (data.get("items") or [])[:max_per_keyword]
+                paths = [it.get("path", "") for it in items if it.get("path")]
+                if paths:
+                    results[kw] = paths
+            except Exception:
+                continue
+    return results
+
+
+def format_done_remaining_for_message(report: Any, max_per_section: int = 5) -> str:
+    """خروجی متن قابل خواندن از done_parts/remaining_parts/next_actions/confidence
+    برای پیام Telegram/Email — با truncate و bullet."""
+    lines: List[str] = []
+    done = list(getattr(report, "done_parts", []) or [])
+    remaining = list(getattr(report, "remaining_parts", []) or [])
+    next_actions = list(getattr(report, "next_actions", []) or [])
+    confidence = float(getattr(report, "confidence_score", 0.0) or 0.0)
+
+    if confidence > 0:
+        lines.append(f"🎯 اعتماد: *{int(confidence * 100)}%*")
+
+    if done:
+        lines.append(f"\n✅ *انجام‌شده ({len(done)}):*")
+        for item in done[:max_per_section]:
+            text = str(item).strip().replace("\n", " ")[:180]
+            if text:
+                lines.append(f"• {text}")
+        if len(done) > max_per_section:
+            lines.append(f"_… و {len(done) - max_per_section} مورد دیگر_")
+
+    if remaining:
+        lines.append(f"\n⏳ *باقی‌مانده ({len(remaining)}):*")
+        for item in remaining[:max_per_section]:
+            text = str(item).strip().replace("\n", " ")[:180]
+            if text:
+                lines.append(f"• {text}")
+        if len(remaining) > max_per_section:
+            lines.append(f"_… و {len(remaining) - max_per_section} مورد دیگر_")
+
+    if next_actions:
+        lines.append("\n🪜 *اقدامات بعدی پیشنهادی:*")
+        for item in next_actions[:3]:
+            text = str(item).strip().replace("\n", " ")[:180]
+            if text:
+                lines.append(f"• {text}")
+
+    return "\n".join(lines)
+
+
 def _find_similar_paths(
     missing_path: str, all_paths: List[str], max_results: int = 5
 ) -> List[str]:
@@ -307,6 +405,20 @@ async def verify_task(
         except Exception as e:
             logger.warning(f"verify: fetch tree failed: {e}")
 
+    # 3.6) GitHub Code Search — برای کلیدواژه‌های مهم (کلاس‌ها/توابع) که در
+    # prompt ذکر شده‌اند، ببین در کجاهای repo استفاده می‌شوند. این کمک می‌کند
+    # verifier حتی اگر فایل صریح نباشد، فایل‌های متن‌به‌متن مرتبط را پیدا کند.
+    keyword_search: Dict[str, List[str]] = {}
+    if token and repo_full_name and "/" in repo_full_name:
+        try:
+            keywords = _extract_keywords_from_prompt(task.prompt or "", max_keywords=5)
+            if keywords:
+                keyword_search = await _github_code_search(
+                    repo_full_name, keywords, token, max_per_keyword=3
+                )
+        except Exception as e:
+            logger.debug(f"verify: code search failed: {e}")
+
     # 4) ساخت پرامپت verifier — برای هر فایل یافت‌نشده، فایل‌های هم‌ارز را
     # از tree پیدا و محتوای آن‌ها را نیز fetch می‌کنیم
     fuzzy_resolved: Dict[str, List[str]] = {}  # missing_path -> similar_paths
@@ -350,6 +462,25 @@ async def verify_task(
         c = file_contents.get(sp)
         if c is not None:
             files_blob_parts.append(f"=== {sp} (فایل هم‌ارز) ===\n{c[:8000]}")
+    # فایل‌های کشف‌شده با code search برای keywords مهم
+    code_search_files: List[str] = []
+    for kw, paths in keyword_search.items():
+        for p in paths:
+            if p not in target_files and p not in extra_files_to_fetch and p not in code_search_files:
+                code_search_files.append(p)
+    if code_search_files and token and repo_full_name and "/" in repo_full_name:
+        try:
+            extra2 = await _fetch_target_files(repo_full_name, code_search_files[:5], branch, token)
+            for k, v in extra2.items():
+                file_contents[k] = v
+                if v is not None:
+                    # لیست keywords که این فایل را برگرداندند
+                    matched_kws = [kw for kw, ps in keyword_search.items() if k in ps]
+                    files_blob_parts.append(
+                        f"=== {k} (یافت‌شده با کلیدواژه‌های: {', '.join(matched_kws)}) ===\n{v[:6000]}"
+                    )
+        except Exception as e:
+            logger.debug(f"verify: fetch code-search files failed: {e}")
     files_blob = "\n\n".join(files_blob_parts) or "(فایل هدفی مشخص نیست — بر اساس کل پرامپت بررسی کن)"
 
     # خلاصهٔ ساختار repo برای دید کلی AI
@@ -427,17 +558,33 @@ async def verify_task(
 - "regressed" = نسبت به قبل بدتر شده
 - "error" = در بررسی خطا داشتی
 
-# خروجی فقط JSON
+# 📋 قواعد پر کردن done_parts و remaining_parts (بسیار مهم — رعایت کن)
+- **done_parts** = فهرست بخش‌های مشخص (نه paragraph) که در وضعیت فعلی repo
+  انجام شده‌اند. هر آیتم یک جملهٔ کوتاه (حداکثر 150 کاراکتر). اگر کاری
+  انجام نشده، آرایهٔ خالی `[]` بگذار، نه null.
+- **remaining_parts** = فهرست بخش‌هایی که هنوز انجام نشده‌اند. هر آیتم
+  یک جملهٔ کوتاه (حداکثر 150 کاراکتر). اگر همه انجام شده، `[]` بگذار.
+- **هر معیار پذیرش (AC) باید دقیقاً در یکی از این دو لیست منعکس شود** —
+  نه هر دو، نه هیچ‌کدام.
+- **next_actions** = اگر status="done" نیست، حداقل یک قدم بعدی concrete.
+  هر آیتم یک جمله، حداکثر 150 کاراکتر.
+- **confidence_score** = عدد بین 0.0 و 1.0 — اگر مطمئن هستی نزدیک 1.0،
+  اگر شک داری 0.5-0.7، اگر نمی‌توانی قضاوت کنی زیر 0.3.
+- **اگر status="partial"** ولی remaining_parts خالی باشد، در logs ثبت
+  می‌شود که AI خطا داشته — باید حتماً remaining_parts را پر کنی.
+- **آیتم‌های لیست‌ها فارسی باشند** (مگر نام فایل/کد).
+
+# خروجی فقط JSON (بدون code block markdown — فقط JSON خام)
 {{
   "status": "done | partial | not_done | regressed | error",
   "criteria_results": [
     {{ "criterion": "...", "met": true, "evidence": "..." }}
   ],
-  "done_parts": ["..."],
-  "remaining_parts": ["..."],
+  "done_parts": ["جملهٔ کوتاه دربارهٔ کار انجام‌شده 1", "..."],
+  "remaining_parts": ["جملهٔ کوتاه دربارهٔ کار باقی‌مانده 1", "..."],
   "evidence": {{ "commits": ["sha"], "files": ["path"], "issues": [] }},
-  "next_actions": ["پیشنهاد قدم‌های بعدی اگر done نباشد"],
-  "confidence_score": 0.0,
+  "next_actions": ["قدم بعدی concrete 1", "..."],
+  "confidence_score": 0.95,
   "summary": "خلاصه یک‌پاراگرافی"
 }}"""
 
@@ -511,6 +658,17 @@ async def verify_task(
         report.evidence["criteria_results"] = parsed["criteria_results"]
     if parsed.get("summary"):
         report.evidence["summary"] = parsed["summary"]
+
+    # 🛡 fallback warning: اگر AI status=partial داد ولی remaining_parts خالی،
+    # یا status=not_done ولی همه پر، یک warning log کن
+    if status_val == VERIFICATION_PARTIAL and not report.remaining_parts:
+        logger.warning(
+            f"verify: status=partial ولی remaining_parts خالی است (task={task.id}). "
+            f"AI verifier prompt را رعایت نکرده. fallback: استفاده از acceptance_criteria."
+        )
+        report.remaining_parts = list(acceptance_criteria[:5])
+    if status_val == "not_done" and not report.remaining_parts:
+        report.remaining_parts = list(acceptance_criteria[:5])
 
     # به‌روزرسانی task
     streak_required = 2
@@ -613,7 +771,11 @@ async def verify_task(
         if report.evidence:
             summary = report.evidence.get("summary") or report.evidence.get("ai_summary")
             if summary:
-                msg_lines.append(f"\n💬 {str(summary)[:400]}")
+                msg_lines.append(f"\n💬 {str(summary)[:300]}")
+        # done/remaining/next_actions/confidence — لیست‌های ساختاریافته
+        details = format_done_remaining_for_message(report, max_per_section=5)
+        if details:
+            msg_lines.append(details)
         # PR link اگر موجود
         extra_buttons = None
         if task.applied_evidence:
