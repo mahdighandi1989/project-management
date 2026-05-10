@@ -45,6 +45,10 @@ class WatchedUpdate(BaseModel):
     # 🆕 (commit 2.3) عمق scan + وزن‌های معیار — مهاجرت از Health
     scan_depth: Optional[str] = None  # quick | standard | deep | thorough
     scan_criteria_weights: Optional[Dict[str, float]] = None
+    # 🆕 (audit fix) فیلدهایی که در UI و backend model بودند ولی در schema جا افتاده بودند
+    default_execution_mode: Optional[str] = None  # manual | auto_via_projects_page | auto_via_pr
+    verify_only_mode: Optional[bool] = None
+    verify_interval_hours: Optional[float] = None
 
 
 class IdeaToPromptRequest(BaseModel):

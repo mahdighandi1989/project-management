@@ -3010,7 +3010,7 @@ function WatchedCard({
         <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
           <label className="block">
             <span className="block text-gray-600 dark:text-gray-300 mb-1">
-              عمق scan <span className="text-blue-400" title="quick: 3 pass، standard: 5 pass، deep: همه (default)، thorough: همه + per-file scoring">ⓘ</span>
+              عمق scan <span className="text-blue-400" title="quick: 3 pass سبک، standard: 5 pass، deep: تمام pass ها، thorough: تمام pass ها + per-file health scoring">ⓘ</span>
             </span>
             <select
               value={w.scan_depth || 'deep'}
@@ -3019,8 +3019,8 @@ function WatchedCard({
             >
               <option value="quick">⚡ quick (3 pass — سریع)</option>
               <option value="standard">⚖ standard (5 pass — متعادل)</option>
-              <option value="deep">🔍 deep (10 pass — کامل، پیش‌فرض)</option>
-              <option value="thorough">🔬 thorough (10 pass + اولویت‌بندی)</option>
+              <option value="deep">🔍 deep (تمام pass ها — کامل، پیش‌فرض)</option>
+              <option value="thorough">🔬 thorough (تمام pass ها + per-file scoring)</option>
             </select>
           </label>
           <div className="text-xs text-gray-500 dark:text-gray-400 self-end">
@@ -3059,35 +3059,13 @@ function WatchedCard({
         </div>
       </details>
 
-      {/* execution mode + verify interval + verify_only_mode */}
+      {/* بازه verify — همیشه قابل تنظیم چون scheduler verify را مستقل از autonomy اجرا می‌کند */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-3">
-        <label className="text-xs">
-          <span className="block text-gray-500 dark:text-gray-400 mb-1 flex items-center gap-1">
-            مسیر اجرا
-            <span
-              title="manual: تسک‌ها را خودتان بیرون اعمال می‌کنید (با Cursor/ChatGPT/...) و سیستم فقط verify می‌کند. auto_via_projects_page: از طریق صفحهٔ /projects اعمال شود. auto_via_pr: AI خودش PR می‌سازد."
-              className="cursor-help text-blue-400"
-            >
-              ⓘ
-            </span>
-          </span>
-          <select
-            value={w.default_execution_mode || 'manual'}
-            onChange={(e) =>
-              onChange({ default_execution_mode: e.target.value as any })
-            }
-            className="w-full p-1.5 border rounded text-sm dark:bg-gray-700 dark:text-white dark:border-gray-600"
-          >
-            <option value="manual">manual (اعمال بیرونی)</option>
-            <option value="auto_via_projects_page">auto via /projects</option>
-            <option value="auto_via_pr">auto via PR</option>
-          </select>
-        </label>
         <label className="text-xs">
           <span className="block text-gray-500 dark:text-gray-400 mb-1 flex items-center gap-1">
             بازه verify (ساعت)
             <span
-              title="هر چند ساعت، تسک‌های اعمال‌شده (یا نشده) دوباره بررسی می‌شوند تا تأیید نهایی - مستقل از روش اعمال"
+              title="هر چند ساعت، تسک‌های اعمال‌شده (یا نشده) دوباره بررسی می‌شوند تا تأیید نهایی — مستقل از مسیر اجرا و autonomy_level"
               className="cursor-help text-blue-400"
             >
               ⓘ
@@ -3105,20 +3083,54 @@ function WatchedCard({
             className="w-full p-1.5 border rounded text-sm dark:bg-gray-700 dark:text-white dark:border-gray-600"
           />
         </label>
-        <label className="text-xs flex items-center gap-2 mt-5">
-          <input
-            type="checkbox"
-            checked={!!w.verify_only_mode}
-            onChange={(e) => onChange({ verify_only_mode: e.target.checked })}
-            className="w-4 h-4"
-          />
-          <span
-            className="dark:text-gray-200"
-            title="اگر فعال باشد، scheduler هرگز apply نمی‌کند، فقط verify می‌کند"
-          >
-            فقط verify (هرگز apply نکن)
-          </span>
-        </label>
+
+        {/* مسیر اجرا و verify_only فقط وقتی autonomy=auto معنی دارند —
+            در manual/assist، scheduler هیچ‌گاه auto-apply نمی‌کند پس این کنترل‌ها redundant هستند */}
+        {w.autonomy_level === 'auto' ? (
+          <>
+            <label className="text-xs">
+              <span className="block text-gray-500 dark:text-gray-400 mb-1 flex items-center gap-1">
+                مسیر اجرا
+                <span
+                  title="فقط در autonomy=auto معنی دارد. auto_via_projects_page: از طریق صفحهٔ /projects اعمال شود. auto_via_pr: AI خودش PR می‌سازد. manual: scheduler نمی‌نویسد، فقط verify."
+                  className="cursor-help text-blue-400"
+                >
+                  ⓘ
+                </span>
+              </span>
+              <select
+                value={w.default_execution_mode || 'manual'}
+                onChange={(e) =>
+                  onChange({ default_execution_mode: e.target.value as any })
+                }
+                className="w-full p-1.5 border rounded text-sm dark:bg-gray-700 dark:text-white dark:border-gray-600"
+              >
+                <option value="manual">manual (اعمال بیرونی)</option>
+                <option value="auto_via_projects_page">auto via /projects</option>
+                <option value="auto_via_pr">auto via PR</option>
+              </select>
+            </label>
+            <label className="text-xs flex items-center gap-2 mt-5">
+              <input
+                type="checkbox"
+                checked={!!w.verify_only_mode}
+                onChange={(e) => onChange({ verify_only_mode: e.target.checked })}
+                className="w-4 h-4"
+              />
+              <span
+                className="dark:text-gray-200"
+                title="کلید فوریت: اگر فعال باشد، scheduler در حالت auto هم apply نمی‌کند — فقط verify"
+              >
+                فقط verify (هرگز apply نکن)
+              </span>
+            </label>
+          </>
+        ) : (
+          <div className="text-xs text-gray-500 dark:text-gray-400 sm:col-span-2 self-center px-2">
+            ℹ️ «مسیر اجرا» و «فقط verify» فقط در حالت autonomy=auto معنی دارند.
+            {w.autonomy_level === 'manual' && ' در حالت manual، تسک‌ها فقط با کلیک شما اجرا می‌شوند.'}
+          </div>
+        )}
       </div>
 
       <div className="flex flex-col sm:flex-row gap-2 mb-3">
@@ -3151,36 +3163,38 @@ function WatchedCard({
       <div className="flex gap-2 flex-wrap">
         <button
           onClick={onDeepScan}
-          title="اسکن چندفازی عمیق روی همهٔ فایل‌ها/صفحات/روتها با progress زنده"
+          title="اسکن چندفازی AI (طبق «عمق scan» در تنظیمات بالا) — یافته‌ها به تسک تبدیل می‌شوند + per-file health score"
           className="px-3 py-1.5 bg-indigo-500 text-white rounded text-sm hover:bg-indigo-600"
         >
           🔬 Deep Scan
         </button>
         <button
           onClick={onScan}
-          title="اسکن سادهٔ سریع (تک پاس) برای یافتن نیازهای کلی"
+          title="اسکن تک‌پاس و سریع (~30 ثانیه) — برای کشف کلی نیازها بدون per-file scoring"
           className="px-3 py-1.5 bg-cyan-500 text-white rounded text-sm hover:bg-cyan-600"
         >
           🔎 اسکن سریع
         </button>
         <button
           onClick={onRunNow}
+          title="اجرای تسک‌های pending موجود (تسک جدید نمی‌سازد) — برای وقتی که قبلاً scan انجام شده"
           className="px-3 py-1.5 bg-blue-500 text-white rounded text-sm hover:bg-blue-600"
         >
           ▶ بررسی فوری
         </button>
         <button
           onClick={onWriteIdea}
+          title="ایدهٔ شما را با AI به یک پرامپت ساختاریافته (هدف/context/مراحل/معیار پذیرش) تبدیل می‌کند و به‌صورت تسک ذخیره می‌کند"
           className="px-3 py-1.5 bg-purple-500 text-white rounded text-sm hover:bg-purple-600"
         >
           💡 نوشتن ایده
         </button>
         <button
           onClick={onOpenCodex}
-          title="شناسنامهٔ خودکار پروژه - توضیح هر فایل/فیچر"
+          title="خلاصهٔ خودکار ساختار پروژه — لیست فایل‌ها با توضیح هر کدام (read-only، بدون ساخت تسک)"
           className="px-3 py-1.5 bg-amber-500 text-white rounded text-sm hover:bg-amber-600"
         >
-          📚 شناسنامه
+          📖 خلاصهٔ پروژه
         </button>
         <button
           onClick={onViewTasks}
