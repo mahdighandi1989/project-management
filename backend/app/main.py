@@ -25,6 +25,7 @@ from .api.routes import project_health  # 🆕 Project Health Analysis (تحلی
 from .api.routes import render_logs  # 🆕 Render Logs (لاگ‌های رندر)
 from .api.routes import security_analysis  # 🆕 Security Analysis (تحلیل امنیتی)
 from .api.routes import system_prompts  # 🆕 System Prompts (مدیریت پرامپت‌ها)
+from .api.routes import notifications  # 🆕 Notifications (Telegram/Email)
 
 # Defensive import for oversight (mustn't block app boot if storage/AI deps misbehave)
 try:
@@ -525,6 +526,7 @@ app.include_router(project_health.router)  # 🆕 Project Health Analysis (تح�
 app.include_router(render_logs.router)  # 🆕 Render Logs (لاگ‌های رندر)
 app.include_router(security_analysis.router)  # 🆕 Security Analysis (تحلیل امنیتی)
 app.include_router(system_prompts.router)  # 🆕 System Prompts (مدیریت پرامپت‌ها)
+app.include_router(notifications.router, prefix="/api")  # 🆕 Notifications (Telegram/Email)
 if OVERSIGHT_AVAILABLE and oversight is not None:
     app.include_router(oversight.router, prefix="/api")  # 🆕 Oversight (مرکز نظارت GitHub)
     # bridge endpoints under /api/projects/{project_id}/{apply-oversight-task,verify-task,oversight-summary}

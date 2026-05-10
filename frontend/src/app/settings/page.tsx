@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import RenderLogsPanel from '@/components/RenderLogsPanel';
+import NotificationSettingsPanel from '@/components/NotificationSettingsPanel';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -24,7 +25,7 @@ const DEPLOY_SERVICES = [
 ];
 
 export default function SettingsPage() {
-  const [activeTab, setActiveTab] = useState<'api' | 'deploy' | 'config' | 'limits' | 'logs'>('api');
+  const [activeTab, setActiveTab] = useState<'api' | 'deploy' | 'config' | 'limits' | 'logs' | 'notifications'>('api');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -310,6 +311,16 @@ export default function SettingsPage() {
             }`}
           >
             📋 لاگ رندر
+          </button>
+          <button
+            onClick={() => setActiveTab('notifications')}
+            className={`px-4 py-2 rounded-lg font-medium transition ${
+              activeTab === 'notifications'
+                ? 'bg-cyan-500 text-white'
+                : 'bg-white dark:bg-gray-800 hover:bg-gray-100'
+            }`}
+          >
+            🔔 نوتیفیکیشن
           </button>
         </div>
 
@@ -698,6 +709,8 @@ export default function SettingsPage() {
         ) : activeTab === 'logs' ? (
           // لاگ‌های Render
           <RenderLogsPanel />
+        ) : activeTab === 'notifications' ? (
+          <NotificationSettingsPanel />
         ) : null}
 
         {/* لینک‌ها */}
