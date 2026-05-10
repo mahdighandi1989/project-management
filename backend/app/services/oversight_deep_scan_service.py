@@ -987,10 +987,16 @@ async def run_deep_scan(
     watched_id: str,
     *,
     model_id: Optional[str] = None,
+    model_ids: Optional[List[str]] = None,
     enabled_passes: Optional[List[str]] = None,
     deep_read_count: int = 35,
 ) -> Dict[str, Any]:
-    """اجرای کامل deep scan روی یک watched."""
+    """اجرای کامل deep scan روی یک watched.
+
+    🆕 (P1) پارامتر model_ids: اگر None یا یک‌مدلی، رفتار قبلی (single model).
+    اگر چندتایی، هر pass با تمام مدل‌ها اجرا می‌شود و findings از همه
+    مدل‌ها با _merge_similar_findings ادغام می‌شوند (consensus by similarity).
+    """
     service = get_oversight_service()
     watched = service._find_watched(watched_id)
     if watched is None:
@@ -1288,21 +1294,41 @@ async def run_deep_scan(
                 import_graph_summary=import_graph_summary,
             )
             try:
-                response = await service._ai_generate(
-                    prompt, model_id=model_id, max_tokens=4500, temperature=0.2
+                # 🆕 (P1) consensus mode: اگر model_ids چندتایی، هر pass با همه
+                # اجرا می‌شود و findings از مدل‌ها merge می‌شوند
+                models_to_run: List[Optional[str]] = (
+                    list(model_ids) if (model_ids and len(model_ids) > 1)
+                    else [model_id]
                 )
-                parsed = service._extract_json(response) or {}
-                findings = parsed.get("findings") or []
-                for f in findings:
-                    f["_pass"] = pass_id
+                pass_findings: List[Dict[str, Any]] = []
+                pass_summaries_local: Dict[str, Any] = {}
+                for mid in models_to_run:
+                    try:
+                        response = await service._ai_generate(
+                            prompt, model_id=mid, max_tokens=4500, temperature=0.2
+                        )
+                        parsed = service._extract_json(response) or {}
+                        m_findings = parsed.get("findings") or []
+                        for f in m_findings:
+                            f["_pass"] = pass_id
+                            f["_model"] = mid or "default"
+                            pass_findings.append(f)
+                        for sum_key in ("security_summary", "coverage_summary"):
+                            if isinstance(parsed.get(sum_key), dict):
+                                pass_summaries_local[sum_key] = parsed[sum_key]
+                    except Exception as me:
+                        logger.warning(
+                            f"deep_scan pass {pass_id} model {mid} failed: {me}"
+                        )
+                # consensus: ادغام findings مشابه از مدل‌های مختلف
+                if len(models_to_run) > 1:
+                    pass_findings = _merge_similar_findings(pass_findings)
+                for f in pass_findings:
                     if f.get("priority") == "critical":
                         critical_count += 1
-                all_findings.extend(findings)
-                # 🆕 ذخیرهٔ summaries ساختاریافته از هر pass (security_summary,
-                # coverage_summary, ...) — برای UI بدون reparsing findings
-                for sum_key in ("security_summary", "coverage_summary"):
-                    if isinstance(parsed.get(sum_key), dict):
-                        pass_summaries[sum_key] = parsed[sum_key]
+                all_findings.extend(pass_findings)
+                for k, v in pass_summaries_local.items():
+                    pass_summaries[k] = v
                 write_progress(
                     watched_id,
                     findings_count=len(all_findings),
@@ -1495,6 +1521,18 @@ async def run_deep_scan(
                     priority=f.get("priority", "medium"),
                     estimate=(f.get("estimated_complexity") or "medium"),
                 )
+                # 🆕 (P1) ضبط metadata scan که این task را ساخته
+                task_scan_metadata = {
+                    "model": model_id or (model_ids[0] if model_ids else "default"),
+                    "models_list": list(model_ids) if model_ids else ([model_id] if model_id else []),
+                    "depth": getattr(watched, "scan_depth", "deep"),
+                    "passes": passes_done,
+                    "passes_total": len(PASSES),
+                    "files_count": len(all_files),
+                    "scan_id": read_progress(watched.id).get("started_at") or now_iso(),
+                    "scanned_at": now_iso(),
+                    "_pass": f.get("_pass", ""),
+                }
                 t = OversightTask(
                     id=str(uuid.uuid4()),
                     watched_id=watched.id,
@@ -1511,6 +1549,11 @@ async def run_deep_scan(
                     execution_mode=execution_mode_default,
                     # 🆕 finding های ادغام‌شده در این task (از smart merger)
                     merged_findings=(f.get("merged_findings") or []),
+                    # 🆕 (P1) metadata scan
+                    created_by_scan_metadata=task_scan_metadata,
+                    # 🆕 (P2) cross-scan tracking — اولین بار دیده شد
+                    scan_seen_count=1,
+                    last_seen_in_scan_at=now_iso(),
                 )
                 async with service._lock:
                     service.tasks.append(t)
@@ -1553,6 +1596,16 @@ async def run_deep_scan(
         async with service._lock:
             service._save_watched()
 
+        # 🆕 (P1) metadata کامل scan برای نمایش در UI و notification
+        scan_metadata = {
+            "model_used": model_id or (model_ids[0] if model_ids else "default"),
+            "models_used_list": list(model_ids) if model_ids else ([model_id] if model_id else []),
+            "scan_depth": getattr(watched, "scan_depth", "deep"),
+            "passes_run": passes_done,
+            "passes_total": len(PASSES),
+            "files_analyzed_count": len(all_files),
+            "scan_id": read_progress(watched_id).get("started_at") or now_iso(),
+        }
         write_progress(
             watched_id,
             status="completed",
@@ -1562,6 +1615,7 @@ async def run_deep_scan(
             tasks_created=len(created_tasks),
             critical_count=critical_count,
             completed_at=now_iso(),
+            **scan_metadata,
         )
 
         # 🔔 notification — silent skip اگر env تنظیم نشده باشد
@@ -1570,11 +1624,18 @@ async def run_deep_scan(
             watched_obj = next((w for w in service.watched_projects if w.id == watched_id), None)
             repo_name = watched_obj.repo_full_name if watched_obj else watched_id
 
-            # 1) همیشه scan_done را بفرست (با خلاصه)
+            # 1) همیشه scan_done را بفرست (با خلاصه + metadata)
+            depth_used = getattr(watched_obj, "scan_depth", "deep") if watched_obj else "deep"
+            models_label = (
+                ", ".join(model_ids) if model_ids
+                else (model_id or "default")
+            )
             msg_lines = [
                 f"🔬 *Deep Scan کامل شد*",
                 f"📁 `{repo_name}`",
-                f"📊 *{passes_done}* pass اجرا شد",
+                f"🤖 مدل: `{models_label}`",
+                f"🔍 depth: *{depth_used}*",
+                f"📊 *{passes_done}/{len(PASSES)}* pass اجرا شد",
                 f"📑 *{len(all_files)}* فایل بررسی شد",
                 f"🔎 *{len(unique)}* یافتهٔ منحصربه‌فرد",
                 f"📝 *{len(created_tasks)}* تسک جدید ساخته شد",

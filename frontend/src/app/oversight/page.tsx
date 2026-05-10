@@ -57,6 +57,8 @@ interface Watched {
   // 🆕 (auto-loop) ping-pong scheduler-driven
   auto_continue_until_done?: boolean;
   max_auto_loop_rounds?: number;
+  // 🆕 (P1) مدل‌های auto-scan
+  selected_models?: string[];
   last_run_at?: string | null;
   next_run_at?: string | null;
   last_scan_at?: string | null;
@@ -114,6 +116,21 @@ interface Task {
   followup_round?: number;
   archived?: boolean;
   archived_at?: string | null;
+  // 🆕 (P1) metadata scan که این task را ساخته
+  created_by_scan_metadata?: {
+    model?: string;
+    models_list?: string[];
+    depth?: string;
+    passes?: number;
+    passes_total?: number;
+    files_count?: number;
+    scan_id?: string;
+    scanned_at?: string;
+    _pass?: string;
+  } | null;
+  // 🆕 (P2) cross-scan tracking
+  scan_seen_count?: number;
+  last_seen_in_scan_at?: string | null;
   prompt_history?: Array<{
     prompt: string;
     raw_idea: string;
@@ -1825,6 +1842,7 @@ export default function OversightPage() {
                   taskCount={wActiveTasks.length}
                   archivedCount={wArchivedTasks.length}
                   reportCount={wReportCount}
+                  availableModels={models}
                   onChange={(u) => updateWatched(w.id, u)}
                   onRemove={() => removeWatched(w.id, w.repo_full_name)}
                   onScan={() => scanProject(w.id)}
@@ -2999,6 +3017,7 @@ function WatchedCard({
   taskCount,
   archivedCount,
   reportCount,
+  availableModels,
   onChange,
   onRemove,
   onScan,
@@ -3014,6 +3033,7 @@ function WatchedCard({
   taskCount: number;
   archivedCount: number;
   reportCount: number;
+  availableModels: ModelInfo[];
   onChange: (updates: Partial<Watched>) => void;
   onRemove: () => void;
   onScan: () => void;
@@ -3281,6 +3301,39 @@ function WatchedCard({
         </div>
         <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
           💡 این تنظیمات روی scan های آینده اعمال می‌شوند. scan فعلی (اگر در حال اجراست) تأثیر نمی‌گیرد.
+        </div>
+
+        {/* 🆕 (P1) Multi-select مدل برای auto-scan */}
+        <div className="mt-4 pt-3 border-t border-cyan-200 dark:border-cyan-800/40">
+          <label className="block">
+            <span className="block text-gray-600 dark:text-gray-300 mb-1 flex items-center gap-1">
+              🤖 مدل‌های AI برای auto-scan
+              <span
+                className="cursor-help text-blue-400"
+                title="Ctrl/Cmd-click برای انتخاب چندتایی. اگر چندتایی، هر pass با همهٔ مدل‌ها اجرا می‌شود و findings ادغام می‌شوند (consensus). خالی = مدل پیش‌فرض backend"
+              >ⓘ</span>
+            </span>
+            <select
+              multiple
+              value={w.selected_models || []}
+              onChange={(e) => {
+                const opts = Array.from(e.target.selectedOptions).map(o => o.value);
+                onChange({ selected_models: opts });
+              }}
+              className="w-full p-1.5 border rounded text-sm dark:bg-gray-700 dark:text-white dark:border-gray-600 h-24"
+            >
+              {availableModels.map(m => (
+                <option key={m.id} value={m.id}>
+                  {m.name}{m.provider ? ` (${m.provider})` : ''}
+                </option>
+              ))}
+            </select>
+            <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              {(w.selected_models || []).length === 0 && '⚠️ هیچ مدلی انتخاب نشده — backend default استفاده می‌شود'}
+              {(w.selected_models || []).length === 1 && `✓ یک‌مدل (${w.selected_models![0]})`}
+              {(w.selected_models || []).length > 1 && `🤝 consensus mode: ${w.selected_models!.length} مدل (هر pass × ${w.selected_models!.length} = هزینه/زمان بیشتر)`}
+            </div>
+          </label>
         </div>
       </details>
 
@@ -3634,6 +3687,34 @@ function TasksPanel({
             {t.project_full_name && (
               <div className="text-xs text-gray-500 dark:text-gray-400" dir="ltr">
                 {t.project_full_name}
+              </div>
+            )}
+            {/* 🆕 (P1+P2) metadata scan: مدل، depth، passes، files + scan_seen_count */}
+            {(t.created_by_scan_metadata || (t.scan_seen_count ?? 1) > 1) && (
+              <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-1 flex items-center gap-2 flex-wrap" dir="ltr"
+                title={t.created_by_scan_metadata ? JSON.stringify(t.created_by_scan_metadata, null, 2) : ''}>
+                {t.created_by_scan_metadata?.model && (
+                  <span>🤖 {t.created_by_scan_metadata.model}</span>
+                )}
+                {t.created_by_scan_metadata?.depth && (
+                  <span>🔍 {t.created_by_scan_metadata.depth}{
+                    t.created_by_scan_metadata.passes && t.created_by_scan_metadata.passes_total
+                      ? ` (${t.created_by_scan_metadata.passes}/${t.created_by_scan_metadata.passes_total})` : ''
+                  }</span>
+                )}
+                {t.created_by_scan_metadata?.files_count != null && (
+                  <span>📄 {t.created_by_scan_metadata.files_count} files</span>
+                )}
+                {t.created_by_scan_metadata?._pass && (
+                  <span className="bg-gray-100 dark:bg-gray-700 px-1.5 py-0.5 rounded">
+                    {t.created_by_scan_metadata._pass}
+                  </span>
+                )}
+                {(t.scan_seen_count ?? 1) > 1 && (
+                  <span className="bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 px-1.5 py-0.5 rounded font-semibold">
+                    🔁 در {t.scan_seen_count} scan دیده شد
+                  </span>
+                )}
               </div>
             )}
             {t.last_summary && (
