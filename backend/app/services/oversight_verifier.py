@@ -586,23 +586,55 @@ async def verify_task(
     # 🔔 notification — silent skip اگر env تنظیم نشده باشد
     try:
         from .notification_service import notification_service
+        # نگاشت status → event دقیق
+        status_to_event = {
+            "done": "verify_done",
+            "partial": "verify_partial",
+            "not_done": "verify_not_done",
+            "regressed": "verify_regressed",
+            "needs_clarification": "verify_clarification",
+        }
+        event = status_to_event.get(task.verification_status, "verify_done")
         status_emoji = {
             "done": "✅", "partial": "🟡", "not_done": "❌",
             "regressed": "🔴", "needs_clarification": "🟠",
         }.get(task.verification_status, "ℹ️")
+
         msg_lines = [
-            f"{status_emoji} Verify {task.verification_status}: {task.title}",
-            f"📁 {task.project_full_name}",
-            f"🔖 {task.priority} • {task.type}",
+            f"{status_emoji} *Verify: {task.verification_status}*",
+            f"📌 _{task.title[:120]}_",
+            f"📁 `{task.project_full_name}`",
+            f"🔖 priority: *{task.priority}* • نوع: `{task.type}`",
         ]
-        if report.evidence and report.evidence.get("summary"):
-            msg_lines.append(f"\n{str(report.evidence['summary'])[:500]}")
-        event = "task_failed" if task.verification_status in ("regressed",) else "verify_done"
+        # streak اطلاعاتی
+        if task.confirmation_streak and streak_required > 1:
+            msg_lines.append(f"🔁 streak: {task.confirmation_streak}/{streak_required}")
+        # خلاصهٔ گزارش
+        if report.evidence:
+            summary = report.evidence.get("summary") or report.evidence.get("ai_summary")
+            if summary:
+                msg_lines.append(f"\n💬 {str(summary)[:400]}")
+        # PR link اگر موجود
+        extra_buttons = None
+        if task.applied_evidence:
+            pr_url = task.applied_evidence.get("pr_url")
+            if pr_url:
+                extra_buttons = [{"text": "🔀 دیدن PR", "url": pr_url}]
+        # priority برای gate و hashtag
+        priority = task.priority or "low"
+        # regressed همیشه بحرانی محسوب می‌شود
+        if task.verification_status == "regressed":
+            priority = "critical"
+
         await notification_service.notify_event(
             event,
             "\n".join(msg_lines),
             subject=f"Verify {task.verification_status}",
-            priority=task.priority or "low",
+            priority=priority,
+            project_name=task.project_full_name,
+            watched_id=task.watched_id,
+            extra_hashtags=[task.type] if task.type else None,
+            extra_buttons=extra_buttons,
         )
     except Exception as e:
         logger.debug(f"notification skipped: {e}")

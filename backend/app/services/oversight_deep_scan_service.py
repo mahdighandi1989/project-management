@@ -1023,6 +1023,20 @@ async def run_deep_scan(
         started_at=now_iso(),
     )
 
+    # 🔔 notification (scan_started)
+    try:
+        from .notification_service import notification_service
+        await notification_service.notify_event(
+            "scan_started",
+            f"🚀 *Deep Scan شروع شد*\n📁 `{watched.repo_full_name}`\n📊 *{len(enabled)}* pass فعال",
+            subject="Scan started",
+            priority="low",
+            project_name=watched.repo_full_name,
+            watched_id=watched_id,
+        )
+    except Exception as _e:
+        logger.debug(f"scan_started notification skipped: {_e}")
+
     token = get_github_token()
     if not token:
         write_progress(watched_id, status="error", message="توکن GitHub تنظیم نشده")
@@ -1547,19 +1561,40 @@ async def run_deep_scan(
             from .notification_service import notification_service
             watched_obj = next((w for w in service.watched_projects if w.id == watched_id), None)
             repo_name = watched_obj.repo_full_name if watched_obj else watched_id
-            msg = (
-                f"🔬 Deep Scan تمام شد\n"
-                f"📁 {repo_name}\n"
-                f"📊 {passes_done} pass • {len(unique)} یافته • "
-                f"{len(created_tasks)} تسک ساخته شد"
-                + (f"\n🚨 {critical_count} مورد critical" if critical_count else "")
-            )
-            priority = "high" if critical_count > 0 else ("medium" if len(created_tasks) > 0 else "low")
+
+            # 1) همیشه scan_done را بفرست (با خلاصه)
+            msg_lines = [
+                f"🔬 *Deep Scan کامل شد*",
+                f"📁 `{repo_name}`",
+                f"📊 *{passes_done}* pass اجرا شد",
+                f"📑 *{len(all_files)}* فایل بررسی شد",
+                f"🔎 *{len(unique)}* یافتهٔ منحصربه‌فرد",
+                f"📝 *{len(created_tasks)}* تسک جدید ساخته شد",
+            ]
+            if critical_count:
+                msg_lines.append(f"🚨 *{critical_count}* مورد critical")
+            done_priority = "high" if critical_count > 0 else ("medium" if len(created_tasks) > 0 else "low")
             await notification_service.notify_event(
-                "scan_done", msg,
+                "scan_done", "\n".join(msg_lines),
                 subject="Deep Scan completed",
-                priority=priority,
+                priority=done_priority,
+                project_name=repo_name,
+                watched_id=watched_id,
             )
+
+            # 2) اگر یافتهٔ critical داشت، یک پیام جداگانه با priority بالا
+            if critical_count > 0:
+                crit_msg = (
+                    f"🚨 *{critical_count} مورد critical* در اسکن `{repo_name}` پیدا شد!\n"
+                    f"به پنل تسک‌ها مراجعه کنید."
+                )
+                await notification_service.notify_event(
+                    "scan_critical_found", crit_msg,
+                    subject=f"🚨 {critical_count} critical finding",
+                    priority="critical",
+                    project_name=repo_name,
+                    watched_id=watched_id,
+                )
         except Exception as e:
             logger.debug(f"scan notification skipped: {e}")
 
