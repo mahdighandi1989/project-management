@@ -1738,10 +1738,15 @@ export default function OversightPage() {
                 </button>
               </div>
             ) : (
-              watched.map((w) => (
+              watched.map((w) => {
+                const wTaskCount = tasks.filter(t => t.watched_id === w.id).length;
+                const wReportCount = reports.filter(r => r.watched_id === w.id).length;
+                return (
                 <WatchedCard
                   key={w.id}
                   w={w}
+                  taskCount={wTaskCount}
+                  reportCount={wReportCount}
                   onChange={(u) => updateWatched(w.id, u)}
                   onRemove={() => removeWatched(w.id, w.repo_full_name)}
                   onScan={() => scanProject(w.id)}
@@ -1763,7 +1768,8 @@ export default function OversightPage() {
                   }}
                   onOpenCodex={() => openCodex(w.id)}
                 />
-              ))
+                );
+              })
             )}
           </div>
         ) : tab === 'repos' ? (
@@ -2779,6 +2785,8 @@ function Section({ title, items }: { title: string; items: string[] }) {
 
 function WatchedCard({
   w,
+  taskCount,
+  reportCount,
   onChange,
   onRemove,
   onScan,
@@ -2790,6 +2798,8 @@ function WatchedCard({
   onOpenCodex,
 }: {
   w: Watched;
+  taskCount: number;
+  reportCount: number;
   onChange: (updates: Partial<Watched>) => void;
   onRemove: () => void;
   onScan: () => void;
@@ -3177,10 +3187,15 @@ function WatchedCard({
         </button>
         <button
           onClick={onRunNow}
-          title="اجرای تسک‌های pending موجود (تسک جدید نمی‌سازد) — برای وقتی که قبلاً scan انجام شده"
-          className="px-3 py-1.5 bg-blue-500 text-white rounded text-sm hover:bg-blue-600"
+          disabled={taskCount === 0}
+          title={
+            taskCount === 0
+              ? 'هیچ تسکی برای این پروژه وجود ندارد — ابتدا Deep Scan یا اسکن سریع بزنید یا یک ایده ثبت کنید'
+              : `اجرای فوری ${taskCount} تسک pending موجود (تسک جدید نمی‌سازد) — برای وقتی که قبلاً تسک ساخته‌اید`
+          }
+          className="px-3 py-1.5 bg-blue-500 text-white rounded text-sm hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          ▶ بررسی فوری
+          ▶ بررسی فوری{taskCount > 0 ? ` (${taskCount})` : ''}
         </button>
         <button
           onClick={onWriteIdea}
@@ -3198,15 +3213,17 @@ function WatchedCard({
         </button>
         <button
           onClick={onViewTasks}
+          title={`${taskCount} تسک برای این پروژه — کلیک: تب «تسک‌ها» با فیلتر همین پروژه`}
           className="px-3 py-1.5 bg-gray-200 dark:bg-gray-700 dark:text-white rounded text-sm hover:bg-gray-300"
         >
-          📋 تسک‌ها
+          📋 تسک‌ها ({taskCount})
         </button>
         <button
           onClick={onViewReports}
+          title={`${reportCount} گزارش verify برای این پروژه — کلیک: تب «گزارش‌ها» با فیلتر همین پروژه`}
           className="px-3 py-1.5 bg-gray-200 dark:bg-gray-700 dark:text-white rounded text-sm hover:bg-gray-300"
         >
-          📊 گزارش‌ها
+          📊 گزارش‌ها ({reportCount})
         </button>
         <button
           onClick={onRemove}
