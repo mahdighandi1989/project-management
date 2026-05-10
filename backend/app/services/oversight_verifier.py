@@ -139,6 +139,122 @@ async def _fetch_repo_tree(
         return []
 
 
+def _extract_relevant_chunks(
+    content: str,
+    keywords: List[str],
+    lines_around: int = 60,
+    max_chunks: int = 8,
+    max_total_chars: int = 12000,
+) -> str:
+    """برای فایل‌های بزرگ (مثل page.tsx 4000+ خط)، فقط chunk‌های مرتبط
+    با keywords را extract می‌کند به‌جای فقط N کاراکتر اول.
+
+    رویکرد:
+    1. فایل را به خط تقسیم کن
+    2. خطوطی که حداقل یک keyword (case-insensitive) دارند → "hit lines"
+    3. حول هر hit line، lines_around خط بالا/پایین بگیر (chunk)
+    4. chunk‌های مجاور را merge کن
+    5. حداکثر max_chunks chunk با مهم‌ترین hits برگردان
+    """
+    if not content or not keywords:
+        return content[:max_total_chars] if content else ""
+
+    lines = content.split("\n")
+    if len(lines) < 200:
+        # فایل کوچک — کل content برگردان
+        return content[:max_total_chars]
+
+    keywords_lower = [k.lower() for k in keywords if k and len(k) >= 3]
+    if not keywords_lower:
+        return content[:max_total_chars]
+
+    # خطوط hit
+    hit_lines: List[int] = []
+    for i, line in enumerate(lines):
+        line_lower = line.lower()
+        if any(kw in line_lower for kw in keywords_lower):
+            hit_lines.append(i)
+
+    if not hit_lines:
+        # هیچ hit ی پیدا نشد — اول و وسط فایل را برگردان
+        first_part = "\n".join(lines[:200])
+        middle_start = max(0, len(lines) // 2 - 100)
+        middle_part = "\n".join(lines[middle_start:middle_start + 200])
+        out = f"{first_part}\n\n... [skipped {len(lines) - 400} lines] ...\n\n{middle_part}"
+        return out[:max_total_chars]
+
+    # ساخت ranges (start, end) و merge کردن مجاورها
+    ranges: List[List[int]] = []
+    for h in hit_lines:
+        s = max(0, h - lines_around)
+        e = min(len(lines), h + lines_around)
+        if ranges and s <= ranges[-1][1] + 5:
+            # merge با range قبلی
+            ranges[-1][1] = max(ranges[-1][1], e)
+        else:
+            ranges.append([s, e])
+
+    # محدود به max_chunks مهم‌ترین (بر اساس تعداد hit‌ها در range)
+    if len(ranges) > max_chunks:
+        ranges_with_count: List[tuple] = []
+        for r in ranges:
+            count = sum(1 for h in hit_lines if r[0] <= h < r[1])
+            ranges_with_count.append((count, r))
+        ranges_with_count.sort(key=lambda x: -x[0])
+        ranges = [r for _, r in ranges_with_count[:max_chunks]]
+        ranges.sort()
+
+    # build خروجی با line numbers
+    out_parts: List[str] = []
+    total = 0
+    last_end = 0
+    for r in ranges:
+        s, e = r
+        if last_end and s > last_end:
+            skipped = s - last_end
+            out_parts.append(f"\n... [پرش {skipped} خط] ...\n")
+        chunk_lines = []
+        for i in range(s, e):
+            chunk_lines.append(f"{i+1:5d} | {lines[i]}")
+        chunk_text = "\n".join(chunk_lines)
+        if total + len(chunk_text) > max_total_chars:
+            chunk_text = chunk_text[: max_total_chars - total]
+            out_parts.append(chunk_text)
+            break
+        out_parts.append(chunk_text)
+        total += len(chunk_text)
+        last_end = e
+
+    return "\n".join(out_parts)
+
+
+def _build_keywords_from_acs(acceptance_criteria: List[str], task_prompt: str = "") -> List[str]:
+    """استخراج کلمات کلیدی از معیارهای پذیرش (فارسی + انگلیسی) برای جستجو در فایل‌ها.
+    این کلمات کلیدی برای chunk extraction استفاده می‌شوند تا فقط بخش‌های مرتبط
+    فایل‌های بزرگ به verifier داده شود.
+    """
+    import re
+    text = " ".join(acceptance_criteria) + " " + (task_prompt or "")
+    keywords: set = set()
+    # کلمات کلیدی انگلیسی (CamelCase + snake_case طولانی)
+    for m in re.findall(r"\b[A-Z][a-zA-Z0-9]{3,}\b", text):
+        keywords.add(m)
+    for m in re.findall(r"\b[a-z][a-z0-9_]{4,}\b", text):
+        if "_" in m or len(m) > 6:
+            keywords.add(m)
+    # کلمات کلیدی فارسی (3+ کاراکتر فارسی)
+    for m in re.findall(r"[؀-ۿ]{4,}", text):
+        keywords.add(m)
+    # حذف stopwords معمول
+    stopwords = {
+        "function", "class", "import", "export", "return", "const",
+        "است", "این", "آن", "های", "هایی", "می‌شود", "شده", "باشد",
+        "برای", "وجود", "ندارد", "دارد", "کاربر", "سیستم", "بتواند",
+    }
+    keywords = {k for k in keywords if k.lower() not in stopwords}
+    return sorted(keywords, key=lambda x: -len(x))[:20]
+
+
 def _extract_keywords_from_prompt(prompt: str, max_keywords: int = 5) -> List[str]:
     """استخراج کلیدواژه‌های کلاس/تابع از prompt (CamelCase + snake_case طولانی)."""
     import re
@@ -458,6 +574,7 @@ async def verify_task(
     # prompt ذکر شده‌اند، ببین در کجاهای repo استفاده می‌شوند. این کمک می‌کند
     # verifier حتی اگر فایل صریح نباشد، فایل‌های متن‌به‌متن مرتبط را پیدا کند.
     keyword_search: Dict[str, List[str]] = {}
+    keywords: List[str] = []
     if token and repo_full_name and "/" in repo_full_name:
         try:
             keywords = _extract_keywords_from_prompt(task.prompt or "", max_keywords=5)
@@ -467,6 +584,10 @@ async def verify_task(
                 )
         except Exception as e:
             logger.debug(f"verify: code search failed: {e}")
+
+    # 🆕 کلمات کلیدی برای chunk extraction — هم AC و هم prompt
+    # این کلمات برای برش هوشمند فایل‌های بزرگ (مثل page.tsx 4000+ خط) به‌کار می‌روند
+    chunk_keywords = _build_keywords_from_acs(acceptance_criteria, task.prompt or "")
 
     # 3.7) 🆕 UI/frontend file injection — اگر AC یا prompt شامل کلمات
     # frontend-related باشد (UI، component، دکمه، page، نمایش، فرانت‌اند، ...)
@@ -548,12 +669,24 @@ async def verify_task(
             else:
                 files_blob_parts.append(f"=== {p} ===\n[فایل یافت نشد]")
         else:
-            files_blob_parts.append(f"=== {p} ===\n{c[:8000]}")
-    # محتوای فایل‌های هم‌ارز را هم اضافه کن
+            # 🆕 chunk extraction هوشمند — اگر فایل بزرگ است (>10000 char)،
+            # فقط بخش‌های مرتبط با کلمات کلیدی AC را بگیر، نه فقط N char اول
+            if len(c) > 10000 and chunk_keywords:
+                chunk = _extract_relevant_chunks(c, chunk_keywords, lines_around=60, max_total_chars=12000)
+                files_blob_parts.append(
+                    f"=== {p} ({len(c.splitlines())} line file — chunk‌های مرتبط با AC) ===\n{chunk}"
+                )
+            else:
+                files_blob_parts.append(f"=== {p} ===\n{c[:8000]}")
+    # محتوای فایل‌های هم‌ارز را هم اضافه کن (با chunk extraction برای فایل‌های بزرگ)
     for sp in extra_files_to_fetch[:10]:
         c = file_contents.get(sp)
         if c is not None:
-            files_blob_parts.append(f"=== {sp} (فایل هم‌ارز) ===\n{c[:8000]}")
+            if len(c) > 10000 and chunk_keywords:
+                chunk = _extract_relevant_chunks(c, chunk_keywords, lines_around=60, max_total_chars=10000)
+                files_blob_parts.append(f"=== {sp} (هم‌ارز — chunk مرتبط) ===\n{chunk}")
+            else:
+                files_blob_parts.append(f"=== {sp} (فایل هم‌ارز) ===\n{c[:8000]}")
     # فایل‌های کشف‌شده با code search برای keywords مهم
     code_search_files: List[str] = []
     for kw, paths in keyword_search.items():
@@ -574,14 +707,21 @@ async def verify_task(
         except Exception as e:
             logger.debug(f"verify: fetch code-search files failed: {e}")
     # 🆕 فایل‌های frontend که خودکار اضافه شده‌اند (وقتی AC مربوط به UI است)
+    # 🚨 برای page.tsx اصلی (که می‌تواند 4000+ خط باشد)، حتماً chunk extraction استفاده کنیم
     for fe_path in auto_frontend_files:
         if fe_path in target_files or fe_path in extra_files_to_fetch:
             continue
         c = file_contents.get(fe_path)
         if c is not None:
-            files_blob_parts.append(
-                f"=== {fe_path} (UI file — auto-added چون AC مربوط به فرانت‌اند است) ===\n{c[:6000]}"
-            )
+            if len(c) > 10000 and chunk_keywords:
+                chunk = _extract_relevant_chunks(c, chunk_keywords, lines_around=80, max_chunks=10, max_total_chars=15000)
+                files_blob_parts.append(
+                    f"=== {fe_path} (UI file — chunk‌های مرتبط با AC از {len(c.splitlines())} خط) ===\n{chunk}"
+                )
+            else:
+                files_blob_parts.append(
+                    f"=== {fe_path} (UI file — auto-added چون AC مربوط به فرانت‌اند است) ===\n{c[:8000]}"
+                )
     files_blob = "\n\n".join(files_blob_parts) or "(فایل هدفی مشخص نیست — بر اساس کل پرامپت بررسی کن)"
 
     # خلاصهٔ ساختار repo برای دید کلی AI
@@ -615,6 +755,21 @@ async def verify_task(
 - **الگوی endpoint اختصاصی vs همگانی**: اگر پرامپت گفته «endpoint `/projects/{id}/ideas` بساز» ولی پروژه از `/oversight/tasks` با field `watched_id` (یا معادل project_id) استفاده می‌کند که **همان کار** را می‌کند، **done** است. تخصیص دقیق path مهم نیست؛ توانایی ثبت ایده با اتصال به پروژه مهم است.
 - **قبل از گفتن "فایل/کلاس X وجود ندارد"**: حتماً repo tree (که در ادامه می‌آید) را اسکن کن. به دنبال اسامی similar (با substring، token overlap، یا روی نقش مشترک) بگرد. اگر هر سرویسی با نقش مشابه (executor, verifier, scheduler, validator, ...) موجود است، این بخش done است.
 - **هرگز** صرفاً به این دلیل که نام دقیقاً همان چیزی نیست که پرامپت اولیه گفته، not_done نگو. پرامپت اولیه ممکن است نام‌گذاری ideal را پیشنهاد داده باشد، ولی تیم ممکن است معماری متفاوتی انتخاب کرده باشد. **رفتار = done، نه نام**.
+
+# 🔬 روش بررسی (بسیار مهم — قبل از تصمیم بخوان)
+**به محتوای chunk‌ها اعتماد کن، نه به پرامپت اولیه یا نام فایل/کلاس.**
+
+برای هر AC این مراحل را انجام بده:
+1. کلمات کلیدی AC (مثل «دکمه کپی»، «فرم ثبت»، «archive»، «webhook») را در chunk‌های فایل‌ها جستجو کن.
+2. اگر در chunk‌ها (که خطوط مرتبط با همین کلمات‌اند) **هر نشانه‌ای** (متن دکمه، نام تابع، JSX، endpoint route، …) یافت کردی که این AC را برآورده می‌کند، آن AC **done** است.
+3. **توجه**: chunk‌ها شامل فقط بخش‌های مرتبط فایل‌های بزرگ‌اند — پس اگر یک کلمه در chunk هست، یعنی فایل واقعاً آن قابلیت را دارد. خود **حضور** آن chunk دلیل کافی است.
+4. اگر هیچ chunk مرتبط برنگشت **و** آن کلمات کلیدی هیچ‌جا در tree یا code search نیست، آنگاه not_done.
+
+**مثال واقعی**:
+- AC: «قابلیت کپی پرامپت در UI پیاده‌سازی شده»
+- اگر در chunk‌های `page.tsx` متن «📋 کپی پرامپت» یا `onCopyPrompt` یا `navigator.clipboard.writeText` پیدا کردی → **done**
+- اگر AC: «فرم ثبت ایده» و chunk‌ها `<textarea`, `setIdea`, `generatePrompt` دارند → **done** (حتی بدون فایل `IdeaForm.tsx`)
+- اگر AC: «archive خودکار done‌ها» و chunk‌ها `archived`, `auto-archive`, `setArchived` دارند → **done**
 - **اگر کاربر دستی تغییر داد** ولی نتیجه به acceptance criteria رسید → **done**.
 - **اگر AI نسخهٔ متفاوت ولی قابل قبول‌تر نوشت** (مثلاً استفاده از pattern مدرن‌تر، error handling بهتر، یا decomposition متفاوت) → **done**.
 - فقط زمانی **not_done** بگو که AC ها واقعاً (از نظر رفتاری) برآورده نشده‌اند یا کد رفتار غلط دارد.
