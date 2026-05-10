@@ -139,6 +139,119 @@ async def _fetch_repo_tree(
         return []
 
 
+def _evaluate_acs_against_files(
+    acceptance_criteria: List[str],
+    file_contents: Dict[str, Optional[str]],
+    repo_tree: List[str],
+) -> List[Dict[str, Any]]:
+    """شواهد ماشینی per-AC: برای هر AC، تعداد hit کلمات کلیدی در هر فایل.
+    این یک baseline deterministic به AI verifier می‌دهد — AI نمی‌تواند ادعا
+    کند فایل وجود ندارد یا قابلیت پیاده نشده، اگر hit‌ها واقعی هستند.
+
+    خروجی per AC:
+    {
+      "ac": str,                              # متن AC (truncated)
+      "keywords": [str],                      # کلمات کلیدی استخراجی
+      "hits_in_files": {file: hit_count},     # فایل‌هایی که hit دارند
+      "hits_in_tree": [str],                  # فایل‌هایی در tree با اسم مرتبط
+      "likely_done": bool,                    # heuristic: hit_count >= 2
+      "verdict_hint": str,                    # راهنما برای AI
+    }
+    """
+    out: List[Dict[str, Any]] = []
+    for ac in acceptance_criteria:
+        ac_keywords = _build_keywords_from_acs([ac])
+        hits_in_files: Dict[str, int] = {}
+        matched_keywords_per_file: Dict[str, List[str]] = {}
+        # شمارش hit در محتوای فایل‌ها
+        for file_path, content in file_contents.items():
+            if not content:
+                continue
+            content_lower = content.lower()
+            file_hit_count = 0
+            file_matched: List[str] = []
+            for kw in ac_keywords:
+                kw_lower = kw.lower()
+                if kw_lower in content_lower:
+                    file_hit_count += content_lower.count(kw_lower)
+                    file_matched.append(kw)
+            if file_hit_count > 0:
+                hits_in_files[file_path] = file_hit_count
+                matched_keywords_per_file[file_path] = file_matched[:5]
+        # جستجوی نام فایل‌های مرتبط در tree
+        hits_in_tree: List[str] = []
+        for kw in ac_keywords[:8]:
+            kw_lower = kw.lower()
+            for tree_path in repo_tree:
+                tp_lower = tree_path.lower()
+                if kw_lower in tp_lower and tree_path not in hits_in_tree:
+                    hits_in_tree.append(tree_path)
+                    if len(hits_in_tree) >= 8:
+                        break
+            if len(hits_in_tree) >= 8:
+                break
+
+        total_hits = sum(hits_in_files.values())
+        likely_done = total_hits >= 2 or len(hits_in_files) >= 2 or len(hits_in_tree) >= 2
+
+        verdict_hint = ""
+        if likely_done:
+            top_files = sorted(hits_in_files.items(), key=lambda x: -x[1])[:3]
+            top_str = ", ".join(f"{f}({n})" for f, n in top_files)
+            verdict_hint = (
+                f"احتمالاً DONE — {total_hits} hit در {len(hits_in_files)} فایل ({top_str}). "
+                f"chunks در ادامه را بررسی کن — اگر کد مرتبط دیدی، done بنویس."
+            )
+        elif hits_in_tree:
+            verdict_hint = (
+                f"احتمال DONE — اسم {len(hits_in_tree)} فایل با کلمات AC match دارد ({', '.join(hits_in_tree[:3])}). "
+                f"اگر content این فایل‌ها در chunks موجود است، بررسی کن."
+            )
+        else:
+            verdict_hint = (
+                f"احتمال NOT_DONE — هیچ فایلی hit نداشت و هیچ نام فایلی match نکرد. "
+                f"کلمات کلیدی AC: {', '.join(ac_keywords[:8])}"
+            )
+
+        out.append({
+            "ac": ac[:200],
+            "keywords": ac_keywords[:8],
+            "hits_in_files": hits_in_files,
+            "matched_keywords_per_file": matched_keywords_per_file,
+            "hits_in_tree": hits_in_tree,
+            "likely_done": likely_done,
+            "verdict_hint": verdict_hint,
+        })
+    return out
+
+
+def _format_machine_evidence_for_prompt(machine_evidence: List[Dict[str, Any]]) -> str:
+    """قالب‌بندی شواهد ماشینی برای تزریق به verify_prompt."""
+    if not machine_evidence:
+        return ""
+    lines = ["## 🤖 شواهد ماشینی per-AC (deterministic — این را اول بخوان)\n"]
+    lines.append(
+        "این تحلیل توسط کد ما (نه AI) انجام شده — کلمات کلیدی هر AC را در محتوای فایل‌ها\n"
+        "و در ساختار repo جستجو کرده‌ایم. **اگر hit وجود دارد، پیش‌فرض done است**.\n"
+        "تو فقط با شواهد قطعی کد می‌توانی not_done بگویی.\n"
+    )
+    for i, m in enumerate(machine_evidence, 1):
+        lines.append(f"\n### AC {i}: {m['ac'][:150]}")
+        lines.append(f"- کلمات کلیدی AC: `{', '.join(m['keywords'])}`")
+        if m["hits_in_files"]:
+            top = sorted(m["hits_in_files"].items(), key=lambda x: -x[1])[:5]
+            lines.append("- 📊 hit در فایل‌ها:")
+            for f, n in top:
+                kws = m["matched_keywords_per_file"].get(f, [])
+                lines.append(f"  - `{f}` → **{n} hit** (کلمات: {', '.join(kws)})")
+        else:
+            lines.append("- 📊 hit در فایل‌ها: هیچ")
+        if m["hits_in_tree"]:
+            lines.append(f"- 📁 فایل‌های با نام match: `{', '.join(m['hits_in_tree'][:5])}`")
+        lines.append(f"- 🤖 hint: **{m['verdict_hint']}**")
+    return "\n".join(lines)
+
+
 def _extract_relevant_chunks(
     content: str,
     keywords: List[str],
@@ -739,6 +852,14 @@ async def verify_task(
         f"- {c['sha']} ({c['date'][:10]}) {c['message']}" for c in recent_commits[:10]
     ) or "(کامیتی یافت نشد)"
 
+    # 🤖 شواهد ماشینی per-AC — قبل از فرستادن به AI، خود ما کلمات AC را در
+    # فایل‌ها grep می‌کنیم. این به AI hint قاطع می‌دهد که AC کدام در کجا
+    # احتمالاً پیاده شده — و جلوگیری از not_done کاذب.
+    machine_evidence = _evaluate_acs_against_files(
+        acceptance_criteria, file_contents, repo_tree
+    )
+    machine_evidence_blob = _format_machine_evidence_for_prompt(machine_evidence)
+
     user_goal = (watched.user_notes if watched else "") or ""
 
     ac_lines = "\n".join(f"- {c}" for c in acceptance_criteria)
@@ -757,13 +878,31 @@ async def verify_task(
 - **هرگز** صرفاً به این دلیل که نام دقیقاً همان چیزی نیست که پرامپت اولیه گفته، not_done نگو. پرامپت اولیه ممکن است نام‌گذاری ideal را پیشنهاد داده باشد، ولی تیم ممکن است معماری متفاوتی انتخاب کرده باشد. **رفتار = done، نه نام**.
 
 # 🔬 روش بررسی (بسیار مهم — قبل از تصمیم بخوان)
-**به محتوای chunk‌ها اعتماد کن، نه به پرامپت اولیه یا نام فایل/کلاس.**
+**ترتیب اعتماد: 🤖 شواهد ماشینی (بالاترین) > chunk‌های فایل > tree > پرامپت اولیه**
 
-برای هر AC این مراحل را انجام بده:
-1. کلمات کلیدی AC (مثل «دکمه کپی»، «فرم ثبت»، «archive»، «webhook») را در chunk‌های فایل‌ها جستجو کن.
-2. اگر در chunk‌ها (که خطوط مرتبط با همین کلمات‌اند) **هر نشانه‌ای** (متن دکمه، نام تابع، JSX، endpoint route، …) یافت کردی که این AC را برآورده می‌کند، آن AC **done** است.
-3. **توجه**: chunk‌ها شامل فقط بخش‌های مرتبط فایل‌های بزرگ‌اند — پس اگر یک کلمه در chunk هست، یعنی فایل واقعاً آن قابلیت را دارد. خود **حضور** آن chunk دلیل کافی است.
-4. اگر هیچ chunk مرتبط برنگشت **و** آن کلمات کلیدی هیچ‌جا در tree یا code search نیست، آنگاه not_done.
+🚨 **قانون طلایی**: اگر «🤖 شواهد ماشینی» (بخش بعدی این پرامپت) برای یک AC
+نشان دهد hit‌هایی در فایل‌ها وجود دارد، **پیش‌فرض همان AC done است**. تو
+فقط در صورتی می‌توانی not_done بگویی که با خواندن chunk‌ها مطمئن شوی کد
+موجود آن AC را برآورده نمی‌کند (نه اینکه نام دقیق نمی‌بینی، بلکه کد رفتار
+متفاوتی دارد).
+
+برای هر AC این مراحل را به ترتیب انجام بده:
+1. **اول**: نگاه کن به «🤖 شواهد ماشینی» — اگر `verdict_hint = "احتمالاً DONE"`
+   با hit‌های قابل توجه (≥2)، **done** بنویس مگر اینکه دلیل قوی برای not_done
+   داشته باشی.
+2. **دوم**: chunk‌های مربوطه را بخوان — اگر متن یا کد مرتبط یافت کردی
+   (متن دکمه، نام تابع، JSX، endpoint، …)، **done** را تأیید کن.
+3. **سوم**: اگر هم hit صفر بود و هم در tree نام مرتبط نبود، آنگاه not_done.
+
+❌ **هرگز** این بهانه‌ها برای not_done قابل قبول نیستند:
+- "فایل با نام دقیق X.py وجود ندارد" (نام مهم نیست — رفتار مهم است)
+- "این کد در فایل دیگری است" (مهم نیست کجاست — مهم وجود دارد یا نه)
+- "ساختار با پرامپت اولیه فرق دارد" (پرامپت اولیه فقط پیشنهاد بود)
+- "پیاده‌سازی متفاوت از انتظار است" (اگر AC را برآورده می‌کند، done است)
+
+✅ **only valid not_done**: کد در هیچ‌جای repo وجود ندارد و هیچ نشانه‌ای
+از آن قابلیت در فایل‌ها/tree/code search نیست. حداقل ۲ بار chunks را
+دوباره بررسی کن قبل از گفتن not_done.
 
 **مثال واقعی**:
 - AC: «قابلیت کپی پرامپت در UI پیاده‌سازی شده»
@@ -792,6 +931,8 @@ async def verify_task(
 
 # معیارهای پذیرش (Acceptance Criteria)
 {ac_lines}
+
+{machine_evidence_blob}
 
 # محتوای فعلی فایل‌های مرتبط (از repository)
 {files_blob[:20000]}
