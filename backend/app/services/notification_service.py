@@ -167,6 +167,28 @@ EVENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "default_sound": False,
         "icon": "📊",
     },
+    # 🆕 (Creator) رویدادهای ساخت پروژه
+    "project_created": {
+        "label": "🚀 پروژهٔ جدید ساخته شد",
+        "help": "وقتی یک پروژه از طریق creator (وب یا ربات) ساخته و push می‌شود",
+        "default_enabled": True,
+        "default_sound": True,
+        "icon": "🚀",
+    },
+    "project_auto_watched": {
+        "label": "👁 پروژه خودکار تحت نظارت قرار گرفت",
+        "help": "وقتی یک پروژهٔ جدید به‌صورت خودکار به watched اضافه می‌شود",
+        "default_enabled": True,
+        "default_sound": False,
+        "icon": "👁",
+    },
+    "creator_failed": {
+        "label": "💥 خطا در ساخت پروژه",
+        "help": "اگر create_project یا push_to_github fail شد",
+        "default_enabled": True,
+        "default_sound": True,
+        "icon": "💥",
+    },
 }
 
 
@@ -189,6 +211,7 @@ def _build_default_prefs() -> Dict[str, Any]:
             "timezone": "Asia/Tehran",
             "include_recommendations": True,
             "include_top_findings": True,
+            "include_creator_section": True,
             "max_projects_in_report": 20,
             "last_sent_at": None,
             "last_sent_status": None,
@@ -589,6 +612,29 @@ def format_health_report_message(
         lines.append(f"   🤖 آخرین scan: `{depth}` · {last_scan_short}")
         lines.append("")  # خط خالی بین پروژه‌ها
 
+    # 🆕 (Creator) بخش پروژه‌های جدید
+    created_30d = summary.get("projects_created_last_30d", 0)
+    watched_30d = summary.get("projects_auto_watched_last_30d", 0)
+    recent_created = summary.get("recent_created_projects", []) or []
+    if created_30d > 0 or watched_30d > 0:
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+        lines.append("🚀 *پروژه‌های جدید (۳۰ روز اخیر):*")
+        lines.append(f"✅ ساخته‌شده: *{created_30d}*")
+        lines.append(f"👁 خودکار تحت نظارت: *{watched_30d}*")
+        if recent_created:
+            lines.append("\n📦 آخرین پروژه‌ها:")
+            for i, p in enumerate(recent_created, 1):
+                name_safe = _safe_md(p.get("name", ""))
+                source = p.get("source", "")
+                src_emoji = (
+                    "🚀" if "creator" in source
+                    else "📥" if source == "github_import"
+                    else "📌"
+                )
+                date_str = _to_jalali_date_str(p.get("created_at"))
+                lines.append(f"{i}. {src_emoji} `{name_safe}` ({source}) — {date_str}")
+        lines.append("")
+
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
     top_findings = summary.get("top_findings_global", []) or []
     if top_findings:
@@ -617,6 +663,8 @@ def format_health_report_message(
     ]
     if summary.get("total_critical", 0) > 0:
         hashtags.append(f"#{summary['total_critical']}_critical")
+    if summary.get("projects_created_last_30d", 0) > 0:
+        hashtags.append(f"#{summary['projects_created_last_30d']}_new_projects")
     lines.append(" ".join(hashtags))
 
     text = "\n".join(lines)
@@ -778,6 +826,13 @@ class NotificationService:
             summary = {**summary, "recommendations": []}
         if not daily_prefs.get("include_top_findings", True):
             summary = {**summary, "top_findings_global": []}
+        if not daily_prefs.get("include_creator_section", True):
+            summary = {
+                **summary,
+                "projects_created_last_30d": 0,
+                "projects_auto_watched_last_30d": 0,
+                "recent_created_projects": [],
+            }
 
         text, reply_markup = format_health_report_message(
             summary, app_base_url=prefs.get("app_base_url", "")
@@ -894,16 +949,26 @@ class NotificationService:
         if text in ("/new_task", "/new_idea"):
             return await self._start_new_task_flow(chat_id_str)
 
-        # ——— state-aware: اگر در phase awaiting_idea هستیم، text = idea ———
+        # 🆕 ——— /new_project و /create_project (Creator flow) ———
+        if text in ("/new_project", "/create_project"):
+            return await self._start_new_project_flow(chat_id_str)
+
+        # ——— state-aware ———
         state = _chat_state.get(chat_id_str)
         if state and state.get("phase") == "awaiting_idea":
             return await self._receive_idea_text(chat_id_str, state, text)
+        # 🆕 Creator phase handlers
+        if state and state.get("phase") in (
+            "creator_awaiting_name", "creator_awaiting_desc", "creator_awaiting_tech",
+        ):
+            return await self._handle_creator_phase(chat_id_str, state, text)
 
         if text in ("/start", "/help"):
             reply = (
                 "👋 *سلام!*\n\n"
                 "این ربات نوتیفیکیشن‌های سیستم نظارت پروژه است.\n\n"
                 "دستورات:\n"
+                "• /new\\_project یا /create\\_project — *🚀 ساخت پروژهٔ جدید* (از صفر، با push به GitHub)\n"
                 "• /new\\_task یا /new\\_idea — ثبت تسک جدید با انتخاب پروژه\n"
                 "• /menu — منوی دسترسی سریع\n"
                 "• /status — وضعیت نوتیفیکیشن\n"
@@ -933,6 +998,11 @@ class NotificationService:
                     [
                         {"text": "📊 گزارش‌ها", "url": f"{base}/oversight?tab=reports"},
                         {"text": "💡 ایده‌ها", "url": f"{base}/oversight?tab=ideas"},
+                    ],
+                    [
+                        # 🆕 (Creator) دکمهٔ ساخت پروژه
+                        {"text": "🚀 ساخت پروژه", "callback_data": "menu:new_project"},
+                        {"text": "🆕 تسک جدید", "callback_data": "menu:new_task"},
                     ],
                     [
                         {"text": "📦 مخازن", "url": f"{base}/oversight?tab=repos"},
@@ -1146,6 +1216,50 @@ class NotificationService:
                 chat_id_str, draft["watched_id"], draft["idea"],
             )
 
+        # 🆕 menu shortcuts
+        if data == "menu:new_project":
+            return await self._start_new_project_flow(chat_id_str)
+        if data == "menu:new_task":
+            return await self._start_new_task_flow(chat_id_str)
+
+        # 🆕 Creator callbacks
+        # creator_type:<value> — انتخاب نوع پروژه
+        if data.startswith("creator_type:"):
+            value = data.split(":", 1)[1]
+            state = _chat_state.get(chat_id_str)
+            if not state or state.get("phase") != "creator_awaiting_type":
+                await tg.send("⚠️ flow منقضی شده. /new\\_project بزنید.", silent=True)
+                return {"ok": True, "handled": "creator_type_expired"}
+            data_ = state.get("creator_data", {})
+            data_["project_type"] = value
+            state["creator_data"] = data_
+            state["phase"] = "creator_awaiting_tech"
+            state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+            await tg.send(
+                f"✅ نوع: `{value}`\n\n"
+                f"🔧 *تکنولوژی‌های دلخواه را وارد کن*\n"
+                f"(با کاما جدا کن، مثلاً: `pydantic, sqlite, jwt`)\n"
+                f"یا /skip برای پیش‌فرض",
+                silent=True,
+            )
+            return {"ok": True, "handled": "creator_type_ok"}
+
+        # creator_confirm:push:<token> یا creator_confirm:local:<token>
+        if data.startswith("creator_confirm:"):
+            parts = data.split(":", 2)
+            if len(parts) < 3:
+                await tg.send("⚠️ callback نامعتبر.", silent=True)
+                return {"ok": True, "handled": "creator_confirm_bad"}
+            mode = parts[1]  # 'push' یا 'local'
+            token = parts[2]
+            draft = _idea_drafts.get(token)
+            if not draft or "creator_data" not in draft:
+                await tg.send("⚠️ draft منقضی شده. /new\\_project بزنید.", silent=True)
+                return {"ok": True, "handled": "creator_draft_expired"}
+            del _idea_drafts[token]
+            push = (mode == "push")
+            return await self._execute_creator_flow(chat_id_str, draft, push_to_github=push)
+
         # ناشناخته
         await tg.send(f"❓ callback ناشناخته: `{data[:50]}`", silent=True)
         return {"ok": True, "handled": "unknown_callback"}
@@ -1217,6 +1331,287 @@ class NotificationService:
                 silent=False,
             )
             return {"ok": True, "handled": "task_create_failed", "error": str(e)}
+
+    # -----------------------------------------------------------------------
+    # 🆕 (Creator) /new_project flow — ساخت پروژه از تلگرام
+    # -----------------------------------------------------------------------
+
+    async def _start_new_project_flow(self, chat_id_str: str) -> Dict[str, Any]:
+        """مرحلهٔ ۱: شروع flow ساخت پروژه — پرسش نام."""
+        _chat_state[chat_id_str] = {
+            "phase": "creator_awaiting_name",
+            "creator_data": {},
+            "expires_at": _now_epoch() + _STATE_TTL_SECONDS,
+        }
+        tg = self._telegram()
+        await tg.send(
+            "🚀 *ساخت پروژهٔ جدید*\n\n"
+            "📝 *نام پروژه را وارد کن*\n"
+            "(انگلیسی، 3+ کاراکتر، شامل a-z A-Z 0-9 - _)\n\n"
+            "/cancel برای لغو",
+            silent=True,
+        )
+        return {"ok": True, "handled": "new_project_start"}
+
+    async def _handle_creator_phase(
+        self, chat_id_str: str, state: Dict[str, Any], text: str,
+    ) -> Dict[str, Any]:
+        """مدیریت مراحل text-based در flow creator."""
+        import re
+        tg = self._telegram()
+        phase = state.get("phase")
+        data = state.get("creator_data", {})
+
+        # phase 1: name
+        if phase == "creator_awaiting_name":
+            name = text.strip()
+            if not re.match(r"^[a-zA-Z][a-zA-Z0-9_-]{2,}$", name):
+                await tg.send(
+                    "⚠️ نام نامعتبر است. باید با حرف شروع شود و فقط a-z A-Z 0-9 - _ بپذیرد (3+ کاراکتر).\n"
+                    "دوباره وارد کن یا /cancel:",
+                    silent=True,
+                )
+                return {"ok": True, "handled": "name_invalid"}
+            data["name"] = name
+            state["phase"] = "creator_awaiting_desc"
+            state["creator_data"] = data
+            state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+            await tg.send(
+                f"✅ نام: `{name}`\n\n"
+                f"📋 *توضیح پروژه را وارد کن*\n"
+                f"(حداقل ۱۰ کاراکتر — چه کاری انجام می‌دهد):",
+                silent=True,
+            )
+            return {"ok": True, "handled": "name_ok"}
+
+        # phase 2: description
+        if phase == "creator_awaiting_desc":
+            desc = text.strip()
+            if len(desc) < 10:
+                await tg.send(
+                    "⚠️ توضیح خیلی کوتاه است. حداقل ۱۰ کاراکتر — جزئیات بیشتر بنویس:",
+                    silent=True,
+                )
+                return {"ok": True, "handled": "desc_too_short"}
+            data["description"] = desc
+            state["phase"] = "creator_awaiting_type"
+            state["creator_data"] = data
+            state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+            # ارسال inline keyboard برای انتخاب نوع
+            kb = self._render_project_type_picker()
+            await tg.send(
+                f"✅ توضیح ذخیره شد\n\n"
+                f"📁 *نوع پروژه را انتخاب کن:*",
+                silent=True,
+                reply_markup=kb,
+            )
+            return {"ok": True, "handled": "desc_ok"}
+
+        # phase 4: technologies
+        if phase == "creator_awaiting_tech":
+            if text.strip().lower() in ("/skip", "skip", "ندارم", "خیر"):
+                data["technologies"] = []
+            else:
+                techs = [t.strip() for t in text.split(",") if t.strip()]
+                data["technologies"] = techs[:10]  # max 10
+            state["creator_data"] = data
+            # توکن برای confirm
+            token = _short_token()
+            _idea_drafts[token] = {
+                "creator_data": data,
+                "expires_at": _now_epoch() + _STATE_TTL_SECONDS,
+            }
+            _chat_state.pop(chat_id_str, None)
+            # نمایش summary + دکمه‌های تأیید
+            tech_label = ", ".join(data.get("technologies") or []) or "(پیش‌فرض)"
+            summary = (
+                f"📋 *تأیید نهایی*\n\n"
+                f"📦 نام: `{data['name']}`\n"
+                f"📁 نوع: `{data['project_type']}`\n"
+                f"🔧 تکنولوژی: {tech_label}\n\n"
+                f"💡 توضیح:\n_{data['description'][:300]}_\n\n"
+                f"تأیید می‌کنی؟"
+            )
+            kb = {
+                "inline_keyboard": [
+                    [
+                        {"text": "✅ بساز + push به GitHub", "callback_data": f"creator_confirm:push:{token}"},
+                    ],
+                    [
+                        {"text": "📁 فقط محلی", "callback_data": f"creator_confirm:local:{token}"},
+                    ],
+                    [
+                        {"text": "❌ لغو", "callback_data": "flow:cancel"},
+                    ],
+                ]
+            }
+            await tg.send(summary, silent=True, reply_markup=kb)
+            return {"ok": True, "handled": "tech_ok"}
+
+        # ناشناخته
+        return {"ok": True, "handled": "creator_unknown_phase"}
+
+    def _render_project_type_picker(self) -> Dict[str, Any]:
+        """inline keyboard برای انتخاب نوع پروژه (۸ گزینه)."""
+        types = [
+            ("🐍 fastapi", "fastapi"),
+            ("⚛️ nextjs", "nextjs"),
+            ("⚛️ react", "react"),
+            ("🐍 flask", "flask"),
+            ("📦 node", "node"),
+            ("🐍 cli", "cli"),
+            ("🐍 python", "python"),
+            ("🤖 auto-detect", "auto"),
+        ]
+        rows = []
+        for i in range(0, len(types), 2):
+            row = []
+            for label, value in types[i:i + 2]:
+                row.append({"text": label, "callback_data": f"creator_type:{value}"})
+            rows.append(row)
+        rows.append([{"text": "❌ لغو", "callback_data": "flow:cancel"}])
+        return {"inline_keyboard": rows}
+
+    async def _execute_creator_flow(
+        self, chat_id_str: str, draft: Dict[str, Any], push_to_github: bool,
+    ) -> Dict[str, Any]:
+        """ساخت واقعی پروژه + push اختیاری + auto-watch + feedback."""
+        tg = self._telegram()
+        data = draft.get("creator_data", {})
+        name = data.get("name", "")
+        description = data.get("description", "")
+        project_type = data.get("project_type", "fastapi")
+        technologies = data.get("technologies", []) or []
+
+        # auto-detect خاص: project_type=="auto" → endpoint detect-type را call کن
+        if project_type == "auto":
+            try:
+                from ..api.routes.simple_projects import _detect_project_type
+                detected = await _detect_project_type(
+                    description=description,
+                    name=name,
+                    technologies=technologies,
+                )
+                project_type = (detected or {}).get("project_type") or "fastapi"
+            except Exception as _e:
+                logger.warning(f"auto-detect failed, fallback to fastapi: {_e}")
+                project_type = "fastapi"
+
+        await tg.send(
+            f"⏳ در حال ساخت پروژه `{name}` ...\n"
+            f"📁 نوع: `{project_type}`\n"
+            f"این فرآیند 1-3 دقیقه طول می‌کشد",
+            silent=True,
+        )
+
+        try:
+            from .simple_creator import get_simple_creator
+            from .ai_manager import get_ai_manager
+            creator = get_simple_creator()
+            ai_mgr = get_ai_manager()
+
+            # AI generator callable
+            async def _ai_gen(prompt: str) -> str:
+                try:
+                    result = await ai_mgr.generate(prompt=prompt, max_tokens=3000)
+                    if isinstance(result, dict):
+                        return result.get("content") or result.get("text") or ""
+                    return str(result or "")
+                except Exception as e:
+                    logger.warning(f"_ai_gen failed: {e}")
+                    return ""
+
+            project = await creator.create_project(
+                name=name,
+                description=description,
+                project_type=project_type,
+                technologies=technologies,
+                ai_generate=_ai_gen,
+            )
+            project_id = getattr(project, "id", None) or project.get("id") if isinstance(project, dict) else None
+            if not project_id:
+                raise RuntimeError("project.id خالی است")
+
+            # اگر push_to_github
+            if push_to_github:
+                from ..api.routes.simple_projects import push_to_github as _push_endpoint, PushToGitHubRequest
+                push_req = PushToGitHubRequest()
+                push_result = await _push_endpoint(project_id, push_req)
+                if not push_result.get("success"):
+                    raise RuntimeError(
+                        f"push failed: {push_result.get('message', 'unknown')}"
+                    )
+                full_name = push_result.get("full_name") or f"{push_result.get('owner')}/{push_result.get('repo')}"
+                repo_url = push_result.get("repo_url", "")
+                files_count = push_result.get("uploaded", 0)
+                watched_id = (push_result.get("auto_watched") or {}).get("id", "")
+            else:
+                full_name = name
+                repo_url = ""
+                files_count = len(getattr(project, "files", []) or [])
+                watched_id = ""
+
+            # ساخت inline_keyboard موفقیت
+            prefs = _read_prefs()
+            base = (prefs.get("app_base_url", "") or "").rstrip("/")
+            kb_rows = []
+            if repo_url:
+                kb_rows.append([{"text": "👁 GitHub repo", "url": repo_url}])
+            if base:
+                kb_rows.append([
+                    {"text": "🏠 مرکز نظارت", "url": f"{base}/oversight"},
+                    {"text": "📋 تسک‌ها", "url": f"{base}/oversight?tab=tasks"},
+                ])
+            kb = {"inline_keyboard": kb_rows} if kb_rows else None
+
+            tech_label = ", ".join(technologies) or "(پیش‌فرض)"
+            status_text = (
+                "✓ خودکار به مرکز نظارت اضافه شد\n"
+                "✓ autonomy: auto (scan خودکار)\n"
+                "✓ execution: manual (apply با کلیک شما)\n"
+                "✓ scan_depth: deep (تمام 12 pass)\n"
+                "✓ بازه scan: 168 ساعت (هفتگی)"
+            ) if push_to_github else "📁 پروژه فقط محلی است (push نشد)"
+
+            await tg.send(
+                f"✅ *پروژه با موفقیت ساخته شد*\n\n"
+                f"📦 نام: `{full_name}`\n"
+                + (f"🔗 GitHub: {repo_url}\n" if repo_url else "")
+                + f"📁 نوع: `{project_type}`\n"
+                f"🔧 تکنولوژی: {tech_label}\n"
+                f"📄 فایل‌های ساخته‌شده: *{files_count}*\n\n"
+                f"💡 *کارکرد:*\n_{description[:300]}_\n\n"
+                f"👁 *وضعیت در مرکز نظارت:*\n{status_text}\n\n"
+                f"#project_created #{project_type} #{name.replace('-', '_').replace(' ', '_')}",
+                silent=False,
+                reply_markup=kb,
+            )
+            return {"ok": True, "handled": "creator_done", "project_id": project_id}
+        except Exception as e:
+            logger.exception(f"creator flow failed: {e}")
+            err_msg = str(e)[:300]
+            await tg.send(
+                f"❌ *خطا در ساخت پروژه*\n\n"
+                f"📦 نام: `{name}`\n"
+                f"🔍 خطا: `{err_msg}`\n\n"
+                f"احتمالاً GitHub token تنظیم نشده یا AI fail شد. "
+                f"از پنل وب امتحان کنید: /settings",
+                silent=False,
+            )
+            # event creator_failed
+            try:
+                await self.notify_event(
+                    "creator_failed",
+                    f"💥 *creator flow از Telegram fail شد*\n"
+                    f"📦 نام: `{name}`\n"
+                    f"❌ خطا: `{err_msg}`",
+                    subject="Creator failed",
+                    priority="high",
+                    project_name=name,
+                )
+            except Exception:
+                pass
+            return {"ok": True, "handled": "creator_failed", "error": err_msg}
 
 
 notification_service = NotificationService()
