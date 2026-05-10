@@ -143,7 +143,7 @@ interface Task {
   // 🆕 (P1) metadata scan که این task را ساخته
   created_by_scan_metadata?: {
     model?: string;
-    models_list?: string[];
+    models_used_list?: string[];
     depth?: string;
     passes?: number;
     passes_total?: number;

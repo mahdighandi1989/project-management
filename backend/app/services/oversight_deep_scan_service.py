@@ -1643,7 +1643,8 @@ async def run_deep_scan(
                 # 🆕 (P1) ضبط metadata scan که این task را ساخته
                 task_scan_metadata = {
                     "model": model_id or (model_ids[0] if model_ids else "default"),
-                    "models_list": list(model_ids) if model_ids else ([model_id] if model_id else []),
+                    # 🔧 standardized نام (یکسان با last_scan_metadata)
+                    "models_used_list": list(model_ids) if model_ids else ([model_id] if model_id else []),
                     "depth": getattr(watched, "scan_depth", "deep"),
                     "passes": passes_done,
                     "passes_total": len(PASSES),
@@ -1784,7 +1785,7 @@ async def run_deep_scan(
         # 🔔 notification — silent skip اگر env تنظیم نشده باشد
         try:
             from .notification_service import notification_service
-            watched_obj = next((w for w in service.watched_projects if w.id == watched_id), None)
+            watched_obj = next((w for w in service.watched if w.id == watched_id), None)
             repo_name = watched_obj.repo_full_name if watched_obj else watched_id
 
             # 1) همیشه scan_done را بفرست (با خلاصه + metadata)
