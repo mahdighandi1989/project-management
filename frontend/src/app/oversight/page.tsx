@@ -67,6 +67,8 @@ interface Watched {
   max_auto_loop_rounds?: number;
   // 🆕 (P1) مدل‌های auto-scan
   selected_models?: string[];
+  // 🆕 (Creator) منبع auto-add
+  auto_added_source?: 'creator_via_web' | 'creator_via_telegram' | 'github_import' | 'manual_api' | string | null;
   // 🆕 (P4) خلاصهٔ آخرین scan
   last_scan_metadata?: {
     model_used?: string;
@@ -3146,6 +3148,27 @@ function WatchedCard({
             {w.language && (
               <span className="text-xs px-1.5 py-0.5 bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 rounded">
                 {w.language}
+              </span>
+            )}
+            {/* 🆕 (Creator) badge منبع auto-add */}
+            {w.auto_added_source && (
+              <span
+                className={`text-xs px-1.5 py-0.5 rounded ${
+                  w.auto_added_source.startsWith('creator')
+                    ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300'
+                    : w.auto_added_source === 'github_import'
+                    ? 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300'
+                    : 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200'
+                }`}
+                title={`source: ${w.auto_added_source}`}
+              >
+                {w.auto_added_source === 'creator_via_telegram'
+                  ? '🤖🚀 از ربات'
+                  : w.auto_added_source === 'creator_via_web'
+                  ? '🚀 از Creator'
+                  : w.auto_added_source === 'github_import'
+                  ? '📥 از Import'
+                  : '📌 auto'}
               </span>
             )}
             <span

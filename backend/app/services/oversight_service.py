@@ -186,6 +186,10 @@ class WatchedProject:
     # files_analyzed_count, findings_count, tasks_created, duplicates_skipped,
     # critical_count, scan_id, completed_at, pass_breakdown
     last_scan_metadata: Optional[Dict[str, Any]] = None
+    # 🆕 (Creator) منبع auto-add: 'creator_via_web' | 'creator_via_telegram' |
+    # 'github_import' | 'manual_api' | None
+    # برای نمایش badge در UI WatchedCard و audit trail
+    auto_added_source: Optional[str] = None
     # 🆕 (auto-loop) ping-pong scheduler-driven:
     # اگر فعال، پس از verify=partial scheduler خودکار:
     #   1. status تسک به pending برمی‌گردد
@@ -815,6 +819,8 @@ class OversightService:
             if w.repo_full_name == repo:
                 return w.to_dict()
 
+        # 🆕 (Creator) defaults هوشمندانه: اگر کاربر صریحاً override نکرده،
+        # autonomy=auto و schedule فعال و execution=manual (apply با کلیک)
         w = WatchedProject(
             id=str(uuid.uuid4()),
             repo_full_name=repo,
@@ -824,10 +830,16 @@ class OversightService:
             language=payload.get("language") or "",
             user_notes=payload.get("user_notes", ""),
             tags=payload.get("tags", []) or [],
-            schedule_enabled=bool(payload.get("schedule_enabled", False)),
+            schedule_enabled=bool(payload.get("schedule_enabled", True)),
             interval_hours=float(payload.get("interval_hours", 24.0)),
-            autonomy_level=payload.get("autonomy_level", "manual"),
+            autonomy_level=payload.get("autonomy_level", "auto"),
             allow_push=bool(payload.get("allow_push", False)),
+            default_execution_mode=payload.get("default_execution_mode", "manual"),
+            verify_only_mode=bool(payload.get("verify_only_mode", False)),
+            scan_interval_hours=float(payload.get("scan_interval_hours", 168.0)),
+            scan_depth=payload.get("scan_depth", "deep"),
+            auto_continue_until_done=bool(payload.get("auto_continue_until_done", False)),
+            auto_added_source=payload.get("auto_added_source"),
         )
         if w.schedule_enabled:
             w.next_run_at = (
@@ -837,6 +849,103 @@ class OversightService:
             self.watched.append(w)
             self._save_watched()
         return w.to_dict()
+
+    async def auto_register_watched(
+        self,
+        repo_full_name: str,
+        *,
+        source: str = "unknown",
+        user_notes: str = "",
+        repo_url: str = "",
+        default_branch: str = "main",
+        language: str = "",
+        private: bool = False,
+    ) -> Dict[str, Any]:
+        """🆕 خودکار یک پروژهٔ GitHub را به watched اضافه می‌کند با defaults هوشمند.
+
+        پیش‌فرض‌ها:
+        - schedule_enabled = True
+        - autonomy_level = "auto" (scan خودکار)
+        - default_execution_mode = "manual" (apply با کلیک)
+        - verify_only_mode = False
+        - auto_continue_until_done = False (loop خاموش)
+        - scan_depth = "deep"
+        - scan_interval_hours = 168 (هفتگی)
+        - interval_hours = 24
+
+        اگر قبلاً موجود است:
+        - duplicate نمی‌سازد
+        - فقط source را در user_notes append می‌کند (به‌عنوان audit trail)
+        """
+        repo = (repo_full_name or "").strip()
+        if not repo or "/" not in repo:
+            raise ValueError("repo_full_name نامعتبر")
+
+        # duplicate check
+        for w in self.watched:
+            if w.repo_full_name == repo:
+                # append source به user_notes (audit trail)
+                if source and source not in (w.user_notes or ""):
+                    audit_note = f"\n[auto-re-registered from {source} at {now_iso()}]"
+                    async with self._lock:
+                        w.user_notes = (w.user_notes or "") + audit_note
+                        w.updated_at = now_iso()
+                        self._save_watched()
+                return {**w.to_dict(), "_was_duplicate": True}
+
+        # ساخت WatchedProject با defaults هوشمند
+        new_notes = user_notes or f"[auto-added from {source}]"
+        w = WatchedProject(
+            id=str(uuid.uuid4()),
+            repo_full_name=repo,
+            repo_url=repo_url or f"https://github.com/{repo}",
+            private=private,
+            default_branch=default_branch or "main",
+            language=language or "",
+            user_notes=new_notes,
+            tags=[],
+            schedule_enabled=True,
+            interval_hours=24.0,
+            autonomy_level="auto",
+            allow_push=False,
+            default_execution_mode="manual",
+            verify_only_mode=False,
+            scan_interval_hours=168.0,
+            scan_depth="deep",
+            auto_continue_until_done=False,
+            auto_added_source=source,
+        )
+        # next_run_at — فوراً اولین scan در یک ساعت آینده برنامه‌ریزی شود
+        now = datetime.now(timezone.utc)
+        w.next_run_at = (now + timedelta(hours=1)).isoformat()
+        w.next_scan_at = (now + timedelta(hours=1)).isoformat()
+
+        async with self._lock:
+            self.watched.append(w)
+            self._save_watched()
+        result = w.to_dict()
+        result["_was_duplicate"] = False
+
+        # notification (silent skip اگر env vars نباشد)
+        try:
+            from .notification_service import notification_service
+            await notification_service.notify_event(
+                "project_auto_watched",
+                f"👁 *پروژه خودکار تحت نظارت قرار گرفت*\n"
+                f"📁 `{repo}`\n"
+                f"🔗 source: `{source}`\n"
+                f"✓ autonomy: auto (scan خودکار)\n"
+                f"✓ execution: manual (apply با کلیک)\n"
+                f"✓ scan_depth: deep · بازه: 168h",
+                subject="Auto-watched",
+                priority="low",
+                project_name=repo,
+                watched_id=w.id,
+            )
+        except Exception as _e:
+            logger.debug(f"auto_register_watched notification skipped: {_e}")
+
+        return result
 
     async def update_watched(self, watched_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         async with self._lock:
@@ -866,6 +975,8 @@ class OversightService:
                         "max_auto_loop_rounds",
                         # 🆕 (P1) مدل‌های auto-scan
                         "selected_models",
+                        # 🆕 (Creator) منبع auto-add
+                        "auto_added_source",
                     }
                     for k, v in updates.items():
                         if k in allowed:
@@ -1372,6 +1483,39 @@ class OversightService:
         if not recommendations:
             recommendations.append("✅ همهٔ پروژه‌ها در وضعیت پایدار — هیچ اقدام فوری لازم نیست")
 
+        # 🆕 (Creator) آمار پروژه‌های ساخته‌شده و auto-watched در ۳۰ روز اخیر
+        projects_created_30d = 0
+        projects_auto_watched_30d = 0
+        recent_created: List[Dict[str, Any]] = []
+        for w in self.watched:
+            try:
+                if not w.auto_added_source:
+                    continue
+                # بررسی created_at در ۳۰ روز اخیر
+                created_iso = w.created_at
+                try:
+                    c_dt = datetime.fromisoformat(created_iso.replace("Z", "+00:00"))
+                    if c_dt.tzinfo is None:
+                        c_dt = c_dt.replace(tzinfo=timezone.utc)
+                except Exception:
+                    continue
+                if c_dt < cutoff_30d:
+                    continue
+                projects_auto_watched_30d += 1
+                if w.auto_added_source in ("creator_via_web", "creator_via_telegram"):
+                    projects_created_30d += 1
+                recent_created.append({
+                    "name": w.repo_full_name,
+                    "created_at": w.created_at,
+                    "source": w.auto_added_source,
+                    "watched_id": w.id,
+                })
+            except Exception:
+                continue
+        # sort by created_at desc
+        recent_created.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        recent_created = recent_created[:5]
+
         return {
             "generated_at": now.isoformat(),
             "watched_count": watched_count,
@@ -1384,6 +1528,10 @@ class OversightService:
             "projects": projects,
             "top_findings_global": top_findings_global,
             "recommendations": recommendations,
+            # 🆕 (Creator) آمار creator
+            "projects_created_last_30d": projects_created_30d,
+            "projects_auto_watched_last_30d": projects_auto_watched_30d,
+            "recent_created_projects": recent_created,
         }
 
     # ====================================================================

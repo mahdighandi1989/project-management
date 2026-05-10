@@ -751,15 +751,71 @@ async def push_to_github(project_id: str, request: Optional[PushToGitHubRequest]
             else:
                 failed.append({"path": file_path, "error": err})
 
+    full_name = f"{owner}/{desired_repo}"
+
+    # 🆕 (Creator) auto-register به watched + notification
+    auto_watched_info: Optional[Dict[str, Any]] = None
+    if len(failed) == 0:
+        try:
+            from ...services.oversight_service import get_oversight_service
+            from ...services.notification_service import notification_service
+            oversight = get_oversight_service()
+            auto_watched_info = await oversight.auto_register_watched(
+                full_name,
+                source="creator_via_web",
+                repo_url=repo_html_url,
+                default_branch=default_branch,
+                language=(project.project_type or ""),
+                private=bool(payload.private),
+                user_notes=(project.description or "")[:300],
+            )
+            # event project_created (موفقیت)
+            await notification_service.notify_event(
+                "project_created",
+                f"🚀 *پروژه با موفقیت ساخته شد*\n"
+                f"📦 نام: `{full_name}`\n"
+                f"🔗 GitHub: {repo_html_url}\n"
+                f"📁 نوع: `{project.project_type or '—'}`\n"
+                f"📄 فایل‌های push شده: *{len(uploaded)}*\n\n"
+                f"💡 *کارکرد:*\n{(project.description or '')[:400]}\n\n"
+                f"👁 خودکار به مرکز نظارت اضافه شد",
+                subject="Project created",
+                priority="medium",
+                project_name=full_name,
+                watched_id=(auto_watched_info or {}).get("id"),
+                extra_buttons=[{"text": "🔗 GitHub repo", "url": repo_html_url}],
+            )
+        except Exception as _e:
+            logger.warning(f"auto_register_watched/notification failed: {_e}")
+    else:
+        # event creator_failed (شکست در push)
+        try:
+            from ...services.notification_service import notification_service
+            await notification_service.notify_event(
+                "creator_failed",
+                f"💥 *خطا در push پروژه به GitHub*\n"
+                f"📦 پروژه: `{project.name}`\n"
+                f"❌ تعداد خطا: *{len(failed)}*\n"
+                f"✅ موفق: *{len(uploaded)}* فایل\n\n"
+                f"اولین خطا: `{(failed[0] or {}).get('error', '')[:200]}`",
+                subject="Creator push failed",
+                priority="high",
+                project_name=project.name,
+            )
+        except Exception:
+            pass
+
     return {
         "success": len(failed) == 0,
         "repo_url": repo_html_url,
         "owner": owner,
         "repo": desired_repo,
+        "full_name": full_name,
         "default_branch": default_branch,
         "uploaded": len(uploaded),
         "failed": failed,
         "private": payload.private,
+        "auto_watched": auto_watched_info,
         "message": (
             f"{len(uploaded)} فایل push شد"
             + (f" — {len(failed)} خطا" if failed else "")

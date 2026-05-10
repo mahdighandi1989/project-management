@@ -16,6 +16,7 @@ type DailyReportPrefs = {
   timezone: string;
   include_recommendations: boolean;
   include_top_findings: boolean;
+  include_creator_section: boolean;
   max_projects_in_report: number;
   last_sent_at: string | null;
   last_sent_status: string | null;
@@ -52,6 +53,17 @@ const EVENT_GROUPS: Array<{ title: string; icon: string; keys: string[] }> = [
     title: 'Task & Idea (تسک و ایده)',
     icon: '📌',
     keys: ['task_created', 'idea_created', 'pr_created'],
+  },
+  // 🆕 (Creator) گروه جدید
+  {
+    title: 'Creator (ساخت پروژه)',
+    icon: '🚀',
+    keys: ['project_created', 'project_auto_watched', 'creator_failed'],
+  },
+  {
+    title: 'گزارش',
+    icon: '📊',
+    keys: ['daily_report'],
   },
   {
     title: 'سیستم',
@@ -538,7 +550,7 @@ export default function NotificationSettingsPanel() {
       {(() => {
         const dr = status.prefs.daily_report || {
           enabled: true, hour_of_day: 8, timezone: 'Asia/Tehran',
-          include_recommendations: true, include_top_findings: true,
+          include_recommendations: true, include_top_findings: true, include_creator_section: true,
           max_projects_in_report: 20, last_sent_at: null, last_sent_status: null,
         };
         return (
@@ -626,6 +638,17 @@ export default function NotificationSettingsPanel() {
                   className="w-4 h-4"
                 />
                 <span className="dark:text-gray-100">🚨 برترین مشکلات (top 5)</span>
+              </label>
+              {/* 🆕 (Creator) checkbox include_creator_section */}
+              <label className="flex items-center gap-2 p-2 bg-gray-50 dark:bg-gray-700/30 rounded text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={dr.include_creator_section !== false}
+                  disabled={saving || !dr.enabled}
+                  onChange={(e) => updateDailyReport({ include_creator_section: e.target.checked })}
+                  className="w-4 h-4"
+                />
+                <span className="dark:text-gray-100">🚀 بخش پروژه‌های جدید (creator)</span>
               </label>
             </div>
 

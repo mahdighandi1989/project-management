@@ -156,6 +156,30 @@ async def import_repository(request: ImportRepoRequest):
         except Exception as e:
             result["auto_setup"] = {"success": False, "error": str(e)}
 
+        # 🆕 (Creator) auto-register به watched
+        try:
+            from ...services.oversight_service import get_oversight_service
+            oversight = get_oversight_service()
+            repo_full_name = result.get("full_name") or result.get("repo_full_name")
+            if not repo_full_name:
+                owner = result.get("owner") or ""
+                name = result.get("name") or ""
+                if owner and name:
+                    repo_full_name = f"{owner}/{name}"
+            if repo_full_name and "/" in repo_full_name:
+                auto_w = await oversight.auto_register_watched(
+                    repo_full_name,
+                    source="github_import",
+                    repo_url=result.get("url") or result.get("html_url", ""),
+                    default_branch=result.get("default_branch", "main"),
+                    language=result.get("language", ""),
+                    private=bool(result.get("private", False)),
+                    user_notes=(result.get("description") or "")[:300],
+                )
+                result["auto_watched"] = auto_w
+        except Exception as e:
+            result["auto_watched"] = {"success": False, "error": str(e)}
+
     return result
 
 
