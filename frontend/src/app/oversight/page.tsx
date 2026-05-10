@@ -54,6 +54,9 @@ interface Watched {
   // 🆕 (commit 2.3) عمق scan + criteria weights — مهاجرت از Health
   scan_depth?: 'quick' | 'standard' | 'deep' | 'thorough';
   scan_criteria_weights?: { security?: number; quality?: number; tests?: number; completeness?: number };
+  // 🆕 (auto-loop) ping-pong scheduler-driven
+  auto_continue_until_done?: boolean;
+  max_auto_loop_rounds?: number;
   last_run_at?: string | null;
   next_run_at?: string | null;
   last_scan_at?: string | null;
@@ -116,6 +119,7 @@ interface Task {
     raw_idea: string;
     model_id: string;
     generated_at: string;
+    source?: string;  // 'regenerate' | 'followup_round_N' | undefined (اولیه)
   }>;
   last_verification_report_id?: string | null;
 }
@@ -2811,16 +2815,36 @@ export default function OversightPage() {
                   </div>
                   {historyTask.prompt_history!.map((h, i) => (
                     <div key={i} className="border dark:border-gray-700 rounded-lg p-3 bg-gray-50 dark:bg-gray-900/30">
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="text-xs">
+                      <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+                        <div className="text-xs flex items-center gap-2 flex-wrap">
                           <span className="font-semibold dark:text-gray-200">نسخه #{i + 1}</span>
+                          {/* 🆕 نمایش source که این نسخه چطور ساخته شده */}
+                          {h.source ? (
+                            h.source.startsWith('followup_round_') ? (
+                              <span className="bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300 px-1.5 py-0.5 rounded text-[10px]">
+                                🔁 followup (دور {h.source.replace('followup_round_', '')})
+                              </span>
+                            ) : h.source === 'regenerate' ? (
+                              <span className="bg-fuchsia-100 text-fuchsia-700 dark:bg-fuchsia-900/40 dark:text-fuchsia-300 px-1.5 py-0.5 rounded text-[10px]">
+                                🔄 بازتولید دستی
+                              </span>
+                            ) : (
+                              <span className="bg-gray-200 dark:bg-gray-700 px-1.5 py-0.5 rounded text-[10px]">
+                                {h.source}
+                              </span>
+                            )
+                          ) : (
+                            <span className="bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 px-1.5 py-0.5 rounded text-[10px]">
+                              📝 پرامپت اولیه
+                            </span>
+                          )}
                           {h.generated_at && (
-                            <span className="text-gray-500 dark:text-gray-400 mr-2">
+                            <span className="text-gray-500 dark:text-gray-400">
                               {fmtDate(h.generated_at)}
                             </span>
                           )}
                           {h.model_id && (
-                            <span className="bg-gray-200 dark:bg-gray-700 px-1.5 py-0.5 rounded mr-2 text-[10px] font-mono">
+                            <span className="bg-gray-200 dark:bg-gray-700 px-1.5 py-0.5 rounded text-[10px] font-mono">
                               {h.model_id}
                             </span>
                           )}
@@ -3334,6 +3358,52 @@ function WatchedCard({
         )}
       </div>
 
+      {/* 🆕 (auto-loop) — ping-pong continuous: فقط اگر autonomy=auto و verify_only=false */}
+      {w.autonomy_level === 'auto' && !w.verify_only_mode && (
+        <div className="mb-3 p-3 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg">
+          <label className="flex items-start gap-2 cursor-pointer mb-2">
+            <input
+              type="checkbox"
+              checked={!!w.auto_continue_until_done}
+              onChange={(e) => onChange({ auto_continue_until_done: e.target.checked })}
+              className="mt-0.5 w-4 h-4"
+            />
+            <div className="flex-1">
+              <div className="text-sm font-semibold dark:text-purple-200">
+                🔁 ادامهٔ خودکار تا تکمیل (ping-pong)
+              </div>
+              <div className="text-xs text-gray-600 dark:text-gray-300 mt-1 leading-relaxed">
+                وقتی verify=partial شد، scheduler خودکار:
+                <br />۱. پرامپت ادامه (focused on remaining) را تولید می‌کند (و نسخهٔ قبلی به history)
+                <br />۲. apply می‌کند و کامیت می‌سازد
+                <br />۳. دوباره verify می‌کند
+                <br />تا verify=done یا max round برسد. شما فقط بعد notify می‌شوید.
+              </div>
+            </div>
+          </label>
+          {w.auto_continue_until_done && (
+            <label className="block text-xs mt-2 dark:text-gray-200">
+              <span>حداکثر تعداد دور (max rounds)</span>
+              <input
+                type="number"
+                min="1"
+                max="20"
+                defaultValue={w.max_auto_loop_rounds ?? 5}
+                onBlur={(e) => {
+                  const v = parseInt(e.target.value, 10) || 5;
+                  if (v !== (w.max_auto_loop_rounds ?? 5))
+                    onChange({ max_auto_loop_rounds: v });
+                }}
+                className="w-24 mr-2 p-1.5 border rounded dark:bg-gray-700 dark:text-white dark:border-gray-600"
+              />
+              <span className="text-gray-500 dark:text-gray-400">
+                (پیش‌فرض ۵ — برای جلوگیری از infinite loop)
+              </span>
+            </label>
+          )}
+        </div>
+      )}
+
       <div className="flex flex-col sm:flex-row gap-2 mb-3">
         <label className="flex items-center gap-2 p-2 bg-blue-50 dark:bg-blue-900/20 rounded text-xs flex-1">
           <input
@@ -3597,10 +3667,15 @@ function TasksPanel({
             {(t.prompt_history && t.prompt_history.length > 0) && (
               <button
                 onClick={() => onOpenHistory(t)}
-                title={`${t.prompt_history!.length} نسخهٔ قبلی — قابل rollback`}
-                className="px-3 py-1 bg-gray-200 dark:bg-gray-700 dark:text-white text-gray-700 rounded text-xs hover:bg-gray-300"
+                title={`${t.prompt_history!.length} نسخهٔ قبلی — شامل پرامپت‌های ادامه (followup) و بازتولید‌ها — قابل rollback`}
+                className={`px-3 py-1 rounded text-xs ${
+                  (t.followup_round || 0) > 0
+                    ? 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300 hover:bg-cyan-200'
+                    : 'bg-gray-200 dark:bg-gray-700 dark:text-white text-gray-700 hover:bg-gray-300'
+                }`}
               >
-                📜 ({t.prompt_history!.length})
+                📜 تاریخچه ({t.prompt_history!.length})
+                {(t.followup_round || 0) > 0 && <span className="mr-1">• 🔁{t.followup_round}</span>}
               </button>
             )}
             {t.execution_mode !== 'manual' ? (
