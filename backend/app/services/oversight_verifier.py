@@ -197,6 +197,55 @@ async def _github_code_search(
     return results
 
 
+def _recover_partial_json(response: str) -> Dict[str, Any]:
+    """تلاش برای استخراج فیلدهای اصلی از JSON ناقص/truncated.
+
+    Strategy: regex برای پیدا کردن آرایه‌های `done_parts`, `remaining_parts`,
+    `next_actions` و فیلدهای اسکالر `status`, `summary`, `confidence_score`
+    حتی اگر JSON کلی valid نباشد. برای مواردی که `criteria_results` در وسط
+    truncate شد ولی فیلدهای قبلی کامل تولید شده‌اند.
+    """
+    import re
+    out: Dict[str, Any] = {}
+    if not response:
+        return out
+
+    # status
+    m = re.search(r'"status"\s*:\s*"([^"]+)"', response)
+    if m:
+        out["status"] = m.group(1)
+
+    # summary (یک‌خطی، بدون \n داخلی)
+    m = re.search(r'"summary"\s*:\s*"((?:[^"\\]|\\.)*)"', response)
+    if m:
+        out["summary"] = m.group(1).replace('\\n', '\n').replace('\\"', '"')
+
+    # confidence_score
+    m = re.search(r'"confidence_score"\s*:\s*([0-9.]+)', response)
+    if m:
+        try:
+            out["confidence_score"] = float(m.group(1))
+        except Exception:
+            pass
+
+    # arrays of strings: done_parts, remaining_parts, next_actions
+    for key in ("done_parts", "remaining_parts", "next_actions"):
+        m = re.search(rf'"{key}"\s*:\s*\[([^\]]*)\]', response, re.DOTALL)
+        if m:
+            try:
+                # parse string items داخل array
+                items_blob = m.group(1)
+                items = re.findall(r'"((?:[^"\\]|\\.)*)"', items_blob)
+                out[key] = [
+                    s.replace('\\n', ' ').replace('\\"', '"').strip()
+                    for s in items if s.strip()
+                ]
+            except Exception:
+                pass
+
+    return out
+
+
 def format_done_remaining_for_message(report: Any, max_per_section: int = 5) -> str:
     """خروجی متن قابل خواندن از done_parts/remaining_parts/next_actions/confidence
     برای پیام Telegram/Email — با truncate و bullet."""
@@ -419,6 +468,49 @@ async def verify_task(
         except Exception as e:
             logger.debug(f"verify: code search failed: {e}")
 
+    # 3.7) 🆕 UI/frontend file injection — اگر AC یا prompt شامل کلمات
+    # frontend-related باشد (UI، component، دکمه، page، نمایش، فرانت‌اند، ...)
+    # حتماً فایل‌های اصلی frontend را به context اضافه کن، چون اغلب اوقات
+    # target_files فقط backend files بود ولی AC مربوط به UI است.
+    frontend_keywords = [
+        "ui", "component", "page", "tsx", "frontend", "فرانت", "فرانت‌اند",
+        "دکمه", "نمایش", "کپی", "panel", "view", "modal",
+    ]
+    prompt_lower = (task.prompt or "").lower() + " ".join(acceptance_criteria).lower()
+    needs_frontend = any(kw in prompt_lower for kw in frontend_keywords)
+    auto_frontend_files: List[str] = []
+    if needs_frontend and repo_tree:
+        # فایل‌های page.tsx اصلی + components را پیدا کن (محدود به ۵ فایل)
+        candidates = [
+            p for p in repo_tree
+            if (p.endswith("/page.tsx") or p.endswith("/page.jsx"))
+            or "components/" in p and (p.endswith(".tsx") or p.endswith(".jsx"))
+        ]
+        # اولویت: فایل‌هایی که نام prompt در path است
+        prompt_words = set()
+        for kw in keywords[:5] if 'keywords' in dir() and keywords else []:
+            prompt_words.add(kw.lower())
+        scored = []
+        for p in candidates:
+            score = 1
+            p_low = p.lower()
+            if "/oversight" in p_low or "oversight" in p_low:
+                score += 3
+            if any(w in p_low for w in prompt_words):
+                score += 2
+            scored.append((score, p))
+        scored.sort(key=lambda x: -x[0])
+        auto_frontend_files = [p for _, p in scored[:5]]
+        if auto_frontend_files and token:
+            try:
+                fe_contents = await _fetch_target_files(
+                    repo_full_name, auto_frontend_files, branch, token
+                )
+                for k, v in fe_contents.items():
+                    file_contents[k] = v
+            except Exception as e:
+                logger.debug(f"verify: fetch frontend files failed: {e}")
+
     # 4) ساخت پرامپت verifier — برای هر فایل یافت‌نشده، فایل‌های هم‌ارز را
     # از tree پیدا و محتوای آن‌ها را نیز fetch می‌کنیم
     fuzzy_resolved: Dict[str, List[str]] = {}  # missing_path -> similar_paths
@@ -481,6 +573,15 @@ async def verify_task(
                     )
         except Exception as e:
             logger.debug(f"verify: fetch code-search files failed: {e}")
+    # 🆕 فایل‌های frontend که خودکار اضافه شده‌اند (وقتی AC مربوط به UI است)
+    for fe_path in auto_frontend_files:
+        if fe_path in target_files or fe_path in extra_files_to_fetch:
+            continue
+        c = file_contents.get(fe_path)
+        if c is not None:
+            files_blob_parts.append(
+                f"=== {fe_path} (UI file — auto-added چون AC مربوط به فرانت‌اند است) ===\n{c[:6000]}"
+            )
     files_blob = "\n\n".join(files_blob_parts) or "(فایل هدفی مشخص نیست — بر اساس کل پرامپت بررسی کن)"
 
     # خلاصهٔ ساختار repo برای دید کلی AI
@@ -576,11 +677,11 @@ async def verify_task(
   می‌شود که AI خطا داشته — باید حتماً remaining_parts را پر کنی.
 - **آیتم‌های لیست‌ها فارسی باشند** (مگر نام فایل/کد).
 - **محدودیت طول حیاتی برای جلوگیری از truncation**:
-  - هر `evidence` در `criteria_results` حداکثر **120 کاراکتر** (مختصر بنویس).
-  - هر آیتم `done_parts`/`remaining_parts` حداکثر **150 کاراکتر**.
-  - `summary` حداکثر **300 کاراکتر**.
-  - اگر معیارها زیاد است (>5)، فقط ۵ مورد را در `criteria_results` بنویس و بقیه را در `done_parts`/`remaining_parts` ادغام کن.
-  - **خیلی مهم**: JSON باید کامل (با `}}` نهایی) برگردد. اگر مطمئن نیستی محتوا جا می‌شود، evidence‌ها را خلاصه‌تر کن.
+  - هر `evidence` در `criteria_results` حداکثر **80 کاراکتر** (فقط نام فایل/تابع کلیدی).
+  - هر آیتم `done_parts`/`remaining_parts` حداکثر **140 کاراکتر**.
+  - `summary` حداکثر **250 کاراکتر**.
+  - **`criteria_results` حداکثر ۳ مورد** — مهم‌ترین معیارها را انتخاب کن. تمام اطلاعات تفصیلی در `done_parts`/`remaining_parts` می‌آید (که شما محدودیت تعداد ندارید).
+  - **خیلی مهم**: JSON باید کامل (با `}}` نهایی) برگردد. اگر AC زیاد است (>5)، فقط ۳ تا را در `criteria_results` نمونه‌برداری کن و بقیه را در `done_parts`/`remaining_parts` بنویس.
 
 # خروجی فقط JSON (بدون code block markdown — فقط JSON خام)
 {{
@@ -597,13 +698,11 @@ async def verify_task(
 }}"""
 
     try:
-        # 🆕 max_tokens از 4500 به 7000 افزایش — تجربه نشان داد deepseek/gpt
-        # وقتی JSON پیچیده با چندین criteria_results دارد، خود JSON را
-        # «ظاهراً معتبر» با } می‌بندد ولی evidence هر criterion را در وسط
-        # cut می‌کند (چون به محدودیت توکن رسیده). این درست توسط endswith
-        # detection نمی‌شد چون response با } تمام می‌شد.
+        # 🆕 max_tokens از 7000 به 10000 افزایش — برای task‌هایی با ۱۰+ AC
+        # که حتی با محدودیت 80 کاراکتر هر evidence، JSON طولانی می‌شود.
+        # همراه با کاهش criteria_results به max 3 (در prompt)، باید کافی باشد.
         response = await service._ai_generate(
-            verify_prompt, model_id=model_id, max_tokens=7000, temperature=0.1
+            verify_prompt, model_id=model_id, max_tokens=10000, temperature=0.1
         )
         # detection بهبود یافته: اگر هر criterion.evidence به نظر cut شده
         # (مثلاً با کاما تمام نشده، با حرف غیر مرتبط تمام شده)، retry با
@@ -661,6 +760,30 @@ async def verify_task(
         return {"task": task.to_dict(), "report": report.to_dict()}
 
     parsed = service._extract_json(response) or {}
+    # 🆕 partial JSON recovery — اگر کل parse fail کرد یا فیلدهای مهم ناقص است،
+    # تلاش کن آرایه‌های اصلی (done_parts, remaining_parts, next_actions, status,
+    # summary, confidence_score) را مستقیماً با regex extract کنی. این برای
+    # مواردی که JSON در criteria_results truncate شد ولی بقیه فیلدها در ابتدای
+    # JSON کامل تولید شده‌اند، ضروری است.
+    if not parsed or not parsed.get("status"):
+        try:
+            recovered = _recover_partial_json(response)
+            if recovered:
+                # merge: parsed مقدم است (اگر JSON کامل بود) ولی recovered fallback
+                for k, v in recovered.items():
+                    if k not in parsed or not parsed[k]:
+                        parsed[k] = v
+        except Exception as _e:
+            logger.debug(f"partial JSON recovery failed: {_e}")
+    # حتی اگر parsed وجود داشت، اگر criteria_results ناقص بود (item‌های incomplete)،
+    # آن آیتم‌ها را filter کن
+    if isinstance(parsed.get("criteria_results"), list):
+        parsed["criteria_results"] = [
+            cr for cr in parsed["criteria_results"]
+            if isinstance(cr, dict)
+            and cr.get("criterion")
+            and "met" in cr  # حداقل criterion + met باید باشد
+        ]
     status_val = parsed.get("status") or VERIFICATION_PARTIAL
     if status_val not in (
         VERIFICATION_DONE,
