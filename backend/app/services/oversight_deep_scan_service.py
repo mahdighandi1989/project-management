@@ -980,6 +980,56 @@ def _merge_similar_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, An
 
 
 # =====================================================================
+# 🆕 (P2) Cross-scan deduplication
+# =====================================================================
+
+def _find_existing_active_task(
+    service: Any,
+    watched_id: str,
+    finding: Dict[str, Any],
+    similarity_threshold: float = 0.8,
+) -> Optional[Any]:
+    """در tasks active موجود (همان watched، نه archived/done/cancelled)
+    دنبال match با finding بگرد. Jaccard >0.8 روی title.
+
+    اگر کاربر title را دستی edit کرده باشد، روی raw_idea finding
+    هم match می‌کنیم (به‌عنوان fallback).
+    """
+    try:
+        finding_title = (finding.get("title") or "").strip()
+        if not finding_title:
+            return None
+        finding_desc = (finding.get("description") or "")[:500]
+        candidates = [
+            t for t in service.tasks
+            if t.watched_id == watched_id
+            and t.status not in ("done", "cancelled")
+            and not getattr(t, "archived", False)
+            # تسک‌هایی که verify done شده‌اند هم match نشوند (الان active match)
+            and t.verification_status not in ("done",)
+        ]
+        for task in candidates:
+            # تطابق با title
+            sim_title = _title_similarity(finding_title, task.title)
+            if sim_title >= similarity_threshold:
+                return task
+            # fallback: تطابق با raw_idea (اگر کاربر title را edit کرده)
+            if task.raw_idea:
+                sim_raw = _title_similarity(finding_title, task.raw_idea)
+                if sim_raw >= similarity_threshold:
+                    return task
+            # fallback ۲: تطابق finding.description با task.raw_idea
+            if finding_desc and task.raw_idea:
+                sim_desc = _title_similarity(finding_desc[:200], task.raw_idea[:200])
+                if sim_desc >= similarity_threshold:
+                    return task
+        return None
+    except Exception as _e:
+        logger.debug(f"_find_existing_active_task failed: {_e}")
+        return None
+
+
+# =====================================================================
 # Main deep scan function
 # =====================================================================
 
@@ -1441,6 +1491,8 @@ async def run_deep_scan(
 
         # ساخت تسک با پرامپت قوی غنی‌شده
         created_tasks: List[Dict[str, Any]] = []
+        # 🆕 (P2) آمار dedup: کدام task‌های موجود با finding‌های جدید match کردند
+        duplicates_skipped: List[str] = []
         execution_mode_default = (watched.default_execution_mode or "manual")
         tech_context_default = (
             f"Stack: {', '.join(stacks)}." if stacks else ""
@@ -1555,6 +1607,26 @@ async def run_deep_scan(
                     scan_seen_count=1,
                     last_seen_in_scan_at=now_iso(),
                 )
+                # 🆕 (P2) Cross-scan dedup: قبل از append، بررسی کن آیا
+                # task مشابه active در همین watched وجود دارد
+                existing = _find_existing_active_task(service, watched.id, f)
+                if existing is not None:
+                    # تسک تکراری → فقط counter را بالا ببر و metadata به‌روز کن
+                    async with service._lock:
+                        existing.scan_seen_count = (
+                            getattr(existing, "scan_seen_count", 1) or 1
+                        ) + 1
+                        existing.last_seen_in_scan_at = now_iso()
+                        # شواهد جدید scan را به raw_idea append کن (با حد طول)
+                        new_evidence = (
+                            f"\n---\n[scan #{existing.scan_seen_count} at {now_iso()}]\n"
+                            f"{(f.get('description') or '')[:300]}"
+                        )
+                        if existing.raw_idea and len(existing.raw_idea) < 2000:
+                            existing.raw_idea = (existing.raw_idea + new_evidence)[:3000]
+                        existing.updated_at = now_iso()
+                    duplicates_skipped.append(existing.id)
+                    continue
                 async with service._lock:
                     service.tasks.append(t)
                 created_tasks.append(t.to_dict())
@@ -1640,6 +1712,11 @@ async def run_deep_scan(
                 f"🔎 *{len(unique)}* یافتهٔ منحصربه‌فرد",
                 f"📝 *{len(created_tasks)}* تسک جدید ساخته شد",
             ]
+            # 🆕 (P2) آمار dedup
+            if duplicates_skipped:
+                msg_lines.append(
+                    f"🔁 *{len(duplicates_skipped)}* تسک تکراری skip شد (موجود به‌روز شد)"
+                )
             if critical_count:
                 msg_lines.append(f"🚨 *{critical_count}* مورد critical")
             done_priority = "high" if critical_count > 0 else ("medium" if len(created_tasks) > 0 else "low")
@@ -1675,4 +1752,7 @@ async def run_deep_scan(
             "findings": len(unique),
             "tasks_created": len(created_tasks),
             "task_ids": [t["id"] for t in created_tasks],
+            # 🆕 (P2) آمار dedup
+            "duplicates_skipped": len(duplicates_skipped),
+            "duplicate_task_ids": list(duplicates_skipped),
         }
