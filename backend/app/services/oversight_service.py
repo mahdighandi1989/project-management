@@ -1077,6 +1077,316 @@ class OversightService:
             return task.to_dict()
 
     # ====================================================================
+    # 🆕 (Daily Report) محاسبه‌های گزارش دوره‌ای
+    # ====================================================================
+
+    async def compute_project_health_report(self, watched_id: str) -> Dict[str, Any]:
+        """گزارش سلامت کامل یک پروژه — برای استفاده در daily/global report.
+
+        خروجی شامل:
+        - health_score, security_score, completeness_score, standard_score (0-100)
+        - tasks breakdown (total, active, done, pending, by priority)
+        - top_critical_findings (تا ۳ تای اول)
+        - last_scan metadata
+        - attention_priority (0-100) و attention_label
+        """
+        from datetime import datetime, timezone, timedelta
+        watched = self._find_watched(watched_id)
+        if not watched:
+            return {
+                "watched_id": watched_id,
+                "project_full_name": "",
+                "error": "watched not found",
+            }
+
+        repo_name = watched.repo_full_name
+
+        # tasks مربوط به این watched
+        all_tasks = [t for t in self.tasks if t.watched_id == watched_id]
+        active_tasks = [
+            t for t in all_tasks
+            if t.status not in ("done", "cancelled")
+            and not getattr(t, "archived", False)
+            and t.verification_status not in ("done",)
+        ]
+        done_tasks = [t for t in all_tasks if t.verification_status == "done" or t.status == "done"]
+        pending_tasks = [t for t in active_tasks if t.status == "pending"]
+
+        # breakdown by priority (active tasks)
+        priority_breakdown = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+        for t in active_tasks:
+            p = (t.priority or "medium").lower()
+            if p in priority_breakdown:
+                priority_breakdown[p] += 1
+
+        # top_critical_findings — تا ۳ تای اول
+        critical_active = sorted(
+            [t for t in active_tasks if (t.priority or "").lower() == "critical"],
+            key=lambda t: -(getattr(t, "scan_seen_count", 1) or 1),
+        )[:3]
+        top_critical_findings = [
+            {
+                "title": (t.title or "")[:120],
+                "task_id": t.id,
+                "scan_seen_count": getattr(t, "scan_seen_count", 1) or 1,
+            }
+            for t in critical_active
+        ]
+
+        # scan metadata
+        last_scan_meta = getattr(watched, "last_scan_metadata", None) or {}
+        last_scan_at = last_scan_meta.get("completed_at") or watched.last_scan_at
+        last_scan_depth = last_scan_meta.get("scan_depth") or getattr(watched, "scan_depth", "deep")
+        scan_seen_top_count = max(
+            (getattr(t, "scan_seen_count", 1) or 1 for t in active_tasks),
+            default=1,
+        )
+
+        # ===== امتیازها =====
+        # health_score: ابتدا از last_scan_metadata، وگرنه از فرمول task-based
+        SEVERITY_PENALTY = {"critical": 25, "high": 12, "medium": 5, "low": 2}
+        if last_scan_meta.get("findings_count") is not None and last_scan_meta.get("critical_count") is not None:
+            # اگر scan داده‌ها داده، ترکیب: 100 - penalty * task_severity_sum
+            penalty = sum(
+                SEVERITY_PENALTY.get((t.priority or "medium").lower(), 5)
+                for t in active_tasks
+            )
+            health_score = max(0.0, min(100.0, 100.0 - penalty * 0.5))
+        else:
+            penalty = sum(
+                SEVERITY_PENALTY.get((t.priority or "medium").lower(), 5)
+                for t in active_tasks
+            )
+            health_score = max(0.0, min(100.0, 100.0 - penalty * 0.5))
+
+        # security_score: متمرکز روی tasks با _pass=security/security_deep
+        security_active = []
+        for t in active_tasks:
+            meta = getattr(t, "created_by_scan_metadata", None) or {}
+            ppass = meta.get("_pass", "")
+            if ppass in ("security", "security_deep"):
+                security_active.append(t)
+        if security_active:
+            sec_penalty = sum(
+                SEVERITY_PENALTY.get((t.priority or "medium").lower(), 5)
+                for t in security_active
+            )
+            security_score = max(0.0, min(100.0, 100.0 - sec_penalty))
+        else:
+            security_score = 95.0  # هیچ مشکل امنیتی شناسایی‌شده — خوش‌بین
+
+        # completeness_score
+        total_for_completeness = len(all_tasks)
+        if total_for_completeness > 0:
+            completeness_score = (len(done_tasks) / total_for_completeness) * 100.0
+        else:
+            completeness_score = 0.0
+
+        # standard_score: میانگین weighted health با criteria_weights
+        weights = getattr(watched, "scan_criteria_weights", None) or {
+            "security": 1.5, "quality": 1.0, "tests": 1.2, "completeness": 1.0,
+            "logical_alignment": 1.0, "functional_correctness": 1.5,
+        }
+        # ساده: weighted average از health/security/completeness
+        w_sec = float(weights.get("security", 1.5))
+        w_qual = float(weights.get("quality", 1.0))
+        w_comp = float(weights.get("completeness", 1.0))
+        total_w = w_sec + w_qual + w_comp
+        standard_score = (
+            (security_score * w_sec) + (health_score * w_qual) + (completeness_score * w_comp)
+        ) / max(total_w, 0.001)
+
+        # attention_priority
+        avg_seen = (
+            sum(getattr(t, "scan_seen_count", 1) or 1 for t in active_tasks) / len(active_tasks)
+            if active_tasks else 0
+        )
+        # age_factor: اگر آخرین scan قدیمی است، attention بالاتر
+        age_factor = 0.0
+        if last_scan_at:
+            try:
+                last_dt = datetime.fromisoformat(last_scan_at.replace("Z", "+00:00"))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                age_days = (datetime.now(timezone.utc) - last_dt).total_seconds() / 86400
+                age_factor = min(20.0, age_days * 1.0)
+            except Exception:
+                age_factor = 0.0
+
+        attention_priority = min(100.0, (
+            priority_breakdown["critical"] * 30
+            + priority_breakdown["high"] * 15
+            + (avg_seen - 1) * 10
+            + age_factor
+        ))
+        if attention_priority >= 80:
+            attention_label = "CRITICAL"
+        elif attention_priority >= 60:
+            attention_label = "HIGH"
+        elif attention_priority >= 40:
+            attention_label = "MEDIUM"
+        else:
+            attention_label = "LOW"
+
+        return {
+            "watched_id": watched_id,
+            "project_full_name": repo_name,
+            "health_score": round(health_score, 1),
+            "security_score": round(security_score, 1),
+            "completeness_score": round(completeness_score, 1),
+            "standard_score": round(standard_score, 1),
+            "tasks_total": len(all_tasks),
+            "tasks_active": len(active_tasks),
+            "tasks_done": len(done_tasks),
+            "tasks_pending": len(pending_tasks),
+            "tasks_priority_breakdown": priority_breakdown,
+            "top_critical_findings": top_critical_findings,
+            "last_scan_at": last_scan_at,
+            "last_scan_depth": last_scan_depth,
+            "scan_seen_top_count": scan_seen_top_count,
+            "attention_priority": round(attention_priority, 1),
+            "attention_label": attention_label,
+        }
+
+    async def compute_global_health_summary(self) -> Dict[str, Any]:
+        """خلاصهٔ کلی همهٔ پروژه‌های watched — برای daily report."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        cutoff_30d = now - timedelta(days=30)
+
+        # محاسبه per-project
+        projects: List[Dict[str, Any]] = []
+        for w in self.watched:
+            try:
+                rep = await self.compute_project_health_report(w.id)
+                if rep.get("error"):
+                    continue
+                projects.append(rep)
+            except Exception as e:
+                logger.warning(f"compute_project_health_report failed for {w.id}: {e}")
+
+        # sort by attention_priority desc
+        projects.sort(key=lambda p: -p.get("attention_priority", 0))
+
+        # global aggregates
+        watched_count = len(projects)
+        total_active = sum(p.get("tasks_active", 0) for p in projects)
+        total_critical = sum(
+            p.get("tasks_priority_breakdown", {}).get("critical", 0) for p in projects
+        )
+        total_high = sum(
+            p.get("tasks_priority_breakdown", {}).get("high", 0) for p in projects
+        )
+
+        # تعداد تسک‌های done در ۳۰ روز اخیر
+        total_done_last_30d = 0
+        for t in self.tasks:
+            if t.status != "done" and t.verification_status != "done":
+                continue
+            updated = t.updated_at or t.created_at
+            try:
+                u_dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+                if u_dt.tzinfo is None:
+                    u_dt = u_dt.replace(tzinfo=timezone.utc)
+                if u_dt >= cutoff_30d:
+                    total_done_last_30d += 1
+            except Exception:
+                continue
+
+        global_health_avg = (
+            sum(p.get("health_score", 0) for p in projects) / max(watched_count, 1)
+        ) if watched_count else 0.0
+        global_security_avg = (
+            sum(p.get("security_score", 0) for p in projects) / max(watched_count, 1)
+        ) if watched_count else 0.0
+
+        # top_findings_global — top 5 critical/high from all projects
+        all_findings: List[Dict[str, Any]] = []
+        for p in projects:
+            for cf in p.get("top_critical_findings", []):
+                all_findings.append({
+                    "project_full_name": p["project_full_name"],
+                    "title": cf["title"],
+                    "priority": "critical",
+                    "task_id": cf["task_id"],
+                    "scan_seen_count": cf["scan_seen_count"],
+                })
+        # add high priority active tasks too
+        for w in self.watched:
+            high_tasks = sorted(
+                [
+                    t for t in self.tasks
+                    if t.watched_id == w.id
+                    and (t.priority or "").lower() == "high"
+                    and t.status not in ("done", "cancelled")
+                    and not getattr(t, "archived", False)
+                    and t.verification_status not in ("done",)
+                ],
+                key=lambda t: -(getattr(t, "scan_seen_count", 1) or 1),
+            )[:2]
+            for t in high_tasks:
+                all_findings.append({
+                    "project_full_name": w.repo_full_name,
+                    "title": (t.title or "")[:120],
+                    "priority": "high",
+                    "task_id": t.id,
+                    "scan_seen_count": getattr(t, "scan_seen_count", 1) or 1,
+                })
+        # sort: critical first، سپس scan_seen_count desc
+        all_findings.sort(
+            key=lambda f: (
+                0 if f["priority"] == "critical" else 1,
+                -f.get("scan_seen_count", 1),
+            )
+        )
+        top_findings_global = all_findings[:5]
+
+        # توصیه‌های دینامیک
+        recommendations: List[str] = []
+        if total_critical > 0:
+            top_crit_proj = next(
+                (p for p in projects if p.get("tasks_priority_breakdown", {}).get("critical", 0) > 0),
+                None,
+            )
+            if top_crit_proj:
+                recommendations.append(
+                    f"ابتدا {top_crit_proj['tasks_priority_breakdown']['critical']} مورد critical در "
+                    f"`{top_crit_proj['project_full_name']}` را بررسی کنید"
+                )
+        # high streak
+        high_streak_count = sum(
+            1 for t in self.tasks
+            if (getattr(t, "scan_seen_count", 1) or 1) > 2
+            and t.status not in ("done", "cancelled")
+            and not getattr(t, "archived", False)
+        )
+        if high_streak_count > 0:
+            recommendations.append(
+                f"{high_streak_count} تسک با scan_seen >2 دارید — این‌ها در چندین scan متوالی شناسایی شده ولی هنوز انجام نشده‌اند"
+            )
+        # پروژه‌های CRITICAL attention
+        crit_projects = [p for p in projects if p.get("attention_label") == "CRITICAL"]
+        if crit_projects:
+            names = ", ".join(f"`{p['project_full_name']}`" for p in crit_projects[:3])
+            recommendations.append(f"پروژه‌های با attention=CRITICAL: {names}")
+        if not recommendations:
+            recommendations.append("✅ همهٔ پروژه‌ها در وضعیت پایدار — هیچ اقدام فوری لازم نیست")
+
+        return {
+            "generated_at": now.isoformat(),
+            "watched_count": watched_count,
+            "total_active_tasks": total_active,
+            "total_critical": total_critical,
+            "total_high": total_high,
+            "total_done_last_30d": total_done_last_30d,
+            "global_health_avg": round(global_health_avg, 1),
+            "global_security_avg": round(global_security_avg, 1),
+            "projects": projects,
+            "top_findings_global": top_findings_global,
+            "recommendations": recommendations,
+        }
+
+    # ====================================================================
     # Idea -> Strong Prompt
     # ====================================================================
 
@@ -2797,11 +3107,63 @@ class OversightService:
         async with self._lock:
             self._save_watched()
 
+        # ----- 4) Daily report (مستقل از scan/run/verify) -----
+        # هر بار tick، چک می‌کنیم آیا الان ساعت target است و امروز ارسال نشده
+        daily_sent = False
+        try:
+            from .notification_service import notification_service
+            prefs = notification_service.get_prefs()
+            daily = prefs.get("daily_report", {}) or {}
+            if daily.get("enabled", True):
+                tz_name = daily.get("timezone", "Asia/Tehran") or "Asia/Tehran"
+                target_hour = int(daily.get("hour_of_day", 8) or 8)
+                last_sent = daily.get("last_sent_at")
+                try:
+                    from zoneinfo import ZoneInfo
+                    local_now = datetime.now(ZoneInfo(tz_name))
+                except Exception:
+                    local_now = datetime.now()
+                is_target_hour = local_now.hour == target_hour
+                already_sent_today = False
+                if last_sent:
+                    try:
+                        last_dt = datetime.fromisoformat(last_sent)
+                        already_sent_today = last_dt.date() == local_now.date()
+                    except Exception:
+                        already_sent_today = False
+                if is_target_hour and not already_sent_today:
+                    try:
+                        summary = await self.compute_global_health_summary()
+                        results = await notification_service.send_daily_report(summary)
+                        ok = any(r.get("ok") for r in results) if results else False
+                        notification_service.update_prefs({
+                            "daily_report": {
+                                "last_sent_at": local_now.isoformat(),
+                                "last_sent_status": "ok" if ok else "no_channel_ready",
+                            }
+                        })
+                        daily_sent = True
+                        logger.info(f"daily_report sent: {ok}, channels={len(results)}")
+                    except Exception as e:
+                        logger.warning(f"daily_report failed: {e}")
+                        try:
+                            notification_service.update_prefs({
+                                "daily_report": {
+                                    "last_sent_at": local_now.isoformat(),
+                                    "last_sent_status": f"failed: {str(e)[:200]}",
+                                }
+                            })
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.debug(f"daily_report check skipped: {e}")
+
         return {
             "ran": ran,
             "ran_count": len(ran),
             "scanned": scanned,
             "scanned_count": len(scanned),
+            "daily_report_sent": daily_sent,
             "verified": verified,
             "verified_count": len(verified),
             "tick_at": now.isoformat(),
