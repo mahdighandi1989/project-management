@@ -957,11 +957,21 @@ class NotificationService:
         state = _chat_state.get(chat_id_str)
         if state and state.get("phase") == "awaiting_idea":
             return await self._receive_idea_text(chat_id_str, state, text)
-        # 🆕 Creator phase handlers
+        # 🆕 Creator phase handlers — text-based phases
         if state and state.get("phase") in (
             "creator_awaiting_name", "creator_awaiting_desc", "creator_awaiting_tech",
         ):
             return await self._handle_creator_phase(chat_id_str, state, text)
+        # 🆕 phase awaiting_type: کاربر باید دکمهٔ inline کلیک کند، نه متن
+        if state and state.get("phase") == "creator_awaiting_type":
+            tg = self._telegram()
+            kb = self._render_project_type_picker()
+            await tg.send(
+                "⚠️ لطفاً نوع پروژه را از دکمه‌های زیر انتخاب کن (نه متن):",
+                silent=True,
+                reply_markup=kb,
+            )
+            return {"ok": True, "handled": "type_needs_button"}
 
         if text in ("/start", "/help"):
             reply = (
@@ -1487,10 +1497,10 @@ class NotificationService:
         if project_type == "auto":
             try:
                 from ..api.routes.simple_projects import _detect_project_type
+                # signature: _detect_project_type(description, name="", model_ids=None)
                 detected = await _detect_project_type(
                     description=description,
                     name=name,
-                    technologies=technologies,
                 )
                 project_type = (detected or {}).get("project_type") or "fastapi"
             except Exception as _e:
@@ -1506,20 +1516,9 @@ class NotificationService:
 
         try:
             from .simple_creator import get_simple_creator
-            from .ai_manager import get_ai_manager
+            # استفاده از helper موجود در route (که signature درست را می‌داند)
+            from ..api.routes.simple_projects import ai_generate as _ai_gen
             creator = get_simple_creator()
-            ai_mgr = get_ai_manager()
-
-            # AI generator callable
-            async def _ai_gen(prompt: str) -> str:
-                try:
-                    result = await ai_mgr.generate(prompt=prompt, max_tokens=3000)
-                    if isinstance(result, dict):
-                        return result.get("content") or result.get("text") or ""
-                    return str(result or "")
-                except Exception as e:
-                    logger.warning(f"_ai_gen failed: {e}")
-                    return ""
 
             project = await creator.create_project(
                 name=name,
@@ -1528,9 +1527,15 @@ class NotificationService:
                 technologies=technologies,
                 ai_generate=_ai_gen,
             )
-            project_id = getattr(project, "id", None) or project.get("id") if isinstance(project, dict) else None
+            # Project یک dataclass است (با .id)؛ ولی dict هم پشتیبانی کنیم
+            if hasattr(project, "id"):
+                project_id = project.id
+            elif isinstance(project, dict):
+                project_id = project.get("id")
+            else:
+                project_id = None
             if not project_id:
-                raise RuntimeError("project.id خالی است")
+                raise RuntimeError("project.id خالی است — create_project خروجی نامعتبر")
 
             # اگر push_to_github
             if push_to_github:
