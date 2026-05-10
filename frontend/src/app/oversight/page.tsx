@@ -2331,7 +2331,7 @@ export default function OversightPage() {
         ) : tab === 'health' ? (
           // ─── 🏥 تب سلامت پروژه (مهاجرت از Health analysis) ───
           <div>
-            <div className="flex items-center justify-between mb-4 pb-3 border-b dark:border-gray-700 flex-wrap gap-3">
+            <div className="flex items-center justify-between mb-3 pb-3 border-b dark:border-gray-700 flex-wrap gap-3">
               <div>
                 <h2 className="text-lg font-bold text-gray-800 dark:text-gray-100 flex items-center gap-2">
                   <span>🏥</span> سلامت پروژه
@@ -2340,7 +2340,7 @@ export default function OversightPage() {
                   متریک‌های سلامت کد، امنیت، پوشش تست و chain status — بر اساس آخرین Deep Scan
                 </p>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <select
                   value={selectedHealthWatchedId}
                   onChange={e => setSelectedHealthWatchedId(e.target.value)}
@@ -2352,8 +2352,22 @@ export default function OversightPage() {
                   ))}
                 </select>
                 <button
+                  onClick={() => selectedHealthWatchedId && startDeepScan(selectedHealthWatchedId)}
+                  disabled={!selectedHealthWatchedId || selectedModelIds.length === 0 || !!deepScanWatchedId}
+                  title={
+                    !selectedHealthWatchedId ? 'ابتدا پروژه انتخاب کنید' :
+                    selectedModelIds.length === 0 ? 'حداقل یک مدل از تنظیمات بالا انتخاب کنید' :
+                    deepScanWatchedId ? 'اسکن دیگری در حال اجرا است' :
+                    'اجرای Deep Scan کامل: امنیت، پوشش تست، chain validation و نقشهٔ سلامت فایل‌ها'
+                  }
+                  className="px-3 py-1.5 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 text-sm font-semibold"
+                >
+                  🔬 اجرای Deep Scan
+                </button>
+                <button
                   onClick={() => loadHealthData(selectedHealthWatchedId)}
                   disabled={!selectedHealthWatchedId || healthLoading}
+                  title="بازخوانی داده‌ها از آخرین Deep Scan ذخیره‌شده (بدون اجرای اسکن جدید)"
                   className="px-3 py-1.5 bg-cyan-600 text-white rounded-lg hover:bg-cyan-700 disabled:opacity-50 text-sm"
                 >
                   {healthLoading ? '⏳' : '🔄'} بروزرسانی
@@ -2361,18 +2375,59 @@ export default function OversightPage() {
               </div>
             </div>
 
+            {/* راهنمای کوتاه — همیشه قابل مشاهده وقتی پروژه‌ای انتخاب نشده یا داده‌ای نیست */}
+            {(!selectedHealthWatchedId || (!healthSummaries && !healthChainStatus && !healthLoading && !healthError)) && (
+              <div className="mb-4 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg text-sm text-gray-700 dark:text-gray-200">
+                <div className="font-semibold mb-2 text-blue-800 dark:text-blue-200">📖 این تب چه می‌کند؟</div>
+                <ul className="list-disc list-inside space-y-1 text-xs leading-relaxed">
+                  <li><b>منبع داده:</b> نتایج آخرین <code className="bg-white dark:bg-gray-800 px-1 rounded">Deep Scan</code> روی پروژهٔ تحت نظارت — endpoints‌های <code className="bg-white dark:bg-gray-800 px-1 rounded">/oversight/scan/&lt;id&gt;/summaries</code> و <code className="bg-white dark:bg-gray-800 px-1 rounded">/watched/&lt;id&gt;/chain-status</code></li>
+                  <li><b>نحوهٔ اسکن:</b> AI کل ساختار repo را تحلیل می‌کند → ۱۰ pass تخصصی (امنیت، پوشش تست، quality و …) → نتایج به همراه یافته‌ها/تسک‌ها ذخیره می‌شوند</li>
+                  <li><b>اجرا:</b> دکمهٔ <span className="text-purple-700 dark:text-purple-300 font-semibold">🔬 اجرای Deep Scan</span> در گوشهٔ بالا (نیاز به انتخاب مدل از نوار تنظیمات بالا)</li>
+                  <li><b>تازگی:</b> پس از اجرای موفق، تاریخ آخرین scan در بالای هر گروه نمایش داده می‌شود — می‌توانید با 🔄 بروزرسانی فقط داده‌ها را refresh کنید بدون اسکن مجدد</li>
+                </ul>
+              </div>
+            )}
+
             {!selectedHealthWatchedId ? (
               <div className="text-center py-12 text-gray-500 dark:text-gray-400">
                 <div className="text-4xl mb-2">🏥</div>
-                <p>یک پروژهٔ تحت نظارت انتخاب کنید</p>
+                <p>یک پروژهٔ تحت نظارت از بالا انتخاب کنید</p>
               </div>
             ) : healthError ? (
               <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 rounded-lg p-4 text-red-800 dark:text-red-200 text-sm">
                 ❌ {healthError}
               </div>
             ) : !healthSummaries && !healthChainStatus ? (
-              <div className="text-center py-12 text-gray-500">
-                {healthLoading ? '⏳ در حال بارگذاری...' : 'data موجود نیست — ابتدا یک Deep Scan اجرا کنید'}
+              <div className="text-center py-10 px-4">
+                {healthLoading ? (
+                  <div className="text-gray-500">⏳ در حال بارگذاری data سلامت...</div>
+                ) : (
+                  <div className="max-w-md mx-auto bg-white dark:bg-gray-800 border-2 border-dashed border-purple-300 dark:border-purple-700 rounded-xl p-6">
+                    <div className="text-5xl mb-3">🔬</div>
+                    <h3 className="font-bold text-gray-800 dark:text-gray-100 mb-2">هنوز داده‌ای موجود نیست</h3>
+                    <p className="text-sm text-gray-600 dark:text-gray-300 mb-4">
+                      برای این پروژه Deep Scan اجرا نشده. با کلیک روی دکمهٔ زیر، AI پروژه را تحلیل می‌کند و
+                      متریک‌های امنیت، پوشش تست، chain status و نقشهٔ سلامت فایل‌ها را تولید می‌کند.
+                    </p>
+                    <button
+                      onClick={() => startDeepScan(selectedHealthWatchedId)}
+                      disabled={selectedModelIds.length === 0 || !!deepScanWatchedId}
+                      className="w-full py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 font-bold"
+                    >
+                      🔬 اجرای Deep Scan
+                    </button>
+                    {selectedModelIds.length === 0 && (
+                      <p className="text-xs text-orange-600 dark:text-orange-400 mt-2">
+                        ⚠️ ابتدا حداقل یک مدل از نوار تنظیمات بالای صفحه انتخاب کنید
+                      </p>
+                    )}
+                    {deepScanWatchedId && (
+                      <p className="text-xs text-blue-600 dark:text-blue-400 mt-2">
+                        ⏳ اسکنی در حال اجراست — پس از اتمام اینجا data ظاهر می‌شود
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             ) : (
               <>
