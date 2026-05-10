@@ -168,11 +168,24 @@ class WatchedProject:
         "quality": 1.0,
         "tests": 1.2,
         "completeness": 1.0,
+        # 🆕 (P3) وزن‌های جدید برای passهای logic + functional
+        "logical_alignment": 1.0,
+        "functional_correctness": 1.5,
     })
     # 🆕 عمق scan قابل تنظیم (مهاجرت از Health depth parameter)
     # quick: 3 pass، standard: 5 pass، deep: همه ۱۰ pass،
     # thorough: همه ۱۰ + per-file scoring + roadmap auto-gen
     scan_depth: str = "deep"  # quick | standard | deep | thorough
+    # 🆕 (P1) مدل‌های انتخابی برای auto-scan از scheduler — مستقل از frontend
+    # session. اگر خالی باشد، scheduler از default backend استفاده می‌کند.
+    # اگر بیش از ۱ مدل، رفتار consensus اعمال می‌شود (هر pass با همهٔ مدل‌ها
+    # و ادغام findings).
+    selected_models: List[str] = field(default_factory=list)
+    # 🆕 (P4) خلاصهٔ آخرین scan — برای نمایش در UI WatchedCard accordion
+    # ست در پایان run_deep_scan. شامل: model_used, depth, passes_run,
+    # files_analyzed_count, findings_count, tasks_created, duplicates_skipped,
+    # critical_count, scan_id, completed_at, pass_breakdown
+    last_scan_metadata: Optional[Dict[str, Any]] = None
     # 🆕 (auto-loop) ping-pong scheduler-driven:
     # اگر فعال، پس از verify=partial scheduler خودکار:
     #   1. status تسک به pending برمی‌گردد
@@ -239,6 +252,13 @@ class OversightTask:
     # backward-compat: اگر در JSON نباشد، False خوانده می‌شود
     archived: bool = False
     archived_at: Optional[str] = None
+    # 🆕 (P1) metadata scan که این task را تولید کرده — برای شفافیت در UI
+    # هر تسک نمایش می‌دهد: مدل، depth، passes، files_count، scan_id
+    # برای task‌های قدیمی (قبل از این تغییر): None
+    created_by_scan_metadata: Optional[Dict[str, Any]] = None
+    # 🆕 (P2) cross-scan tracking — چندبار این task در scan‌های متوالی دیده شد
+    scan_seen_count: int = 1
+    last_seen_in_scan_at: Optional[str] = None
     # 🆕 (P4) prompt history — وقتی پرامپت regenerate می‌شود، نسخهٔ قبلی اینجا
     # ذخیره می‌شود (max 10 آیتم). هر آیتم: {prompt, raw_idea, model_id, generated_at}
     prompt_history: List[Dict[str, Any]] = field(default_factory=list)
@@ -844,6 +864,8 @@ class OversightService:
                         # 🆕 (auto-loop) ping-pong scheduler-driven
                         "auto_continue_until_done",
                         "max_auto_loop_rounds",
+                        # 🆕 (P1) مدل‌های auto-scan
+                        "selected_models",
                     }
                     for k, v in updates.items():
                         if k in allowed:
@@ -2672,7 +2694,17 @@ class OversightService:
                     ):
                         if w.schedule_enabled:
                             try:
-                                await self.scan_project(w.id, model_id=None)
+                                # 🆕 (P1) auto-scan از run_deep_scan استفاده می‌کند
+                                # نه scan_project ساده — تا تمام ۱۰+ pass + scan_depth
+                                # + scan_criteria_weights + selected_models اعمال شوند
+                                from .oversight_deep_scan_service import run_deep_scan
+                                model_ids = list(getattr(w, "selected_models", []) or [])
+                                primary_model = model_ids[0] if model_ids else None
+                                await run_deep_scan(
+                                    w.id,
+                                    model_id=primary_model,
+                                    model_ids=model_ids if len(model_ids) > 1 else None,
+                                )
                                 w.last_scan_at = now.isoformat()
                                 w.next_scan_at = (
                                     now + timedelta(hours=w.scan_interval_hours)

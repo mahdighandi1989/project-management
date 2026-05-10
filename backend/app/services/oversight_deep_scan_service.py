@@ -404,6 +404,10 @@ PASSES = [
     # 🆕 Pass J — تحلیل پوشش تست
     # (مهاجرت از /projects/[id]/health/coverage)
     ("coverage", "تحلیل پوشش تست — فایل‌های untested و gap detection"),
+    # 🆕 (P3) Pass K — همراستایی منطقی فایل‌ها/قابلیت‌ها
+    ("logical_alignment", "همراستایی منطقی فایل‌ها/قابلیت‌ها + UI binding + conflict detection"),
+    # 🆕 (P3) Pass L — صحت رفتاری per-feature
+    ("functional_correctness", "صحت رفتاری: edge cases، error handling، runtime errors"),
 ]
 
 
@@ -589,6 +593,63 @@ Stack تشخیص داده شده: {', '.join(stacks) or '(نامشخص)'}
 
 نکته: critical_untested فقط برای فایل‌هایی که در نقشهٔ Importهای داخلی
 hub هستند یا critical_path (/auth/, /payment/, /security/) را شامل می‌شوند.
+""",
+        # 🆕 (P3) Pass K
+        "logical_alignment": """
+فاز فعلی: **K — همراستایی منطقی فایل‌ها/قابلیت‌ها**
+
+برای هر فایل اصلی پروژه، **سه سؤال** را به‌صورت explicit جواب بده:
+- (الف) **چه کاری می‌کند؟** نقش این فایل/قابلیت در کل پروژه چیست؟
+- (ب) **در frontend کجا نمایان می‌شود؟** اگر backend است، کدام UI آن را
+  مصرف می‌کند؟ اگر frontend است، چه داده‌ای را نمایش می‌دهد؟
+- (ج) **آیا با file دیگری تضاد دارد؟** آیا قابلیتی که این فایل ارائه
+  می‌دهد، در فایل دیگری duplicate شده؟ آیا با naming/contract فایل
+  دیگری ناسازگار است؟
+
+برای هر مورد ناسازگاری/تضاد/orphan، یک finding بساز:
+- Orphan: backend endpoint بدون frontend caller (یا برعکس) → severity high
+- Duplicate: همان قابلیت در دو فایل مختلف پیاده شده → severity medium
+- Naming conflict: دو endpoint با path یکسان → severity high
+- Contract mismatch: response shape backend با Type frontend match نمی‌کند → severity high
+- Stale code: کد ای که هیچ‌جا استفاده نمی‌شود → severity low
+
+مثال finding:
+- title: "duplicate prompt builder در runtime_executor و oversight_strong_prompt"
+- description: "هر دو فایل تابع build_prompt دارند با logic مختلف"
+- target_files: ["runtime_executor.py", "oversight_strong_prompt.py"]
+- type: "refactor"
+- priority: "medium"
+""",
+        # 🆕 (P3) Pass L
+        "functional_correctness": """
+فاز فعلی: **L — صحت رفتاری per-feature**
+
+برای هر قابلیت اصلی، edge case‌ها و failure modeها را شمارش کن:
+- **Edge cases**: ورودی خالی، null، negative، خیلی بزرگ، Unicode، RTL
+- **Error handling**: try/except missing، exception swallowed بدون log،
+  no user-facing error message
+- **Race conditions**: async که lock ندارد، shared state بدون mutex،
+  concurrent writes
+- **Failure modes**: API call بدون timeout، fetch بدون error handling،
+  DB transaction بدون rollback
+- **Security boundaries**: input validation missing، SQL injection vector،
+  XSS vector، path traversal
+
+برای هر مورد یک finding با severity بر اساس impact:
+- critical: شکست production در شرایط نسبتاً عادی (مثل null user input)
+- high: race condition یا exception swallowed در critical path
+- medium: edge case کمتر رایج
+- low: cosmetic یا rare edge case
+
+**مهم**: فقط با شواهد قابل استناد در کد finding بساز. حدس نزن. اگر
+احتمالی است، severity پایین بگذار با تذکر "نیاز به تأیید".
+
+مثال finding:
+- title: "exception swallowed در apply_followup_after_verify"
+- description: "خط 2410، try/except عام بدون log کافی — fail silent"
+- target_files: ["oversight_service.py:2410"]
+- type: "bug"
+- priority: "high"
 """,
     }
 
@@ -980,6 +1041,56 @@ def _merge_similar_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, An
 
 
 # =====================================================================
+# 🆕 (P2) Cross-scan deduplication
+# =====================================================================
+
+def _find_existing_active_task(
+    service: Any,
+    watched_id: str,
+    finding: Dict[str, Any],
+    similarity_threshold: float = 0.8,
+) -> Optional[Any]:
+    """در tasks active موجود (همان watched، نه archived/done/cancelled)
+    دنبال match با finding بگرد. Jaccard >0.8 روی title.
+
+    اگر کاربر title را دستی edit کرده باشد، روی raw_idea finding
+    هم match می‌کنیم (به‌عنوان fallback).
+    """
+    try:
+        finding_title = (finding.get("title") or "").strip()
+        if not finding_title:
+            return None
+        finding_desc = (finding.get("description") or "")[:500]
+        candidates = [
+            t for t in service.tasks
+            if t.watched_id == watched_id
+            and t.status not in ("done", "cancelled")
+            and not getattr(t, "archived", False)
+            # تسک‌هایی که verify done شده‌اند هم match نشوند (الان active match)
+            and t.verification_status not in ("done",)
+        ]
+        for task in candidates:
+            # تطابق با title
+            sim_title = _title_similarity(finding_title, task.title)
+            if sim_title >= similarity_threshold:
+                return task
+            # fallback: تطابق با raw_idea (اگر کاربر title را edit کرده)
+            if task.raw_idea:
+                sim_raw = _title_similarity(finding_title, task.raw_idea)
+                if sim_raw >= similarity_threshold:
+                    return task
+            # fallback ۲: تطابق finding.description با task.raw_idea
+            if finding_desc and task.raw_idea:
+                sim_desc = _title_similarity(finding_desc[:200], task.raw_idea[:200])
+                if sim_desc >= similarity_threshold:
+                    return task
+        return None
+    except Exception as _e:
+        logger.debug(f"_find_existing_active_task failed: {_e}")
+        return None
+
+
+# =====================================================================
 # Main deep scan function
 # =====================================================================
 
@@ -987,10 +1098,16 @@ async def run_deep_scan(
     watched_id: str,
     *,
     model_id: Optional[str] = None,
+    model_ids: Optional[List[str]] = None,
     enabled_passes: Optional[List[str]] = None,
     deep_read_count: int = 35,
 ) -> Dict[str, Any]:
-    """اجرای کامل deep scan روی یک watched."""
+    """اجرای کامل deep scan روی یک watched.
+
+    🆕 (P1) پارامتر model_ids: اگر None یا یک‌مدلی، رفتار قبلی (single model).
+    اگر چندتایی، هر pass با تمام مدل‌ها اجرا می‌شود و findings از همه
+    مدل‌ها با _merge_similar_findings ادغام می‌شوند (consensus by similarity).
+    """
     service = get_oversight_service()
     watched = service._find_watched(watched_id)
     if watched is None:
@@ -999,20 +1116,21 @@ async def run_deep_scan(
     # 🆕 Mapping scan_depth → enabled_passes (مهاجرت از Health depth)
     # اگر enabled_passes صریحاً پاس داده شده، آن را استفاده کن
     # وگرنه از watched.scan_depth بخوان
+    # 🆕 (P3) به‌روز: حالا ۱۲ pass موجود است (logical_alignment + functional_correctness اضافه شدند)
     if enabled_passes is None:
         depth = getattr(watched, "scan_depth", "deep") or "deep"
         if depth == "quick":
             # سریع: فقط ۳ pass essential
             enabled_passes = ["frontend", "backend", "security_deep"]
         elif depth == "standard":
-            # متعادل: ۵ pass
+            # متعادل: ۶ pass (پنج تای قبلی + logical_alignment)
             enabled_passes = ["frontend", "backend", "security_deep",
-                              "quality", "completeness"]
+                              "quality", "completeness", "logical_alignment"]
         elif depth == "thorough":
-            # کامل + per-file scoring + roadmap (همه)
+            # کامل + per-file scoring + roadmap (همهٔ ۱۲)
             enabled_passes = [p[0] for p in PASSES]
         else:  # "deep" (default)
-            # عمیق: همه passes
+            # عمیق: همهٔ ۱۲ pass
             enabled_passes = [p[0] for p in PASSES]
 
     enabled = set(enabled_passes)
@@ -1288,21 +1406,41 @@ async def run_deep_scan(
                 import_graph_summary=import_graph_summary,
             )
             try:
-                response = await service._ai_generate(
-                    prompt, model_id=model_id, max_tokens=4500, temperature=0.2
+                # 🆕 (P1) consensus mode: اگر model_ids چندتایی، هر pass با همه
+                # اجرا می‌شود و findings از مدل‌ها merge می‌شوند
+                models_to_run: List[Optional[str]] = (
+                    list(model_ids) if (model_ids and len(model_ids) > 1)
+                    else [model_id]
                 )
-                parsed = service._extract_json(response) or {}
-                findings = parsed.get("findings") or []
-                for f in findings:
-                    f["_pass"] = pass_id
+                pass_findings: List[Dict[str, Any]] = []
+                pass_summaries_local: Dict[str, Any] = {}
+                for mid in models_to_run:
+                    try:
+                        response = await service._ai_generate(
+                            prompt, model_id=mid, max_tokens=4500, temperature=0.2
+                        )
+                        parsed = service._extract_json(response) or {}
+                        m_findings = parsed.get("findings") or []
+                        for f in m_findings:
+                            f["_pass"] = pass_id
+                            f["_model"] = mid or "default"
+                            pass_findings.append(f)
+                        for sum_key in ("security_summary", "coverage_summary"):
+                            if isinstance(parsed.get(sum_key), dict):
+                                pass_summaries_local[sum_key] = parsed[sum_key]
+                    except Exception as me:
+                        logger.warning(
+                            f"deep_scan pass {pass_id} model {mid} failed: {me}"
+                        )
+                # consensus: ادغام findings مشابه از مدل‌های مختلف
+                if len(models_to_run) > 1:
+                    pass_findings = _merge_similar_findings(pass_findings)
+                for f in pass_findings:
                     if f.get("priority") == "critical":
                         critical_count += 1
-                all_findings.extend(findings)
-                # 🆕 ذخیرهٔ summaries ساختاریافته از هر pass (security_summary,
-                # coverage_summary, ...) — برای UI بدون reparsing findings
-                for sum_key in ("security_summary", "coverage_summary"):
-                    if isinstance(parsed.get(sum_key), dict):
-                        pass_summaries[sum_key] = parsed[sum_key]
+                all_findings.extend(pass_findings)
+                for k, v in pass_summaries_local.items():
+                    pass_summaries[k] = v
                 write_progress(
                     watched_id,
                     findings_count=len(all_findings),
@@ -1329,6 +1467,8 @@ async def run_deep_scan(
         # خروجی در structure ذخیره می‌شود تا UI heatmap نمایش دهد.
         weights = getattr(watched, "scan_criteria_weights", None) or {
             "security": 1.5, "quality": 1.0, "tests": 1.2, "completeness": 1.0,
+            # 🆕 (P3) defaults برای dimensions جدید
+            "logical_alignment": 1.0, "functional_correctness": 1.5,
         }
         SEVERITY_PENALTY = {"critical": 25, "high": 12, "medium": 5, "low": 2}
         # mapping pass_id → criteria key برای weight lookup
@@ -1339,6 +1479,9 @@ async def run_deep_scan(
             "frontend": "quality", "backend": "quality",
             "cross_stack": "quality", "integrity": "quality",
             "dependency": "quality",
+            # 🆕 (P3) two new pass mappings
+            "logical_alignment": "logical_alignment",
+            "functional_correctness": "functional_correctness",
         }
 
         file_health_map: Dict[str, Dict[str, Any]] = {}
@@ -1415,6 +1558,8 @@ async def run_deep_scan(
 
         # ساخت تسک با پرامپت قوی غنی‌شده
         created_tasks: List[Dict[str, Any]] = []
+        # 🆕 (P2) آمار dedup: کدام task‌های موجود با finding‌های جدید match کردند
+        duplicates_skipped: List[str] = []
         execution_mode_default = (watched.default_execution_mode or "manual")
         tech_context_default = (
             f"Stack: {', '.join(stacks)}." if stacks else ""
@@ -1495,6 +1640,18 @@ async def run_deep_scan(
                     priority=f.get("priority", "medium"),
                     estimate=(f.get("estimated_complexity") or "medium"),
                 )
+                # 🆕 (P1) ضبط metadata scan که این task را ساخته
+                task_scan_metadata = {
+                    "model": model_id or (model_ids[0] if model_ids else "default"),
+                    "models_list": list(model_ids) if model_ids else ([model_id] if model_id else []),
+                    "depth": getattr(watched, "scan_depth", "deep"),
+                    "passes": passes_done,
+                    "passes_total": len(PASSES),
+                    "files_count": len(all_files),
+                    "scan_id": read_progress(watched.id).get("started_at") or now_iso(),
+                    "scanned_at": now_iso(),
+                    "_pass": f.get("_pass", ""),
+                }
                 t = OversightTask(
                     id=str(uuid.uuid4()),
                     watched_id=watched.id,
@@ -1511,7 +1668,32 @@ async def run_deep_scan(
                     execution_mode=execution_mode_default,
                     # 🆕 finding های ادغام‌شده در این task (از smart merger)
                     merged_findings=(f.get("merged_findings") or []),
+                    # 🆕 (P1) metadata scan
+                    created_by_scan_metadata=task_scan_metadata,
+                    # 🆕 (P2) cross-scan tracking — اولین بار دیده شد
+                    scan_seen_count=1,
+                    last_seen_in_scan_at=now_iso(),
                 )
+                # 🆕 (P2) Cross-scan dedup: قبل از append، بررسی کن آیا
+                # task مشابه active در همین watched وجود دارد
+                existing = _find_existing_active_task(service, watched.id, f)
+                if existing is not None:
+                    # تسک تکراری → فقط counter را بالا ببر و metadata به‌روز کن
+                    async with service._lock:
+                        existing.scan_seen_count = (
+                            getattr(existing, "scan_seen_count", 1) or 1
+                        ) + 1
+                        existing.last_seen_in_scan_at = now_iso()
+                        # شواهد جدید scan را به raw_idea append کن (با حد طول)
+                        new_evidence = (
+                            f"\n---\n[scan #{existing.scan_seen_count} at {now_iso()}]\n"
+                            f"{(f.get('description') or '')[:300]}"
+                        )
+                        if existing.raw_idea and len(existing.raw_idea) < 2000:
+                            existing.raw_idea = (existing.raw_idea + new_evidence)[:3000]
+                        existing.updated_at = now_iso()
+                    duplicates_skipped.append(existing.id)
+                    continue
                 async with service._lock:
                     service.tasks.append(t)
                 created_tasks.append(t.to_dict())
@@ -1553,6 +1735,21 @@ async def run_deep_scan(
         async with service._lock:
             service._save_watched()
 
+        # 🆕 (P1) metadata کامل scan برای نمایش در UI و notification
+        # 🆕 (P3) per-pass breakdown
+        pass_breakdown: Dict[str, int] = {}
+        for finding in unique:
+            pid = finding.get("_pass") or "?"
+            pass_breakdown[pid] = pass_breakdown.get(pid, 0) + 1
+        scan_metadata = {
+            "model_used": model_id or (model_ids[0] if model_ids else "default"),
+            "models_used_list": list(model_ids) if model_ids else ([model_id] if model_id else []),
+            "scan_depth": getattr(watched, "scan_depth", "deep"),
+            "passes_run": passes_done,
+            "passes_total": len(PASSES),
+            "files_analyzed_count": len(all_files),
+            "scan_id": read_progress(watched_id).get("started_at") or now_iso(),
+        }
         write_progress(
             watched_id,
             status="completed",
@@ -1562,7 +1759,27 @@ async def run_deep_scan(
             tasks_created=len(created_tasks),
             critical_count=critical_count,
             completed_at=now_iso(),
+            pass_breakdown=pass_breakdown,
+            duplicates_skipped=len(duplicates_skipped),
+            **scan_metadata,
         )
+
+        # 🆕 (P4) ذخیره خلاصهٔ آخرین scan روی خود WatchedProject — برای نمایش
+        # دائمی در UI WatchedCard (مستقل از progress JSON که override می‌شود)
+        try:
+            async with service._lock:
+                watched.last_scan_metadata = {
+                    **scan_metadata,
+                    "findings_count": len(unique),
+                    "tasks_created": len(created_tasks),
+                    "duplicates_skipped": len(duplicates_skipped),
+                    "critical_count": critical_count,
+                    "completed_at": now_iso(),
+                    "pass_breakdown": pass_breakdown,
+                }
+                service._save_watched()
+        except Exception as _e:
+            logger.debug(f"failed to save last_scan_metadata: {_e}")
 
         # 🔔 notification — silent skip اگر env تنظیم نشده باشد
         try:
@@ -1570,17 +1787,42 @@ async def run_deep_scan(
             watched_obj = next((w for w in service.watched_projects if w.id == watched_id), None)
             repo_name = watched_obj.repo_full_name if watched_obj else watched_id
 
-            # 1) همیشه scan_done را بفرست (با خلاصه)
+            # 1) همیشه scan_done را بفرست (با خلاصه + metadata)
+            depth_used = getattr(watched_obj, "scan_depth", "deep") if watched_obj else "deep"
+            models_label = (
+                ", ".join(model_ids) if model_ids
+                else (model_id or "default")
+            )
             msg_lines = [
                 f"🔬 *Deep Scan کامل شد*",
                 f"📁 `{repo_name}`",
-                f"📊 *{passes_done}* pass اجرا شد",
+                f"🤖 مدل: `{models_label}`",
+                f"🔍 depth: *{depth_used}*",
+                f"📊 *{passes_done}/{len(PASSES)}* pass اجرا شد",
                 f"📑 *{len(all_files)}* فایل بررسی شد",
                 f"🔎 *{len(unique)}* یافتهٔ منحصربه‌فرد",
                 f"📝 *{len(created_tasks)}* تسک جدید ساخته شد",
             ]
+            # 🆕 (P2) آمار dedup
+            if duplicates_skipped:
+                msg_lines.append(
+                    f"🔁 *{len(duplicates_skipped)}* تسک تکراری skip شد (موجود به‌روز شد)"
+                )
             if critical_count:
                 msg_lines.append(f"🚨 *{critical_count}* مورد critical")
+            # 🆕 (P3) per-pass breakdown از findings
+            try:
+                pass_counts: Dict[str, int] = {}
+                for finding in unique:
+                    pid = finding.get("_pass") or "?"
+                    pass_counts[pid] = pass_counts.get(pid, 0) + 1
+                if pass_counts:
+                    breakdown = " · ".join(f"{p}:{n}" for p, n in sorted(
+                        pass_counts.items(), key=lambda x: -x[1]
+                    )[:6])
+                    msg_lines.append(f"📊 per-pass: {breakdown}")
+            except Exception:
+                pass
             done_priority = "high" if critical_count > 0 else ("medium" if len(created_tasks) > 0 else "low")
             await notification_service.notify_event(
                 "scan_done", "\n".join(msg_lines),
@@ -1614,4 +1856,7 @@ async def run_deep_scan(
             "findings": len(unique),
             "tasks_created": len(created_tasks),
             "task_ids": [t["id"] for t in created_tasks],
+            # 🆕 (P2) آمار dedup
+            "duplicates_skipped": len(duplicates_skipped),
+            "duplicate_task_ids": list(duplicates_skipped),
         }
