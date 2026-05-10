@@ -583,6 +583,30 @@ async def verify_task(
     except Exception:
         pass
 
+    # 🔔 notification — silent skip اگر env تنظیم نشده باشد
+    try:
+        from .notification_service import notification_service
+        status_emoji = {
+            "done": "✅", "partial": "🟡", "not_done": "❌",
+            "regressed": "🔴", "needs_clarification": "🟠",
+        }.get(task.verification_status, "ℹ️")
+        msg_lines = [
+            f"{status_emoji} Verify {task.verification_status}: {task.title}",
+            f"📁 {task.project_full_name}",
+            f"🔖 {task.priority} • {task.type}",
+        ]
+        if report.evidence and report.evidence.get("summary"):
+            msg_lines.append(f"\n{str(report.evidence['summary'])[:500]}")
+        event = "task_failed" if task.verification_status in ("regressed",) else "verify_done"
+        await notification_service.notify_event(
+            event,
+            "\n".join(msg_lines),
+            subject=f"Verify {task.verification_status}",
+            priority=task.priority or "low",
+        )
+    except Exception as e:
+        logger.debug(f"notification skipped: {e}")
+
     return {
         "task": task.to_dict(),
         "report": report.to_dict(),

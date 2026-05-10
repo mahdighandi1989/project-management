@@ -1542,6 +1542,27 @@ async def run_deep_scan(
             completed_at=now_iso(),
         )
 
+        # 🔔 notification — silent skip اگر env تنظیم نشده باشد
+        try:
+            from .notification_service import notification_service
+            watched_obj = next((w for w in service.watched_projects if w.id == watched_id), None)
+            repo_name = watched_obj.repo_full_name if watched_obj else watched_id
+            msg = (
+                f"🔬 Deep Scan تمام شد\n"
+                f"📁 {repo_name}\n"
+                f"📊 {passes_done} pass • {len(unique)} یافته • "
+                f"{len(created_tasks)} تسک ساخته شد"
+                + (f"\n🚨 {critical_count} مورد critical" if critical_count else "")
+            )
+            priority = "high" if critical_count > 0 else ("medium" if len(created_tasks) > 0 else "low")
+            await notification_service.notify_event(
+                "scan_done", msg,
+                subject="Deep Scan completed",
+                priority=priority,
+            )
+        except Exception as e:
+            logger.debug(f"scan notification skipped: {e}")
+
         return {
             "success": True,
             "files_count": len(all_files),

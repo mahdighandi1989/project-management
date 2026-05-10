@@ -89,6 +89,18 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE: int = Field(default=500 * 1024 * 1024, description="حداکثر سایز آپلود (500MB)")
 
     # ===========================================
+    # تنظیمات Notification (Telegram + Email)
+    # ===========================================
+    TELEGRAM_BOT_TOKEN: Optional[str] = Field(default=None, description="توکن ربات تلگرام (از @BotFather)")
+    TELEGRAM_CHAT_ID: Optional[str] = Field(default=None, description="Chat ID مقصد (از @userinfobot یا API)")
+    SMTP_HOST: Optional[str] = Field(default=None, description="آدرس SMTP server (مثلاً smtp.gmail.com)")
+    SMTP_PORT: Optional[int] = Field(default=587, description="پورت SMTP (587 برای TLS، 465 برای SSL)")
+    SMTP_USER: Optional[str] = Field(default=None, description="آدرس ایمیل برای login SMTP")
+    SMTP_PASSWORD: Optional[str] = Field(default=None, description="پسورد یا App Password (برای Gmail)")
+    NOTIFICATION_EMAIL_FROM: Optional[str] = Field(default=None, description="آدرس فرستنده (default: SMTP_USER)")
+    NOTIFICATION_EMAIL_TO: Optional[str] = Field(default=None, description="آدرس گیرنده")
+
+    # ===========================================
     # تنظیمات JWT
     # ===========================================
     SECRET_KEY: str = Field(
