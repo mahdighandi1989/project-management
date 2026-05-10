@@ -608,6 +608,11 @@ async def verify_task(
 # 🧠 اصل ارزیابی (مهم — قبل از تصمیم بخوان)
 - **تطابق معنایی، نه literal**: اگر کد به شکل متفاوت ولی **هم‌ارز** نوشته شده — یعنی همان نتیجه را تولید می‌کند، همان رفتار را دارد، همان معیار پذیرش را برآورده می‌کند — این **done** است. نباید بخواهی exactly مطابق پرامپت باشد.
 - **نام فایل‌ها/کلاس‌ها/سرویس‌ها مهم نیست — نقش و رفتار مهم است**: اگر پرامپت گفته «فایل `idea.py` بساز» ولی پروژه از `oversight_service.py` با همان نقش (تعریف Idea/Task) استفاده کرده، این **done** است. اگر پرامپت گفته «کلاس `AITaskExecutor` بساز» ولی پروژه از یک سرویس با نام دیگر (مثل `runtime_executor` یا `apply_action`) که **همان کار** را می‌کند استفاده کرده، **done** است. اگر پرامپت گفته «`SmartVerifier`» ولی پروژه از `oversight_verifier` استفاده می‌کند، **done** است. اگر پرامپت گفته «پیاده‌سازی scheduler» ولی پروژه از `background_scheduler` یا منطق scheduling embedded در service دیگری استفاده می‌کند، **done** است.
+- **🎯 الگوی Next.js / SPA — بسیار مهم**: اگر پرامپت گفته «کامپوننت `XyzPanel.tsx` یا `XyzForm.tsx` بساز» ولی پروژه از Next.js App Router استفاده می‌کند، تمام آن منطق ممکن است در یک فایل `app/<route>/page.tsx` پیاده شده باشد (نه فایل کامپوننت جدا). این **done** است. به عنوان مثال:
+  - پرامپت: «`OversightPanel.tsx` بساز» → پروژه: `frontend/src/app/oversight/page.tsx` با همان UI = **done**
+  - پرامپت: «`IdeaForm.tsx` بساز» → پروژه: form ای داخل `app/oversight/page.tsx` که ایده می‌گیرد = **done**
+  - پرامپت: «`SettingsPanel.tsx` بساز» → پروژه: `app/settings/page.tsx` = **done**
+- **الگوی endpoint اختصاصی vs همگانی**: اگر پرامپت گفته «endpoint `/projects/{id}/ideas` بساز» ولی پروژه از `/oversight/tasks` با field `watched_id` (یا معادل project_id) استفاده می‌کند که **همان کار** را می‌کند، **done** است. تخصیص دقیق path مهم نیست؛ توانایی ثبت ایده با اتصال به پروژه مهم است.
 - **قبل از گفتن "فایل/کلاس X وجود ندارد"**: حتماً repo tree (که در ادامه می‌آید) را اسکن کن. به دنبال اسامی similar (با substring، token overlap، یا روی نقش مشترک) بگرد. اگر هر سرویسی با نقش مشابه (executor, verifier, scheduler, validator, ...) موجود است، این بخش done است.
 - **هرگز** صرفاً به این دلیل که نام دقیقاً همان چیزی نیست که پرامپت اولیه گفته، not_done نگو. پرامپت اولیه ممکن است نام‌گذاری ideal را پیشنهاد داده باشد، ولی تیم ممکن است معماری متفاوتی انتخاب کرده باشد. **رفتار = done، نه نام**.
 - **اگر کاربر دستی تغییر داد** ولی نتیجه به acceptance criteria رسید → **done**.
@@ -680,15 +685,12 @@ async def verify_task(
   - هر `evidence` در `criteria_results` حداکثر **80 کاراکتر** (فقط نام فایل/تابع کلیدی).
   - هر آیتم `done_parts`/`remaining_parts` حداکثر **140 کاراکتر**.
   - `summary` حداکثر **250 کاراکتر**.
-  - **`criteria_results` حداکثر ۳ مورد** — مهم‌ترین معیارها را انتخاب کن. تمام اطلاعات تفصیلی در `done_parts`/`remaining_parts` می‌آید (که شما محدودیت تعداد ندارید).
-  - **خیلی مهم**: JSON باید کامل (با `}}` نهایی) برگردد. اگر AC زیاد است (>5)، فقط ۳ تا را در `criteria_results` نمونه‌برداری کن و بقیه را در `done_parts`/`remaining_parts` بنویس.
+  - **`criteria_results` کاملاً حذف شد** — دیگر آن را در خروجی نگذار. کل اطلاعات معیارها در `done_parts`/`remaining_parts` می‌آید (هر AC یک آیتم در یکی از این دو لیست).
+  - **خیلی مهم**: JSON باید کامل (با `}}` نهایی) برگردد و فشرده باشد.
 
 # خروجی فقط JSON (بدون code block markdown — فقط JSON خام)
 {{
   "status": "done | partial | not_done | regressed | error",
-  "criteria_results": [
-    {{ "criterion": "...", "met": true, "evidence": "..." }}
-  ],
   "done_parts": ["جملهٔ کوتاه دربارهٔ کار انجام‌شده 1", "..."],
   "remaining_parts": ["جملهٔ کوتاه دربارهٔ کار باقی‌مانده 1", "..."],
   "evidence": {{ "commits": ["sha"], "files": ["path"], "issues": [] }},
@@ -775,15 +777,11 @@ async def verify_task(
                         parsed[k] = v
         except Exception as _e:
             logger.debug(f"partial JSON recovery failed: {_e}")
-    # حتی اگر parsed وجود داشت، اگر criteria_results ناقص بود (item‌های incomplete)،
-    # آن آیتم‌ها را filter کن
-    if isinstance(parsed.get("criteria_results"), list):
-        parsed["criteria_results"] = [
-            cr for cr in parsed["criteria_results"]
-            if isinstance(cr, dict)
-            and cr.get("criterion")
-            and "met" in cr  # حداقل criterion + met باید باشد
-        ]
+    # 🆕 (audit) criteria_results دیگر در خروجی expected نیست — اگر AI همچنان
+    # تولید کرد، آن را drop کن (چون ممکن است truncated باشد و JSON ناقص نشان
+    # دهد). اطلاعات کامل معیارها در done_parts/remaining_parts است.
+    if "criteria_results" in parsed:
+        del parsed["criteria_results"]
     status_val = parsed.get("status") or VERIFICATION_PARTIAL
     if status_val not in (
         VERIFICATION_DONE,
@@ -821,9 +819,8 @@ async def verify_task(
         touched_codex=touched_codex,
     )
 
-    # ذخیرهٔ نتایج معیارها در evidence
-    if parsed.get("criteria_results"):
-        report.evidence["criteria_results"] = parsed["criteria_results"]
+    # 🆕 criteria_results دیگر ذخیره نمی‌شود (drop شد در parser بالا)
+    # تمام اطلاعات معیارها در done_parts/remaining_parts است
     if parsed.get("summary"):
         report.evidence["summary"] = parsed["summary"]
 

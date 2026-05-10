@@ -3895,14 +3895,57 @@ function TasksPanel({
                         </ul>
                       </div>
                     )}
-                    {r.evidence && (Object.keys(r.evidence).length > 0) && (
-                      <div>
-                        <div className="font-semibold text-gray-700 dark:text-gray-300 mb-1">📁 شواهد:</div>
-                        <pre className="text-[10px] bg-white dark:bg-black/30 p-2 rounded font-mono whitespace-pre-wrap max-h-32 overflow-auto">
-                          {JSON.stringify(r.evidence, null, 2).slice(0, 1000)}
-                        </pre>
-                      </div>
-                    )}
+                    {r.evidence && (Object.keys(r.evidence).length > 0) && (() => {
+                      // نمایش زیباتر شواهد: commits، files، issues به صورت جدا
+                      const commits = Array.isArray(r.evidence.commits) ? r.evidence.commits : [];
+                      const files = Array.isArray(r.evidence.files) ? r.evidence.files : [];
+                      const issues = Array.isArray(r.evidence.issues) ? r.evidence.issues : [];
+                      const otherKeys = Object.keys(r.evidence).filter(
+                        (k) => !['commits', 'files', 'issues', 'summary', 'criteria_results'].includes(k)
+                      );
+                      if (commits.length === 0 && files.length === 0 && issues.length === 0 && otherKeys.length === 0) {
+                        return null;
+                      }
+                      return (
+                        <div>
+                          <div className="font-semibold text-gray-700 dark:text-gray-300 mb-1">📁 شواهد:</div>
+                          <div className="bg-white dark:bg-black/30 p-2 rounded text-xs space-y-1">
+                            {commits.length > 0 && (
+                              <div>
+                                <span className="font-mono text-gray-500 dark:text-gray-400">📦 commits ({commits.length}):</span>
+                                <div className="flex gap-1 flex-wrap mt-0.5">
+                                  {commits.slice(0, 8).map((c: string, i: number) => (
+                                    <code key={i} className="bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded text-[10px]">{String(c).slice(0, 8)}</code>
+                                  ))}
+                                  {commits.length > 8 && <span className="text-[10px] text-gray-500">+{commits.length - 8}</span>}
+                                </div>
+                              </div>
+                            )}
+                            {files.length > 0 && (
+                              <div>
+                                <span className="font-mono text-gray-500 dark:text-gray-400">📄 files ({files.length}):</span>
+                                <ul className="list-disc list-inside text-[10px] mt-0.5 space-y-0.5">
+                                  {files.slice(0, 10).map((f: string, i: number) => (
+                                    <li key={i} className="font-mono text-gray-700 dark:text-gray-300 truncate">{f}</li>
+                                  ))}
+                                  {files.length > 10 && <li className="text-gray-500">… و {files.length - 10} مورد دیگر</li>}
+                                </ul>
+                              </div>
+                            )}
+                            {issues.length > 0 && (
+                              <div>
+                                <span className="font-mono text-gray-500 dark:text-gray-400">⚠️ issues ({issues.length}):</span>
+                                <ul className="list-disc list-inside text-[10px] mt-0.5">
+                                  {issues.slice(0, 5).map((iss: any, i: number) => (
+                                    <li key={i}>{typeof iss === 'string' ? iss : JSON.stringify(iss).slice(0, 100)}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
                     {r.model_id && (
                       <div className="text-[10px] text-gray-500 dark:text-gray-400">
                         🤖 verifier model: <code className="bg-white dark:bg-black/30 px-1 rounded">{r.model_id}</code>
