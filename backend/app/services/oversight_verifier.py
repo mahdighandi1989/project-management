@@ -91,6 +91,94 @@ async def _fetch_target_files(
     return out
 
 
+async def _fetch_repo_tree(
+    repo: str, branch: Optional[str], token: str, max_paths: int = 400
+) -> List[str]:
+    """لیست مسیرهای فایل‌های پروژه از git tree (recursive).
+
+    خروجی فقط شامل code/config files است (نه binaries، نه vendored deps).
+    استفاده برای fuzzy matching: اگر AI در پرامپت اسم فایل خاصی ذکر کرده
+    ولی آن فایل وجود ندارد، verifier می‌تواند با کمک این لیست فایل‌های
+    هم‌ارز با نقش مشابه را پیشنهاد دهد.
+    """
+    headers = _gh_headers(token)
+    url = f"{GITHUB_API}/repos/{repo}/git/trees/{branch or 'main'}?recursive=1"
+    skip_prefixes = (
+        "node_modules/", "venv/", ".venv/", "vendor/", "dist/", "build/",
+        ".next/", ".git/", "__pycache__/", ".pytest_cache/", ".mypy_cache/",
+        "coverage/", ".idea/", ".vscode/",
+    )
+    skip_suffixes = (
+        ".pyc", ".pyo", ".so", ".dll", ".exe", ".bin", ".lock",
+        ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".pdf",
+        ".woff", ".woff2", ".ttf", ".eot", ".mp4", ".mp3",
+    )
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=30) as r:
+                if r.status != 200:
+                    return []
+                data = await r.json()
+        tree = data.get("tree") or []
+        paths: List[str] = []
+        for item in tree:
+            if item.get("type") != "blob":
+                continue
+            p = item.get("path") or ""
+            if not p:
+                continue
+            if any(p.startswith(pre) for pre in skip_prefixes):
+                continue
+            if any(p.endswith(suf) for suf in skip_suffixes):
+                continue
+            paths.append(p)
+            if len(paths) >= max_paths:
+                break
+        return paths
+    except Exception:
+        return []
+
+
+def _find_similar_paths(
+    missing_path: str, all_paths: List[str], max_results: int = 5
+) -> List[str]:
+    """برای فایل ذکر‌شده ولی یافت‌نشده، در tree دنبال فایل‌های با نام مشابه می‌گرد.
+
+    معیار شباهت: stem (اسم فایل بدون پسوند و دایرکتوری) به‌صورت substring
+    در path هدف بیاید، یا برعکس. همچنین فایل‌های هم‌دایرکتوری بررسی می‌شوند.
+    """
+    if not missing_path or not all_paths:
+        return []
+    import os
+    stem = os.path.splitext(os.path.basename(missing_path))[0].lower()
+    if len(stem) < 3:
+        return []
+    target_dir = os.path.dirname(missing_path).lower()
+    scored: List[tuple] = []
+    for p in all_paths:
+        p_low = p.lower()
+        p_stem = os.path.splitext(os.path.basename(p))[0].lower()
+        score = 0
+        if stem in p_stem or p_stem in stem:
+            score += 10
+        # تطابق partial: چند کاراکتر اول/آخر یکسان
+        if len(stem) >= 4 and len(p_stem) >= 4:
+            if stem[:4] == p_stem[:4]:
+                score += 3
+        # هم‌دایرکتوری بودن
+        if target_dir and os.path.dirname(p_low) == target_dir:
+            score += 2
+        # کلمات کلیدی مشترک (split by _ / -)
+        stem_tokens = set(t for t in stem.replace("-", "_").split("_") if len(t) >= 3)
+        p_tokens = set(t for t in p_stem.replace("-", "_").split("_") if len(t) >= 3)
+        common = stem_tokens & p_tokens
+        score += len(common) * 4
+        if score > 0:
+            scored.append((score, p))
+    scored.sort(key=lambda x: -x[0])
+    return [p for _, p in scored[:max_results]]
+
+
 async def _fetch_recent_commits(
     repo: str, branch: Optional[str], token: str, limit: int = 15
 ) -> List[Dict[str, Any]]:
@@ -209,15 +297,71 @@ async def verify_task(
         except Exception as e:
             logger.warning(f"verify: fetch commits failed: {e}")
 
-    # 4) ساخت پرامپت verifier
+    # 3.5) repo tree برای fuzzy matching — کمک می‌کند verifier فایل‌های هم‌ارز
+    # با نام متفاوت را هم تشخیص دهد (مثلاً پرامپت idea.py خواسته ولی پروژه
+    # از oversight_service.py استفاده کرده)
+    repo_tree: List[str] = []
+    if token and repo_full_name and "/" in repo_full_name:
+        try:
+            repo_tree = await _fetch_repo_tree(repo_full_name, branch, token)
+        except Exception as e:
+            logger.warning(f"verify: fetch tree failed: {e}")
+
+    # 4) ساخت پرامپت verifier — برای هر فایل یافت‌نشده، فایل‌های هم‌ارز را
+    # از tree پیدا و محتوای آن‌ها را نیز fetch می‌کنیم
+    fuzzy_resolved: Dict[str, List[str]] = {}  # missing_path -> similar_paths
+    extra_files_to_fetch: List[str] = []
+    for p in target_files:
+        if file_contents.get(p) is None and repo_tree:
+            similar = _find_similar_paths(p, repo_tree, max_results=3)
+            if similar:
+                fuzzy_resolved[p] = similar
+                for sp in similar:
+                    if sp not in target_files and sp not in extra_files_to_fetch:
+                        extra_files_to_fetch.append(sp)
+
+    if extra_files_to_fetch and token and repo_full_name and "/" in repo_full_name:
+        try:
+            extra_contents = await _fetch_target_files(
+                repo_full_name, extra_files_to_fetch[:10], branch, token
+            )
+            for k, v in extra_contents.items():
+                file_contents[k] = v
+        except Exception as e:
+            logger.warning(f"verify: fetch fuzzy-matched files failed: {e}")
+
     files_blob_parts: List[str] = []
     for p in target_files:
         c = file_contents.get(p)
         if c is None:
-            files_blob_parts.append(f"=== {p} ===\n[فایل یافت نشد یا قابل خواندن نبود]")
+            similar = fuzzy_resolved.get(p, [])
+            if similar:
+                files_blob_parts.append(
+                    f"=== {p} ===\n[فایل با این نام دقیق وجود ندارد — "
+                    f"اما این فایل‌های هم‌نقش/هم‌ارز در repo یافت شدند: {', '.join(similar)}. "
+                    f"محتوایشان در ادامه آمده — بررسی کن آیا نقش مورد نظر را برآورده می‌کنند.]"
+                )
+            else:
+                files_blob_parts.append(f"=== {p} ===\n[فایل یافت نشد]")
         else:
             files_blob_parts.append(f"=== {p} ===\n{c[:8000]}")
+    # محتوای فایل‌های هم‌ارز را هم اضافه کن
+    for sp in extra_files_to_fetch[:10]:
+        c = file_contents.get(sp)
+        if c is not None:
+            files_blob_parts.append(f"=== {sp} (فایل هم‌ارز) ===\n{c[:8000]}")
     files_blob = "\n\n".join(files_blob_parts) or "(فایل هدفی مشخص نیست — بر اساس کل پرامپت بررسی کن)"
+
+    # خلاصهٔ ساختار repo برای دید کلی AI
+    tree_blob = ""
+    if repo_tree:
+        # محدود به مسیرهای کد (backend/frontend/src/services/...) و حداکثر 200 خط
+        meaningful = [p for p in repo_tree if any(
+            seg in p for seg in ("backend/", "frontend/", "src/", "app/", "services/",
+                                  "routes/", "components/", "pages/", "lib/", "utils/")
+        )][:200]
+        if meaningful:
+            tree_blob = "\n".join(meaningful)
 
     commits_blob = "\n".join(
         f"- {c['sha']} ({c['date'][:10]}) {c['message']}" for c in recent_commits[:10]
@@ -231,9 +375,10 @@ async def verify_task(
 
 # 🧠 اصل ارزیابی (مهم — قبل از تصمیم بخوان)
 - **تطابق معنایی، نه literal**: اگر کد به شکل متفاوت ولی **هم‌ارز** نوشته شده — یعنی همان نتیجه را تولید می‌کند، همان رفتار را دارد، همان معیار پذیرش را برآورده می‌کند — این **done** است. نباید بخواهی exactly مطابق پرامپت باشد.
+- **نام فایل‌ها mhم نیست — نقش‌شان مهم است**: اگر پرامپت گفته «فایل `idea.py` بساز» ولی پروژه از `oversight_service.py` با همان نقش (تعریف Idea/Task) استفاده کرده، این **done** است. اگر پرامپت گفته `OversightPanel.tsx` ولی پروژه از `oversight/page.tsx` استفاده کرده، باز هم **done**. به ساختار repository (که در ادامه می‌آید) نگاه کن و فایل‌های هم‌نقش را شناسایی کن. **هرگز** صرفاً به این دلیل که نام فایل دقیقاً همان چیزی نیست که پرامپت گفته، نگو not_done.
 - **اگر کاربر دستی تغییر داد** ولی نتیجه به acceptance criteria رسید → **done**.
 - **اگر AI نسخهٔ متفاوت ولی قابل قبول‌تر نوشت** (مثلاً استفاده از pattern مدرن‌تر، error handling بهتر، یا decomposition متفاوت) → **done**.
-- فقط زمانی **not_done** بگو که AC ها واقعاً برآورده نشده‌اند یا کد رفتار غلط دارد.
+- فقط زمانی **not_done** بگو که AC ها واقعاً (از نظر رفتاری) برآورده نشده‌اند یا کد رفتار غلط دارد.
 - اگر بخشی از AC ها برآورده شده ولی بخشی نه → **partial**.
 - اگر تغییرات نسبت به قبل وضع را بدتر کرده → **regressed**.
 
@@ -256,6 +401,17 @@ async def verify_task(
 
 # محتوای فعلی فایل‌های مرتبط (از repository)
 {files_blob[:20000]}
+
+# 🗂 ساختار پروژه (مسیرهای کلیدی repo — برای کشف فایل‌های هم‌نقش)
+**این لیست را با دقت اسکن کن قبل از گفتن "فایل وجود ندارد".**
+اگر در پرامپت فایل خاصی ذکر شده ولی در «محتوای فعلی فایل‌ها» یافت نشده،
+حتماً در این tree دنبال فایل‌های هم‌نقش بگرد. مثال: اگر پرامپت idea.py
+خواسته ولی فقط `oversight_service.py` (که مدل Idea را تعریف می‌کند) وجود
+دارد، **این done است نه not_done**.
+
+```
+{tree_blob[:8000] if tree_blob else '(tree در دسترس نیست — تنها بر اساس فایل‌های ارائه‌شده قضاوت کن)'}
+```
 
 # کامیت‌های اخیر
 {commits_blob}
