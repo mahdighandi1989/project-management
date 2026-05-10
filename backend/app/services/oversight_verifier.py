@@ -575,6 +575,12 @@ async def verify_task(
 - **اگر status="partial"** ولی remaining_parts خالی باشد، در logs ثبت
   می‌شود که AI خطا داشته — باید حتماً remaining_parts را پر کنی.
 - **آیتم‌های لیست‌ها فارسی باشند** (مگر نام فایل/کد).
+- **محدودیت طول حیاتی برای جلوگیری از truncation**:
+  - هر `evidence` در `criteria_results` حداکثر **120 کاراکتر** (مختصر بنویس).
+  - هر آیتم `done_parts`/`remaining_parts` حداکثر **150 کاراکتر**.
+  - `summary` حداکثر **300 کاراکتر**.
+  - اگر معیارها زیاد است (>5)، فقط ۵ مورد را در `criteria_results` بنویس و بقیه را در `done_parts`/`remaining_parts` ادغام کن.
+  - **خیلی مهم**: JSON باید کامل (با `}}` نهایی) برگردد. اگر مطمئن نیستی محتوا جا می‌شود، evidence‌ها را خلاصه‌تر کن.
 
 # خروجی فقط JSON (بدون code block markdown — فقط JSON خام)
 {{
@@ -591,20 +597,46 @@ async def verify_task(
 }}"""
 
     try:
-        # 🆕 max_tokens از 2500 به 4500 افزایش یافت — JSON خروجی با چندین
-        # done/remaining + criteria_results مفصل گاهی truncate می‌شد
+        # 🆕 max_tokens از 4500 به 7000 افزایش — تجربه نشان داد deepseek/gpt
+        # وقتی JSON پیچیده با چندین criteria_results دارد، خود JSON را
+        # «ظاهراً معتبر» با } می‌بندد ولی evidence هر criterion را در وسط
+        # cut می‌کند (چون به محدودیت توکن رسیده). این درست توسط endswith
+        # detection نمی‌شد چون response با } تمام می‌شد.
         response = await service._ai_generate(
-            verify_prompt, model_id=model_id, max_tokens=4500, temperature=0.1
+            verify_prompt, model_id=model_id, max_tokens=7000, temperature=0.1
         )
-        # 🆕 اگر response به نظر truncated می‌رسد (JSON ناقص)، یک retry با تنظیمات بیشتر
-        if response and len(response) > 100 and not response.rstrip().endswith(("}", "]", "}\n")):
-            logger.warning("verify response به نظر truncated است — retry با max_tokens=6000")
+        # detection بهبود یافته: اگر هر criterion.evidence به نظر cut شده
+        # (مثلاً با کاما تمام نشده، با حرف غیر مرتبط تمام شده)، retry با
+        # max_tokens بیشتر و instruction خلاصه‌نویسی
+        def _looks_truncated(resp: str) -> bool:
+            if not resp or len(resp) < 100:
+                return False
+            stripped = resp.rstrip()
+            # حالت بدیهی: JSON ناتمام
+            if not stripped.endswith(("}", "]", "}\n", "]\n")):
+                return True
+            # حالت ظریف: JSON با } بسته شده ولی string‌های داخلی truncated
+            # شاخص: تعداد } و { برابر نیست در نسخهٔ raw
+            try:
+                opens = stripped.count("{")
+                closes = stripped.count("}")
+                if opens != closes:
+                    return True
+            except Exception:
+                pass
+            return False
+
+        if _looks_truncated(response):
+            logger.warning("verify response به نظر truncated است — retry با max_tokens=10000")
             try:
                 response = await service._ai_generate(
-                    verify_prompt, model_id=model_id, max_tokens=6000, temperature=0.1
+                    verify_prompt + "\n\n# ⚠️ مهم: evidence هر criterion را حداکثر 100 کاراکتر بنویس تا JSON کامل برگردد.",
+                    model_id=model_id,
+                    max_tokens=10000,
+                    temperature=0.1,
                 )
             except Exception:
-                pass  # response اصلی را نگه‌دار
+                pass
     except Exception as e:
         logger.exception("verify ai_generate failed")
         # ذخیرهٔ گزارش error

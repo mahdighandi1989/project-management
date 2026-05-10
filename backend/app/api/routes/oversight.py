@@ -49,6 +49,9 @@ class WatchedUpdate(BaseModel):
     default_execution_mode: Optional[str] = None  # manual | auto_via_projects_page | auto_via_pr
     verify_only_mode: Optional[bool] = None
     verify_interval_hours: Optional[float] = None
+    # 🆕 (auto-loop) ping-pong مداوم تا verify=done
+    auto_continue_until_done: Optional[bool] = None
+    max_auto_loop_rounds: Optional[int] = None
 
 
 class IdeaToPromptRequest(BaseModel):

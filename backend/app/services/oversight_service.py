@@ -173,6 +173,15 @@ class WatchedProject:
     # quick: 3 pass، standard: 5 pass، deep: همه ۱۰ pass،
     # thorough: همه ۱۰ + per-file scoring + roadmap auto-gen
     scan_depth: str = "deep"  # quick | standard | deep | thorough
+    # 🆕 (auto-loop) ping-pong scheduler-driven:
+    # اگر فعال، پس از verify=partial scheduler خودکار:
+    #   1. status تسک به pending برمی‌گردد
+    #   2. apply‌ٔ مجدد با followup_prompt
+    #   3. verify خودکار
+    # تا verify=done شود یا max_auto_loop_rounds برسد یا regress رخ دهد
+    # فقط وقتی autonomy_level=auto و execution_mode auto_via_* معنی دارد
+    auto_continue_until_done: bool = False
+    max_auto_loop_rounds: int = 5
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
 
@@ -832,6 +841,9 @@ class OversightService:
                         # 🆕 (commit 2.3) — مهاجرت از Health analysis settings
                         "scan_depth",
                         "scan_criteria_weights",
+                        # 🆕 (auto-loop) ping-pong scheduler-driven
+                        "auto_continue_until_done",
+                        "max_auto_loop_rounds",
                     }
                     for k, v in updates.items():
                         if k in allowed:
@@ -2456,6 +2468,36 @@ class OversightService:
             task.followup_acceptance_criteria = extracted_ac
             task.followup_round = (task.followup_round or 0) + 1
             task.updated_at = now_iso()
+
+            # 🆕 (auto-loop) — ping-pong scheduler-driven:
+            # اگر watched.auto_continue_until_done فعال است + autonomy=auto +
+            # هنوز به max_auto_loop_rounds نرسیدیم → status را به pending
+            # برگردان تا scheduler tick بعدی این تسک را دوباره اجرا کند.
+            try:
+                if (
+                    watched
+                    and getattr(watched, "auto_continue_until_done", False)
+                    and watched.autonomy_level == "auto"
+                    and not getattr(watched, "verify_only_mode", False)
+                    and task.execution_mode in ("auto_via_projects_page", "auto_via_pr")
+                ):
+                    max_rounds = int(getattr(watched, "max_auto_loop_rounds", 5) or 5)
+                    if (task.followup_round or 0) < max_rounds:
+                        task.status = "pending"
+                        # next_run_at به الان ست می‌شود تا در tick بعدی اجرا شود
+                        task.next_run_at = now_iso()
+                        logger.info(
+                            f"auto-loop: task {task.id} → pending for round "
+                            f"{task.followup_round}/{max_rounds}"
+                        )
+                    else:
+                        logger.info(
+                            f"auto-loop: task {task.id} به max_auto_loop_rounds={max_rounds} رسید"
+                            f" — متوقف شد (نیاز به مداخلهٔ کاربر)"
+                        )
+            except Exception as _e:
+                logger.debug(f"auto-loop check failed: {_e}")
+
             self._save_tasks()
 
     # ====================================================================
