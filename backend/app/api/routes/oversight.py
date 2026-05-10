@@ -76,12 +76,14 @@ class TaskCreate(BaseModel):
 class TaskUpdate(BaseModel):
     title: Optional[str] = None
     prompt: Optional[str] = None
+    raw_idea: Optional[str] = None  # 🆕 (P4) برای regenerate prompt
     type: Optional[str] = None
     priority: Optional[str] = None
     status: Optional[str] = None
     deadline: Optional[str] = None
     last_summary: Optional[str] = None
     next_run_at: Optional[str] = None
+    archived: Optional[bool] = None  # 🆕 (P3)
 
 
 class RunTaskRequest(BaseModel):
@@ -192,13 +194,20 @@ async def list_tasks(
     watched_id: Optional[str] = None,
     status: Optional[str] = None,
     priority: Optional[str] = None,
+    archived: Optional[str] = None,  # 🆕 (P3) "active" | "archived" | "all" (default: active)
 ):
     service = get_oversight_service()
-    return {
-        "items": await service.list_tasks(
-            watched_id=watched_id, status=status, priority=priority
-        )
-    }
+    items = await service.list_tasks(
+        watched_id=watched_id, status=status, priority=priority
+    )
+    # filter by archived state — default: hide archived
+    archived_filter = (archived or "active").lower()
+    if archived_filter == "active":
+        items = [t for t in items if not t.get("archived")]
+    elif archived_filter == "archived":
+        items = [t for t in items if t.get("archived")]
+    # archived_filter == "all" → no filter
+    return {"items": items}
 
 
 @router.get("/tasks/by-project/{project_full_name:path}")
@@ -272,6 +281,25 @@ async def delete_task(task_id: str):
     if not ok:
         raise HTTPException(status_code=404, detail="تسک یافت نشد")
     return {"success": True}
+
+
+# 🆕 (P3) archive/unarchive endpoints
+@router.post("/tasks/{task_id}/archive")
+async def archive_task(task_id: str):
+    service = get_oversight_service()
+    res = await service.update_task(task_id, {"archived": True})
+    if not res:
+        raise HTTPException(status_code=404, detail="تسک یافت نشد")
+    return {"success": True, "task": res}
+
+
+@router.post("/tasks/{task_id}/unarchive")
+async def unarchive_task(task_id: str):
+    service = get_oversight_service()
+    res = await service.update_task(task_id, {"archived": False})
+    if not res:
+        raise HTTPException(status_code=404, detail="تسک یافت نشد")
+    return {"success": True, "task": res}
 
 
 @router.post("/tasks/{task_id}/run")

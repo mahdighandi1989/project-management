@@ -226,6 +226,10 @@ class OversightTask:
     merged_findings: List[Dict[str, Any]] = field(default_factory=list)
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
+    # 🆕 (P3) archive flag — تسک‌های done که از فهرست اصلی پنهان شده‌اند
+    # backward-compat: اگر در JSON نباشد، False خوانده می‌شود
+    archived: bool = False
+    archived_at: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -927,6 +931,7 @@ class OversightService:
                     allowed = {
                         "title",
                         "prompt",
+                        "raw_idea",  # 🆕 (P4) برای regenerate prompt
                         "type",
                         "priority",
                         "status",
@@ -937,10 +942,16 @@ class OversightService:
                         "target_files",
                         "acceptance_criteria",
                         "verification_status",
+                        "archived",  # 🆕 (P3)
                     }
                     for k, v in updates.items():
                         if k in allowed:
                             setattr(t, k, v)
+                            # وقتی archived true شد، archived_at را ست کن
+                            if k == "archived" and v:
+                                t.archived_at = now_iso()
+                            elif k == "archived" and not v:
+                                t.archived_at = None
                     # اگر prompt تغییر کرده، target_files و AC را هم به‌روز کن
                     if "prompt" in updates and updates["prompt"]:
                         if not updates.get("target_files"):

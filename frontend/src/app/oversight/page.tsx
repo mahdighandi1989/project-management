@@ -109,6 +109,8 @@ interface Task {
   followup_target_locations?: Array<{path: string; lines?: string; symbol?: string; snippet?: string; note?: string}>;
   followup_acceptance_criteria?: string[];
   followup_round?: number;
+  archived?: boolean;
+  archived_at?: string | null;
   last_verification_report_id?: string | null;
 }
 
@@ -742,6 +744,8 @@ export default function OversightPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [taskFilterStatus, setTaskFilterStatus] = useState<string>('all');
   const [taskFilterWatched, setTaskFilterWatched] = useState<string>('all');
+  // 🆕 (P3) فیلتر archived: 'active' | 'archived' | 'all' — default: active
+  const [taskFilterArchived, setTaskFilterArchived] = useState<'active' | 'archived' | 'all'>('active');
   const [taskView, setTaskView] = useState<'list' | 'kanban'>('list');
   const [selectedSuggested, setSelectedSuggested] = useState<Set<string>>(new Set());
   const [viewingTask, setViewingTask] = useState<Task | null>(null);
@@ -1461,9 +1465,12 @@ export default function OversightPage() {
     return tasks.filter((t) => {
       if (taskFilterStatus !== 'all' && t.status !== taskFilterStatus) return false;
       if (taskFilterWatched !== 'all' && t.watched_id !== taskFilterWatched) return false;
+      // 🆕 (P3) archived filter
+      if (taskFilterArchived === 'active' && t.archived) return false;
+      if (taskFilterArchived === 'archived' && !t.archived) return false;
       return true;
     });
-  }, [tasks, taskFilterStatus, taskFilterWatched]);
+  }, [tasks, taskFilterStatus, taskFilterWatched, taskFilterArchived]);
 
   // ============================ Reports ============================
 
@@ -1739,13 +1746,15 @@ export default function OversightPage() {
               </div>
             ) : (
               watched.map((w) => {
-                const wTaskCount = tasks.filter(t => t.watched_id === w.id).length;
+                const wActiveTasks = tasks.filter(t => t.watched_id === w.id && !t.archived);
+                const wArchivedTasks = tasks.filter(t => t.watched_id === w.id && t.archived);
                 const wReportCount = reports.filter(r => r.watched_id === w.id).length;
                 return (
                 <WatchedCard
                   key={w.id}
                   w={w}
-                  taskCount={wTaskCount}
+                  taskCount={wActiveTasks.length}
+                  archivedCount={wArchivedTasks.length}
                   reportCount={wReportCount}
                   onChange={(u) => updateWatched(w.id, u)}
                   onRemove={() => removeWatched(w.id, w.repo_full_name)}
@@ -1759,6 +1768,13 @@ export default function OversightPage() {
                   onViewTasks={() => {
                     setTaskFilterWatched(w.id);
                     setTaskFilterStatus('all');
+                    setTaskFilterArchived('active');
+                    setTab('tasks');
+                  }}
+                  onViewArchive={() => {
+                    setTaskFilterWatched(w.id);
+                    setTaskFilterStatus('all');
+                    setTaskFilterArchived('archived');
                     setTab('tasks');
                   }}
                   onViewReports={() => {
@@ -2093,6 +2109,8 @@ export default function OversightPage() {
             setTaskFilterStatus={setTaskFilterStatus}
             taskFilterWatched={taskFilterWatched}
             setTaskFilterWatched={setTaskFilterWatched}
+            taskFilterArchived={taskFilterArchived}
+            setTaskFilterArchived={setTaskFilterArchived}
             taskView={taskView}
             setTaskView={setTaskView}
             selectedSuggested={selectedSuggested}
@@ -2786,6 +2804,7 @@ function Section({ title, items }: { title: string; items: string[] }) {
 function WatchedCard({
   w,
   taskCount,
+  archivedCount,
   reportCount,
   onChange,
   onRemove,
@@ -2794,11 +2813,13 @@ function WatchedCard({
   onRunNow,
   onWriteIdea,
   onViewTasks,
+  onViewArchive,
   onViewReports,
   onOpenCodex,
 }: {
   w: Watched;
   taskCount: number;
+  archivedCount: number;
   reportCount: number;
   onChange: (updates: Partial<Watched>) => void;
   onRemove: () => void;
@@ -2807,6 +2828,7 @@ function WatchedCard({
   onRunNow: () => void;
   onWriteIdea: () => void;
   onViewTasks: () => void;
+  onViewArchive: () => void;
   onViewReports: () => void;
   onOpenCodex: () => void;
 }) {
@@ -3213,11 +3235,20 @@ function WatchedCard({
         </button>
         <button
           onClick={onViewTasks}
-          title={`${taskCount} تسک برای این پروژه — کلیک: تب «تسک‌ها» با فیلتر همین پروژه`}
+          title={`${taskCount} تسک فعال برای این پروژه — کلیک: تب «تسک‌ها» با فیلتر همین پروژه`}
           className="px-3 py-1.5 bg-gray-200 dark:bg-gray-700 dark:text-white rounded text-sm hover:bg-gray-300"
         >
           📋 تسک‌ها ({taskCount})
         </button>
+        {archivedCount > 0 && (
+          <button
+            onClick={onViewArchive}
+            title={`${archivedCount} تسک آرشیوشده (done) — تسک‌هایی که verify شده‌اند و کامل تمام شده‌اند`}
+            className="px-3 py-1.5 bg-gray-200 dark:bg-gray-700 dark:text-white rounded text-sm hover:bg-gray-300"
+          >
+            📦 آرشیو ({archivedCount})
+          </button>
+        )}
         <button
           onClick={onViewReports}
           title={`${reportCount} گزارش verify برای این پروژه — کلیک: تب «گزارش‌ها» با فیلتر همین پروژه`}
@@ -3244,6 +3275,8 @@ function TasksPanel({
   setTaskFilterStatus,
   taskFilterWatched,
   setTaskFilterWatched,
+  taskFilterArchived,
+  setTaskFilterArchived,
   taskView,
   setTaskView,
   selectedSuggested,
@@ -3276,6 +3309,8 @@ function TasksPanel({
   setTaskFilterStatus: (s: string) => void;
   taskFilterWatched: string;
   setTaskFilterWatched: (s: string) => void;
+  taskFilterArchived: 'active' | 'archived' | 'all';
+  setTaskFilterArchived: (v: 'active' | 'archived' | 'all') => void;
   taskView: 'list' | 'kanban';
   setTaskView: (v: 'list' | 'kanban') => void;
   selectedSuggested: Set<string>;
@@ -3438,6 +3473,17 @@ function TasksPanel({
               className="px-3 py-1 bg-gray-200 dark:bg-gray-600 dark:text-white rounded text-xs hover:bg-gray-300"
             >
               👁
+            </button>
+            <button
+              onClick={() => {
+                if (confirm(t.archived ? 'این تسک را از آرشیو خارج کنم؟' : 'این تسک را آرشیو کنم؟')) {
+                  onUpdate(t.id, { archived: !t.archived });
+                }
+              }}
+              title={t.archived ? 'بازگردانی از آرشیو' : 'انتقال به آرشیو'}
+              className="px-3 py-1 bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 rounded text-xs hover:bg-amber-200"
+            >
+              {t.archived ? '↩️' : '📦'}
             </button>
             <button
               onClick={() => onDelete(t.id)}
@@ -3690,6 +3736,17 @@ function TasksPanel({
                 {w.repo_full_name}
               </option>
             ))}
+          </select>
+          {/* 🆕 (P3) archive filter */}
+          <select
+            value={taskFilterArchived}
+            onChange={(e) => setTaskFilterArchived(e.target.value as any)}
+            className="p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600 text-sm"
+            title="نمایش تسک‌های فعال یا آرشیوشده"
+          >
+            <option value="active">📋 فعال</option>
+            <option value="archived">📦 آرشیو</option>
+            <option value="all">همه</option>
           </select>
         </div>
       </div>

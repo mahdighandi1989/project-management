@@ -697,6 +697,11 @@ async def verify_task(
             if task.confirmation_streak >= streak_required:
                 task.verification_status = "done"
                 task.status = "done"
+                # 🆕 (P3) auto-archive وقتی هم status هم verification_status = done
+                # تسک از فهرست فعال حذف می‌شود ولی در آرشیو قابل مشاهده است
+                if not getattr(task, "archived", False):
+                    task.archived = True
+                    task.archived_at = now_iso()
             else:
                 task.verification_status = "partial"
                 task.status = "awaiting_review"
