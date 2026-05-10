@@ -1564,7 +1564,6 @@ class NotificationService:
             reply_markup={"inline_keyboard": rows},
         )
         return {"ok": True, "handled": "model_picker_shown"}
-        return {"ok": True, "handled": "new_project_start"}
 
     async def _handle_creator_phase(
         self, chat_id_str: str, state: Dict[str, Any], text: str,
