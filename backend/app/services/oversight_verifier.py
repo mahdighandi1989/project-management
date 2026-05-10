@@ -506,7 +506,9 @@ async def verify_task(
 
 # 🧠 اصل ارزیابی (مهم — قبل از تصمیم بخوان)
 - **تطابق معنایی، نه literal**: اگر کد به شکل متفاوت ولی **هم‌ارز** نوشته شده — یعنی همان نتیجه را تولید می‌کند، همان رفتار را دارد، همان معیار پذیرش را برآورده می‌کند — این **done** است. نباید بخواهی exactly مطابق پرامپت باشد.
-- **نام فایل‌ها mhم نیست — نقش‌شان مهم است**: اگر پرامپت گفته «فایل `idea.py` بساز» ولی پروژه از `oversight_service.py` با همان نقش (تعریف Idea/Task) استفاده کرده، این **done** است. اگر پرامپت گفته `OversightPanel.tsx` ولی پروژه از `oversight/page.tsx` استفاده کرده، باز هم **done**. به ساختار repository (که در ادامه می‌آید) نگاه کن و فایل‌های هم‌نقش را شناسایی کن. **هرگز** صرفاً به این دلیل که نام فایل دقیقاً همان چیزی نیست که پرامپت گفته، نگو not_done.
+- **نام فایل‌ها/کلاس‌ها/سرویس‌ها مهم نیست — نقش و رفتار مهم است**: اگر پرامپت گفته «فایل `idea.py` بساز» ولی پروژه از `oversight_service.py` با همان نقش (تعریف Idea/Task) استفاده کرده، این **done** است. اگر پرامپت گفته «کلاس `AITaskExecutor` بساز» ولی پروژه از یک سرویس با نام دیگر (مثل `runtime_executor` یا `apply_action`) که **همان کار** را می‌کند استفاده کرده، **done** است. اگر پرامپت گفته «`SmartVerifier`» ولی پروژه از `oversight_verifier` استفاده می‌کند، **done** است. اگر پرامپت گفته «پیاده‌سازی scheduler» ولی پروژه از `background_scheduler` یا منطق scheduling embedded در service دیگری استفاده می‌کند، **done** است.
+- **قبل از گفتن "فایل/کلاس X وجود ندارد"**: حتماً repo tree (که در ادامه می‌آید) را اسکن کن. به دنبال اسامی similar (با substring، token overlap، یا روی نقش مشترک) بگرد. اگر هر سرویسی با نقش مشابه (executor, verifier, scheduler, validator, ...) موجود است، این بخش done است.
+- **هرگز** صرفاً به این دلیل که نام دقیقاً همان چیزی نیست که پرامپت اولیه گفته، not_done نگو. پرامپت اولیه ممکن است نام‌گذاری ideal را پیشنهاد داده باشد، ولی تیم ممکن است معماری متفاوتی انتخاب کرده باشد. **رفتار = done، نه نام**.
 - **اگر کاربر دستی تغییر داد** ولی نتیجه به acceptance criteria رسید → **done**.
 - **اگر AI نسخهٔ متفاوت ولی قابل قبول‌تر نوشت** (مثلاً استفاده از pattern مدرن‌تر، error handling بهتر، یا decomposition متفاوت) → **done**.
 - فقط زمانی **not_done** بگو که AC ها واقعاً (از نظر رفتاری) برآورده نشده‌اند یا کد رفتار غلط دارد.
@@ -589,9 +591,20 @@ async def verify_task(
 }}"""
 
     try:
+        # 🆕 max_tokens از 2500 به 4500 افزایش یافت — JSON خروجی با چندین
+        # done/remaining + criteria_results مفصل گاهی truncate می‌شد
         response = await service._ai_generate(
-            verify_prompt, model_id=model_id, max_tokens=2500, temperature=0.1
+            verify_prompt, model_id=model_id, max_tokens=4500, temperature=0.1
         )
+        # 🆕 اگر response به نظر truncated می‌رسد (JSON ناقص)، یک retry با تنظیمات بیشتر
+        if response and len(response) > 100 and not response.rstrip().endswith(("}", "]", "}\n")):
+            logger.warning("verify response به نظر truncated است — retry با max_tokens=6000")
+            try:
+                response = await service._ai_generate(
+                    verify_prompt, model_id=model_id, max_tokens=6000, temperature=0.1
+                )
+            except Exception:
+                pass  # response اصلی را نگه‌دار
     except Exception as e:
         logger.exception("verify ai_generate failed")
         # ذخیرهٔ گزارش error
