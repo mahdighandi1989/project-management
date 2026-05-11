@@ -1144,7 +1144,9 @@ class NotificationService:
                 "• /cancel — لغو flow فعلی\n"
                 "• /hide\\_menu — مخفی‌کردن منوی ثابت\n"
                 "• /help — این پیام\n\n"
-                "💡 *منوی ثابت* در پایین صفحه فعال شد — برای دسترسی سریع از آن استفاده کنید."
+                "💡 *منوی ثابت* در پایین صفحه فعال شد — برای دسترسی سریع از آن استفاده کنید.\n"
+                "ℹ️ اگر منوی پایین مخفی شد (مثلاً بعد از سوئیچ بین چت‌های مختلف)، "
+                "/menu را بزنید تا دوباره فعال شود."
             )
             # 🆕 reply_markup = persistent reply keyboard (یک‌بار ست می‌شود، تا remove نشود می‌ماند)
             await tg.send(reply, silent=True, reply_markup=PERSISTENT_REPLY_KEYBOARD)
@@ -1203,23 +1205,18 @@ class NotificationService:
                     [{"text": "🏠 صفحهٔ اصلی", "url": f"{base}/"}],
                 ]
             }
-            # 🆕 یک پیام: inline keyboard. persistent reply keyboard از /start
-            # یا اولین /menu قبلاً ست شده — Telegram خودش آن را زیر input نگه می‌دارد
-            # تا /hide_menu بشود. پس نیازی به send دوم نیست.
-            # اگر این اولین تعامل کاربر باشد، یک‌بار persistent همراه پیام می‌فرستیم.
-            state_index = _read_index_state()
-            already_seen = bool(state_index.get("chat_id") == chat_id_str)
-            if already_seen:
-                # کاربر قبلاً با bot کار کرده — فقط inline keyboard
-                await tg.send(reply, silent=True, reply_markup=kb)
-            else:
-                # اولین بار — persistent keyboard + متن. سپس inline در پیام بعدی.
-                await tg.send(reply, silent=True, reply_markup=PERSISTENT_REPLY_KEYBOARD)
-                await tg.send(
-                    "🔗 *لینک‌های دسترسی سریع:*",
-                    silent=True,
-                    reply_markup=kb,
-                )
+            # 🆕 (audit-fix) همیشه persistent reply keyboard را با /menu
+            # دوباره ست می‌کنیم. علت: کلاینت‌های Telegram (به‌ویژه Web)
+            # گاهی keyboard state را وقتی کاربر بین چت‌های bot های مختلف
+            # سوئیچ می‌کند گم می‌کنند. /menu باید این مشکل را resolve کند.
+            # دو پیام: اول inline keyboard، بعد یک پیام کوتاه با reply_keyboard
+            # برای re-attach.
+            await tg.send(reply, silent=True, reply_markup=kb)
+            await tg.send(
+                "🎛 _منوی ثابت در پایین فعال است._",
+                silent=True,
+                reply_markup=PERSISTENT_REPLY_KEYBOARD,
+            )
             return {"ok": True, "handled": "menu"}
 
         if text == "/status":
@@ -2389,10 +2386,26 @@ class NotificationService:
         if action == "build":
             # 🆕 پیام فوری progress — کاربر بلافاصله می‌داند کلیکش ثبت شد
             await tg.send("⏳ *آماده‌سازی فهرست مدل‌های AI...*", silent=True)
+            # 🆕 timeout 15 ثانیه — برای محافظت در برابر hang در DB
             try:
                 from .ai_manager import get_ai_manager
-                ai_mgr = get_ai_manager()
-                available = ai_mgr.get_available_models() or []
+                # get_available_models() sync است؛ run_in_executor + wait_for
+                loop = asyncio.get_event_loop()
+                available = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None, lambda: get_ai_manager().get_available_models() or []
+                    ),
+                    timeout=15.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error("codex build: get_available_models timeout (15s)")
+                await tg.send(
+                    "❌ *Timeout در بارگذاری مدل‌ها*\n\n"
+                    "بارگذاری فهرست مدل‌ها بیش از 15 ثانیه طول کشید — احتمالاً "
+                    "اتصال دیتابیس مشکل دارد. لطفاً admin را خبر کنید.",
+                    silent=False,
+                )
+                return {"ok": True, "handled": "codex_models_timeout"}
             except Exception as e:
                 logger.exception(f"codex build: cannot load ai_manager: {e}")
                 await tg.send(
