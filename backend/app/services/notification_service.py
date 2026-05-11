@@ -2300,11 +2300,33 @@ class NotificationService:
                 prov_str = (prov.value if hasattr(prov, "value") else str(prov)).lower()
                 if prov_str in providers_with_key:
                     avail.append(model.id)
-            lines.append(f"*Available models for /codex build:* {len(avail)}")
+            lines.append(f"*Available (env-only):* {len(avail)} مدل")
             for mid in avail[:8]:
                 lines.append(f"  ✅ `{mid}`")
         except Exception as e:
             lines.append(f"❌ Filter error: `{str(e)[:200]}`")
+
+        # Step 4: DB filter (model_settings table)
+        lines.append("")
+        try:
+            from ..core.database import SessionLocal
+            from ..models.ai_profile import ModelSettings
+            db = SessionLocal()
+            try:
+                rows = db.query(ModelSettings).all()
+                enabled_in_db = [r.model_id for r in rows if r.enabled]
+                disabled_in_db = [r.model_id for r in rows if not r.enabled]
+                lines.append(f"*DB Filter:* {len(enabled_in_db)} enabled, {len(disabled_in_db)} disabled")
+                for mid in enabled_in_db[:8]:
+                    lines.append(f"  ✅ `{mid}`")
+                if disabled_in_db:
+                    lines.append("  Disabled:")
+                    for mid in disabled_in_db[:5]:
+                        lines.append(f"    ❌ `{mid}`")
+            finally:
+                db.close()
+        except Exception as e:
+            lines.append(f"❌ DB filter check failed: `{str(e)[:200]}`")
 
         lines.append("")
         lines.append("---")
@@ -2485,13 +2507,17 @@ class NotificationService:
         if action == "build":
             # 🆕 پیام فوری progress — کاربر بلافاصله می‌داند کلیکش ثبت شد
             await tg.send("⏳ *آماده‌سازی فهرست مدل‌های AI...*", silent=True)
-            # 🆕 (BULLETPROOF) لیست مدل‌ها بدون DB، بدون singleton state.
-            # فقط از:
-            #   1. MODEL_REGISTRY در حافظه (immutable در runtime)
-            #   2. ENV variables (هیچ DB call نمی‌خواهد)
+            # 🆕 (FIXED) ترکیب env + DB filter:
+            #   1. enabled_models از registry (in-memory)
+            #   2. providers_with_key از env
+            #   3. *FILTER اضافی*: ModelSettings.enabled در DB (اگر دسترسی داشت)
+            # DB query با timeout کوتاه. اگر timeout/error، فقط env-based filter
+            # اعمال می‌شود (یعنی نمی‌توانیم disable در پنل را اعمال کنیم — fallback).
             available: List[Any] = []
             enabled_count = 0
             available_providers: List[str] = []
+            db_filter_applied = False
+            db_enabled_set: Optional[set] = None
             try:
                 from ..core.models_registry import get_enabled_models
                 enabled_models = get_enabled_models() or []
@@ -2516,13 +2542,51 @@ class NotificationService:
                 available_providers = sorted(providers_with_key)
                 logger.info(f"codex: providers with API key: {available_providers}")
 
-                # Step 2: filter
+                # Step 2: DB filter (با timeout کوتاه) — مدل‌های disabled در پنل را خارج کن
+                # اگر DB pool exhausted/down است، خاموش skip می‌شود.
+                try:
+                    def _load_db_settings():
+                        from ..core.database import SessionLocal
+                        from ..models.ai_profile import ModelSettings
+                        db = SessionLocal()
+                        try:
+                            rows = db.query(ModelSettings).all()
+                            # ModelSettings.enabled = 1 یعنی فعال
+                            return {r.model_id for r in rows if r.enabled}
+                        finally:
+                            db.close()
+                    loop = asyncio.get_event_loop()
+                    db_enabled_set = await asyncio.wait_for(
+                        loop.run_in_executor(None, _load_db_settings),
+                        timeout=5.0,
+                    )
+                    db_filter_applied = True
+                    logger.info(
+                        f"codex: DB filter loaded ({len(db_enabled_set)} enabled in DB)"
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("codex: DB filter timeout (5s) — fallback to env-only")
+                    db_enabled_set = None
+                except Exception as _db_e:
+                    logger.warning(f"codex: DB filter unavailable — fallback to env-only: {_db_e}")
+                    db_enabled_set = None
+
+                # Step 3: filter نهایی
                 for model in enabled_models:
                     prov = model.provider
                     prov_str = (prov.value if hasattr(prov, "value") else str(prov)).lower()
-                    if prov_str in providers_with_key:
-                        available.append(model)
-                logger.info(f"codex build: {len(available)} models available")
+                    # filter 1: provider با API key
+                    if prov_str not in providers_with_key:
+                        continue
+                    # filter 2: DB enabled (اگر در دسترس بود)
+                    if db_filter_applied and db_enabled_set is not None:
+                        if model.id not in db_enabled_set:
+                            continue
+                    available.append(model)
+                logger.info(
+                    f"codex build: {len(available)} models available "
+                    f"(db_filter={db_filter_applied})"
+                )
             except Exception as e:
                 logger.exception(f"codex build models enumeration failed: {e}")
                 await tg.send(
@@ -2582,14 +2646,24 @@ class NotificationService:
             rows.append([{"text": "❌ انصراف", "callback_data": "flow:cancel"}])
             # text فاقد escape pitfall (نام پروژه با _ ممکن است باشد)
             repo_safe = (watched.repo_full_name or "").replace("`", "")
+            filter_note = (
+                "🔍 _مطابق تنظیمات صفحهٔ «مدل‌ها»_"
+                if db_filter_applied
+                else "⚠️ _filter DB غیرفعال — لیست کامل registry (admin: pod restart کنید)_"
+            )
             await tg.send(
                 f"📚 *ساخت Codex برای* `{repo_safe}`\n\n"
-                f"✅ *{len(available)} مدل AI فعال است*. کدام مدل استفاده شود؟\n\n"
+                f"✅ *{len(available)} مدل فعال*. کدام مدل استفاده شود؟\n"
+                f"{filter_note}\n\n"
                 f"Providers: {', '.join(available_providers)}",
                 silent=True,
                 reply_markup={"inline_keyboard": rows},
             )
-            return {"ok": True, "handled": "codex_model_picker", "available": len(available)}
+            return {
+                "ok": True, "handled": "codex_model_picker",
+                "available": len(available),
+                "db_filter_applied": db_filter_applied,
+            }
 
         # ============= build_model:<wid>:<mid> =============
         # 🆕 bm = "build_model" کوتاه — با token + index (callback_data ≤ 64B)
