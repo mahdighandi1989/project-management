@@ -1360,7 +1360,18 @@ class NotificationService:
 
         chat_id_str = str(chat_id)
         tg = self._telegram()
-        await self._answer_callback(cq_id)  # دکمه را از loading state خارج کن
+        # 🆕 toast فوری برای callback های زمان‌بر — کاربر بلافاصله می‌بیند چیزی
+        # در حال پردازش است (حتی اگر پاسخ متنی چند ثانیه طول بکشد)
+        _heavy_prefixes = (
+            "codex:build", "codex:view", "codex:refresh",
+            "creator_confirm", "creator_regenerate_prompt",
+            "task_dup:merge", "task_dup:force", "menu:index",
+            "index:refresh", "confirm:",
+        )
+        if any(data.startswith(p) for p in _heavy_prefixes):
+            await self._answer_callback(cq_id, "⏳ در حال پردازش...")
+        else:
+            await self._answer_callback(cq_id)  # دکمه را از loading state خارج کن
 
         # flow:cancel
         if data == "flow:cancel":
@@ -2376,18 +2387,31 @@ class NotificationService:
 
         # ============= build (نمایش model picker) =============
         if action == "build":
+            # 🆕 پیام فوری progress — کاربر بلافاصله می‌داند کلیکش ثبت شد
+            await tg.send("⏳ *آماده‌سازی فهرست مدل‌های AI...*", silent=True)
             try:
                 from .ai_manager import get_ai_manager
                 ai_mgr = get_ai_manager()
                 available = ai_mgr.get_available_models() or []
             except Exception as e:
-                logger.warning(f"codex build: cannot load models: {e}")
-                available = []
+                logger.exception(f"codex build: cannot load ai_manager: {e}")
+                await tg.send(
+                    f"❌ *خطا در بارگذاری AI Manager*\n\n`{str(e)[:300]}`\n\n"
+                    f"این یک خطای سیستمی است — لطفاً admin را خبر کنید.",
+                    silent=False,
+                )
+                return {"ok": True, "handled": "codex_load_models_fail", "error": str(e)}
             if not available:
                 await tg.send(
-                    "⚠️ هیچ مدل AI فعالی نیست. ابتدا از پنل /settings یک کلید API "
-                    "(OpenAI/Anthropic/Gemini/DeepSeek) وارد کنید.",
-                    silent=True,
+                    "⚠️ *هیچ مدل AI فعالی نیست*\n\n"
+                    "برای ساخت Codex، حداقل یک کلید API لازم است.\n\n"
+                    "از پنل وب → /settings یکی از این‌ها را تنظیم کنید:\n"
+                    "• OpenAI (gpt-4o, gpt-4)\n"
+                    "• Anthropic (claude-sonnet, claude-opus)\n"
+                    "• Gemini\n"
+                    "• DeepSeek\n\n"
+                    "سپس دوباره /codex بزنید.",
+                    silent=False,
                 )
                 return {"ok": True, "handled": "codex_no_model"}
 
@@ -2401,7 +2425,9 @@ class NotificationService:
             rows.append([{"text": "❌ انصراف", "callback_data": "flow:cancel"}])
             await tg.send(
                 f"📚 *ساخت Codex برای* `{watched.repo_full_name}`\n\n"
-                f"کدام مدل AI استفاده شود؟",
+                f"✅ *{len(available)} مدل AI فعال است*. کدام مدل استفاده شود؟\n\n"
+                f"_توصیه: مدل با context window بزرگ‌تر (مثل gpt-4o یا claude-sonnet) "
+                f"نتیجهٔ بهتری می‌دهد._",
                 silent=True,
                 reply_markup={"inline_keyboard": rows},
             )
@@ -2415,9 +2441,18 @@ class NotificationService:
             # model_id ممکن است حاوی ":" باشد (مثل "openai:gpt-4o") — همهٔ
             # parts بعد از index 2 را با ":" join می‌کنیم
             model_id = ":".join(parts[3:])
+            logger.info(f"codex build_model: watched={watched_id} model={model_id}")
+            # 🆕 پیام progress واضح + پایدار
             await tg.send(
-                f"⏳ *ساخت Codex با* `{model_id}`...\n"
-                f"این فرآیند 30 تا 60 ثانیه طول می‌کشد.",
+                f"⏳ *در حال ساخت Codex...*\n\n"
+                f"📁 پروژه: `{watched.repo_full_name}`\n"
+                f"🤖 مدل: `{model_id}`\n\n"
+                f"🔍 مراحل:\n"
+                f"  1️⃣ خواندن ساختار پروژه از GitHub\n"
+                f"  2️⃣ انتخاب متوازن backend + frontend\n"
+                f"  3️⃣ تحلیل با AI (شامل overview + dependencies + action_items)\n"
+                f"  4️⃣ ذخیره و ارسال نتیجه\n\n"
+                f"⏱ این فرآیند *30 تا 90 ثانیه* طول می‌کشد. منتظر بمانید...",
                 silent=True,
             )
             try:
@@ -2465,12 +2500,22 @@ class NotificationService:
                     "model_used": used_model,
                 }
             except Exception as e:
+                logger.exception(f"codex build_model fail: {e}")
                 err_text = str(e)[:500]
+                # دکمه برای retry با مدل دیگر
+                retry_kb = {
+                    "inline_keyboard": [
+                        [{"text": "🔄 امتحان دوباره با مدل دیگر", "callback_data": f"codex:build:{watched_id}"}],
+                        [{"text": "❌ بستن", "callback_data": "flow:cancel"}],
+                    ],
+                }
                 await tg.send(
                     f"❌ *خطا در ساخت Codex*\n\n"
-                    f"`{err_text}`\n\n"
+                    f"🤖 مدل: `{model_id}`\n"
+                    f"💬 خطا:\n`{err_text}`\n\n"
                     f"می‌توانید مدل دیگری امتحان کنید یا از پنل وب اقدام کنید.",
                     silent=False,
+                    reply_markup=retry_kb,
                 )
                 return {"ok": True, "handled": "codex_build_fail", "error": err_text}
 
