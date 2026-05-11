@@ -1268,7 +1268,16 @@ export default function OversightPage() {
         setPreviewPrompt({ title: data.title, prompt: data.prompt });
         setGenPhase('پرامپت آماده شد');
         setGenPct(100);
-        showSuccess('پرامپت تولید شد - بررسی و تأیید کنید');
+        // 🆕 (Smart Task Lifecycle) اگر AI نتوانست JSON معتبر تولید کند،
+        // backend پرامپت minimal با _quality_flag برمی‌گرداند.
+        if (data._quality_flag === 'json_parse_failed') {
+          showError(
+            '⚠️ AI نتوانست JSON معتبر تولید کند. پرامپت minimal است — '
+            + 'لطفاً پرامپت را ویرایش کنید یا با مدل دیگری دوباره تلاش کنید.'
+          );
+        } else {
+          showSuccess('پرامپت تولید شد - بررسی و تأیید کنید');
+        }
       } else {
         const err = await res.json().catch(() => ({}));
         showError(err.detail || 'خطا در تولید پرامپت');
@@ -1450,6 +1459,14 @@ export default function OversightPage() {
   // 🆕 اعمال نهایی ادغام
   const applyMerge = async () => {
     if (!mergeModal) return;
+    // استخراج ai_merged_values از field_diffs برای پاس به backend
+    // (تا apply_merge از همان متن AI استفاده کند نه concat ساده)
+    const aiMergedValues: Record<string, any> = {};
+    for (const d of (mergeModal.preview?.field_diffs || [])) {
+      if (d.ai_merged_value !== undefined && d.ai_merged_value !== null) {
+        aiMergedValues[d.name] = d.ai_merged_value;
+      }
+    }
     try {
       const res = await fetch(`${API_BASE}/api/oversight/tasks/merge-apply`, {
         method: 'POST',
@@ -1464,6 +1481,7 @@ export default function OversightPage() {
           chosen_fields: mergeModal.choices,
           source: 'manual',
           similarity_score: mergeModal.similarity_score,
+          ai_merged_values: aiMergedValues,
         }),
       });
       if (res.ok) {
@@ -2374,11 +2392,39 @@ export default function OversightPage() {
 
             <textarea
               value={idea}
-              onChange={(e) => setIdea(e.target.value)}
+              onChange={(e) => {
+                const v = e.target.value;
+                setIdea(v);
+                // 🆕 (Smart Task Lifecycle) debounce check-similarity همزمان با تایپ
+                // تا قبل از زدن «تبدیل به پرامپت»، تسک‌های مشابه نمایش داده شود.
+                checkSimilarityDebounced(
+                  ideaWatchedIds[0] || null,
+                  v.split('\n')[0].slice(0, 120),  // اولین خط = title فرضی
+                  v,
+                );
+              }}
               rows={6}
               placeholder="مثلاً: «authentication این پروژه ضعیفه. JWT اضافه کن، rate limit بذار، endpoint های login/register رو امن کن، اگه کاربر سه بار اشتباه پسورد بزنه قفل بشه...»"
               className="w-full p-3 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600 mb-3"
             />
+            {/* 🆕 نمایش similarity hints قبل از تولید پرامپت — تا کاربر زودتر بفهمد */}
+            {similarityHints.length > 0 && !previewPrompt && (
+              <div className="mb-3 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded">
+                <div className="text-sm font-semibold text-amber-800 dark:text-amber-200 mb-1">
+                  ⚠️ {similarityHints.length} تسک مشابه در این پروژه پیدا شد:
+                </div>
+                <ul className="text-xs text-amber-700 dark:text-amber-300 space-y-1">
+                  {similarityHints.map((m) => (
+                    <li key={m.task_id}>
+                      • «{m.title.slice(0, 70)}» — شباهت {Math.round(m.score * 100)}٪
+                    </li>
+                  ))}
+                </ul>
+                <div className="text-[11px] text-amber-600 dark:text-amber-400 mt-1">
+                  اگر ادامه دهید، پس از تولید پرامپت گزینهٔ «ادغام / جداگانه» داده می‌شود.
+                </div>
+              </div>
+            )}
 
             {/* نوار پیشرفت */}
             {generating && (

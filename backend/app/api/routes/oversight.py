@@ -119,6 +119,8 @@ class MergeApplyRequest(BaseModel):
     chosen_fields: Optional[Dict[str, str]] = None  # field -> existing|candidate|ai_merged
     source: str = "manual"
     similarity_score: float = 0.0
+    # 🆕 مقادیر AI-merged که در preview محاسبه شده (frontend از field_diffs می‌گیرد)
+    ai_merged_values: Optional[Dict[str, Any]] = None
 
 
 class TaskUpdate(BaseModel):
@@ -473,6 +475,7 @@ async def merge_apply(payload: MergeApplyRequest):
             chosen_fields=payload.chosen_fields,
             source=payload.source,
             similarity_score=payload.similarity_score,
+            ai_merged_values=payload.ai_merged_values,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
