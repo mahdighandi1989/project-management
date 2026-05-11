@@ -314,6 +314,47 @@ class RegenPromptRequest(BaseModel):
     model_ids: Optional[List[str]] = None
 
 
+# 🆕 endpoint سبک برای prepend DISCLAIMER به تسک‌های قدیمی (بدون AI call)
+@router.post("/tasks/prepend-disclaimer-to-old")
+async def prepend_disclaimer_to_old_tasks():
+    """تسک‌های موجود که DISCLAIMER ندارند را با prepend به‌روز می‌کند.
+    سریع و رایگان — هیچ AI call نمی‌کند.
+    """
+    from ...services.oversight_strong_prompt import EXECUTOR_DISCLAIMER
+    from ...services.oversight_service import get_oversight_service, now_iso
+    service = get_oversight_service()
+    updated_count = 0
+    skipped_count = 0
+    async with service._lock:
+        for t in service.tasks:
+            if not t.prompt:
+                skipped_count += 1
+                continue
+            if "یادداشت مهم برای مدل اجراکننده" in t.prompt[:500]:
+                skipped_count += 1
+                continue
+            # archive قدیمی به history
+            history_entry = {
+                "prompt": t.prompt,
+                "raw_idea": t.raw_idea or "",
+                "model_id": (t.models_used[0] if t.models_used else "") or "",
+                "generated_at": t.updated_at or t.created_at,
+                "source": "before_disclaimer_migration",
+            }
+            t.prompt_history.insert(0, history_entry)
+            t.prompt_history = t.prompt_history[:10]
+            # prepend DISCLAIMER
+            t.prompt = EXECUTOR_DISCLAIMER + "\n" + t.prompt
+            t.updated_at = now_iso()
+            updated_count += 1
+        service._save_tasks()
+    return {
+        "ok": True,
+        "updated_count": updated_count,
+        "skipped_count": skipped_count,
+        "total_tasks": len(service.tasks),
+    }
+
 @router.post("/tasks/{task_id}/regenerate-prompt")
 async def regenerate_prompt(task_id: str, payload: RegenPromptRequest):
     service = get_oversight_service()

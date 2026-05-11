@@ -1570,7 +1570,7 @@ class OversightService:
                         watched.repo_full_name,
                         branch=watched.default_branch or "main",
                         token=token_for_deep,
-                        max_deep_read=30,
+                        max_deep_read=40,  # 🆕 از 30 به 40 — context پربارتر برای پرامپت دقیق‌تر
                     )
                     if not deep_ctx.get("ok"):
                         logger.warning(f"deep_context for idea failed: {deep_ctx.get('error')}")
@@ -1727,15 +1727,29 @@ class OversightService:
 2. acceptance_criteria باید قابل تست باشد، نه تعریف کلی.
 3. عنوان و توضیحات فارسی و حرفه‌ای.
 4. حداقل ۱ مورد در target_locations الزامی است (مگر اینکه ایدهٔ کاربر کاملاً غیرفنی باشد — مثلاً «اضافه کردن صفحه درباره ما»).
-5. اگر deep context موجود نیست، در `note` هر location بنویس "بر اساس ساختار سطحی — توسط مجری تأیید شود"."""
+5. اگر deep context موجود نیست، در `note` هر location بنویس "بر اساس ساختار سطحی — توسط مجری تأیید شود".
+
+# ⚠️ قواعد کیفیت (بسیار مهم — رعایت کن)
+6. **عمق تحلیل**: قبل از پاسخ، حداقل ۱۰ فایل deep context را که در ادامه آمده **به‌طور کامل** بخوان. به نام فایل اعتماد نکن — کد را بخوان.
+7. **وابستگی‌ها**: برای هر تغییری که پیشنهاد می‌دهی، در `dependency_summary` بنویس کدام فایل‌ها/توابع/state‌های دیگر تحت تأثیر قرار می‌گیرند. حداقل ۳ مورد.
+8. **مدت زمان مناسب**: پاسخ سریع (زیر ۳۰ ثانیه) = پاسخ سطحی. برای پروژهٔ واقعی، حدود ۱-۳ دقیقه فکر کن. اگر هر دو deep_context و related_files خوانده‌شده، باید پاسخ غنی باشد.
+9. **JSON کامل**: مطمئن شو خروجی JSON معتبر و کامل است (با `}}` نهایی). اگر فضای کمی داری، خلاصه‌تر بنویس ولی **هیچ بخش را قطع نکن**.
+10. **target_locations**: حداقل ۲-۳ مورد با `snippet` کد واقعی (۳-۸ خط) از فایل‌های deep context. snippet باید چسبیده به مشکل/تغییر باشد، نه random.
+11. **related_files**: حداقل ۳ فایل دیگر که تحت تأثیر قرار می‌گیرند، با `reason` مشخص.
+12. **before_after_examples**: حداقل ۱ مثال قبل/بعد با کد واقعی (نه placeholder).
+"""
 
         try:
-            # max_tokens افزایش یافت چون با deep_ctx، خروجی JSON ساختاریافته
-            # شامل snippetهای کد و related_files می‌شود — نیاز به فضای بیشتر
-            # دارد. temperature پایین‌تر برای grounding بیشتر در کد واقعی.
+            # 🆕 max_tokens از 4000 به 10000 افزایش — تجربه نشان داد
+            # idea_to_prompt با grounded JSON ساختاریافته (شامل description،
+            # related_files با snippet، acceptance_criteria، endpoints، …)
+            # گاهی > 6000 token می‌شود. اگر max_tokens کم باشد:
+            #   - AI زود stop می‌کند (زیر 30 ثانیه — کیفیت ضعیف)
+            #   - JSON ناقص → پرامپت ناقص
+            # temperature پایین برای grounding بیشتر در کد واقعی.
             effective_models = model_ids or ([model_id] if model_id else None)
-            grounded_max_tokens = 4000 if deep_ctx.get("ok") else 2500
-            grounded_temperature = 0.2 if deep_ctx.get("ok") else 0.4
+            grounded_max_tokens = 10000 if deep_ctx.get("ok") else 6000
+            grounded_temperature = 0.15 if deep_ctx.get("ok") else 0.3
             if effective_models and len(effective_models) > 1:
                 multi = await self._ai_generate_multi(
                     system_prompt,
@@ -1756,6 +1770,49 @@ class OversightService:
                     max_tokens=grounded_max_tokens,
                     temperature=grounded_temperature,
                 )
+
+            # 🆕 detection truncation: اگر response با } یا ] تمام نشد، JSON ناقص است
+            def _looks_truncated(resp: str) -> bool:
+                if not resp or len(resp) < 100:
+                    return False
+                stripped = resp.rstrip().rstrip(" `\n")
+                if not stripped.endswith(("}", "]")):
+                    return True
+                try:
+                    opens = stripped.count("{")
+                    closes = stripped.count("}")
+                    if opens != closes:
+                        return True
+                except Exception:
+                    pass
+                return False
+
+            if _looks_truncated(response):
+                logger.warning("idea_to_prompt response به نظر truncated است — retry با max_tokens بیشتر")
+                try:
+                    retry_max = min(16000, grounded_max_tokens + 4000)
+                    if effective_models and len(effective_models) > 1:
+                        multi = await self._ai_generate_multi(
+                            system_prompt + "\n\n# ⚠️ پاسخ قبلی truncated بود — این بار خلاصه‌تر و مطمئن شو JSON کامل بسته شود.",
+                            model_ids=effective_models,
+                            max_tokens=retry_max,
+                            temperature=grounded_temperature,
+                        )
+                        best = max(
+                            (m for m in multi if not m.get("error") and m.get("content")),
+                            key=lambda m: len(m["content"]),
+                            default=None,
+                        )
+                        response = best["content"] if best else response
+                    else:
+                        response = await self._ai_generate(
+                            system_prompt + "\n\n# ⚠️ پاسخ قبلی truncated بود — این بار خلاصه‌تر و مطمئن شو JSON کامل بسته شود.",
+                            model_id=(effective_models[0] if effective_models else None),
+                            max_tokens=retry_max,
+                            temperature=grounded_temperature,
+                        )
+                except Exception as _retry_e:
+                    logger.warning(f"idea_to_prompt retry failed: {_retry_e}")
         except Exception as e:
             raise RuntimeError(f"خطا در تولید پرامپت: {e}")
 
@@ -1814,6 +1871,11 @@ class OversightService:
             priority=parsed.get("priority") or priority,
             estimate=(parsed.get("estimated_complexity") or parsed.get("estimate") or "medium"),
         )
+        # 🆕 safety check: اگر به هر دلیلی DISCLAIMER در ابتدا نبود، prepend کن
+        from .oversight_strong_prompt import EXECUTOR_DISCLAIMER
+        if "یادداشت مهم برای مدل اجراکننده" not in full_prompt[:500]:
+            logger.warning("idea_to_prompt: DISCLAIMER در full_prompt نبود — prepend می‌شود")
+            full_prompt = EXECUTOR_DISCLAIMER + "\n" + full_prompt
 
         return {
             "title": title,
