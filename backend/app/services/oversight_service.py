@@ -4183,6 +4183,18 @@ class OversightService:
         except Exception as _ie:
             logger.debug(f"index silent refresh skipped: {_ie}")
 
+        # ----- 6) 🆕 (AI Balance — Tile 3) periodic check + alert -----
+        # هر 1 ساعت یک بار check_and_notify. self._last_balance_check برای dedup.
+        try:
+            last_bal = getattr(self, "_last_balance_check", None)
+            now_ts = datetime.now(timezone.utc)
+            if last_bal is None or (now_ts - last_bal) >= timedelta(hours=1):
+                from .ai_balance_service import AIBalanceService
+                await AIBalanceService.check_and_notify()
+                self._last_balance_check = now_ts
+        except Exception as _be:
+            logger.debug(f"AI balance check skipped: {_be}")
+
         return {
             "ran": ran,
             "ran_count": len(ran),

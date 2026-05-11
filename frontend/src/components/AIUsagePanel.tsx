@@ -58,6 +58,29 @@ interface LeaksResponse {
   leaks: Leak[];
 }
 
+interface BalanceInfo {
+  type?: 'remote_api' | 'manual_budget';
+  // remote_api fields:
+  remote_balance_usd?: number;
+  currency?: string;
+  is_available?: boolean;
+  // manual_budget fields:
+  budget_usd?: number;
+  consumed_usd?: number;
+  remaining_estimate_usd?: number;
+  budget_reset_at?: string;
+  // shared:
+  alert_threshold_usd?: number;
+  alert_last_sent_at?: string | null;
+  last_checked_at?: string;
+}
+
+interface BalancesResponse {
+  balances: Record<string, BalanceInfo>;
+  providers_with_remote_api: string[];
+  manual_only_providers: string[];
+}
+
 const PROVIDER_ICON: Record<string, string> = {
   openai: '🤖',
   claude: '🟣',
@@ -100,19 +123,27 @@ export default function AIUsagePanel() {
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [leaks, setLeaks] = useState<LeaksResponse | null>(null);
+  const [balances, setBalances] = useState<BalancesResponse | null>(null);
   const [days, setDays] = useState(30);
   const [loading, setLoading] = useState(true);
+  const [refreshingBalance, setRefreshingBalance] = useState(false);
   const [error, setError] = useState('');
-  const [activeTab, setActiveTab] = useState<'overview' | 'providers' | 'leaks'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'providers' | 'leaks' | 'balances'>('overview');
+
+  // budget edit form state
+  const [editProvider, setEditProvider] = useState<string | null>(null);
+  const [editBudget, setEditBudget] = useState('');
+  const [editThreshold, setEditThreshold] = useState('');
 
   const loadData = async () => {
     setLoading(true);
     setError('');
     try {
-      const [statsRes, summaryRes, leaksRes] = await Promise.allSettled([
+      const [statsRes, summaryRes, leaksRes, balancesRes] = await Promise.allSettled([
         fetch(`${API_BASE}/api/ai-usage/stats?days=${days}`),
         fetch(`${API_BASE}/api/ai-usage/summary`),
         fetch(`${API_BASE}/api/ai-usage/leaks?days=7`),
+        fetch(`${API_BASE}/api/ai-usage/balances`),
       ]);
       if (statsRes.status === 'fulfilled' && statsRes.value.ok)
         setStats(await statsRes.value.json());
@@ -120,10 +151,65 @@ export default function AIUsagePanel() {
         setSummary(await summaryRes.value.json());
       if (leaksRes.status === 'fulfilled' && leaksRes.value.ok)
         setLeaks(await leaksRes.value.json());
+      if (balancesRes.status === 'fulfilled' && balancesRes.value.ok)
+        setBalances(await balancesRes.value.json());
     } catch (e: any) {
       setError(e.message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const refreshBalances = async () => {
+    setRefreshingBalance(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/ai-usage/balances/refresh`, { method: 'POST' });
+      if (res.ok) {
+        // reload state
+        const r = await fetch(`${API_BASE}/api/ai-usage/balances`);
+        if (r.ok) setBalances(await r.json());
+      }
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setRefreshingBalance(false);
+    }
+  };
+
+  const saveBudget = async (provider: string) => {
+    const budget_usd = parseFloat(editBudget);
+    const threshold_usd = parseFloat(editThreshold);
+    if (isNaN(budget_usd) || budget_usd < 0) {
+      alert('Budget باید عددی مثبت باشد');
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/ai-usage/balances/${provider}/budget`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          budget_usd,
+          alert_threshold_usd: isNaN(threshold_usd) ? undefined : threshold_usd,
+        }),
+      });
+      if (res.ok) {
+        setEditProvider(null);
+        setEditBudget('');
+        setEditThreshold('');
+        await refreshBalances();
+      }
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
+
+  const removeBudget = async (provider: string) => {
+    if (!confirm(`Budget برای ${provider} حذف شود؟`)) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/ai-usage/balances/${provider}`, { method: 'DELETE' });
+      if (res.ok) await refreshBalances();
+    } catch (e: any) {
+      setError(e.message);
     }
   };
 
@@ -168,6 +254,7 @@ export default function AIUsagePanel() {
           ['overview', '📈 خلاصه'],
           ['providers', '🤖 Providers'],
           ['leaks', '🩸 نشتی‌ها'],
+          ['balances', '💰 موجودی'],
         ] as const).map(([key, label]) => (
           <button
             key={key}
@@ -321,6 +408,214 @@ export default function AIUsagePanel() {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Balances tab */}
+      {activeTab === 'balances' && balances && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="text-xs text-gray-500 dark:text-gray-400">
+              <strong>DeepSeek</strong>: موجودی واقعی از API ·{' '}
+              <strong>بقیه</strong>: budget دستی (شارژ کرده‌اید چقدر؟) با محاسبهٔ مصرف از لاگ‌ها
+            </div>
+            <button
+              onClick={refreshBalances}
+              disabled={refreshingBalance}
+              className="px-3 py-1 bg-green-500 text-white rounded text-sm hover:bg-green-600 disabled:opacity-50"
+            >
+              {refreshingBalance ? '⏳ refresh...' : '🔄 refresh + check alerts'}
+            </button>
+          </div>
+
+          {/* Remote API providers (DeepSeek) */}
+          <div className="text-xs font-semibold text-gray-600 dark:text-gray-300 mt-3">🌐 موجودی واقعی (از API)</div>
+          {balances.providers_with_remote_api.map((p) => {
+            const b = balances.balances[p];
+            if (!b) {
+              return (
+                <div key={p} className="p-3 bg-gray-50 dark:bg-gray-700/50 rounded border border-gray-200 dark:border-gray-700">
+                  <div className="flex items-center gap-2">
+                    <span>{PROVIDER_ICON[p]}</span>
+                    <span className="font-medium dark:text-white">{p}</span>
+                    <span className="text-xs text-gray-500 mr-auto">هنوز refresh نشده</span>
+                  </div>
+                </div>
+              );
+            }
+            const balance = b.remote_balance_usd ?? 0;
+            const threshold = b.alert_threshold_usd ?? 1.0;
+            const isLow = balance <= threshold;
+            return (
+              <div key={p} className={`p-3 rounded border ${isLow ? 'bg-red-50 dark:bg-red-900/20 border-red-300 dark:border-red-700' : 'bg-green-50 dark:bg-green-900/20 border-green-300 dark:border-green-700'}`}>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-lg">{PROVIDER_ICON[p]}</span>
+                  <span className="font-semibold dark:text-white">{p}</span>
+                  {isLow && <span className="text-xs px-1.5 py-0.5 bg-red-200 dark:bg-red-800 text-red-800 dark:text-red-200 rounded">⚠️ کم</span>}
+                  <span className="mr-auto text-2xl font-bold dark:text-white">
+                    {balance.toFixed(2)} <span className="text-xs">{b.currency || 'USD'}</span>
+                  </span>
+                </div>
+                <div className="text-xs text-gray-600 dark:text-gray-400">
+                  آستانه alert: <strong>${threshold.toFixed(2)}</strong> ·{' '}
+                  آخرین بررسی: {formatRelative(b.last_checked_at || null)}
+                </div>
+                {editProvider === p ? (
+                  <div className="mt-2 flex gap-2">
+                    <input
+                      type="number"
+                      value={editThreshold}
+                      onChange={(e) => setEditThreshold(e.target.value)}
+                      placeholder="آستانه (USD)"
+                      className="px-2 py-1 text-xs border rounded dark:bg-gray-700 dark:text-white"
+                      step="0.5"
+                      min="0"
+                    />
+                    <button
+                      onClick={async () => {
+                        const t = parseFloat(editThreshold);
+                        if (!isNaN(t) && t >= 0) {
+                          await fetch(`${API_BASE}/api/ai-usage/balances/${p}/threshold`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ threshold_usd: t }),
+                          });
+                          setEditProvider(null);
+                          await refreshBalances();
+                        }
+                      }}
+                      className="px-2 py-1 text-xs bg-blue-500 text-white rounded"
+                    >
+                      ذخیره
+                    </button>
+                    <button onClick={() => setEditProvider(null)} className="px-2 py-1 text-xs bg-gray-300 rounded">
+                      انصراف
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setEditProvider(p);
+                      setEditThreshold(threshold.toString());
+                    }}
+                    className="mt-1 text-xs text-blue-600 dark:text-blue-300 hover:underline"
+                  >
+                    ✏️ تنظیم آستانه
+                  </button>
+                )}
+              </div>
+            );
+          })}
+
+          {/* Manual budget providers */}
+          <div className="text-xs font-semibold text-gray-600 dark:text-gray-300 mt-4">
+            ✋ Budget دستی (شارژ خودتان را ثبت کنید)
+          </div>
+          {balances.manual_only_providers.map((p) => {
+            const b = balances.balances[p];
+            const hasBudget = b && b.type === 'manual_budget';
+            const budget = b?.budget_usd ?? 0;
+            const consumed = b?.consumed_usd ?? 0;
+            const remaining = b?.remaining_estimate_usd ?? 0;
+            const threshold = b?.alert_threshold_usd ?? 1.0;
+            const isLow = hasBudget && remaining <= threshold;
+            const pct = hasBudget && budget > 0 ? Math.min(100, (consumed / budget) * 100) : 0;
+            return (
+              <div key={p} className={`p-3 rounded border ${hasBudget ? (isLow ? 'bg-red-50 dark:bg-red-900/20 border-red-300 dark:border-red-700' : 'bg-blue-50 dark:bg-blue-900/20 border-blue-300 dark:border-blue-700') : 'bg-gray-50 dark:bg-gray-700/50 border-gray-200 dark:border-gray-700'}`}>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-lg">{PROVIDER_ICON[p]}</span>
+                  <span className="font-semibold dark:text-white">{p}</span>
+                  {hasBudget && isLow && (
+                    <span className="text-xs px-1.5 py-0.5 bg-red-200 dark:bg-red-800 text-red-800 dark:text-red-200 rounded">⚠️ رو به اتمام</span>
+                  )}
+                  {hasBudget && (
+                    <span className="mr-auto text-sm dark:text-white">
+                      باقی <strong>${remaining.toFixed(2)}</strong> از <strong>${budget.toFixed(2)}</strong>
+                    </span>
+                  )}
+                </div>
+                {hasBudget && (
+                  <>
+                    <div className="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded overflow-hidden mb-1">
+                      <div
+                        className={`h-full ${isLow ? 'bg-red-500' : pct > 75 ? 'bg-yellow-500' : 'bg-green-500'}`}
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                    <div className="text-xs text-gray-600 dark:text-gray-400">
+                      مصرف: ${consumed.toFixed(2)} ({pct.toFixed(0)}%) · آستانه: ${threshold.toFixed(2)} · از: {b?.budget_reset_at?.slice(0, 10) || '—'}
+                    </div>
+                  </>
+                )}
+                {!hasBudget && (
+                  <div className="text-xs text-gray-500 dark:text-gray-400 mb-2">
+                    Budget تعریف نشده — برای دریافت alert موجودی، شارژ خود را ثبت کنید
+                  </div>
+                )}
+                {editProvider === p ? (
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    <input
+                      type="number"
+                      value={editBudget}
+                      onChange={(e) => setEditBudget(e.target.value)}
+                      placeholder="Budget (USD) مثلاً 10"
+                      className="px-2 py-1 text-xs border rounded dark:bg-gray-700 dark:text-white"
+                      step="1"
+                      min="0"
+                    />
+                    <input
+                      type="number"
+                      value={editThreshold}
+                      onChange={(e) => setEditThreshold(e.target.value)}
+                      placeholder="آستانه (USD)"
+                      className="px-2 py-1 text-xs border rounded dark:bg-gray-700 dark:text-white"
+                      step="0.5"
+                      min="0"
+                    />
+                    <button
+                      onClick={() => saveBudget(p)}
+                      className="col-span-2 px-2 py-1 text-xs bg-blue-500 text-white rounded"
+                    >
+                      ذخیره
+                    </button>
+                    <button
+                      onClick={() => { setEditProvider(null); setEditBudget(''); setEditThreshold(''); }}
+                      className="col-span-2 px-2 py-1 text-xs bg-gray-300 rounded"
+                    >
+                      انصراف
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex gap-2 mt-1">
+                    <button
+                      onClick={() => {
+                        setEditProvider(p);
+                        setEditBudget(budget.toString());
+                        setEditThreshold(threshold.toString());
+                      }}
+                      className="text-xs text-blue-600 dark:text-blue-300 hover:underline"
+                    >
+                      {hasBudget ? '✏️ ویرایش' : '➕ تنظیم budget'}
+                    </button>
+                    {hasBudget && (
+                      <button
+                        onClick={() => removeBudget(p)}
+                        className="text-xs text-red-600 dark:text-red-300 hover:underline"
+                      >
+                        🗑 حذف
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          <div className="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded text-xs text-amber-800 dark:text-amber-300">
+            💡 <strong>نکته:</strong> Anthropic / OpenAI / Gemini / Perplexity هیچ public API برای موجودی ندارند.
+            با ثبت budget دستی، سیستم مصرف را از لاگ‌ها محاسبه و وقتی نزدیک آستانه است، notification می‌فرستد.
+            DeepSeek تنها provider با API موجودی واقعی است.
+          </div>
         </div>
       )}
     </div>

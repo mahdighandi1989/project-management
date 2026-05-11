@@ -8,6 +8,11 @@ GET  /recent?limit=50            لیست لاگ‌های اخیر
 GET  /leaks?days=7               تشخیص نشتی (مصرف بدون خروجی مفید)
 GET  /by-model?days=30           breakdown per model
 GET  /summary                    خلاصهٔ کلی (برای داشبورد)
+GET  /balances                   موجودی همهٔ providers (DeepSeek API + manual budgets)
+POST /balances/refresh           force refresh + alert check
+POST /balances/{provider}/budget تنظیم/به‌روزرسانی budget دستی
+POST /balances/{provider}/threshold  تنظیم آستانهٔ alert
+DELETE /balances/{provider}      حذف budget یک provider
 
 تمام داده‌ها از جدول ai_logs (که Tile 1 پر می‌کند) می‌آیند.
 """
@@ -331,3 +336,79 @@ async def get_summary(db: Session = Depends(get_db)) -> Dict[str, Any]:
         "last_request_at": last_request_at,
         "distinct_providers_30d": distinct_providers,
     }
+
+
+# ============================================================
+# Balance endpoints (Tile 3)
+# ============================================================
+
+from pydantic import BaseModel
+
+
+class BudgetRequest(BaseModel):
+    budget_usd: float
+    alert_threshold_usd: Optional[float] = None
+    reset_at: Optional[str] = None  # ISO datetime — اگر None، الان
+
+
+class ThresholdRequest(BaseModel):
+    threshold_usd: float
+
+
+@router.get("/balances")
+async def get_balances() -> Dict[str, Any]:
+    """موجودی همهٔ providers (state ذخیره‌شده).
+
+    برای refresh و call API، از POST /balances/refresh استفاده کنید.
+    """
+    from ...services.ai_balance_service import AIBalanceService, PROVIDERS_WITH_REMOTE_API
+    state = AIBalanceService.get_all_balances()
+    # ضمیمهٔ metadata: کدام provider ها API دارند، کدام نیاز به manual
+    return {
+        "balances": state,
+        "providers_with_remote_api": list(PROVIDERS_WITH_REMOTE_API),
+        "manual_only_providers": ["openai", "claude", "anthropic", "gemini", "google", "perplexity"],
+    }
+
+
+@router.post("/balances/refresh")
+async def refresh_balances() -> Dict[str, Any]:
+    """Force refresh — DeepSeek API + محاسبهٔ remaining برای manual budgets.
+
+    اگر balance < threshold باشد، event ai_balance_low فاير می‌شود (با dedup 24h).
+    """
+    from ...services.ai_balance_service import AIBalanceService
+    return await AIBalanceService.check_and_notify()
+
+
+@router.post("/balances/{provider}/budget")
+async def set_budget(provider: str, payload: BudgetRequest) -> Dict[str, Any]:
+    """تنظیم budget دستی برای provider (همه به‌جز DeepSeek که API دارد)."""
+    from ...services.ai_balance_service import AIBalanceService
+    if payload.budget_usd < 0:
+        raise HTTPException(status_code=400, detail="budget_usd باید مثبت باشد")
+    result = AIBalanceService.set_manual_budget(
+        provider=provider.lower().strip(),
+        budget_usd=payload.budget_usd,
+        reset_at=payload.reset_at,
+        alert_threshold_usd=payload.alert_threshold_usd,
+    )
+    return {"ok": True, "provider": provider, "state": result}
+
+
+@router.post("/balances/{provider}/threshold")
+async def set_threshold(provider: str, payload: ThresholdRequest) -> Dict[str, Any]:
+    """فقط آستانهٔ alert را تنظیم می‌کند (بدون تغییر budget)."""
+    from ...services.ai_balance_service import AIBalanceService
+    if payload.threshold_usd < 0:
+        raise HTTPException(status_code=400, detail="threshold_usd باید مثبت باشد")
+    result = AIBalanceService.set_threshold(provider.lower().strip(), payload.threshold_usd)
+    return {"ok": True, "provider": provider, "state": result}
+
+
+@router.delete("/balances/{provider}")
+async def delete_balance(provider: str) -> Dict[str, Any]:
+    """حذف budget یک provider."""
+    from ...services.ai_balance_service import AIBalanceService
+    ok = AIBalanceService.remove_provider(provider.lower().strip())
+    return {"ok": ok, "provider": provider}
