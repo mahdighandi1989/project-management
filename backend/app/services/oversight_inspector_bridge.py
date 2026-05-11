@@ -470,22 +470,38 @@ async def process_from_inspector(
     watched_id = watched.id
     project_full_name_final = watched.repo_full_name
 
-    # 2. vision describe (فقط visual_debug)
+    # 2. vision describe (فقط visual_debug) — موازی برای جلوگیری از timeout
     screenshots_with_descriptions: List[Dict[str, Any]] = []
     vision_descriptions: List[Dict[str, Any]] = []
     if mode == "visual_debug" and screenshots:
-        for ss in screenshots:
-            base64 = ss.get("base64") or ""
-            if not base64:
-                continue
+        import asyncio as _asyncio
+        # فیلتر فقط screenshot هایی با base64
+        valid_screenshots = [ss for ss in screenshots if ss.get("base64")]
+
+        async def _safe_describe(ss):
             try:
-                d = await describe_screenshot_with_vision(
-                    base64, user_request or "", ss.get("page_url") or "",
+                return await describe_screenshot_with_vision(
+                    ss.get("base64") or "",
+                    user_request or "",
+                    ss.get("page_url") or "",
                 )
             except Exception as e:
-                logger.warning(f"vision describe failed: {e}")
-                d = {
+                logger.warning(f"vision describe failed for one screenshot: {e}")
+                return {
                     "scene": f"(خطا در توصیف: {str(e)[:150]})",
+                    "ocr_text": "", "ui_elements": "", "error_signals": "",
+                    "layout_hints": "", "vision_model_used": None,
+                }
+
+        # موازی اجرا — تا 5 screenshot هم در ~30s تمام شوند
+        results = await _asyncio.gather(
+            *[_safe_describe(ss) for ss in valid_screenshots],
+            return_exceptions=True,
+        )
+        for ss, d in zip(valid_screenshots, results):
+            if isinstance(d, Exception):
+                d = {
+                    "scene": f"(exception: {str(d)[:150]})",
                     "ocr_text": "", "ui_elements": "", "error_signals": "",
                     "layout_hints": "", "vision_model_used": None,
                 }
