@@ -5396,27 +5396,30 @@ function CodexView({
     (p) => !search || p.toLowerCase().includes(search.toLowerCase()),
   );
 
-  // دسته‌بندی فایل بر اساس path (همان منطق backend _categorize_file)
+  // دسته‌بندی فایل بر اساس path — هم‌منطق با backend _categorize_file
+  // اولویت: top-level dir اول، سپس extension fallback.
   const categorizeFile = (p: string): string => {
     const pl = (p || '').toLowerCase();
-    if (pl.startsWith('backend/') || pl.startsWith('server/') || pl.startsWith('api/') || pl.endsWith('.py')) {
-      if (pl.includes('/test') || pl.startsWith('test')) return 'tests';
-      return 'backend';
-    }
-    if (pl.startsWith('frontend/') || pl.startsWith('client/') || pl.startsWith('web/') || pl.startsWith('ui/')
-        || pl.endsWith('.tsx') || pl.endsWith('.jsx') || pl.endsWith('.ts') || pl.endsWith('.js')
-        || pl.endsWith('.vue') || pl.endsWith('.svelte')) {
-      if (pl.includes('/test') || pl.includes('/__tests__/') || pl.includes('.test.') || pl.includes('.spec.'))
-        return 'tests';
+    // 1) tests
+    if (pl.includes('/__tests__/') || pl.includes('.test.') || pl.includes('.spec.')) return 'tests';
+    if (pl.includes('/tests/') || pl.startsWith('tests/') || pl.startsWith('test_')) return 'tests';
+    // 2) top-level dir
+    if (pl.startsWith('frontend/') || pl.startsWith('client/') || pl.startsWith('web/') || pl.startsWith('ui/'))
       return 'frontend';
-    }
-    if (pl.endsWith('.yml') || pl.endsWith('.yaml') || pl.endsWith('.toml')
-        || pl.endsWith('.json') || pl.endsWith('.env.example') || pl.endsWith('dockerfile'))
-      return 'config';
-    if (pl.endsWith('.md') || pl.endsWith('.rst') || pl.endsWith('.txt') || pl.includes('/docs/'))
-      return 'docs';
+    if (pl.startsWith('backend/') || pl.startsWith('server/') || pl.startsWith('api/'))
+      return 'backend';
     if (pl.startsWith('scripts/') || pl.startsWith('tools/') || pl.startsWith('bin/'))
       return 'scripts';
+    if (pl.includes('/docs/') || pl.startsWith('docs/')) return 'docs';
+    // 3) extension fallback
+    if (pl.endsWith('.py')) return 'backend';
+    if (pl.endsWith('.tsx') || pl.endsWith('.jsx') || pl.endsWith('.ts') || pl.endsWith('.js')
+        || pl.endsWith('.vue') || pl.endsWith('.svelte')) return 'frontend';
+    const base = pl.split('/').pop() || '';
+    if (pl.endsWith('.yml') || pl.endsWith('.yaml') || pl.endsWith('.toml')
+        || pl.endsWith('.json') || pl.endsWith('.env.example') || base.includes('dockerfile'))
+      return 'config';
+    if (pl.endsWith('.md') || pl.endsWith('.rst') || pl.endsWith('.txt')) return 'docs';
     return 'other';
   };
 
