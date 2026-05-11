@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import RenderLogsPanel from '@/components/RenderLogsPanel';
 import NotificationSettingsPanel from '@/components/NotificationSettingsPanel';
+import AIUsagePanel from '@/components/AIUsagePanel';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -25,7 +26,7 @@ const DEPLOY_SERVICES = [
 ];
 
 export default function SettingsPage() {
-  const [activeTab, setActiveTab] = useState<'api' | 'deploy' | 'config' | 'limits' | 'logs' | 'notifications'>('api');
+  const [activeTab, setActiveTab] = useState<'api' | 'deploy' | 'config' | 'limits' | 'logs' | 'notifications' | 'usage'>('api');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -321,6 +322,16 @@ export default function SettingsPage() {
             }`}
           >
             🔔 نوتیفیکیشن
+          </button>
+          <button
+            onClick={() => setActiveTab('usage')}
+            className={`px-4 py-2 rounded-lg font-medium transition ${
+              activeTab === 'usage'
+                ? 'bg-cyan-500 text-white'
+                : 'bg-white dark:bg-gray-800 hover:bg-gray-100'
+            }`}
+          >
+            📊 مصرف AI
           </button>
         </div>
 
@@ -711,6 +722,10 @@ export default function SettingsPage() {
           <RenderLogsPanel />
         ) : activeTab === 'notifications' ? (
           <NotificationSettingsPanel />
+        ) : activeTab === 'usage' ? (
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
+            <AIUsagePanel />
+          </div>
         ) : null}
 
         {/* لینک‌ها */}
