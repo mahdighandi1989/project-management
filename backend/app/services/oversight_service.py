@@ -1570,7 +1570,8 @@ class OversightService:
                         watched.repo_full_name,
                         branch=watched.default_branch or "main",
                         token=token_for_deep,
-                        max_deep_read=40,  # 🆕 از 30 به 40 — context پربارتر برای پرامپت دقیق‌تر
+                        max_deep_read=40,  # context پربارتر برای پرامپت دقیق‌تر
+                        idea=idea,  # 🆕 keyword-aware file selection: فایل‌های مرتبط با ایده اولویت می‌گیرند
                     )
                     if not deep_ctx.get("ok"):
                         logger.warning(f"deep_context for idea failed: {deep_ctx.get('error')}")

@@ -347,14 +347,54 @@ def _related_for_paths(
     return out[:limit]
 
 
+def _extract_idea_keywords(idea: str, max_keywords: int = 15) -> List[str]:
+    """🆕 استخراج کلمات کلیدی از idea کاربر برای keyword-aware ranking.
+
+    - CamelCase identifiers (مثل OversightPanel)
+    - snake_case identifiers (مثل copy_prompt)
+    - کلمات فارسی 4+ کاراکتر
+    - کلمات انگلیسی 4+ کاراکتر (با حذف stopwords)
+    """
+    if not idea:
+        return []
+    import re
+    text = idea.strip()
+    keywords: set = set()
+    # CamelCase
+    for m in re.findall(r"\b[A-Z][a-zA-Z0-9]{3,}\b", text):
+        keywords.add(m.lower())
+    # snake_case طولانی
+    for m in re.findall(r"\b[a-z][a-z0-9_]{4,}\b", text):
+        keywords.add(m)
+    # کلمات فارسی
+    for m in re.findall(r"[؀-ۿ]{4,}", text):
+        keywords.add(m)
+    # کلمات انگلیسی معمول (4+ char)
+    for m in re.findall(r"\b[a-zA-Z]{4,}\b", text):
+        keywords.add(m.lower())
+    # حذف stopwords
+    stopwords = {
+        "function", "method", "class", "import", "should", "would",
+        "this", "that", "these", "those", "with", "from", "into",
+        "make", "want", "need", "have", "more", "less", "some", "many",
+        "است", "این", "آن", "های", "هایی", "می‌شود", "شده", "باشد",
+        "برای", "وجود", "ندارد", "دارد", "کاربر", "بتواند", "خواهد",
+    }
+    keywords = {k for k in keywords if k.lower() not in stopwords and len(k) >= 4}
+    # sort by length descending — long keywords are more specific
+    return sorted(keywords, key=lambda x: -len(x))[:max_keywords]
+
+
 def _score_files(
     paths: List[str],
     sizes: Dict[str, int],
     recent_changed_files: List[str],
     import_counts: Dict[str, int],
+    idea_keywords: Optional[List[str]] = None,  # 🆕 برای keyword-aware boost
 ) -> List[Tuple[str, int]]:
     """ترتیب فایل‌ها بر اساس امتیاز اهمیت برای deep-read."""
     scores: Dict[str, int] = {}
+    kws = [k.lower() for k in (idea_keywords or []) if k]
     for p in paths:
         s = 0
         name = p.split("/")[-1]
@@ -381,6 +421,17 @@ def _score_files(
         sz = sizes.get(p, 0)
         if sz > 20000:
             s += 2
+        # 🆕 keyword-aware boost: اگر path شامل کلمات کلیدی idea است
+        # هر keyword match = +5 score (شاخص قوی برای relevance)
+        if kws:
+            p_low = p.lower()
+            matched_kws = sum(1 for kw in kws if kw in p_low)
+            if matched_kws > 0:
+                s += matched_kws * 5
+                # bonus اگر در نام فایل (basename) match بود — قوی‌تر
+                name_low = name.lower()
+                if any(kw in name_low for kw in kws):
+                    s += 3
         scores[p] = s
     return sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
@@ -746,6 +797,7 @@ async def build_deep_context_for_idea(
     max_files_summary: int = 200,
     max_file_lines: int = 350,
     max_file_bytes: int = 50000,
+    idea: str = "",  # 🆕 متن idea کاربر — برای keyword-aware ranking
 ) -> Dict[str, Any]:
     """ساخت context عمیق پروژه — برای استفاده در idea_to_prompt و سایر
     مسیرهایی که نیاز به محتوای واقعی فایل‌ها (با شمارهٔ خط) و گراف import
@@ -820,8 +872,15 @@ async def build_deep_context_for_idea(
 
         stacks = _detect_stack(all_files, dep_contents)
 
+        # 🆕 استخراج کلمات کلیدی از idea کاربر برای keyword-aware ranking
+        # این یعنی فایل‌هایی که در path شان کلمات idea را دارند اولویت می‌گیرند
+        idea_keywords = _extract_idea_keywords(idea) if idea else []
+        if idea_keywords:
+            logger.info(f"deep_context_for_idea: keywords extracted: {idea_keywords[:5]}...")
+
         # Phase 2: ابتدا rank سبک، سپس rerank با import graph
-        ranked0 = _score_files(all_files, sizes, [], {})
+        # هر دو call با idea_keywords تا فایل‌های مرتبط با idea اولویت بگیرند
+        ranked0 = _score_files(all_files, sizes, [], {}, idea_keywords=idea_keywords)
         initial_paths = [p for p, s in ranked0[: max_deep_read * 2] if s > 0][: max_deep_read * 2]
 
         deep_contents: Dict[str, str] = {}
@@ -837,7 +896,7 @@ async def build_deep_context_for_idea(
         imports, imported_by, real_import_counts = _build_import_graph(deep_contents, all_files)
 
         # rerank با import_counts واقعی، انتخاب نهایی max_deep_read
-        ranked = _score_files(all_files, sizes, [], real_import_counts)
+        ranked = _score_files(all_files, sizes, [], real_import_counts, idea_keywords=idea_keywords)
         final_paths = [p for p, s in ranked[: max_deep_read] if s > 0]
         for p in final_paths:
             if p not in deep_contents:
