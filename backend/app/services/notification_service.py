@@ -2386,34 +2386,40 @@ class NotificationService:
         if action == "build":
             # 🆕 پیام فوری progress — کاربر بلافاصله می‌داند کلیکش ثبت شد
             await tg.send("⏳ *آماده‌سازی فهرست مدل‌های AI...*", silent=True)
-            # 🆕 timeout 15 ثانیه — برای محافظت در برابر hang در DB
+            # 🆕 (CRITICAL fix) fast path — کاملاً bypass DB query
+            # علت: قبلاً get_available_models() از DB می‌خواند که در صورت
+            # exhaustion connection pool، minutes block می‌کرد. حالا:
+            # 1. فقط از registry در حافظه استفاده می‌کنیم
+            # 2. provider services در ai_manager init شده‌اند (sync، fast)
+            # 3. هیچ DB call نمی‌زنیم
+            available: List[Any] = []
             try:
                 from .ai_manager import get_ai_manager
-                # get_available_models() sync است؛ run_in_executor + wait_for
-                loop = asyncio.get_event_loop()
-                available = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        None, lambda: get_ai_manager().get_available_models() or []
-                    ),
-                    timeout=15.0,
-                )
-            except asyncio.TimeoutError:
-                logger.error("codex build: get_available_models timeout (15s)")
-                await tg.send(
-                    "❌ *Timeout در بارگذاری مدل‌ها*\n\n"
-                    "بارگذاری فهرست مدل‌ها بیش از 15 ثانیه طول کشید — احتمالاً "
-                    "اتصال دیتابیس مشکل دارد. لطفاً admin را خبر کنید.",
-                    silent=False,
-                )
-                return {"ok": True, "handled": "codex_models_timeout"}
+                from ..core.models_registry import get_enabled_models
+                from ..core.models_registry import ModelProvider as _MP
+                ai_mgr = get_ai_manager()
+                for model in get_enabled_models():
+                    prov = model.provider
+                    if isinstance(prov, str):
+                        try:
+                            prov = _MP(prov)
+                        except Exception:
+                            continue
+                    services = getattr(ai_mgr, "_services", {})
+                    svc = services.get(prov)
+                    if svc is None:
+                        continue
+                    # is_in_error_state ممکن است blocking باشد، در try/except
+                    try:
+                        if hasattr(svc, "is_in_error_state") and svc.is_in_error_state():
+                            continue
+                    except Exception:
+                        pass
+                    available.append(model)
+                logger.info(f"codex build (fast path): {len(available)} models available")
             except Exception as e:
-                logger.exception(f"codex build: cannot load ai_manager: {e}")
-                await tg.send(
-                    f"❌ *خطا در بارگذاری AI Manager*\n\n`{str(e)[:300]}`\n\n"
-                    f"این یک خطای سیستمی است — لطفاً admin را خبر کنید.",
-                    silent=False,
-                )
-                return {"ok": True, "handled": "codex_load_models_fail", "error": str(e)}
+                logger.exception(f"codex build fast path failed: {e}")
+                available = []
             if not available:
                 await tg.send(
                     "⚠️ *هیچ مدل AI فعالی نیست*\n\n"
