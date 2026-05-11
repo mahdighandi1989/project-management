@@ -1615,16 +1615,34 @@ export default function OversightPage() {
 
   const refreshCodex = async () => {
     if (!codexWatchedId) return;
+    if (selectedModelIds.length === 0) {
+      showError(
+        '⚠️ هیچ مدلی انتخاب نشده. ابتدا از بخش «انتخاب مدل» در بالای صفحه '
+        + 'حداقل یک مدل AI را انتخاب کنید.'
+      );
+      return;
+    }
     setCodexLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/oversight/codex/${codexWatchedId}/refresh`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model_id: selectedModelIds[0] || undefined, only_changed: false }),
+        body: JSON.stringify({ model_id: selectedModelIds[0], only_changed: false }),
       });
       if (res.ok) {
         const data = await res.json();
-        showSuccess(`${data.files_documented || 0} فایل مستند شد`);
+        const modelInfo = data.model_used ? ` (با مدل ${data.model_used})` : '';
+        const depthInfo = data.used_deep_structure ? '' : ' — توصیه: ابتدا Deep Scan اجرا شود';
+        if ((data.files_documented || 0) > 0) {
+          showSuccess(
+            `✅ ${data.newly_added || 0} فایل جدید مستند شد` + modelInfo
+            + ` — مجموع: ${data.files_documented} فایل${depthInfo}`
+          );
+        } else {
+          showError(
+            `هیچ فایلی مستند نشد${modelInfo}. لطفاً ابتدا یک Deep Scan کامل اجرا کنید.`
+          );
+        }
         // reload codex
         const reload = await fetch(`${API_BASE}/api/oversight/codex/${codexWatchedId}`);
         if (reload.ok) setCodexData(await reload.json());
@@ -3401,6 +3419,7 @@ export default function OversightPage() {
               onRefresh={refreshCodex}
               search={codexSearch}
               onSearch={setCodexSearch}
+              selectedModel={selectedModelIds[0]}
             />
           </Modal>
         )}
@@ -5363,12 +5382,14 @@ function CodexView({
   onRefresh,
   search,
   onSearch,
+  selectedModel,
 }: {
   data: any;
   loading: boolean;
   onRefresh: () => void;
   search: string;
   onSearch: (s: string) => void;
+  selectedModel?: string;
 }) {
   const files = data?.files || {};
   const filtered = Object.keys(files).filter(
@@ -5414,23 +5435,49 @@ function CodexView({
           <p className="text-xs text-gray-400 mt-1">
             {Object.keys(files).length} فایل مستند شده
             {data?.updated_at ? ` · ${new Date(data.updated_at).toLocaleString('fa-IR')}` : ''}
+            {data?.model_used && (
+              <span className="mr-2 px-1.5 py-0.5 bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 rounded text-[10px]" dir="ltr">
+                🤖 {data.model_used}
+              </span>
+            )}
+            {data?.used_deep_structure === false && (
+              <span className="mr-2 px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 rounded text-[10px]">
+                ⚠️ بدون Deep Scan
+              </span>
+            )}
           </p>
         </div>
-        <div className="flex gap-2">
-          <button
-            onClick={onRefresh}
-            disabled={loading}
-            className="px-3 py-1 bg-amber-500 text-white rounded text-sm hover:bg-amber-600 disabled:opacity-50"
-          >
-            {loading ? '⏳ در حال ساخت...' : '🪄 به‌روزرسانی با AI'}
-          </button>
-          <button
-            onClick={exportMd}
-            disabled={!Object.keys(files).length}
-            className="px-3 py-1 bg-blue-500 text-white rounded text-sm hover:bg-blue-600 disabled:opacity-50"
-          >
-            ↓ Markdown
-          </button>
+        <div className="flex flex-col items-end gap-1">
+          <div className="flex gap-2">
+            <button
+              onClick={onRefresh}
+              disabled={loading}
+              className="px-3 py-1 bg-amber-500 text-white rounded text-sm hover:bg-amber-600 disabled:opacity-50"
+              title={
+                selectedModel
+                  ? `ساخت Codex با مدل: ${selectedModel}`
+                  : 'هیچ مدلی انتخاب نشده — ابتدا از بالای صفحه مدل انتخاب کنید'
+              }
+            >
+              {loading ? '⏳ در حال ساخت...' : '🪄 به‌روزرسانی با AI'}
+            </button>
+            <button
+              onClick={exportMd}
+              disabled={!Object.keys(files).length}
+              className="px-3 py-1 bg-blue-500 text-white rounded text-sm hover:bg-blue-600 disabled:opacity-50"
+            >
+              ↓ Markdown
+            </button>
+          </div>
+          {selectedModel ? (
+            <span className="text-[10px] text-gray-500 dark:text-gray-400" dir="ltr">
+              مدل انتخابی: {selectedModel}
+            </span>
+          ) : (
+            <span className="text-[10px] text-red-500 dark:text-red-400">
+              ⚠️ هیچ مدلی انتخاب نشده
+            </span>
+          )}
         </div>
       </div>
 

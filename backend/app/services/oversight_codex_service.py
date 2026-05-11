@@ -50,6 +50,48 @@ def write_codex(watched_id: str, data: Dict[str, Any]) -> None:
     _write_json(_codex_path(watched_id), data)
 
 
+def _guess_kind_from_path(p: str) -> str:
+    """تشخیص kind از path/نام فایل — وقتی structure از deep scan موجود نیست.
+
+    کاربرد: fallback برای refresh_codex زمانی که kinds از deep_scan نداریم.
+    """
+    pl = (p or "").lower()
+    name = pl.rsplit("/", 1)[-1]
+    # config files
+    if name in {
+        "package.json", "tsconfig.json", "pyproject.toml", "requirements.txt",
+        "next.config.js", "next.config.mjs", "tailwind.config.js",
+        "tailwind.config.ts", "vite.config.ts", "vite.config.js",
+        "docker-compose.yml", "dockerfile", "render.yaml", ".env.example",
+    } or pl.endswith(("/dockerfile", ".env.example")):
+        return "config"
+    # entry points
+    if name in {"main.py", "app.py", "index.ts", "index.tsx", "index.js", "server.py", "manage.py"}:
+        return "entry"
+    # migration
+    if "/migrations/" in pl or "/alembic/" in pl:
+        return "migration"
+    # by path
+    if "/routes/" in pl or "/api/" in pl or pl.endswith(("_router.py", "_routes.py")):
+        return "route"
+    if "/services/" in pl or pl.endswith("_service.py"):
+        return "service"
+    if "/models/" in pl or pl.endswith("_model.py") or pl.endswith("/models.py"):
+        return "model"
+    if "/middleware/" in pl or pl.endswith("_middleware.py"):
+        return "middleware"
+    if "/components/" in pl or pl.endswith((".tsx", ".jsx")):
+        return "component"
+    if "/hooks/" in pl or "/use" in name:
+        return "hook"
+    if "/pages/" in pl or "/app/" in pl and pl.endswith("page.tsx"):
+        return "page"
+    # by extension fallback
+    if pl.endswith((".py", ".ts", ".js", ".tsx", ".jsx", ".go", ".rs", ".java")):
+        return "source"
+    return "other"
+
+
 async def refresh_codex(
     watched_id: str,
     *,
@@ -57,26 +99,69 @@ async def refresh_codex(
     max_files: int = 40,
     only_changed: bool = True,
 ) -> Dict[str, Any]:
-    """به‌روزرسانی Codex یک پروژه — delta-based."""
+    """به‌روزرسانی Codex یک پروژه — delta-based.
+
+    خروجی همیشه شامل model_used و وضعیت دقیق است تا کاربر بفهمد چه اتفاقی افتاد.
+    """
     service = get_oversight_service()
     watched = service._find_watched(watched_id)
     if watched is None:
         raise ValueError("پروژه یافت نشد")
 
+    # تشخیص مدل واقعی که استفاده خواهد شد — برای شفافیت در پاسخ
+    actual_model_id = model_id
+    available_models_info: List[str] = []
+    try:
+        from .ai_manager import get_ai_manager
+        ai_mgr = get_ai_manager()
+        available = ai_mgr.get_available_models() or []
+        available_models_info = [m.id for m in available]
+        if not available:
+            raise RuntimeError(
+                "هیچ مدل AI فعالی نیست. ابتدا در /settings یک کلید API "
+                "(OpenAI/Anthropic/Gemini/DeepSeek) وارد کنید."
+            )
+        if model_id and model_id not in {m.id for m in available}:
+            # مدل درخواست‌شده در دسترس نیست — fallback به اولین مدل فعال
+            logger.warning(
+                f"refresh_codex: model {model_id} در دسترس نیست. "
+                f"available={[m.id for m in available]}. fallback به {available[0].id}"
+            )
+            actual_model_id = available[0].id
+        elif not model_id:
+            actual_model_id = available[0].id
+    except RuntimeError:
+        raise
+    except Exception as _e:
+        logger.warning(f"refresh_codex: cannot resolve actual model: {_e}")
+        actual_model_id = model_id or "default"
+
     # خواندن structure از deep scan (اگر موجود)
     structure = _read_json(STORAGE_DIR / "structure" / f"{watched_id}.json", None)
+    used_deep_structure = False
     if not structure:
         # fallback: build_project_context
         ctx = await service.build_project_context(watched.repo_full_name)
         files_sample = ctx.get("files_sample") or []
-        kinds = {p: "other" for p in files_sample}
+        # 🆕 fallback kinds از روی path/extension — نه همه "other"
+        kinds = {p: _guess_kind_from_path(p) for p in files_sample}
         stacks = []
         readme = ctx.get("readme") or ""
     else:
+        used_deep_structure = True
         files_sample = structure.get("files") or []
         kinds = structure.get("kinds") or {}
         stacks = structure.get("stacks") or []
         readme = ""
+        # اگر structure موجود ولی kinds خالی، fallback بزن
+        if not kinds and files_sample:
+            kinds = {p: _guess_kind_from_path(p) for p in files_sample}
+
+    if not files_sample:
+        raise RuntimeError(
+            "هیچ فایلی در پروژه پیدا نشد. ممکن است token GitHub منقضی شده باشد "
+            "یا ریپو خصوصی بدون دسترسی است."
+        )
 
     existing = read_codex(watched_id)
     existing_files: Dict[str, Any] = existing.get("files") or {}
@@ -85,8 +170,17 @@ async def refresh_codex(
     important_kinds = {
         "entry", "page", "route", "service", "model",
         "middleware", "component", "hook", "config", "migration",
+        # 🆕 source هم به‌عنوان کاندید (وقتی deep scan نکرده‌ایم)
+        "source",
     }
     candidate_files = [p for p in files_sample if kinds.get(p) in important_kinds]
+    # 🆕 اگر بازم خالی شد (پروژهٔ بسیار غیرعادی)، حداقل ۲۰ فایل اول
+    if not candidate_files:
+        logger.warning(
+            f"refresh_codex: هیچ فایل با kind مهم پیدا نشد ({len(files_sample)} فایل کل) — "
+            f"استفاده از ۲۰ فایل اول"
+        )
+        candidate_files = files_sample[:20]
     candidate_files = candidate_files[:max_files]
 
     if only_changed:
@@ -130,14 +224,29 @@ Stack: {', '.join(stacks) or '(نامشخص)'}
 }}"""
 
     try:
+        # 🆕 max_tokens از 3500 به 8000 (برای 40 فایل JSON خروجی)
         response = await service._ai_generate(
-            prompt, model_id=model_id, max_tokens=3500, temperature=0.3
+            prompt, model_id=actual_model_id, max_tokens=8000, temperature=0.3
         )
     except Exception as e:
-        raise RuntimeError(f"خطا در ساخت Codex: {e}")
+        raise RuntimeError(f"خطا در ساخت Codex (مدل {actual_model_id}): {e}")
+
+    if not response or len(response.strip()) < 20:
+        raise RuntimeError(
+            f"مدل {actual_model_id} پاسخ خالی یا خیلی کوتاه برگرداند. "
+            f"ممکن است quota تمام شده یا کلید API نامعتبر باشد."
+        )
 
     parsed = service._extract_json(response) or {}
     new_entries = parsed.get("files") or {}
+
+    if not new_entries:
+        # 🆕 خطای واضح — نه silent success "0 فایل"
+        raise RuntimeError(
+            f"مدل {actual_model_id} نتوانست JSON معتبر تولید کند. "
+            f"پاسخ خام {len(response)} کاراکتر. "
+            f"لطفاً با مدل دیگری امتحان کنید یا scan کامل پروژه را اجرا کنید."
+        )
 
     # ادغام با موجود
     merged_files = dict(existing_files)
@@ -154,6 +263,8 @@ Stack: {', '.join(stacks) or '(نامشخص)'}
         "updated_at": now_iso(),
         "files": merged_files,
         "files_count": len(merged_files),
+        "model_used": actual_model_id,
+        "used_deep_structure": used_deep_structure,
     }
 
     write_codex(watched_id, codex)
@@ -162,7 +273,11 @@ Stack: {', '.join(stacks) or '(نامشخص)'}
         "success": True,
         "files_documented": len(merged_files),
         "newly_added": len(new_entries),
+        "candidates_analyzed": len(candidate_files),
         "stacks": stacks,
+        "model_used": actual_model_id,
+        "used_deep_structure": used_deep_structure,
+        "available_models": available_models_info,
     }
 
 
