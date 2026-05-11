@@ -264,6 +264,14 @@ EVENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "default_sound": True,
         "icon": "🔄",
     },
+    # 🆕 (Inspector → Oversight Bridge) تسک‌های آمده از بازرس ویژه
+    "task_from_inspector": {
+        "label": "📥 تسک از بازرس ویژه",
+        "help": "وقتی کاربر از بازرس ویژه (در /projects) درخواست را به مرکز نظارت ارسال می‌کند",
+        "default_enabled": True,
+        "default_sound": True,
+        "icon": "📥",
+    },
     # 🆕 (AI Balance Monitor — Tile 3)
     "ai_balance_low": {
         "label": "💰 موجودی AI کم",

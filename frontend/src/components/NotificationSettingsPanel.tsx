@@ -60,6 +60,12 @@ const EVENT_GROUPS: Array<{ title: string; icon: string; keys: string[] }> = [
     icon: '🔁',
     keys: ['task_duplicate_detected', 'task_merged', 'prompt_regenerated'],
   },
+  // 🆕 (Inspector → Oversight) تسک از بازرس ویژه
+  {
+    title: 'بازرس ویژه → مرکز نظارت',
+    icon: '📥',
+    keys: ['task_from_inspector'],
+  },
   // 🆕 (Creator) گروه ساخت پروژه
   {
     title: 'Creator (ساخت پروژه)',

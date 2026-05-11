@@ -292,6 +292,10 @@ class OversightTask:
     # که در inspector_context/{id}.json ذخیره شده. None برای تسک‌های غیر-inspector.
     inspector_context_id: Optional[str] = None
     inspector_mode: Optional[str] = None  # "chat" | "visual_debug" | None
+    # 🆕 (Inspector → Oversight) متن meta جدا که در UI کنار پرامپت نمایش داده می‌شود
+    # (page_url, captured_at, screenshot timestamps, session id, ...) —
+    # مستقل از task.prompt که فقط core است.
+    inspector_meta_summary: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

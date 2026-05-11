@@ -650,6 +650,8 @@ async def process_from_inspector(
         acceptance_criteria=[],
         inspector_mode=mode,
         inspector_context_id=None,
+        # 🆕 meta_summary مستقیم در task ذخیره می‌شود — UI سبک و قابل دسترسی
+        inspector_meta_summary=meta_summary,
     )
 
     # 6. ذخیره context
@@ -682,13 +684,13 @@ async def process_from_inspector(
         svc.tasks.append(new_task)
         svc._save_tasks()
 
-    # 8. notify (best-effort)
+    # 8. notify (best-effort) — از event task_from_inspector که default_enabled=True
     try:
         from .notification_service import notification_service
         await notification_service.notify_event(
-            "task_created",
+            "task_from_inspector",
             (
-                f"📥 *تسک از بازرس ویژه*\n\n"
+                f"📥 *تسک جدید از بازرس ویژه*\n\n"
                 f"📁 `{project_full_name_final}`\n"
                 f"🎯 _{title[:100]}_\n"
                 f"🔖 حالت: `{mode}`{(' · ' + str(len(screenshots)) + ' عکس' if screenshots else '')}\n"
