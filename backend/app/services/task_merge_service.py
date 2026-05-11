@@ -181,7 +181,23 @@ class TaskMergeService:
 
         خروجی شامل field_diffs برای هر فیلد قابل ادغام. کاربر در UI انتخاب می‌کند
         کدام recommendation اعمال شود.
+
+        نتیجه برای ۶۰۰ ثانیه cache می‌شود تا کلیک‌های پیاپی روی همان merge هزینهٔ
+        AI تکراری نداشته باشد (کلید: hash(existing_id + candidate_raw_idea + use_ai)).
         """
+        # cache hit?
+        cache_key = self._cache_key(
+            existing.id, f"{candidate_raw_idea}|ai={int(bool(use_ai))}",
+        )
+        cached = self._cache_get(cache_key)
+        if cached:
+            try:
+                # بازسازی MergePreview از dict ذخیره‌شده
+                return MergePreview(**cached)
+            except Exception:
+                # اگر struct تغییر کرده، cache را بی‌خیال شو
+                self._preview_cache.pop(cache_key, None)
+
         cand_ac = list(candidate_acceptance_criteria or [])
         cand_tf = list(candidate_target_files or [])
 
@@ -323,6 +339,11 @@ class TaskMergeService:
             new_seen_count=existing_seen + 1,
             raw_idea_history_append=(candidate_raw_idea or candidate_title)[:300],
         )
+        # ذخیره در cache برای کلیک‌های پیاپی
+        try:
+            self._cache_set(cache_key, preview.to_dict())
+        except Exception:
+            pass
         return preview
 
     @staticmethod
