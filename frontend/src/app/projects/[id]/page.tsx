@@ -4228,11 +4228,25 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       return false;
     }
 
+    // محاسبهٔ size تخمینی برای screenshots
+    let payloadSizeWarning = '';
+    if (mode === 'visual_debug' && visualDebugScreenshots.length > 0) {
+      const totalKB = visualDebugScreenshots.reduce(
+        (sum, s) => sum + Math.ceil((s.base64?.length || 0) / 1024),
+        0,
+      );
+      if (totalKB > 4000) {
+        payloadSizeWarning = ` ⚠️ حجم تصاویر ${(totalKB / 1024).toFixed(1)}MB — ممکن است upload چند دقیقه طول بکشد.`;
+      } else if (totalKB > 1500) {
+        payloadSizeWarning = ` (حجم تصاویر ~${(totalKB / 1024).toFixed(1)}MB)`;
+      }
+    }
+
     setSendToOversightLoading(true);
     setInspectorChatMessages(prev => [...prev, {
       id: `sending_oversight_${Date.now()}`,
       role: 'system' as const,
-      content: `⏳ در حال ساخت پرامپت غنی و ارسال به مرکز نظارت...${mode === 'visual_debug' ? ` (${visualDebugScreenshots.length} عکس با vision model توصیف می‌شود)` : ''}`,
+      content: `⏳ در حال ساخت پرامپت غنی و ارسال به مرکز نظارت...${mode === 'visual_debug' ? ` (${visualDebugScreenshots.length} عکس با vision model به‌صورت موازی توصیف می‌شود)${payloadSizeWarning}` : ''}`,
       timestamp: new Date(),
     }]);
 
@@ -4425,6 +4439,15 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           timestamp: new Date(),
         }];
       });
+    } else if (_bypassOversightCheck) {
+      // 🆕 (Inspector → Oversight) منوال override: پیام user قبلاً در چت هست
+      // فقط system message اضافه کن که می‌گه «حالا مدل را اجرا می‌کنم»
+      setInspectorChatMessages(prev => [...prev, {
+        id: `bypass_reanalyze_${Date.now()}`,
+        role: 'system' as const,
+        content: '🔍 *بررسی همین پرامپت در چت* — مدل را روی پیام بالا اجرا می‌کنم...',
+        timestamp: new Date(),
+      }]);
     } else {
       // اضافه کردن پیام کاربر به چت — اگر ساختارمند شده، متن ساختارمند اصلی نمایش داده میشه
       const userMsgId = `user_${Date.now()}`;
