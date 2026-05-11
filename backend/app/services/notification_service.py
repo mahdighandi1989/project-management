@@ -262,6 +262,14 @@ EVENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "default_sound": True,
         "icon": "🔄",
     },
+    # 🆕 (AI Balance Monitor — Tile 3)
+    "ai_balance_low": {
+        "label": "💰 موجودی AI کم",
+        "help": "موجودی DeepSeek (API) یا budget دستی پایین‌تر از آستانه",
+        "default_enabled": True,
+        "default_sound": True,
+        "icon": "💰",
+    },
 }
 
 

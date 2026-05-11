@@ -545,7 +545,119 @@ class AIManager:
                 tokens_used=response.tokens_used
             )
 
+        # 🆕 (Token Tracking — Tile 1) ثبت مصرف در ai_logs
+        # Fire-and-forget — هیچ exception نباید AI flow را block کند.
+        try:
+            import asyncio as _asyncio
+            _asyncio.create_task(self._log_ai_usage_async(
+                provider_str=(provider.value if hasattr(provider, "value") else str(provider)),
+                model_id=model_id,
+                messages=messages,
+                response=response,
+                original_model_id=original_model_id if used_fallback else None,
+                project_id=kwargs.get("_log_project_id"),
+                debate_id=kwargs.get("_log_debate_id"),
+            ))
+        except Exception as _le:
+            slog.warning(f"failed to schedule AI usage log: {_le}")
+
         return response
+
+    async def _log_ai_usage_async(
+        self,
+        *,
+        provider_str: str,
+        model_id: str,
+        messages: List[Message],
+        response: AIResponse,
+        original_model_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        debate_id: Optional[str] = None,
+    ) -> None:
+        """ثبت یک log از مصرف توکن در ai_logs (non-blocking, best-effort).
+
+        Pattern:
+          - استخراج input/output tokens از response.metadata یا fallback به tokens_used
+          - تخمین هزینه از model.cost_per_1k_tokens
+          - اجرای DB call در thread executor (sync SQLAlchemy)
+          - هر exception silent (slog.debug) — نباید AI flow را خراب کند
+        """
+        try:
+            # نسخهٔ کوتاه prompt — جلوگیری از پر شدن DB با متن بلند
+            try:
+                prompt_text = "\n".join(
+                    f"[{m.role}] {(m.content or '')[:400]}"
+                    for m in messages[-3:]  # فقط ۳ پیام آخر
+                )[:2000]
+            except Exception:
+                prompt_text = ""
+            response_text = (response.content or "")[:2000]
+
+            # استخراج تفکیک از metadata
+            meta = response.metadata or {}
+            input_tokens = int(meta.get("prompt_tokens") or meta.get("input_tokens") or 0)
+            output_tokens = int(meta.get("completion_tokens") or meta.get("output_tokens") or 0)
+            total = response.tokens_used or (input_tokens + output_tokens)
+            # اگر فقط total موجود است و تفکیک نه، تخمین: 30% input / 70% output
+            if total > 0 and input_tokens == 0 and output_tokens == 0:
+                input_tokens = int(total * 0.3)
+                output_tokens = total - input_tokens
+
+            # تخمین هزینه (دلار) — cost_per_1k_tokens × total / 1000
+            cost = 0.0
+            try:
+                m = get_model(model_id)
+                cpt = float(getattr(m, "cost_per_1k_tokens", 0) or 0) if m else 0
+                if cpt > 0 and total > 0:
+                    cost = round((total / 1000.0) * cpt, 6)
+            except Exception:
+                pass
+
+            extra: Dict[str, Any] = {
+                "messages_count": len(messages),
+                "finish_reason": getattr(response, "finish_reason", ""),
+            }
+            if original_model_id:
+                extra["fallback_used"] = True
+                extra["original_model_id"] = original_model_id
+
+            # status determination
+            err = getattr(response, "error", None)
+            status = "error" if err else "success"
+
+            # DB call sync — در thread executor اجرا شود تا event loop block نشود
+            def _do_log() -> None:
+                from ..core.database import SessionLocal
+                from ..models.ai_log import AILog
+                db = SessionLocal()
+                try:
+                    AILog.log_request(
+                        db,
+                        provider=provider_str,
+                        model=model_id,
+                        request_type="chat",
+                        prompt=prompt_text,
+                        response=response_text,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cost=cost,
+                        latency_ms=int(getattr(response, "latency_ms", 0) or 0),
+                        project_id=project_id,
+                        debate_id=debate_id,
+                        status=status,
+                        error_message=str(err)[:500] if err else None,
+                        extra_data=extra,
+                    )
+                except Exception as _de:
+                    slog.debug(f"AILog write failed: {_de}")
+                finally:
+                    db.close()
+
+            import asyncio as _asyncio
+            loop = _asyncio.get_event_loop()
+            await loop.run_in_executor(None, _do_log)
+        except Exception as _e:
+            slog.debug(f"_log_ai_usage_async outer error: {_e}")
 
     async def generate_with_fallback(
         self,

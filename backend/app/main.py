@@ -26,6 +26,7 @@ from .api.routes import render_logs  # 🆕 Render Logs (لاگ‌های رند�
 from .api.routes import security_analysis  # 🆕 Security Analysis (تحلیل امنیتی)
 from .api.routes import system_prompts  # 🆕 System Prompts (مدیریت پرامپت‌ها)
 from .api.routes import notifications  # 🆕 Notifications (Telegram/Email)
+from .api.routes import ai_usage  # 🆕 AI Usage tracking (token consumption + leak detection)
 
 # Defensive import for oversight (mustn't block app boot if storage/AI deps misbehave)
 try:
@@ -527,6 +528,7 @@ app.include_router(render_logs.router)  # 🆕 Render Logs (لاگ‌های رن
 app.include_router(security_analysis.router)  # 🆕 Security Analysis (تحلیل امنیتی)
 app.include_router(system_prompts.router)  # 🆕 System Prompts (مدیریت پرامپت‌ها)
 app.include_router(notifications.router, prefix="/api")  # 🆕 Notifications (Telegram/Email)
+app.include_router(ai_usage.router, prefix="/api")  # 🆕 AI Usage tracking
 if OVERSIGHT_AVAILABLE and oversight is not None:
     app.include_router(oversight.router, prefix="/api")  # 🆕 Oversight (مرکز نظارت GitHub)
     # bridge endpoints under /api/projects/{project_id}/{apply-oversight-task,verify-task,oversight-summary}
