@@ -1031,11 +1031,15 @@ class NotificationService:
         # ——— message ———
         msg = update.get("message") or {}
         text = (msg.get("text") or "").strip()
-        # 🆕 alias دکمه‌های persistent reply keyboard → command واقعی
-        if text in TEXT_ALIASES:
-            text = TEXT_ALIASES[text]
         chat = (msg.get("chat") or {})
         chat_id = chat.get("id")
+        # 🆕 alias دکمه‌های persistent reply keyboard → command واقعی
+        # وقتی کاربر روی دکمهٔ menu کلیک می‌کند، اگر در یک flow بود، state را پاک
+        # می‌کنیم تا alias با fast-path command به‌جای text-handler flow اجرا شود.
+        if text in TEXT_ALIASES:
+            if chat_id:
+                _chat_state.pop(str(chat_id), None)
+            text = TEXT_ALIASES[text]
         if not chat_id or not text:
             return {"ok": True, "ignored": True}
         # فقط روی chat ID پیکربندی‌شده پاسخ دهیم (security)
@@ -1178,17 +1182,23 @@ class NotificationService:
                     [{"text": "🏠 صفحهٔ اصلی", "url": f"{base}/"}],
                 ]
             }
-            # 🆕 inline keyboard همراه با persistent reply keyboard — هر دو نمایش داده می‌شوند
-            # (Telegram: یک پیام می‌تواند هم inline داشته باشد هم reply_keyboard را ست کند)
-            await tg.send(reply, silent=True, reply_markup=kb)
-            # ست persistent reply keyboard با یک پیام نامحسوس (یا در پاسخ بعدی)
-            # سادهٔ: همان پیام reply_keyboard را ست نمی‌کند چون reply_markup را اشغال کرده.
-            # راه‌حل: یک پیام نامحسوس برای ست keyboard
-            await tg.send(
-                "🎛 منوی ثابت در پایین فعال است.",
-                silent=True,
-                reply_markup=PERSISTENT_REPLY_KEYBOARD,
-            )
+            # 🆕 یک پیام: inline keyboard. persistent reply keyboard از /start
+            # یا اولین /menu قبلاً ست شده — Telegram خودش آن را زیر input نگه می‌دارد
+            # تا /hide_menu بشود. پس نیازی به send دوم نیست.
+            # اگر این اولین تعامل کاربر باشد، یک‌بار persistent همراه پیام می‌فرستیم.
+            state_index = _read_index_state()
+            already_seen = bool(state_index.get("chat_id") == chat_id_str)
+            if already_seen:
+                # کاربر قبلاً با bot کار کرده — فقط inline keyboard
+                await tg.send(reply, silent=True, reply_markup=kb)
+            else:
+                # اولین بار — persistent keyboard + متن. سپس inline در پیام بعدی.
+                await tg.send(reply, silent=True, reply_markup=PERSISTENT_REPLY_KEYBOARD)
+                await tg.send(
+                    "🔗 *لینک‌های دسترسی سریع:*",
+                    silent=True,
+                    reply_markup=kb,
+                )
             return {"ok": True, "handled": "menu"}
 
         if text == "/status":
@@ -1954,11 +1964,12 @@ class NotificationService:
                 seen = getattr(t, "scan_seen_count", 1) or 1
                 seen_tag = f" 🔁{seen}x" if seen > 1 else ""
                 proj = (t.project_full_name or "").split("/")[-1][:20]
-                # escape underscore برای Markdown
+                # escape underscore و asterisk برای Markdown
                 title_safe = title.replace("_", "\\_").replace("*", "\\*")
+                proj_safe = proj.replace("_", "\\_").replace("*", "\\*")
                 lines.append(f"• {title_safe}{seen_tag}")
-                if proj:
-                    lines.append(f"   _{proj}_")
+                if proj_safe:
+                    lines.append(f"   _{proj_safe}_")
             if len(items) > cap:
                 lines.append(f"   ... و {len(items) - cap} مورد دیگر")
             lines.append("")
@@ -1987,7 +1998,9 @@ class NotificationService:
                 w_done = sum(
                     1 for t in recent_done if t.watched_id == w.id
                 )
-                name = (w.repo_full_name or w.id)[:35]
+                # نام داخل backtick — `_` در code formatting OK است
+                # ولی اگر backtick داخل نام بود مشکل می‌شد. escape می‌کنیم.
+                name = (w.repo_full_name or w.id)[:35].replace("`", "")
                 badge_bits = []
                 if w_active > 0:
                     badge_bits.append(f"⚡{w_active}")
@@ -2026,6 +2039,8 @@ class NotificationService:
             return {"ok": False, "error": "bot token تنظیم نشده"}
 
         content = self._build_index_content()
+        import hashlib
+        content_hash = hashlib.md5(content.encode("utf-8")).hexdigest()[:16]
         kb = {
             "inline_keyboard": [
                 [{"text": "🔄 به‌روزرسانی", "callback_data": "index:refresh"}],
@@ -2039,6 +2054,14 @@ class NotificationService:
 
         # 1) تلاش برای edit پیام موجود
         if prev_msg_id and str(prev_chat_id) == chat_id_str:
+            # اگر content یکسان است، فقط notification کوتاه بدهد (skip edit)
+            if state.get("last_content_hash") == content_hash and not force_refresh:
+                await tg.send(
+                    "📋 ایندکس از قبل به‌روز است (در پیام pin‌شده ↑)",
+                    silent=True,
+                )
+                return {"ok": True, "skipped": "no_change", "message_id": prev_msg_id}
+
             edit_url = f"https://api.telegram.org/bot{tg.bot_token}/editMessageText"
             try:
                 timeout = aiohttp.ClientTimeout(total=15)
@@ -2055,6 +2078,7 @@ class NotificationService:
                             _write_index_state({
                                 **state,
                                 "last_updated": _now_epoch(),
+                                "last_content_hash": content_hash,
                             })
                             # اطلاع کوتاه به کاربر (اگر force_refresh، silent)
                             if not force_refresh:
@@ -2103,6 +2127,7 @@ class NotificationService:
                 "chat_id": chat_id_str,
                 "message_id": new_msg_id,
                 "last_updated": _now_epoch(),
+                "last_content_hash": content_hash,
                 "pinned": True,
             })
             return {"ok": True, "created": True, "message_id": new_msg_id}
@@ -2114,6 +2139,9 @@ class NotificationService:
 
         اگر هیچ index قبلی موجود نیست، چیزی نمی‌سازد (تا کاربر مزاحم نشود).
         فقط edit می‌کند اگر message_id قبلی هست.
+
+        اگر content یکسان با آخرین نسخهٔ ارسالی باشد، edit نمی‌زند (تا Telegram
+        «message is not modified» 400 نده و log noise کم شود).
         """
         state = _read_index_state()
         chat_id = state.get("chat_id")
@@ -2125,6 +2153,11 @@ class NotificationService:
             return {"ok": False, "error": "no token"}
         try:
             content = self._build_index_content()
+            # hash content — skip اگر تغییری نیست
+            import hashlib
+            content_hash = hashlib.md5(content.encode("utf-8")).hexdigest()[:16]
+            if state.get("last_content_hash") == content_hash:
+                return {"ok": True, "skipped": "no_change"}
             kb = {
                 "inline_keyboard": [
                     [{"text": "🔄 به‌روزرسانی", "callback_data": "index:refresh"}],
@@ -2142,7 +2175,11 @@ class NotificationService:
                     "reply_markup": kb,
                 }) as r:
                     if r.status == 200:
-                        _write_index_state({**state, "last_updated": _now_epoch()})
+                        _write_index_state({
+                            **state,
+                            "last_updated": _now_epoch(),
+                            "last_content_hash": content_hash,
+                        })
                         return {"ok": True, "edited": True}
                     return {"ok": False, "status": r.status}
         except Exception as e:
