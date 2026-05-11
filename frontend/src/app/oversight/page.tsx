@@ -179,6 +179,7 @@ interface Task {
   // 🆕 (Inspector → Oversight)
   inspector_context_id?: string | null;
   inspector_mode?: 'chat' | 'visual_debug' | null;
+  inspector_meta_summary?: string | null;
   raw_idea_history?: Array<{
     ts: string;
     source: string;
@@ -4607,6 +4608,17 @@ function TasksPanel({
                   </span>
                 )}
               </div>
+            )}
+            {/* 🆕 (Inspector → Oversight) meta summary در کادر جدا (خارج از پرامپت اصلی) */}
+            {t.inspector_meta_summary && (
+              <details className="mt-2 text-[11px] bg-cyan-50 dark:bg-cyan-900/20 border border-cyan-200 dark:border-cyan-800 rounded p-2">
+                <summary className="cursor-pointer font-semibold text-cyan-700 dark:text-cyan-300">
+                  📥 Inspector meta (خارج از کادر پرامپت — برای copy نمی‌رود)
+                </summary>
+                <pre className="mt-1.5 whitespace-pre-wrap break-words text-cyan-800 dark:text-cyan-200 text-[10px] leading-relaxed">
+                  {t.inspector_meta_summary}
+                </pre>
+              </details>
             )}
             {t.last_summary && (
               <p className="text-xs text-gray-600 dark:text-gray-300 mt-1 line-clamp-2">
