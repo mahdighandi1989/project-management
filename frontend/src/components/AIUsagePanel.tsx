@@ -611,10 +611,25 @@ export default function AIUsagePanel() {
             );
           })}
 
-          <div className="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded text-xs text-amber-800 dark:text-amber-300">
-            💡 <strong>نکته:</strong> Anthropic / OpenAI / Gemini / Perplexity هیچ public API برای موجودی ندارند.
-            با ثبت budget دستی، سیستم مصرف را از لاگ‌ها محاسبه و وقتی نزدیک آستانه است، notification می‌فرستد.
-            DeepSeek تنها provider با API موجودی واقعی است.
+          <div className="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded text-xs text-amber-800 dark:text-amber-300 space-y-2">
+            <div>
+              💡 <strong>تفاوت مهم بین DeepSeek و بقیه:</strong>
+            </div>
+            <ul className="list-disc mr-5 space-y-1">
+              <li>
+                <strong>DeepSeek</strong> — API واقعی دارد. هر بار roundtrip به سرور DeepSeek می‌زنیم.
+                اگر همین API key را در پروژهٔ دیگری هم مصرف کنید، با refresh کردن، کاهش موجودی را
+                <strong> به‌صورت لحظه‌ای</strong> می‌بینید. ✅ cross-project دقیق.
+              </li>
+              <li>
+                <strong>Anthropic / OpenAI / Gemini / Perplexity</strong> — هیچ public API برای موجودی ندارند.
+                ما فقط مصرف <em>این پروژه</em> را از <code>ai_logs</code> محاسبه می‌کنیم.
+                اگر همین key را در پروژهٔ دیگری هم استفاده کنید، آن مصرف اینجا دیده <strong>نمی‌شود</strong>
+                و <code>remaining_estimate</code> بیشتر از واقعی نشان می‌دهد.
+                ⚠️ توصیه: budget را برای این پروژه به‌تنهایی تنظیم کنید (نه کل شارژ پلتفرم)،
+                یا هر چند روز با مقدار واقعی dashboard خود sync کنید.
+              </li>
+            </ul>
           </div>
         </div>
       )}

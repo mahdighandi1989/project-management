@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import func, desc, and_
+from sqlalchemy import func, desc, and_, case
 
 from ...core.database import get_db
 from ...models.ai_log import AILog
@@ -50,7 +50,7 @@ async def get_stats(
         func.sum(AILog.cost).label("total_cost"),
         func.avg(AILog.latency_ms).label("avg_latency"),
         func.sum(
-            func.iif(AILog.status == "error", 1, 0)  # SQLite-compatible
+            case((AILog.status == "error", 1), else_=0)  # SQLAlchemy portable
         ).label("error_count"),
     ).filter(AILog.created_at >= since).group_by(AILog.provider).all()
 
@@ -186,18 +186,21 @@ async def get_leaks(
     """
     since = datetime.utcnow() - timedelta(days=days)
     # حالت ۱: input سنگین، output کم
+    # فیلتر در SQL تا حد امکان: output * 1000 <= total * (ratio * 1000)
+    # multiplication برای جلوگیری از float precision در SQLite
+    ratio_int = max(1, int(max_output_ratio * 1000))
     leaks_query = db.query(AILog).filter(
         AILog.created_at >= since,
         AILog.total_tokens >= min_tokens,
         AILog.status != "error",
-        (AILog.total_tokens > 0),
-    ).all()
+        (AILog.output_tokens * 1000) <= (AILog.total_tokens * ratio_int),
+    ).order_by(desc(AILog.total_tokens)).limit(200).all()
     leaks: List[Dict[str, Any]] = []
     for log in leaks_query:
         total = log.total_tokens or 0
         out = log.output_tokens or 0
         ratio = (out / total) if total > 0 else 0
-        if ratio <= max_output_ratio:
+        if True:  # filter already applied in SQL
             leaks.append({
                 "id": log.id,
                 "provider": log.provider,

@@ -319,10 +319,18 @@ class AIBalanceService:
                 from .notification_service import notification_service
                 provider = alert["provider"]
                 if alert["type"] == "remote_api":
+                    curr = alert.get("currency", "USD")
+                    currency_note = ""
+                    if curr.upper() != "USD":
+                        currency_note = (
+                            f"\n⚠️ توجه: واحد پول `{curr}` است ولی threshold به USD است — "
+                            f"اگر می‌خواهی hashtag دقیق باشد، threshold را به همان واحد تنظیم کن."
+                        )
                     msg = (
                         f"💰 *موجودی کم — {provider}*\n\n"
-                        f"موجودی فعلی: *{alert['balance_usd']:.2f} {alert['currency']}*\n"
-                        f"آستانه: {alert['threshold_usd']:.2f}\n\n"
+                        f"موجودی فعلی: *{alert['balance_usd']:.2f} {curr}*\n"
+                        f"آستانه: {alert['threshold_usd']:.2f} USD"
+                        f"{currency_note}\n\n"
                         f"⚠️ لطفاً اکانت `{provider}` را شارژ کنید."
                     )
                 else:
