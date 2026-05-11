@@ -54,11 +54,23 @@ const EVENT_GROUPS: Array<{ title: string; icon: string; keys: string[] }> = [
     icon: '📌',
     keys: ['task_created', 'idea_created', 'pr_created'],
   },
-  // 🆕 (Creator) گروه جدید
+  // 🆕 (Smart Task Lifecycle) چرخهٔ تسک — dedup + merge + regenerate
+  {
+    title: 'چرخهٔ تسک (Smart Lifecycle)',
+    icon: '🔁',
+    keys: ['task_duplicate_detected', 'task_merged', 'prompt_regenerated'],
+  },
+  // 🆕 (Creator) گروه ساخت پروژه
   {
     title: 'Creator (ساخت پروژه)',
     icon: '🚀',
     keys: ['project_created', 'project_auto_watched', 'creator_failed'],
+  },
+  // 🆕 (AI Usage) مصرف توکن و موجودی
+  {
+    title: 'مصرف AI (توکن و موجودی)',
+    icon: '💰',
+    keys: ['ai_balance_low'],
   },
   {
     title: 'گزارش',

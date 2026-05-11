@@ -2216,7 +2216,71 @@ class OversightService:
             "projects_created_last_30d": projects_created_30d,
             "projects_auto_watched_last_30d": projects_auto_watched_30d,
             "recent_created_projects": recent_created,
+            # 🆕 (AI Usage) آمار مصرف ۷ روز اخیر + موجودی provider ها
+            "ai_usage": self._compute_ai_usage_summary(),
         }
+
+    def _compute_ai_usage_summary(self) -> Dict[str, Any]:
+        """خلاصهٔ مصرف AI برای daily report (۷ روز اخیر + balances)."""
+        try:
+            from .ai_balance_service import AIBalanceService
+            from datetime import timedelta as _td
+            from .ai_log_helper import query_ai_usage_summary  # type: ignore
+        except Exception:
+            # ai_log_helper اختیاری — اگر نبود، inline query
+            pass
+        result: Dict[str, Any] = {
+            "week_tokens": 0,
+            "week_cost_usd": 0.0,
+            "week_request_count": 0,
+            "top_providers": [],
+            "balances": {},
+        }
+        try:
+            from datetime import datetime, timedelta
+            from .ai_balance_service import AIBalanceService
+            from ..core.database import SessionLocal
+            from ..models.ai_log import AILog
+            from sqlalchemy import func
+            since = datetime.utcnow() - timedelta(days=7)
+            db = SessionLocal()
+            try:
+                # totals
+                row = db.query(
+                    func.count(AILog.id),
+                    func.sum(AILog.total_tokens),
+                    func.sum(AILog.cost),
+                ).filter(AILog.created_at >= since).first()
+                if row:
+                    result["week_request_count"] = int(row[0] or 0)
+                    result["week_tokens"] = int(row[1] or 0)
+                    result["week_cost_usd"] = round(float(row[2] or 0), 4)
+                # top 3 providers
+                prov_rows = db.query(
+                    AILog.provider,
+                    func.sum(AILog.total_tokens),
+                    func.sum(AILog.cost),
+                ).filter(AILog.created_at >= since).group_by(AILog.provider).order_by(
+                    func.sum(AILog.total_tokens).desc()
+                ).limit(3).all()
+                result["top_providers"] = [
+                    {
+                        "provider": r[0],
+                        "tokens": int(r[1] or 0),
+                        "cost": round(float(r[2] or 0), 4),
+                    }
+                    for r in prov_rows
+                ]
+            finally:
+                db.close()
+            # balances
+            try:
+                result["balances"] = AIBalanceService.get_all_balances() or {}
+            except Exception as _be:
+                logger.debug(f"_compute_ai_usage_summary balances skip: {_be}")
+        except Exception as e:
+            logger.debug(f"_compute_ai_usage_summary failed: {e}")
+        return result
 
     # ====================================================================
     # Idea -> Strong Prompt

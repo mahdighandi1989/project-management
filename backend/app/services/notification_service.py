@@ -90,7 +90,8 @@ PERSISTENT_REPLY_KEYBOARD: Dict[str, Any] = {
     "keyboard": [
         [{"text": "📋 ایندکس"}, {"text": "🆕 تسک جدید"}],
         [{"text": "📚 شناسنامه"}, {"text": "🚀 پروژه جدید"}],
-        [{"text": "📊 وضعیت"}, {"text": "📋 منو"}],
+        [{"text": "💰 مصرف AI"}, {"text": "📊 وضعیت"}],
+        [{"text": "📋 منو"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -106,6 +107,7 @@ TEXT_ALIASES: Dict[str, str] = {
     "🚀 پروژه جدید": "/new_project",
     "📊 وضعیت": "/status",
     "📋 منو": "/menu",
+    "💰 مصرف AI": "/usage",
     "❌ بستن منو": "/hide_menu",
 }
 
@@ -772,6 +774,51 @@ def format_health_report_message(
         for r in recommendations:
             lines.append(f"• {r}")
 
+    # 🆕 (AI Usage) بخش مصرف AI ۷ روز اخیر + موجودی
+    ai_usage = summary.get("ai_usage") or {}
+    if ai_usage and (ai_usage.get("week_tokens", 0) > 0 or ai_usage.get("balances")):
+        lines.append("")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("💰 *مصرف AI (۷ روز اخیر):*")
+        wtok = ai_usage.get("week_tokens", 0)
+        wcost = ai_usage.get("week_cost_usd", 0)
+        wcnt = ai_usage.get("week_request_count", 0)
+        # format helpers inline
+        def _fn(n):
+            if n >= 1_000_000: return f"{n/1_000_000:.2f}M"
+            if n >= 1_000: return f"{n/1_000:.1f}K"
+            return str(n)
+        def _fc(c):
+            if c < 0.01: return f"${c:.6f}"
+            if c < 1: return f"${c:.4f}"
+            return f"${c:.2f}"
+        lines.append(f"📊 مجموع: *{_fn(wtok)}* توکن · {wcnt} request · {_fc(wcost)}")
+        top_providers = (ai_usage.get("top_providers") or [])[:3]
+        for p in top_providers:
+            lines.append(
+                f"  • `{p.get('provider', '?')}`: "
+                f"{_fn(int(p.get('tokens', 0)))} tok · {_fc(float(p.get('cost', 0)))}"
+            )
+        # موجودی provider ها (با هشدار اگر کم)
+        balances = ai_usage.get("balances") or {}
+        low_balances = []
+        for prov, b in balances.items():
+            ptype = b.get("type")
+            threshold = b.get("alert_threshold_usd", 1.0)
+            if ptype == "remote_api":
+                bal = b.get("remote_balance_usd", 0)
+                if bal <= threshold:
+                    curr = b.get("currency", "USD")
+                    low_balances.append(f"🔴 `{prov}` (API): *{bal:.2f} {curr}*")
+            elif ptype == "manual_budget":
+                rem = b.get("remaining_estimate_usd", 0)
+                if rem <= threshold:
+                    low_balances.append(f"🔴 `{prov}` (budget): باقی *${rem:.2f}*")
+        if low_balances:
+            lines.append("⚠️ *موجودی کم:*")
+            for lb in low_balances:
+                lines.append(f"  {lb}")
+
     # هشتگ‌ها
     lines.append("")
     date_tag = date_label.replace("/", "_").replace("-", "_")
@@ -1096,6 +1143,10 @@ class NotificationService:
         if text == "/codex":
             return await self._start_codex_flow(chat_id_str)
 
+        # 🆕 ——— /usage و /balance (مصرف AI + موجودی) ———
+        if text in ("/usage", "/balance"):
+            return await self._show_ai_usage(chat_id_str)
+
         # 🆕 /codex_debug — تشخیص دقیق وضعیت برای debug
         if text == "/codex_debug":
             return await self._codex_debug(chat_id_str)
@@ -1151,6 +1202,7 @@ class NotificationService:
                 "• /new\\_project یا /create\\_project — *🚀 ساخت پروژهٔ جدید* (از صفر، با push به GitHub)\n"
                 "• /new\\_task یا /new\\_idea — ثبت تسک جدید با انتخاب پروژه\n"
                 "• /codex — 📚 شناسنامهٔ پروژه (مشاهده یا ساخت با AI)\n"
+                "• /usage یا /balance — 💰 مصرف توکن AI و موجودی provider ها\n"
                 "• /menu — منوی دسترسی سریع\n"
                 "• /status — وضعیت نوتیفیکیشن\n"
                 "• /cancel — لغو flow فعلی\n"
@@ -1209,6 +1261,10 @@ class NotificationService:
                     [
                         # 🆕 (Codex) دکمهٔ شناسنامه
                         {"text": "📚 شناسنامهٔ پروژه", "callback_data": "menu:codex"},
+                    ],
+                    [
+                        # 🆕 (AI Usage) دکمهٔ مصرف
+                        {"text": "💰 مصرف AI و موجودی", "callback_data": "menu:usage"},
                     ],
                     [
                         {"text": "📦 مخازن", "url": f"{base}/oversight?tab=repos"},
@@ -1451,6 +1507,10 @@ class NotificationService:
             return await self._start_new_task_flow(chat_id_str)
         if data == "menu:codex":
             return await self._start_codex_flow(chat_id_str)
+        if data == "menu:usage":
+            return await self._show_ai_usage(chat_id_str)
+        if data == "usage:refresh_balance":
+            return await self._show_ai_usage(chat_id_str, refresh=True)
         if data == "menu:index":
             return await self._send_or_edit_index_message(chat_id_str)
         if data == "index:refresh":
@@ -2343,6 +2403,157 @@ class NotificationService:
 
         await tg.send("\n".join(lines), silent=True)
         return {"ok": True, "handled": "codex_debug"}
+
+    # -----------------------------------------------------------------------
+    # 🆕 (AI Usage) /usage و /balance — نمایش مصرف AI + موجودی provider ها
+    # -----------------------------------------------------------------------
+
+    async def _show_ai_usage(
+        self, chat_id_str: str, *, refresh: bool = False,
+    ) -> Dict[str, Any]:
+        """نمایش خلاصه‌ای از مصرف AI + موجودی provider ها در تلگرام."""
+        tg = self._telegram()
+        try:
+            # 1. summary مصرف
+            from ..core.database import SessionLocal
+            from ..models.ai_log import AILog
+            from sqlalchemy import func
+            from datetime import timedelta as _td
+            db = SessionLocal()
+            try:
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                last_7d = now - _td(days=7)
+
+                def _agg(since):
+                    row = db.query(
+                        func.count(AILog.id),
+                        func.sum(AILog.total_tokens),
+                        func.sum(AILog.cost),
+                    ).filter(AILog.created_at >= since).first()
+                    return {
+                        "count": int((row[0] or 0) if row else 0),
+                        "tokens": int((row[1] or 0) if row else 0),
+                        "cost": round(float((row[2] or 0) if row else 0), 4),
+                    }
+                today_agg = _agg(today)
+                week_agg = _agg(last_7d)
+
+                # per-provider breakdown (آخرین ۷ روز)
+                provider_rows = db.query(
+                    AILog.provider,
+                    func.count(AILog.id),
+                    func.sum(AILog.total_tokens),
+                    func.sum(AILog.cost),
+                ).filter(AILog.created_at >= last_7d).group_by(AILog.provider).all()
+            finally:
+                db.close()
+        except Exception as e:
+            logger.exception(f"_show_ai_usage db error: {e}")
+            await tg.send(
+                f"❌ خطا در خواندن مصرف از DB:\n`{str(e)[:200]}`",
+                silent=True,
+            )
+            return {"ok": True, "handled": "usage_db_error"}
+
+        # 2. موجودی‌ها (با refresh اختیاری)
+        try:
+            from .ai_balance_service import AIBalanceService
+            if refresh:
+                await tg.send("⏳ در حال refresh موجودی‌ها...", silent=True)
+                await AIBalanceService.check_and_notify()
+            balances_state = AIBalanceService.get_all_balances()
+        except Exception as e:
+            logger.warning(f"_show_ai_usage balance error: {e}")
+            balances_state = {}
+
+        # 3. ساخت متن
+        def _fmt_num(n):
+            if n >= 1_000_000:
+                return f"{n/1_000_000:.2f}M"
+            if n >= 1_000:
+                return f"{n/1_000:.1f}K"
+            return str(n)
+
+        def _fmt_cost(c):
+            if c < 0.01:
+                return f"${c:.6f}"
+            if c < 1:
+                return f"${c:.4f}"
+            return f"${c:.2f}"
+
+        lines: List[str] = []
+        lines.append("💰 *مصرف AI و موجودی*")
+        lines.append("")
+        lines.append("─" * 25)
+        lines.append("*📈 مصرف*")
+        lines.append(
+            f"📅 امروز: *{_fmt_num(today_agg['tokens'])}* توکن · "
+            f"{today_agg['count']} request · {_fmt_cost(today_agg['cost'])}"
+        )
+        lines.append(
+            f"🗓 ۷ روز: *{_fmt_num(week_agg['tokens'])}* توکن · "
+            f"{week_agg['count']} request · {_fmt_cost(week_agg['cost'])}"
+        )
+        lines.append("")
+
+        if provider_rows:
+            lines.append("─" * 25)
+            lines.append("*🤖 Per Provider (۷ روز)*")
+            for prov, cnt, tok, cost in sorted(
+                provider_rows, key=lambda r: -(r[2] or 0)
+            ):
+                lines.append(
+                    f"• `{prov}`: {_fmt_num(int(tok or 0))} tok · "
+                    f"{int(cnt or 0)} req · {_fmt_cost(float(cost or 0))}"
+                )
+            lines.append("")
+
+        # 4. موجودی‌ها
+        lines.append("─" * 25)
+        lines.append("*💳 موجودی*")
+        if not balances_state:
+            lines.append("هنوز هیچ provider/budget تنظیم نشده.")
+            lines.append("از پنل وب: /settings → 📊 مصرف AI → 💰 موجودی")
+        else:
+            for prov, data in balances_state.items():
+                ptype = data.get("type", "")
+                threshold = data.get("alert_threshold_usd", 1.0)
+                if ptype == "remote_api":
+                    bal = data.get("remote_balance_usd", 0)
+                    curr = data.get("currency", "USD")
+                    icon = "🟢" if bal > threshold else "🔴"
+                    lines.append(f"{icon} `{prov}` (API): *{bal:.2f} {curr}*")
+                elif ptype == "manual_budget":
+                    budget = data.get("budget_usd", 0)
+                    remaining = data.get("remaining_estimate_usd", 0)
+                    consumed = data.get("consumed_usd", 0)
+                    icon = "🟢" if remaining > threshold else "🔴"
+                    pct = (consumed / budget * 100) if budget > 0 else 0
+                    lines.append(
+                        f"{icon} `{prov}` (manual): باقی *${remaining:.2f}* از ${budget:.2f} "
+                        f"({pct:.0f}% مصرف)"
+                    )
+
+        prefs = _read_prefs()
+        base = (prefs.get("app_base_url", "") or "").rstrip("/")
+
+        # 5. inline keyboard: refresh + لینک پنل
+        rows: List[List[Dict[str, str]]] = [
+            [{"text": "🔄 refresh موجودی (DeepSeek API)", "callback_data": "usage:refresh_balance"}],
+        ]
+        if base:
+            rows.append([
+                {"text": "📊 پنل کامل", "url": f"{base}/settings?tab=usage"},
+            ])
+        rows.append([{"text": "❌ بستن", "callback_data": "flow:cancel"}])
+
+        await tg.send(
+            "\n".join(lines),
+            silent=True,
+            reply_markup={"inline_keyboard": rows},
+        )
+        return {"ok": True, "handled": "ai_usage_shown"}
 
     async def _start_codex_flow(self, chat_id_str: str) -> Dict[str, Any]:
         """مرحلهٔ ۱: انتخاب پروژه از لیست watched."""
