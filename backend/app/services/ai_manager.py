@@ -88,12 +88,17 @@ class AIManager:
         # 🔴 دریافت تنظیمات از دیتابیس
         db_settings_map = {}
         try:
-            from ..core.database import get_db
+            from ..core.database import SessionLocal
             from ..models.ai_profile import ModelSettings
-            db = next(get_db())
-            db_settings = db.query(ModelSettings).all()
-            db_settings_map = {s.model_id: s for s in db_settings}
-            logger.debug(f"Loaded {len(db_settings_map)} model settings from DB")
+            # 🆕 (bugfix) قبلاً `db = next(get_db())` بدون close → session leak
+            # حالا با context manager، session تضمیناً close می‌شود
+            db = SessionLocal()
+            try:
+                db_settings = db.query(ModelSettings).all()
+                db_settings_map = {s.model_id: s for s in db_settings}
+                logger.debug(f"Loaded {len(db_settings_map)} model settings from DB")
+            finally:
+                db.close()
         except Exception as e:
             logger.warning(f"Could not load model settings from DB: {e}")
 
@@ -372,16 +377,19 @@ class AIManager:
     def get_enabled_status(self, model_id: str) -> bool:
         """بررسی فعال بودن مدل در دیتابیس"""
         try:
-            from ..core.database import get_db
+            from ..core.database import SessionLocal
             from ..models.ai_profile import ModelSettings
-            db = next(get_db())
-            db_setting = db.query(ModelSettings).filter(ModelSettings.model_id == model_id).first()
-            if db_setting:
-                is_enabled = bool(db_setting.enabled)
-                return is_enabled
-            # اگر تنظیمات نداشت، از registry استفاده کن
-            model = get_model(model_id)
-            return model.enabled if model else False
+            # 🆕 (bugfix) قبلاً `db = next(get_db())` بدون close → session leak
+            db = SessionLocal()
+            try:
+                db_setting = db.query(ModelSettings).filter(ModelSettings.model_id == model_id).first()
+                if db_setting:
+                    return bool(db_setting.enabled)
+                # اگر تنظیمات نداشت، از registry استفاده کن
+                model = get_model(model_id)
+                return model.enabled if model else False
+            finally:
+                db.close()
         except Exception as e:
             slog.error("Error checking model enabled status",
                 model_id=model_id,
