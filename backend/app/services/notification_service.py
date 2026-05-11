@@ -2386,52 +2386,80 @@ class NotificationService:
         if action == "build":
             # 🆕 پیام فوری progress — کاربر بلافاصله می‌داند کلیکش ثبت شد
             await tg.send("⏳ *آماده‌سازی فهرست مدل‌های AI...*", silent=True)
-            # 🆕 (CRITICAL fix) fast path — کاملاً bypass DB query
-            # علت: قبلاً get_available_models() از DB می‌خواند که در صورت
-            # exhaustion connection pool، minutes block می‌کرد. حالا:
-            # 1. فقط از registry در حافظه استفاده می‌کنیم
-            # 2. provider services در ai_manager init شده‌اند (sync، fast)
-            # 3. هیچ DB call نمی‌زنیم
+            # 🆕 (BULLETPROOF) لیست مدل‌ها بدون DB، بدون singleton state.
+            # فقط از:
+            #   1. MODEL_REGISTRY در حافظه (immutable در runtime)
+            #   2. ENV variables (هیچ DB call نمی‌خواهد)
             available: List[Any] = []
+            enabled_count = 0
+            available_providers: List[str] = []
             try:
-                from .ai_manager import get_ai_manager
                 from ..core.models_registry import get_enabled_models
-                from ..core.models_registry import ModelProvider as _MP
-                ai_mgr = get_ai_manager()
-                for model in get_enabled_models():
+                enabled_models = get_enabled_models() or []
+                enabled_count = len(enabled_models)
+                logger.info(f"codex: get_enabled_models returned {enabled_count}")
+
+                # Step 1: providers با API key مشخص — فقط ENV
+                import os as _os
+                provider_env_keys = {
+                    "openai": ["OPENAI_API_KEY"],
+                    "claude": ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
+                    "anthropic": ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
+                    "gemini": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+                    "google": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+                    "deepseek": ["DEEPSEEK_API_KEY"],
+                    "perplexity": ["PERPLEXITY_API_KEY"],
+                }
+                providers_with_key = set()
+                for pname, ekeys in provider_env_keys.items():
+                    if any((_os.environ.get(k) or "").strip() for k in ekeys):
+                        providers_with_key.add(pname.lower())
+                available_providers = sorted(providers_with_key)
+                logger.info(f"codex: providers with API key: {available_providers}")
+
+                # Step 2: filter
+                for model in enabled_models:
                     prov = model.provider
-                    if isinstance(prov, str):
-                        try:
-                            prov = _MP(prov)
-                        except Exception:
-                            continue
-                    services = getattr(ai_mgr, "_services", {})
-                    svc = services.get(prov)
-                    if svc is None:
-                        continue
-                    # is_in_error_state ممکن است blocking باشد، در try/except
-                    try:
-                        if hasattr(svc, "is_in_error_state") and svc.is_in_error_state():
-                            continue
-                    except Exception:
-                        pass
-                    available.append(model)
-                logger.info(f"codex build (fast path): {len(available)} models available")
+                    prov_str = (prov.value if hasattr(prov, "value") else str(prov)).lower()
+                    if prov_str in providers_with_key:
+                        available.append(model)
+                logger.info(f"codex build: {len(available)} models available")
             except Exception as e:
-                logger.exception(f"codex build fast path failed: {e}")
-                available = []
-            if not available:
+                logger.exception(f"codex build models enumeration failed: {e}")
                 await tg.send(
-                    "⚠️ *هیچ مدل AI فعالی نیست*\n\n"
-                    "برای ساخت Codex، حداقل یک کلید API لازم است.\n\n"
-                    "از پنل وب → /settings یکی از این‌ها را تنظیم کنید:\n"
-                    "• OpenAI (gpt-4o, gpt-4)\n"
-                    "• Anthropic (claude-sonnet, claude-opus)\n"
-                    "• Gemini\n"
-                    "• DeepSeek\n\n"
-                    "سپس دوباره /codex بزنید.",
+                    f"❌ *خطا در شناسایی مدل‌ها*\n\n`{str(e)[:300]}`\n\n"
+                    f"می‌توانید از پنل وب /settings مدل را تنظیم کنید.",
                     silent=False,
                 )
+                return {"ok": True, "handled": "codex_enum_fail", "error": str(e)}
+
+            if not available:
+                # تشخیص دقیق چرا خالی است
+                if enabled_count == 0:
+                    msg = (
+                        "⚠️ *هیچ مدلی در MODEL_REGISTRY enabled نیست*\n\n"
+                        "این یک خطای سیستمی است — لطفاً admin را خبر کنید."
+                    )
+                elif not available_providers:
+                    msg = (
+                        "⚠️ *هیچ کلید API در env تنظیم نشده*\n\n"
+                        f"از {enabled_count} مدل registered، هیچ کدام provider با API key ندارد.\n\n"
+                        "روی Render → Environment، یکی از این‌ها را اضافه کنید:\n"
+                        "• `OPENAI_API_KEY`\n"
+                        "• `ANTHROPIC_API_KEY`\n"
+                        "• `GEMINI_API_KEY`\n"
+                        "• `DEEPSEEK_API_KEY`\n"
+                        "• `PERPLEXITY_API_KEY`\n\n"
+                        "سپس restart service بزنید."
+                    )
+                else:
+                    msg = (
+                        f"⚠️ *هیچ مدل مطابق پیدا نشد*\n\n"
+                        f"Providers با API key: `{', '.join(available_providers)}`\n"
+                        f"مدل‌های enabled در registry: *{enabled_count}*\n"
+                        f"ولی هیچ مدل matched نشد — احتمالاً registry با ENV ناهماهنگ است."
+                    )
+                await tg.send(msg, silent=False)
                 return {"ok": True, "handled": "codex_no_model"}
 
             # picker مدل — یک callback per model
@@ -2442,11 +2470,12 @@ class NotificationService:
                     "callback_data": f"codex:build_model:{watched_id}:{m.id}",
                 }])
             rows.append([{"text": "❌ انصراف", "callback_data": "flow:cancel"}])
+            # text فاقد escape pitfall (نام پروژه با _ ممکن است باشد)
+            repo_safe = (watched.repo_full_name or "").replace("`", "")
             await tg.send(
-                f"📚 *ساخت Codex برای* `{watched.repo_full_name}`\n\n"
+                f"📚 *ساخت Codex برای* `{repo_safe}`\n\n"
                 f"✅ *{len(available)} مدل AI فعال است*. کدام مدل استفاده شود؟\n\n"
-                f"_توصیه: مدل با context window بزرگ‌تر (مثل gpt-4o یا claude-sonnet) "
-                f"نتیجهٔ بهتری می‌دهد._",
+                f"Providers: {', '.join(available_providers)}",
                 silent=True,
                 reply_markup={"inline_keyboard": rows},
             )
