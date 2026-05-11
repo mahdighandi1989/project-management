@@ -1281,12 +1281,23 @@ export default function OversightPage() {
     }
   };
 
-  const savePromptAsTask = async (forceCreate: boolean = false) => {
+  // 🆕 (Smart Task Lifecycle) لیست watched های در حال پردازش — برای avoid
+  // double-create در فلوی duplicate. وقتی یک watched تسک ساخت یا کاربر صراحتاً
+  // force_create کرد، باید از همان نقطه ادامه بدهد، نه از اول.
+  const [savePendingIds, setSavePendingIds] = useState<string[]>([]);
+
+  const savePromptAsTask = async (
+    forceCreate: boolean = false,
+    pendingIds?: string[],
+  ) => {
     if (!previewPrompt) return;
-    const targetIds = ideaWatchedIds.length ? ideaWatchedIds : [''];
+    const targetIds = pendingIds ?? (ideaWatchedIds.length ? ideaWatchedIds : ['']);
     let created = 0;
     let duplicate: typeof duplicatePrompt = null;
+    const remaining: string[] = [];
+    let idx = 0;
     for (const wid of targetIds) {
+      idx++;
       const w = watched.find((x) => x.id === wid);
       try {
         const res = await fetch(`${API_BASE}/api/oversight/tasks`, {
@@ -1317,8 +1328,9 @@ export default function OversightPage() {
               priority: ideaPriority,
               matches: result.similar_matches || [],
             };
-            // فقط برای اولین duplicate dialog نمایش بده — کاربر تصمیم می‌گیرد و
-            // اگر force_create انتخاب کرد، savePromptAsTask(true) دوباره صدا زده می‌شود.
+            // باقی watched ها را به remaining منتقل کن تا پس از تصمیم کاربر
+            // فقط همین مورد و بعدی‌ها پردازش شوند، نه قبلی‌های موفق.
+            remaining.push(...targetIds.slice(idx - 1));
             break;
           }
           if (result.task) {
@@ -1329,9 +1341,11 @@ export default function OversightPage() {
       } catch {}
     }
     if (duplicate) {
+      setSavePendingIds(remaining);
       setDuplicatePrompt(duplicate);
       return;
     }
+    setSavePendingIds([]);
     if (created > 0) {
       setIdea('');
       setIdeaDeadline('');
@@ -1459,9 +1473,19 @@ export default function OversightPage() {
         showSuccess('ادغام انجام شد');
         setMergeModal(null);
         setDuplicatePrompt(null);
-        setPreviewPrompt(null);
-        setIdea('');
-        setTab('tasks');
+        // پس از merge این watched، اگر watched های باقی‌مانده وجود دارد، ادامه بده
+        // (در حالت تک watched_id، rest خالی است → flow بسته می‌شود)
+        const rest = savePendingIds.slice(1);
+        if (rest.length > 0) {
+          setSavePendingIds(rest);
+          // فلوی duplicate برای watched های بعدی همچنان فعال است
+          await savePromptAsTask(false, rest);
+        } else {
+          setSavePendingIds([]);
+          setPreviewPrompt(null);
+          setIdea('');
+          setTab('tasks');
+        }
         reloadStatus();
       } else {
         const err = await res.json().catch(() => ({}));
@@ -2486,15 +2510,22 @@ export default function OversightPage() {
                   <div className="flex gap-2 mt-4">
                     <button
                       onClick={() => {
+                        const pending = savePendingIds.length ? savePendingIds : undefined;
                         setDuplicatePrompt(null);
-                        savePromptAsTask(true);
+                        // فقط برای watched های باقی‌مانده force_create — قبلی‌های
+                        // موفق دوباره ساخته نمی‌شوند.
+                        savePromptAsTask(true, pending);
                       }}
                       className="flex-1 py-2 bg-amber-500 text-white rounded hover:bg-amber-600 text-sm"
                     >
                       ➕ ایجاد جداگانه با وجود تشابه
+                      {savePendingIds.length > 1 ? ` (${savePendingIds.length} باقی‌مانده)` : ''}
                     </button>
                     <button
-                      onClick={() => setDuplicatePrompt(null)}
+                      onClick={() => {
+                        setDuplicatePrompt(null);
+                        setSavePendingIds([]);
+                      }}
                       className="px-4 py-2 bg-gray-300 dark:bg-gray-600 dark:text-white rounded hover:bg-gray-400 text-sm"
                     >
                       ❌ انصراف
