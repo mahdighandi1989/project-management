@@ -123,6 +123,28 @@ class MergeApplyRequest(BaseModel):
     ai_merged_values: Optional[Dict[str, Any]] = None
 
 
+class FromInspectorRequest(BaseModel):
+    """درخواست ساخت تسک از ویجت «بازرس ویژه»."""
+    project_id: str
+    project_full_name: Optional[str] = None  # hint از frontend
+    mode: str  # "chat" | "visual_debug"
+    user_request: str
+    enhanced_prompt: Optional[str] = None
+    # context
+    screenshots: Optional[List[Dict[str, Any]]] = None  # [{base64, page_url, timestamp}]
+    console_logs: Optional[List[Dict[str, Any]]] = None
+    backend_logs: Optional[List[Dict[str, Any]]] = None
+    related_urls: Optional[List[str]] = None
+    api_paths: Optional[List[str]] = None
+    frontend_url: Optional[str] = None
+    backend_url: Optional[str] = None
+    page_url: Optional[str] = None
+    # metadata
+    priority: str = "medium"
+    type: str = "bug"
+    inspector_session_id: Optional[str] = None
+
+
 class TaskUpdate(BaseModel):
     title: Optional[str] = None
     prompt: Optional[str] = None
@@ -408,6 +430,65 @@ async def prepend_disclaimer_to_old_tasks():
         "skipped_count": skipped_count,
         "total_tasks": len(service.tasks),
     }
+
+# 🆕 (Inspector → Oversight Bridge) ساخت تسک از بازرس ویژه
+@router.post("/tasks/from-inspector")
+async def create_task_from_inspector(payload: FromInspectorRequest):
+    """ساخت تسک از ویجت بازرس ویژه با پرامپت غنی و context کامل.
+
+    - mode='chat': درخواست متنی + لاگ‌ها → پرامپت غنی
+    - mode='visual_debug': درخواست + screenshots → vision describe → پرامپت
+      خودکفا که حتی برای مدل غیر بصری قابل درک است
+    - بدون محدودیت طول prompt
+    - inspector_context ذخیره می‌شود برای دسترسی بعدی به screenshots اصلی
+    """
+    if payload.mode not in ("chat", "visual_debug"):
+        raise HTTPException(status_code=400, detail="mode باید 'chat' یا 'visual_debug' باشد")
+    if not (payload.user_request or "").strip():
+        raise HTTPException(status_code=400, detail="user_request خالی است")
+
+    from ...services.oversight_inspector_bridge import process_from_inspector
+    try:
+        result = await process_from_inspector(
+            project_id=payload.project_id,
+            project_full_name=payload.project_full_name,
+            mode=payload.mode,
+            user_request=payload.user_request,
+            enhanced_prompt=payload.enhanced_prompt,
+            screenshots=payload.screenshots,
+            console_logs=payload.console_logs,
+            backend_logs=payload.backend_logs,
+            related_urls=payload.related_urls,
+            api_paths=payload.api_paths,
+            frontend_url=payload.frontend_url,
+            backend_url=payload.backend_url,
+            page_url=payload.page_url,
+            priority=payload.priority,
+            task_type=payload.type,
+            inspector_session_id=payload.inspector_session_id,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"خطا: {str(e)[:300]}")
+
+
+@router.get("/tasks/{task_id}/inspector-context")
+async def get_inspector_context(task_id: str):
+    """خواندن inspector_context کامل (شامل screenshots base64) برای یک تسک.
+
+    استفاده: نمایش جزئیات در UI مرکز نظارت یا fetch توسط مدل اجراکننده.
+    """
+    from ...services.oversight_inspector_bridge import read_inspector_context
+    data = read_inspector_context(task_id)
+    if not data:
+        raise HTTPException(
+            status_code=404,
+            detail="inspector_context برای این تسک یافت نشد (این تسک از inspector نیست یا context پاک شده)",
+        )
+    return data
+
 
 # 🆕 (Smart Task Lifecycle) Dedup + Merge + Auto-Regenerate endpoints
 @router.post("/tasks/check-similarity")

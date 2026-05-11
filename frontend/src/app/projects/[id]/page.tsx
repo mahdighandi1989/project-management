@@ -344,6 +344,11 @@ export default function ProjectDetailPage() {
     logs_checked?: number;
     error_logs_count?: number;
     checked_logs?: Array<{ level: string; message: string; timestamp: string | null; service_id?: string }>;
+    // 🆕 (Inspector → Oversight) برای پیام‌هایی که به مرکز نظارت ارسال شده‌اند
+    sent_to_oversight?: boolean;
+    oversight_task_id?: string;
+    oversight_url?: string;
+    oversight_mode?: 'chat' | 'visual_debug';
   }>>([]);
   const [inspectorSessionId, setInspectorSessionId] = useState<number | null>(null);
   const inspectorSessionIdRef = useRef<number | null>(null);
@@ -581,6 +586,10 @@ export default function ProjectDetailPage() {
   }>>([]);
   const [visualDebugSelectedModels, setVisualDebugSelectedModels] = useState<string[]>([]);
   const [visualDebugLoading, setVisualDebugLoading] = useState(false);
+  // 🆕 (Inspector → Oversight) دو تیک جداگانه برای ارسال به مرکز نظارت
+  const [sendToOversightChat, setSendToOversightChat] = useState(false);
+  const [sendToOversightVisual, setSendToOversightVisual] = useState(false);
+  const [sendToOversightLoading, setSendToOversightLoading] = useState(false);
   const [visualDebugPromptOpen, setVisualDebugPromptOpen] = useState(false);
   const [visualDebugPromptData, setVisualDebugPromptData] = useState<{vd: Array<{id: string; title: string; content: string; icon: string; prompt_detail?: string}>; gen: Array<{id: string; title: string; content: string; icon: string; prompt_detail?: string}>} | null>(null);
 
@@ -4204,7 +4213,164 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   };
 
   // 🆕 ارسال پیام به AI
-  const sendInspectorChat = async (overrideMessage?: string, _isRetry = false) => {
+  // 🆕 (Inspector → Oversight) ارسال درخواست به مرکز نظارت به‌جای اجرای مدل
+  const sendToOversight = async (
+    mode: 'chat' | 'visual_debug',
+    overrideMessage?: string,
+  ): Promise<boolean> => {
+    const rawMessage = (overrideMessage || (mode === 'chat' ? inspectorChatInput : visualDebugDescription)).trim();
+    if (!rawMessage) {
+      alert('لطفاً متن درخواست را وارد کنید');
+      return false;
+    }
+    if (mode === 'visual_debug' && visualDebugScreenshots.length === 0) {
+      alert('لطفاً حداقل یک عکس بگیرید');
+      return false;
+    }
+
+    setSendToOversightLoading(true);
+    setInspectorChatMessages(prev => [...prev, {
+      id: `sending_oversight_${Date.now()}`,
+      role: 'system' as const,
+      content: `⏳ در حال ساخت پرامپت غنی و ارسال به مرکز نظارت...${mode === 'visual_debug' ? ` (${visualDebugScreenshots.length} عکس با vision model توصیف می‌شود)` : ''}`,
+      timestamp: new Date(),
+    }]);
+
+    // 1. enhance prompt (اگر فعال است)
+    let enhanced: string | null = null;
+    if (inspectorSmartPrompt && rawMessage.length >= 10) {
+      try {
+        const r = await enhancePrompt(rawMessage, mode === 'visual_debug' ? 'visual_debug' : 'chat');
+        if (r.wasEnhanced) enhanced = r.text;
+      } catch (e) {
+        // ignore enhance errors — original message will be used
+      }
+    }
+
+    // 2. آماده‌سازی payload
+    const screenshots = mode === 'visual_debug' ? visualDebugScreenshots.map(s => ({
+      base64: s.base64,
+      page_url: s.pageUrl,
+      timestamp: s.timestamp.toISOString(),
+    })) : null;
+
+    // جمع‌آوری همه related URLs از screenshots packs
+    const allRelatedUrls: string[] = [];
+    const allApiPaths: string[] = [];
+    if (mode === 'visual_debug') {
+      visualDebugScreenshots.forEach(ss => {
+        (ss.relatedUrls || []).forEach(u => {
+          if (!allRelatedUrls.includes(u) && allRelatedUrls.length < 30) allRelatedUrls.push(u);
+        });
+        (ss.apiPaths || []).forEach(p => {
+          if (!allApiPaths.includes(p) && allApiPaths.length < 30) allApiPaths.push(p);
+        });
+      });
+    }
+
+    const payload = {
+      project_id: projectId,
+      project_full_name: oversightBridgeSummary?.project_full_name || null,
+      mode,
+      user_request: rawMessage,
+      enhanced_prompt: enhanced,
+      screenshots,
+      console_logs: importedProjectConsoleLogs.slice(-50).map(l => ({
+        level: l.level, message: l.message, timestamp: l.timestamp, source: l.source,
+      })),
+      backend_logs: inspectorBackendLogs.slice(-30).map(l => ({
+        level: l.level, message: l.message, timestamp: l.timestamp, service_id: l.service_name,
+      })),
+      related_urls: allRelatedUrls.length > 0 ? allRelatedUrls : null,
+      api_paths: allApiPaths.length > 0 ? allApiPaths : null,
+      frontend_url: inspectorFrontendUrl || null,
+      backend_url: inspectorBaseUrl || null,
+      page_url: (typeof window !== 'undefined' ? window.location.href : null),
+      priority: 'medium',
+      type: mode === 'visual_debug' ? 'bug' : 'other',
+      inspector_session_id: inspectorSessionIdRef.current ? String(inspectorSessionIdRef.current) : null,
+    };
+
+    // 3. POST
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/tasks/from-inspector`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      // پاک کردن پیام «در حال ساخت...»
+      setInspectorChatMessages(prev => prev.filter(m => !m.id.startsWith('sending_oversight_')));
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        const errMsg = errData.detail || `HTTP ${res.status}`;
+        setInspectorChatMessages(prev => [...prev, {
+          id: `oversight_err_${Date.now()}`,
+          role: 'system' as const,
+          content: `❌ خطا در ارسال به مرکز نظارت: ${errMsg}`,
+          timestamp: new Date(),
+        }]);
+        setSendToOversightLoading(false);
+        return false;
+      }
+      const data = await res.json();
+
+      // 4. پیام کاربر (با علامت‌گذاری sent_to_oversight)
+      setInspectorChatMessages(prev => [...prev, {
+        id: `sent_oversight_user_${Date.now()}`,
+        role: 'user' as const,
+        content: rawMessage,
+        timestamp: new Date(),
+        sent_to_oversight: true,
+        oversight_task_id: data.task_id,
+        oversight_url: data.oversight_url,
+        oversight_mode: mode,
+      } as any]);
+
+      // 5. پیام موفقیت
+      const taskExcerpt = data.prompt_excerpt ? `\n\n📝 _پیش‌نمایش پرامپت (${data.prompt_length} char):_\n> ${data.prompt_excerpt.slice(0, 200)}…` : '';
+      setInspectorChatMessages(prev => [...prev, {
+        id: `oversight_ack_${Date.now()}`,
+        role: 'system' as const,
+        content: `✅ *به مرکز نظارت ارسال شد*\n\n📁 ${data.project_full_name}\n📋 تسک ID: \`${data.task_id?.slice(0, 8) || '?'}…\`${data.vision_descriptions_count ? `\n📸 ${data.vision_descriptions_count} عکس با vision توصیف شد` : ''}${taskExcerpt}\n\n🔗 [📋 مشاهدهٔ تسک در مرکز نظارت](${data.oversight_url})\n\n⏳ *هیچ مدلی روی این پیام trigger نشد* — هر وقت خواستید روی دکمهٔ زیر کلیک کنید.`,
+        timestamp: new Date(),
+        oversight_task_id: data.task_id,
+      } as any]);
+
+      // 6. پاکسازی فیلدها
+      if (mode === 'chat') {
+        setInspectorChatInput('');
+      } else {
+        setVisualDebugScreenshots([]);
+        setVisualDebugDescription('');
+        setVisualDebugModelSelection(false);
+      }
+      setSendToOversightLoading(false);
+      return true;
+    } catch (e: any) {
+      setInspectorChatMessages(prev => prev.filter(m => !m.id.startsWith('sending_oversight_')));
+      setInspectorChatMessages(prev => [...prev, {
+        id: `oversight_err_${Date.now()}`,
+        role: 'system' as const,
+        content: `❌ خطای شبکه در ارسال به مرکز نظارت: ${e.message || e}`,
+        timestamp: new Date(),
+      }]);
+      setSendToOversightLoading(false);
+      return false;
+    }
+  };
+
+  const sendInspectorChat = async (
+    overrideMessage?: string,
+    _isRetry = false,
+    _bypassOversightCheck = false,
+  ) => {
+    // 🆕 (Inspector → Oversight) اگر تیک ارسال به نظارت فعال است، مسیر متفاوت
+    // _bypassOversightCheck برای دکمهٔ «🔍 بررسی همین پرامپت در چت» استفاده می‌شود
+    if (sendToOversightChat && !_isRetry && !_bypassOversightCheck) {
+      await sendToOversight('chat', overrideMessage);
+      return;
+    }
+
     // در حالت انتخاب خودکار، نیازی به انتخاب دستی مدل نیست
     const rawMessage = (overrideMessage || inspectorChatInput).trim();
     if (!rawMessage) return;
@@ -4869,6 +5035,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
   // 📸 شروع دیباگ بصری - نمایش انتخاب مدل
   const startVisualDebugModelSelection = () => {
+    // 🆕 (Inspector → Oversight) اگر تیک ارسال به نظارت فعال است،
+    // model picker لازم نیست — مستقیم به sendToOversight می‌رود
+    if (sendToOversightVisual) {
+      sendToOversight('visual_debug');
+      return;
+    }
     loadVisionModels();
     setVisualDebugModelSelection(true);
   };
@@ -4876,6 +5048,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   // 📸 ارسال درخواست دیباگ بصری
   const sendVisualDebug = async () => {
     if (visualDebugScreenshots.length === 0) return;
+    // 🆕 (Inspector → Oversight) اگر تیک ارسال به نظارت فعال است
+    if (sendToOversightVisual) {
+      await sendToOversight('visual_debug');
+      return;
+    }
     if (visualDebugSelectedModels.length === 0) {
       alert('لطفاً حداقل یک مدل Vision انتخاب کنید');
       return;
@@ -12944,6 +13121,38 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             </details>
                           </div>
                         )}
+                        {/* 🆕 (Inspector → Oversight) badge + manual override button */}
+                        {(msg as any).sent_to_oversight && (
+                          <div className="mb-1.5 flex items-center gap-1.5 flex-wrap">
+                            <span className="inline-block text-[9px] bg-cyan-400/30 text-cyan-100 px-1.5 py-0.5 rounded-full">
+                              📤 ارسال به مرکز نظارت ({(msg as any).oversight_mode === 'visual_debug' ? 'بصری' : 'چت'})
+                            </span>
+                            {(msg as any).oversight_url && (
+                              <a
+                                href={(msg as any).oversight_url}
+                                target="_blank"
+                                rel="noopener"
+                                onClick={(e) => e.stopPropagation()}
+                                className="text-[10px] underline text-cyan-100 hover:text-white"
+                              >
+                                📋 مشاهدهٔ تسک
+                              </a>
+                            )}
+                            {msg.role === 'user' && msg.content && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  // bypass تیک — مدل را روی همین پیام اجرا کن
+                                  sendInspectorChat(msg.content, false, true);
+                                }}
+                                className="text-[10px] px-1.5 py-0.5 bg-blue-500 hover:bg-blue-600 text-white rounded"
+                                title="مدل را روی همین پرامپت در چت اجرا کن (مستقل از مرکز نظارت)"
+                              >
+                                🔍 بررسی همین پرامپت در چت
+                              </button>
+                            )}
+                          </div>
+                        )}
                         {msg.model_id && msg.role === 'assistant' && (
                           <p className="text-xs text-gray-400 mb-1">{msg.model_id}</p>
                         )}
@@ -13963,20 +14172,46 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         })}
                       </div>
 
+                      {/* 🆕 (Inspector → Oversight) تیک ارسال به مرکز نظارت — حالت بصری */}
+                      <label className="flex items-start gap-1.5 text-[10px] text-purple-700 dark:text-purple-300 cursor-pointer mb-1.5 p-1.5 rounded bg-purple-50 dark:bg-purple-900/30 border border-purple-200 dark:border-purple-700/50">
+                        <input
+                          type="checkbox"
+                          checked={sendToOversightVisual}
+                          onChange={(e) => setSendToOversightVisual(e.target.checked)}
+                          className="w-3.5 h-3.5 mt-0.5"
+                          disabled={sendToOversightLoading}
+                        />
+                        <span className="leading-tight">
+                          📤 <strong>ارسال به مرکز نظارت</strong> — به‌جای تحلیل بصری در inspector، یک تسک جدید در /oversight ذیل این پروژه بساز.
+                          عکس‌ها با vision model به متن غنی تبدیل می‌شوند تا مدل‌های غیر بصری هم بفهمند.
+                        </span>
+                      </label>
+
                       {/* ورودی توضیح */}
                       <div className="flex gap-2 items-end">
                         <textarea
                           value={visualDebugDescription}
                           onChange={(e) => setVisualDebugDescription(e.target.value)}
-                          placeholder="توضیح اختیاری درباره مشکل... (مثلاً: دکمه لاگین کار نمیکنه)"
+                          placeholder={sendToOversightVisual
+                            ? 'توضیح درخواست (الزامی برای مرکز نظارت)...'
+                            : 'توضیح اختیاری درباره مشکل... (مثلاً: دکمه لاگین کار نمیکنه)'}
                           className="flex-1 text-xs bg-white dark:bg-gray-700 border border-purple-200 dark:border-purple-700 rounded-lg px-3 py-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-purple-400"
                           rows={2}
                         />
                         <button
                           onClick={startVisualDebugModelSelection}
-                          className="px-3 py-2 bg-purple-600 hover:bg-purple-700 text-white text-xs rounded-lg shadow-md transition-colors flex items-center gap-1 flex-shrink-0"
+                          disabled={sendToOversightLoading}
+                          className={`px-3 py-2 text-white text-xs rounded-lg shadow-md transition-colors flex items-center gap-1 flex-shrink-0 disabled:opacity-50 ${
+                            sendToOversightVisual
+                              ? 'bg-cyan-600 hover:bg-cyan-700'
+                              : 'bg-purple-600 hover:bg-purple-700'
+                          }`}
                         >
-                          📸 ارسال برای تحلیل
+                          {sendToOversightLoading
+                            ? '⏳ در حال ارسال...'
+                            : sendToOversightVisual
+                              ? '📤 ارسال به نظارت'
+                              : '📸 ارسال برای تحلیل'}
                         </button>
                       </div>
 
@@ -14027,6 +14262,21 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                       </button>
                     </div>
                   )}
+
+                  {/* 🆕 (Inspector → Oversight) تیک ارسال به مرکز نظارت — حالت چت */}
+                  <label className="flex items-start gap-1.5 text-[10px] text-cyan-700 dark:text-cyan-300 cursor-pointer mb-1.5 p-1.5 rounded bg-cyan-50 dark:bg-cyan-900/30 border border-cyan-200 dark:border-cyan-700/50">
+                    <input
+                      type="checkbox"
+                      checked={sendToOversightChat}
+                      onChange={(e) => setSendToOversightChat(e.target.checked)}
+                      className="w-3.5 h-3.5 mt-0.5"
+                      disabled={sendToOversightLoading || inspectorOpLock}
+                    />
+                    <span className="leading-tight">
+                      📤 <strong>ارسال به مرکز نظارت</strong> — به‌جای اجرای مدل در inspector، یک تسک جدید در /oversight ذیل این پروژه بساز.
+                      درخواست به پرامپت غنی (با URLs و لاگ‌ها) تبدیل و ذخیره می‌شود — بعداً می‌توانید روی «🔍 بررسی همین پرامپت در چت» کلیک کنید.
+                    </span>
+                  </label>
 
                   <div className="flex gap-2">
                     <input
