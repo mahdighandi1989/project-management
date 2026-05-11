@@ -404,6 +404,44 @@ class TelegramChannel(NotificationChannel):
         except Exception as e:
             return {"ok": False, "channel": self.name, "error": str(e)[:300]}
 
+    async def send_document(
+        self, file_bytes: bytes, filename: str, *,
+        caption: Optional[str] = None, silent: bool = False,
+        reply_markup: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """ارسال فایل (مثل .md, .json) به Telegram.
+
+        کاربرد: نمایش Codex کامل که بیش از 4000 کاراکتر است.
+        """
+        if not self.is_configured():
+            return {"ok": False, "channel": self.name, "error": "TELEGRAM_BOT_TOKEN/CHAT_ID خالی است"}
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendDocument"
+        data = aiohttp.FormData()
+        data.add_field("chat_id", str(self.chat_id))
+        if caption:
+            # caption تا 1024 char محدودیت دارد
+            cap = caption[:1020] + ("…" if len(caption) > 1020 else "")
+            data.add_field("caption", cap)
+            data.add_field("parse_mode", "Markdown")
+        if silent:
+            data.add_field("disable_notification", "true")
+        if reply_markup:
+            data.add_field("reply_markup", json.dumps(reply_markup))
+        data.add_field(
+            "document", file_bytes,
+            filename=filename, content_type="text/markdown",
+        )
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, data=data) as r:
+                    if r.status != 200:
+                        body = await r.text()
+                        return {"ok": False, "channel": self.name, "error": f"HTTP {r.status}: {body[:300]}"}
+                    return {"ok": True, "channel": self.name, "filename": filename}
+        except Exception as e:
+            return {"ok": False, "channel": self.name, "error": str(e)[:300]}
+
     async def set_webhook(self, webhook_url: str) -> Dict[str, Any]:
         if not self.bot_token:
             return {"ok": False, "error": "TELEGRAM_BOT_TOKEN تنظیم نشده"}
@@ -967,6 +1005,10 @@ class NotificationService:
             )
             return {"ok": True, "handled": "cancel"}
 
+        # 🆕 ——— /codex (مشاهده/ساخت شناسنامهٔ پروژه از تلگرام) ———
+        if text == "/codex":
+            return await self._start_codex_flow(chat_id_str)
+
         # ——— /new_task و /new_idea (شروع flow جدید) ———
         if text in ("/new_task", "/new_idea"):
             return await self._start_new_task_flow(chat_id_str)
@@ -1016,6 +1058,7 @@ class NotificationService:
                 "دستورات:\n"
                 "• /new\\_project یا /create\\_project — *🚀 ساخت پروژهٔ جدید* (از صفر، با push به GitHub)\n"
                 "• /new\\_task یا /new\\_idea — ثبت تسک جدید با انتخاب پروژه\n"
+                "• /codex — 📚 شناسنامهٔ پروژه (مشاهده یا ساخت با AI)\n"
                 "• /menu — منوی دسترسی سریع\n"
                 "• /status — وضعیت نوتیفیکیشن\n"
                 "• /cancel — لغو flow فعلی\n"
@@ -1049,6 +1092,10 @@ class NotificationService:
                         # 🆕 (Creator) دکمهٔ ساخت پروژه
                         {"text": "🚀 ساخت پروژه", "callback_data": "menu:new_project"},
                         {"text": "🆕 تسک جدید", "callback_data": "menu:new_task"},
+                    ],
+                    [
+                        # 🆕 (Codex) دکمهٔ شناسنامه
+                        {"text": "📚 شناسنامهٔ پروژه", "callback_data": "menu:codex"},
                     ],
                     [
                         {"text": "📦 مخازن", "url": f"{base}/oversight?tab=repos"},
@@ -1267,6 +1314,12 @@ class NotificationService:
             return await self._start_new_project_flow(chat_id_str)
         if data == "menu:new_task":
             return await self._start_new_task_flow(chat_id_str)
+        if data == "menu:codex":
+            return await self._start_codex_flow(chat_id_str)
+
+        # 🆕 (Codex) callbacks
+        if data.startswith("codex:"):
+            return await self._handle_codex_callback(chat_id_str, data)
 
         # 🆕 (Creator v2) name selection callbacks
         if data == "creator_use_suggested_name":
@@ -1707,6 +1760,466 @@ class NotificationService:
 
         await tg.send(f"⚠️ action ناشناخته: `{action}`", silent=True)
         return {"ok": True, "handled": "task_dup_unknown_action"}
+
+    # -----------------------------------------------------------------------
+    # 🆕 (Codex) /codex flow — مشاهده/ساخت شناسنامهٔ پروژه از تلگرام
+    # -----------------------------------------------------------------------
+
+    async def _start_codex_flow(self, chat_id_str: str) -> Dict[str, Any]:
+        """مرحلهٔ ۱: انتخاب پروژه از لیست watched."""
+        tg = self._telegram()
+        try:
+            from .oversight_service import get_oversight_service
+            _oversight = get_oversight_service()
+        except Exception as e:
+            await tg.send(f"❌ خطا در بارگذاری سرویس oversight: {e}", silent=True)
+            return {"ok": True, "handled": "codex_fail"}
+
+        watched_list = list(_oversight.watched or [])
+        if not watched_list:
+            await tg.send(
+                "⚠️ هیچ پروژهٔ تحت نظارتی پیدا نشد.\n"
+                "ابتدا در پنل وب /oversight یک پروژه اضافه کنید.",
+                silent=True,
+            )
+            return {"ok": True, "handled": "codex_no_watched"}
+
+        # picker با callback codex:pick:<watched_id>
+        items = watched_list[:12]
+        rows: List[List[Dict[str, str]]] = []
+        for i in range(0, len(items), 2):
+            row: List[Dict[str, str]] = []
+            for w in items[i:i + 2]:
+                label = (w.repo_full_name or w.id)[:30]
+                row.append({"text": f"📁 {label}", "callback_data": f"codex:pick:{w.id}"})
+            rows.append(row)
+        rows.append([{"text": "❌ لغو", "callback_data": "flow:cancel"}])
+
+        await tg.send(
+            "📚 *شناسنامهٔ پروژه (Codex)*\n\nپروژه را انتخاب کنید:",
+            silent=True,
+            reply_markup={"inline_keyboard": rows},
+        )
+        return {"ok": True, "handled": "codex_picker", "count": len(items)}
+
+    async def _handle_codex_callback(
+        self, chat_id_str: str, data: str,
+    ) -> Dict[str, Any]:
+        """پردازش callback های codex:* —
+        codex:pick:<watched_id>       → نمایش وضعیت + گزینه‌ها
+        codex:view:<watched_id>       → ارسال markdown کامل به‌عنوان فایل
+        codex:build:<watched_id>      → نمایش model picker
+        codex:build_model:<wid>:<mid> → اجرای refresh_codex با مدل انتخابی
+        codex:refresh:<watched_id>    → alias برای build (وقتی codex از قبل هست)
+        """
+        tg = self._telegram()
+        parts = data.split(":")
+        if len(parts) < 3:
+            await tg.send("⚠️ callback نامعتبر.", silent=True)
+            return {"ok": True, "handled": "codex_bad_cb"}
+        action = parts[1]
+        watched_id = parts[2]
+
+        try:
+            from .oversight_service import get_oversight_service
+            from .oversight_codex_service import read_codex
+            _oversight = get_oversight_service()
+            watched = next((w for w in _oversight.watched if w.id == watched_id), None)
+        except Exception as e:
+            await tg.send(f"❌ خطای backend: {e}", silent=True)
+            return {"ok": True, "handled": "codex_backend_fail"}
+
+        if not watched:
+            await tg.send("⚠️ پروژه یافت نشد.", silent=True)
+            return {"ok": True, "handled": "codex_no_project"}
+
+        # ============= pick =============
+        if action == "pick":
+            codex = read_codex(watched_id)
+            files = codex.get("files") or {}
+            n = len(files)
+            stacks = ", ".join(codex.get("stacks") or []) or "نامشخص"
+            model_used = codex.get("model_used") or "—"
+            updated = codex.get("updated_at") or ""
+            if updated:
+                try:
+                    from datetime import datetime
+                    updated = datetime.fromisoformat(
+                        updated.replace("Z", "+00:00")
+                    ).strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    pass
+
+            if n == 0:
+                msg = (
+                    f"📚 *Codex برای* `{watched.repo_full_name}`\n\n"
+                    f"⚠️ هنوز ساخته نشده است.\n\n"
+                    f"شناسنامه شامل می‌شود:\n"
+                    f"• توضیح کامل پروژه و کاربردها\n"
+                    f"• مستندات per-file (backend + frontend)\n"
+                    f"• نقشهٔ وابستگی فایل‌ها\n"
+                    f"• خلاصهٔ نیازمندی‌ها بر اساس تسک‌ها\n\n"
+                    f"برای ساخت با AI، روی دکمهٔ زیر کلیک کنید:"
+                )
+                kb = {
+                    "inline_keyboard": [
+                        [{"text": "🪄 ساخت با AI", "callback_data": f"codex:build:{watched_id}"}],
+                        [{"text": "❌ بستن", "callback_data": "flow:cancel"}],
+                    ],
+                }
+            else:
+                # شمارش per-category + flags overview/action_items
+                by_cat = codex.get("files_by_category") or {}
+                cat_summary = ""
+                if by_cat:
+                    cat_bits = []
+                    for cat, num in by_cat.items():
+                        if num > 0:
+                            cat_bits.append(f"{cat}: {num}")
+                    if cat_bits:
+                        cat_summary = "\n📂 " + " · ".join(cat_bits)
+                has_overview = bool(codex.get("overview"))
+                has_actions = bool(codex.get("action_items"))
+                total_files = codex.get("total_repo_files") or 0
+                msg = (
+                    f"📚 *Codex* `{watched.repo_full_name}`\n\n"
+                    f"📄 *{n}* فایل مستند"
+                    + (f" (از {total_files} فایل پروژه)" if total_files else "")
+                    + f"{cat_summary}\n"
+                    f"🛠 Stack: `{stacks}`\n"
+                    f"🎯 توضیح پروژه: {'✅' if has_overview else '❌ ندارد'}\n"
+                    f"🚧 نیازمندی‌ها: {'✅' if has_actions else '❌ ندارد'}\n"
+                    f"🤖 مدل آخر: `{model_used}`\n"
+                    f"🕒 به‌روز: {updated or '—'}"
+                )
+                kb = {
+                    "inline_keyboard": [
+                        [{"text": "📄 مشاهدهٔ کامل (فایل md)", "callback_data": f"codex:view:{watched_id}"}],
+                        [{"text": "🔄 به‌روزرسانی با AI", "callback_data": f"codex:build:{watched_id}"}],
+                        [{"text": "❌ بستن", "callback_data": "flow:cancel"}],
+                    ],
+                }
+            await tg.send(msg, silent=True, reply_markup=kb)
+            return {"ok": True, "handled": "codex_pick", "files_count": n}
+
+        # ============= view (download markdown) =============
+        if action == "view":
+            codex = read_codex(watched_id)
+            files = codex.get("files") or {}
+            if not files:
+                await tg.send(
+                    "⚠️ Codex هنوز ساخته نشده. ابتدا با «🪄 ساخت با AI» بسازید.",
+                    silent=True,
+                )
+                return {"ok": True, "handled": "codex_view_empty"}
+            md = self._render_codex_markdown(codex, watched.repo_full_name)
+            filename = f"codex-{watched.repo_full_name.replace('/', '-')}.md"
+            caption = (
+                f"📚 *Codex — {watched.repo_full_name}*\n"
+                f"📄 {len(files)} فایل · 🤖 {codex.get('model_used') or '—'}"
+            )
+            res = await tg.send_document(
+                md.encode("utf-8"), filename, caption=caption, silent=True,
+            )
+            if not res.get("ok"):
+                await tg.send(
+                    f"❌ خطا در ارسال فایل: {res.get('error', '?')}",
+                    silent=True,
+                )
+            return {"ok": True, "handled": "codex_view", "sent": bool(res.get("ok"))}
+
+        # ============= build (نمایش model picker) =============
+        if action == "build":
+            try:
+                from .ai_manager import get_ai_manager
+                ai_mgr = get_ai_manager()
+                available = ai_mgr.get_available_models() or []
+            except Exception as e:
+                logger.warning(f"codex build: cannot load models: {e}")
+                available = []
+            if not available:
+                await tg.send(
+                    "⚠️ هیچ مدل AI فعالی نیست. ابتدا از پنل /settings یک کلید API "
+                    "(OpenAI/Anthropic/Gemini/DeepSeek) وارد کنید.",
+                    silent=True,
+                )
+                return {"ok": True, "handled": "codex_no_model"}
+
+            # picker مدل — یک callback per model
+            rows: List[List[Dict[str, str]]] = []
+            for m in available[:8]:  # max 8 model
+                rows.append([{
+                    "text": f"🤖 {m.id}",
+                    "callback_data": f"codex:build_model:{watched_id}:{m.id}",
+                }])
+            rows.append([{"text": "❌ انصراف", "callback_data": "flow:cancel"}])
+            await tg.send(
+                f"📚 *ساخت Codex برای* `{watched.repo_full_name}`\n\n"
+                f"کدام مدل AI استفاده شود؟",
+                silent=True,
+                reply_markup={"inline_keyboard": rows},
+            )
+            return {"ok": True, "handled": "codex_model_picker", "available": len(available)}
+
+        # ============= build_model:<wid>:<mid> =============
+        if action == "build_model":
+            if len(parts) < 4:
+                await tg.send("⚠️ model_id در callback نیست.", silent=True)
+                return {"ok": True, "handled": "codex_no_mid"}
+            model_id = parts[3]
+            await tg.send(
+                f"⏳ *ساخت Codex با* `{model_id}`...\n"
+                f"این فرآیند 30 تا 60 ثانیه طول می‌کشد.",
+                silent=True,
+            )
+            try:
+                from .oversight_codex_service import refresh_codex as _refresh_codex
+                result = await _refresh_codex(
+                    watched_id,
+                    model_id=model_id,
+                    only_changed=False,
+                )
+                files_n = result.get("files_documented", 0)
+                new_n = result.get("newly_added", 0)
+                used_model = result.get("model_used") or model_id
+                used_deep = result.get("used_deep_structure", False)
+                has_overview = result.get("has_overview", False)
+                has_actions = result.get("has_action_items", False)
+                total_files = result.get("total_repo_files", 0)
+                by_cat = result.get("files_by_category") or {}
+                cat_summary = ""
+                if by_cat:
+                    cat_bits = [f"{c}: {n}" for c, n in by_cat.items() if n > 0]
+                    if cat_bits:
+                        cat_summary = "\n📂 " + " · ".join(cat_bits)
+                deep_warn = "" if used_deep else "\n⚠️ بدون Deep Scan — توصیه می‌شود ابتدا scan کنید."
+                msg = (
+                    f"✅ *Codex ساخته شد*\n\n"
+                    f"📁 `{watched.repo_full_name}`\n"
+                    f"📄 {files_n} فایل مستند شده ({new_n} جدید)"
+                    + (f" از {total_files}" if total_files else "")
+                    + cat_summary
+                    + f"\n🎯 توضیح پروژه: {'✅' if has_overview else '❌'}"
+                    + f"\n🚧 نیازمندی‌ها: {'✅' if has_actions else '❌'}"
+                    + f"\n🤖 مدل: `{used_model}`"
+                    + deep_warn
+                )
+                kb = {
+                    "inline_keyboard": [
+                        [{"text": "📄 مشاهدهٔ کامل", "callback_data": f"codex:view:{watched_id}"}],
+                        [{"text": "✅ تمام", "callback_data": "flow:cancel"}],
+                    ],
+                }
+                await tg.send(msg, silent=False, reply_markup=kb)
+                return {
+                    "ok": True, "handled": "codex_built",
+                    "files_documented": files_n,
+                    "model_used": used_model,
+                }
+            except Exception as e:
+                err_text = str(e)[:500]
+                await tg.send(
+                    f"❌ *خطا در ساخت Codex*\n\n"
+                    f"`{err_text}`\n\n"
+                    f"می‌توانید مدل دیگری امتحان کنید یا از پنل وب اقدام کنید.",
+                    silent=False,
+                )
+                return {"ok": True, "handled": "codex_build_fail", "error": err_text}
+
+        await tg.send(f"⚠️ action ناشناخته: `{action}`", silent=True)
+        return {"ok": True, "handled": "codex_unknown_action"}
+
+    def _render_codex_markdown(self, codex: Dict[str, Any], repo_name: str) -> str:
+        """تبدیل Codex به markdown با ساختار overview + files (دسته‌بندی شده) + action_items."""
+        lines: List[str] = []
+
+        # === Header ===
+        lines.append(f"# 📚 Codex — {repo_name}")
+        lines.append("")
+        if codex.get("user_goal"):
+            lines.append(f"> 🎯 **هدف کاربر**: {codex['user_goal']}")
+            lines.append("")
+        meta_bits: List[str] = []
+        if codex.get("stacks"):
+            meta_bits.append(f"**Stack**: {', '.join(codex['stacks'])}")
+        if codex.get("model_used"):
+            meta_bits.append(f"**مدل**: `{codex['model_used']}`")
+        if codex.get("updated_at"):
+            meta_bits.append(f"**به‌روز**: {codex['updated_at']}")
+        if codex.get("total_repo_files"):
+            meta_bits.append(
+                f"**فایل‌های تحلیل‌شده**: {codex.get('files_count', 0)} از "
+                f"{codex.get('total_repo_files', 0)}"
+            )
+        if meta_bits:
+            lines.append(" · ".join(meta_bits))
+            lines.append("")
+
+        files_by_cat = codex.get("files_by_category") or {}
+        if files_by_cat:
+            cat_summary = " · ".join(
+                f"{cat}: {n}" for cat, n in files_by_cat.items() if n > 0
+            )
+            lines.append(f"**توزیع**: {cat_summary}")
+            lines.append("")
+        lines.append("---")
+        lines.append("")
+
+        # === Overview ===
+        overview = codex.get("overview") or {}
+        if overview:
+            lines.append("## 🎯 توضیح کلی پروژه")
+            lines.append("")
+            if overview.get("purpose"):
+                lines.append(overview["purpose"])
+                lines.append("")
+            cap = overview.get("capabilities") or []
+            if cap:
+                lines.append("### ✨ قابلیت‌ها")
+                lines.append("")
+                for c in cap:
+                    lines.append(f"- {c}")
+                lines.append("")
+            uc = overview.get("use_cases") or []
+            if uc:
+                lines.append("### 🎯 کاربردها")
+                lines.append("")
+                for u in uc:
+                    lines.append(f"- {u}")
+                lines.append("")
+            if overview.get("target_users"):
+                lines.append(f"**کاربران هدف**: {overview['target_users']}")
+                lines.append("")
+            ts = overview.get("tech_stack") or {}
+            if ts:
+                lines.append("### 🛠 Tech Stack")
+                lines.append("")
+                if ts.get("backend"):
+                    lines.append(f"- **Backend**: {ts['backend']}")
+                if ts.get("frontend"):
+                    lines.append(f"- **Frontend**: {ts['frontend']}")
+                if ts.get("storage"):
+                    lines.append(f"- **Storage**: {ts['storage']}")
+                ints = ts.get("integrations") or []
+                if ints:
+                    lines.append(f"- **Integrations**: {', '.join(ints)}")
+                lines.append("")
+            if overview.get("architecture_summary"):
+                lines.append("### 🏗 معماری")
+                lines.append("")
+                lines.append(overview["architecture_summary"])
+                lines.append("")
+            kc = overview.get("key_concepts") or []
+            if kc:
+                lines.append("### 🔑 مفاهیم کلیدی")
+                lines.append("")
+                for k in kc:
+                    lines.append(f"- {k}")
+                lines.append("")
+            lines.append("---")
+            lines.append("")
+
+        # === Files — گروه‌بندی شده ===
+        files = codex.get("files") or {}
+        if files:
+            # دسته‌بندی فایل‌ها
+            try:
+                from .oversight_codex_service import _categorize_file
+            except Exception:
+                _categorize_file = lambda p: "other"
+            grouped: Dict[str, List[str]] = {}
+            for path in files.keys():
+                cat = _categorize_file(path)
+                grouped.setdefault(cat, []).append(path)
+            # ترتیب نمایش
+            order = ["backend", "frontend", "config", "docs", "scripts", "tests", "other"]
+            cat_labels = {
+                "backend": "🐍 Backend",
+                "frontend": "⚛️ Frontend",
+                "config": "⚙️ Config",
+                "docs": "📖 Docs",
+                "scripts": "🔧 Scripts",
+                "tests": "🧪 Tests",
+                "other": "📁 سایر",
+            }
+            lines.append(f"## 📂 فایل‌ها ({len(files)} مورد)")
+            lines.append("")
+            for cat in order:
+                items = sorted(grouped.get(cat, []))
+                if not items:
+                    continue
+                lines.append(f"### {cat_labels.get(cat, cat)} ({len(items)})")
+                lines.append("")
+                for path in items:
+                    doc = files.get(path) or {}
+                    if not isinstance(doc, dict):
+                        continue
+                    lines.append(f"#### `{path}`")
+                    if doc.get("what_is_it"):
+                        lines.append(f"- **این چیست؟** {doc['what_is_it']}")
+                    if doc.get("what_it_does"):
+                        lines.append(f"- **چه می‌کند؟** {doc['what_it_does']}")
+                    uc = doc.get("use_cases") or []
+                    if uc:
+                        lines.append("- **کاربردها**:")
+                        for u in uc:
+                            lines.append(f"  - {u}")
+                    dep = doc.get("depends_on") or []
+                    if dep:
+                        lines.append(f"- **وابسته به**: {', '.join(f'`{x}`' for x in dep)}")
+                    used = doc.get("used_by") or []
+                    if used:
+                        lines.append(f"- **استفاده‌شده در**: {', '.join(f'`{x}`' for x in used)}")
+                    # backward-compat: relations فیلد قدیمی
+                    if doc.get("relations") and not (dep or used):
+                        lines.append(f"- **روابط**: {doc['relations']}")
+                    if doc.get("breaks_if_removed"):
+                        lines.append(f"- **در صورت حذف**: {doc['breaks_if_removed']}")
+                    lines.append("")
+                lines.append("")
+
+        # === Action Items ===
+        action = codex.get("action_items") or {}
+        if action:
+            lines.append("---")
+            lines.append("")
+            lines.append("## 🚧 نیازمندی‌ها و بهبودها")
+            lines.append("")
+            if action.get("summary"):
+                lines.append(f"> {action['summary']}")
+                lines.append("")
+            needs = action.get("needs_attention") or []
+            if needs:
+                lines.append("### ⚠️ موارد نیازمند توجه")
+                lines.append("")
+                priority_icon = {
+                    "critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵",
+                }
+                for n in needs:
+                    if isinstance(n, dict):
+                        pri = (n.get("priority") or "medium").lower()
+                        icon = priority_icon.get(pri, "•")
+                        item = n.get("item") or ""
+                        lines.append(f"- {icon} [{pri}] {item}")
+                    else:
+                        lines.append(f"- {n}")
+                lines.append("")
+            improvements = action.get("suggested_improvements") or []
+            if improvements:
+                lines.append("### 💡 پیشنهادات بهبود")
+                lines.append("")
+                for imp in improvements:
+                    lines.append(f"- {imp}")
+                lines.append("")
+            risks = action.get("risks") or []
+            if risks:
+                lines.append("### ⚠️ ریسک‌ها")
+                lines.append("")
+                for r in risks:
+                    lines.append(f"- {r}")
+                lines.append("")
+
+        return "\n".join(lines)
 
     # -----------------------------------------------------------------------
     # 🆕 (Creator) /new_project flow — ساخت پروژه از تلگرام

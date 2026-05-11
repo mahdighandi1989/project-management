@@ -92,16 +92,108 @@ def _guess_kind_from_path(p: str) -> str:
     return "other"
 
 
+def _categorize_file(p: str) -> str:
+    """دسته‌بندی فایل بر اساس top-level path — برای balanced selection.
+
+    دسته‌ها: backend, frontend, config, docs, tests, scripts, other
+    """
+    pl = (p or "").lower()
+    if pl.startswith(("backend/", "server/", "api/")) or pl.endswith(".py"):
+        if "/test" in pl or pl.startswith("test"):
+            return "tests"
+        return "backend"
+    if pl.startswith(("frontend/", "client/", "web/", "ui/")) or pl.endswith((".tsx", ".jsx", ".ts", ".js", ".vue", ".svelte")):
+        if "/test" in pl or "/__tests__/" in pl or ".test." in pl or ".spec." in pl:
+            return "tests"
+        return "frontend"
+    if pl.endswith((".yml", ".yaml", ".toml", ".json", ".env.example", "dockerfile")):
+        return "config"
+    if pl.endswith((".md", ".rst", ".txt")) or "/docs/" in pl:
+        return "docs"
+    if pl.startswith(("scripts/", "tools/", "bin/")):
+        return "scripts"
+    return "other"
+
+
+def _select_balanced_files(
+    files: List[str], kinds: Dict[str, str], max_total: int = 60,
+) -> List[str]:
+    """انتخاب متوازن فایل‌ها از همهٔ دسته‌ها — تضمین می‌کند فرانت و بک هر دو دیده شوند.
+
+    سهمیه‌ها (از max_total=60):
+      - backend: 22
+      - frontend: 22
+      - config:    6
+      - docs:      3
+      - scripts:   3
+      - tests:     2
+      - other:     2
+
+    اگر یک دسته کمتر از سهمیه‌اش فایل داشت، باقی به دسته‌های پر تخصیص می‌یابد.
+    """
+    important_kinds = {
+        "entry", "page", "route", "service", "model",
+        "middleware", "component", "hook", "config", "migration", "source",
+    }
+    # priority: فایل‌هایی که kind مهم دارند اول
+    grouped: Dict[str, List[str]] = {
+        "backend": [], "frontend": [], "config": [],
+        "docs": [], "scripts": [], "tests": [], "other": [],
+    }
+    for p in files:
+        cat = _categorize_file(p)
+        grouped.setdefault(cat, []).append(p)
+    # در هر دسته، مرتب‌سازی: ابتدا فایل‌های با kind مهم
+    for cat, lst in grouped.items():
+        lst.sort(key=lambda p: (
+            0 if kinds.get(p) in important_kinds else 1,
+            len(p),  # کوتاه‌تر = نزدیک‌تر به root = مهم‌تر
+        ))
+
+    quotas = {
+        "backend": 22, "frontend": 22, "config": 6,
+        "docs": 3, "scripts": 3, "tests": 2, "other": 2,
+    }
+    selected: List[str] = []
+    leftover = 0
+    # pass ۱: سهمیهٔ هر دسته
+    for cat, lst in grouped.items():
+        q = quotas.get(cat, 2)
+        take = lst[:q]
+        selected.extend(take)
+        leftover += max(0, q - len(take))  # سهمیه باقی‌مانده
+    # pass ۲: اضافی را به دسته‌های پر بازتوزیع کن (به ترتیب اولویت)
+    redistribute_order = ["backend", "frontend", "config", "docs", "tests", "scripts", "other"]
+    for cat in redistribute_order:
+        if leftover <= 0:
+            break
+        lst = grouped.get(cat, [])
+        q = quotas.get(cat, 2)
+        extra_slots = leftover
+        more = lst[q:q + extra_slots]
+        if more:
+            selected.extend(more)
+            leftover -= len(more)
+    # cap نهایی
+    return selected[:max_total]
+
+
 async def refresh_codex(
     watched_id: str,
     *,
     model_id: Optional[str] = None,
-    max_files: int = 40,
-    only_changed: bool = True,
+    max_files: int = 60,
+    only_changed: bool = False,
 ) -> Dict[str, Any]:
-    """به‌روزرسانی Codex یک پروژه — delta-based.
+    """به‌روزرسانی Codex یک پروژه — کامل با overview + dependencies + action_items.
 
-    خروجی همیشه شامل model_used و وضعیت دقیق است تا کاربر بفهمد چه اتفاقی افتاد.
+    تغییرات نسبت به نسخهٔ قبل:
+      - balanced selection: بک‌اند، فرانت‌اند، config، docs همه دیده می‌شوند
+      - overview: AI یک توضیح مفصل از کارایی و اهداف پروژه می‌نویسد (بالای codex)
+      - dependencies: per-file، depends_on + used_by لیست می‌شود
+      - action_items: بر اساس tasks/findings/ideas فعال، AI نیازمندی‌های باز را
+        خلاصه می‌کند (انتهای codex)
+      - افزایش max_tree از 80 به 500 (تا فرانت‌اند هم در tree دیده شود)
     """
     service = get_oversight_service()
     watched = service._find_watched(watched_id)
@@ -122,10 +214,9 @@ async def refresh_codex(
                 "(OpenAI/Anthropic/Gemini/DeepSeek) وارد کنید."
             )
         if model_id and model_id not in {m.id for m in available}:
-            # مدل درخواست‌شده در دسترس نیست — fallback به اولین مدل فعال
             logger.warning(
                 f"refresh_codex: model {model_id} در دسترس نیست. "
-                f"available={[m.id for m in available]}. fallback به {available[0].id}"
+                f"fallback به {available[0].id}"
             )
             actual_model_id = available[0].id
         elif not model_id:
@@ -140,10 +231,12 @@ async def refresh_codex(
     structure = _read_json(STORAGE_DIR / "structure" / f"{watched_id}.json", None)
     used_deep_structure = False
     if not structure:
-        # fallback: build_project_context
-        ctx = await service.build_project_context(watched.repo_full_name)
+        # fallback: build_project_context — افزایش max_tree از 80 به 500
+        # تا فرانت‌اند هم در tree دیده شود (قبلاً فقط backend می‌آمد).
+        ctx = await service.build_project_context(
+            watched.repo_full_name, max_tree=500,
+        )
         files_sample = ctx.get("files_sample") or []
-        # 🆕 fallback kinds از روی path/extension — نه همه "other"
         kinds = {p: _guess_kind_from_path(p) for p in files_sample}
         stacks = []
         readme = ctx.get("readme") or ""
@@ -153,7 +246,6 @@ async def refresh_codex(
         kinds = structure.get("kinds") or {}
         stacks = structure.get("stacks") or []
         readme = ""
-        # اگر structure موجود ولی kinds خالی، fallback بزن
         if not kinds and files_sample:
             kinds = {p: _guess_kind_from_path(p) for p in files_sample}
 
@@ -166,67 +258,142 @@ async def refresh_codex(
     existing = read_codex(watched_id)
     existing_files: Dict[str, Any] = existing.get("files") or {}
 
-    # انتخاب فایل‌های مهم
-    important_kinds = {
-        "entry", "page", "route", "service", "model",
-        "middleware", "component", "hook", "config", "migration",
-        # 🆕 source هم به‌عنوان کاندید (وقتی deep scan نکرده‌ایم)
-        "source",
-    }
-    candidate_files = [p for p in files_sample if kinds.get(p) in important_kinds]
-    # 🆕 اگر بازم خالی شد (پروژهٔ بسیار غیرعادی)، حداقل ۲۰ فایل اول
-    if not candidate_files:
-        logger.warning(
-            f"refresh_codex: هیچ فایل با kind مهم پیدا نشد ({len(files_sample)} فایل کل) — "
-            f"استفاده از ۲۰ فایل اول"
-        )
-        candidate_files = files_sample[:20]
-    candidate_files = candidate_files[:max_files]
-
+    # 🆕 (Smart Selection) متوازن — backend + frontend + config با سهمیه
+    candidate_files = _select_balanced_files(
+        files_sample, kinds, max_total=max_files,
+    )
     if only_changed:
-        # ساده: فایل‌هایی که هنوز در existing نیستند
         candidate_files = [p for p in candidate_files if p not in existing_files] or candidate_files[:10]
+
+    # categorize for prompt + result
+    by_cat: Dict[str, List[str]] = {}
+    for p in candidate_files:
+        by_cat.setdefault(_categorize_file(p), []).append(p)
 
     user_goal = watched.user_notes or ""
 
-    # ساخت پرامپت برای AI
-    files_listing = "\n".join(f"- {p} ({kinds.get(p, 'other')})" for p in candidate_files)
-    prompt = f"""تو نویسندهٔ مستندات نرم‌افزار هستی. وظیفه‌ات نوشتن «شناسنامه» (Codex) برای فایل‌های زیر است.
+    # 🆕 جمع‌آوری tasks/findings/ideas فعال برای action_items
+    active_tasks = [
+        t for t in service.tasks
+        if t.watched_id == watched_id
+        and t.status not in ("done", "cancelled")
+        and not getattr(t, "archived", False)
+        and t.verification_status != "done"
+    ]
+    # خلاصه‌سازی برای prompt
+    task_summaries: List[str] = []
+    for t in active_tasks[:25]:
+        title = (t.title or "").strip()[:140]
+        pri = (t.priority or "medium")
+        ttype = (t.type or "other")
+        task_summaries.append(f"- [{pri}/{ttype}] {title}")
+    tasks_text = "\n".join(task_summaries) or "(تسک فعالی نیست)"
 
-# 🎯 هدف اصلی پروژه (از زبان کاربر)
+    # ساخت بخش فایل‌ها در prompt — گروه‌بندی شده برای خوانایی AI
+    file_lines: List[str] = []
+    for cat in ["backend", "frontend", "config", "docs", "scripts", "tests", "other"]:
+        items = by_cat.get(cat, [])
+        if not items:
+            continue
+        file_lines.append(f"\n## {cat} ({len(items)} فایل)")
+        for p in items:
+            file_lines.append(f"- {p} ({kinds.get(p, 'other')})")
+    files_listing = "\n".join(file_lines)
+    readme_excerpt = (readme or "")[:2500]
+    prompt = f"""تو معمار ارشد نرم‌افزار و technical writer حرفه‌ای هستی. وظیفهٔ تو نوشتن یک «شناسنامهٔ کامل پروژه» (Project Codex) است.
+
+این شناسنامه باید سه بخش داشته باشد:
+  ۱) **overview**: توضیح مفصل از کارایی پروژه و اهدافش
+  ۲) **files**: مستندات per-file شامل وابستگی‌ها
+  ۳) **action_items**: نیازمندی‌ها و موارد قابل بهبود
+
+# 🎯 یادداشت کاربر (هدف اصلی)
 {user_goal or '(کاربر یادداشتی ثبت نکرده است)'}
 
 # پروژه
 {watched.repo_full_name}
-Stack: {', '.join(stacks) or '(نامشخص)'}
+Stack شناسایی‌شده: {', '.join(stacks) or '(نامشخص)'}
+{f"README خلاصه:{chr(10)}{readme_excerpt}" if readme_excerpt else ""}
 
-# فایل‌هایی که باید مستند شوند
+# فایل‌های مستندشدنی (گروه‌بندی شده)
 {files_listing}
 
-برای هر فایل، بنویس:
-- what_is_it: این چیست؟ (یک جملهٔ ساده)
-- what_it_does: چه می‌کند؟
-- use_cases: برای چه اهدافی استفاده می‌شود؟ (لیست ۲-۴ مورد)
-- relations: با کدام بخش‌های دیگر پروژه ارتباط دارد؟
-- breaks_if_removed: در صورت حذف چه چیزی می‌شکند؟
+# 🚧 تسک‌های فعال / یافته‌های اسکن / ایده‌ها ({len(active_tasks)} مورد)
+{tasks_text}
 
-# خروجی فقط JSON (بدون ``` و بدون متن اضافی)
+# 📤 خروجی فقط JSON خالص (بدون ``` و توضیح اضافی)
+
 {{
+  "overview": {{
+    "purpose": "این پروژه چه می‌کند و چه مشکلی را حل می‌کند؟ (یک پاراگراف ۳-۵ جمله‌ای)",
+    "capabilities": [
+      "قابلیت ۱ مشخص — مثل «scan خودکار GitHub repos با AI»",
+      "قابلیت ۲",
+      "قابلیت ۳",
+      "..."
+    ],
+    "target_users": "چه کسانی این پروژه را استفاده می‌کنند؟ (مثل solo developers, teams, ...)",
+    "use_cases": [
+      "use case مشخص ۱ — مثل «نظارت روی پروژه‌های متعدد + خودکارسازی verify»",
+      "use case ۲",
+      "..."
+    ],
+    "tech_stack": {{
+      "backend": "FastAPI + Python + ...",
+      "frontend": "Next.js + TypeScript + ...",
+      "storage": "JSON files + ...",
+      "integrations": ["GitHub API", "Telegram Bot", "OpenAI/Anthropic/...", "..."]
+    }},
+    "architecture_summary": "معماری کلی در ۲-۳ جمله — مثل «backend سرویس‌محور با scheduler، frontend SPA با ...»",
+    "key_concepts": [
+      "watched project: ...",
+      "task lifecycle: ...",
+      "..."
+    ]
+  }},
+
   "files": {{
     "path/to/file.ext": {{
-      "what_is_it": "...",
-      "what_it_does": "...",
-      "use_cases": ["...", "..."],
-      "relations": "...",
-      "breaks_if_removed": "..."
+      "what_is_it": "این چیست؟ (یک جمله)",
+      "what_it_does": "چه می‌کند؟ (۱-۲ جمله)",
+      "use_cases": ["کاربرد ۱", "کاربرد ۲"],
+      "depends_on": ["other/path.py", "another/file.ts"],
+      "used_by": ["caller/path.py", "..."],
+      "breaks_if_removed": "اگر حذف شود چه چیز می‌شکند؟"
     }}
+  }},
+
+  "action_items": {{
+    "summary": "خلاصهٔ ۲-۳ جمله‌ای از وضعیت کلی پروژه و کارهای اولویت‌دار",
+    "needs_attention": [
+      {{"item": "موضوع نیازمند توجه ۱", "priority": "critical|high|medium|low", "related_tasks": ["task ID از لیست بالا"]}},
+      {{"item": "موضوع ۲", "priority": "high"}}
+    ],
+    "suggested_improvements": [
+      "بهبود پیشنهادی ۱ بر اساس ساختار کد",
+      "بهبود ۲"
+    ],
+    "risks": [
+      "ریسک شناسایی‌شده ۱ (مثل «وابستگی به فلان سرویس بدون fallback»)",
+      "..."
+    ]
   }}
-}}"""
+}}
+
+# 🚨 قوانین مهم
+۱. **همهٔ گروه‌های فایل را پوشش بده** — اگر backend و frontend هر دو دارند، برای فایل‌های هر دو entry بنویس.
+۲. **depends_on/used_by**: از نام فایل‌های لیست‌شده استفاده کن. اگر مطمئن نیستی، خالی بگذار — حدس نزن.
+۳. **overview** باید قابل خواندن برای کسی باشد که هیچ‌چیز از پروژه نمی‌داند.
+۴. **action_items.needs_attention**: ابتدا بر اساس تسک‌های critical/high سپس بر اساس ساختار. حداکثر ۸ مورد.
+۵. **suggested_improvements**: مستقل از تسک‌ها — چیزهایی که در ساختار کد می‌بینی (مثل «تست‌های e2e ندارد»، «migration scripts نیست»).
+۶. **risks**: تکنیکال (نه عمومی) — مثل «in-memory store بدون persistence»، «هیچ rate-limit روی webhook».
+۷. JSON معتبر — همهٔ braces/quotes بسته شوند. اگر فضا کم آورد، فایل‌ها را کم کن نه overview/action_items.
+"""
 
     try:
-        # 🆕 max_tokens از 3500 به 8000 (برای 40 فایل JSON خروجی)
+        # max_tokens بالا برای پاسخ کامل (overview + files + action_items)
         response = await service._ai_generate(
-            prompt, model_id=actual_model_id, max_tokens=8000, temperature=0.3
+            prompt, model_id=actual_model_id, max_tokens=14000, temperature=0.25
         )
     except Exception as e:
         raise RuntimeError(f"خطا در ساخت Codex (مدل {actual_model_id}): {e}")
@@ -239,30 +406,42 @@ Stack: {', '.join(stacks) or '(نامشخص)'}
 
     parsed = service._extract_json(response) or {}
     new_entries = parsed.get("files") or {}
+    overview = parsed.get("overview") or {}
+    action_items = parsed.get("action_items") or {}
 
-    if not new_entries:
-        # 🆕 خطای واضح — نه silent success "0 فایل"
+    if not new_entries and not overview:
         raise RuntimeError(
             f"مدل {actual_model_id} نتوانست JSON معتبر تولید کند. "
             f"پاسخ خام {len(response)} کاراکتر. "
-            f"لطفاً با مدل دیگری امتحان کنید یا scan کامل پروژه را اجرا کنید."
+            f"لطفاً با مدل دیگری امتحان کنید."
         )
 
-    # ادغام با موجود
+    # ادغام files با موجود
     merged_files = dict(existing_files)
     for path, doc in new_entries.items():
         if isinstance(doc, dict):
             doc["_updated_at"] = now_iso()
             merged_files[path] = doc
 
+    # شمارش‌های per-category
+    files_by_category: Dict[str, int] = {}
+    for p in merged_files.keys():
+        cat = _categorize_file(p)
+        files_by_category[cat] = files_by_category.get(cat, 0) + 1
+
     codex = {
         "watched_id": watched_id,
         "repo": watched.repo_full_name,
         "user_goal": user_goal,
         "stacks": stacks,
+        "overview": overview,
+        "action_items": action_items,
         "updated_at": now_iso(),
         "files": merged_files,
         "files_count": len(merged_files),
+        "files_by_category": files_by_category,
+        "candidates_analyzed": len(candidate_files),
+        "total_repo_files": len(files_sample),
         "model_used": actual_model_id,
         "used_deep_structure": used_deep_structure,
     }
@@ -274,6 +453,10 @@ Stack: {', '.join(stacks) or '(نامشخص)'}
         "files_documented": len(merged_files),
         "newly_added": len(new_entries),
         "candidates_analyzed": len(candidate_files),
+        "total_repo_files": len(files_sample),
+        "files_by_category": files_by_category,
+        "has_overview": bool(overview),
+        "has_action_items": bool(action_items),
         "stacks": stacks,
         "model_used": actual_model_id,
         "used_deep_structure": used_deep_structure,

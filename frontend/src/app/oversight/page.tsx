@@ -5396,21 +5396,153 @@ function CodexView({
     (p) => !search || p.toLowerCase().includes(search.toLowerCase()),
   );
 
+  // دسته‌بندی فایل بر اساس path (همان منطق backend _categorize_file)
+  const categorizeFile = (p: string): string => {
+    const pl = (p || '').toLowerCase();
+    if (pl.startsWith('backend/') || pl.startsWith('server/') || pl.startsWith('api/') || pl.endsWith('.py')) {
+      if (pl.includes('/test') || pl.startsWith('test')) return 'tests';
+      return 'backend';
+    }
+    if (pl.startsWith('frontend/') || pl.startsWith('client/') || pl.startsWith('web/') || pl.startsWith('ui/')
+        || pl.endsWith('.tsx') || pl.endsWith('.jsx') || pl.endsWith('.ts') || pl.endsWith('.js')
+        || pl.endsWith('.vue') || pl.endsWith('.svelte')) {
+      if (pl.includes('/test') || pl.includes('/__tests__/') || pl.includes('.test.') || pl.includes('.spec.'))
+        return 'tests';
+      return 'frontend';
+    }
+    if (pl.endsWith('.yml') || pl.endsWith('.yaml') || pl.endsWith('.toml')
+        || pl.endsWith('.json') || pl.endsWith('.env.example') || pl.endsWith('dockerfile'))
+      return 'config';
+    if (pl.endsWith('.md') || pl.endsWith('.rst') || pl.endsWith('.txt') || pl.includes('/docs/'))
+      return 'docs';
+    if (pl.startsWith('scripts/') || pl.startsWith('tools/') || pl.startsWith('bin/'))
+      return 'scripts';
+    return 'other';
+  };
+
+  const overview = data?.overview || {};
+  const actionItems = data?.action_items || {};
+
+  // گروه‌بندی فایل‌های filtered بر اساس دسته
+  const grouped: Record<string, string[]> = {};
+  filtered.forEach((p) => {
+    const cat = categorizeFile(p);
+    if (!grouped[cat]) grouped[cat] = [];
+    grouped[cat].push(p);
+  });
+  Object.keys(grouped).forEach((k) => grouped[k].sort());
+
+  const categoryOrder = ['backend', 'frontend', 'config', 'docs', 'scripts', 'tests', 'other'];
+  const categoryLabels: Record<string, string> = {
+    backend: '🐍 Backend',
+    frontend: '⚛️ Frontend',
+    config: '⚙️ Config',
+    docs: '📖 Docs',
+    scripts: '🔧 Scripts',
+    tests: '🧪 Tests',
+    other: '📁 سایر',
+  };
+
   const exportMd = () => {
+    // ساخت markdown کامل (همان ساختار backend _render_codex_markdown)
     const lines: string[] = [];
-    lines.push(`# 📚 Codex — ${data?.repo || ''}`);
-    if (data?.user_goal) lines.push(`\n> 🎯 ${data.user_goal}\n`);
-    if (data?.stacks?.length) lines.push(`Stack: ${data.stacks.join(', ')}\n`);
-    Object.keys(files).forEach((path) => {
-      const f = files[path];
-      lines.push(`\n## ${path}`);
-      lines.push(`- **این چیست؟** ${f.what_is_it || ''}`);
-      lines.push(`- **چه می‌کند؟** ${f.what_it_does || ''}`);
-      if (f.use_cases?.length)
-        lines.push(`- **کاربردها:**\n${f.use_cases.map((u: string) => `  - ${u}`).join('\n')}`);
-      lines.push(`- **روابط:** ${f.relations || ''}`);
-      lines.push(`- **در صورت حذف:** ${f.breaks_if_removed || ''}`);
-    });
+    lines.push(`# 📚 Codex — ${data?.repo || ''}\n`);
+    if (data?.user_goal) lines.push(`> 🎯 **هدف کاربر**: ${data.user_goal}\n`);
+    if (data?.stacks?.length) lines.push(`**Stack**: ${data.stacks.join(', ')}`);
+    if (data?.model_used) lines.push(`**مدل**: \`${data.model_used}\``);
+    if (data?.total_repo_files)
+      lines.push(`**فایل‌های تحلیل‌شده**: ${data.files_count || 0} از ${data.total_repo_files}`);
+    lines.push('\n---\n');
+    // Overview
+    if (overview.purpose) {
+      lines.push('## 🎯 توضیح کلی پروژه\n');
+      lines.push(overview.purpose + '\n');
+      if (overview.capabilities?.length) {
+        lines.push('### ✨ قابلیت‌ها\n');
+        overview.capabilities.forEach((c: string) => lines.push(`- ${c}`));
+        lines.push('');
+      }
+      if (overview.use_cases?.length) {
+        lines.push('### 🎯 کاربردها\n');
+        overview.use_cases.forEach((u: string) => lines.push(`- ${u}`));
+        lines.push('');
+      }
+      if (overview.target_users) lines.push(`**کاربران هدف**: ${overview.target_users}\n`);
+      const ts = overview.tech_stack || {};
+      if (ts.backend || ts.frontend || ts.storage || ts.integrations?.length) {
+        lines.push('### 🛠 Tech Stack\n');
+        if (ts.backend) lines.push(`- **Backend**: ${ts.backend}`);
+        if (ts.frontend) lines.push(`- **Frontend**: ${ts.frontend}`);
+        if (ts.storage) lines.push(`- **Storage**: ${ts.storage}`);
+        if (ts.integrations?.length) lines.push(`- **Integrations**: ${ts.integrations.join(', ')}`);
+        lines.push('');
+      }
+      if (overview.architecture_summary) {
+        lines.push('### 🏗 معماری\n');
+        lines.push(overview.architecture_summary + '\n');
+      }
+      if (overview.key_concepts?.length) {
+        lines.push('### 🔑 مفاهیم کلیدی\n');
+        overview.key_concepts.forEach((k: string) => lines.push(`- ${k}`));
+        lines.push('');
+      }
+      lines.push('---\n');
+    }
+    // Files (grouped)
+    if (Object.keys(files).length > 0) {
+      lines.push(`## 📂 فایل‌ها (${Object.keys(files).length} مورد)\n`);
+      categoryOrder.forEach((cat) => {
+        const allInCat = Object.keys(files).filter((p) => categorizeFile(p) === cat).sort();
+        if (!allInCat.length) return;
+        lines.push(`### ${categoryLabels[cat]} (${allInCat.length})\n`);
+        allInCat.forEach((path) => {
+          const f = files[path];
+          lines.push(`#### \`${path}\``);
+          if (f.what_is_it) lines.push(`- **این چیست؟** ${f.what_is_it}`);
+          if (f.what_it_does) lines.push(`- **چه می‌کند؟** ${f.what_it_does}`);
+          if (f.use_cases?.length) {
+            lines.push('- **کاربردها**:');
+            f.use_cases.forEach((u: string) => lines.push(`  - ${u}`));
+          }
+          if (f.depends_on?.length)
+            lines.push(`- **وابسته به**: ${f.depends_on.map((x: string) => '`' + x + '`').join(', ')}`);
+          if (f.used_by?.length)
+            lines.push(`- **استفاده‌شده در**: ${f.used_by.map((x: string) => '`' + x + '`').join(', ')}`);
+          if (f.relations && !f.depends_on && !f.used_by) lines.push(`- **روابط**: ${f.relations}`);
+          if (f.breaks_if_removed) lines.push(`- **در صورت حذف**: ${f.breaks_if_removed}`);
+          lines.push('');
+        });
+      });
+    }
+    // Action items
+    if (actionItems.summary || actionItems.needs_attention?.length) {
+      lines.push('---\n');
+      lines.push('## 🚧 نیازمندی‌ها و بهبودها\n');
+      if (actionItems.summary) lines.push(`> ${actionItems.summary}\n`);
+      const priorityIcon: Record<string, string> = { critical: '🔴', high: '🟠', medium: '🟡', low: '🔵' };
+      if (actionItems.needs_attention?.length) {
+        lines.push('### ⚠️ موارد نیازمند توجه\n');
+        actionItems.needs_attention.forEach((n: any) => {
+          if (typeof n === 'object' && n.item) {
+            const pri = (n.priority || 'medium').toLowerCase();
+            lines.push(`- ${priorityIcon[pri] || '•'} [${pri}] ${n.item}`);
+          } else {
+            lines.push(`- ${n}`);
+          }
+        });
+        lines.push('');
+      }
+      if (actionItems.suggested_improvements?.length) {
+        lines.push('### 💡 پیشنهادات بهبود\n');
+        actionItems.suggested_improvements.forEach((i: string) => lines.push(`- ${i}`));
+        lines.push('');
+      }
+      if (actionItems.risks?.length) {
+        lines.push('### ⚠️ ریسک‌ها\n');
+        actionItems.risks.forEach((r: string) => lines.push(`- ${r}`));
+        lines.push('');
+      }
+    }
     const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -5495,55 +5627,236 @@ function CodexView({
         <div className="text-center py-8 text-gray-400">
           <div className="text-4xl mb-2">📭</div>
           <p>Codex هنوز ساخته نشده</p>
+          <p className="text-xs mt-1">شامل: توضیح پروژه + مستندات per-file (بک + فرانت) + وابستگی‌ها + نیازمندی‌ها</p>
           <p className="text-xs mt-1">روی «به‌روزرسانی با AI» کلیک کنید</p>
         </div>
       ) : (
-        <div className="space-y-2 max-h-[60vh] overflow-auto">
-          {filtered.map((path) => {
-            const f = files[path];
-            return (
-              <details
-                key={path}
-                className="bg-gray-50 dark:bg-gray-700/50 rounded p-2"
-              >
-                <summary className="cursor-pointer text-sm font-medium dark:text-white" dir="ltr">
-                  {path}
-                </summary>
-                <div className="mt-2 text-xs space-y-1 dark:text-gray-200" dir="rtl">
-                  {f?.what_is_it && (
-                    <div>
-                      <strong>این چیست؟</strong> {f.what_is_it}
+        <div className="space-y-3 max-h-[70vh] overflow-auto pr-1">
+
+          {/* 🆕 (Overview) توضیح کلی پروژه */}
+          {overview && (overview.purpose || overview.capabilities?.length) && (
+            <details
+              open
+              className="bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800 rounded p-3"
+            >
+              <summary className="cursor-pointer font-bold text-sm dark:text-indigo-200">
+                🎯 توضیح کلی پروژه
+              </summary>
+              <div className="mt-3 space-y-3 text-sm dark:text-gray-200">
+                {overview.purpose && (
+                  <p className="leading-relaxed">{overview.purpose}</p>
+                )}
+                {overview.capabilities?.length > 0 && (
+                  <div>
+                    <div className="font-semibold mb-1">✨ قابلیت‌ها</div>
+                    <ul className="list-disc mr-5 space-y-0.5">
+                      {overview.capabilities.map((c: string, i: number) => (
+                        <li key={i}>{c}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {overview.use_cases?.length > 0 && (
+                  <div>
+                    <div className="font-semibold mb-1">🎯 کاربردها</div>
+                    <ul className="list-disc mr-5 space-y-0.5">
+                      {overview.use_cases.map((u: string, i: number) => (
+                        <li key={i}>{u}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {overview.target_users && (
+                  <div>
+                    <span className="font-semibold">کاربران هدف: </span>
+                    <span>{overview.target_users}</span>
+                  </div>
+                )}
+                {overview.tech_stack && (
+                  <div>
+                    <div className="font-semibold mb-1">🛠 Tech Stack</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 text-xs">
+                      {overview.tech_stack.backend && <div><span className="text-gray-500">Backend:</span> {overview.tech_stack.backend}</div>}
+                      {overview.tech_stack.frontend && <div><span className="text-gray-500">Frontend:</span> {overview.tech_stack.frontend}</div>}
+                      {overview.tech_stack.storage && <div><span className="text-gray-500">Storage:</span> {overview.tech_stack.storage}</div>}
+                      {overview.tech_stack.integrations?.length > 0 && (
+                        <div className="sm:col-span-2">
+                          <span className="text-gray-500">Integrations:</span> {overview.tech_stack.integrations.join(', ')}
+                        </div>
+                      )}
                     </div>
-                  )}
-                  {f?.what_it_does && (
-                    <div>
-                      <strong>چه می‌کند؟</strong> {f.what_it_does}
-                    </div>
-                  )}
-                  {f?.use_cases?.length > 0 && (
-                    <div>
-                      <strong>کاربردها:</strong>
-                      <ul className="list-disc mr-4">
-                        {f.use_cases.map((u: string, i: number) => (
-                          <li key={i}>{u}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {f?.relations && (
-                    <div>
-                      <strong>روابط:</strong> {f.relations}
-                    </div>
-                  )}
-                  {f?.breaks_if_removed && (
-                    <div>
-                      <strong>در صورت حذف:</strong> {f.breaks_if_removed}
-                    </div>
-                  )}
-                </div>
-              </details>
-            );
-          })}
+                  </div>
+                )}
+                {overview.architecture_summary && (
+                  <div>
+                    <div className="font-semibold mb-1">🏗 معماری</div>
+                    <p>{overview.architecture_summary}</p>
+                  </div>
+                )}
+                {overview.key_concepts?.length > 0 && (
+                  <div>
+                    <div className="font-semibold mb-1">🔑 مفاهیم کلیدی</div>
+                    <ul className="list-disc mr-5 space-y-0.5 text-xs">
+                      {overview.key_concepts.map((k: string, i: number) => (
+                        <li key={i}>{k}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </details>
+          )}
+
+          {/* 📂 فایل‌ها (گروه‌بندی‌شده) */}
+          <div>
+            <div className="font-bold text-sm dark:text-white mb-2">
+              📂 فایل‌ها ({filtered.length}{filtered.length !== Object.keys(files).length ? `/${Object.keys(files).length}` : ''})
+            </div>
+            {categoryOrder.map((cat) => {
+              const items = grouped[cat] || [];
+              if (!items.length) return null;
+              return (
+                <details key={cat} open className="mb-2">
+                  <summary className="cursor-pointer text-xs font-semibold text-gray-600 dark:text-gray-300 py-1">
+                    {categoryLabels[cat]} ({items.length})
+                  </summary>
+                  <div className="space-y-1 mt-1 mr-2">
+                    {items.map((path) => {
+                      const f = files[path];
+                      return (
+                        <details
+                          key={path}
+                          className="bg-gray-50 dark:bg-gray-700/50 rounded p-2"
+                        >
+                          <summary className="cursor-pointer text-xs font-medium dark:text-white" dir="ltr">
+                            {path}
+                          </summary>
+                          <div className="mt-2 text-xs space-y-1 dark:text-gray-200" dir="rtl">
+                            {f?.what_is_it && (
+                              <div>
+                                <strong>این چیست؟</strong> {f.what_is_it}
+                              </div>
+                            )}
+                            {f?.what_it_does && (
+                              <div>
+                                <strong>چه می‌کند؟</strong> {f.what_it_does}
+                              </div>
+                            )}
+                            {f?.use_cases?.length > 0 && (
+                              <div>
+                                <strong>کاربردها:</strong>
+                                <ul className="list-disc mr-4">
+                                  {f.use_cases.map((u: string, i: number) => (
+                                    <li key={i}>{u}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                            {f?.depends_on?.length > 0 && (
+                              <div>
+                                <strong>وابسته به:</strong>{' '}
+                                {f.depends_on.map((d: string, i: number) => (
+                                  <code key={i} className="bg-gray-200 dark:bg-gray-600 px-1 mr-1 rounded text-[10px]" dir="ltr">
+                                    {d}
+                                  </code>
+                                ))}
+                              </div>
+                            )}
+                            {f?.used_by?.length > 0 && (
+                              <div>
+                                <strong>استفاده‌شده در:</strong>{' '}
+                                {f.used_by.map((d: string, i: number) => (
+                                  <code key={i} className="bg-gray-200 dark:bg-gray-600 px-1 mr-1 rounded text-[10px]" dir="ltr">
+                                    {d}
+                                  </code>
+                                ))}
+                              </div>
+                            )}
+                            {f?.relations && !f?.depends_on?.length && !f?.used_by?.length && (
+                              <div>
+                                <strong>روابط:</strong> {f.relations}
+                              </div>
+                            )}
+                            {f?.breaks_if_removed && (
+                              <div>
+                                <strong>در صورت حذف:</strong> {f.breaks_if_removed}
+                              </div>
+                            )}
+                          </div>
+                        </details>
+                      );
+                    })}
+                  </div>
+                </details>
+              );
+            })}
+          </div>
+
+          {/* 🚧 (Action Items) نیازمندی‌ها در انتها */}
+          {actionItems && (actionItems.summary || actionItems.needs_attention?.length || actionItems.suggested_improvements?.length || actionItems.risks?.length) && (
+            <details
+              open
+              className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded p-3"
+            >
+              <summary className="cursor-pointer font-bold text-sm dark:text-amber-200">
+                🚧 نیازمندی‌ها و بهبودها
+              </summary>
+              <div className="mt-3 space-y-3 text-sm dark:text-gray-200">
+                {actionItems.summary && (
+                  <blockquote className="border-r-4 border-amber-400 pr-3 italic text-gray-700 dark:text-gray-300">
+                    {actionItems.summary}
+                  </blockquote>
+                )}
+                {actionItems.needs_attention?.length > 0 && (
+                  <div>
+                    <div className="font-semibold mb-1">⚠️ موارد نیازمند توجه</div>
+                    <ul className="space-y-1">
+                      {actionItems.needs_attention.map((n: any, i: number) => {
+                        const item = typeof n === 'object' ? n.item : String(n);
+                        const pri = typeof n === 'object' ? (n.priority || 'medium').toLowerCase() : 'medium';
+                        const iconMap: Record<string, string> = { critical: '🔴', high: '🟠', medium: '🟡', low: '🔵' };
+                        const colorMap: Record<string, string> = {
+                          critical: 'bg-red-100 dark:bg-red-900/40',
+                          high: 'bg-orange-100 dark:bg-orange-900/40',
+                          medium: 'bg-yellow-100 dark:bg-yellow-900/40',
+                          low: 'bg-blue-100 dark:bg-blue-900/40',
+                        };
+                        const icon = iconMap[pri] || '•';
+                        const colorClass = colorMap[pri] || 'bg-gray-100 dark:bg-gray-700';
+                        return (
+                          <li key={i} className={`${colorClass} p-2 rounded text-xs flex items-start gap-2`}>
+                            <span>{icon}</span>
+                            <span className="flex-1">{item}</span>
+                            <span className="text-[10px] text-gray-500">{pri}</span>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                )}
+                {actionItems.suggested_improvements?.length > 0 && (
+                  <div>
+                    <div className="font-semibold mb-1">💡 پیشنهادات بهبود</div>
+                    <ul className="list-disc mr-5 space-y-0.5 text-xs">
+                      {actionItems.suggested_improvements.map((s: string, i: number) => (
+                        <li key={i}>{s}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {actionItems.risks?.length > 0 && (
+                  <div>
+                    <div className="font-semibold mb-1">⚠️ ریسک‌ها</div>
+                    <ul className="list-disc mr-5 space-y-0.5 text-xs text-red-700 dark:text-red-300">
+                      {actionItems.risks.map((r: string, i: number) => (
+                        <li key={i}>{r}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </details>
+          )}
         </div>
       )}
     </div>
