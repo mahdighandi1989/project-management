@@ -2395,6 +2395,39 @@ class NotificationService:
         action = parts[1]
         watched_id = parts[2]
 
+        # 🆕 (BUG FIX) برای action='bm'، parts[2] یک token کوتاه است نه UUID.
+        # ابتدا token را resolve می‌کنیم تا watched_id واقعی پیدا شود، سپس
+        # action را به build_model تبدیل می‌کنیم و parts را reshape می‌کنیم.
+        if action == "bm":
+            if len(parts) < 4:
+                await tg.send("⚠️ callback نامعتبر (bm).", silent=True)
+                return {"ok": True, "handled": "codex_bm_bad"}
+            token = parts[2]
+            try:
+                idx = int(parts[3])
+            except Exception:
+                await tg.send("⚠️ index نامعتبر در callback.", silent=True)
+                return {"ok": True, "handled": "codex_bm_bad_idx"}
+            draft = _idea_drafts.get(token)
+            if not draft or "models" not in draft:
+                await tg.send(
+                    "⚠️ این انتخاب منقضی شده. لطفاً /codex بزنید و دوباره امتحان کنید.",
+                    silent=True,
+                )
+                return {"ok": True, "handled": "codex_bm_expired"}
+            models = draft.get("models") or []
+            if idx < 0 or idx >= len(models):
+                await tg.send("⚠️ index خارج از محدوده.", silent=True)
+                return {"ok": True, "handled": "codex_bm_oob"}
+            # resolve واقعی
+            model_id = models[idx]
+            watched_id = draft.get("watched_id") or ""
+            # token را extend کن (تا اگر بازم استفاده شد منقضی نباشد)
+            draft["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+            # تبدیل به build_model
+            action = "build_model"
+            parts = ["codex", "build_model", watched_id, model_id]
+
         try:
             from .oversight_service import get_oversight_service
             from .oversight_codex_service import read_codex
@@ -2405,7 +2438,10 @@ class NotificationService:
             return {"ok": True, "handled": "codex_backend_fail"}
 
         if not watched:
-            await tg.send("⚠️ پروژه یافت نشد.", silent=True)
+            await tg.send(
+                f"⚠️ پروژه یافت نشد (id=`{watched_id[:12]}...`)",
+                silent=True,
+            )
             return {"ok": True, "handled": "codex_no_project"}
 
         # ============= pick =============
@@ -2666,38 +2702,7 @@ class NotificationService:
             }
 
         # ============= build_model:<wid>:<mid> =============
-        # 🆕 bm = "build_model" کوتاه — با token + index (callback_data ≤ 64B)
-        if action == "bm":
-            if len(parts) < 4:
-                await tg.send("⚠️ callback نامعتبر (bm).", silent=True)
-                return {"ok": True, "handled": "codex_bm_bad"}
-            token = parts[2]
-            try:
-                idx = int(parts[3])
-            except Exception:
-                await tg.send("⚠️ index نامعتبر در callback.", silent=True)
-                return {"ok": True, "handled": "codex_bm_bad_idx"}
-            draft = _idea_drafts.get(token)
-            if not draft or "models" not in draft:
-                await tg.send(
-                    "⚠️ این انتخاب منقضی شده. لطفاً /codex بزنید و دوباره امتحان کنید.",
-                    silent=True,
-                )
-                return {"ok": True, "handled": "codex_bm_expired"}
-            models = draft.get("models") or []
-            if idx < 0 or idx >= len(models):
-                await tg.send("⚠️ index خارج از محدوده.", silent=True)
-                return {"ok": True, "handled": "codex_bm_oob"}
-            model_id = models[idx]
-            watched_id = draft.get("watched_id") or watched_id
-            # یک‌بار مصرف: token را حذف نمی‌کنیم تا اگر کاربر button دیگری زد بازم کار کند
-            # ولی expire را extend می‌کنیم
-            draft["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
-            # ادامهٔ flow عادی build_model — همان منطق پایین (با fall-through)
-            action = "build_model"
-            # set parts برای backward compat با کد build_model
-            parts = ["codex", "build_model", watched_id, model_id]
-
+        # نکته: action='bm' در ابتدای handler resolve می‌شود (نه اینجا).
         if action == "build_model":
             if len(parts) < 4:
                 await tg.send("⚠️ model_id در callback نیست.", silent=True)
