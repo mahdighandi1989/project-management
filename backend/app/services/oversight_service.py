@@ -199,6 +199,15 @@ class WatchedProject:
     # فقط وقتی autonomy_level=auto و execution_mode auto_via_* معنی دارد
     auto_continue_until_done: bool = False
     max_auto_loop_rounds: int = 5
+    # 🆕 (Smart Task Lifecycle) بازتولید خودکار پرامپت‌های ناقص قدیمی
+    # وقتی scan خودکار اجرا می‌شود، پس از scan تسک‌هایی که prompt_quality_score آن‌ها
+    # کمتر از prompt_quality_threshold باشد بازتولید می‌شوند (با rate-limit 5).
+    auto_regenerate_old_prompts: bool = False
+    prompt_quality_threshold: int = 60  # 0..100
+    last_prompt_audit_at: Optional[str] = None
+    # 🆕 (Smart Task Lifecycle) فعال‌سازی dedup در ایجاد دستی + آستانهٔ امتیاز
+    dedup_in_manual_create: bool = True
+    dedup_score_threshold: float = 0.65  # 0..1
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
 
@@ -266,6 +275,51 @@ class OversightTask:
     # 🆕 (P4) prompt history — وقتی پرامپت regenerate می‌شود، نسخهٔ قبلی اینجا
     # ذخیره می‌شود (max 10 آیتم). هر آیتم: {prompt, raw_idea, model_id, generated_at}
     prompt_history: List[Dict[str, Any]] = field(default_factory=list)
+    # 🆕 (Smart Task Lifecycle) merge / quality tracking
+    # merge_count: چندبار این تسک با تسک دیگری ادغام شده (manual یا auto)
+    merge_count: int = 0
+    # raw_idea_history: هربار که تسک از طریق merge یا manual create دیده می‌شود،
+    # یک entry append می‌شود — مفید برای audit و forensics.
+    # هر آیتم: {ts, source, raw_idea, candidate_title, merged_fields, similarity_score}
+    raw_idea_history: List[Dict[str, Any]] = field(default_factory=list)
+    # prompt_quality_score: امتیاز 0..100 از _score_prompt_quality — هربار scan
+    # یا regenerate به‌روز می‌شود.
+    prompt_quality_score: Optional[int] = None
+    last_quality_audit_at: Optional[str] = None
+    # manual_seen_count: چندبار از طریق manual create به همین تسک ادغام شده
+    manual_seen_count: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# ====================================================================
+# 🆕 (Smart Task Lifecycle) Similarity & Merge dataclasses
+# ====================================================================
+
+@dataclass
+class SimilarityMatch:
+    """نتیجهٔ یک کاندید مشابه‌سنجی برای یک تسک."""
+    task_id: str
+    title: str
+    score: float  # 0..1 وزن‌دار
+    title_jaccard: float
+    idea_overlap: float
+    ac_overlap: float
+    reasons: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class CreateTaskResult:
+    """نتیجهٔ create_task — هم برای ایجاد موفق، هم برای duplicate."""
+    status: str  # "created" | "duplicate_detected" | "merged"
+    task: Optional[Dict[str, Any]] = None
+    similar_matches: List[Dict[str, Any]] = field(default_factory=list)
+    merge_preview: Optional[Dict[str, Any]] = None
+    message: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -977,6 +1031,11 @@ class OversightService:
                         "selected_models",
                         # 🆕 (Creator) منبع auto-add
                         "auto_added_source",
+                        # 🆕 (Smart Task Lifecycle) Dedup + Quality Audit
+                        "auto_regenerate_old_prompts",
+                        "prompt_quality_threshold",
+                        "dedup_in_manual_create",
+                        "dedup_score_threshold",
                     }
                     for k, v in updates.items():
                         if k in allowed:
@@ -1026,6 +1085,166 @@ class OversightService:
             items = [t for t in items if t.priority == priority]
         return [t.to_dict() for t in items]
 
+    # ================================================================
+    # 🆕 (Smart Task Lifecycle) Similarity detection
+    # ================================================================
+
+    @staticmethod
+    def _normalize_text(s: str) -> str:
+        """نرمال‌سازی متن برای similarity — حذف stopwords + lowercase + punctuation."""
+        import re as _re
+        s = (s or "").strip().lower()
+        for stop in [
+            "the", "a", "an", "is", "are", "to", "of", "for", "in", "on", "with",
+            "and", "or", "but",
+            "و", "در", "از", "به", "که", "یک", "این", "آن", "را", "با", "هم",
+            "بر", "تا", "می", "های", "ها", "اما", "یا",
+        ]:
+            s = _re.sub(rf"\b{stop}\b", " ", s)
+        s = _re.sub(r"[^\w\s؀-ۿ]", " ", s)
+        s = _re.sub(r"\s+", " ", s).strip()
+        return s
+
+    @classmethod
+    def _jaccard(cls, a: str, b: str) -> float:
+        na, nb = cls._normalize_text(a), cls._normalize_text(b)
+        if not na or not nb:
+            return 0.0
+        if na == nb:
+            return 1.0
+        sa, sb = set(na.split()), set(nb.split())
+        if not sa or not sb:
+            return 0.0
+        inter = len(sa & sb)
+        union = len(sa | sb)
+        return inter / union if union else 0.0
+
+    @classmethod
+    def _ngram_overlap(cls, a: str, b: str, n: int = 3) -> float:
+        """Token n-gram overlap — برای متن‌های بلندتر مثل raw_idea دقیق‌تر از Jaccard ساده."""
+        na, nb = cls._normalize_text(a), cls._normalize_text(b)
+        if not na or not nb:
+            return 0.0
+        ta = na.split()
+        tb = nb.split()
+        if len(ta) < n or len(tb) < n:
+            # برای متن‌های خیلی کوتاه به Jaccard ساده fallback
+            return cls._jaccard(a, b)
+        ga = {" ".join(ta[i:i + n]) for i in range(len(ta) - n + 1)}
+        gb = {" ".join(tb[i:i + n]) for i in range(len(tb) - n + 1)}
+        if not ga or not gb:
+            return 0.0
+        inter = len(ga & gb)
+        union = len(ga | gb)
+        return inter / union if union else 0.0
+
+    @classmethod
+    def _ac_overlap(
+        cls, a: Optional[List[str]], b: Optional[List[str]]
+    ) -> float:
+        """تطابق acceptance_criteria — هر AC با هم Jaccard بزرگ‌تر از 0.6 یعنی match."""
+        la = [x for x in (a or []) if x]
+        lb = [x for x in (b or []) if x]
+        if not la or not lb:
+            return 0.0
+        matched = 0
+        for x in la:
+            for y in lb:
+                if cls._jaccard(x, y) >= 0.6:
+                    matched += 1
+                    break
+        total = max(len(la), len(lb))
+        return matched / total if total else 0.0
+
+    def find_similar_active_tasks(
+        self,
+        project_id: Optional[str],
+        candidate_title: str,
+        candidate_raw_idea: str = "",
+        candidate_acceptance_criteria: Optional[List[str]] = None,
+        *,
+        jaccard_threshold: float = 0.75,
+        raw_idea_overlap_threshold: float = 0.6,
+        score_threshold: float = 0.65,
+        include_archived: bool = False,
+        include_done: bool = False,
+        limit: int = 5,
+    ) -> List[SimilarityMatch]:
+        """کاندیدهای مشابه را در tasks موجود (همان watched/project) با امتیاز
+        وزن‌دار بازمی‌گرداند.
+
+        وزن‌ها:
+          - title_jaccard: 40%
+          - idea_overlap (3-gram): 40%
+          - ac_overlap: 20%
+
+        آستانه‌های راهنما (هر کدام می‌توانند به‌تنهایی trigger شوند):
+          - title_jaccard >= jaccard_threshold (0.75) → کاندید قوی
+          - idea_overlap >= raw_idea_overlap_threshold (0.6) → کاندید قوی
+          - score کلی >= score_threshold (0.65) → کاندید نهایی
+        """
+        candidate_title = (candidate_title or "").strip()
+        if not candidate_title and not candidate_raw_idea:
+            return []
+        cand_ac = candidate_acceptance_criteria or []
+
+        # کاندیدها: همان watched_id، active (نه archived/done/cancelled)
+        candidates: List[OversightTask] = []
+        for t in self.tasks:
+            if project_id is not None and t.watched_id != project_id:
+                continue
+            if not include_archived and getattr(t, "archived", False):
+                continue
+            if not include_done:
+                if t.status in ("done", "cancelled"):
+                    continue
+                if t.verification_status == "done":
+                    continue
+            candidates.append(t)
+
+        matches: List[SimilarityMatch] = []
+        for t in candidates:
+            tj = self._jaccard(candidate_title, t.title or "")
+            io = self._ngram_overlap(
+                candidate_raw_idea or candidate_title,
+                t.raw_idea or t.title or "",
+            )
+            ao = self._ac_overlap(cand_ac, t.acceptance_criteria)
+
+            score = (tj * 0.4) + (io * 0.4) + (ao * 0.2)
+            reasons: List[str] = []
+            if tj >= jaccard_threshold:
+                reasons.append(f"title Jaccard {tj:.2f}")
+            if io >= raw_idea_overlap_threshold:
+                reasons.append(f"raw_idea overlap {io:.2f}")
+            if ao >= 0.5:
+                reasons.append(f"AC overlap {ao:.2f}")
+
+            # یک کاندید فقط در صورتی برگردانده می‌شود که حداقل یکی از
+            # آستانه‌های نام/ایده برآورده شود، یا score کلی >= threshold
+            qualifies = (
+                tj >= jaccard_threshold
+                or io >= raw_idea_overlap_threshold
+                or score >= score_threshold
+            )
+            if not qualifies:
+                continue
+
+            matches.append(
+                SimilarityMatch(
+                    task_id=t.id,
+                    title=t.title or "",
+                    score=round(score, 4),
+                    title_jaccard=round(tj, 4),
+                    idea_overlap=round(io, 4),
+                    ac_overlap=round(ao, 4),
+                    reasons=reasons,
+                )
+            )
+
+        matches.sort(key=lambda m: m.score, reverse=True)
+        return matches[:limit]
+
     async def create_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         from .oversight_strong_prompt import extract_target_files, extract_acceptance_criteria
 
@@ -1039,6 +1258,11 @@ class OversightService:
         if not prompt:
             raise ValueError("prompt خالی است")
 
+        raw_idea = (payload.get("raw_idea") or "").strip()
+        force_create = bool(payload.get("force_create"))
+        merge_into_task_id = payload.get("merge_into_task_id")
+        source = payload.get("source") or "user"
+
         # استخراج target_files و acceptance_criteria از پرامپت در صورت نبودن
         target_files = payload.get("target_files") or extract_target_files(prompt)
         acceptance_criteria = (
@@ -1049,18 +1273,93 @@ class OversightService:
         if not execution_mode:
             execution_mode = (watched.default_execution_mode if watched else "manual") or "manual"
 
+        # ───────────── 🆕 (Smart Task Lifecycle) Dedup Gate ─────────────
+        # 1) اگر merge_into_task_id داده شده → مستقیماً merge بزن (mode 3)
+        if merge_into_task_id:
+            try:
+                from .task_merge_service import get_task_merge_service
+                merge_service = get_task_merge_service()
+                merged_task = await merge_service.apply_merge_simple(
+                    existing_task_id=merge_into_task_id,
+                    candidate_title=title,
+                    candidate_raw_idea=raw_idea,
+                    candidate_prompt=prompt,
+                    candidate_acceptance_criteria=acceptance_criteria,
+                    candidate_target_files=target_files,
+                    source=source,
+                )
+                if merged_task is None:
+                    raise ValueError("تسک هدف برای ادغام یافت نشد")
+                return CreateTaskResult(
+                    status="merged",
+                    task=merged_task,
+                    similar_matches=[],
+                    merge_preview=None,
+                    message=f"با تسک «{merged_task.get('title', '')[:60]}» ادغام شد.",
+                ).to_dict()
+            except Exception as e:
+                logger.warning(f"create_task: merge_into failed: {e}")
+                # شکست در merge → بدون duplicate detection ایجاد کن (پیش‌فرض ایمن)
+                force_create = True
+
+        # 2) اگر force_create نیست و dedup فعال است → بررسی مشابهت
+        dedup_enabled = (
+            not force_create
+            and (watched is None or getattr(watched, "dedup_in_manual_create", True))
+        )
+        if dedup_enabled and watched_id:
+            try:
+                threshold = float(
+                    getattr(watched, "dedup_score_threshold", 0.65) if watched else 0.65
+                )
+            except Exception:
+                threshold = 0.65
+            matches = self.find_similar_active_tasks(
+                project_id=watched_id,
+                candidate_title=title,
+                candidate_raw_idea=raw_idea or title,
+                candidate_acceptance_criteria=acceptance_criteria,
+                score_threshold=threshold,
+            )
+            if matches:
+                # تسک ایجاد نمی‌شود — duplicate_detected برگشت داده می‌شود
+                # رویداد notify از سمت route یا frontend صدا می‌شود (نه اینجا، تا
+                # await در پاسخ HTTP بلاک نشود).
+                try:
+                    asyncio.create_task(
+                        self._notify_duplicate_detected(
+                            watched=watched,
+                            candidate_title=title,
+                            matches=matches,
+                            source=source,
+                        )
+                    )
+                except Exception:
+                    pass
+                return CreateTaskResult(
+                    status="duplicate_detected",
+                    task=None,
+                    similar_matches=[m.to_dict() for m in matches],
+                    merge_preview=None,
+                    message=(
+                        f"{len(matches)} تسک مشابه پیدا شد. "
+                        f"می‌توانید ادغام کنید یا با force_create=true ایجاد جداگانه بسازید."
+                    ),
+                ).to_dict()
+        # ─────────────────────────────────────────────────────────────────
+
         t = OversightTask(
             id=str(uuid.uuid4()),
             watched_id=watched_id,
             project_full_name=watched.repo_full_name if watched else payload.get("project_full_name", ""),
             title=title,
             prompt=prompt,
-            raw_idea=payload.get("raw_idea", ""),
+            raw_idea=raw_idea,
             type=payload.get("type", "other"),
             priority=payload.get("priority", "medium"),
             status=payload.get("status", "pending"),
             deadline=payload.get("deadline"),
-            source=payload.get("source", "user"),
+            source=source,
             execution_mode=execution_mode,
             target_files=target_files,
             acceptance_criteria=acceptance_criteria,
@@ -1068,7 +1367,46 @@ class OversightService:
         async with self._lock:
             self.tasks.append(t)
             self._save_tasks()
-        return t.to_dict()
+        return CreateTaskResult(
+            status="created",
+            task=t.to_dict(),
+            similar_matches=[],
+            merge_preview=None,
+            message="تسک ساخته شد.",
+        ).to_dict()
+
+    async def _notify_duplicate_detected(
+        self,
+        *,
+        watched: Optional[WatchedProject],
+        candidate_title: str,
+        matches: List[SimilarityMatch],
+        source: str,
+    ) -> None:
+        """ارسال notification غیر-blocking برای duplicate_detected (best-effort)."""
+        try:
+            from .notification_service import notification_service
+            project_name = watched.repo_full_name if watched else ""
+            lines = [
+                "🔍 *تسک‌های مشابه پیدا شد*",
+                f"📁 پروژه: `{project_name}`",
+                f"📥 منبع: `{source}`",
+                f"✏️ ورودی: _{candidate_title[:100]}_",
+                "",
+                f"🔁 {len(matches)} مورد مشابه:",
+            ]
+            for i, m in enumerate(matches[:3], 1):
+                lines.append(f"  {i}. «{m.title[:60]}» — شباهت {int(m.score * 100)}٪")
+            await notification_service.notify_event(
+                "task_duplicate_detected",
+                "\n".join(lines),
+                subject="تسک مشابه پیدا شد",
+                priority="low",
+                project_name=project_name,
+                watched_id=watched.id if watched else None,
+            )
+        except Exception as e:
+            logger.debug(f"_notify_duplicate_detected failed: {e}")
 
     async def update_task(self, task_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         from .oversight_strong_prompt import extract_target_files, extract_acceptance_criteria
@@ -1119,6 +1457,188 @@ class OversightService:
             if removed:
                 self._save_tasks()
             return removed
+
+    # ================================================================
+    # 🆕 (Smart Task Lifecycle) Prompt quality scoring
+    # ================================================================
+
+    @staticmethod
+    def _score_prompt_quality(task: "OversightTask") -> int:
+        """امتیاز کیفیت پرامپت (0..100). ۰ = خالی/خراب، ۱۰۰ = پروژهٔ ایده‌آل.
+
+        معیارها (پیش‌گزیدهٔ heuristic، بدون AI):
+          - پرامپت موجود است + حداقل ۲۰۰ کاراکتر (base 30)
+          - حضور هدف/مأموریت یا «##» (header markdown)
+          - حضور EXECUTOR_DISCLAIMER
+          - حضور acceptance_criteria
+          - حضور target_files
+          - عدم truncation (پایان ناقص)
+        """
+        prompt = (task.prompt or "").strip()
+        if not prompt:
+            return 5
+        score = 30
+        # length tier
+        if len(prompt) >= 200:
+            score += 10
+        if len(prompt) >= 800:
+            score += 10
+        if len(prompt) >= 2000:
+            score += 5
+        # structure
+        if "##" in prompt or "###" in prompt:
+            score += 10
+        # DISCLAIMER
+        if "یادداشت مهم برای مدل اجراکننده" in prompt[:1500]:
+            score += 10
+        # acceptance criteria
+        if task.acceptance_criteria and len(task.acceptance_criteria) >= 2:
+            score += 10
+        elif task.acceptance_criteria:
+            score += 5
+        # target files
+        if task.target_files:
+            score += 5
+        # standard sections (ُفارسی + انگلیسی)
+        for kw in [
+            "هدف", "Goal", "context", "Context", "تست", "Test",
+            "Acceptance", "معیار",
+        ]:
+            if kw in prompt:
+                score += 1
+        score = min(score, 100)
+        # truncation penalty
+        last_chars = prompt[-20:].strip()
+        if last_chars.endswith("...") or last_chars.endswith("…"):
+            score = max(score - 25, 5)
+        # ناقص بودن backticks یا code fences
+        if prompt.count("```") % 2 != 0:
+            score = max(score - 10, 5)
+        return max(0, min(score, 100))
+
+    async def audit_prompt_quality(self, watched_id: Optional[str] = None) -> Dict[str, Any]:
+        """تمام تسک‌های active را برای کیفیت پرامپت scan می‌کند و امتیاز ست می‌کند.
+
+        خروجی: شمارش‌ها + لیست low_quality_task_ids.
+        """
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).isoformat()
+        scanned = 0
+        low_quality: List[str] = []
+        threshold_default = 60
+        async with self._lock:
+            for t in self.tasks:
+                if watched_id is not None and t.watched_id != watched_id:
+                    continue
+                if getattr(t, "archived", False):
+                    continue
+                if t.status in ("done", "cancelled"):
+                    continue
+                if t.verification_status == "done":
+                    continue
+                scanned += 1
+                q = self._score_prompt_quality(t)
+                t.prompt_quality_score = q
+                t.last_quality_audit_at = ts
+                # threshold از watched اگر موجود
+                w = self._find_watched(t.watched_id) if t.watched_id else None
+                thr = int(
+                    getattr(w, "prompt_quality_threshold", threshold_default)
+                    if w else threshold_default
+                )
+                if q < thr:
+                    low_quality.append(t.id)
+            self._save_tasks()
+            # last_prompt_audit_at روی watched
+            if watched_id:
+                w = self._find_watched(watched_id)
+                if w:
+                    w.last_prompt_audit_at = ts
+                    self._save_watched()
+        return {
+            "scanned": scanned,
+            "low_quality_count": len(low_quality),
+            "low_quality_task_ids": low_quality,
+        }
+
+    async def regenerate_low_quality_prompts(
+        self,
+        watched_id: Optional[str] = None,
+        *,
+        max_count: int = 5,
+        reason: str = "manual_override",
+    ) -> Dict[str, Any]:
+        """پرامپت تسک‌های با کیفیت پایین را بازتولید می‌کند.
+
+        - ابتدا audit_prompt_quality صدا زده می‌شود (تا امتیازها به‌روز شوند).
+        - حداکثر max_count تسک بازتولید می‌شود (rate-limit برای هزینهٔ AI).
+        - تسک‌ها به ترتیب صعودی امتیاز sort می‌شوند (بدترین اول).
+        """
+        audit = await self.audit_prompt_quality(watched_id)
+        ids = list(audit.get("low_quality_task_ids", []))
+        # sort: بدترین کیفیت اول
+        ids_with_score: List[tuple] = []
+        for tid in ids:
+            t = next((x for x in self.tasks if x.id == tid), None)
+            if t:
+                ids_with_score.append((tid, t.prompt_quality_score or 0))
+        ids_with_score.sort(key=lambda x: x[1])
+        ids_to_run = [tid for tid, _ in ids_with_score[:max_count]]
+
+        regenerated: List[Dict[str, Any]] = []
+        failed: List[Dict[str, Any]] = []
+        for tid in ids_to_run:
+            try:
+                t_before = next((x for x in self.tasks if x.id == tid), None)
+                old_quality = t_before.prompt_quality_score if t_before else 0
+                res = await self.regenerate_prompt_for_task(tid)
+                if res is None:
+                    failed.append({"task_id": tid, "error": "not_found"})
+                    continue
+                # امتیاز جدید
+                t_after = next((x for x in self.tasks if x.id == tid), None)
+                new_quality = self._score_prompt_quality(t_after) if t_after else 0
+                if t_after:
+                    t_after.prompt_quality_score = new_quality
+                regenerated.append({
+                    "task_id": tid,
+                    "title": (res.get("title") or "")[:120],
+                    "old_quality": old_quality,
+                    "new_quality": new_quality,
+                })
+                # notify (best-effort)
+                try:
+                    from .notification_service import notification_service
+                    await notification_service.notify_event(
+                        "prompt_regenerated",
+                        (
+                            "🔄 *پرامپت بازتولید شد*\n"
+                            f"📌 تسک: «{(res.get('title') or '')[:80]}»\n"
+                            f"📊 کیفیت: {old_quality}٪ → {new_quality}٪\n"
+                            f"📥 دلیل: `{reason}`"
+                        ),
+                        subject="پرامپت بازتولید شد",
+                        priority="low",
+                        project_name=res.get("project_full_name") or "",
+                        watched_id=res.get("watched_id"),
+                    )
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.warning(f"regenerate_low_quality: {tid} failed: {e}")
+                failed.append({"task_id": tid, "error": str(e)[:200]})
+        async with self._lock:
+            self._save_tasks()
+        return {
+            "scanned": audit.get("scanned", 0),
+            "low_quality_count": audit.get("low_quality_count", 0),
+            "regenerated": regenerated,
+            "regenerated_count": len(regenerated),
+            "failed": failed,
+            "skipped": max(0, len(ids) - len(ids_to_run)),
+            "max_count": max_count,
+            "reason": reason,
+        }
 
     # 🆕 (P4) regenerate prompt با حفظ history — راه ارتقای پرامپت‌های قدیمی
     async def regenerate_prompt_for_task(
@@ -3231,6 +3751,20 @@ class OversightService:
                                     now + timedelta(hours=w.scan_interval_hours)
                                 ).isoformat()
                                 scanned.append(w.id)
+                                # 🆕 (Smart Task Lifecycle) auto-regenerate
+                                # پس از scan، اگر فلگ فعال است، تسک‌های با کیفیت
+                                # پایین این پروژه را بازتولید کن (rate-limit 5)
+                                if getattr(w, "auto_regenerate_old_prompts", False):
+                                    try:
+                                        await self.regenerate_low_quality_prompts(
+                                            w.id,
+                                            max_count=5,
+                                            reason="auto_quality_threshold",
+                                        )
+                                    except Exception as _re:
+                                        logger.warning(
+                                            f"auto-regen after scan {w.id} failed: {_re}"
+                                        )
                             except Exception as e:
                                 logger.warning(f"auto-scan {w.id} failed: {e}")
             except Exception as e:
