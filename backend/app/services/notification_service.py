@@ -1005,17 +1005,22 @@ class NotificationService:
     # -----------------------------------------------------------------------
 
     async def _answer_callback(self, callback_query_id: str, text: str = "") -> None:
-        """پاسخ به callback_query (برای حذف loading state دکمه)."""
+        """پاسخ به callback_query (برای حذف loading state دکمه).
+
+        اگر text خالی باشد، key 'text' را در payload نمی‌گذاریم. در غیر این
+        صورت بعضی کلاینت‌های تلگرام (مثل web) JSON null را به‌عنوان literal
+        رشتهٔ "null" نمایش می‌دهند که toast اشتباه ایجاد می‌کند.
+        """
         if not self._telegram().bot_token:
             return
         url = f"https://api.telegram.org/bot{self._telegram().bot_token}/answerCallbackQuery"
+        payload: Dict[str, Any] = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text[:200]
         try:
             timeout = aiohttp.ClientTimeout(total=10)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                await session.post(url, json={
-                    "callback_query_id": callback_query_id,
-                    "text": text[:200] if text else None,
-                })
+                await session.post(url, json=payload)
         except Exception:
             pass
 
@@ -1026,7 +1031,23 @@ class NotificationService:
         # ——— callback_query (دکمه‌های inline) ———
         cq = update.get("callback_query")
         if cq:
-            return await self._handle_callback_query(cq)
+            # 🛡 global try/except — هیچ exception نباید silent باشد
+            try:
+                return await self._handle_callback_query(cq)
+            except Exception as e:
+                logger.exception(f"callback handler crashed: {e}")
+                # تلاش برای ارسال پیام خطا به کاربر
+                try:
+                    chat = (cq.get("message") or {}).get("chat") or {}
+                    if chat.get("id"):
+                        await self._telegram().send(
+                            f"❌ خطا در پردازش دکمه:\n`{str(e)[:300]}`\n\n"
+                            f"می‌توانید با /menu دوباره شروع کنید.",
+                            silent=False,
+                        )
+                except Exception:
+                    pass
+                return {"ok": False, "handled": "callback_crash", "error": str(e)[:300]}
 
         # ——— message ———
         msg = update.get("message") or {}
@@ -2232,8 +2253,12 @@ class NotificationService:
         codex:build:<watched_id>      → نمایش model picker
         codex:build_model:<wid>:<mid> → اجرای refresh_codex با مدل انتخابی
         codex:refresh:<watched_id>    → alias برای build (وقتی codex از قبل هست)
+
+        نکته: model_id می‌تواند حاوی ":" باشد (مثل "openai:gpt-4o") — برای
+        build_model، parts بعد از index 2 با ":" دوباره join می‌شود.
         """
         tg = self._telegram()
+        logger.info(f"codex callback: data={data}")
         parts = data.split(":")
         if len(parts) < 3:
             await tg.send("⚠️ callback نامعتبر.", silent=True)
@@ -2387,7 +2412,9 @@ class NotificationService:
             if len(parts) < 4:
                 await tg.send("⚠️ model_id در callback نیست.", silent=True)
                 return {"ok": True, "handled": "codex_no_mid"}
-            model_id = parts[3]
+            # model_id ممکن است حاوی ":" باشد (مثل "openai:gpt-4o") — همهٔ
+            # parts بعد از index 2 را با ":" join می‌کنیم
+            model_id = ":".join(parts[3:])
             await tg.send(
                 f"⏳ *ساخت Codex با* `{model_id}`...\n"
                 f"این فرآیند 30 تا 60 ثانیه طول می‌کشد.",
