@@ -1639,10 +1639,12 @@ class OversightService:
         prompt = (task.prompt or "").strip()
         if not prompt:
             return 5
+        # spec: پرامپت < 200 کاراکتر = صراحتاً کیفیت پایین (max 10)
+        if len(prompt) < 200:
+            return 10
         score = 30
-        # length tier
-        if len(prompt) >= 200:
-            score += 10
+        # length tier (200..∞)
+        score += 10  # base bonus for >=200
         if len(prompt) >= 800:
             score += 10
         if len(prompt) >= 2000:

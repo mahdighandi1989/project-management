@@ -396,11 +396,18 @@ class TaskMergeService:
         chosen_fields: Optional[Dict[str, str]] = None,
         source: str = "manual",
         similarity_score: float = 0.0,
+        ai_merged_values: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
-        """اعمال انتخاب کاربر روی تسک موجود."""
+        """اعمال انتخاب کاربر روی تسک موجود.
+
+        ai_merged_values: dict[field_name -> ai_merged_value] که از preview آمده.
+        اگر کاربر choice='ai_merged' برای فیلدی انتخاب کرده باشد، از این مقدار
+        استفاده می‌شود (نه concat ساده). اگر None باشد، fallback به heuristic.
+        """
         from .oversight_service import get_oversight_service
         service = get_oversight_service()
         chosen = chosen_fields or {}
+        ai_vals = ai_merged_values or {}
 
         async with service._lock:
             existing = next(
@@ -417,6 +424,9 @@ class TaskMergeService:
             if choice == "candidate" and candidate_title:
                 existing.title = candidate_title
                 merged_fields_applied.append("title")
+            elif choice == "ai_merged" and ai_vals.get("title"):
+                existing.title = str(ai_vals["title"])
+                merged_fields_applied.append("title")
 
             # 2) raw_idea
             choice = chosen.get("raw_idea", "existing")
@@ -424,9 +434,15 @@ class TaskMergeService:
                 existing.raw_idea = candidate_raw_idea
                 merged_fields_applied.append("raw_idea")
             elif choice == "ai_merged" and candidate_raw_idea:
-                existing.raw_idea = self._concat_with_separator(
-                    existing.raw_idea or "", candidate_raw_idea,
-                )[:5000]
+                # اولویت با ai_merged_value از preview (اگر use_ai=true بود)
+                ai_text = ai_vals.get("raw_idea")
+                if ai_text and isinstance(ai_text, str) and ai_text.strip():
+                    existing.raw_idea = ai_text.strip()[:5000]
+                else:
+                    # fallback: concat ساده اگر AI merge انجام نشده بود
+                    existing.raw_idea = self._concat_with_separator(
+                        existing.raw_idea or "", candidate_raw_idea,
+                    )[:5000]
                 merged_fields_applied.append("raw_idea")
 
             # 3) acceptance_criteria
@@ -435,10 +451,15 @@ class TaskMergeService:
                 if choice == "candidate":
                     existing.acceptance_criteria = list(candidate_acceptance_criteria)
                 else:
-                    existing.acceptance_criteria = self._merge_acceptance_criteria(
-                        existing.acceptance_criteria or [],
-                        candidate_acceptance_criteria,
-                    )
+                    # اولویت با ai_merged_value (لیست از preview)
+                    ai_ac = ai_vals.get("acceptance_criteria")
+                    if isinstance(ai_ac, list) and ai_ac:
+                        existing.acceptance_criteria = [str(x) for x in ai_ac if x]
+                    else:
+                        existing.acceptance_criteria = self._merge_acceptance_criteria(
+                            existing.acceptance_criteria or [],
+                            candidate_acceptance_criteria,
+                        )
                 merged_fields_applied.append("acceptance_criteria")
 
             # 4) target_files
@@ -447,10 +468,14 @@ class TaskMergeService:
                 if choice == "candidate":
                     existing.target_files = list(candidate_target_files)
                 else:
-                    existing.target_files = self._merge_target_files(
-                        existing.target_files or [],
-                        candidate_target_files,
-                    )
+                    ai_tf = ai_vals.get("target_files")
+                    if isinstance(ai_tf, list) and ai_tf:
+                        existing.target_files = [str(x) for x in ai_tf if x]
+                    else:
+                        existing.target_files = self._merge_target_files(
+                            existing.target_files or [],
+                            candidate_target_files,
+                        )
                 merged_fields_applied.append("target_files")
 
             # 5) prompt (فقط اگر صراحتاً انتخاب شده باشد)
