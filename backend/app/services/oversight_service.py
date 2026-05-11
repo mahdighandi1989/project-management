@@ -4174,6 +4174,15 @@ class OversightService:
         except Exception as e:
             logger.debug(f"daily_report check skipped: {e}")
 
+        # ----- 5) 🆕 (Index Hub) silent refresh پیام ایندکس pin‌شده -----
+        # فقط اگر index قبلاً ساخته شده باشد (state در فایل موجود است).
+        # rate: هر 60 ثانیه — قابل قبول برای Telegram bot.
+        try:
+            from .notification_service import notification_service
+            await notification_service.refresh_index_silently()
+        except Exception as _ie:
+            logger.debug(f"index silent refresh skipped: {_ie}")
+
         return {
             "ran": ran,
             "ran_count": len(ran),

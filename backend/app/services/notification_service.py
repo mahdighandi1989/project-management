@@ -57,6 +57,57 @@ def _resolve_storage_dir() -> Path:
 
 _STORAGE = _resolve_storage_dir()
 _PREFS_FILE = _STORAGE / "notification_prefs.json"
+# 🆕 (Index Hub) state پیام index pin شده — message_id ذخیره می‌شود تا edit شود
+_INDEX_STATE_FILE = _STORAGE / "telegram_index_state.json"
+
+
+def _read_index_state() -> Dict[str, Any]:
+    try:
+        if _INDEX_STATE_FILE.exists():
+            with open(_INDEX_STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f) or {}
+    except Exception as e:
+        logger.warning(f"index state read failed: {e}")
+    return {}
+
+
+def _write_index_state(state: Dict[str, Any]) -> None:
+    try:
+        tmp = _INDEX_STATE_FILE.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        tmp.replace(_INDEX_STATE_FILE)
+    except Exception as e:
+        logger.warning(f"index state write failed: {e}")
+
+
+# 🆕 (Persistent Reply Keyboard) منوی ثابت زیر input box
+# Telegram دو نوع keyboard دارد:
+#   - inline (زیر یک پیام مشخص) — برای flow های مرحله‌ای استفاده می‌کنیم
+#   - reply (زیر input، در همه پیام‌ها) — منوی ثابت برای دسترسی سریع
+# این persistent است: یک‌بار با /start یا /menu ست می‌شود و تا remove نشود می‌ماند.
+PERSISTENT_REPLY_KEYBOARD: Dict[str, Any] = {
+    "keyboard": [
+        [{"text": "📋 ایندکس"}, {"text": "🆕 تسک جدید"}],
+        [{"text": "📚 شناسنامه"}, {"text": "🚀 پروژه جدید"}],
+        [{"text": "📊 وضعیت"}, {"text": "📋 منو"}],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+    "input_field_placeholder": "/menu یا روی دکمه‌های زیر کلیک کن",
+}
+
+# نقشهٔ alias های متنی → command واقعی
+# وقتی کاربر روی دکمهٔ reply keyboard کلیک می‌کند، متن دکمه ارسال می‌شود
+TEXT_ALIASES: Dict[str, str] = {
+    "📋 ایندکس": "/index",
+    "🆕 تسک جدید": "/new_task",
+    "📚 شناسنامه": "/codex",
+    "🚀 پروژه جدید": "/new_project",
+    "📊 وضعیت": "/status",
+    "📋 منو": "/menu",
+    "❌ بستن منو": "/hide_menu",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -980,6 +1031,9 @@ class NotificationService:
         # ——— message ———
         msg = update.get("message") or {}
         text = (msg.get("text") or "").strip()
+        # 🆕 alias دکمه‌های persistent reply keyboard → command واقعی
+        if text in TEXT_ALIASES:
+            text = TEXT_ALIASES[text]
         chat = (msg.get("chat") or {})
         chat_id = chat.get("id")
         if not chat_id or not text:
@@ -1056,17 +1110,33 @@ class NotificationService:
                 "👋 *سلام!*\n\n"
                 "این ربات نوتیفیکیشن‌های سیستم نظارت پروژه است.\n\n"
                 "دستورات:\n"
+                "• /index — 📋 *لیست دسته‌بندی‌شدهٔ کارها* (pin‌شده، خودکار به‌روز)\n"
                 "• /new\\_project یا /create\\_project — *🚀 ساخت پروژهٔ جدید* (از صفر، با push به GitHub)\n"
                 "• /new\\_task یا /new\\_idea — ثبت تسک جدید با انتخاب پروژه\n"
                 "• /codex — 📚 شناسنامهٔ پروژه (مشاهده یا ساخت با AI)\n"
                 "• /menu — منوی دسترسی سریع\n"
                 "• /status — وضعیت نوتیفیکیشن\n"
                 "• /cancel — لغو flow فعلی\n"
-                "• /help — این پیام"
+                "• /hide\\_menu — مخفی‌کردن منوی ثابت\n"
+                "• /help — این پیام\n\n"
+                "💡 *منوی ثابت* در پایین صفحه فعال شد — برای دسترسی سریع از آن استفاده کنید."
             )
-            kb = build_inline_keyboard(base, "manual_test") if base else None
-            await tg.send(reply, silent=True, reply_markup=kb)
+            # 🆕 reply_markup = persistent reply keyboard (یک‌بار ست می‌شود، تا remove نشود می‌ماند)
+            await tg.send(reply, silent=True, reply_markup=PERSISTENT_REPLY_KEYBOARD)
             return {"ok": True, "handled": "start"}
+
+        # 🆕 /index — پیام pin‌شدهٔ ایندکس کارها (دسته‌بندی شده، خودکار edit)
+        if text == "/index":
+            return await self._send_or_edit_index_message(chat_id_str)
+
+        # 🆕 /hide_menu — حذف persistent reply keyboard
+        if text == "/hide_menu":
+            await tg.send(
+                "🔕 منوی ثابت مخفی شد.\nبرای فعال‌سازی مجدد: /start یا /menu",
+                silent=True,
+                reply_markup={"remove_keyboard": True},
+            )
+            return {"ok": True, "handled": "hide_menu"}
 
         if text == "/menu":
             reply = (
@@ -1076,10 +1146,14 @@ class NotificationService:
             )
             if not base:
                 reply += "\n\n⚠️ `app_base_url` در پنل تنظیمات ست نشده — لینک‌ها در دسترس نیستند."
-                await tg.send(reply, silent=True)
+                # 🆕 حتی بدون base، persistent keyboard ست می‌شود
+                await tg.send(reply, silent=True, reply_markup=PERSISTENT_REPLY_KEYBOARD)
                 return {"ok": True, "handled": "menu_no_url"}
             kb = {
                 "inline_keyboard": [
+                    [
+                        {"text": "📋 ایندکس کارها", "callback_data": "menu:index"},
+                    ],
                     [
                         {"text": "👁 تحت نظارت", "url": f"{base}/oversight?tab=watched"},
                         {"text": "📋 تسک‌ها", "url": f"{base}/oversight?tab=tasks"},
@@ -1104,7 +1178,17 @@ class NotificationService:
                     [{"text": "🏠 صفحهٔ اصلی", "url": f"{base}/"}],
                 ]
             }
+            # 🆕 inline keyboard همراه با persistent reply keyboard — هر دو نمایش داده می‌شوند
+            # (Telegram: یک پیام می‌تواند هم inline داشته باشد هم reply_keyboard را ست کند)
             await tg.send(reply, silent=True, reply_markup=kb)
+            # ست persistent reply keyboard با یک پیام نامحسوس (یا در پاسخ بعدی)
+            # سادهٔ: همان پیام reply_keyboard را ست نمی‌کند چون reply_markup را اشغال کرده.
+            # راه‌حل: یک پیام نامحسوس برای ست keyboard
+            await tg.send(
+                "🎛 منوی ثابت در پایین فعال است.",
+                silent=True,
+                reply_markup=PERSISTENT_REPLY_KEYBOARD,
+            )
             return {"ok": True, "handled": "menu"}
 
         if text == "/status":
@@ -1316,6 +1400,10 @@ class NotificationService:
             return await self._start_new_task_flow(chat_id_str)
         if data == "menu:codex":
             return await self._start_codex_flow(chat_id_str)
+        if data == "menu:index":
+            return await self._send_or_edit_index_message(chat_id_str)
+        if data == "index:refresh":
+            return await self._send_or_edit_index_message(chat_id_str, force_refresh=True)
 
         # 🆕 (Codex) callbacks
         if data.startswith("codex:"):
@@ -1764,6 +1852,302 @@ class NotificationService:
     # -----------------------------------------------------------------------
     # 🆕 (Codex) /codex flow — مشاهده/ساخت شناسنامهٔ پروژه از تلگرام
     # -----------------------------------------------------------------------
+
+    # -----------------------------------------------------------------------
+    # 🆕 (Index Hub) /index — پیام pin‌شدهٔ دسته‌بندی‌شدهٔ کارها
+    # -----------------------------------------------------------------------
+
+    def _build_index_content(self) -> str:
+        """ساختن متن ایندکس دسته‌بندی‌شده از تسک‌ها/ایده‌ها/پروژه‌ها."""
+        try:
+            from .oversight_service import get_oversight_service
+            from datetime import datetime, timezone
+            svc = get_oversight_service()
+        except Exception as e:
+            return f"❌ خطا در بارگذاری: {e}"
+
+        # tasks فعال (نه done/cancelled/archived/verified-done)
+        active = [
+            t for t in svc.tasks
+            if t.status not in ("done", "cancelled")
+            and not getattr(t, "archived", False)
+            and t.verification_status != "done"
+        ]
+        # done در ۷ روز اخیر
+        try:
+            now = datetime.now(timezone.utc)
+            from datetime import timedelta
+            cutoff = now - timedelta(days=7)
+            recent_done = []
+            for t in svc.tasks:
+                if t.status == "done" or t.verification_status == "done":
+                    try:
+                        u = datetime.fromisoformat((t.updated_at or t.created_at).replace("Z", "+00:00"))
+                        if u.tzinfo is None:
+                            u = u.replace(tzinfo=timezone.utc)
+                        if u >= cutoff:
+                            recent_done.append(t)
+                    except Exception:
+                        pass
+        except Exception:
+            recent_done = []
+
+        # گروه‌بندی فعال‌ها
+        ideas: List[Any] = []
+        by_pri: Dict[str, List[Any]] = {"critical": [], "high": [], "medium": [], "low": []}
+        for t in active:
+            if (t.type or "") == "idea":
+                ideas.append(t)
+                continue
+            p = (t.priority or "medium").lower()
+            if p in by_pri:
+                by_pri[p].append(t)
+            else:
+                by_pri["medium"].append(t)
+
+        # sort هر گروه بر اساس scan_seen_count desc و updated_at
+        for k in by_pri:
+            by_pri[k].sort(
+                key=lambda t: (-(getattr(t, "scan_seen_count", 1) or 1), t.updated_at or ""),
+                reverse=False,
+            )
+
+        # ساخت متن
+        lines: List[str] = []
+        # Header
+        local_time = ""
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            local_time = datetime.now(ZoneInfo("Asia/Tehran")).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            try:
+                local_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+            except Exception:
+                pass
+        lines.append("📋 *ایندکس کارها*")
+        if local_time:
+            lines.append(f"🕒 _به‌روز: {local_time}_")
+        lines.append("")
+
+        # Summary
+        lines.append("─" * 25)
+        lines.append("📊 *خلاصه*")
+        lines.append(f"📁 پروژه‌ها: *{len(svc.watched)}*")
+        lines.append(f"📋 تسک‌های فعال: *{len(active)}*")
+        if recent_done:
+            lines.append(f"✅ تکمیل‌شده (۷ روز): *{len(recent_done)}*")
+        lines.append(f"📦 آرشیو: *{sum(1 for t in svc.tasks if getattr(t, 'archived', False))}*")
+        lines.append("")
+
+        # Critical
+        pri_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵"}
+        for pri in ("critical", "high", "medium", "low"):
+            items = by_pri[pri]
+            if not items:
+                continue
+            lines.append("─" * 25)
+            lines.append(f"{pri_emoji[pri]} *{pri.upper()}* ({len(items)})")
+            cap = 8 if pri in ("critical", "high") else 5
+            for t in items[:cap]:
+                title = (t.title or "").strip()[:65]
+                seen = getattr(t, "scan_seen_count", 1) or 1
+                seen_tag = f" 🔁{seen}x" if seen > 1 else ""
+                proj = (t.project_full_name or "").split("/")[-1][:20]
+                # escape underscore برای Markdown
+                title_safe = title.replace("_", "\\_").replace("*", "\\*")
+                lines.append(f"• {title_safe}{seen_tag}")
+                if proj:
+                    lines.append(f"   _{proj}_")
+            if len(items) > cap:
+                lines.append(f"   ... و {len(items) - cap} مورد دیگر")
+            lines.append("")
+
+        # Ideas
+        if ideas:
+            lines.append("─" * 25)
+            lines.append(f"💡 *ایده‌ها* ({len(ideas)})")
+            for t in ideas[:6]:
+                title = (t.title or "").strip()[:70]
+                title_safe = title.replace("_", "\\_").replace("*", "\\*")
+                lines.append(f"• {title_safe}")
+            if len(ideas) > 6:
+                lines.append(f"   ... و {len(ideas) - 6} ایده")
+            lines.append("")
+
+        # پروژه‌ها
+        if svc.watched:
+            lines.append("─" * 25)
+            lines.append("📁 *پروژه‌ها*")
+            for w in svc.watched[:10]:
+                # شمارش تسک‌های هر پروژه
+                w_active = sum(
+                    1 for t in active if t.watched_id == w.id
+                )
+                w_done = sum(
+                    1 for t in recent_done if t.watched_id == w.id
+                )
+                name = (w.repo_full_name or w.id)[:35]
+                badge_bits = []
+                if w_active > 0:
+                    badge_bits.append(f"⚡{w_active}")
+                if w_done > 0:
+                    badge_bits.append(f"✅{w_done}")
+                badges = " ".join(badge_bits) if badge_bits else "—"
+                lines.append(f"• `{name}` {badges}")
+            if len(svc.watched) > 10:
+                lines.append(f"   ... و {len(svc.watched) - 10} پروژهٔ دیگر")
+            lines.append("")
+
+        # Footer
+        lines.append("─" * 25)
+        lines.append("🔄 _این پیام خودکار به‌روز می‌شود_")
+        lines.append("برای دسترسی به دکمه‌ها: /menu")
+
+        full = "\n".join(lines)
+        # Telegram limit: 4096 char
+        if len(full) > 3900:
+            full = full[:3890] + "\n…\n_(محتوای کامل: /menu → پنل وب)_"
+        return full
+
+    async def _send_or_edit_index_message(
+        self, chat_id_str: str, *, force_refresh: bool = False,
+    ) -> Dict[str, Any]:
+        """ارسال یا edit پیام ایندکس pin‌شده.
+
+        رفتار:
+          - اگر message_id قبلی موجود است → edit با محتوای جدید
+          - وگرنه → send + pin + ذخیرهٔ message_id
+          - اگر edit fail شد (مثلاً پیام پاک شده) → message_id را پاک کن و
+            یک پیام جدید بساز.
+        """
+        tg = self._telegram()
+        if not tg.bot_token:
+            return {"ok": False, "error": "bot token تنظیم نشده"}
+
+        content = self._build_index_content()
+        kb = {
+            "inline_keyboard": [
+                [{"text": "🔄 به‌روزرسانی", "callback_data": "index:refresh"}],
+                [{"text": "❌ بستن", "callback_data": "flow:cancel"}],
+            ],
+        }
+
+        state = _read_index_state()
+        prev_msg_id = state.get("message_id")
+        prev_chat_id = state.get("chat_id")
+
+        # 1) تلاش برای edit پیام موجود
+        if prev_msg_id and str(prev_chat_id) == chat_id_str:
+            edit_url = f"https://api.telegram.org/bot{tg.bot_token}/editMessageText"
+            try:
+                timeout = aiohttp.ClientTimeout(total=15)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(edit_url, json={
+                        "chat_id": chat_id_str,
+                        "message_id": prev_msg_id,
+                        "text": content,
+                        "parse_mode": "Markdown",
+                        "disable_web_page_preview": True,
+                        "reply_markup": kb,
+                    }) as r:
+                        if r.status == 200:
+                            _write_index_state({
+                                **state,
+                                "last_updated": _now_epoch(),
+                            })
+                            # اطلاع کوتاه به کاربر (اگر force_refresh، silent)
+                            if not force_refresh:
+                                await tg.send(
+                                    "📋 ایندکس به‌روز شد ↑ (در پیام pin‌شده)",
+                                    silent=True,
+                                )
+                            return {"ok": True, "edited": True, "message_id": prev_msg_id}
+                        else:
+                            # احتمالاً پیام پاک شده — fall through به send
+                            body = await r.text()
+                            logger.info(f"edit index failed (will resend): {body[:200]}")
+            except Exception as e:
+                logger.warning(f"edit index exception: {e}")
+
+        # 2) ارسال پیام جدید + pin
+        send_url = f"https://api.telegram.org/bot{tg.bot_token}/sendMessage"
+        try:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(send_url, json={
+                    "chat_id": chat_id_str,
+                    "text": content,
+                    "parse_mode": "Markdown",
+                    "disable_web_page_preview": True,
+                    "disable_notification": True,
+                    "reply_markup": kb,
+                }) as r:
+                    body = await r.json()
+                    if r.status != 200 or not body.get("ok"):
+                        return {"ok": False, "error": f"send failed: {body}"}
+                    new_msg_id = body.get("result", {}).get("message_id")
+                # pin پیام
+                if new_msg_id:
+                    pin_url = f"https://api.telegram.org/bot{tg.bot_token}/pinChatMessage"
+                    try:
+                        async with session.post(pin_url, json={
+                            "chat_id": chat_id_str,
+                            "message_id": new_msg_id,
+                            "disable_notification": True,
+                        }) as pr:
+                            pass  # موفق یا ناموفق — مهم نیست
+                    except Exception as _pe:
+                        logger.debug(f"pin index msg failed: {_pe}")
+            _write_index_state({
+                "chat_id": chat_id_str,
+                "message_id": new_msg_id,
+                "last_updated": _now_epoch(),
+                "pinned": True,
+            })
+            return {"ok": True, "created": True, "message_id": new_msg_id}
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:300]}
+
+    async def refresh_index_silently(self) -> Dict[str, Any]:
+        """تابع helper برای background refresh — وقتی task تغییر می‌کند صدا زده می‌شود.
+
+        اگر هیچ index قبلی موجود نیست، چیزی نمی‌سازد (تا کاربر مزاحم نشود).
+        فقط edit می‌کند اگر message_id قبلی هست.
+        """
+        state = _read_index_state()
+        chat_id = state.get("chat_id")
+        msg_id = state.get("message_id")
+        if not chat_id or not msg_id:
+            return {"ok": True, "skipped": "no_index_yet"}
+        tg = self._telegram()
+        if not tg.bot_token:
+            return {"ok": False, "error": "no token"}
+        try:
+            content = self._build_index_content()
+            kb = {
+                "inline_keyboard": [
+                    [{"text": "🔄 به‌روزرسانی", "callback_data": "index:refresh"}],
+                ],
+            }
+            edit_url = f"https://api.telegram.org/bot{tg.bot_token}/editMessageText"
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(edit_url, json={
+                    "chat_id": chat_id,
+                    "message_id": msg_id,
+                    "text": content,
+                    "parse_mode": "Markdown",
+                    "disable_web_page_preview": True,
+                    "reply_markup": kb,
+                }) as r:
+                    if r.status == 200:
+                        _write_index_state({**state, "last_updated": _now_epoch()})
+                        return {"ok": True, "edited": True}
+                    return {"ok": False, "status": r.status}
+        except Exception as e:
+            logger.debug(f"refresh_index_silently failed: {e}")
+            return {"ok": False, "error": str(e)[:200]}
 
     async def _start_codex_flow(self, chat_id_str: str) -> Dict[str, Any]:
         """مرحلهٔ ۱: انتخاب پروژه از لیست watched."""
