@@ -189,6 +189,28 @@ EVENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "default_sound": True,
         "icon": "💥",
     },
+    # 🆕 (Smart Task Lifecycle) رویدادهای چرخهٔ تسک
+    "task_duplicate_detected": {
+        "label": "🔍 تسک مشابه پیدا شد",
+        "help": "هنگام ایجاد دستی تسک، یک یا چند تسک مشابه قبلی یافت شد",
+        "default_enabled": True,
+        "default_sound": False,
+        "icon": "🔍",
+    },
+    "task_merged": {
+        "label": "🔀 ادغام تسک انجام شد",
+        "help": "وقتی یک تسک کاندید با تسک موجود ادغام می‌شود",
+        "default_enabled": True,
+        "default_sound": True,
+        "icon": "🔀",
+    },
+    "prompt_regenerated": {
+        "label": "🔄 پرامپت بازتولید شد",
+        "help": "پس از regenerate خودکار یا دستی یک پرامپت ناقص",
+        "default_enabled": True,
+        "default_sound": True,
+        "icon": "🔄",
+    },
 }
 
 
@@ -1416,6 +1438,10 @@ class NotificationService:
             )
             return {"ok": True, "handled": "creator_type_ok"}
 
+        # 🆕 (Smart Task Lifecycle) task_dup:* — پاسخ کاربر به duplicate detection
+        if data.startswith("task_dup:"):
+            return await self._handle_task_dup_callback(chat_id_str, data)
+
         # creator_confirm:push:<token> یا creator_confirm:local:<token>
         if data.startswith("creator_confirm:"):
             parts = data.split(":", 2)
@@ -1439,43 +1465,92 @@ class NotificationService:
     async def _call_idea_to_prompt(
         self, chat_id_str: str, watched_id: str, idea: str,
     ) -> Dict[str, Any]:
-        """فراخوانی idea_to_prompt و گزارش نتیجه به کاربر."""
+        """فراخوانی idea_to_prompt و گزارش نتیجه به کاربر.
+
+        🆕 (Smart Task Lifecycle): پیش از ساخت تسک، dedup check انجام می‌شود.
+        اگر مشابه پیدا شد، با inline keyboard از کاربر می‌پرسد:
+          [🔀 ادغام با ۱] [➕ جداگانه] [❌ انصراف]
+        """
         tg = self._telegram()
         prefs = _read_prefs()
         base = (prefs.get("app_base_url", "") or "").rstrip("/")
         try:
             from .oversight_service import get_oversight_service
             _oversight = get_oversight_service()
+
+            # ───── (1) Dedup pre-check روی متن ایدهٔ خام (سریع، بدون AI) ─────
+            quick_matches = _oversight.find_similar_active_tasks(
+                project_id=watched_id,
+                candidate_title=idea[:120],
+                candidate_raw_idea=idea,
+            )
+            if quick_matches:
+                # متن ایده را در draft نگه دار تا پس از انتخاب کاربر استفاده شود
+                token = _short_token()
+                _idea_drafts[token] = {
+                    "watched_id": watched_id,
+                    "idea": idea,
+                    "matches": [m.to_dict() for m in quick_matches[:3]],
+                    "source": "telegram_bot",
+                    "expires_at": _now_epoch() + _STATE_TTL_SECONDS,
+                }
+                rows: List[List[Dict[str, str]]] = []
+                # هر match یک ردیف
+                for i, m in enumerate(quick_matches[:3]):
+                    rows.append([{
+                        "text": f"🔀 ادغام با «{m.title[:30]}» ({int(m.score * 100)}٪)",
+                        "callback_data": f"task_dup:merge:{token}:{m.task_id}",
+                    }])
+                rows.append([
+                    {"text": "➕ ایجاد جداگانه", "callback_data": f"task_dup:force:{token}"},
+                    {"text": "❌ انصراف", "callback_data": "flow:cancel"},
+                ])
+                lines = [
+                    "⚠️ *تسک‌های مشابه پیدا شد*",
+                    "",
+                    f"📁 پروژه: `{next((w.repo_full_name for w in _oversight.watched if w.id == watched_id), '')}`",
+                    f"💭 ایدهٔ شما: _{idea[:120]}{'...' if len(idea) > 120 else ''}_",
+                    "",
+                    "تسک‌های مشابهٔ موجود:",
+                ]
+                for i, m in enumerate(quick_matches[:3], 1):
+                    lines.append(f"  {i}. «{m.title[:60]}» — {int(m.score * 100)}٪")
+                lines.append("")
+                lines.append("کدام را می‌خواهی؟")
+                await tg.send(
+                    "\n".join(lines),
+                    silent=True,
+                    reply_markup={"inline_keyboard": rows},
+                )
+                return {
+                    "ok": True,
+                    "handled": "duplicate_detected",
+                    "matches_count": len(quick_matches),
+                    "token": token,
+                }
+
+            # ───── (2) مشابه ندارد → ادامهٔ مسیر طبیعی (idea→prompt) ─────
             data = await _oversight.idea_to_prompt(
                 idea=idea,
                 watched_id=watched_id,
                 type_="other",
                 priority="medium",
             )
-            # data شامل title/prompt/... است؛ task واقعی باید ساخته شود
-            # idea_to_prompt تسک نمی‌سازد — فقط prompt تولید می‌کند
-            # برای ساخت task، service.create_task یا منطق مشابه
-            from .oversight_service import OversightTask
-            from datetime import datetime, timezone
-            import uuid as _uuid
-            new_task = OversightTask(
-                id=str(_uuid.uuid4()),
-                watched_id=watched_id,
-                project_full_name=next(
-                    (w.repo_full_name for w in _oversight.watched if w.id == watched_id), ""
-                ),
-                title=data.get("title") or idea[:80],
-                prompt=data.get("prompt") or "",
-                raw_idea=idea,
-                type=data.get("type") or "other",
-                priority=data.get("priority") or "medium",
-                source="telegram_bot",
-                target_files=data.get("target_files") or [],
-                acceptance_criteria=data.get("acceptance_criteria") or [],
-            )
-            async with _oversight._lock:
-                _oversight.tasks.insert(0, new_task)
-                _oversight._save_tasks()
+            # ایجاد تسک از طریق create_task (با force_create=True چون قبلاً
+            # dedup check کردیم و قطعاً مشابه نیست)
+            result = await _oversight.create_task({
+                "watched_id": watched_id,
+                "title": data.get("title") or idea[:80],
+                "prompt": data.get("prompt") or "",
+                "raw_idea": idea,
+                "type": data.get("type") or "other",
+                "priority": data.get("priority") or "medium",
+                "source": "telegram_bot",
+                "target_files": data.get("target_files") or [],
+                "acceptance_criteria": data.get("acceptance_criteria") or [],
+                "force_create": True,
+            })
+            new_task = result.get("task") or {}
 
             # پاسخ به کاربر با لینک
             kb = None
@@ -1488,14 +1563,14 @@ class NotificationService:
                 }
             await tg.send(
                 f"✅ *تسک ساخته شد*\n\n"
-                f"📌 _{new_task.title[:120]}_\n"
-                f"📁 `{new_task.project_full_name}`\n"
-                f"🔖 {new_task.priority} • {new_task.type}\n\n"
+                f"📌 _{(new_task.get('title') or '')[:120]}_\n"
+                f"📁 `{new_task.get('project_full_name') or ''}`\n"
+                f"🔖 {new_task.get('priority') or 'medium'} • {new_task.get('type') or 'other'}\n\n"
                 f"در پنل قابل مشاهده، اجرا و verify است.",
                 silent=False,  # موفقیت با صدا
                 reply_markup=kb,
             )
-            return {"ok": True, "handled": "task_created", "task_id": new_task.id}
+            return {"ok": True, "handled": "task_created", "task_id": new_task.get("id")}
         except Exception as e:
             logger.exception(f"telegram bot idea_to_prompt failed: {e}")
             await tg.send(
@@ -1503,6 +1578,135 @@ class NotificationService:
                 silent=False,
             )
             return {"ok": True, "handled": "task_create_failed", "error": str(e)}
+
+    # -----------------------------------------------------------------------
+    # 🆕 (Smart Task Lifecycle) task_dup:* callbacks
+    # -----------------------------------------------------------------------
+
+    async def _handle_task_dup_callback(
+        self, chat_id_str: str, data: str,
+    ) -> Dict[str, Any]:
+        """پردازش انتخاب کاربر در مواجهه با duplicate detection:
+          task_dup:merge:<token>:<task_id>  → ادغام سریع
+          task_dup:force:<token>            → ایجاد جداگانه (force_create)
+        """
+        tg = self._telegram()
+        parts = data.split(":")
+        # parts[0]='task_dup', parts[1]=action
+        if len(parts) < 3:
+            await tg.send("⚠️ callback نامعتبر.", silent=True)
+            return {"ok": True, "handled": "task_dup_bad"}
+        action = parts[1]
+        token = parts[2]
+        draft = _idea_drafts.get(token)
+        if not draft:
+            await tg.send("⚠️ draft منقضی شده. /new\\_task بزنید.", silent=True)
+            return {"ok": True, "handled": "task_dup_expired"}
+
+        idea = draft.get("idea", "")
+        watched_id = draft.get("watched_id")
+        source = draft.get("source", "telegram_bot")
+        # یک‌بار مصرف
+        del _idea_drafts[token]
+
+        from .oversight_service import get_oversight_service
+        _oversight = get_oversight_service()
+
+        if action == "merge":
+            if len(parts) < 4:
+                await tg.send("⚠️ task_id در callback نیست.", silent=True)
+                return {"ok": True, "handled": "task_dup_no_task_id"}
+            target_task_id = parts[3]
+            await tg.send(
+                "⏳ در حال ادغام...",
+                silent=True,
+            )
+            try:
+                from .task_merge_service import get_task_merge_service
+                merge_service = get_task_merge_service()
+                merged = await merge_service.apply_merge_simple(
+                    existing_task_id=target_task_id,
+                    candidate_title=idea[:120],
+                    candidate_raw_idea=idea,
+                    candidate_prompt="",
+                    candidate_acceptance_criteria=None,
+                    candidate_target_files=None,
+                    source=source,
+                )
+                if not merged:
+                    await tg.send("⚠️ تسک هدف یافت نشد.", silent=True)
+                    return {"ok": True, "handled": "task_dup_merge_not_found"}
+                prefs = _read_prefs()
+                base = (prefs.get("app_base_url", "") or "").rstrip("/")
+                kb = None
+                if base:
+                    kb = {
+                        "inline_keyboard": [
+                            [{
+                                "text": "📋 مشاهده در پنل",
+                                "url": f"{base}/oversight?tab=tasks#{merged.get('id', '')}",
+                            }],
+                        ],
+                    }
+                await tg.send(
+                    f"🔀 *ادغام انجام شد*\n\n"
+                    f"📌 «{(merged.get('title') or '')[:100]}»\n"
+                    f"🔁 seen: {merged.get('scan_seen_count', 1)} scan, "
+                    f"{merged.get('manual_seen_count', 0)} manual\n"
+                    f"🛠 merge_count: {merged.get('merge_count', 1)}",
+                    silent=False,
+                    reply_markup=kb,
+                )
+                return {"ok": True, "handled": "task_dup_merged", "task_id": merged.get("id")}
+            except Exception as e:
+                logger.exception(f"task_dup merge failed: {e}")
+                await tg.send(f"❌ خطا در ادغام: `{str(e)[:200]}`", silent=True)
+                return {"ok": True, "handled": "task_dup_merge_fail"}
+
+        if action == "force":
+            # ایجاد جداگانه — مسیر کامل idea_to_prompt + create_task با force_create
+            await tg.send("⏳ ایجاد تسک جداگانه — در حال تولید پرامپت...", silent=True)
+            try:
+                data_p = await _oversight.idea_to_prompt(
+                    idea=idea,
+                    watched_id=watched_id,
+                    type_="other",
+                    priority="medium",
+                )
+                result = await _oversight.create_task({
+                    "watched_id": watched_id,
+                    "title": data_p.get("title") or idea[:80],
+                    "prompt": data_p.get("prompt") or "",
+                    "raw_idea": idea,
+                    "type": data_p.get("type") or "other",
+                    "priority": data_p.get("priority") or "medium",
+                    "source": source,
+                    "target_files": data_p.get("target_files") or [],
+                    "acceptance_criteria": data_p.get("acceptance_criteria") or [],
+                    "force_create": True,
+                })
+                new_task = result.get("task") or {}
+                prefs = _read_prefs()
+                base = (prefs.get("app_base_url", "") or "").rstrip("/")
+                kb = None
+                if base:
+                    kb = {"inline_keyboard": [
+                        [{"text": "📋 دیدن تسک", "url": f"{base}/oversight?tab=tasks"}],
+                    ]}
+                await tg.send(
+                    f"✅ *تسک جداگانه ساخته شد*\n\n"
+                    f"📌 _{(new_task.get('title') or '')[:120]}_",
+                    silent=False,
+                    reply_markup=kb,
+                )
+                return {"ok": True, "handled": "task_dup_forced", "task_id": new_task.get("id")}
+            except Exception as e:
+                logger.exception(f"task_dup force failed: {e}")
+                await tg.send(f"❌ خطا: `{str(e)[:200]}`", silent=True)
+                return {"ok": True, "handled": "task_dup_force_fail"}
+
+        await tg.send(f"⚠️ action ناشناخته: `{action}`", silent=True)
+        return {"ok": True, "handled": "task_dup_unknown_action"}
 
     # -----------------------------------------------------------------------
     # 🆕 (Creator) /new_project flow — ساخت پروژه از تلگرام

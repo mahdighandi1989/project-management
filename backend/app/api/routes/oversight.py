@@ -54,6 +54,11 @@ class WatchedUpdate(BaseModel):
     max_auto_loop_rounds: Optional[int] = None
     # 🆕 (P1) مدل‌های auto-scan — لیست ID مدل‌ها (مثل deepseek-coder)
     selected_models: Optional[List[str]] = None
+    # 🆕 (Smart Task Lifecycle)
+    auto_regenerate_old_prompts: Optional[bool] = None
+    prompt_quality_threshold: Optional[int] = None  # 0..100
+    dedup_in_manual_create: Optional[bool] = None
+    dedup_score_threshold: Optional[float] = None  # 0..1
 
 
 class IdeaToPromptRequest(BaseModel):
@@ -76,6 +81,44 @@ class TaskCreate(BaseModel):
     status: str = "pending"
     deadline: Optional[str] = None
     source: str = "user"
+    # 🆕 (Smart Task Lifecycle) Dedup Gate parameters
+    force_create: bool = False
+    merge_into_task_id: Optional[str] = None
+    target_files: Optional[List[str]] = None
+    acceptance_criteria: Optional[List[str]] = None
+
+
+class SimilarityCheckRequest(BaseModel):
+    """درخواست پیش‌نمایش similarity پیش از ایجاد تسک (frontend debounce)."""
+    watched_id: Optional[str] = None
+    title: str
+    raw_idea: str = ""
+    acceptance_criteria: Optional[List[str]] = None
+    score_threshold: Optional[float] = None  # override پیش‌فرض watched
+
+
+class MergePreviewRequest(BaseModel):
+    existing_task_id: str
+    candidate_title: str
+    candidate_raw_idea: str = ""
+    candidate_prompt: str = ""
+    candidate_acceptance_criteria: Optional[List[str]] = None
+    candidate_target_files: Optional[List[str]] = None
+    similarity_score: float = 0.0
+    use_ai: bool = False
+    model_id: Optional[str] = None
+
+
+class MergeApplyRequest(BaseModel):
+    existing_task_id: str
+    candidate_title: str
+    candidate_raw_idea: str = ""
+    candidate_prompt: str = ""
+    candidate_acceptance_criteria: Optional[List[str]] = None
+    candidate_target_files: Optional[List[str]] = None
+    chosen_fields: Optional[Dict[str, str]] = None  # field -> existing|candidate|ai_merged
+    source: str = "manual"
+    similarity_score: float = 0.0
 
 
 class TaskUpdate(BaseModel):
@@ -243,6 +286,15 @@ async def oversight_summary_by_project(project_full_name: str):
 
 @router.post("/tasks")
 async def create_task(payload: TaskCreate):
+    """ایجاد تسک با dedup gate.
+
+    خروجی همیشه dict با فیلد status:
+      - "created": تسک ساخته شد (task پر است)
+      - "duplicate_detected": مشابه پیدا شد و تسک ساخته نشد (similar_matches پر است)
+      - "merged": با تسک هدف merge شد (task پر است)
+
+    HTTP status همیشه 200 است — duplicate_detected حالت خطا نیست.
+    """
     service = get_oversight_service()
     try:
         return await service.create_task(payload.model_dump())
@@ -354,6 +406,110 @@ async def prepend_disclaimer_to_old_tasks():
         "skipped_count": skipped_count,
         "total_tasks": len(service.tasks),
     }
+
+# 🆕 (Smart Task Lifecycle) Dedup + Merge + Auto-Regenerate endpoints
+@router.post("/tasks/check-similarity")
+async def check_similarity(payload: SimilarityCheckRequest):
+    """پیش‌نمایش similarity برای debounce در frontend پیش از submit نهایی فرم."""
+    service = get_oversight_service()
+    threshold = payload.score_threshold
+    if threshold is None:
+        # از watched گرفته شود
+        if payload.watched_id:
+            w = next((x for x in service.watched if x.id == payload.watched_id), None)
+            threshold = float(getattr(w, "dedup_score_threshold", 0.65) if w else 0.65)
+        else:
+            threshold = 0.65
+    matches = service.find_similar_active_tasks(
+        project_id=payload.watched_id,
+        candidate_title=payload.title,
+        candidate_raw_idea=payload.raw_idea,
+        candidate_acceptance_criteria=payload.acceptance_criteria,
+        score_threshold=threshold,
+    )
+    return {
+        "matches": [m.to_dict() for m in matches],
+        "count": len(matches),
+        "score_threshold": threshold,
+    }
+
+
+@router.post("/tasks/merge-preview")
+async def merge_preview(payload: MergePreviewRequest):
+    """تولید پیش‌نمایش side-by-side ادغام (بدون اعمال تغییر)."""
+    from ...services.task_merge_service import get_task_merge_service
+    service = get_oversight_service()
+    existing = next((t for t in service.tasks if t.id == payload.existing_task_id), None)
+    if not existing:
+        raise HTTPException(status_code=404, detail="تسک هدف یافت نشد")
+    merge_service = get_task_merge_service()
+    preview = await merge_service.preview_merge(
+        existing=existing,
+        candidate_title=payload.candidate_title,
+        candidate_raw_idea=payload.candidate_raw_idea,
+        candidate_prompt=payload.candidate_prompt,
+        candidate_acceptance_criteria=payload.candidate_acceptance_criteria,
+        candidate_target_files=payload.candidate_target_files,
+        similarity_score=payload.similarity_score,
+        use_ai=payload.use_ai,
+        model_id=payload.model_id,
+    )
+    return preview.to_dict()
+
+
+@router.post("/tasks/merge-apply")
+async def merge_apply(payload: MergeApplyRequest):
+    """اعمال انتخاب کاربر و ادغام تسک."""
+    from ...services.task_merge_service import get_task_merge_service
+    merge_service = get_task_merge_service()
+    try:
+        res = await merge_service.apply_merge(
+            existing_task_id=payload.existing_task_id,
+            candidate_title=payload.candidate_title,
+            candidate_raw_idea=payload.candidate_raw_idea,
+            candidate_prompt=payload.candidate_prompt,
+            candidate_acceptance_criteria=payload.candidate_acceptance_criteria,
+            candidate_target_files=payload.candidate_target_files,
+            chosen_fields=payload.chosen_fields,
+            source=payload.source,
+            similarity_score=payload.similarity_score,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    if not res:
+        raise HTTPException(status_code=404, detail="تسک هدف یافت نشد")
+    return {"success": True, "task": res}
+
+
+@router.post("/watched/{watched_id}/audit-prompt-quality")
+async def watched_audit_prompt_quality(watched_id: str):
+    """امتیاز کیفیت پرامپت تسک‌های active پروژه را به‌روز می‌کند (بدون AI call)."""
+    service = get_oversight_service()
+    if not next((w for w in service.watched if w.id == watched_id), None):
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+    return await service.audit_prompt_quality(watched_id)
+
+
+class RegenerateLowQualityRequest(BaseModel):
+    max_count: int = 5
+    reason: str = "manual_override"
+
+
+@router.post("/watched/{watched_id}/regenerate-low-quality-prompts")
+async def watched_regenerate_low_quality(
+    watched_id: str, payload: RegenerateLowQualityRequest = None,
+):
+    """پرامپت‌های با کیفیت پایین این پروژه را بازتولید می‌کند (rate-limit max_count)."""
+    service = get_oversight_service()
+    if not next((w for w in service.watched if w.id == watched_id), None):
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+    payload = payload or RegenerateLowQualityRequest()
+    return await service.regenerate_low_quality_prompts(
+        watched_id,
+        max_count=int(payload.max_count or 5),
+        reason=payload.reason or "manual_override",
+    )
+
 
 @router.post("/tasks/{task_id}/regenerate-prompt")
 async def regenerate_prompt(task_id: str, payload: RegenPromptRequest):

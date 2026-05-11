@@ -69,6 +69,12 @@ interface Watched {
   selected_models?: string[];
   // 🆕 (Creator) منبع auto-add
   auto_added_source?: 'creator_via_web' | 'creator_via_telegram' | 'github_import' | 'manual_api' | string | null;
+  // 🆕 (Smart Task Lifecycle)
+  auto_regenerate_old_prompts?: boolean;
+  prompt_quality_threshold?: number;
+  last_prompt_audit_at?: string | null;
+  dedup_in_manual_create?: boolean;
+  dedup_score_threshold?: number;
   // 🆕 (P4) خلاصهٔ آخرین scan
   last_scan_metadata?: {
     model_used?: string;
@@ -165,6 +171,19 @@ interface Task {
     source?: string;  // 'regenerate' | 'followup_round_N' | undefined (اولیه)
   }>;
   last_verification_report_id?: string | null;
+  // 🆕 (Smart Task Lifecycle)
+  merge_count?: number;
+  manual_seen_count?: number;
+  prompt_quality_score?: number | null;
+  last_quality_audit_at?: string | null;
+  raw_idea_history?: Array<{
+    ts: string;
+    source: string;
+    raw_idea: string;
+    candidate_title?: string;
+    merged_fields?: string[];
+    similarity_score?: number;
+  }>;
 }
 
 interface Report {
@@ -827,6 +846,47 @@ export default function OversightPage() {
   const [genPct, setGenPct] = useState(0);
   const [previewPrompt, setPreviewPrompt] = useState<{ title: string; prompt: string } | null>(null);
 
+  // 🆕 (Smart Task Lifecycle) Dedup state — وقتی save تسک با duplicate_detected برمی‌گردد
+  const [duplicatePrompt, setDuplicatePrompt] = useState<null | {
+    watched_id: string | null;
+    title: string;
+    prompt: string;
+    raw_idea: string;
+    type: string;
+    priority: string;
+    matches: Array<{
+      task_id: string;
+      title: string;
+      score: number;
+      title_jaccard: number;
+      idea_overlap: number;
+      ac_overlap: number;
+      reasons: string[];
+    }>;
+  }>(null);
+  // similarity preview (debounced check before submit)
+  const [similarityHints, setSimilarityHints] = useState<Array<{
+    task_id: string;
+    title: string;
+    score: number;
+  }>>([]);
+
+  // merge preview modal
+  const [mergeModal, setMergeModal] = useState<null | {
+    existingTaskId: string;
+    candidate: {
+      title: string;
+      raw_idea: string;
+      prompt: string;
+      acceptance_criteria?: string[];
+      target_files?: string[];
+    };
+    similarity_score: number;
+    preview: any | null;  // MergePreview dict
+    loading: boolean;
+    choices: Record<string, 'existing' | 'candidate' | 'ai_merged'>;
+  }>(null);
+
   const [runningTaskIds, setRunningTaskIds] = useState<Set<string>>(new Set());
 
   // Deep scan progress
@@ -1221,10 +1281,11 @@ export default function OversightPage() {
     }
   };
 
-  const savePromptAsTask = async () => {
+  const savePromptAsTask = async (forceCreate: boolean = false) => {
     if (!previewPrompt) return;
     const targetIds = ideaWatchedIds.length ? ideaWatchedIds : [''];
     let created = 0;
+    let duplicate: typeof duplicatePrompt = null;
     for (const wid of targetIds) {
       const w = watched.find((x) => x.id === wid);
       try {
@@ -1241,14 +1302,35 @@ export default function OversightPage() {
             priority: ideaPriority,
             status: 'pending',
             deadline: ideaDeadline || null,
+            force_create: forceCreate,
           }),
         });
         if (res.ok) {
-          const t = await res.json();
-          setTasks((prev) => [t, ...prev]);
-          created++;
+          const result = await res.json();
+          if (result.status === 'duplicate_detected' && !forceCreate) {
+            duplicate = {
+              watched_id: wid || null,
+              title: previewPrompt.title,
+              prompt: previewPrompt.prompt,
+              raw_idea: idea,
+              type: ideaType,
+              priority: ideaPriority,
+              matches: result.similar_matches || [],
+            };
+            // فقط برای اولین duplicate dialog نمایش بده — کاربر تصمیم می‌گیرد و
+            // اگر force_create انتخاب کرد، savePromptAsTask(true) دوباره صدا زده می‌شود.
+            break;
+          }
+          if (result.task) {
+            setTasks((prev) => [result.task, ...prev]);
+            created++;
+          }
         }
       } catch {}
+    }
+    if (duplicate) {
+      setDuplicatePrompt(duplicate);
+      return;
     }
     if (created > 0) {
       setIdea('');
@@ -1259,6 +1341,134 @@ export default function OversightPage() {
       setTab('tasks');
     } else {
       showError('هیچ تسکی ساخته نشد');
+    }
+  };
+
+  // 🆕 پیش‌نمایش similarity همراه با debounce — تماس با check-similarity
+  const checkSimilarityDebounced = (
+    watchedId: string | null,
+    title: string,
+    rawIdea: string,
+  ) => {
+    if (!watchedId || (!title.trim() && !rawIdea.trim())) {
+      setSimilarityHints([]);
+      return;
+    }
+    if ((window as any).__simTimer) clearTimeout((window as any).__simTimer);
+    (window as any).__simTimer = setTimeout(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/oversight/tasks/check-similarity`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            watched_id: watchedId,
+            title,
+            raw_idea: rawIdea,
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setSimilarityHints(
+            (data.matches || []).slice(0, 3).map((m: any) => ({
+              task_id: m.task_id,
+              title: m.title,
+              score: m.score,
+            })),
+          );
+        } else {
+          setSimilarityHints([]);
+        }
+      } catch {
+        setSimilarityHints([]);
+      }
+    }, 500);
+  };
+
+  // 🆕 باز کردن merge modal از duplicate dialog
+  const openMergeFromDuplicate = async (existingTaskId: string) => {
+    if (!duplicatePrompt) return;
+    const matchEntry = duplicatePrompt.matches.find((m) => m.task_id === existingTaskId);
+    setMergeModal({
+      existingTaskId,
+      candidate: {
+        title: duplicatePrompt.title,
+        raw_idea: duplicatePrompt.raw_idea,
+        prompt: duplicatePrompt.prompt,
+      },
+      similarity_score: matchEntry?.score || 0,
+      preview: null,
+      loading: true,
+      choices: {},
+    });
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/tasks/merge-preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          existing_task_id: existingTaskId,
+          candidate_title: duplicatePrompt.title,
+          candidate_raw_idea: duplicatePrompt.raw_idea,
+          candidate_prompt: duplicatePrompt.prompt,
+          similarity_score: matchEntry?.score || 0,
+          use_ai: false,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        // pre-fill choices با recommendation
+        const init: Record<string, any> = {};
+        for (const d of data.field_diffs || []) {
+          init[d.name] = d.recommendation;
+        }
+        setMergeModal((prev) =>
+          prev ? { ...prev, preview: data, loading: false, choices: init } : prev,
+        );
+      } else {
+        showError('خطا در preview ادغام');
+        setMergeModal(null);
+      }
+    } catch (e: any) {
+      showError(e.message);
+      setMergeModal(null);
+    }
+  };
+
+  // 🆕 اعمال نهایی ادغام
+  const applyMerge = async () => {
+    if (!mergeModal) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/tasks/merge-apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          existing_task_id: mergeModal.existingTaskId,
+          candidate_title: mergeModal.candidate.title,
+          candidate_raw_idea: mergeModal.candidate.raw_idea,
+          candidate_prompt: mergeModal.candidate.prompt,
+          candidate_acceptance_criteria: mergeModal.candidate.acceptance_criteria,
+          candidate_target_files: mergeModal.candidate.target_files,
+          chosen_fields: mergeModal.choices,
+          source: 'manual',
+          similarity_score: mergeModal.similarity_score,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        // update task in list
+        setTasks((prev) => prev.map((t) => (t.id === data.task.id ? data.task : t)));
+        showSuccess('ادغام انجام شد');
+        setMergeModal(null);
+        setDuplicatePrompt(null);
+        setPreviewPrompt(null);
+        setIdea('');
+        setTab('tasks');
+        reloadStatus();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showError(err.detail || 'خطا در اعمال ادغام');
+      }
+    } catch (e: any) {
+      showError(e.message);
     }
   };
 
@@ -2179,9 +2389,14 @@ export default function OversightPage() {
                 <input
                   type="text"
                   value={previewPrompt.title}
-                  onChange={(e) =>
-                    setPreviewPrompt({ ...previewPrompt, title: e.target.value })
-                  }
+                  onChange={(e) => {
+                    setPreviewPrompt({ ...previewPrompt, title: e.target.value });
+                    checkSimilarityDebounced(
+                      ideaWatchedIds[0] || null,
+                      e.target.value,
+                      idea,
+                    );
+                  }}
                   className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600 mb-2 font-medium"
                 />
                 <textarea
@@ -2197,9 +2412,26 @@ export default function OversightPage() {
                     ℹ️ هنگام ذخیره، {ideaWatchedIds.length} تسک جداگانه (یکی برای هر پروژه) ساخته می‌شود.
                   </p>
                 )}
+                {similarityHints.length > 0 && (
+                  <div className="mt-3 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded">
+                    <div className="text-sm font-semibold text-amber-800 dark:text-amber-200 mb-1">
+                      ⚠️ {similarityHints.length} تسک مشابه پیدا شد:
+                    </div>
+                    <ul className="text-xs text-amber-700 dark:text-amber-300 space-y-1">
+                      {similarityHints.map((m) => (
+                        <li key={m.task_id}>
+                          • «{m.title.slice(0, 60)}» — شباهت {Math.round(m.score * 100)}٪
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="text-[11px] text-amber-600 dark:text-amber-400 mt-1">
+                      اگر ذخیره کنید، سیستم گزینهٔ «ادغام / جداگانه» را پیشنهاد می‌دهد.
+                    </div>
+                  </div>
+                )}
                 <div className="flex gap-2 mt-3">
                   <button
-                    onClick={savePromptAsTask}
+                    onClick={() => savePromptAsTask(false)}
                     className="flex-1 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600"
                   >
                     ✓ ذخیره به‌عنوان تسک
@@ -2211,6 +2443,169 @@ export default function OversightPage() {
                   >
                     لغو
                   </button>
+                </div>
+              </div>
+            )}
+
+            {/* 🆕 (Smart Task Lifecycle) Duplicate Detected Dialog */}
+            {duplicatePrompt && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+                <div className="bg-white dark:bg-gray-800 rounded-lg w-full max-w-2xl p-5 shadow-2xl">
+                  <h3 className="font-bold text-lg mb-2 text-amber-700 dark:text-amber-300">
+                    🔍 تسک‌های مشابه پیدا شد
+                  </h3>
+                  <p className="text-sm text-gray-600 dark:text-gray-300 mb-3">
+                    عنوان جدید: <span className="font-medium">«{duplicatePrompt.title.slice(0, 80)}»</span>
+                  </p>
+                  <div className="space-y-2 max-h-72 overflow-y-auto">
+                    {duplicatePrompt.matches.map((m) => (
+                      <div
+                        key={m.task_id}
+                        className="border border-gray-200 dark:border-gray-700 rounded p-3 flex items-center justify-between gap-2"
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="font-medium dark:text-white truncate">{m.title}</div>
+                          <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
+                            شباهت کلی: {Math.round(m.score * 100)}٪ • title: {Math.round(m.title_jaccard * 100)}٪ • idea: {Math.round(m.idea_overlap * 100)}٪
+                          </div>
+                          {m.reasons.length > 0 && (
+                            <div className="text-[11px] text-gray-400 mt-0.5" dir="ltr">
+                              {m.reasons.join(' · ')}
+                            </div>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => openMergeFromDuplicate(m.task_id)}
+                          className="px-3 py-1.5 bg-blue-500 text-white text-xs rounded hover:bg-blue-600 shrink-0"
+                        >
+                          🔀 ادغام
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex gap-2 mt-4">
+                    <button
+                      onClick={() => {
+                        setDuplicatePrompt(null);
+                        savePromptAsTask(true);
+                      }}
+                      className="flex-1 py-2 bg-amber-500 text-white rounded hover:bg-amber-600 text-sm"
+                    >
+                      ➕ ایجاد جداگانه با وجود تشابه
+                    </button>
+                    <button
+                      onClick={() => setDuplicatePrompt(null)}
+                      className="px-4 py-2 bg-gray-300 dark:bg-gray-600 dark:text-white rounded hover:bg-gray-400 text-sm"
+                    >
+                      ❌ انصراف
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 🆕 (Smart Task Lifecycle) Merge Preview Modal */}
+            {mergeModal && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+                <div className="bg-white dark:bg-gray-800 rounded-lg w-full max-w-4xl p-5 shadow-2xl max-h-[90vh] overflow-y-auto">
+                  <h3 className="font-bold text-lg mb-1 dark:text-white">
+                    🔀 پیش‌نمایش ادغام تسک
+                  </h3>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
+                    شباهت: {Math.round(mergeModal.similarity_score * 100)}٪
+                  </p>
+                  {mergeModal.loading ? (
+                    <div className="text-center py-8 text-gray-500">⏳ در حال آماده‌سازی پیش‌نمایش...</div>
+                  ) : !mergeModal.preview ? (
+                    <div className="text-center py-8 text-gray-500">پیش‌نمایش در دسترس نیست</div>
+                  ) : (
+                    <>
+                      <p className="text-sm text-gray-700 dark:text-gray-300 mb-3 p-2 bg-gray-50 dark:bg-gray-900 rounded">
+                        {mergeModal.preview.summary}
+                      </p>
+                      {(mergeModal.preview.field_diffs || []).length === 0 ? (
+                        <p className="text-sm text-gray-500 text-center py-4">
+                          هیچ تغییر واقعی پیشنهاد نشد — فقط شمارنده‌ها افزایش می‌یابد.
+                        </p>
+                      ) : (
+                        <div className="space-y-3">
+                          {(mergeModal.preview.field_diffs || []).map((d: any) => (
+                            <div key={d.name} className="border border-gray-200 dark:border-gray-700 rounded p-3">
+                              <div className="flex items-center justify-between mb-2">
+                                <span className="font-semibold text-sm dark:text-white">
+                                  📌 {d.name}
+                                </span>
+                                <select
+                                  value={mergeModal.choices[d.name] || d.recommendation}
+                                  onChange={(e) =>
+                                    setMergeModal((prev) =>
+                                      prev
+                                        ? {
+                                            ...prev,
+                                            choices: { ...prev.choices, [d.name]: e.target.value as any },
+                                          }
+                                        : prev,
+                                    )
+                                  }
+                                  className="text-xs px-2 py-1 border rounded dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                                >
+                                  <option value="existing">نگه داشتن موجود</option>
+                                  <option value="candidate">جایگزینی با کاندید</option>
+                                  {d.ai_merged_value && <option value="ai_merged">ادغام پیشنهاد AI</option>}
+                                </select>
+                              </div>
+                              {d.notes && (
+                                <div className="text-[11px] text-gray-500 dark:text-gray-400 mb-2">{d.notes}</div>
+                              )}
+                              <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
+                                <div className="border border-gray-200 dark:border-gray-700 rounded p-2 bg-gray-50 dark:bg-gray-900/40">
+                                  <div className="font-medium mb-1 text-gray-500">موجود</div>
+                                  <pre className="whitespace-pre-wrap break-words text-[11px] dark:text-gray-200">
+                                    {typeof d.existing_value === 'string'
+                                      ? d.existing_value.slice(0, 400)
+                                      : JSON.stringify(d.existing_value, null, 2).slice(0, 400)}
+                                  </pre>
+                                </div>
+                                <div className="border border-blue-200 dark:border-blue-800 rounded p-2 bg-blue-50/40 dark:bg-blue-900/20">
+                                  <div className="font-medium mb-1 text-blue-600 dark:text-blue-300">کاندید</div>
+                                  <pre className="whitespace-pre-wrap break-words text-[11px] dark:text-gray-200">
+                                    {typeof d.candidate_value === 'string'
+                                      ? d.candidate_value.slice(0, 400)
+                                      : JSON.stringify(d.candidate_value, null, 2).slice(0, 400)}
+                                  </pre>
+                                </div>
+                                <div className="border border-emerald-200 dark:border-emerald-800 rounded p-2 bg-emerald-50/40 dark:bg-emerald-900/20">
+                                  <div className="font-medium mb-1 text-emerald-600 dark:text-emerald-300">پیشنهاد ادغام</div>
+                                  <pre className="whitespace-pre-wrap break-words text-[11px] dark:text-gray-200">
+                                    {d.ai_merged_value
+                                      ? typeof d.ai_merged_value === 'string'
+                                        ? d.ai_merged_value.slice(0, 400)
+                                        : JSON.stringify(d.ai_merged_value, null, 2).slice(0, 400)
+                                      : '—'}
+                                  </pre>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                  <div className="flex gap-2 mt-4">
+                    <button
+                      onClick={applyMerge}
+                      disabled={mergeModal.loading || !mergeModal.preview}
+                      className="flex-1 py-2 bg-emerald-500 text-white rounded hover:bg-emerald-600 disabled:opacity-50 text-sm"
+                    >
+                      ✅ اعمال ادغام
+                    </button>
+                    <button
+                      onClick={() => setMergeModal(null)}
+                      className="px-4 py-2 bg-gray-300 dark:bg-gray-600 dark:text-white rounded hover:bg-gray-400 text-sm"
+                    >
+                      ❌ لغو
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -3182,6 +3577,22 @@ function WatchedCard({
             >
               {w.autonomy_level}
             </span>
+            {w.auto_regenerate_old_prompts && (
+              <span
+                className="text-xs px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300"
+                title={`بازتولید خودکار پرامپت‌های ناقص (آستانهٔ کیفیت ${w.prompt_quality_threshold ?? 60}٪)`}
+              >
+                🔄 auto-regen
+              </span>
+            )}
+            {w.dedup_in_manual_create !== false && (
+              <span
+                className="text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                title={`بررسی مشابهت در ایجاد دستی (آستانه ${Math.round((w.dedup_score_threshold ?? 0.65) * 100)}٪)`}
+              >
+                🔍 dedup
+              </span>
+            )}
           </div>
 
           <div className="flex items-center gap-2 mt-2 text-xs text-gray-500 dark:text-gray-400 flex-wrap">
@@ -3601,6 +4012,135 @@ function WatchedCard({
         )}
       </div>
 
+      {/* 🆕 (Smart Task Lifecycle) چرخهٔ تسک — dedup + auto-regenerate */}
+      <div className="mb-3 p-3 bg-teal-50 dark:bg-teal-900/20 border border-teal-200 dark:border-teal-800 rounded-lg">
+        <div className="text-sm font-semibold dark:text-teal-200 mb-2">
+          🔁 چرخهٔ تسک (Smart Task Lifecycle)
+        </div>
+        <label className="flex items-start gap-2 cursor-pointer mb-2">
+          <input
+            type="checkbox"
+            checked={w.dedup_in_manual_create !== false}
+            onChange={(e) => onChange({ dedup_in_manual_create: e.target.checked })}
+            className="mt-0.5 w-4 h-4"
+          />
+          <div className="flex-1">
+            <div className="text-xs font-semibold dark:text-teal-200">
+              🔍 بررسی مشابهت در ایجاد دستی
+            </div>
+            <div className="text-[11px] text-gray-600 dark:text-gray-300 mt-0.5">
+              وقتی فعال است، در ایجاد تسک دستی (وب/تلگرام) تسک‌های مشابه نمایش داده می‌شود
+              و پیش از ساخت، گزینهٔ «ادغام/جداگانه/انصراف» داده می‌شود.
+            </div>
+          </div>
+        </label>
+        {w.dedup_in_manual_create !== false && (
+          <label className="block text-xs mt-1 mb-3 dark:text-gray-200">
+            <span>آستانهٔ شباهت (0.50..0.95)</span>
+            <input
+              type="number"
+              min="0.50"
+              max="0.95"
+              step="0.05"
+              defaultValue={w.dedup_score_threshold ?? 0.65}
+              onBlur={(e) => {
+                const v = parseFloat(e.target.value) || 0.65;
+                if (v !== (w.dedup_score_threshold ?? 0.65))
+                  onChange({ dedup_score_threshold: v });
+              }}
+              className="w-24 mr-2 p-1.5 border rounded dark:bg-gray-700 dark:text-white dark:border-gray-600"
+            />
+            <span className="text-gray-500 dark:text-gray-400 text-[11px]">
+              (پیش‌فرض 0.65 — کوچک‌تر = حساس‌تر)
+            </span>
+          </label>
+        )}
+
+        <label className="flex items-start gap-2 cursor-pointer mb-2">
+          <input
+            type="checkbox"
+            checked={!!w.auto_regenerate_old_prompts}
+            onChange={(e) => onChange({ auto_regenerate_old_prompts: e.target.checked })}
+            className="mt-0.5 w-4 h-4"
+          />
+          <div className="flex-1">
+            <div className="text-xs font-semibold dark:text-teal-200">
+              🔄 بازتولید خودکار پرامپت‌های ناقص
+            </div>
+            <div className="text-[11px] text-gray-600 dark:text-gray-300 mt-0.5">
+              پس از هر scan خودکار، پرامپت‌های با کیفیت پایین (کمتر از آستانه)
+              با AI بازتولید می‌شوند. حداکثر ۵ تسک در هر tick.
+            </div>
+          </div>
+        </label>
+        {w.auto_regenerate_old_prompts && (
+          <label className="block text-xs mt-1 dark:text-gray-200">
+            <span>آستانهٔ کیفیت (40..90)</span>
+            <input
+              type="number"
+              min="40"
+              max="90"
+              step="5"
+              defaultValue={w.prompt_quality_threshold ?? 60}
+              onBlur={(e) => {
+                const v = parseInt(e.target.value, 10) || 60;
+                if (v !== (w.prompt_quality_threshold ?? 60))
+                  onChange({ prompt_quality_threshold: v });
+              }}
+              className="w-24 mr-2 p-1.5 border rounded dark:bg-gray-700 dark:text-white dark:border-gray-600"
+            />
+            <span className="text-gray-500 dark:text-gray-400 text-[11px]">
+              (تسک‌های با کیفیت کمتر بازتولید می‌شوند)
+            </span>
+          </label>
+        )}
+        <div className="flex gap-2 mt-2">
+          <button
+            onClick={async () => {
+              try {
+                const res = await fetch(
+                  `${API_BASE}/api/oversight/watched/${w.id}/audit-prompt-quality`,
+                  { method: 'POST' },
+                );
+                if (res.ok) {
+                  const d = await res.json();
+                  alert(`scan: ${d.scanned}, کیفیت پایین: ${d.low_quality_count}`);
+                }
+              } catch {}
+            }}
+            className="text-[11px] px-2 py-1 bg-teal-200 dark:bg-teal-700 dark:text-white rounded hover:bg-teal-300"
+            title="امتیاز کیفیت پرامپت تسک‌های active را به‌روز می‌کند (بدون AI call)"
+          >
+            🔍 امتیازدهی کیفیت
+          </button>
+          <button
+            onClick={async () => {
+              if (!confirm('پرامپت‌های با کیفیت پایین (حداکثر ۵) بازتولید شوند؟')) return;
+              try {
+                const res = await fetch(
+                  `${API_BASE}/api/oversight/watched/${w.id}/regenerate-low-quality-prompts`,
+                  {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ max_count: 5, reason: 'manual_override' }),
+                  },
+                );
+                if (res.ok) {
+                  const d = await res.json();
+                  alert(`بازتولید شد: ${d.regenerated_count} از ${d.low_quality_count} ناقص`);
+                }
+              } catch (e: any) {
+                alert(`خطا: ${e.message}`);
+              }
+            }}
+            className="text-[11px] px-2 py-1 bg-fuchsia-500 text-white rounded hover:bg-fuchsia-600"
+            title="بازتولید فوری پرامپت‌های ناقص این پروژه"
+          >
+            🔄 بازتولید پرامپت‌های ناقص
+          </button>
+        </div>
+      </div>
+
       {/* 🆕 (auto-loop) — ping-pong continuous: فقط اگر autonomy=auto و verify_only=false */}
       {w.autonomy_level === 'auto' && !w.verify_only_mode && (
         <div className="mb-3 p-3 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg">
@@ -3880,7 +4420,12 @@ function TasksPanel({
               </div>
             )}
             {/* 🆕 (P1+P2) metadata scan: مدل، depth، passes، files + scan_seen_count */}
-            {(t.created_by_scan_metadata || (t.scan_seen_count ?? 1) > 1) && (
+            {(t.created_by_scan_metadata
+              || (t.scan_seen_count ?? 1) > 1
+              || (t.merge_count ?? 0) > 0
+              || (t.manual_seen_count ?? 0) > 0
+              || (t.prompt_history?.length ?? 0) > 0
+              || typeof t.prompt_quality_score === 'number') && (
               <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-1 flex items-center gap-2 flex-wrap" dir="ltr"
                 title={t.created_by_scan_metadata ? JSON.stringify(t.created_by_scan_metadata, null, 2) : ''}>
                 {t.created_by_scan_metadata?.model && (
@@ -3903,6 +4448,44 @@ function TasksPanel({
                 {(t.scan_seen_count ?? 1) > 1 && (
                   <span className="bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 px-1.5 py-0.5 rounded font-semibold">
                     🔁 در {t.scan_seen_count} scan دیده شد
+                  </span>
+                )}
+                {(t.merge_count ?? 0) > 0 && (
+                  <span
+                    className="bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300 px-1.5 py-0.5 rounded font-semibold"
+                    title="چندبار با تسک کاندید جدید ادغام شده"
+                  >
+                    🔀 ادغام‌شده ({t.merge_count})
+                  </span>
+                )}
+                {(t.manual_seen_count ?? 0) > 0 && (
+                  <span
+                    className="bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 px-1.5 py-0.5 rounded"
+                    title="چندبار از طریق ایجاد دستی به همین تسک ادغام شد"
+                  >
+                    ✏️ {t.manual_seen_count} ایجاد دستی
+                  </span>
+                )}
+                {(t.prompt_history?.length ?? 0) > 0 && (
+                  <span
+                    className="bg-fuchsia-100 text-fuchsia-700 dark:bg-fuchsia-900/40 dark:text-fuchsia-300 px-1.5 py-0.5 rounded"
+                    title={`${t.prompt_history!.length} نسخهٔ قبلی پرامپت`}
+                  >
+                    🔄 پرامپت v{(t.prompt_history?.length ?? 0) + 1}
+                  </span>
+                )}
+                {typeof t.prompt_quality_score === 'number' && (
+                  <span
+                    className={
+                      t.prompt_quality_score >= 75
+                        ? "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300 px-1.5 py-0.5 rounded"
+                        : t.prompt_quality_score >= 60
+                        ? "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300 px-1.5 py-0.5 rounded"
+                        : "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300 px-1.5 py-0.5 rounded font-semibold"
+                    }
+                    title="امتیاز کیفیت پرامپت (0..100)"
+                  >
+                    {t.prompt_quality_score >= 60 ? '✓' : '⚠️'} کیفیت {t.prompt_quality_score}٪
                   </span>
                 )}
               </div>
