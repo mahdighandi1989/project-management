@@ -96,22 +96,35 @@ def _categorize_file(p: str) -> str:
     """دسته‌بندی فایل بر اساس top-level path — برای balanced selection.
 
     دسته‌ها: backend, frontend, config, docs, tests, scripts, other
+
+    اولویت: top-level dir اول (frontend/scripts/setup.py → frontend، نه backend
+    حتی اگر .py باشد). فقط اگر top-level dir خاصی نباشد، بر اساس extension
+    تشخیص داده می‌شود.
     """
     pl = (p or "").lower()
-    if pl.startswith(("backend/", "server/", "api/")) or pl.endswith(".py"):
-        if "/test" in pl or pl.startswith("test"):
-            return "tests"
-        return "backend"
-    if pl.startswith(("frontend/", "client/", "web/", "ui/")) or pl.endswith((".tsx", ".jsx", ".ts", ".js", ".vue", ".svelte")):
-        if "/test" in pl or "/__tests__/" in pl or ".test." in pl or ".spec." in pl:
-            return "tests"
+    # 1) tests (هر جایی)
+    if "/__tests__/" in pl or ".test." in pl or ".spec." in pl:
+        return "tests"
+    if "/tests/" in pl or pl.startswith("tests/") or pl.startswith("test_"):
+        return "tests"
+    # 2) top-level dir دارای اولویت
+    if pl.startswith("frontend/") or pl.startswith("client/") or pl.startswith("web/") or pl.startswith("ui/"):
         return "frontend"
-    if pl.endswith((".yml", ".yaml", ".toml", ".json", ".env.example", "dockerfile")):
-        return "config"
-    if pl.endswith((".md", ".rst", ".txt")) or "/docs/" in pl:
-        return "docs"
-    if pl.startswith(("scripts/", "tools/", "bin/")):
+    if pl.startswith("backend/") or pl.startswith("server/") or pl.startswith("api/"):
+        return "backend"
+    if pl.startswith("scripts/") or pl.startswith("tools/") or pl.startswith("bin/"):
         return "scripts"
+    if "/docs/" in pl or pl.startswith("docs/"):
+        return "docs"
+    # 3) extension fallback (وقتی top-level مشخص نیست)
+    if pl.endswith(".py"):
+        return "backend"
+    if pl.endswith((".tsx", ".jsx", ".ts", ".js", ".vue", ".svelte")):
+        return "frontend"
+    if pl.endswith((".yml", ".yaml", ".toml", ".json", ".env.example")) or "dockerfile" in pl.rsplit("/", 1)[-1]:
+        return "config"
+    if pl.endswith((".md", ".rst", ".txt")):
+        return "docs"
     return "other"
 
 
@@ -280,13 +293,24 @@ async def refresh_codex(
         and not getattr(t, "archived", False)
         and t.verification_status != "done"
     ]
-    # خلاصه‌سازی برای prompt
+    # sort: critical → high → medium → low، سپس بر اساس scan_seen_count desc
+    priority_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    active_tasks_sorted = sorted(
+        active_tasks,
+        key=lambda t: (
+            priority_rank.get((t.priority or "medium").lower(), 2),
+            -(getattr(t, "scan_seen_count", 1) or 1),
+        ),
+    )
+    # خلاصه‌سازی برای prompt — تسک‌های critical/high اول
     task_summaries: List[str] = []
-    for t in active_tasks[:25]:
+    for t in active_tasks_sorted[:25]:
         title = (t.title or "").strip()[:140]
         pri = (t.priority or "medium")
         ttype = (t.type or "other")
-        task_summaries.append(f"- [{pri}/{ttype}] {title}")
+        seen = getattr(t, "scan_seen_count", 1) or 1
+        seen_tag = f" 🔁{seen}x" if seen > 1 else ""
+        task_summaries.append(f"- [{pri}/{ttype}{seen_tag}] {title}")
     tasks_text = "\n".join(task_summaries) or "(تسک فعالی نیست)"
 
     # ساخت بخش فایل‌ها در prompt — گروه‌بندی شده برای خوانایی AI
