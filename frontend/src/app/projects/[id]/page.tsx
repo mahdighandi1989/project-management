@@ -4328,8 +4328,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       }
       const data = await res.json();
 
-      // 4. پیام کاربر (با علامت‌گذاری sent_to_oversight)
-      setInspectorChatMessages(prev => [...prev, {
+      // 4 + 5. پیام user + system در یک update (جلوگیری از race در React batching)
+      const taskExcerpt = data.prompt_excerpt
+        ? `\n\n📝 _پیش‌نمایش پرامپت (${data.prompt_length} char):_\n> ${data.prompt_excerpt.slice(0, 200)}…`
+        : '';
+      const userMsg = {
         id: `sent_oversight_user_${Date.now()}`,
         role: 'user' as const,
         content: rawMessage,
@@ -4338,17 +4341,15 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         oversight_task_id: data.task_id,
         oversight_url: data.oversight_url,
         oversight_mode: mode,
-      } as any]);
-
-      // 5. پیام موفقیت
-      const taskExcerpt = data.prompt_excerpt ? `\n\n📝 _پیش‌نمایش پرامپت (${data.prompt_length} char):_\n> ${data.prompt_excerpt.slice(0, 200)}…` : '';
-      setInspectorChatMessages(prev => [...prev, {
-        id: `oversight_ack_${Date.now()}`,
+      } as any;
+      const sysMsg = {
+        id: `oversight_ack_${Date.now() + 1}`,
         role: 'system' as const,
-        content: `✅ *به مرکز نظارت ارسال شد*\n\n📁 ${data.project_full_name}\n📋 تسک ID: \`${data.task_id?.slice(0, 8) || '?'}…\`${data.vision_descriptions_count ? `\n📸 ${data.vision_descriptions_count} عکس با vision توصیف شد` : ''}${taskExcerpt}\n\n🔗 [📋 مشاهدهٔ تسک در مرکز نظارت](${data.oversight_url})\n\n⏳ *هیچ مدلی روی این پیام trigger نشد* — هر وقت خواستید روی دکمهٔ زیر کلیک کنید.`,
+        content: `✅ *به مرکز نظارت ارسال شد*\n\n📁 ${data.project_full_name}\n📋 تسک ID: \`${data.task_id?.slice(0, 8) || '?'}…\`${data.vision_descriptions_count ? `\n📸 ${data.vision_descriptions_count} عکس با vision توصیف شد` : ''}${taskExcerpt}\n\n🔗 [📋 مشاهدهٔ تسک در مرکز نظارت](${data.oversight_url})\n\n⏳ *هیچ مدلی روی این پیام trigger نشد* — برای اجرای مدل، روی دکمهٔ «🔍 بررسی همین پرامپت در چت» در پیام بالا کلیک کنید.`,
         timestamp: new Date(),
         oversight_task_id: data.task_id,
-      } as any]);
+      } as any;
+      setInspectorChatMessages(prev => [...prev, userMsg, sysMsg]);
 
       // 6. پاکسازی فیلدها
       if (mode === 'chat') {

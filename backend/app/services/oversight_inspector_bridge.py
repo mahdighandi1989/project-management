@@ -186,8 +186,23 @@ def build_inspector_strong_prompt(
     api_paths: Optional[List[str]] = None,
     screenshots_with_descriptions: Optional[List[Dict[str, Any]]] = None,
     captured_at: Optional[str] = None,
+    core_only: bool = True,
 ) -> str:
-    """ساخت پرامپت غنی برای مدل‌های مرکز نظارت (بدون محدودیت طولی)."""
+    """پرامپت اصلی برای ساخت task.prompt — clean و قابل copy.
+
+    اگر core_only=True (پیش‌فرض):
+      - meta خاص inspector (URL inspector، timestamps screenshot، یادداشت
+        «از بازرس ویژه» و ...) خارج می‌شود
+      - فقط چیزهایی که یک سیستم بیرونی برای انجام کار نیاز دارد، باقی می‌ماند:
+        * هدف کاربر
+        * توصیف visual صفحه (محتوای OCR + UI + error signals)
+        * logs (مفید برای debug)
+        * api_paths
+        * AC
+
+    اگر core_only=False:
+      - مثل قبل، همه meta هم درون پرامپت می‌آیند (برای نمایش full)
+    """
     from .oversight_strong_prompt import EXECUTOR_DISCLAIMER
 
     parts: List[str] = []
@@ -196,7 +211,7 @@ def build_inspector_strong_prompt(
     parts.append("---")
     parts.append("")
 
-    parts.append(f"# 🎯 هدف کاربر (از طریق بازرس ویژه — حالت {mode})")
+    parts.append("# 🎯 هدف کاربر")
     parts.append("")
     parts.append(user_request.strip())
     if enhanced_prompt and enhanced_prompt.strip() != user_request.strip():
@@ -204,39 +219,54 @@ def build_inspector_strong_prompt(
         parts.append("## نسخهٔ ساختارمند شده (enhanced)")
         parts.append(enhanced_prompt.strip())
 
-    parts.append("")
-    parts.append("## 📍 محل وقوع")
-    if project_full_name:
-        parts.append(f"- **پروژه**: `{project_full_name}`")
-    if page_url:
-        parts.append(f"- **URL صفحه**: `{page_url}`")
-    if frontend_url:
-        parts.append(f"- **Frontend URL**: `{frontend_url}`")
-    if backend_url:
-        parts.append(f"- **Backend URL**: `{backend_url}`")
-    if api_paths:
-        parts.append(f"- **API paths مرتبط**: {', '.join(f'`{p}`' for p in api_paths[:15])}")
+    # محل وقوع فقط در حالت non-core
+    if not core_only:
+        parts.append("")
+        parts.append("## 📍 محل وقوع")
+        if project_full_name:
+            parts.append(f"- **پروژه**: `{project_full_name}`")
+        if page_url:
+            parts.append(f"- **URL صفحه**: `{page_url}`")
+        if frontend_url:
+            parts.append(f"- **Frontend URL**: `{frontend_url}`")
+        if backend_url:
+            parts.append(f"- **Backend URL**: `{backend_url}`")
 
+    # api_paths (همیشه — مفید برای کار)
+    if api_paths:
+        parts.append("")
+        parts.append("## 🔗 API endpoints مرتبط")
+        for p in api_paths[:15]:
+            parts.append(f"- `{p}`")
+
+    # محتوای بصری — همیشه شامل (محتوا، نه meta عکس)
     screenshots = screenshots_with_descriptions or []
     if screenshots:
         parts.append("")
-        parts.append(f"## 📸 محتوای بصری ({len(screenshots)} عکس)")
+        parts.append("## 📸 محتوای بصری صفحه (تحلیل عکس‌ها)")
         parts.append("")
         parts.append(
-            "*محتوای زیر توسط vision model به متن تبدیل شده — تا مدل‌های "
-            "غیر بصری هم بتوانند درک کنند چه چیزی روی صفحه است.*"
+            "*این بخش حاصل تحلیل visual توسط مدل بصری است — "
+            "تا یک مدل غیر بصری هم بتواند بدون دیدن عکس بفهمد روی صفحه چه چیزی است.*"
         )
         for i, ss in enumerate(screenshots, start=1):
             d = ss.get("description") or {}
-            parts.append("")
-            parts.append(f"### 📸 عکس #{i}")
-            if ss.get("page_url"):
-                parts.append(f"- **موقعیت**: `{ss['page_url']}`")
-            if ss.get("timestamp"):
-                parts.append(f"- **زمان**: {ss['timestamp']}")
-            vm = d.get("vision_model_used")
-            if vm:
-                parts.append(f"- **توصیف با**: `{vm}`")
+            # meta عکس (URL/timestamp/مدل) فقط در non-core
+            if not core_only:
+                parts.append("")
+                parts.append(f"### 📸 عکس #{i}")
+                if ss.get("page_url"):
+                    parts.append(f"- **موقعیت**: `{ss['page_url']}`")
+                if ss.get("timestamp"):
+                    parts.append(f"- **زمان**: {ss['timestamp']}")
+                vm = d.get("vision_model_used")
+                if vm:
+                    parts.append(f"- **توصیف با**: `{vm}`")
+            else:
+                # core_only: فقط یک شماره بدون meta
+                if len(screenshots) > 1:
+                    parts.append("")
+                    parts.append(f"### بخش #{i}")
             if d.get("scene"):
                 parts.append("")
                 parts.append("**📝 توصیف صحنه:**")
@@ -292,7 +322,7 @@ def build_inspector_strong_prompt(
             parts.append(f"[{lvl}] {ts} {svc}: {msg}")
         parts.append("```")
 
-    if related_urls:
+    if related_urls and not core_only:
         parts.append("")
         parts.append("## 🔗 URLs مرتبط")
         for u in related_urls[:20]:
@@ -306,19 +336,66 @@ def build_inspector_strong_prompt(
     parts.append("- [ ] اگر تغییر UI لازم بود، تطبیق با تم dark mode حفظ شود")
     parts.append("- [ ] تست‌های موجود pass شوند (npm test / pytest)")
 
-    parts.append("")
-    parts.append("## ⚠️ یادداشت")
-    parts.append(f"- این تسک از طریق **بازرس ویژه** ارسال شده — حالت: `{mode}`")
-    if captured_at:
-        parts.append(f"- لاگ/عکس‌ها در زمان `{captured_at}` گرفته شده‌اند")
-    if screenshots:
-        parts.append(
-            "- screenshots اصلی به‌صورت base64 در `inspector_context_id` ذخیره "
-            "شده‌اند — اگر مدل vision دارید، می‌توانید از endpoint "
-            "`/api/oversight/tasks/{task_id}/inspector-context` آنها را بخوانید."
-        )
+    if not core_only:
+        parts.append("")
+        parts.append("## ⚠️ یادداشت")
+        parts.append(f"- این تسک از طریق **بازرس ویژه** ارسال شده — حالت: `{mode}`")
+        if captured_at:
+            parts.append(f"- لاگ/عکس‌ها در زمان `{captured_at}` گرفته شده‌اند")
+        if screenshots:
+            parts.append(
+                "- screenshots اصلی به‌صورت base64 در `inspector_context_id` "
+                "ذخیره شده‌اند."
+            )
 
     return "\n".join(parts)
+
+
+def build_inspector_meta_summary(
+    *,
+    mode: str,
+    project_full_name: str,
+    page_url: str,
+    frontend_url: str,
+    backend_url: str,
+    captured_at: str,
+    screenshots: Optional[List[Dict[str, Any]]] = None,
+    related_urls: Optional[List[str]] = None,
+    inspector_session_id: Optional[str] = None,
+) -> str:
+    """متن meta جدا — نمایش در UI مرکز نظارت در کنار پرامپت اصلی، نه داخلش.
+
+    شامل: page_url، timestamps، session id، توصیف اینکه این تسک از کجا آمده.
+    این بخش‌ها به‌درد سیستم بیرونی نمی‌خورند ولی برای trace/audit مفیدند.
+    """
+    lines: List[str] = []
+    lines.append(f"📥 از بازرس ویژه — حالت `{mode}`")
+    if captured_at:
+        lines.append(f"🕒 زمان گرفتن: `{captured_at}`")
+    if page_url:
+        lines.append(f"📍 URL صفحه: `{page_url}`")
+    if frontend_url:
+        lines.append(f"🌐 Frontend URL: `{frontend_url}`")
+    if backend_url:
+        lines.append(f"🖥 Backend URL: `{backend_url}`")
+    if inspector_session_id:
+        lines.append(f"🔖 Session ID: `{inspector_session_id}`")
+    if screenshots:
+        lines.append("")
+        lines.append(f"📸 Screenshots ({len(screenshots)} عکس):")
+        for i, ss in enumerate(screenshots, start=1):
+            bits: List[str] = []
+            if ss.get("page_url"):
+                bits.append(f"URL: `{ss['page_url']}`")
+            if ss.get("timestamp"):
+                bits.append(f"زمان: `{ss['timestamp']}`")
+            lines.append(f"  • عکس #{i} — {' · '.join(bits) if bits else '—'}")
+    if related_urls:
+        lines.append("")
+        lines.append("🔗 URLs مرتبط (در inspector لاگ شده):")
+        for u in related_urls[:15]:
+            lines.append(f"  • `{u}`")
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -343,6 +420,7 @@ def save_inspector_context(
     backend_url: Optional[str],
     page_url: Optional[str],
     inspector_session_id: Optional[str],
+    meta_summary: Optional[str] = None,
 ) -> str:
     """ذخیرهٔ context کامل (شامل screenshots base64) در فایل جداگانه."""
     ctx_id = task_id
@@ -355,6 +433,7 @@ def save_inspector_context(
         "mode": mode,
         "user_request": user_request,
         "enhanced_prompt": enhanced_prompt,
+        "meta_summary": meta_summary or "",
         "screenshots": screenshots or [],
         "vision_descriptions": vision_descriptions or [],
         "console_logs": console_logs or [],
@@ -512,7 +591,8 @@ async def process_from_inspector(
                 "description": d,
             })
 
-    # 3. ساخت پرامپت غنی
+    # 3. ساخت پرامپت اصلی (core_only=True — clean برای copy/export)
+    #    + meta summary جدا برای نمایش در UI
     captured_at = _now_iso()
     strong_prompt = build_inspector_strong_prompt(
         user_request=user_request,
@@ -528,6 +608,18 @@ async def process_from_inspector(
         api_paths=api_paths,
         screenshots_with_descriptions=screenshots_with_descriptions or None,
         captured_at=captured_at,
+        core_only=True,
+    )
+    meta_summary = build_inspector_meta_summary(
+        mode=mode,
+        project_full_name=project_full_name_final,
+        page_url=page_url or "",
+        frontend_url=frontend_url or "",
+        backend_url=backend_url or "",
+        captured_at=captured_at,
+        screenshots=screenshots,
+        related_urls=related_urls,
+        inspector_session_id=inspector_session_id,
     )
 
     # 4. title
@@ -579,6 +671,7 @@ async def process_from_inspector(
             backend_url=backend_url,
             page_url=page_url,
             inspector_session_id=inspector_session_id,
+            meta_summary=meta_summary,
         )
         new_task.inspector_context_id = ctx_id
     except Exception as e:
