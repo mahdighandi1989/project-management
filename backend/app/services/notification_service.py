@@ -2561,12 +2561,23 @@ class NotificationService:
                 await tg.send(msg, silent=False)
                 return {"ok": True, "handled": "codex_no_model"}
 
-            # picker مدل — یک callback per model
+            # picker مدل — استفاده از token + index برای callback_data کوتاه.
+            # علت: callback_data در Telegram محدود به 64 byte است.
+            # codex:build_model:<UUID>:<long-model-id> می‌تواند > 64 شود.
+            # مثلاً claude-3-5-sonnet-20241022 → 81 byte → reject!
+            # حالا: codex:bm:<8char-token>:<index> → max ~22 byte ✓
+            token = _short_token()
+            _idea_drafts[token] = {
+                "watched_id": watched_id,
+                "models": [m.id for m in available[:8]],
+                "repo": watched.repo_full_name,
+                "expires_at": _now_epoch() + _STATE_TTL_SECONDS,
+            }
             rows: List[List[Dict[str, str]]] = []
-            for m in available[:8]:  # max 8 model
+            for i, m in enumerate(available[:8]):
                 rows.append([{
                     "text": f"🤖 {m.id}",
-                    "callback_data": f"codex:build_model:{watched_id}:{m.id}",
+                    "callback_data": f"codex:bm:{token}:{i}",
                 }])
             rows.append([{"text": "❌ انصراف", "callback_data": "flow:cancel"}])
             # text فاقد escape pitfall (نام پروژه با _ ممکن است باشد)
@@ -2581,6 +2592,38 @@ class NotificationService:
             return {"ok": True, "handled": "codex_model_picker", "available": len(available)}
 
         # ============= build_model:<wid>:<mid> =============
+        # 🆕 bm = "build_model" کوتاه — با token + index (callback_data ≤ 64B)
+        if action == "bm":
+            if len(parts) < 4:
+                await tg.send("⚠️ callback نامعتبر (bm).", silent=True)
+                return {"ok": True, "handled": "codex_bm_bad"}
+            token = parts[2]
+            try:
+                idx = int(parts[3])
+            except Exception:
+                await tg.send("⚠️ index نامعتبر در callback.", silent=True)
+                return {"ok": True, "handled": "codex_bm_bad_idx"}
+            draft = _idea_drafts.get(token)
+            if not draft or "models" not in draft:
+                await tg.send(
+                    "⚠️ این انتخاب منقضی شده. لطفاً /codex بزنید و دوباره امتحان کنید.",
+                    silent=True,
+                )
+                return {"ok": True, "handled": "codex_bm_expired"}
+            models = draft.get("models") or []
+            if idx < 0 or idx >= len(models):
+                await tg.send("⚠️ index خارج از محدوده.", silent=True)
+                return {"ok": True, "handled": "codex_bm_oob"}
+            model_id = models[idx]
+            watched_id = draft.get("watched_id") or watched_id
+            # یک‌بار مصرف: token را حذف نمی‌کنیم تا اگر کاربر button دیگری زد بازم کار کند
+            # ولی expire را extend می‌کنیم
+            draft["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+            # ادامهٔ flow عادی build_model — همان منطق پایین (با fall-through)
+            action = "build_model"
+            # set parts برای backward compat با کد build_model
+            parts = ["codex", "build_model", watched_id, model_id]
+
         if action == "build_model":
             if len(parts) < 4:
                 await tg.send("⚠️ model_id در callback نیست.", silent=True)
