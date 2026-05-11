@@ -984,7 +984,8 @@ export default function OversightPage() {
           fetch(`${API_BASE}/api/oversight/status`),
           fetch(`${API_BASE}/api/models/available`),
           fetch(`${API_BASE}/api/oversight/watched`),
-          fetch(`${API_BASE}/api/oversight/tasks`),
+          // 🆕 archived=all تا هم active هم archived بیاید و فیلتر سمت کلاینت کار کند
+          fetch(`${API_BASE}/api/oversight/tasks?archived=all`),
           fetch(`${API_BASE}/api/oversight/reports?limit=300`),
         ]);
 
@@ -1021,7 +1022,8 @@ export default function OversightPage() {
   };
 
   const reloadTasks = async () => {
-    const r = await fetch(`${API_BASE}/api/oversight/tasks`);
+    // 🆕 archived=all تا فیلتر آرشیو در UI کار کند
+    const r = await fetch(`${API_BASE}/api/oversight/tasks?archived=all`);
     if (r.ok) {
       const data = await r.json();
       setTasks(data.items || []);
