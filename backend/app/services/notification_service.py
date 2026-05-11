@@ -1088,6 +1088,10 @@ class NotificationService:
         if text == "/codex":
             return await self._start_codex_flow(chat_id_str)
 
+        # 🆕 /codex_debug — تشخیص دقیق وضعیت برای debug
+        if text == "/codex_debug":
+            return await self._codex_debug(chat_id_str)
+
         # ——— /new_task و /new_idea (شروع flow جدید) ———
         if text in ("/new_task", "/new_idea"):
             return await self._start_new_task_flow(chat_id_str)
@@ -2214,6 +2218,101 @@ class NotificationService:
         except Exception as e:
             logger.debug(f"refresh_index_silently failed: {e}")
             return {"ok": False, "error": str(e)[:200]}
+
+    async def _codex_debug(self, chat_id_str: str) -> Dict[str, Any]:
+        """نمایش وضعیت دقیق سیستم برای debug کردن `/codex` flow.
+
+        کاربر می‌تواند این را اجرا کند تا ببیند:
+          - کدام version از کد اجرا می‌شود
+          - کدام env variables برای provider ها set است
+          - چند مدل در registry موجود است
+          - فیلتر نهایی چه می‌دهد
+        """
+        tg = self._telegram()
+        import os as _os
+        from datetime import datetime as _dt
+
+        lines: List[str] = []
+        lines.append("🔧 *Codex Debug Info*")
+        lines.append("")
+        # Version marker (تغییر در commit جدید)
+        lines.append("Version: `bulletproof-v2 (d163442+)`")
+        lines.append(f"Time: `{_dt.utcnow().isoformat()[:19]}Z`")
+        lines.append("")
+
+        # Step 1: env vars
+        env_keys = {
+            "OPENAI_API_KEY": "openai",
+            "ANTHROPIC_API_KEY": "claude/anthropic",
+            "CLAUDE_API_KEY": "claude (alt)",
+            "GEMINI_API_KEY": "gemini",
+            "GOOGLE_API_KEY": "google (alt)",
+            "DEEPSEEK_API_KEY": "deepseek",
+            "PERPLEXITY_API_KEY": "perplexity",
+        }
+        lines.append("*ENV vars:*")
+        env_set = []
+        for k, label in env_keys.items():
+            val = (_os.environ.get(k) or "").strip()
+            if val:
+                lines.append(f"  ✅ `{k}` → {label} (len={len(val)})")
+                env_set.append(k)
+            else:
+                lines.append(f"  ❌ `{k}`")
+        lines.append("")
+
+        # Step 2: registry
+        try:
+            from ..core.models_registry import get_enabled_models, MODEL_REGISTRY
+            total = len(MODEL_REGISTRY)
+            enabled = get_enabled_models() or []
+            lines.append(f"*Registry:* {total} total, {len(enabled)} enabled")
+            # نمونه: ۵ مدل اول
+            for m in enabled[:5]:
+                prov = m.provider
+                prov_str = (prov.value if hasattr(prov, "value") else str(prov))
+                lines.append(f"  • `{m.id}` ({prov_str})")
+            if len(enabled) > 5:
+                lines.append(f"  ... و {len(enabled) - 5} مدل دیگر")
+        except Exception as e:
+            lines.append(f"❌ Registry error: `{str(e)[:200]}`")
+        lines.append("")
+
+        # Step 3: final available
+        try:
+            providers_with_key = set()
+            provider_env_keys = {
+                "openai": ["OPENAI_API_KEY"],
+                "claude": ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
+                "anthropic": ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
+                "gemini": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+                "google": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+                "deepseek": ["DEEPSEEK_API_KEY"],
+                "perplexity": ["PERPLEXITY_API_KEY"],
+            }
+            for pname, ekeys in provider_env_keys.items():
+                if any((_os.environ.get(k) or "").strip() for k in ekeys):
+                    providers_with_key.add(pname.lower())
+            from ..core.models_registry import get_enabled_models as _gem
+            avail = []
+            for model in (_gem() or []):
+                prov = model.provider
+                prov_str = (prov.value if hasattr(prov, "value") else str(prov)).lower()
+                if prov_str in providers_with_key:
+                    avail.append(model.id)
+            lines.append(f"*Available models for /codex build:* {len(avail)}")
+            for mid in avail[:8]:
+                lines.append(f"  ✅ `{mid}`")
+        except Exception as e:
+            lines.append(f"❌ Filter error: `{str(e)[:200]}`")
+
+        lines.append("")
+        lines.append("---")
+        lines.append("اگر «Available models = 0» ولی ENV vars ست است،")
+        lines.append("registry با ENV ناهماهنگ است — لطفاً ارسال کنید این خروجی را.")
+
+        await tg.send("\n".join(lines), silent=True)
+        return {"ok": True, "handled": "codex_debug"}
 
     async def _start_codex_flow(self, chat_id_str: str) -> Dict[str, Any]:
         """مرحلهٔ ۱: انتخاب پروژه از لیست watched."""
