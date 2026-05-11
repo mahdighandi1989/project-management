@@ -832,28 +832,190 @@ class OversightService:
         return list(results)
 
     @staticmethod
+    @staticmethod
     def _extract_json(text: str) -> Optional[Dict[str, Any]]:
-        """استخراج اولین JSON معتبر از خروجی مدل."""
+        """استخراج اولین JSON معتبر از خروجی مدل — با recovery قوی برای
+        پاسخ‌های ناقص/truncated/کثیف."""
         if not text:
             return None
-        # حذف ```json
         cleaned = text.strip()
+        # حذف code fence (```json ... ```)
         if cleaned.startswith("```"):
             cleaned = cleaned.split("\n", 1)[-1]
             if "```" in cleaned:
                 cleaned = cleaned.rsplit("```", 1)[0]
+        cleaned = cleaned.strip()
+        # سعی ۱: parse مستقیم
         try:
             return json.loads(cleaned)
         except Exception:
             pass
-        # تلاش با پیدا کردن { ... }
+        # سعی ۲: substring بین اولین `{` و آخرین `}`
         start = cleaned.find("{")
+        if start == -1:
+            return None
         end = cleaned.rfind("}")
-        if start != -1 and end > start:
+        if end > start:
             try:
                 return json.loads(cleaned[start : end + 1])
             except Exception:
-                return None
+                pass
+        # سعی ۳: recovery قوی — balance brackets + حذف trailing comma + crop
+        # تا آخرین فیلد کامل. این برای JSON های truncated شده ضروری است.
+        return OversightService._repair_truncated_json(cleaned[start:])
+
+    @staticmethod
+    def _repair_truncated_json(text: str) -> Optional[Dict[str, Any]]:
+        """تلاش برای ترمیم JSON ناقص:
+          1. حذف trailing whitespace
+          2. اگر JSON قطع شده داخل string، آن string را ببند
+          3. حذف trailing comma
+          4. بستن brackets/braces باز
+          5. backtrack: اگر هنوز fail، حذف آخرین فیلد ناقص
+
+        برمی‌گرداند dict در صورت موفقیت، None اگر بازیابی ناممکن باشد.
+        """
+        if not text or not text.startswith("{"):
+            return None
+        s = text.rstrip()
+
+        # state machine برای پیمایش JSON و شناسایی موقعیت کاربردی
+        # شناسایی stack of brackets با احترام به stringها
+        def _scan(src: str) -> Dict[str, Any]:
+            stack: List[str] = []
+            in_str = False
+            esc = False
+            string_open_idx = -1
+            last_complete_value_end = -1  # index بعد از آخرین `,` یا `{` یا کلید-مقدار کامل
+            i = 0
+            n = len(src)
+            while i < n:
+                c = src[i]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif c == "\\":
+                        esc = True
+                    elif c == '"':
+                        in_str = False
+                else:
+                    if c == '"':
+                        in_str = True
+                        string_open_idx = i
+                    elif c in "{[":
+                        stack.append("}" if c == "{" else "]")
+                    elif c in "}]":
+                        if stack and stack[-1] == c:
+                            stack.pop()
+                            last_complete_value_end = i + 1
+                        else:
+                            # JSON خراب — بشکن
+                            return {
+                                "stack": stack,
+                                "in_str": in_str,
+                                "string_open_idx": string_open_idx,
+                                "last_complete_value_end": last_complete_value_end,
+                                "broke_at": i,
+                            }
+                    elif c == "," and not stack:
+                        # virgule خارج از همهٔ braces — غیرمنتظره
+                        pass
+                i += 1
+            return {
+                "stack": stack,
+                "in_str": in_str,
+                "string_open_idx": string_open_idx,
+                "last_complete_value_end": last_complete_value_end,
+                "broke_at": -1,
+            }
+
+        state = _scan(s)
+
+        candidate = s
+        # اگر در string قطع شده، آن را ببند
+        if state["in_str"]:
+            candidate = candidate + '"'
+        # حذف trailing comma و whitespace
+        candidate_r = candidate.rstrip()
+        while candidate_r and candidate_r[-1] in ", \t\n":
+            candidate_r = candidate_r[:-1]
+        candidate = candidate_r
+
+        # بستن brackets/braces باز به ترتیب stack
+        for closer in reversed(state["stack"]):
+            candidate = candidate + closer
+
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+
+        # اگر هنوز fail، backtrack: از آخرین `,` در سطح روت قطع کن
+        # و یک }/] ببند
+        # پیدا کردن آخرین `,` در عمق ۱ (بلافاصله داخل root `{`)
+        depth = 0
+        in_str = False
+        esc = False
+        last_top_comma = -1
+        for i, c in enumerate(s):
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            else:
+                if c == '"':
+                    in_str = True
+                elif c in "{[":
+                    depth += 1
+                elif c in "}]":
+                    depth -= 1
+                elif c == "," and depth == 1:
+                    last_top_comma = i
+
+        if last_top_comma > 0:
+            truncated = s[:last_top_comma] + "}"
+            try:
+                return json.loads(truncated)
+            except Exception:
+                pass
+            # اگر بازم fail، یک سطح backtrack بیشتر برو
+            # یک یا چند bracket باز کن و ببند
+            close_attempt = s[:last_top_comma]
+            # موقعی که داخل array بودیم
+            try:
+                # بستن آرایه‌ها و object های باز
+                stack: List[str] = []
+                in_str2 = False
+                esc2 = False
+                for c in close_attempt:
+                    if in_str2:
+                        if esc2:
+                            esc2 = False
+                        elif c == "\\":
+                            esc2 = True
+                        elif c == '"':
+                            in_str2 = False
+                    else:
+                        if c == '"':
+                            in_str2 = True
+                        elif c == "{":
+                            stack.append("}")
+                        elif c == "[":
+                            stack.append("]")
+                        elif c in "}]" and stack and stack[-1] == c:
+                            stack.pop()
+                final = close_attempt
+                if in_str2:
+                    final += '"'
+                for closer in reversed(stack):
+                    final += closer
+                return json.loads(final)
+            except Exception:
+                pass
+
         return None
 
     # ====================================================================
@@ -2292,21 +2454,52 @@ class OversightService:
                     temperature=grounded_temperature,
                 )
 
-            # 🆕 detection truncation: اگر response با } یا ] تمام نشد، JSON ناقص است
+            # 🆕 detection truncation: stringها را در نظر می‌گیرد
+            # (شمارش ساده count("{") نادرست است چون snippet ها می‌توانند {} داشته باشند)
             def _looks_truncated(resp: str) -> bool:
                 if not resp or len(resp) < 100:
                     return False
                 stripped = resp.rstrip().rstrip(" `\n")
                 if not stripped.endswith(("}", "]")):
                     return True
+                # پیمایش با احترام به stringها
+                depth = 0
+                in_str = False
+                esc = False
+                for c in stripped:
+                    if in_str:
+                        if esc:
+                            esc = False
+                        elif c == "\\":
+                            esc = True
+                        elif c == '"':
+                            in_str = False
+                    else:
+                        if c == '"':
+                            in_str = True
+                        elif c in "{[":
+                            depth += 1
+                        elif c in "}]":
+                            depth -= 1
+                if in_str:
+                    return True
+                if depth != 0:
+                    return True
+                # سعی parse — اگر بازم خطا می‌دهد، احتمالاً truncated است
                 try:
-                    opens = stripped.count("{")
-                    closes = stripped.count("}")
-                    if opens != closes:
-                        return True
+                    json.loads(stripped)
+                    return False
                 except Exception:
-                    pass
-                return False
+                    # ممکن است JSON valid باشد ولی با extra prefix/suffix
+                    start = stripped.find("{")
+                    end = stripped.rfind("}")
+                    if start != -1 and end > start:
+                        try:
+                            json.loads(stripped[start:end + 1])
+                            return False
+                        except Exception:
+                            return True
+                    return True
 
             if _looks_truncated(response):
                 logger.warning("idea_to_prompt response به نظر truncated است — retry با max_tokens بیشتر")
@@ -2337,14 +2530,89 @@ class OversightService:
         except Exception as e:
             raise RuntimeError(f"خطا در تولید پرامپت: {e}")
 
-        from .oversight_strong_prompt import build_strong_prompt
+        from .oversight_strong_prompt import build_strong_prompt, EXECUTOR_DISCLAIMER
 
         parsed = self._extract_json(response)
-        if not parsed:
-            # fallback: کل خروجی را پرامپت بدان
+
+        # 🆕 اگر parsed خیلی ناقص است (کلیدهای حیاتی نیست)، تلاش دوم با retry
+        # و قانون‌های سخت‌گیرانه
+        critical_keys = {"description", "target_locations", "acceptance_criteria"}
+        parsed_keys = set(parsed.keys()) if isinstance(parsed, dict) else set()
+        is_too_thin = (
+            not parsed
+            or not parsed_keys
+            or len(parsed_keys & critical_keys) < 2
+            or not (parsed.get("description") or "").strip()
+        )
+
+        if is_too_thin:
+            logger.warning(
+                f"idea_to_prompt: parsed JSON ناقص است "
+                f"(keys={list(parsed_keys)[:8] if parsed_keys else 'None'}) — retry سخت‌گیرانه"
+            )
+            try:
+                strict_suffix = (
+                    "\n\n# 🚨 توجه: پاسخ قبلی JSON معتبر/کامل نبود.\n"
+                    "این بار:\n"
+                    "1. فقط یک JSON object معتبر — هیچ متن قبل/بعد JSON نباشد.\n"
+                    "2. هیچ ``` یا توضیح اضافه نباشد.\n"
+                    "3. حتماً این فیلدها را پر کن: title, description, proposed_action,\n"
+                    "   target_locations (حداقل ۱), acceptance_criteria (حداقل ۲),\n"
+                    "   type, priority.\n"
+                    "4. اگر فضا کم است، تعداد target_locations را کم کن (نه description).\n"
+                    "5. JSON با } بسته شود — هیچ field ناقص نگذار.\n"
+                )
+                retry_max2 = min(20000, grounded_max_tokens + 6000)
+                if effective_models and len(effective_models) > 1:
+                    multi2 = await self._ai_generate_multi(
+                        system_prompt + strict_suffix,
+                        model_ids=effective_models,
+                        max_tokens=retry_max2,
+                        temperature=grounded_temperature,
+                    )
+                    best2 = max(
+                        (m for m in multi2 if not m.get("error") and m.get("content")),
+                        key=lambda m: len(m["content"]),
+                        default=None,
+                    )
+                    response2 = best2["content"] if best2 else ""
+                else:
+                    response2 = await self._ai_generate(
+                        system_prompt + strict_suffix,
+                        model_id=(effective_models[0] if effective_models else None),
+                        max_tokens=retry_max2,
+                        temperature=grounded_temperature,
+                    )
+                if response2 and len(response2) > 200:
+                    parsed2 = self._extract_json(response2)
+                    if isinstance(parsed2, dict) and (parsed2.get("description") or "").strip():
+                        parsed = parsed2
+                        response = response2
+                        logger.info("idea_to_prompt: retry سخت‌گیرانه موفق بود")
+                    elif isinstance(parsed2, dict) and len(parsed2.keys()) > len(parsed_keys):
+                        # حتی اگر description خالی، اگر keys بیشتر دارد بهتر است
+                        parsed = parsed2
+                        response = response2
+            except Exception as _strict_e:
+                logger.warning(f"idea_to_prompt strict retry failed: {_strict_e}")
+
+        if not parsed or not isinstance(parsed, dict):
+            # 🆕 fallback ایمن: به جای دامپ raw response آلوده،
+            # یک پرامپت ساختاریافتهٔ صریح بساز که کاربر بداند AI درست عمل نکرده
+            # و بتواند regenerate بزند.
+            logger.error("idea_to_prompt: AI نتوانست JSON معتبر تولید کند")
+            safe_title = (idea.strip().split("\n")[0])[:80] or "تسک بدون عنوان"
+            safe_prompt_body = (
+                f"## هدف\n{idea.strip()}\n\n"
+                "## ⚠️ توجه: AI خروجی JSON معتبر تولید نکرد\n"
+                "این پرامپت minimal است. لطفاً:\n"
+                "- روی دکمهٔ «🔄 بازتولید» کلیک کنید (با مدل دیگر یا raw_idea بیشتر)\n"
+                "- یا پرامپت را دستی ویرایش کنید\n\n"
+                "## معیار پذیرش\n- (تعریف نشده — لطفاً regenerate یا edit کنید)\n"
+            )
             return {
-                "title": (idea.strip().split("\n")[0])[:80],
-                "prompt": response.strip(),
+                "title": safe_title,
+                "prompt": EXECUTOR_DISCLAIMER + "\n" + safe_prompt_body,
                 "target_files": [],
                 "target_locations": [],
                 "related_files": [],
@@ -2353,6 +2621,7 @@ class OversightService:
                 "priority": priority,
                 "estimate": "medium",
                 "raw_response": response,
+                "_quality_flag": "json_parse_failed",
             }
 
         # locations جدید + fallback به target_files قدیمی
