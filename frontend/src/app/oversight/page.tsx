@@ -176,6 +176,9 @@ interface Task {
   manual_seen_count?: number;
   prompt_quality_score?: number | null;
   last_quality_audit_at?: string | null;
+  // 🆕 (Inspector → Oversight)
+  inspector_context_id?: string | null;
+  inspector_mode?: 'chat' | 'visual_debug' | null;
   raw_idea_history?: Array<{
     ts: string;
     source: string;
@@ -4523,9 +4526,26 @@ function TasksPanel({
               || (t.merge_count ?? 0) > 0
               || (t.manual_seen_count ?? 0) > 0
               || (t.prompt_history?.length ?? 0) > 0
-              || typeof t.prompt_quality_score === 'number') && (
+              || typeof t.prompt_quality_score === 'number'
+              || t.inspector_mode) && (
               <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-1 flex items-center gap-2 flex-wrap" dir="ltr"
                 title={t.created_by_scan_metadata ? JSON.stringify(t.created_by_scan_metadata, null, 2) : ''}>
+                {t.inspector_mode === 'visual_debug' && (
+                  <span
+                    className="bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300 px-1.5 py-0.5 rounded font-semibold"
+                    title="ساخته‌شده از بازرس ویژه — حالت دیباگ بصری (با screenshots)"
+                  >
+                    📸 از بازرس بصری
+                  </span>
+                )}
+                {t.inspector_mode === 'chat' && (
+                  <span
+                    className="bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300 px-1.5 py-0.5 rounded font-semibold"
+                    title="ساخته‌شده از بازرس ویژه — حالت چت"
+                  >
+                    💬 از بازرس چت
+                  </span>
+                )}
                 {t.created_by_scan_metadata?.model && (
                   <span>🤖 {t.created_by_scan_metadata.model}</span>
                 )}

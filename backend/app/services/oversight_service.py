@@ -288,6 +288,10 @@ class OversightTask:
     last_quality_audit_at: Optional[str] = None
     # manual_seen_count: چندبار از طریق manual create به همین تسک ادغام شده
     manual_seen_count: int = 0
+    # 🆕 (Inspector → Oversight) reference به context کامل (screenshots/logs/urls)
+    # که در inspector_context/{id}.json ذخیره شده. None برای تسک‌های غیر-inspector.
+    inspector_context_id: Optional[str] = None
+    inspector_mode: Optional[str] = None  # "chat" | "visual_debug" | None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
