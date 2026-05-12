@@ -207,6 +207,47 @@ def build_strong_prompt(
 
     parts: List[str] = []
 
+    # 🔔 (Reminder feature) — اگر type_=="reminder"، یک پرامپت کاملاً متفاوت
+    # با لحن شخصی/یادآوری برمی‌گردانیم. این یادآوری برای انجام کاری توسط
+    # خود کاربر است، نه دستورالعملی برای مدل کدنویس. ساختار:
+    #   - بدون EXECUTOR_DISCLAIMER (آن متن برای مدل اجرایی است)
+    #   - بدون target_locations / risks / validation_commands
+    #   - چک‌لیست action items قابل تیک — هر AC به یک ردیف [ ] تبدیل می‌شود
+    if (type_ or "").lower().strip() == "reminder":
+        rem_parts: List[str] = []
+        rem_parts.append(f"# 🔔 یادداشت یادآوری: {title.strip()}")
+        rem_parts.append("")
+        if raw_user_request and raw_user_request.strip():
+            rem_parts.append("## 📝 متن کاربر (verbatim)")
+            rem_parts.append(f"> {raw_user_request.strip()}")
+            rem_parts.append("")
+        if description and description.strip() and description.strip() != raw_user_request.strip():
+            rem_parts.append("## 📌 شرح کوتاه")
+            rem_parts.append(description.strip())
+            rem_parts.append("")
+        if acceptance_criteria:
+            rem_parts.append("## ✅ چک‌لیست (قابل تیک)")
+            rem_parts.append(
+                "_هر آیتم را با تیک علامت بزن وقتی انجام شد. "
+                "وقتی از تلگرام دکمهٔ آیتم را بزنی، در فرانت هم تیک می‌خورد و "
+                "در یادآوری بعدی نمایش داده نمی‌شود._"
+            )
+            rem_parts.append("")
+            for a in acceptance_criteria:
+                if a and a.strip():
+                    rem_parts.append(f"- [ ] {a.strip()}")
+            rem_parts.append("")
+        if user_goal and user_goal.strip():
+            rem_parts.append("## 🎯 چرا این یادآوری مهم است")
+            rem_parts.append(user_goal.strip())
+            rem_parts.append("")
+        rem_parts.append("---")
+        rem_parts.append(
+            "_این یک یادآوری شخصی است؛ از طریق تلگرام در زمان موعد "
+            "به‌صورت inline checklist ارسال می‌شود._"
+        )
+        return "\n".join(rem_parts)
+
     # === ⚠️ DISCLAIMER (همیشه ابتدای پرامپت — قبل از هر چیز دیگر) ===
     parts.append(EXECUTOR_DISCLAIMER)
 

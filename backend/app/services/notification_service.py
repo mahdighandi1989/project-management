@@ -197,6 +197,28 @@ EVENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "default_sound": False,
         "icon": "💡",
     },
+    # 🔔 Reminder events
+    "reminder_due": {
+        "label": "🔔 یادآوری موعد رسیده",
+        "help": "وقتی یک یادآوری به زمان موعدش می‌رسد و باید به کاربر اطلاع داده شود",
+        "default_enabled": True,
+        "default_sound": True,  # با صدا — کاربر باید بفهمد
+        "icon": "🔔",
+    },
+    "reminder_snoozed": {
+        "label": "⏰ یادآوری به تعویق افتاد",
+        "help": "وقتی کاربر یادآوری را snooze می‌کند",
+        "default_enabled": True,
+        "default_sound": False,
+        "icon": "⏰",
+    },
+    "reminder_done": {
+        "label": "✅ یادآوری انجام شد",
+        "help": "وقتی یادآوری توسط کاربر done/archived می‌شود",
+        "default_enabled": True,
+        "default_sound": False,
+        "icon": "✅",
+    },
     # 🆕 (Stage 10 audit fix #3) — eventهای اختصاصی برای فعال/غیرفعال موقت مدل
     "model_temp_activated": {
         "label": "🔓 مدل موقتاً فعال شد",
@@ -1250,6 +1272,255 @@ class NotificationService:
                 )
             results.append(res)
         return results
+
+    # ====================================================================
+    # 🔔 Reminder feature
+    # ====================================================================
+
+    async def send_reminder_due(self, task: Any) -> Optional[Dict[str, Any]]:
+        """ارسال پیام «یادآوری موعد رسیده» با inline checklist + snooze/done.
+
+        - متن پیام: title + summary (description) + lines for pending steps
+        - دکمه‌ها:
+            • برای هر step pending (max 8): «✅ <عنوان مرحله>»
+              callback: reminder:tick:<task_id>:<step_id>
+            • ردیف: «✅ همه انجام شد» — reminder:done:<task_id>
+            • ردیف: «⏰ یادآوری دوباره» — reminder:snooze_pick:<task_id>
+        - silent بر اساس prefs sound (reminder_due default=True یعنی صدا)
+        """
+        prefs = _read_prefs()
+        events = prefs.get("events", {})
+        if not events.get("reminder_due", EVENT_REGISTRY.get("reminder_due", {}).get("default_enabled", True)):
+            return None
+        sound = bool(prefs.get("sound", {}).get(
+            "reminder_due",
+            EVENT_REGISTRY.get("reminder_due", {}).get("default_sound", True),
+        ))
+        silent = not sound
+
+        title = getattr(task, "title", "یادآوری") or "یادآوری"
+        steps = getattr(task, "task_steps", []) or []
+        pending = [s for s in steps if not s.get("done") and s.get("status") != "done"]
+
+        lines: List[str] = [
+            f"🔔 *یادآوری موعد رسیده*: {title}",
+            "",
+        ]
+        raw_idea = (getattr(task, "raw_idea", "") or "")[:300]
+        if raw_idea and raw_idea.strip():
+            lines.append(f"📝 {raw_idea}")
+            lines.append("")
+        if pending:
+            lines.append("✅ *آیتم‌های باقی‌مانده:*")
+            for s in pending[:15]:
+                stitle = (s.get("title") or s.get("scope") or "آیتم")[:120]
+                lines.append(f"  • {stitle}")
+        else:
+            lines.append("(چک‌لیستی ثبت نشده — می‌توانی کل یادآوری را تمام شده اعلام کنی)")
+
+        text = "\n".join(lines)
+
+        # inline keyboard
+        rows: List[List[Dict[str, str]]] = []
+        for s in pending[:8]:
+            sid = s.get("id")
+            stitle = (s.get("title") or s.get("scope") or "آیتم")[:35]
+            rows.append([{
+                "text": f"✅ {stitle}",
+                "callback_data": f"reminder:tick:{task.id}:{sid}",
+            }])
+        rows.append([
+            {"text": "✅ همه انجام شد / آرشیو", "callback_data": f"reminder:done:{task.id}"},
+        ])
+        rows.append([
+            {"text": "⏰ یادآوری دوباره", "callback_data": f"reminder:snooze_pick:{task.id}"},
+        ])
+
+        # ارسال مستقیم از طریق Telegram channel (notify_event برای inline
+        # keyboard اختصاصی منعطف نیست — اینجا کنترل کامل می‌خواهیم)
+        tg = self._telegram()
+        if not tg.is_configured():
+            logger.warning("send_reminder_due: telegram not configured")
+            return None
+        try:
+            res = await tg.send(
+                text,
+                silent=silent,
+                reply_markup={"inline_keyboard": rows},
+            )
+            return res if isinstance(res, dict) else {"ok": True}
+        except Exception as e:
+            logger.warning(f"send_reminder_due telegram send failed: {e}")
+            return None
+
+    async def _handle_reminder_callback(
+        self, chat_id_str: str, data: str, msg: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """router برای callback_data با prefix reminder:*
+
+        فرمت‌ها:
+          reminder:tick:<task_id>:<step_id>
+          reminder:done:<task_id>
+          reminder:snooze_pick:<task_id>
+          reminder:snooze:<task_id>:<delta_seconds|iso>
+        """
+        tg = self._telegram()
+        parts = data.split(":")
+        if len(parts) < 3:
+            return {"ok": True, "ignored": True}
+        action = parts[1]
+        task_id = parts[2]
+
+        try:
+            from .oversight_service import get_oversight_service, now_iso
+            ov = get_oversight_service()
+        except Exception as e:
+            await tg.send(f"⚠️ سرویس در دسترس نیست: {e}", silent=True)
+            return {"ok": False}
+
+        task = next((t for t in ov.tasks if t.id == task_id), None)
+        if task is None or task.type != "reminder":
+            await tg.send("⚠️ یادآوری یافت نشد.", silent=True)
+            return {"ok": True, "handled": "reminder_not_found"}
+
+        if action == "tick" and len(parts) >= 4:
+            try:
+                step_id = int(parts[3])
+            except ValueError:
+                return {"ok": True, "ignored": True}
+            async with ov._lock:
+                for s in task.task_steps:
+                    if s.get("id") == step_id:
+                        s["done"] = True
+                        s["status"] = "done"
+                        s["completion_pct"] = 100
+                        s["completed_at"] = now_iso()
+                        break
+                task.reminder_history.append({
+                    "ts": now_iso(),
+                    "action": "step_ticked",
+                    "step_id": step_id,
+                })
+                # اگر همه done شدند، خودکار done کن
+                all_done = all(
+                    s.get("done") or s.get("status") == "done"
+                    for s in (task.task_steps or [])
+                )
+                if all_done:
+                    task.reminder_state = "done"
+                    task.archived = True
+                    task.archived_at = now_iso()
+                    task.reminder_history.append({
+                        "ts": now_iso(), "action": "done",
+                        "via": "all_steps_ticked",
+                    })
+                task.updated_at = now_iso()
+                ov._save_tasks()
+            if all_done:
+                await tg.send(
+                    f"✅ یادآوری «{task.title}» کامل شد و آرشیو شد.",
+                    silent=True,
+                )
+                try:
+                    await self.notify_event(
+                        "reminder_done", f"✅ یادآوری «{task.title}» تمام شد.",
+                        priority="low",
+                    )
+                except Exception:
+                    pass
+            else:
+                pending_titles = [
+                    (s.get("title") or "")[:40]
+                    for s in task.task_steps if not s.get("done")
+                ]
+                await tg.send(
+                    f"✅ آیتم انجام شد. باقی‌مانده ({len(pending_titles)}):\n"
+                    + "\n".join(f"  • {t}" for t in pending_titles[:10]),
+                    silent=True,
+                )
+            return {"ok": True, "handled": "reminder_tick"}
+
+        if action == "done":
+            async with ov._lock:
+                for s in task.task_steps or []:
+                    s["done"] = True
+                    s["status"] = "done"
+                    s["completion_pct"] = 100
+                task.reminder_state = "done"
+                task.archived = True
+                task.archived_at = now_iso()
+                task.reminder_history.append({
+                    "ts": now_iso(), "action": "done", "via": "user_button",
+                })
+                task.updated_at = now_iso()
+                ov._save_tasks()
+            await tg.send(
+                f"✅ یادآوری «{task.title}» تمام و آرشیو شد.", silent=True,
+            )
+            try:
+                await self.notify_event(
+                    "reminder_done", f"✅ یادآوری «{task.title}» تمام شد.",
+                    priority="low",
+                )
+            except Exception:
+                pass
+            return {"ok": True, "handled": "reminder_done"}
+
+        if action == "snooze_pick":
+            rows = [
+                [{"text": "⏰ ۱۵ دقیقه دیگر", "callback_data": f"reminder:snooze:{task_id}:900"}],
+                [{"text": "⏰ ۱ ساعت دیگر", "callback_data": f"reminder:snooze:{task_id}:3600"}],
+                [{"text": "⏰ ۳ ساعت دیگر", "callback_data": f"reminder:snooze:{task_id}:10800"}],
+                [{"text": "⏰ فردا همین ساعت", "callback_data": f"reminder:snooze:{task_id}:86400"}],
+                [{"text": "⏰ یک هفته دیگر", "callback_data": f"reminder:snooze:{task_id}:604800"}],
+            ]
+            await tg.send(
+                f"⏰ چه زمانی دوباره یادآوری کنم برای «{task.title}»؟",
+                silent=True,
+                reply_markup={"inline_keyboard": rows},
+            )
+            return {"ok": True, "handled": "reminder_snooze_pick"}
+
+        if action == "snooze" and len(parts) >= 4:
+            spec = parts[3]
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+            try:
+                delta = int(spec)
+                new_at = _dt.now(_tz.utc) + _td(seconds=delta)
+                new_at_iso = new_at.isoformat()
+            except ValueError:
+                # ISO خام
+                try:
+                    new_at = _dt.fromisoformat(spec.replace("Z", "+00:00"))
+                    if new_at.tzinfo is None:
+                        new_at = new_at.replace(tzinfo=_tz.utc)
+                    new_at_iso = new_at.isoformat()
+                except Exception:
+                    await tg.send("⚠️ فرمت زمان نامعتبر.", silent=True)
+                    return {"ok": True, "handled": "reminder_snooze_bad_format"}
+            async with ov._lock:
+                task.reminder_at = new_at_iso
+                task.reminder_state = "snoozed"
+                task.reminder_history.append({
+                    "ts": now_iso(), "action": "snoozed", "new_at": new_at_iso,
+                })
+                task.updated_at = now_iso()
+                ov._save_tasks()
+            await tg.send(
+                f"⏰ یادآوری «{task.title}» به {new_at_iso} موکول شد.",
+                silent=True,
+            )
+            try:
+                await self.notify_event(
+                    "reminder_snoozed",
+                    f"⏰ یادآوری «{task.title}» به {new_at_iso} موکول شد.",
+                    priority="low",
+                )
+            except Exception:
+                pass
+            return {"ok": True, "handled": "reminder_snoozed"}
+
+        return {"ok": True, "ignored": True}
 
     async def send_daily_report(self, summary: Dict[str, Any]) -> List[Dict[str, Any]]:
         """ارسال گزارش روزانه به همه کانال‌های ready.
@@ -2864,6 +3135,10 @@ class NotificationService:
             _chat_state.pop(chat_id_str, None)
             await tg.send("❌ flow لغو شد.", silent=True)
             return {"ok": True, "handled": "flow_cancel"}
+
+        # 🔔 reminder:* callbacks (tick/done/snooze)
+        if data.startswith("reminder:"):
+            return await self._handle_reminder_callback(chat_id_str, data, msg)
 
         # pick:<watched_id>
         if data.startswith("pick:"):

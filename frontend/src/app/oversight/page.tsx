@@ -203,8 +203,15 @@ interface Task {
     evidence?: string;
     last_verified_at?: string | null;
     completed_at?: string | null;
+    done?: boolean;  // 🔔 reminder tick flag
   }>;
   overall_completion_pct?: number | null;
+  // 🔔 Reminder feature
+  reminder_at?: string | null;
+  reminder_state?: 'none' | 'scheduled' | 'fired' | 'snoozed' | 'done';
+  reminder_history?: Array<{ ts: string; action: string; [k: string]: any }>;
+  reminder_message_id?: number | null;
+  reminder_repeat_rule?: string | null;
 }
 
 interface Report {
@@ -268,6 +275,7 @@ const TYPE_ICONS: Record<string, string> = {
   feature_request: '✨',
   refactor: '🔧',
   docs: '📝',
+  reminder: '🔔',
   other: '📌',
 };
 
@@ -906,6 +914,9 @@ export default function OversightPage() {
   }, []);
   const [ideaType, setIdeaType] = useState('idea');
   const [ideaPriority, setIdeaPriority] = useState('medium');
+  // 🔔 Reminder feature — datetime-local string (YYYY-MM-DDTHH:mm)
+  const [reminderAt, setReminderAt] = useState<string>('');
+  const [reminderRepeat, setReminderRepeat] = useState<string>('');  // ''|daily|weekly
   const [ideaDeadline, setIdeaDeadline] = useState('');
   // 🆕 (Multi-pass) حالت تبدیل ایده به پرامپت
   // "auto" = heuristic، "always" = همیشه تقسیم مرحله‌ای، "never" = single-pass
@@ -1502,6 +1513,13 @@ export default function OversightPage() {
               .filter((s) => ['completed', 'extracting', 'extracted'].includes(s.status))
               .sort((a, b) => a.file_order - b.file_order)
               .map((s) => s.session_id),
+            // 🔔 Reminder feature — فقط وقتی type=reminder
+            reminder_at: ideaType === 'reminder' && reminderAt
+              ? new Date(reminderAt).toISOString()
+              : null,
+            reminder_repeat_rule: ideaType === 'reminder' && reminderRepeat
+              ? reminderRepeat
+              : null,
           }),
         });
         if (res.ok) {
@@ -2595,9 +2613,42 @@ export default function OversightPage() {
                   <option value="feature_request">✨ قابلیت جدید</option>
                   <option value="refactor">🔧 بازنویسی</option>
                   <option value="docs">📝 مستند</option>
+                  <option value="reminder">🔔 یادآوری</option>
                   <option value="other">📌 دیگر</option>
                 </select>
               </div>
+              {ideaType === 'reminder' && (
+                <>
+                  <div>
+                    <label className="block text-xs mb-1 dark:text-gray-300">
+                      🔔 موعد یادآوری
+                    </label>
+                    <input
+                      type="datetime-local"
+                      value={reminderAt}
+                      onChange={(e) => setReminderAt(e.target.value)}
+                      className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                    />
+                    <p className="text-xs text-gray-400 mt-1">
+                      در این زمان از طریق تلگرام یادآوری می‌شود
+                    </p>
+                  </div>
+                  <div>
+                    <label className="block text-xs mb-1 dark:text-gray-300">
+                      تکرار (اختیاری)
+                    </label>
+                    <select
+                      value={reminderRepeat}
+                      onChange={(e) => setReminderRepeat(e.target.value)}
+                      className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                    >
+                      <option value="">یک‌بار</option>
+                      <option value="daily">روزانه</option>
+                      <option value="weekly">هفتگی</option>
+                    </select>
+                  </div>
+                </>
+              )}
               <div>
                 <label className="block text-xs mb-1 dark:text-gray-300">اولویت</label>
                 <select
@@ -3432,16 +3483,155 @@ export default function OversightPage() {
                   </p>
                 </div>
               )}
+              {viewingTask.type === 'reminder' && (
+                <div className="border-t pt-3 mt-3 dark:border-gray-700">
+                  <h4 className="text-sm font-bold dark:text-white mb-2">
+                    🔔 یادآوری
+                  </h4>
+                  {viewingTask.reminder_at && (
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">
+                      موعد بعدی: {new Date(viewingTask.reminder_at).toLocaleString('fa-IR')}
+                      {' '}({viewingTask.reminder_state})
+                    </p>
+                  )}
+                  {(viewingTask.task_steps || []).length > 0 && (
+                    <div className="space-y-1 mb-3">
+                      <p className="text-xs text-gray-500 mb-1">چک‌لیست:</p>
+                      {(viewingTask.task_steps || []).map((s: any) => (
+                        <label
+                          key={s.id}
+                          className="flex items-start gap-2 text-sm dark:text-gray-200 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 p-1 rounded"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={!!s.done || s.status === 'done'}
+                            onChange={async (e) => {
+                              try {
+                                const r = await fetch(
+                                  `${API_BASE}/api/oversight/tasks/${viewingTask.id}/reminder/step/${s.id}`,
+                                  {
+                                    method: 'PATCH',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ done: e.target.checked }),
+                                  },
+                                );
+                                if (r.ok) {
+                                  const data = await r.json();
+                                  if (data.task) {
+                                    setTasks((prev) =>
+                                      prev.map((t) => (t.id === data.task.id ? data.task : t)),
+                                    );
+                                    setViewingTask(data.task);
+                                  }
+                                } else {
+                                  showError('ذخیره ناموفق');
+                                }
+                              } catch {
+                                showError('شبکه ناموفق');
+                              }
+                            }}
+                            className="mt-1"
+                          />
+                          <span
+                            className={
+                              s.done || s.status === 'done' ? 'line-through opacity-60' : ''
+                            }
+                          >
+                            {s.title || s.scope}
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex gap-2 flex-wrap">
+                    <button
+                      onClick={async () => {
+                        const choice = prompt(
+                          'تعویق به چه زمانی؟ (مثال: 1h, 3h, 1d) یا تاریخ ISO',
+                          '1h',
+                        );
+                        if (!choice) return;
+                        let body: any = {};
+                        const m = choice.match(/^(\d+)([smhd])$/);
+                        if (m) {
+                          const n = parseInt(m[1]);
+                          const mult = { s: 1, m: 60, h: 3600, d: 86400 }[m[2]] || 60;
+                          body = { delta_seconds: n * mult };
+                        } else {
+                          body = { until: choice };
+                        }
+                        try {
+                          const r = await fetch(
+                            `${API_BASE}/api/oversight/tasks/${viewingTask.id}/reminder/snooze`,
+                            {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify(body),
+                            },
+                          );
+                          if (r.ok) {
+                            const data = await r.json();
+                            if (data.task) {
+                              setTasks((p) =>
+                                p.map((t) => (t.id === data.task.id ? data.task : t)),
+                              );
+                              setViewingTask(data.task);
+                              showSuccess('snooze شد');
+                            }
+                          } else {
+                            showError('ذخیره ناموفق');
+                          }
+                        } catch {
+                          showError('شبکه ناموفق');
+                        }
+                      }}
+                      className="px-3 py-1.5 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600 text-sm"
+                    >
+                      ⏰ Snooze
+                    </button>
+                    <button
+                      onClick={async () => {
+                        if (!confirm('این یادآوری تمام شد و آرشیو شود؟')) return;
+                        try {
+                          const r = await fetch(
+                            `${API_BASE}/api/oversight/tasks/${viewingTask.id}/reminder/done`,
+                            { method: 'POST' },
+                          );
+                          if (r.ok) {
+                            const data = await r.json();
+                            if (data.task) {
+                              setTasks((p) =>
+                                p.map((t) => (t.id === data.task.id ? data.task : t)),
+                              );
+                              setViewingTask(null);
+                              showSuccess('یادآوری انجام شد و آرشیو شد');
+                            }
+                          } else {
+                            showError('ذخیره ناموفق');
+                          }
+                        } catch {
+                          showError('شبکه ناموفق');
+                        }
+                      }}
+                      className="px-3 py-1.5 bg-green-500 text-white rounded-lg hover:bg-green-600 text-sm"
+                    >
+                      ✅ تمام شد / آرشیو
+                    </button>
+                  </div>
+                </div>
+              )}
               <div className="flex gap-2 pt-3">
-                <button
-                  onClick={() => {
-                    runTask(viewingTask.id);
-                    setViewingTask(null);
-                  }}
-                  className="flex-1 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
-                >
-                  ▶ اجرای فوری
-                </button>
+                {viewingTask.type !== 'reminder' && (
+                  <button
+                    onClick={() => {
+                      runTask(viewingTask.id);
+                      setViewingTask(null);
+                    }}
+                    className="flex-1 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+                  >
+                    ▶ اجرای فوری
+                  </button>
+                )}
               </div>
             </div>
           </Modal>
