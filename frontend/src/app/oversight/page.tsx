@@ -3388,7 +3388,38 @@ export default function OversightPage() {
                 </div>
               )}
               <div>
-                <h4 className="text-xs text-gray-500 mb-1">پرامپت</h4>
+                <div className="flex items-center justify-between mb-1">
+                  <h4 className="text-xs text-gray-500">پرامپت</h4>
+                  <button
+                    onClick={async () => {
+                      const txt = viewingTask.prompt || '';
+                      if (!txt) {
+                        showError('پرامپت خالی است');
+                        return;
+                      }
+                      try {
+                        if (navigator?.clipboard?.writeText) {
+                          await navigator.clipboard.writeText(txt);
+                          showSuccess('پرامپت در کلیپ‌بورد کپی شد');
+                        } else {
+                          const ta = document.createElement('textarea');
+                          ta.value = txt;
+                          document.body.appendChild(ta);
+                          ta.select();
+                          document.execCommand('copy');
+                          document.body.removeChild(ta);
+                          showSuccess('پرامپت کپی شد');
+                        }
+                      } catch {
+                        showError('کپی ناموفق');
+                      }
+                    }}
+                    className="text-xs px-2 py-1 bg-gray-200 dark:bg-gray-700 dark:text-gray-200 rounded hover:bg-gray-300 dark:hover:bg-gray-600"
+                    title="کپی متن پرامپت"
+                  >
+                    📋 کپی
+                  </button>
+                </div>
                 <pre className="text-sm dark:text-gray-200 whitespace-pre-wrap p-3 bg-gray-50 dark:bg-gray-900 rounded-lg max-h-80 overflow-auto">
                   {viewingTask.prompt}
                 </pre>
