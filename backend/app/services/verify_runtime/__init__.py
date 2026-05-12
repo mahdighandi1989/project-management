@@ -20,6 +20,7 @@ from .ac_schema import (
     normalize_task_step,
     normalize_task_steps,
 )
+from .ac_enricher import enrich_acs_with_verify_plans
 
 __all__ = [
     "AC_METHODS",
@@ -28,4 +29,5 @@ __all__ = [
     "normalize_ac_list",
     "normalize_task_step",
     "normalize_task_steps",
+    "enrich_acs_with_verify_plans",
 ]

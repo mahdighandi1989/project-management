@@ -1521,6 +1521,22 @@ class OversightService:
         # evidence_history} تبدیل می‌کند. اگر هیچ AC ای نبود، از پرامپت extract می‌شود.
         raw_ac = payload.get("acceptance_criteria") or extract_acceptance_criteria(prompt)
         acceptance_criteria = normalize_ac_list(raw_ac)
+        # 🔬 (Runtime Verify Stage 2) — AC ها را با AI enrich کن تا verify_method
+        # و verify_plan ساختاریافته بگیرند. این یک best-effort call است — اگر
+        # شکست بخورد، AC ها با method=static باقی می‌مانند.
+        # فقط برای task هایی که تازه ساخته می‌شوند (نه merge/duplicate) لازم
+        # است، چون یکبار است و سرعت ایجاد را کم می‌کند.
+        try:
+            from .verify_runtime import enrich_acs_with_verify_plans
+            acceptance_criteria = await enrich_acs_with_verify_plans(
+                acceptance_criteria,
+                title=title,
+                description=raw_idea or prompt[:500],
+                target_files=target_files,
+                model_id=(payload.get("model_id") or None),
+            )
+        except Exception as _e:
+            logger.debug(f"AC enrich at create_task skipped: {_e}")
 
         execution_mode = payload.get("execution_mode")
         if not execution_mode:
