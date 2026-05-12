@@ -99,6 +99,11 @@ interface Watched {
   next_scan_at?: string | null;
   last_verify_at?: string | null;
   next_verify_at?: string | null;
+  // 🔬 (Runtime Verify Stage 4) — base URLs + auth + repo برای probe ها
+  frontend_base_url?: string | null;
+  backend_base_url?: string | null;
+  runtime_auth?: { type?: 'bearer' | 'cookie' | null; value?: string | null } | null;
+  runtime_repo_path?: string | null;
 }
 
 // 🔬 (Runtime Verify Stage 1) — ساختار AC جدید
@@ -4797,6 +4802,119 @@ function WatchedCard({
             🔄 بازتولید پرامپت‌های ناقص
           </button>
         </div>
+      </div>
+
+      {/* 🔬 (Runtime Verify Stage 4) — Runtime Verify config */}
+      <div className="mt-3 p-2 border border-cyan-300 dark:border-cyan-700 rounded bg-cyan-50/40 dark:bg-cyan-900/10">
+        <div className="text-xs font-semibold dark:text-cyan-200 mb-1.5">
+          🔬 Runtime Verify (probe ها)
+        </div>
+        <div className="text-[10px] text-gray-500 dark:text-gray-400 mb-2">
+          base URL ها برای UI/API probe ها. اگر تنظیم نشده، probe ها skip می‌شوند.
+        </div>
+        <label className="block text-xs mb-1.5 dark:text-gray-200">
+          <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Frontend Base URL</span>
+          <input
+            type="url"
+            defaultValue={w.frontend_base_url || ''}
+            placeholder="https://my-app.example.com"
+            onBlur={(e) => {
+              const v = e.target.value.trim() || null;
+              if (v !== (w.frontend_base_url || null)) onChange({ frontend_base_url: v });
+            }}
+            className="w-full p-1.5 border rounded text-xs dark:bg-gray-700 dark:text-white dark:border-gray-600"
+            dir="ltr"
+          />
+        </label>
+        <label className="block text-xs mb-1.5 dark:text-gray-200">
+          <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Backend Base URL</span>
+          <input
+            type="url"
+            defaultValue={w.backend_base_url || ''}
+            placeholder="https://my-api.example.com"
+            onBlur={(e) => {
+              const v = e.target.value.trim() || null;
+              if (v !== (w.backend_base_url || null)) onChange({ backend_base_url: v });
+            }}
+            className="w-full p-1.5 border rounded text-xs dark:bg-gray-700 dark:text-white dark:border-gray-600"
+            dir="ltr"
+          />
+        </label>
+        <label className="block text-xs mb-1.5 dark:text-gray-200">
+          <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Repo Path (محلی)</span>
+          <input
+            type="text"
+            defaultValue={w.runtime_repo_path || ''}
+            placeholder="/path/to/cloned/repo"
+            onBlur={(e) => {
+              const v = e.target.value.trim() || null;
+              if (v !== (w.runtime_repo_path || null)) onChange({ runtime_repo_path: v });
+            }}
+            className="w-full p-1.5 border rounded text-xs dark:bg-gray-700 dark:text-white dark:border-gray-600"
+            dir="ltr"
+          />
+        </label>
+        <div className="grid grid-cols-3 gap-1 mb-1.5">
+          <label className="text-xs col-span-1 dark:text-gray-200">
+            <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Auth Type</span>
+            <select
+              value={w.runtime_auth?.type || ''}
+              onChange={(e) => {
+                const v = e.target.value || null;
+                onChange({
+                  runtime_auth: v
+                    ? { type: v, value: w.runtime_auth?.value || '' }
+                    : null,
+                });
+              }}
+              className="w-full p-1.5 border rounded text-xs dark:bg-gray-700 dark:text-white dark:border-gray-600"
+            >
+              <option value="">none</option>
+              <option value="bearer">Bearer</option>
+              <option value="cookie">Cookie</option>
+            </select>
+          </label>
+          <label className="text-xs col-span-2 dark:text-gray-200">
+            <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Auth Value</span>
+            <input
+              type="text"
+              defaultValue={w.runtime_auth?.value || ''}
+              placeholder={w.runtime_auth?.type === 'cookie' ? 'name=val; name2=val2' : 'token...'}
+              onBlur={(e) => {
+                const v = e.target.value.trim();
+                if (v !== (w.runtime_auth?.value || '')) {
+                  onChange({
+                    runtime_auth: v
+                      ? { type: w.runtime_auth?.type || 'bearer', value: v }
+                      : null,
+                  });
+                }
+              }}
+              className="w-full p-1.5 border rounded text-xs dark:bg-gray-700 dark:text-white dark:border-gray-600"
+              dir="ltr"
+            />
+          </label>
+        </div>
+        <button
+          onClick={async () => {
+            try {
+              const r = await fetch(
+                `${API_BASE}/api/oversight/watched/${w.id}/runtime/test-connection`,
+                { method: 'POST' },
+              );
+              const data = await r.json();
+              alert(
+                `Frontend: ${data.frontend?.ok ? '✅' : '❌'} ${data.frontend?.status || data.frontend?.error || ''}\n` +
+                `Backend:  ${data.backend?.ok ? '✅' : '❌'} ${data.backend?.status || data.backend?.error || ''}`,
+              );
+            } catch (e: any) {
+              alert(`خطا: ${e.message}`);
+            }
+          }}
+          className="text-[11px] px-2 py-1 bg-cyan-600 text-white rounded hover:bg-cyan-700"
+        >
+          🔌 تست اتصال
+        </button>
       </div>
 
       {/* 🆕 (auto-loop) — ping-pong continuous: فقط اگر autonomy=auto و verify_only=false */}

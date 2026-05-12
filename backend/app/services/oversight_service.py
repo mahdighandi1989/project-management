@@ -208,6 +208,18 @@ class WatchedProject:
     # 🆕 (Smart Task Lifecycle) فعال‌سازی dedup در ایجاد دستی + آستانهٔ امتیاز
     dedup_in_manual_create: bool = True
     dedup_score_threshold: float = 0.65  # 0..1
+
+    # 🔬 (Runtime Verify Stage 4) — base URLs برای probe های runtime
+    # اگر تنظیم نشده باشد، UI/API probe ها برای این پروژه skip می‌شوند.
+    frontend_base_url: Optional[str] = None  # مثلاً https://ai-creator-frontend.onrender.com
+    backend_base_url: Optional[str] = None   # مثلاً https://ai-creator-backend.onrender.com
+    # احراز هویت برای probe ها — dict {"type": "bearer"|"cookie", "value": "..."}
+    # نمونه: {"type": "cookie", "value": "session=abc; csrf=xyz"}
+    runtime_auth: Optional[Dict[str, Any]] = None
+    # path مطلق به repo (clone شده) برای static + test probe
+    # اگر None، probe های static/backend_test skip می‌شوند
+    runtime_repo_path: Optional[str] = None
+
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
 

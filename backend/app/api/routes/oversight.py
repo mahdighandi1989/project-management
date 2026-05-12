@@ -59,6 +59,11 @@ class WatchedUpdate(BaseModel):
     prompt_quality_threshold: Optional[int] = None  # 0..100
     dedup_in_manual_create: Optional[bool] = None
     dedup_score_threshold: Optional[float] = None  # 0..1
+    # 🔬 (Runtime Verify Stage 4) — base URLs + auth + repo_path برای probe ها
+    frontend_base_url: Optional[str] = None
+    backend_base_url: Optional[str] = None
+    runtime_auth: Optional[Dict[str, Any]] = None   # {type, value}
+    runtime_repo_path: Optional[str] = None
 
 
 class IdeaToPromptRequest(BaseModel):
@@ -263,6 +268,42 @@ async def update_watched(watched_id: str, payload: WatchedUpdate):
     if not result:
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
     return result
+
+
+# 🔬 (Runtime Verify Stage 4) — تست اتصال probe
+@router.post("/watched/{watched_id}/runtime/test-connection")
+async def runtime_test_connection(watched_id: str):
+    """ping به frontend و backend base URL تنظیم‌شدهٔ این watched.
+
+    خروجی: {frontend: {ok, status, error?}, backend: {ok, status, error?}}
+    """
+    service = get_oversight_service()
+    w = next((x for x in service.watched if x.id == watched_id), None)
+    if not w:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+    out: Dict[str, Any] = {}
+    try:
+        import httpx
+    except ImportError:
+        raise HTTPException(status_code=500, detail="httpx در سرور نصب نیست")
+    for label, url in (
+        ("frontend", getattr(w, "frontend_base_url", None)),
+        ("backend", getattr(w, "backend_base_url", None)),
+    ):
+        if not url:
+            out[label] = {"ok": False, "error": "URL تنظیم نشده"}
+            continue
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+                r = await c.get(url)
+            out[label] = {
+                "ok": 200 <= r.status_code < 500,
+                "status": r.status_code,
+                "url": url,
+            }
+        except Exception as e:
+            out[label] = {"ok": False, "error": str(e)[:200], "url": url}
+    return out
 
 
 @router.delete("/watched/{watched_id}")
