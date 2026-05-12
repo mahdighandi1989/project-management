@@ -621,6 +621,19 @@ class EmailChannel(NotificationChannel):
 PRIORITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 
+def _md_escape_tg(s: str) -> str:
+    """escape کاراکترهای Markdown که می‌توانند parse تلگرام را بشکنند."""
+    if not s:
+        return ""
+    out = []
+    for ch in s:
+        if ch in ("_", "*", "`", "["):
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 # 🆕 (P5) state machine برای flow چند-مرحله‌ای ربات (/new_task)
 # in-memory state — اگر backend restart شود، session‌های فعال گم می‌شوند
 # (timeout 10 دقیقه شدید است → cleanup خودکار)
@@ -1229,6 +1242,23 @@ class NotificationService:
         state = _chat_state.get(chat_id_str)
         if state and state.get("phase") == "awaiting_idea":
             return await self._receive_idea_text(chat_id_str, state, text)
+        # 🆕 (Task Regen) phase awaiting_regen_idea — کاربر متن جدید را داد
+        if state and state.get("phase") == "awaiting_regen_idea":
+            task_id = state.get("task_id") or ""
+            _chat_state.pop(chat_id_str, None)  # یک‌بار مصرف
+            if not task_id:
+                tg = self._telegram()
+                await tg.send("⚠️ task_id ناشناخته است.", silent=True)
+                return {"ok": True, "handled": "regen_no_task"}
+            t = (text or "").strip()
+            # /skip → از همان raw_idea فعلی استفاده می‌کنیم (new_raw_idea=None)
+            if t.lower() in ("/skip", "skip"):
+                return await self._execute_task_regen(chat_id_str, task_id, None)
+            if t.lower() in ("/cancel", "cancel"):
+                tg = self._telegram()
+                await tg.send("❌ بازتولید لغو شد.", silent=True)
+                return {"ok": True, "handled": "regen_cancel"}
+            return await self._execute_task_regen(chat_id_str, task_id, t)
         # 🆕 Creator phase handlers — text-based phases (v1 — legacy)
         if state and state.get("phase") in (
             "creator_awaiting_name", "creator_awaiting_desc", "creator_awaiting_tech",
@@ -1497,7 +1527,7 @@ class NotificationService:
             "codex:build", "codex:view", "codex:refresh",
             "creator_confirm", "creator_regenerate_prompt",
             "task_dup:merge", "task_dup:force", "menu:index",
-            "index:refresh", "confirm:",
+            "index:refresh", "confirm:", "task_regen:",
         )
         if any(data.startswith(p) for p in _heavy_prefixes):
             await self._answer_callback(cq_id, "⏳ در حال پردازش...")
@@ -1760,6 +1790,10 @@ class NotificationService:
         if data.startswith("task_dup:"):
             return await self._handle_task_dup_callback(chat_id_str, data)
 
+        # 🆕 (Task Regen) task_regen:<task_id> — بازتولید پرامپت تسک
+        if data.startswith("task_regen:"):
+            return await self._handle_task_regen_callback(chat_id_str, data)
+
         # creator_confirm:push:<token> یا creator_confirm:local:<token>
         if data.startswith("creator_confirm:"):
             parts = data.split(":", 2)
@@ -1870,24 +1904,9 @@ class NotificationService:
             })
             new_task = result.get("task") or {}
 
-            # پاسخ به کاربر با لینک
-            kb = None
-            if base:
-                kb = {
-                    "inline_keyboard": [
-                        [{"text": "📋 دیدن تسک‌ها", "url": f"{base}/oversight?tab=tasks"}],
-                        [{"text": "👁 تحت نظارت", "url": f"{base}/oversight?tab=watched"}],
-                    ]
-                }
-            await tg.send(
-                f"✅ *تسک ساخته شد*\n\n"
-                f"📌 _{(new_task.get('title') or '')[:120]}_\n"
-                f"📁 `{new_task.get('project_full_name') or ''}`\n"
-                f"🔖 {new_task.get('priority') or 'medium'} • {new_task.get('type') or 'other'}\n\n"
-                f"در پنل قابل مشاهده، اجرا و verify است.",
-                silent=False,  # موفقیت با صدا
-                reply_markup=kb,
-            )
+            # 🆕 پیام را با چک‌لیست + PDF (متن کامل پرامپت + جزئیات همهٔ
+            # مراحل) + دکمهٔ «بازتولید پرامپت» (از همین تلگرام) بفرست.
+            await self._send_task_created_message(new_task, base=base)
             return {"ok": True, "handled": "task_created", "task_id": new_task.get("id")}
         except Exception as e:
             logger.exception(f"telegram bot idea_to_prompt failed: {e}")
@@ -1896,6 +1915,167 @@ class NotificationService:
                 silent=False,
             )
             return {"ok": True, "handled": "task_create_failed", "error": str(e)}
+
+    # -----------------------------------------------------------------------
+    # 🆕 (Task Created Telegram Message) — پیام چک‌لیستی + PDF + دکمهٔ بازتولید
+    # -----------------------------------------------------------------------
+
+    async def _send_task_created_message(
+        self, task_dict: Dict[str, Any], *, base: str = "",
+    ) -> Dict[str, Any]:
+        """ارسال پیام «تسک ساخته شد» با:
+          • متن چک‌لیستی (عناوین کوتاه مراحل با ⬜)
+          • PDF پیوست (متن کامل پرامپت + جزئیات همهٔ مراحل + AC ها)
+          • دکمهٔ بازتولید پرامپت (از همین تلگرام)
+        """
+        tg = self._telegram()
+        if not tg.is_configured():
+            return {"ok": False, "error": "telegram not configured"}
+
+        # ساخت یک namespace ساده از dict تا با getattr کار کند (builderها از
+        # getattr استفاده می‌کنند تا روی هر شیء dataclass/namespace کار کنند).
+        class _TaskNs:
+            pass
+        ns = _TaskNs()
+        for k, v in (task_dict or {}).items():
+            setattr(ns, k, v)
+
+        # متن چک‌لیستی با header اختصاصی «تسک ساخته شد»
+        try:
+            from .oversight_verify_pdf import (
+                build_verify_checklist_message,
+                build_verify_report_pdf,
+            )
+            msg_text = build_verify_checklist_message(
+                ns, None,
+                header_override="✅ *تسک ساخته شد*",
+                char_budget=850,
+            )
+        except Exception as _e:
+            logger.warning(f"build_task_created_message failed: {_e}")
+            msg_text = (
+                f"✅ *تسک ساخته شد*\n\n"
+                f"📌 _{(task_dict.get('title') or '')[:120]}_\n"
+                f"📁 `{task_dict.get('project_full_name') or ''}`\n"
+                f"🔖 {task_dict.get('priority') or 'medium'} • {task_dict.get('type') or 'other'}"
+            )
+
+        # تولید PDF (best-effort)
+        pdf_bytes: Optional[bytes] = None
+        pdf_filename: Optional[str] = None
+        try:
+            pdf_bytes, pdf_filename = await build_verify_report_pdf(
+                ns, None, filename_prefix="task",
+            )
+        except Exception as _e:
+            logger.warning(f"task_created pdf failed: {_e}")
+            pdf_bytes = None
+
+        # دکمه‌ها: بازتولید + لینک‌های پنل
+        rows: List[List[Dict[str, str]]] = []
+        task_id = task_dict.get("id")
+        if task_id:
+            rows.append([
+                {"text": "🔄 بازتولید پرامپت", "callback_data": f"task_regen:{task_id}"},
+            ])
+        if base:
+            rows.append([
+                {"text": "📋 دیدن تسک‌ها", "url": f"{base}/oversight?tab=tasks"},
+            ])
+            rows.append([
+                {"text": "👁 تحت نظارت", "url": f"{base}/oversight?tab=watched"},
+            ])
+        reply_markup = {"inline_keyboard": rows} if rows else None
+
+        # اگر PDF داشتیم — به‌عنوان document با caption=msg_text. در غیر این
+        # صورت پیام متنی ساده.
+        if pdf_bytes and pdf_filename:
+            res = await tg.send_document(
+                pdf_bytes, pdf_filename,
+                caption=msg_text,
+                silent=False,
+                reply_markup=reply_markup,
+            )
+            if not res.get("ok"):
+                logger.warning(f"task_created send_document failed: {res.get('error')}")
+                # fallback به متن ساده
+                await tg.send(msg_text, silent=False, reply_markup=reply_markup)
+            return res
+        else:
+            return await tg.send(msg_text, silent=False, reply_markup=reply_markup)
+
+    async def _handle_task_regen_callback(
+        self, chat_id_str: str, data: str,
+    ) -> Dict[str, Any]:
+        """callback پاسخ به دکمهٔ «بازتولید پرامپت» در پیام تسک ساخته‌شده.
+
+        فرمت: `task_regen:<task_id>` — کاربر را به phase
+        `awaiting_regen_idea` می‌برد تا متن جدید ایده را وارد کند.
+        پس از دریافت متن، `regenerate_prompt_for_task` صدا زده می‌شود و
+        پیام تسک با PDF جدید دوباره فرستاده می‌شود.
+        """
+        tg = self._telegram()
+        parts = data.split(":", 1)
+        if len(parts) != 2 or not parts[1]:
+            await tg.send("⚠️ callback نامعتبر.", silent=True)
+            return {"ok": True, "handled": "task_regen_bad"}
+        task_id = parts[1].strip()
+        # وضعیت را روی phase جدید تنظیم کن
+        _chat_state[chat_id_str] = {
+            "phase": "awaiting_regen_idea",
+            "task_id": task_id,
+            "expires_at": _now_epoch() + _STATE_TTL_SECONDS,
+        }
+        # عنوان فعلی تسک را نشان بده تا کاربر بداند کدام تسک را بازتولید می‌کند
+        try:
+            from .oversight_service import get_oversight_service
+            _ov = get_oversight_service()
+            cur = next((t for t in _ov.tasks if t.id == task_id), None)
+            cur_title = (cur.title if cur else "")[:80] or "?"
+            cur_raw = (cur.raw_idea if cur else "") or ""
+        except Exception:
+            cur_title = "?"
+            cur_raw = ""
+        snippet = (cur_raw[:200] + "…") if len(cur_raw) > 200 else cur_raw
+        await tg.send(
+            f"🔄 *بازتولید پرامپت*\n\n"
+            f"📌 _{_md_escape_tg(cur_title)}_\n\n"
+            + (f"💭 ایدهٔ خام فعلی:\n_{_md_escape_tg(snippet)}_\n\n" if cur_raw else "")
+            + "✏️ متن ایدهٔ *جدید* را بنویس (یا /skip برای استفاده از همان ایدهٔ خام فعلی، یا /cancel برای لغو):",
+            silent=True,
+        )
+        return {"ok": True, "handled": "task_regen_start", "task_id": task_id}
+
+    async def _execute_task_regen(
+        self, chat_id_str: str, task_id: str, new_raw_idea: Optional[str],
+    ) -> Dict[str, Any]:
+        """اجرای regenerate برای تسک با raw_idea جدید (یا همان قبلی اگر None).
+
+        پس از موفقیت، پیام تسک با PDF جدید دوباره فرستاده می‌شود.
+        """
+        tg = self._telegram()
+        prefs = _read_prefs()
+        base = (prefs.get("app_base_url", "") or "").rstrip("/")
+        try:
+            from .oversight_service import get_oversight_service
+            _ov = get_oversight_service()
+            await tg.send("⏳ در حال بازتولید پرامپت با AI...", silent=True)
+            updated = await _ov.regenerate_prompt_for_task(
+                task_id,
+                new_raw_idea=new_raw_idea,
+            )
+            if not updated:
+                await tg.send("⚠️ تسک یافت نشد.", silent=True)
+                return {"ok": True, "handled": "task_regen_not_found"}
+            await self._send_task_created_message(updated, base=base)
+            return {"ok": True, "handled": "task_regen_done", "task_id": task_id}
+        except Exception as e:
+            logger.exception(f"task_regen failed: {e}")
+            await tg.send(
+                f"❌ خطا در بازتولید: `{str(e)[:300]}`",
+                silent=False,
+            )
+            return {"ok": True, "handled": "task_regen_failed", "error": str(e)}
 
     # -----------------------------------------------------------------------
     # 🆕 (Smart Task Lifecycle) task_dup:* callbacks
