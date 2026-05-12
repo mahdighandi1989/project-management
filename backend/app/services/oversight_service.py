@@ -2421,6 +2421,18 @@ class OversightService:
 
 خروجی این تسک به یک ابزار کدنویس خارجی (Cursor/Copilot/ChatGPT) داده می‌شود — پس فیلدها باید **کاملاً مشخص، grounded در کد واقعی، و قابل اعمال** باشند.
 
+# 🚨 قانون طلایی (نقض = شکست تسک)
+**متن خام کاربر مرجع اصلی است.** تو فقط ساختار اضافه می‌کنی، **هرگز اطلاعات را نمی‌حذفی**:
+
+1. **همهٔ URL ها، لینک‌ها، آدرس‌ها** که کاربر ذکر کرده، در `description` کپی شوند — verbatim، بدون تغییر.
+2. **همهٔ نام‌ها** (نام فایل، تابع، endpoint، repo، sandbox، service خاص) که کاربر گفته، در `description` تکرار شوند.
+3. **همهٔ context** که کاربر داده (مثلاً «در صفحهٔ X»، «وقتی Y رخ می‌دهد»، «در حالت Z»)، در `description` حفظ شود.
+4. **هرگز** کلمات اختصاصی، technical terms، یا کلمات کلیدی کاربر را با مترادف عمومی جایگزین نکن.
+5. `description` باید **حداقل ۸۰٪** حجم متن خام کاربر را داشته باشد + توضیحات تو.
+6. اگر کاربر چندین مورد در درخواست خود گفته (مثلاً ۵ تغییر مختلف)، **همهٔ ۵ مورد** باید در `description` ذکر شوند — هیچ‌کدام را حذف نکن.
+
+ساختار تو، **پوشش** متن کاربر است، نه **جایگزینی** آن.
+
 # 🎯 هدف اصلی پروژه (از زبان کاربر)
 {user_goal or '(کاربر یادداشتی ثبت نکرده است)'}
 
@@ -2428,7 +2440,7 @@ class OversightService:
 {ctx_text or 'پروژه مشخص نیست'}
 {deep_block}
 
-# 💬 ایده/درخواست خام کاربر
+# 💬 ایده/درخواست خام کاربر (مرجع اصلی — هیچ‌چیز را حذف نکن)
 نوع: {type_}
 اولویت: {priority}
 متن:
@@ -2440,8 +2452,8 @@ class OversightService:
 
 {{
   "title": "عنوان کوتاه و گویا تسک — یک جمله قابل سنجش (فارسی)",
-  "description": "پاراگراف کامل: چه چیزی، چرا، شواهد در کد واقعی پروژه (نام فایل و خط ذکر کن)",
-  "proposed_action": "پیشنهاد عملی برای پیاده‌سازی — با ذکر فایل‌ها/توابع واقعی",
+  "description": "پاراگراف کامل + همهٔ URL ها/آدرس‌ها/نام‌ها از متن کاربر + شواهد در کد واقعی پروژه (نام فایل و خط ذکر کن). حداقل ۸۰٪ متن کاربر در اینجا باید بازتاب پیدا کند.",
+  "proposed_action": "پیشنهاد عملی برای پیاده‌سازی — با ذکر فایل‌ها/توابع واقعی + همهٔ URL/آدرس از متن کاربر",
   "type": "bug | feature_request | refactor | docs | security | other",
   "priority": "low | medium | high | critical",
   "estimated_complexity": "small | medium | large",
@@ -2720,6 +2732,7 @@ class OversightService:
         full_prompt = build_strong_prompt(
             title=title,
             user_goal=user_goal,
+            raw_user_request=idea,  # 🆕 متن خام کاربر — verbatim حفظ می‌شود
             description=parsed.get("description", ""),
             proposed_action=parsed.get("proposed_action", ""),
             target_files=target_files,
