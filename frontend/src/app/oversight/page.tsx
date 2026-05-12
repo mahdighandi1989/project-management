@@ -5625,22 +5625,24 @@ function TasksPanel({
                 🔖 من اعمال کردم
               </button>
             )}
-            <button
-              onClick={() => onVerify(t.id, false)}
-              disabled={isRunning}
-              title="verify سریع: فقط تحلیل کد، بدون probe های runtime (Playwright/HTTP/pytest)"
-              className="px-3 py-1 bg-cyan-500 text-white rounded text-xs hover:bg-cyan-600 disabled:opacity-50"
-            >
-              🔍 verify
-            </button>
-            <button
-              onClick={() => onVerify(t.id, true)}
-              disabled={isRunning}
-              title="verify کامل: تحلیل کد + probe های runtime (مرورگر/API/تست) — کندتر ولی دقیق‌تر"
-              className="px-3 py-1 bg-purple-500 text-white rounded text-xs hover:bg-purple-600 disabled:opacity-50"
-            >
-              🔬 verify + runtime
-            </button>
+            <div className="inline-flex rounded overflow-hidden" title="verify">
+              <button
+                onClick={() => onVerify(t.id, true)}
+                disabled={isRunning}
+                title="verify کامل: تحلیل کد + probe های runtime (مرورگر/API/تست) — دقیق‌ترین حالت"
+                className="px-3 py-1 bg-cyan-500 text-white text-xs hover:bg-cyan-600 disabled:opacity-50"
+              >
+                🔍 verify
+              </button>
+              <button
+                onClick={() => onVerify(t.id, false)}
+                disabled={isRunning}
+                title="verify سریع: فقط تحلیل کد، بدون probe های runtime"
+                className="px-1.5 py-1 bg-cyan-700 text-white text-xs hover:bg-cyan-800 disabled:opacity-50 border-l border-cyan-900/30"
+              >
+                ⚡
+              </button>
+            </div>
             <button
               onClick={() => onExecuteWithAi(t)}
               disabled={!!executeDisabledReason}
