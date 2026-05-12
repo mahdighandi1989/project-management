@@ -1446,6 +1446,8 @@ export default function OversightPage() {
     let duplicate: typeof duplicatePrompt = null;
     const remaining: string[] = [];
     let idx = 0;
+    // 🛡 (audit fix) — جمع‌آوری خطاهای دقیق به‌جای silent fail
+    const errors: string[] = [];
     for (const wid of targetIds) {
       idx++;
       const w = watched.find((x) => x.id === wid);
@@ -1466,7 +1468,6 @@ export default function OversightPage() {
             force_create: forceCreate,
             task_steps: previewPrompt.task_steps || [],
             overall_completion_pct: previewPrompt.overall_completion_pct ?? null,
-            // 🆕 (Stage 7) — sessionهای آپلود (با ترتیب file_order) به این تسک ربط می‌خورند
             upload_session_ids: uploadedSessions
               .filter((s) => ['completed', 'extracting', 'extracted'].includes(s.status))
               .sort((a, b) => a.file_order - b.file_order)
@@ -1485,17 +1486,30 @@ export default function OversightPage() {
               priority: ideaPriority,
               matches: result.similar_matches || [],
             };
-            // باقی watched ها را به remaining منتقل کن تا پس از تصمیم کاربر
-            // فقط همین مورد و بعدی‌ها پردازش شوند، نه قبلی‌های موفق.
             remaining.push(...targetIds.slice(idx - 1));
             break;
           }
           if (result.task) {
             setTasks((prev) => [result.task, ...prev]);
             created++;
+          } else {
+            // 🛡 backend OK ولی task null — بهتر هشدار بدهیم
+            errors.push(
+              `پروژه «${w?.repo_full_name || '(بدون پروژه)'}»: status=${result.status || '?'}, task=null`,
+            );
           }
+        } else {
+          // 🛡 HTTP error — body را بخوان و نمایش بده
+          const errBody = await res.text().catch(() => '');
+          errors.push(
+            `پروژه «${w?.repo_full_name || '(بدون پروژه)'}»: HTTP ${res.status} — ${errBody.slice(0, 200)}`,
+          );
         }
-      } catch {}
+      } catch (e: any) {
+        errors.push(
+          `پروژه «${w?.repo_full_name || '(بدون پروژه)'}»: network — ${e?.message || e}`,
+        );
+      }
     }
     if (duplicate) {
       setSavePendingIds(remaining);
@@ -1511,11 +1525,22 @@ export default function OversightPage() {
       // در تسک بعدی نباشند. (sessions در سرور persist هستند ولی به task_id
       // مربوطه ربط خورده‌اند — UI آنها را نمایش نمی‌دهد.)
       resetTaskDraft();
-      showSuccess(`${created} تسک ساخته شد`);
+      // اگر برخی هم موفق بودند و برخی نه، هر دو پیام
+      const msg = errors.length
+        ? `${created} تسک ساخته شد ولی ${errors.length} خطا:\n${errors.join('\n')}`
+        : `${created} تسک ساخته شد`;
+      if (errors.length) showError(msg); else showSuccess(msg);
       reloadStatus();
       setTab('tasks');
     } else {
-      showError('هیچ تسکی ساخته نشد');
+      // 🛡 نمایش جزئیات خطا (به‌جای پیام مبهم)
+      if (errors.length) {
+        showError(`هیچ تسکی ساخته نشد:\n${errors.join('\n')}`);
+        // log به console برای debug کاربر
+        console.error('[savePromptAsTask] errors:', errors);
+      } else {
+        showError('هیچ تسکی ساخته نشد — هیچ پروژه‌ای انتخاب نشده؟');
+      }
     }
   };
 
