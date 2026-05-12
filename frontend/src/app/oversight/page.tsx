@@ -4956,7 +4956,7 @@ function WatchedCard({
             <select
               value={w.runtime_auth?.type || ''}
               onChange={(e) => {
-                const v = e.target.value || null;
+                const v = (e.target.value || null) as 'bearer' | 'cookie' | null;
                 onChange({
                   runtime_auth: v
                     ? { type: v, value: w.runtime_auth?.value || '' }
