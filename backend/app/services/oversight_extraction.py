@@ -623,6 +623,191 @@ def _extract_xlsx_sheets(path: Path) -> List[Tuple[str, str]]:
         raise ExtractionError(f"openpyxl failed: {e}")
 
 
+# ─────────────── PDF 4-page chunking (Stage 7) ───────────────
+
+PDF_CHUNK_SIZE: int = 4  # هر batch چند صفحه (قابل تنظیم)
+
+
+async def _run_pdf_extraction(
+    fe: "FileExtraction",
+    session: Any,
+    user_idea: str,
+    repo: "ExtractionRepo",
+    path: Path,
+    completed: set,
+    persist_segment_fn,
+) -> None:
+    """منطق PDF با 4-page chunking + final جمع‌بندی segment.
+
+    1. pypdf همهٔ صفحات را extract می‌کند → text-pages (که متن دارند) و
+       scan-pages (که خالی هستند، نیاز به OCR)
+    2. text-pages: هر صفحه یک segment مجزا (سریع، بدون AI call)
+    3. scan-pages: گروه‌بندی به batchهای 4-تایی، هر batch:
+       - render هر صفحه با pdftoppm → PNG → base64
+       - یک AI call با ۴ تصویر به Gemini، prompt: "متن کامل ۴ صفحه به
+         ترتیب صفحه، literal، بدون خلاصه‌سازی"
+       - یک segment با عنوان "صفحات N-M (OCR)" و متن کل ۴ صفحه
+    4. در پایان یک segment با عنوان "📋 جمع‌بندی نهایی" که شامل
+       متادیتای پروسه است (NOT summarization of content):
+       - تعداد کل صفحات
+       - text-pages vs scan-pages
+       - تعداد AI call های انجام‌شده
+       - زمان شروع/پایان (پر می‌شود توسط repo.update_extraction)
+       - hash sha256 از full text
+       - char count
+       - مدل استفاده‌شده
+
+    progress: per batch update روی tracker (اگر set شده).
+    """
+    import hashlib
+    from time import time as _now
+    pages = _extract_pdf_pages(path)
+    total_pages = len(pages)
+
+    # جدا کردن text-pages از scan-pages
+    text_pages: List[Tuple[int, str]] = []
+    scan_pages: List[int] = []
+    for page_num, txt in pages:
+        if txt.strip():
+            text_pages.append((page_num, txt))
+        else:
+            scan_pages.append(page_num)
+
+    # batchهای scan (هر 4 صفحه)
+    scan_batches: List[List[int]] = []
+    for i in range(0, len(scan_pages), PDF_CHUNK_SIZE):
+        scan_batches.append(scan_pages[i:i + PDF_CHUNK_SIZE])
+
+    # total_segments: هر text-page یک، هر batch یک، plus 1 جمع‌بندی
+    estimated_total = len(text_pages) + len(scan_batches) + 1
+    await repo.update_extraction(fe.id, total_segments=estimated_total)
+
+    start_time = _now()
+    ai_calls = 0
+
+    # 1) text-pages — هر کدام یک segment (سریع، resume-friendly)
+    for page_num, txt in text_pages:
+        if page_num in completed:
+            continue
+        await _wait_for_memory_headroom()
+        await persist_segment_fn(
+            page_num, f"صفحه {page_num}", txt, f"page={page_num}",
+        )
+
+    # 2) scan-batches — هر batch یک segment با OCR
+    # هر batch با شماره batch_index (نه page_num، تا overlap با text-pages نباشد):
+    # از 10000 + batch_index استفاده می‌کنیم برای ID یکتا
+    batch_id_offset = max(total_pages + 1, 10001)
+    for b_idx, batch_pages in enumerate(scan_batches, start=1):
+        seg_id = batch_id_offset + b_idx
+        if seg_id in completed:
+            continue
+        await _wait_for_memory_headroom()
+        first_p = batch_pages[0]
+        last_p = batch_pages[-1]
+        title = f"صفحات {first_p}–{last_p} (OCR — {len(batch_pages)} صفحه)"
+        # render همهٔ صفحات batch به base64
+        imgs: List[str] = []
+        render_errors: List[str] = []
+        for p_num in batch_pages:
+            try:
+                b64 = await _render_pdf_page_to_b64(path, p_num)
+                if b64:
+                    imgs.append(b64)
+                else:
+                    render_errors.append(f"page {p_num}: render returned None")
+            except Exception as e:
+                render_errors.append(f"page {p_num}: {str(e)[:100]}")
+
+        if not imgs:
+            # هیچ‌چیز render نشد — placeholder
+            await persist_segment_fn(
+                seg_id, title + " (render failed)",
+                "[render تصویری همهٔ صفحات این batch ناموفق بود — "
+                f"احتمالاً pdftoppm در سیستم نیست یا PDF خراب است.]\n"
+                f"خطاها: {'; '.join(render_errors[:3])}",
+                f"pages={first_p}-{last_p}",
+            )
+            continue
+
+        # ساخت prompt — همهٔ تصاویر را با هم بفرست
+        prompt = (
+            f"این {len(imgs)} تصویر صفحات {first_p} تا {last_p} از یک PDF هستند.\n\n"
+            f"**وظیفه**: متن کامل و literal هر صفحه را به ترتیب صفحه (از {first_p} به {last_p}) "
+            f"استخراج کن. قبل از متن هر صفحه، یک header `## صفحه N` بگذار.\n\n"
+            "قواعد سختگیرانه:\n"
+            "- هیچ‌چیز را خلاصه نکن.\n"
+            "- هیچ خطی، header، footer، شماره صفحه drop نشود.\n"
+            "- اگر فارسی است، فارسی بنویس.\n"
+            "- اگر جدولی هست، خطی‌سازی کن (با |).\n"
+            "- اگر تصویری بدون متن هست، توصیف کن «[تصویر: ...]».\n"
+        )
+        try:
+            # _ai_extract_text فقط یک image می‌گیرد در پارامتر `image_b64`،
+            # اما در داخلش `images` لیست است. برای چند تصویر، باید custom call
+            # داشته باشیم. ساده‌ترین راه: همهٔ تصاویر را به `_ai_extract_text`
+            # بفرستیم با inline_file_data به‌عنوان لیست (اما فعلاً API single).
+            # راه‌حل: اولین تصویر به image_b64، بقیه via inline_file_data fake
+            # نمی‌شود — لذا ai_manager.generate را مستقیم با images=[...] صدا می‌زنیم.
+            from .ai_manager import get_ai_manager
+            from .ai_base import Message
+            mgr = get_ai_manager()
+            messages = [
+                Message(role="system", content=(
+                    "تو یک OCR و استخراج‌گر متن دقیق هستی. متن کامل و literal "
+                    "از تصاویر داده‌شده بنویس. هیچ‌چیز خلاصه نکن."
+                )),
+                Message(role="user", content=prompt, images=imgs),
+            ]
+            resp = await asyncio.wait_for(
+                mgr.generate(
+                    model_id=fe.model_used, messages=messages,
+                    max_tokens=32000, temperature=0.1,
+                ),
+                timeout=PER_SEGMENT_TIMEOUT_SEC,
+            )
+            ai_calls += 1
+            text = (resp.content or "").strip()
+        except asyncio.TimeoutError:
+            text = f"[timeout بعد از {PER_SEGMENT_TIMEOUT_SEC}s — batch صفحات {first_p}-{last_p}]"
+        except Exception as e:
+            text = f"[OCR خطا: {str(e)[:200]}]"
+
+        await persist_segment_fn(seg_id, title, text, f"pages={first_p}-{last_p}")
+
+    # 3) جمع‌بندی نهایی — متادیتای پروسه (NOT content summary)
+    final_seg_id = batch_id_offset + len(scan_batches) + 1
+    if final_seg_id not in completed:
+        end_time = _now()
+        elapsed = end_time - start_time
+        # full text برای hash
+        all_segs = repo.get_segments(fe.id)
+        all_text_parts = []
+        for s in sorted(all_segs, key=lambda x: x.segment_index):
+            if s.status == "done":
+                all_text_parts.append(s.text)
+        full_text = "\n\n".join(all_text_parts)
+        h = hashlib.sha256(full_text.encode("utf-8")).hexdigest()[:16]
+        meta_text = (
+            f"📋 **جمع‌بندی پروسه استخراج PDF**\n\n"
+            f"- فایل: `{fe.original_filename}`\n"
+            f"- تعداد کل صفحات: **{total_pages}**\n"
+            f"- صفحات متنی (pypdf): **{len(text_pages)}**\n"
+            f"- صفحات اسکن‌شده (OCR): **{len(scan_pages)}** "
+            f"(در {len(scan_batches)} batch ۴تایی)\n"
+            f"- مدل OCR: `{fe.model_used}`\n"
+            f"- تعداد AI calls: **{ai_calls}**\n"
+            f"- زمان کل: **{elapsed:.1f}s**\n"
+            f"- char count کل متن: **{len(full_text):,}**\n"
+            f"- sha256 (16 char): `{h}`\n\n"
+            "✅ متن کامل در segmentهای قبلی به ترتیب صفحه قابل بازیابی است. "
+            "این segment فقط متادیتای پروسه است — *نه خلاصه‌سازی محتوا*."
+        )
+        await persist_segment_fn(
+            final_seg_id, "📋 جمع‌بندی نهایی", meta_text, "meta=process",
+        )
+
+
 # ─────────────── main entry ───────────────
 
 async def extract_session(
@@ -747,46 +932,9 @@ async def _run_extraction(
         return
 
     if mime == "application/pdf":
-        pages = _extract_pdf_pages(path)
-        await repo.update_extraction(fe.id, total_segments=len(pages))
-        # برای صفحاتی که pypdf متن نگرفت → AI extraction (Gemini)
-        for page_num, txt in pages:
-            if page_num in completed:
-                continue
-            await _wait_for_memory_headroom()
-            if txt.strip():
-                await _persist_segment(page_num, f"صفحه {page_num}", txt, f"page={page_num}")
-            else:
-                # 🆕 (Stage 9) — صفحه scan-only: render شده با Gemini Vision
-                # خواندن صفحه به‌صورت image و ارسال به مدل
-                try:
-                    img_b64 = await _render_pdf_page_to_b64(path, page_num)
-                except Exception as e:
-                    img_b64 = None
-                    logger.warning(f"PDF page {page_num} render failed: {e}")
-                if img_b64 is None:
-                    await _persist_segment(
-                        page_num, f"صفحه {page_num} (scan)",
-                        "[این صفحه scan-only است و render تصویری ناموفق بود. "
-                        "اگر pypdf نسخهٔ متن استخراج نمی‌کند، احتمالاً encrypted/کیفیت پایین است.]",
-                        f"page={page_num}",
-                    )
-                    continue
-                prompt = (
-                    f"این تصویر صفحهٔ {page_num} از یک PDF است. "
-                    "متن کامل و literal این صفحه را OCR کن — هیچ‌چیز را خلاصه نکن، "
-                    "هیچ خطی drop نشود. اگر متن فارسی است، فارسی بنویس."
-                )
-                try:
-                    text = await asyncio.wait_for(
-                        _ai_extract_text(fe.model_used, prompt=prompt, image_b64=img_b64, max_tokens=16000),
-                        timeout=PER_SEGMENT_TIMEOUT_SEC,
-                    )
-                except asyncio.TimeoutError:
-                    text = f"[timeout بعد از {PER_SEGMENT_TIMEOUT_SEC}s — page {page_num}]"
-                except Exception as e:
-                    text = f"[OCR خطا: {str(e)[:200]}]"
-                await _persist_segment(page_num, f"صفحه {page_num} (OCR)", text, f"page={page_num}")
+        await _run_pdf_extraction(
+            fe, session, user_idea, repo, path, completed, _persist_segment,
+        )
         return
 
     if mime in (
