@@ -978,10 +978,47 @@ async def verify_task(
             _os.environ.get("RUNTIME_VERIFY_ENABLED", "true").lower() != "false"
         )
         if runtime_enabled and acceptance_criteria:
-            from .verify_runtime import run_probes_for_task
+            from .verify_runtime import (
+                run_probes_for_task,
+                enrich_acs_with_verify_plans,
+            )
+            from .verify_runtime.ac_enricher import _ac_already_classified
             from .verify_runtime.storage import (
                 ensure_run_dir, write_manifest, cleanup_old_runs,
             )
+
+            # 🔬 (Stage 5 fix) — اگر AC این تسک هنوز classify نشده (همه static)
+            # و base URL داریم، AI را فراخوانی کن تا method ها را تشخیص دهد
+            # (یعنی AC هایی که UI/API هستند درست probe بخورند، نه static skipped).
+            try:
+                needs_enrich = any(
+                    not _ac_already_classified(ac if isinstance(ac, dict) else {"text": str(ac), "verify_method": "static", "verify_plan": {}})
+                    for ac in acceptance_criteria
+                )
+                has_base_url = bool(
+                    (watched and (getattr(watched, "frontend_base_url", None) or getattr(watched, "backend_base_url", None)))
+                )
+                if needs_enrich and has_base_url:
+                    logger.info(
+                        f"verify {task.id}: AC ها classify نشده‌اند — AI enricher را فراخوانی می‌کنیم"
+                    )
+                    enriched = await enrich_acs_with_verify_plans(
+                        acceptance_criteria,
+                        title=task.title,
+                        description=task.raw_idea or task.prompt[:500],
+                        target_files=list(task.target_files or []),
+                        model_id=model_id,
+                    )
+                    if enriched:
+                        # ذخیرهٔ AC جدید روی task (در lock)
+                        async with service._lock:
+                            task.acceptance_criteria = enriched
+                            task.updated_at = now_iso()
+                            service._save_tasks()
+                        acceptance_criteria = enriched
+            except Exception as _ee:
+                logger.warning(f"AC on-the-fly enrichment failed: {_ee}")
+
             runtime_run_id = f"run_{int(time.time() * 1000)}_{_uuid.uuid4().hex[:6]}"
             run_dir = ensure_run_dir(
                 _Path(STORAGE_DIR), str(task.id), runtime_run_id,
