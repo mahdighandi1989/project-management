@@ -2294,6 +2294,354 @@ class OversightService:
     # Idea -> Strong Prompt
     # ====================================================================
 
+    @staticmethod
+    def _is_complex_idea(idea: str) -> bool:
+        """تشخیص اینکه ایده پیچیده/طولانی است و نیاز به multi-pass دارد.
+
+        معیارها (هر کدام True باشد، complex است):
+          - طول > 400 کاراکتر
+          - بیش از ۸ خط
+          - بیش از ۳ علامت bullet (- * • ۱. 1.)
+          - بیش از ۴ علامت گذاری مرتبط (;، .، \n\n)
+          - بیش از ۲ URL متفاوت
+        """
+        import re as _re
+        if not idea or not idea.strip():
+            return False
+        if len(idea) > 400:
+            return True
+        if idea.count("\n") > 7:
+            return True
+        bullets = len(_re.findall(r'(?m)^\s*(?:[-*•]|\d+[\.\)])\s+', idea))
+        if bullets > 3:
+            return True
+        urls = _re.findall(r'https?://[^\s\)\]\}]+', idea)
+        if len(set(urls)) > 2:
+            return True
+        # شمارش "و" و "همچنین" و "بعد" به‌عنوان indicator مراحل
+        connectors = sum(idea.count(w) for w in [
+            "همچنین", "بعد از", "علاوه", "ضمناً", "نکته:", "اول", "دوم", "سوم",
+            "اضافه کن", "اصلاح کن", "تغییر بده", "حذف کن",
+        ])
+        if connectors >= 4:
+            return True
+        return False
+
+    async def _ai_plan_steps_from_idea(
+        self,
+        idea: str,
+        user_goal: str,
+        model_id: Optional[str] = None,
+        model_ids: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """مرحله ۱ از multi-pass: تقسیم ایده طولانی به مراحل کوچک.
+
+        خروجی: list از مراحل، هرکدام شامل:
+          {id, title, scope, raw_excerpt, key_terms: [...]}
+        اگر AI نتوانست تقسیم منطقی بدهد، list خالی.
+        """
+        plan_prompt = f"""تو یک پلانر هستی. درخواست طولانی کاربر را به مراحل کوچک‌تر و مستقل تقسیم می‌کنی.
+
+## قانون‌ها:
+1. هر مرحله یک scope واضح و **یک action** دارد (مثل «اضافه کردن endpoint X» یا «اصلاح UI Y» یا «نوشتن تست Z»)
+2. مراحل را به ترتیب منطقی پیاده‌سازی مرتب کن (foundation → core → integration → tests)
+3. حداکثر ۶ مرحله — اگر کاربر چیز بیشتری گفته، مراحل مرتبط را combine کن
+4. **`raw_excerpt`**: بخش‌هایی از متن کاربر که به این مرحله مربوط است — **verbatim**، با URLs و نام‌ها
+5. **`key_terms`**: همهٔ نام‌ها (فایل، endpoint، function، URL، library) که کاربر در این بخش گفته
+6. اگر درخواست کاربر فقط یک کار است (نه چندتایی)، فقط ۱ مرحله بده
+
+## هدف اصلی پروژه:
+{user_goal or '(کاربر یادداشتی ثبت نکرده است)'}
+
+## درخواست کاربر:
+\"\"\"
+{idea.strip()}
+\"\"\"
+
+## خروجی فقط JSON خالص (بدون ``` و توضیح اضافه):
+
+{{
+  "steps": [
+    {{
+      "id": 1,
+      "title": "عنوان کوتاه مرحله (یک جمله)",
+      "scope": "scope این مرحله — چه چیزی باید انجام شود، چه چیزی خارج از این مرحله است (۱-۲ جمله)",
+      "raw_excerpt": "بخشی از متن کاربر که به این مرحله مربوط است — کلمه به کلمه با URL ها و نام‌ها",
+      "key_terms": ["نام فایل ۱", "endpoint ۲", "library ۳", "https://..."]
+    }}
+  ],
+  "rationale": "چرا این تقسیم منطقی است (۱-۲ جمله)"
+}}
+"""
+        try:
+            response = await self._ai_generate(
+                plan_prompt,
+                model_id=(model_ids[0] if model_ids else model_id),
+                max_tokens=4000,
+                temperature=0.2,
+            )
+            parsed = self._extract_json(response)
+            if not isinstance(parsed, dict):
+                return []
+            steps = parsed.get("steps") or []
+            if not isinstance(steps, list):
+                return []
+            # validation
+            valid_steps: List[Dict[str, Any]] = []
+            for i, s in enumerate(steps):
+                if not isinstance(s, dict):
+                    continue
+                title = (s.get("title") or "").strip()
+                scope = (s.get("scope") or "").strip()
+                if not title or not scope:
+                    continue
+                valid_steps.append({
+                    "id": int(s.get("id") or (i + 1)),
+                    "title": title[:200],
+                    "scope": scope[:1000],
+                    "raw_excerpt": (s.get("raw_excerpt") or "").strip()[:2000],
+                    "key_terms": [str(k) for k in (s.get("key_terms") or [])[:15]],
+                })
+            return valid_steps[:6]
+        except Exception as e:
+            logger.warning(f"_ai_plan_steps_from_idea failed: {e}")
+            return []
+
+    async def _idea_to_prompt_multi_pass(
+        self,
+        idea: str,
+        watched_id: Optional[str],
+        type_: str = "other",
+        priority: str = "medium",
+        model_id: Optional[str] = None,
+        model_ids: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Multi-pass prompt generation:
+          Pass 1: AI ایده را به ۱-۶ مرحله می‌شکند
+          Pass 2..N: برای هر مرحله یک sub-prompt غنی می‌سازد (با همان منطق
+                     idea_to_prompt ولی scope محدود)
+          Pass N+1: همهٔ sub-prompts را به یک پرامپت master ادغام می‌کند
+
+        مزیت: برای مدل‌های کم‌قدرت، هر pass scope کوچک‌تری دارد → کیفیت بسیار بهتر.
+
+        خروجی همان format `idea_to_prompt` است (title, prompt, target_files, …)
+        یا None اگر multi-pass نتوانست انجام شود.
+        """
+        from .oversight_strong_prompt import EXECUTOR_DISCLAIMER, build_strong_prompt
+
+        watched = self._find_watched(watched_id) if watched_id else None
+        user_goal = (watched.user_notes or "").strip() if watched else ""
+
+        # Pass 1: تقسیم به مراحل
+        logger.info("idea_to_prompt multi-pass: Pass 1 — splitting into steps")
+        steps = await self._ai_plan_steps_from_idea(idea, user_goal, model_id, model_ids)
+        if not steps:
+            logger.info("multi-pass: AI نتوانست تقسیم کند → fallback به single-pass")
+            return None
+        if len(steps) < 2:
+            # فقط ۱ مرحله = همان single-pass بهتر است
+            logger.info(f"multi-pass: فقط {len(steps)} مرحله — fallback به single-pass")
+            return None
+
+        logger.info(f"multi-pass: {len(steps)} مرحله شناسایی شد")
+
+        # Pass 2..N: برای هر مرحله، single-pass idea_to_prompt با scope محدود
+        # نکته: scope هر step به‌عنوان مینی-idea به idea_to_prompt داده می‌شود.
+        # برای جلوگیری از infinite recursion، _is_complex_idea را روی sub-step
+        # bypass می‌کنیم — یعنی single-pass استفاده می‌شود.
+        sub_results: List[Dict[str, Any]] = []
+        for step in steps:
+            mini_idea = (
+                f"{step['title']}\n\n"
+                f"{step['scope']}\n\n"
+                f"--- بخش مربوط از درخواست اصلی کاربر ---\n"
+                f"{step['raw_excerpt']}\n\n"
+                f"--- کلیدواژه‌ها ---\n"
+                f"{', '.join(step['key_terms']) if step['key_terms'] else '(ندارد)'}"
+            )
+            logger.info(f"multi-pass: Pass {step['id']} — generating for «{step['title'][:60]}»")
+            try:
+                # فراخوانی idea_to_prompt با bypass complex-check
+                # روش: مستقیم single-pass logic را invoke می‌کنیم با یک flag
+                sub = await self._idea_to_prompt_single_pass(
+                    idea=mini_idea,
+                    watched_id=watched_id,
+                    type_=type_,
+                    priority=priority,
+                    model_id=model_id,
+                    model_ids=model_ids,
+                )
+                sub_results.append({"step": step, "result": sub})
+            except Exception as se:
+                logger.warning(f"multi-pass: step {step['id']} failed: {se}")
+                # fallback: یک sub minimal با فقط title + scope
+                sub_results.append({
+                    "step": step,
+                    "result": {
+                        "title": step["title"],
+                        "prompt": f"## هدف\n{step['scope']}\n\n## معیار پذیرش\n- پیاده‌سازی موفق",
+                        "target_files": [],
+                        "target_locations": [],
+                        "related_files": [],
+                        "acceptance_criteria": [],
+                    },
+                })
+
+        if not sub_results:
+            return None
+
+        # Pass N+1: Merge همهٔ sub-prompts به یک master prompt
+        logger.info(f"multi-pass: Pass {len(steps) + 1} — merging {len(sub_results)} sub-prompts")
+        master_title = (idea.strip().split("\n")[0])[:80] + (f" ({len(steps)} مرحله)" if len(steps) > 1 else "")
+
+        merged_parts: List[str] = []
+        merged_parts.append(EXECUTOR_DISCLAIMER)
+        merged_parts.append("")
+        merged_parts.append("---")
+        merged_parts.append("")
+
+        # متن خام کاربر (verbatim)
+        merged_parts.append(
+            "## 📥 درخواست خام کاربر (verbatim — همان متنی که کاربر نوشت)\n"
+            "_(همهٔ URL ها، آدرس‌ها، نام‌ها، و کلمات کلیدی در این متن دست‌نخورده هستند.)_\n\n"
+            "```\n"
+            f"{idea.strip()}\n"
+            "```"
+        )
+        merged_parts.append("")
+
+        # نقشهٔ مراحل
+        merged_parts.append(
+            f"## 🗺 نقشهٔ راه ({len(steps)} مرحله)\n\n"
+            "این تسک به مراحل کوچک‌تر تقسیم شده. هر مرحله به‌طور مستقل قابل پیاده‌سازی است.\n"
+        )
+        for s in steps:
+            merged_parts.append(f"{s['id']}. **{s['title']}** — {s['scope'][:200]}")
+
+        # عناصر متادیتای ادغام‌شده
+        all_target_files: List[str] = []
+        all_target_locations: List[Dict[str, Any]] = []
+        all_related: List[Dict[str, Any]] = []
+        all_ac: List[str] = []
+
+        # برای هر مرحله، بخش جداگانه
+        for sr in sub_results:
+            step = sr["step"]
+            sub = sr["result"]
+            merged_parts.append("")
+            merged_parts.append("---")
+            merged_parts.append("")
+            merged_parts.append(f"# 🔹 مرحله {step['id']}: {step['title']}")
+            merged_parts.append("")
+            merged_parts.append(f"**Scope:** {step['scope']}")
+            if step["key_terms"]:
+                merged_parts.append(f"**Key terms:** {', '.join(step['key_terms'])}")
+            if step.get("raw_excerpt"):
+                merged_parts.append("")
+                merged_parts.append("**بخش مربوط از متن کاربر:**")
+                merged_parts.append("```")
+                merged_parts.append(step["raw_excerpt"])
+                merged_parts.append("```")
+            merged_parts.append("")
+            # محتوای sub prompt — حذف disclaimer تکراری و verbatim تکراری
+            sub_prompt_clean = self._strip_disclaimer_and_verbatim(sub.get("prompt") or "")
+            merged_parts.append(sub_prompt_clean)
+
+            # جمع‌آوری meta
+            for tf in (sub.get("target_files") or []):
+                if tf and tf not in all_target_files:
+                    all_target_files.append(tf)
+            for tl in (sub.get("target_locations") or []):
+                if isinstance(tl, dict):
+                    all_target_locations.append(tl)
+            for rf in (sub.get("related_files") or []):
+                if isinstance(rf, dict):
+                    all_related.append(rf)
+            for a in (sub.get("acceptance_criteria") or []):
+                if a and a not in all_ac:
+                    all_ac.append(a)
+
+        # AC کلی نهایی
+        merged_parts.append("")
+        merged_parts.append("---")
+        merged_parts.append("")
+        merged_parts.append("## ✅ معیارهای پذیرش کلی (همهٔ مراحل)")
+        if all_ac:
+            for a in all_ac[:20]:
+                merged_parts.append(f"- [ ] {a}")
+        else:
+            merged_parts.append("- [ ] همهٔ مراحل بالا با موفقیت پیاده‌سازی شده‌اند")
+            merged_parts.append("- [ ] تست‌های موجود pass می‌شوند")
+            merged_parts.append("- [ ] هیچ regression رخ نداده")
+
+        master_prompt = "\n".join(merged_parts)
+
+        return {
+            "title": master_title,
+            "prompt": master_prompt,
+            "target_files": all_target_files,
+            "target_locations": all_target_locations,
+            "related_files": all_related,
+            "acceptance_criteria": all_ac,
+            "type": type_,
+            "priority": priority,
+            "estimate": "large" if len(steps) >= 4 else "medium",
+            "raw_response": f"[multi-pass with {len(steps)} steps]",
+            "_multi_pass": True,
+            "_step_count": len(steps),
+        }
+
+    @staticmethod
+    def _strip_disclaimer_and_verbatim(prompt_text: str) -> str:
+        """حذف DISCLAIMER و بخش verbatim از یک sub-prompt برای ادغام بدون تکرار."""
+        if not prompt_text:
+            return ""
+        text = prompt_text
+        # حذف DISCLAIMER اگر در ابتدا هست
+        try:
+            from .oversight_strong_prompt import EXECUTOR_DISCLAIMER
+            if text.startswith(EXECUTOR_DISCLAIMER):
+                text = text[len(EXECUTOR_DISCLAIMER):].lstrip()
+            # حذف "---\n\n"
+            if text.startswith("---"):
+                idx = text.find("\n", 3)
+                if idx > 0:
+                    text = text[idx:].lstrip()
+        except Exception:
+            pass
+        # حذف "## 📥 درخواست خام کاربر..." و کل بلوک code fence آن
+        import re as _re
+        verbatim_pattern = _re.compile(
+            r'##\s*📥\s*درخواست خام کاربر.*?```\s*\n.*?\n```',
+            _re.DOTALL,
+        )
+        text = verbatim_pattern.sub("", text).strip()
+        return text
+
+    async def _idea_to_prompt_single_pass(
+        self,
+        idea: str,
+        watched_id: Optional[str],
+        type_: str = "other",
+        priority: str = "medium",
+        model_id: Optional[str] = None,
+        model_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """invocation single-pass بدون چک complex (برای استفاده داخل multi-pass).
+
+        این تابع همان منطق idea_to_prompt است ولی **بدون** redirect به multi-pass.
+        برای جلوگیری از infinite recursion.
+        """
+        # یک flag در state موقت می‌گذاریم
+        self._skip_multi_pass = True
+        try:
+            return await self.idea_to_prompt(
+                idea=idea, watched_id=watched_id, type_=type_,
+                priority=priority, model_id=model_id, model_ids=model_ids,
+            )
+        finally:
+            self._skip_multi_pass = False
+
     async def idea_to_prompt(
         self,
         idea: str,
@@ -2305,6 +2653,28 @@ class OversightService:
     ) -> Dict[str, Any]:
         if not idea.strip():
             raise ValueError("ایده خالی است")
+
+        # 🆕 (Multi-pass) — اگر ایده پیچیده است، آن را به مراحل کوچک می‌شکنیم
+        # و هر مرحله را جدا به پرامپت تبدیل می‌کنیم. برای مدل‌های کم‌قدرت
+        # (مثل DeepSeek Chat) این بسیار قوی‌تر از single-pass است.
+        # `_skip_multi_pass` برای جلوگیری از infinite recursion (وقتی خودش از
+        # داخل multi-pass فراخوانی می‌شود).
+        if self._is_complex_idea(idea) and not getattr(self, "_skip_multi_pass", False):
+            try:
+                result = await self._idea_to_prompt_multi_pass(
+                    idea=idea,
+                    watched_id=watched_id,
+                    type_=type_,
+                    priority=priority,
+                    model_id=model_id,
+                    model_ids=model_ids,
+                )
+                if result:
+                    return result
+            except Exception as _mp_e:
+                logger.warning(
+                    f"idea_to_prompt: multi-pass fail ({_mp_e}) — fallback به single-pass"
+                )
 
         watched = self._find_watched(watched_id) if watched_id else None
         ctx_text = ""
