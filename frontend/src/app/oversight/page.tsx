@@ -878,6 +878,26 @@ export default function OversightPage() {
     mime_type?: string;
     session_id?: string;
   } | null>(null);
+  // 🆕 (audit fix) — اگر کاربر از طریق modal toggle مدلی را موقتاً فعال کرد،
+  // model_id آن اینجا ذخیره می‌شود تا پس از اتمام (save یا cancel) خودکار
+  // revert شود.
+  const [tempActivatedModelId, setTempActivatedModelId] = useState<string | null>(null);
+
+  // helper: revert temp-activated model (silent، best-effort)
+  const revertTempActivatedIfAny = useCallback(async () => {
+    if (!tempActivatedModelId) return;
+    const mid = tempActivatedModelId;
+    setTempActivatedModelId(null);
+    try {
+      await fetch(
+        `${API_BASE}/api/oversight/models/${encodeURIComponent(mid)}/temp-revert?trigger=ui-task-create-done`,
+        { method: 'POST' },
+      );
+    } catch {
+      // ignore — best effort. اگر شکست خورد، در DB stale می‌ماند ولی boot
+      // recovery پاکش می‌کند.
+    }
+  }, [tempActivatedModelId]);
   const resetTaskDraft = useCallback(() => {
     const v = `draft-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     try { sessionStorage.setItem('oversight-current-task-draft-id', v); } catch {}
@@ -1303,6 +1323,9 @@ export default function OversightPage() {
     setPreviewPrompt(null);
     setGenPhase('AI در حال خواندن context پروژه...');
     setGenPct(8);
+    // 🛡 (audit fix) — pollInterval را خارج از try/finally نگه دار تا
+    // در catch/finally هم قابل پاک کردن باشد.
+    let pollInterval: any = null;
     try {
       // برای multi-project: یک پرامپت تولید می‌شود اما هنگام ذخیره برای هر پروژه یکی ساخته می‌شود
       const firstId = ideaWatchedIds[0] || null;
@@ -1314,7 +1337,6 @@ export default function OversightPage() {
         .sort((a, b) => a.file_order - b.file_order)
         .map((s) => s.session_id);
       // 🆕 (Stage 6 — Progress) اگر فایل پیوست شده، progress live را poll کن
-      let pollInterval: any = null;
       if (validSessionIds.length > 0) {
         pollInterval = setInterval(async () => {
           try {
@@ -1404,16 +1426,21 @@ export default function OversightPage() {
     } catch (e: any) {
       showError(e.message);
     } finally {
+      // 🛡 (audit fix) — تضمین پاک‌سازی pollInterval در همه paths
+      if (pollInterval) {
+        try { clearInterval(pollInterval); } catch {}
+        pollInterval = null;
+      }
       setGenerating(false);
       setTimeout(() => setGenPhase(''), 1500);
     }
   };
 
-  // 🆕 (Stage 8) — فعال‌سازی موقت مدل و retry pull
+  // 🆕 (Stage 8 + audit fix) — فعال‌سازی موقت مدل و retry
   const activateModelAndRetry = async (modelId: string) => {
     try {
       const r = await fetch(
-        `${API_BASE}/api/oversight/models/${encodeURIComponent(modelId)}/temp-activate?trigger=ui-task-create`,
+        `${API_BASE}/api/oversight/models/${encodeURIComponent(modelId)}/temp-activate?trigger=ui-task-create-${taskDraftId}`,
         { method: 'POST' },
       );
       if (!r.ok) {
@@ -1422,7 +1449,10 @@ export default function OversightPage() {
         return;
       }
       const d = await r.json();
-      showSuccess(`✅ ${d.name} موقتاً فعال شد — درحال تولید پرامپت...`);
+      // 🆕 (audit fix) — model_id را track کن تا بعداً (پس از save یا
+      // cancel) خودکار revert شود
+      setTempActivatedModelId(modelId);
+      showSuccess(`✅ ${d.name} موقتاً فعال شد — پس از اتمام کار، خودکار غیرفعال خواهد شد.`);
       setModelBlockModal(null);
       // retry generatePrompt — اکنون extraction باید کار کند
       await generatePrompt();
@@ -1514,9 +1544,16 @@ export default function OversightPage() {
     if (duplicate) {
       setSavePendingIds(remaining);
       setDuplicatePrompt(duplicate);
+      // 🛡 (audit fix HIGH) — حتی در duplicate path، اگر کاربر مدلی را
+      // موقتاً فعال کرده، revert کن. در غیر این صورت مدل تا restart
+      // backend stale می‌ماند.
+      await revertTempActivatedIfAny();
       return;
     }
     setSavePendingIds([]);
+    // 🆕 (audit fix) — پس از اتمام کار (موفق یا با خطا)، اگر کاربر مدلی را
+    // موقتاً فعال کرده بود، revert کن.
+    await revertTempActivatedIfAny();
     if (created > 0) {
       setIdea('');
       setIdeaDeadline('');
@@ -2744,7 +2781,11 @@ export default function OversightPage() {
                     {ideaWatchedIds.length > 1 ? ` (×${ideaWatchedIds.length})` : ''}
                   </button>
                   <button
-                    onClick={() => setPreviewPrompt(null)}
+                    onClick={async () => {
+                      setPreviewPrompt(null);
+                      // 🆕 (audit fix) — اگر کاربر cancel کرد، مدل temp-activated را revert کن
+                      await revertTempActivatedIfAny();
+                    }}
                     className="px-4 py-2 bg-gray-300 dark:bg-gray-600 dark:text-white rounded-lg hover:bg-gray-400"
                   >
                     لغو

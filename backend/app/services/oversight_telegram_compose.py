@@ -101,6 +101,11 @@ class ComposeBuffer:
     reply_keyboard_active: bool = False
     # اگر کاربر submit زده و در حال پردازش است — برای جلوگیری از double-submit
     submitting: bool = False
+    # 🆕 (audit fix) — اگر کاربر مدلی را از طریق toggle inline در این session
+    # موقتاً فعال کرده، model_id آن اینجا نگه داشته می‌شود تا پس از اتمام
+    # extraction خودکار revert شود. اگر None باشد، مدل از قبل enabled بوده
+    # و revert لازم نیست.
+    temp_activated_model_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -255,6 +260,14 @@ class ComposeService:
             b = self._buffers.get(chat_id)
             if b is not None:
                 b.reply_keyboard_active = active
+                self._save()
+
+    async def set_temp_activated_model(self, chat_id: str, model_id: Optional[str]) -> None:
+        """🆕 (audit fix) — ثبت/پاک کردن model_id که موقتاً برای این session فعال شد."""
+        async with self._lock:
+            b = self._buffers.get(chat_id)
+            if b is not None:
+                b.temp_activated_model_id = model_id
                 self._save()
 
     async def mark_submitting(self, chat_id: str, value: bool = True) -> Optional[ComposeBuffer]:
