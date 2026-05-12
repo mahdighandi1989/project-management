@@ -2406,15 +2406,19 @@ class OversightService:
           {id, title, scope, raw_excerpt, key_terms: [...]}
         اگر AI نتوانست تقسیم منطقی بدهد، list خالی.
         """
-        plan_prompt = f"""تو یک پلانر هستی. درخواست طولانی کاربر را به مراحل کوچک‌تر و مستقل تقسیم می‌کنی.
+        plan_prompt = f"""تو یک پلانر دقیق هستی. درخواست طولانی کاربر را به مراحل کوچک‌تر و **مستقل** تقسیم می‌کنی.
 
-## قانون‌ها:
-1. هر مرحله یک scope واضح و **یک action** دارد (مثل «اضافه کردن endpoint X» یا «اصلاح UI Y» یا «نوشتن تست Z»)
-2. مراحل را به ترتیب منطقی پیاده‌سازی مرتب کن (foundation → core → integration → tests)
-3. حداکثر ۶ مرحله — اگر کاربر چیز بیشتری گفته، مراحل مرتبط را combine کن
-4. **`raw_excerpt`**: بخش‌هایی از متن کاربر که به این مرحله مربوط است — **verbatim**، با URLs و نام‌ها
-5. **`key_terms`**: همهٔ نام‌ها (فایل، endpoint، function، URL، library) که کاربر در این بخش گفته
-6. اگر درخواست کاربر فقط یک کار است (نه چندتایی)، فقط ۱ مرحله بده
+## قانون‌های حیاتی (دقیقاً رعایت کن):
+1. هر مرحله یک **scope مشخص** و **یک action اصلی** دارد (مثل «اضافه کردن endpoint X»، «اصلاح UI Y»، «نوشتن تست Z»، «integration A با B»).
+2. مراحل را به ترتیب منطقی پیاده‌سازی مرتب کن (foundation → core → integration → UI → tests → audit).
+3. **بدون خلاصه‌سازی و بدون فشرده‌سازی**: اگر کاربر ۸ کار جداگانه را خواسته، **۸ مرحله** بده — نه ۴ مرحلهٔ ادغام‌شده. هدف: **هیچ requirement کاربر گم نشود**.
+4. حداکثر ۱۲ مرحله (پیش‌فرض). اگر بیشتر لازم بود، مهم‌ترین‌ها را اول بگذار و در آخرین مرحله اشاره کن «X موارد دیگر هم در فاز بعدی».
+5. **`raw_excerpt`**: بخش‌هایی از متن کاربر که به این مرحله مربوط است — **verbatim و کامل**، با URLs و نام‌ها. حداقل ۱۰۰ کاراکتر اگر متن کاربر اجازه دهد.
+6. **`scope`**: حداقل ۲-۳ جمله — چه چیزی شامل این مرحله است، چه چیزی خارج از این مرحله است، چه نکته‌ای حیاتی است. **نه یک جمله سرسری**.
+7. **`key_terms`**: همهٔ نام‌ها (فایل، endpoint، function، URL، library، dataclass، table، …) که کاربر در این بخش گفته. حداقل ۳ آیتم اگر در متن وجود دارد.
+8. اگر درخواست کاربر فقط یک کار است (نه چندتایی)، فقط ۱ مرحله بده — ولی همان ۱ مرحله را خیلی غنی توضیح بده.
+
+## مهم: اگر کاربر صراحتاً موارد ۱، ۲، ۳، … را شماره‌گذاری کرده، **برای هر کدام یک مرحله** بساز. اگر بنویسد «و این، و آن، و فلان»، هر کدام جداگانه.
 
 ## هدف اصلی پروژه:
 {user_goal or '(کاربر یادداشتی ثبت نکرده است)'}
@@ -2431,19 +2435,20 @@ class OversightService:
     {{
       "id": 1,
       "title": "عنوان کوتاه مرحله (یک جمله)",
-      "scope": "scope این مرحله — چه چیزی باید انجام شود، چه چیزی خارج از این مرحله است (۱-۲ جمله)",
-      "raw_excerpt": "بخشی از متن کاربر که به این مرحله مربوط است — کلمه به کلمه با URL ها و نام‌ها",
+      "scope": "scope کامل این مرحله — چه چیزی باید انجام شود، چه چیزی خارج از این مرحله است، نکات حیاتی (حداقل ۲-۳ جمله، می‌تواند تا ۱۰۰۰ کاراکتر باشد)",
+      "raw_excerpt": "بخش‌هایی از متن کاربر که به این مرحله مربوط است — کلمه به کلمه با URL ها و نام‌ها، حداقل ۱۰۰ char اگر متن طولانی است",
       "key_terms": ["نام فایل ۱", "endpoint ۲", "library ۳", "https://..."]
     }}
   ],
-  "rationale": "چرا این تقسیم منطقی است (۱-۲ جمله)"
+  "rationale": "چرا این تقسیم منطقی است (۲-۳ جمله)"
 }}
 """
         try:
             response = await self._ai_generate(
                 plan_prompt,
                 model_id=(model_ids[0] if model_ids else model_id),
-                max_tokens=4000,
+                max_tokens=12000,  # 🛡 (audit fix #2) از 4000 افزایش یافت — تا
+                                   # planner برای requestهای بزرگ کوتاهی نکند
                 temperature=0.2,
             )
             parsed = self._extract_json(response)
@@ -2464,11 +2469,11 @@ class OversightService:
                 valid_steps.append({
                     "id": int(s.get("id") or (i + 1)),
                     "title": title[:200],
-                    "scope": scope[:1000],
-                    "raw_excerpt": (s.get("raw_excerpt") or "").strip()[:2000],
-                    "key_terms": [str(k) for k in (s.get("key_terms") or [])[:15]],
+                    "scope": scope[:2500],   # 🛡 از 1000 به 2500 — جلوی شکست detail
+                    "raw_excerpt": (s.get("raw_excerpt") or "").strip()[:4000],  # از 2000 به 4000
+                    "key_terms": [str(k) for k in (s.get("key_terms") or [])[:25]],  # از 15 به 25
                 })
-            return valid_steps[:6]
+            return valid_steps[:12]  # 🛡 از 6 به 12
         except Exception as e:
             logger.warning(f"_ai_plan_steps_from_idea failed: {e}")
             return []
@@ -2504,10 +2509,15 @@ class OversightService:
         if not steps:
             logger.info("multi-pass: AI نتوانست تقسیم کند → fallback به single-pass")
             return None
-        if len(steps) < 2:
-            # فقط ۱ مرحله = همان single-pass بهتر است
-            logger.info(f"multi-pass: فقط {len(steps)} مرحله — fallback به single-pass")
+        # 🛡 (audit fix #3) — حتی اگر فقط 1 مرحله بود، multi-pass را
+        # ادامه می‌دهیم تا چک‌لیست (هرچند با ۱ آیتم) تولید شود. کاربر
+        # حداقل یک checkbox برای پیگیری دارد، و verify می‌تواند آن را
+        # تیک بزند.
+        if len(steps) < 1:
+            logger.info("multi-pass: 0 مرحله — fallback به single-pass")
             return None
+        if len(steps) == 1:
+            logger.info("multi-pass: فقط ۱ مرحله — همچنان adامه می‌دهیم تا checklist تولید شود")
 
         logger.info(f"multi-pass: {len(steps)} مرحله شناسایی شد")
 
@@ -2924,6 +2934,16 @@ class OversightService:
                 # ادامه می‌دهیم بدون attachments — تسک ساخته می‌شود ولی پرامپت
                 # ضعیف‌تر است (کاربر از طریق UI متوجه می‌شود)
 
+        # 🛡 (audit fix #3 CRITICAL) — اگر فایل پیوست هست، **همیشه** multi-pass
+        # اجبار می‌شود تا چک‌لیست تولید شود. heuristic `_is_complex_idea` کافی
+        # نیست چون متن کاربر می‌تواند کوتاه باشد ولی محتوای فایل‌ها طولانی.
+        if attachments_meta and multi_pass_mode == "auto":
+            multi_pass_mode = "always"
+            logger.info(
+                f"idea_to_prompt: attachments present ({len(attachments_meta)} files) "
+                f"→ force multi_pass_mode='always' برای تضمین checklist"
+            )
+
         # 🆕 (Stage 10 audit fix #1 — CRITICAL) — وقتی فایل پیوست هست، طبق
         # درخواست صریح کاربر، **همهٔ کارها از تبدیل به پرامپت تا شرح فایل**
         # باید با مدل بصری (Gemini یا جایگزین پویا) انجام شود — نه با مدل
@@ -3020,14 +3040,16 @@ class OversightService:
                 token_for_deep = get_github_token()
                 if token_for_deep:
                     from .oversight_deep_scan_service import build_deep_context_for_idea
-                    # 🆕 (P2) max_deep_read از 18 به 30 افزایش یافت — context
-                    # پربارتر برای پرامپت تولیدشده (شامل manifests + tests + config)
+                    # 🛡 (audit fix #1) — context عمیق‌تر و گسترده‌تر:
+                    # 40 → 60 فایل، per-file byte cap 50K → 120K، خط 350 → 800
                     deep_ctx = await build_deep_context_for_idea(
                         watched.repo_full_name,
                         branch=watched.default_branch or "main",
                         token=token_for_deep,
-                        max_deep_read=40,  # context پربارتر برای پرامپت دقیق‌تر
-                        idea=idea,  # 🆕 keyword-aware file selection: فایل‌های مرتبط با ایده اولویت می‌گیرند
+                        max_deep_read=60,        # افزایش از 40
+                        max_file_bytes=120000,   # افزایش از 50K — هر فایل ~120KB
+                        max_file_lines=800,      # افزایش از 350 — فایل‌های بزرگ بهتر دیده شوند
+                        idea=idea,  # keyword-aware file selection
                     )
                     if not deep_ctx.get("ok"):
                         logger.warning(f"deep_context for idea failed: {deep_ctx.get('error')}")
