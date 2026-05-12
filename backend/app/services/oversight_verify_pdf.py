@@ -174,6 +174,23 @@ def build_verify_checklist_message(
     # PR link (compact)
     applied = getattr(task, "applied_evidence", None) or {}
     pr_url = applied.get("pr_url") if isinstance(applied, dict) else None
+    # 🔬 (Runtime Verify Stage 7) — runtime probes summary در caption
+    try:
+        if report is not None:
+            ev = getattr(report, "evidence", None) or {}
+            if isinstance(ev, dict):
+                rsum = ev.get("runtime_probes_summary") or {}
+                if rsum and any(rsum.get(k) for k in ("passed", "failed", "error")):
+                    rp = rsum.get("passed", 0)
+                    rf = rsum.get("failed", 0)
+                    rs = rsum.get("skipped", 0)
+                    re_ = rsum.get("error", 0)
+                    lines.append(
+                        f"\n🔬 Runtime: ✅{rp} ❌{rf} ⏭{rs} ⚠️{re_}"
+                    )
+    except Exception:
+        pass
+
     if pr_url:
         lines.append(f"\n🔗 PR: {pr_url}")
 
@@ -349,6 +366,88 @@ def _build_verify_report_html(task: Any, report: Any) -> str:
     # ───── full prompt
     prompt_html = f'<section><h2>📜 پرامپت کامل تسک</h2><pre class="prompt">{_esc(prompt)}</pre></section>' if prompt else ""
 
+    # 🔬 (Runtime Verify Stage 7) — Runtime evidence section
+    runtime_html = ""
+    try:
+        ev = getattr(report, "evidence", None) or {}
+        if isinstance(ev, dict):
+            probes = ev.get("runtime_probes") or []
+            summary = ev.get("runtime_probes_summary") or {}
+            run_id = ev.get("runtime_run_id") or ""
+            if probes:
+                cards: List[str] = []
+                badge_class = {
+                    "passed": "ok", "failed": "fail",
+                    "error": "warn", "skipped": "muted",
+                }
+                method_emoji = {
+                    "static": "🔍", "ui_interaction": "🖱",
+                    "api_response": "🌐", "backend_test": "🧪",
+                    "manual_only": "👁",
+                }
+                for p in probes:
+                    if not isinstance(p, dict):
+                        continue
+                    st = p.get("status", "?")
+                    me = method_emoji.get(p.get("method", ""), "•")
+                    cls = badge_class.get(st, "muted")
+                    ac_text = _esc((p.get("ac_text") or "")[:300])
+                    duration = p.get("duration_ms", 0)
+                    err = _esc((p.get("error_message") or "")[:300])
+                    err_html = (
+                        f'<div class="muted">خطا: {err}</div>' if err else ""
+                    )
+                    ev_blob = p.get("evidence") or {}
+                    # screenshots inline (فقط نام‌ها — viewer جداست در frontend)
+                    screenshots = ev_blob.get("screenshots") or []
+                    if screenshots:
+                        shots_html = (
+                            '<div class="muted">screenshots: '
+                            + ", ".join(_esc(s) for s in screenshots[:5])
+                            + '</div>'
+                        )
+                    else:
+                        shots_html = ""
+                    # response/stdout excerpt
+                    extra_html = ""
+                    if p.get("method") == "api_response":
+                        ex = ev_blob.get("response_excerpt") or ""
+                        if ex:
+                            extra_html = (
+                                f'<pre class="code">{_esc(ex[:400])}</pre>'
+                            )
+                    elif p.get("method") == "backend_test":
+                        out = ev_blob.get("stdout_excerpt") or ""
+                        if out:
+                            extra_html = (
+                                f'<pre class="code">{_esc(out[-600:])}</pre>'
+                            )
+                    cards.append(
+                        f'<div class="probe-card probe-{cls}">'
+                        f'<div class="probe-head">{me} <b>{_esc(p.get("method", "?"))}</b>'
+                        f' <span class="badge badge-{cls}">{_esc(st)}</span>'
+                        f' <span class="muted">{duration}ms</span></div>'
+                        f'<div class="probe-ac">«{ac_text}»</div>'
+                        f'{shots_html}'
+                        f'{extra_html}'
+                        f'{err_html}'
+                        f'</div>'
+                    )
+                runtime_html = (
+                    '<section>'
+                    '<h2>🔬 شواهد Runtime (probe ها)</h2>'
+                    f'<div class="muted">run: {_esc(run_id)} · '
+                    f'passed={summary.get("passed", 0)}, '
+                    f'failed={summary.get("failed", 0)}, '
+                    f'skipped={summary.get("skipped", 0)}, '
+                    f'error={summary.get("error", 0)}</div>'
+                    + "".join(cards)
+                    + '</section>'
+                )
+    except Exception as _re:
+        logger.warning(f"PDF runtime section build failed: {_re}")
+        runtime_html = ""
+
     streak_str = f"{streak}" + (f"/{streak_required}" if streak_required else "")
 
     return f"""<!doctype html>
@@ -387,6 +486,18 @@ pre {{
   font-size: 10.5px; max-width: 100%;
 }}
 pre.prompt {{ font-size: 10px; line-height: 1.6; }}
+pre.code {{ font-size: 10.5px; line-height: 1.4; background:#0f172a; color:#e2e8f0; padding:6px 8px; border-radius:4px; }}
+.probe-card {{ border:1px solid #e5e7eb; border-radius:6px; padding:8px 10px; margin:6px 0; }}
+.probe-card.probe-ok {{ border-color:#86efac; background:#f0fdf4; }}
+.probe-card.probe-fail {{ border-color:#fca5a5; background:#fef2f2; }}
+.probe-card.probe-warn {{ border-color:#fde68a; background:#fffbeb; }}
+.probe-card.probe-muted {{ border-color:#d1d5db; background:#f9fafb; }}
+.probe-head {{ font-size:11.5px; margin-bottom:4px; }}
+.probe-ac {{ font-size:10.5px; color:#374151; margin:3px 0; font-style:italic; }}
+.badge-ok {{ background:#16a34a; color:#fff; padding:1px 6px; border-radius:8px; font-size:10px; }}
+.badge-fail {{ background:#dc2626; color:#fff; padding:1px 6px; border-radius:8px; font-size:10px; }}
+.badge-warn {{ background:#d97706; color:#fff; padding:1px 6px; border-radius:8px; font-size:10px; }}
+.badge-muted {{ background:#6b7280; color:#fff; padding:1px 6px; border-radius:8px; font-size:10px; }}
 blockquote {{
   margin: 4px 0; padding: 6px 12px; border-right: 3px solid #6366f1;
   background: #eef2ff; color: #312e81; border-radius: 4px;
@@ -458,6 +569,7 @@ section {{ margin: 10px 0; }}
   {acs_html}
   {tf_html}
   {raw_idea_html}
+  {runtime_html}
   {extractions_html}
   {prompt_html}
 
