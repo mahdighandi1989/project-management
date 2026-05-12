@@ -2505,11 +2505,16 @@ class NotificationService:
         )
 
         try:
+            # 🛡 (audit fix #3) — Telegram compose **همیشه** multi-pass تا
+            # checklist تولید شود. تسک‌های Telegram اغلب فایل‌محور هستند یا
+            # idea کوتاهی دارند که heuristic auto آن را single-pass تشخیص
+            # می‌دهد و چک‌لیست از دست می‌رود.
             preview = await _ov.idea_to_prompt(
                 idea=idea_for_ai,
                 watched_id=buf.watched_id,
                 upload_session_ids=session_ids or None,
                 progress_track_id=buf.task_draft_id,
+                multi_pass_mode="always",
             )
         except Exception as e:
             await tracker.complete(
