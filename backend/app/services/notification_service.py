@@ -2046,23 +2046,247 @@ class NotificationService:
         return " ".join(parts)
 
     async def _compose_submit(self, chat_id_str: str, *, mode: str = "task") -> Dict[str, Any]:
-        """Stage 4 پایپ‌لاین submit (placeholder در Stage 3 — هنوز کامل نشده).
+        """پایپ‌لاین submit نهایی — buffer را به idea_to_prompt + create_task
+        (یا new_project — Stage 5) منتقل می‌کند.
 
-        موقتاً تأیید می‌گیریم که دکمه شنیده شد، در Stage 4 منطق واقعی می‌آید.
+        flow:
+          1. validate buffer (وجود + has items)
+          2. اگر mode=task و watched_id خالی → picker پروژه + state
+             `phase=compose_awaiting_watched_id` (callback همان buffer)
+          3. mark_submitting=True (جلوگیری از double-click)
+          4. remove_reply_keyboard
+          5. idea = join(text_parts)؛ اگر خالی + فایل هست →
+             intent_from_files_only=True
+          6. await idea_to_prompt(idea, upload_session_ids=...)
+          7. create_task با upload_session_ids
+          8. finalize_after_submit (buffer پاک)
+          9. _send_task_created_message (با PDF + checklist + regen button)
+          10. در صورت exception → unmark + پیام خطا، buffer دست‌نخورده
         """
         from .oversight_telegram_compose import get_compose_service
+        from .oversight_service import get_oversight_service
         tg = self._telegram()
         compose_svc = get_compose_service()
         buf = compose_svc.get(chat_id_str)
         if buf is None:
-            await tg.send("⚠️ هیچ compose فعالی نیست.", silent=True)
+            await tg.send("⚠️ هیچ compose فعالی نیست. /new\\_task بزن.", silent=True)
             return {"ok": True, "handled": "compose_submit_no_buffer"}
+
+        # validate
+        if not buf.items:
+            await tg.send(
+                "⚠️ buffer خالی است — حداقل یک فایل یا متن بفرست تا submit ممکن شود.",
+                silent=True,
+            )
+            return {"ok": True, "handled": "compose_submit_empty"}
+
+        if buf.submitting:
+            # double-click protection
+            return {"ok": True, "handled": "compose_submit_already_running"}
+
+        # Stage 5: mode=project مسیر دیگری دارد
+        if mode == "project":
+            return await self._compose_submit_project(chat_id_str, buf)
+
+        # 🆕 task mode: اگر پروژه انتخاب نشده، picker
+        if not buf.watched_id:
+            return await self._compose_pick_project(chat_id_str, buf)
+
+        # mark submitting
+        await compose_svc.mark_submitting(chat_id_str, True)
+
+        # remove ReplyKeyboard
+        await tg.remove_reply_keyboard("⏳ شروع پردازش...")
+
+        try:
+            return await self._compose_run_pipeline_task(chat_id_str, buf)
+        except Exception as e:
+            logger.exception(f"compose submit failed: {e}")
+            # un-mark تا کاربر بتواند دوباره تلاش کند
+            await compose_svc.mark_submitting(chat_id_str, False)
+            # دکمه‌ها دوباره برگردانده شوند
+            submit_btn = self._COMPOSE_BTN_SUBMIT
+            await tg.send_with_reply_keyboard(
+                f"❌ خطا در پردازش submit:\n`{str(e)[:300]}`\n\n"
+                f"می‌توانی دوباره تلاش کنی یا با `{self._COMPOSE_BTN_CANCEL}` لغو کنی.",
+                keyboard_rows=[[submit_btn], [self._COMPOSE_BTN_CANCEL]],
+                silent=False,
+            )
+            return {"ok": False, "handled": "compose_submit_failed", "error": str(e)[:300]}
+
+    async def _compose_submit_project(
+        self, chat_id_str: str, buf: Any,
+    ) -> Dict[str, Any]:
+        """submit برای mode=project (Stage 5 — اینجا stub).
+
+        موقتاً به کاربر می‌گویم که این feature در Stage 5 می‌آید.
+        """
+        from .oversight_telegram_compose import get_compose_service
+        tg = self._telegram()
         await tg.send(
-            f"⏳ submit آغاز شد ({mode}, {buf.total_files()} فایل، {len(buf.text_items_sorted())} متن)...\n"
-            "_(پایپ‌لاین کامل در Stage 4 — این پیام موقت است)_",
-            silent=True,
+            "⏳ ساخت پروژهٔ ترکیبی هنوز پیاده‌سازی نشده (Stage 5).\n"
+            "فعلاً برای ساخت پروژه از /new\\_project بدون پیوست استفاده کن.",
+            silent=False,
         )
-        return {"ok": True, "handled": "compose_submit_stub", "mode": mode}
+        # buffer را cancel کن تا گیج کننده نباشد
+        await get_compose_service().cancel(chat_id_str)
+        await tg.remove_reply_keyboard("compose پاک شد.")
+        return {"ok": True, "handled": "compose_submit_project_stub"}
+
+    async def _compose_pick_project(
+        self, chat_id_str: str, buf: Any,
+    ) -> Dict[str, Any]:
+        """اگر watched_id ست نیست، list پروژه‌ها به‌صورت inline keyboard
+        نمایش داده می‌شود. callback `compose_pick:<watched_id>` آن را ست
+        می‌کند و دوباره submit را trigger می‌کند.
+        """
+        from .oversight_service import get_oversight_service
+        tg = self._telegram()
+        try:
+            _ov = get_oversight_service()
+            watched = list(getattr(_ov, "watched", []) or [])
+        except Exception as e:
+            await tg.send(f"❌ خواندن پروژه‌ها ناموفق: {e}", silent=False)
+            return {"ok": False, "handled": "compose_pick_load_failed"}
+
+        if not watched:
+            await tg.send(
+                "⚠️ هیچ پروژهٔ تحت نظارت موجود نیست. اول /new\\_project بزن یا پروژه‌ای را watch کن.",
+                silent=False,
+            )
+            return {"ok": True, "handled": "compose_pick_no_watched"}
+
+        rows: List[List[Dict[str, str]]] = []
+        for w in watched[:20]:
+            rows.append([{
+                "text": f"📁 {w.repo_full_name[:60]}",
+                "callback_data": f"compose_pick:{w.id}",
+            }])
+        rows.append([{"text": "❌ لغو", "callback_data": "compose_cancel_picker"}])
+        await tg.send(
+            "📌 *کدام پروژه را برای این تسک می‌خواهی؟*\n\n"
+            "بعد از انتخاب، تسک با تمام پیوست‌های فرستاده‌شده ساخته می‌شود.",
+            silent=False,
+            reply_markup={"inline_keyboard": rows},
+        )
+        return {"ok": True, "handled": "compose_picker_shown"}
+
+    async def _compose_run_pipeline_task(
+        self, chat_id_str: str, buf: Any,
+    ) -> Dict[str, Any]:
+        """اصل اجرای پایپ‌لاین task mode — بعد از validate + remove_keyboard."""
+        from .oversight_service import get_oversight_service
+        from .oversight_telegram_compose import get_compose_service
+        tg = self._telegram()
+        _ov = get_oversight_service()
+        compose_svc = get_compose_service()
+        prefs = _read_prefs()
+        base = (prefs.get("app_base_url", "") or "").rstrip("/")
+
+        # 1) جمع متن‌ها — به‌ترتیب order
+        text_parts: List[str] = []
+        for it in buf.text_items_sorted():
+            t = (it.text or "").strip()
+            if t:
+                text_parts.append(t)
+        idea = "\n\n".join(text_parts).strip()
+        files_only = (not idea) and (buf.total_files() > 0)
+
+        # 2) upload_session_ids به ترتیب file_order
+        session_ids = buf.session_ids_in_order()
+
+        if not session_ids and not idea:
+            await tg.send("⚠️ نه فایلی صحیح آپلود شده، نه متنی نوشته شده.", silent=True)
+            await compose_svc.mark_submitting(chat_id_str, False)
+            return {"ok": True, "handled": "compose_submit_no_content"}
+
+        # 3) پیام شروع
+        await tg.send(
+            "⏳ *در حال پردازش submit*\n"
+            f"📎 {buf.total_files()} فایل ({buf.total_size_bytes() // 1024 // 1024 + 1}MB)\n"
+            f"📝 {len(text_parts)} متن ({sum(len(t) for t in text_parts)} char)\n\n"
+            "این می‌تواند چند دقیقه طول بکشد — مراحل:\n"
+            "  1. استخراج متن از فایل‌ها (با مدل بصری)\n"
+            "  2. تولید پرامپت قدرتمند (idea→prompt)\n"
+            "  3. ذخیرهٔ تسک + ارسال PDF فیدبک\n\n"
+            "وضعیت در پیام‌های بعدی به‌روز می‌شود.",
+            silent=False,
+        )
+
+        # 4) idea_to_prompt
+        if files_only:
+            # اگر idea خالی + فقط فایل: یک placeholder که به multi-pass
+            # explicitly می‌گوید intent در فایل‌ها است
+            idea_for_ai = (
+                "[ایدهٔ متنی همراه نیست — دستورالعمل/درخواست کاربر **داخل** "
+                "محتوای فایل‌های پیوست است. لطفاً متن استخراج‌شدهٔ فایل‌ها را "
+                "بخوان، دستورالعمل را از آنجا برداشت کن، و یک پرامپت کامل "
+                "بساز.]"
+            )
+        else:
+            idea_for_ai = idea
+
+        try:
+            preview = await _ov.idea_to_prompt(
+                idea=idea_for_ai,
+                watched_id=buf.watched_id,
+                upload_session_ids=session_ids or None,
+            )
+        except Exception as e:
+            raise RuntimeError(f"idea_to_prompt failed: {e}")
+
+        # 5) dedup check (find_similar_active_tasks)
+        title = preview.get("title") or (text_parts[0][:80] if text_parts else "تسک ترکیبی از تلگرام")
+        try:
+            similar = _ov.find_similar_active_tasks(
+                project_id=buf.watched_id,
+                candidate_title=title,
+                candidate_raw_idea=idea or title,
+            )
+        except Exception:
+            similar = []
+
+        # 6) create_task
+        try:
+            result = await _ov.create_task({
+                "watched_id": buf.watched_id,
+                "title": title,
+                "prompt": preview.get("prompt") or "",
+                "raw_idea": idea or "(از فایل پیوست)",
+                "type": preview.get("type") or "other",
+                "priority": preview.get("priority") or "medium",
+                "source": "telegram_bot_compose",
+                "target_files": preview.get("target_files") or [],
+                "acceptance_criteria": preview.get("acceptance_criteria") or [],
+                "task_steps": preview.get("task_steps") or [],
+                "overall_completion_pct": preview.get("overall_completion_pct"),
+                "upload_session_ids": session_ids,
+                "force_create": True,  # dedup را خود پایپ‌لاین خاص anjam داده
+            })
+        except Exception as e:
+            raise RuntimeError(f"create_task failed: {e}")
+
+        new_task = result.get("task") or {}
+
+        # 7) finalize compose
+        await compose_svc.finalize_after_submit(chat_id_str)
+
+        # 8) پیام نهایی با PDF + checklist + regen button
+        await self._send_task_created_message(new_task, base=base)
+
+        # 9) اگر similar matches بود، بعدش پیام informative
+        if similar:
+            lines = ["ℹ️ توجه: تسک‌های مشابه پیدا شد (force_create=true فعال بود):"]
+            for m in similar[:3]:
+                lines.append(f"  • «{m.title[:50]}» — شباهت {int(m.score * 100)}٪")
+            await self._telegram().send("\n".join(lines), silent=True)
+
+        return {
+            "ok": True,
+            "handled": "compose_submit_done",
+            "task_id": new_task.get("id"),
+            "files_only": files_only,
+        }
 
     # -----------------------------------------------------------------------
     # 🆕 (P5) /new_task flow — ثبت تسک از تلگرام با انتخاب پروژه
@@ -2460,6 +2684,23 @@ class NotificationService:
         # 🆕 (Task Regen) task_regen:<task_id> — بازتولید پرامپت تسک
         if data.startswith("task_regen:"):
             return await self._handle_task_regen_callback(chat_id_str, data)
+
+        # 🆕 (Compose Stage 4) — picker پروژه هنگام submit بدون watched_id
+        if data.startswith("compose_pick:"):
+            watched_id = data.split(":", 1)[1]
+            from .oversight_telegram_compose import get_compose_service
+            cs = get_compose_service()
+            buf = cs.get(chat_id_str)
+            if buf is None:
+                await tg.send("⚠️ compose منقضی شد.", silent=True)
+                return {"ok": True, "handled": "compose_pick_expired"}
+            await cs.set_watched(chat_id_str, watched_id)
+            # ادامهٔ submit
+            return await self._compose_submit(chat_id_str, mode=buf.mode)
+
+        if data == "compose_cancel_picker":
+            await tg.send("⏸ انتخاب پروژه لغو شد — می‌توانی همچنان آیتم بفرستی یا با ❌ لغو همه ببندی.", silent=True)
+            return {"ok": True, "handled": "compose_picker_cancelled"}
 
         # creator_confirm:push:<token> یا creator_confirm:local:<token>
         if data.startswith("creator_confirm:"):
