@@ -150,6 +150,7 @@ def build_strong_prompt(
     *,
     title: str,
     user_goal: str = "",
+    raw_user_request: str = "",  # 🆕 متن خام کاربر (verbatim) — هرگز خلاصه نشود
     description: str = "",
     proposed_action: str = "",
     context_snippet: str = "",
@@ -170,6 +171,11 @@ def build_strong_prompt(
     estimate: str = "medium",
 ) -> str:
     """ساخت پرامپت اجرایی با ساختار استاندارد و عمق بالا برای ابزارهای کدنویس خارجی.
+
+    🆕 پارامتر raw_user_request (مهم):
+      متن خام کاربر — اگر داده شود، **به‌صورت verbatim** در ابتدای پرامپت
+      قرار می‌گیرد (هرگز خلاصه/تغییر نمی‌کند). این تضمین می‌کند URLs،
+      آدرس‌ها، نام‌ها، کلمات کلیدی هرگز گم نشوند، حتی اگر AI ضعیف باشد.
 
     پارامترهای کلیدی:
     - target_locations: لیست dictهای {"path","lines","line_start","line_end","symbol","snippet","note"}
@@ -195,7 +201,20 @@ def build_strong_prompt(
     # === ⚠️ DISCLAIMER (همیشه ابتدای پرامپت — قبل از هر چیز دیگر) ===
     parts.append(EXECUTOR_DISCLAIMER)
 
-    parts.append(f"## 🎯 هدف\n{title.strip()}")
+    # === 📥 درخواست خام کاربر (verbatim — هرگز خلاصه نشود) ===
+    # این بخش حیاتی است: تضمین می‌کند URL ها، آدرس‌ها، نام‌ها، context کامل
+    # کاربر در پرامپت نهایی می‌مانند، حتی اگر AI در ساختاردهی ضعیف باشد.
+    if raw_user_request and raw_user_request.strip():
+        parts.append(
+            "## 📥 درخواست خام کاربر (verbatim — همان متنی که کاربر نوشت)\n"
+            "_(همهٔ URL ها، آدرس‌ها، نام‌ها، و کلمات کلیدی در این متن دست‌نخورده هستند. "
+            "بخش‌های بعدی توسط AI ساختار داده شده‌اند و ممکن است ناقص باشند — این متن مرجع اصلی است.)_\n\n"
+            "```\n"
+            f"{raw_user_request.strip()}\n"
+            "```"
+        )
+
+    parts.append(f"## 🎯 هدف (خلاصه ساختاریافته)\n{title.strip()}")
 
     # === موقعیت دقیق ===
     if locations:
