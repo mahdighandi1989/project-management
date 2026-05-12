@@ -1392,11 +1392,34 @@ class NotificationService:
         if text == "/cancel":
             had = chat_id_str in _chat_state
             _chat_state.pop(chat_id_str, None)
+            # 🆕 (Compose) — اگر compose فعال است، آن را هم cancel کن
+            from .oversight_telegram_compose import get_compose_service
+            compose_svc = get_compose_service()
+            had_compose = compose_svc.has_active(chat_id_str)
+            if had_compose:
+                await compose_svc.cancel(chat_id_str)
+                await tg.remove_reply_keyboard("🗑 compose لغو شد.")
             await tg.send(
-                "✅ flow لغو شد." if had else "هیچ flow فعالی نبود.",
+                "✅ همه‌چیز لغو شد." if (had or had_compose) else "هیچ flow فعالی نبود.",
                 silent=True,
             )
             return {"ok": True, "handled": "cancel"}
+
+        # 🆕 (Compose Stage 3) — دکمه‌های ReplyKeyboard
+        if text == self._COMPOSE_BTN_CANCEL:
+            from .oversight_telegram_compose import get_compose_service
+            compose_svc = get_compose_service()
+            buf = compose_svc.get(chat_id_str)
+            if buf is not None:
+                await compose_svc.cancel(chat_id_str)
+                await tg.remove_reply_keyboard("🗑 ساخت تسک ترکیبی لغو شد — همهٔ پیوست‌ها پاک شدند.")
+            else:
+                await tg.send("هیچ compose فعالی نیست.", silent=True)
+            return {"ok": True, "handled": "compose_cancelled"}
+
+        if text in (self._COMPOSE_BTN_SUBMIT, self._COMPOSE_BTN_SUBMIT_PROJECT):
+            # Stage 4 این را به پایان پایپ‌لاین می‌برد
+            return await self._compose_submit(chat_id_str, mode=("project" if text == self._COMPOSE_BTN_SUBMIT_PROJECT else "task"))
 
         # 🆕 ——— /codex (مشاهده/ساخت شناسنامهٔ پروژه از تلگرام) ———
         if text == "/codex":
@@ -1755,18 +1778,153 @@ class NotificationService:
         return None
 
     async def _compose_send_welcome(self, chat_id_str: str, buf: Any) -> None:
-        """پیام راهنمای اولین ورود به compose mode."""
+        """پیام راهنمای اولین ورود به compose mode + ReplyKeyboard بزرگ.
+
+        ReplyKeyboard دکمه‌های واضح در پایین صفحه (نه inline) — تا پایان
+        compose mode dormant باقی می‌ماند.
+        """
+        from .oversight_telegram_compose import get_compose_service
         tg = self._telegram()
-        await tg.send(
-            "📦 *حالت ساخت تسک ترکیبی فعال شد*\n\n"
-            "هر تعداد فایل (صوت، ویدئو، عکس، سند، کد) و متن می‌توانی بفرستی.\n"
-            "ترتیب رسیدن = ترتیب در پرامپت (اولی → بخش اول).\n\n"
-            "وقتی همهٔ پیوست‌ها/متن‌ها را فرستادی، دکمهٔ پایین صفحه را بزن:\n"
-            f"   `{self._COMPOSE_BTN_SUBMIT}`\n"
-            "یا برای لغو: \n"
-            f"   `{self._COMPOSE_BTN_CANCEL}`",
-            silent=True,
+        submit_btn = (
+            self._COMPOSE_BTN_SUBMIT
+            if buf.mode == "task"
+            else self._COMPOSE_BTN_SUBMIT_PROJECT
         )
+        welcome = (
+            "📦 *حالت ساخت "
+            + ("تسک" if buf.mode == "task" else "پروژه")
+            + " ترکیبی فعال شد*\n\n"
+            "✅ هر تعداد فایل (صوت، ویدئو، عکس، سند، کد) و متن می‌توانی بفرستی.\n"
+            "✅ ترتیب رسیدن = ترتیب در پرامپت (اولی → بخش اول).\n"
+            "✅ تا زمانی که دکمهٔ زیر را نزنی، هیچ‌چیز ساخته نمی‌شود.\n\n"
+            "⬇ از *دکمه‌های پایین صفحه* برای ارسال یا لغو استفاده کن."
+        )
+        res = await tg.send_with_reply_keyboard(
+            welcome,
+            keyboard_rows=[
+                [submit_btn],
+                [self._COMPOSE_BTN_CANCEL],
+            ],
+            silent=False,
+        )
+        if res.get("ok"):
+            await get_compose_service().set_reply_keyboard_active(chat_id_str, True)
+
+    async def _compose_refresh_ui(self, chat_id_str: str, buf: Any) -> None:
+        """به‌روزرسانی UI compose — یک status message که هر بار edit می‌شود
+        (به‌جای spam پیام جدید).
+
+        - اگر status_message_id نداریم → اولین status را بفرست
+        - اگر داریم → edit (با diff check برای جلوگیری از "not modified")
+        - ReplyKeyboard همان قبلی باقی می‌ماند (در welcome ست شده)
+        """
+        from .oversight_telegram_compose import get_compose_service
+        tg = self._telegram()
+        compose_svc = get_compose_service()
+
+        # اگر ReplyKeyboard هنوز فعال نشده (case کاربر بدون auto-enter از
+        # awaiting_idea رسیده)، حالا فعالش کن
+        if not buf.reply_keyboard_active:
+            submit_btn = (
+                self._COMPOSE_BTN_SUBMIT
+                if buf.mode == "task"
+                else self._COMPOSE_BTN_SUBMIT_PROJECT
+            )
+            await tg.send_with_reply_keyboard(
+                "📦 آیتم اضافه شد — می‌توانی پیوست/متن بیشتر بفرستی، یا دکمهٔ زیر را بزنی.",
+                keyboard_rows=[[submit_btn], [self._COMPOSE_BTN_CANCEL]],
+                silent=True,
+            )
+            await compose_svc.set_reply_keyboard_active(chat_id_str, True)
+
+        # ساخت متن status
+        status_text = self._compose_render_status(buf)
+
+        # اگر status_message_id داریم، edit کن
+        if buf.status_message_id:
+            res = await tg.edit_message_text(
+                tg.chat_id, buf.status_message_id, status_text,
+                parse_mode="Markdown",
+            )
+            if res.get("ok"):
+                return
+            # اگر edit fail (مثلاً پیام delete شده توسط کاربر)، یک پیام جدید بفرست
+            logger.debug(f"compose: edit status failed, sending new: {res.get('error')}")
+
+        # ارسال پیام جدید + ذخیرهٔ message_id
+        send_res = await tg.send(status_text, silent=True)
+        # نکته: TelegramChannel.send فعلاً message_id را برنمی‌گرداند مگر در
+        # موارد خاص. در حال حاضر یک fallback نرم: اگر status_message_id نگرفتیم،
+        # دفعهٔ بعد یک پیام جدید می‌رود (idempotency کامل نیست ولی spam نمی‌شود
+        # چون status فقط در صورت تغییر می‌آید). در stage 4 message_id را از
+        # response واقعی می‌خوانیم.
+        # برای الان، یک تماس مستقیم با sendMessage که message_id را برگرداند:
+        try:
+            import aiohttp as _ah
+            url = f"https://api.telegram.org/bot{tg.bot_token}/sendMessage"
+            payload = {
+                "chat_id": tg.chat_id,
+                "text": status_text[:4000],
+                "parse_mode": "Markdown",
+                "disable_web_page_preview": True,
+                "disable_notification": True,
+            }
+            timeout = _ah.ClientTimeout(total=15)
+            async with _ah.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json=payload) as r:
+                    body = await r.json()
+                    if body.get("ok"):
+                        mid = (body.get("result") or {}).get("message_id")
+                        if mid:
+                            await compose_svc.set_status_message_id(chat_id_str, int(mid))
+        except Exception as e:
+            logger.debug(f"compose: send status (with id) failed: {e}")
+
+    @staticmethod
+    def _compose_render_status(buf: Any) -> str:
+        """متن status message با همهٔ آیتم‌های فعلی."""
+        files = buf.file_items_sorted()
+        texts = buf.text_items_sorted()
+        total_size_mb = buf.total_size_bytes() / 1024.0 / 1024.0
+        header = (
+            f"📦 *در حال ساخت "
+            + ("تسک" if buf.mode == "task" else "پروژه")
+            + f" ترکیبی* — {buf.total_files()} فایل ({total_size_mb:.2f}MB) + {len(texts)} پیام متنی\n"
+            "─────────────────"
+        )
+        lines: List[str] = [header]
+        # همهٔ items به ترتیب order
+        for it in sorted(buf.items, key=lambda x: x.order):
+            type_icon = {
+                "voice": "🎙", "video_note": "🎬", "video": "🎞",
+                "photo": "🖼", "audio": "🎵", "document": "📄",
+                "animation": "🌀", "text": "📝",
+            }.get(it.type, "📎")
+            if it.type == "text":
+                txt = (it.text or "").replace("\n", " ").replace("`", "ʼ")
+                preview = txt[:80] + ("..." if len(txt) > 80 else "")
+                lines.append(f"  {it.order}. {type_icon} متن: _{preview}_")
+            else:
+                size_kb = (it.size_bytes or 0) / 1024.0
+                size_str = (
+                    f"{size_kb / 1024:.1f}MB" if size_kb >= 1024 else f"{int(size_kb)}KB"
+                )
+                dur = (
+                    f" ⏱{int(it.duration_seconds)}s"
+                    if it.duration_seconds else ""
+                )
+                err = f" ⚠️{it.error[:50]}" if it.error else ""
+                fname = (it.filename or it.type).replace("`", "ʼ")
+                lines.append(
+                    f"  {it.order}. {type_icon} `{fname[:50]}` ({size_str}){dur}{err}"
+                )
+        if not buf.items:
+            lines.append("  _(هنوز آیتمی اضافه نشده)_")
+        lines.append("─────────────────")
+        if buf.mode == "task" and not buf.watched_id:
+            lines.append("⚠️ پروژهٔ هدف انتخاب نشده — هنگام submit از تو خواسته می‌شود.")
+        lines.append("⬇ از دکمه‌های پایین برای ارسال یا لغو استفاده کن.")
+        return "\n".join(lines)
 
     async def _compose_add_media(
         self,
@@ -1868,27 +2026,6 @@ class NotificationService:
                 ComposeItem(order=0, type="text", text=caption),
             )
 
-    async def _compose_refresh_ui(self, chat_id_str: str, buf: Any) -> None:
-        """به‌روزرسانی UI compose — status message + ReplyKeyboard.
-
-        Stage 3 این تابع را پر می‌کند. در Stage 2 فعلاً فقط یک confirm کوتاه
-        می‌فرستیم تا کاربر بداند آیتم اضافه شد.
-        """
-        tg = self._telegram()
-        files = buf.file_items_sorted()
-        texts = buf.text_items_sorted()
-        last = buf.items[-1] if buf.items else None
-        if last and last.is_file():
-            await tg.send(
-                f"✅ #{last.order} اضافه شد: {self._fmt_compose_item(last)}",
-                silent=True,
-            )
-        elif last and last.type == "text":
-            await tg.send(
-                f"✅ متن #{last.order} اضافه شد ({len(last.text or '')} char).",
-                silent=True,
-            )
-
     @staticmethod
     def _fmt_compose_item(it: Any) -> str:
         type_icon = {
@@ -1907,6 +2044,25 @@ class NotificationService:
         if it.duration_seconds:
             parts.append(f"⏱{int(it.duration_seconds)}s")
         return " ".join(parts)
+
+    async def _compose_submit(self, chat_id_str: str, *, mode: str = "task") -> Dict[str, Any]:
+        """Stage 4 پایپ‌لاین submit (placeholder در Stage 3 — هنوز کامل نشده).
+
+        موقتاً تأیید می‌گیریم که دکمه شنیده شد، در Stage 4 منطق واقعی می‌آید.
+        """
+        from .oversight_telegram_compose import get_compose_service
+        tg = self._telegram()
+        compose_svc = get_compose_service()
+        buf = compose_svc.get(chat_id_str)
+        if buf is None:
+            await tg.send("⚠️ هیچ compose فعالی نیست.", silent=True)
+            return {"ok": True, "handled": "compose_submit_no_buffer"}
+        await tg.send(
+            f"⏳ submit آغاز شد ({mode}, {buf.total_files()} فایل، {len(buf.text_items_sorted())} متن)...\n"
+            "_(پایپ‌لاین کامل در Stage 4 — این پیام موقت است)_",
+            silent=True,
+        )
+        return {"ok": True, "handled": "compose_submit_stub", "mode": mode}
 
     # -----------------------------------------------------------------------
     # 🆕 (P5) /new_task flow — ثبت تسک از تلگرام با انتخاب پروژه
