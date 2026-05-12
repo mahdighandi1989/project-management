@@ -33,6 +33,14 @@ from .base import (
 )
 from .static_probe import run_static_probe
 from .manual_probe import run_manual_probe
+from .api_probe import run_api_probe
+from .test_probe import run_test_probe
+from .ui_probe import run_ui_probe
+from .runner import (
+    build_probe_context,
+    run_probes_for_acs,
+    run_probes_for_task,
+)
 
 __all__ = [
     "AC_METHODS",
@@ -52,4 +60,10 @@ __all__ = [
     "RuntimeProbeResult",
     "run_static_probe",
     "run_manual_probe",
+    "run_api_probe",
+    "run_test_probe",
+    "run_ui_probe",
+    "build_probe_context",
+    "run_probes_for_acs",
+    "run_probes_for_task",
 ]
