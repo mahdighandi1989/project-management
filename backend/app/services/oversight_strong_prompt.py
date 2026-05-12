@@ -169,7 +169,8 @@ def build_strong_prompt(
     dependency_summary: str = "",
     tech_context: str = "",
     before_after_examples: Optional[List[Dict[str, str]]] = None,
-    acceptance_criteria: Optional[List[str]] = None,
+    # 🔬 (Runtime Verify Stage 1) — AC می‌تواند str (قدیمی) یا dict (جدید) باشد
+    acceptance_criteria: Optional[List[Any]] = None,
     steps: Optional[List[str]] = None,
     validation_commands: Optional[List[str]] = None,
     expected_output: str = "",
@@ -234,8 +235,11 @@ def build_strong_prompt(
             )
             rem_parts.append("")
             for a in acceptance_criteria:
-                if a and a.strip():
-                    rem_parts.append(f"- [ ] {a.strip()}")
+                # 🔬 (Runtime Verify Stage 1) — AC می‌تواند str یا dict باشد
+                txt = (a.get("text") if isinstance(a, dict) else a) or ""
+                txt = str(txt).strip()
+                if txt:
+                    rem_parts.append(f"- [ ] {txt}")
             rem_parts.append("")
         if user_goal and user_goal.strip():
             rem_parts.append("## 🎯 چرا این یادآوری مهم است")
@@ -315,11 +319,13 @@ def build_strong_prompt(
     )
 
     # === Acceptance criteria ===
+    # 🔬 (Runtime Verify Stage 1) — AC می‌تواند str یا dict باشد
     ac_lines: List[str] = []
     for c in acceptance_criteria:
-        c = c.strip()
-        if c:
-            ac_lines.append(f"- [ ] {c}")
+        c_text = (c.get("text") if isinstance(c, dict) else c) or ""
+        c_text = str(c_text).strip()
+        if c_text:
+            ac_lines.append(f"- [ ] {c_text}")
     standard_ac = [
         "- [ ] هیچ تستی fail نمی‌شود (`npm run test` / `pytest`)",
         "- [ ] linter بدون warning عبور می‌کند",

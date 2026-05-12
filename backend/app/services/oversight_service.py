@@ -246,7 +246,11 @@ class OversightTask:
     apply_retries: int = 0
     # location hints (extracted from prompt for faster verify)
     target_files: List[str] = field(default_factory=list)
-    acceptance_criteria: List[str] = field(default_factory=list)
+    # 🔬 (Runtime Verify Stage 1) — AC ساختاریافته. هر AC می‌تواند:
+    #   - str قدیمی (backward compat — هنگام load به dict تبدیل می‌شود)
+    #   - dict جدید: {text, verify_method, verify_plan, evidence_history, ...}
+    # برای جزئیات شکل ساختار، verify_runtime/ac_schema.py را ببین.
+    acceptance_criteria: List[Any] = field(default_factory=list)
     # 🆕 followup prompt — وقتی verify نتیجهٔ partial/not_done/regressed/error
     # داد، AI یک پرامپت ادامه (focused on remaining_parts) تولید می‌کند که
     # کاربر می‌تواند کپی یا با دکمهٔ "اجرای بعدی با AI" اعمال کند.
@@ -254,7 +258,8 @@ class OversightTask:
     followup_prompt: str = ""
     followup_generated_at: Optional[str] = None
     followup_target_locations: List[Dict[str, Any]] = field(default_factory=list)
-    followup_acceptance_criteria: List[str] = field(default_factory=list)
+    # 🔬 (Runtime Verify Stage 1) — followup AC هم ساختاریافته
+    followup_acceptance_criteria: List[Any] = field(default_factory=list)
     followup_round: int = 0  # 0=هیچ، 1=دور اول follow-up، 2=...
     # 🆕 findings که در این task ادغام شده‌اند (از smart merger در deep_scan)
     # هر merged finding شامل: title, type, priority, _pass, description (snippet)
@@ -459,8 +464,40 @@ class OversightService:
             except (TypeError, KeyError):
                 logger.warning(f"Ignoring malformed watched entry: {w}")
 
+        # 🔬 (Runtime Verify Stage 1) — normalize AC + task_steps در بارگذاری
+        # task های قدیمی AC string دارند → به ساختار {text, verify_method,
+        # verify_plan, ...} تبدیل می‌شود. task_steps بدون verify_method ←
+        # default static. این normalize **روی state در حافظه** اجرا می‌شود؛
+        # ذخیرهٔ مجدد به JSON با اولین _save_tasks اتفاق می‌افتد.
+        try:
+            from .verify_runtime import normalize_ac_list, normalize_task_steps
+        except Exception as _e:
+            logger.debug(f"verify_runtime import failed (skipping AC normalize): {_e}")
+            normalize_ac_list = None  # type: ignore
+            normalize_task_steps = None  # type: ignore
+
         for t in _read_json(TASKS_FILE, []):
             try:
+                # AC + task_steps را قبل از سازندهٔ dataclass normalize کن
+                # تا فیلدها از همان ابتدا dict باشند، نه str.
+                if normalize_ac_list is not None:
+                    try:
+                        if "acceptance_criteria" in t:
+                            t["acceptance_criteria"] = normalize_ac_list(
+                                t.get("acceptance_criteria") or []
+                            )
+                        if "followup_acceptance_criteria" in t:
+                            t["followup_acceptance_criteria"] = normalize_ac_list(
+                                t.get("followup_acceptance_criteria") or []
+                            )
+                    except Exception as _e:
+                        logger.debug(f"AC normalize failed for task: {_e}")
+                if normalize_task_steps is not None:
+                    try:
+                        if "task_steps" in t and t.get("task_steps"):
+                            t["task_steps"] = normalize_task_steps(t["task_steps"])
+                    except Exception as _e:
+                        logger.debug(f"task_steps normalize failed: {_e}")
                 self.tasks.append(OversightTask(**self._filter_known_fields(OversightTask, t)))
             except (TypeError, KeyError):
                 logger.warning(f"Ignoring malformed task: {t}")
@@ -1338,13 +1375,25 @@ class OversightService:
         union = len(ga | gb)
         return inter / union if union else 0.0
 
+    @staticmethod
+    def _ac_text(ac: Any) -> str:
+        """🔬 (Runtime Verify Stage 1) — متن AC را برمی‌گرداند، خواه str قدیمی
+        خواه dict جدید با فیلد text."""
+        if isinstance(ac, dict):
+            return str(ac.get("text") or "").strip()
+        return str(ac).strip() if ac is not None else ""
+
     @classmethod
     def _ac_overlap(
-        cls, a: Optional[List[str]], b: Optional[List[str]]
+        cls, a: Optional[List[Any]], b: Optional[List[Any]]
     ) -> float:
-        """تطابق acceptance_criteria — هر AC با هم Jaccard بزرگ‌تر از 0.6 یعنی match."""
-        la = [x for x in (a or []) if x]
-        lb = [x for x in (b or []) if x]
+        """تطابق acceptance_criteria — هر AC با هم Jaccard بزرگ‌تر از 0.6 یعنی match.
+        ورودی می‌تواند str یا dict (ساختار جدید) باشد.
+        """
+        la_texts = [cls._ac_text(x) for x in (a or [])]
+        lb_texts = [cls._ac_text(x) for x in (b or [])]
+        la = [x for x in la_texts if x]
+        lb = [x for x in lb_texts if x]
         if not la or not lb:
             return 0.0
         matched = 0
@@ -1447,6 +1496,7 @@ class OversightService:
 
     async def create_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         from .oversight_strong_prompt import extract_target_files, extract_acceptance_criteria
+        from .verify_runtime import normalize_ac_list, normalize_task_steps
 
         watched_id = payload.get("watched_id")
         watched = self._find_watched(watched_id) if watched_id else None
@@ -1465,9 +1515,12 @@ class OversightService:
 
         # استخراج target_files و acceptance_criteria از پرامپت در صورت نبودن
         target_files = payload.get("target_files") or extract_target_files(prompt)
-        acceptance_criteria = (
-            payload.get("acceptance_criteria") or extract_acceptance_criteria(prompt)
-        )
+        # 🔬 (Runtime Verify Stage 1) — AC را به ساختار استاندارد تبدیل کن.
+        # کاربر می‌تواند str قدیمی، dict جدید، یا ترکیبی پاس کند —
+        # normalize_ac_list هر سه را به ساختار {text, verify_method, verify_plan,
+        # evidence_history} تبدیل می‌کند. اگر هیچ AC ای نبود، از پرامپت extract می‌شود.
+        raw_ac = payload.get("acceptance_criteria") or extract_acceptance_criteria(prompt)
+        acceptance_criteria = normalize_ac_list(raw_ac)
 
         execution_mode = payload.get("execution_mode")
         if not execution_mode:
@@ -1605,9 +1658,15 @@ class OversightService:
                     "evidence": s.get("evidence", ""),
                     "last_verified_at": s.get("last_verified_at"),
                     "completed_at": s.get("completed_at"),
+                    # 🔬 (Runtime Verify Stage 1) — اگر idea_to_prompt مرحله را
+                    # با verify_method/plan داد، حفظ کن (Stage 2 آن را پر می‌کند).
+                    "verify_method": s.get("verify_method"),
+                    "verify_plan": s.get("verify_plan"),
                 })
             if normalized_steps:
-                t.task_steps = normalized_steps
+                # 🔬 normalize نهایی برای پرکردن default های verify_method/plan
+                # روی step هایی که AI آن‌ها را نگفت.
+                t.task_steps = normalize_task_steps(normalized_steps)
                 t.overall_completion_pct = int(payload.get("overall_completion_pct") or 0)
         async with self._lock:
             self.tasks.append(t)
@@ -1971,7 +2030,12 @@ class OversightService:
             if new_target_files:
                 task.target_files = new_target_files
             if new_ac:
-                task.acceptance_criteria = new_ac
+                # 🔬 (Runtime Verify Stage 1) — همیشه AC را normalize کن
+                try:
+                    from .verify_runtime import normalize_ac_list
+                    task.acceptance_criteria = normalize_ac_list(new_ac)
+                except Exception:
+                    task.acceptance_criteria = new_ac
             # 🆕 (Multi-pass Checklist) — task_steps را به‌روز کن
             new_steps = new_data.get("task_steps") or []
             if new_steps:
@@ -5246,13 +5310,23 @@ class OversightService:
                     l.get("path", "") for l in extracted_locs if l.get("path")
                 ] or task.target_files
             if extracted_ac:
-                task.acceptance_criteria = extracted_ac
+                # 🔬 (Runtime Verify Stage 1) — AC به ساختار جدید normalize
+                try:
+                    from .verify_runtime import normalize_ac_list
+                    task.acceptance_criteria = normalize_ac_list(extracted_ac)
+                except Exception:
+                    task.acceptance_criteria = extracted_ac
             # field‌های followup همچنان نگه‌داشته می‌شوند برای backward compat
             # با UI قدیمی (دکمهٔ «اجرای followup»)، ولی prompt اصلی به‌روز است.
             task.followup_prompt = new_prompt
             task.followup_generated_at = now_iso()
             task.followup_target_locations = extracted_locs
-            task.followup_acceptance_criteria = extracted_ac
+            # 🔬 (Runtime Verify Stage 1) — followup AC هم normalize
+            try:
+                from .verify_runtime import normalize_ac_list
+                task.followup_acceptance_criteria = normalize_ac_list(extracted_ac)
+            except Exception:
+                task.followup_acceptance_criteria = extracted_ac
             task.followup_round = (task.followup_round or 0) + 1
             task.updated_at = now_iso()
 
