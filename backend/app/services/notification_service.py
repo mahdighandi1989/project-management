@@ -2196,6 +2196,55 @@ class NotificationService:
             )
             return {"ok": False, "handled": "compose_submit_failed", "error": str(e)[:300]}
 
+    async def _send_compose_vision_toggle(
+        self, chat_id_str: str, buf: Any, blocked: Dict[str, Any],
+    ) -> None:
+        """🛡 (audit fix) — Telegram inline keyboard معادل modal فرانت‌اند.
+
+        وقتی idea_to_prompt به‌دلیل نبود vision model fail می‌شود، این تابع
+        یک پیام با inline_keyboard می‌فرستد که هر دکمه یک candidate model
+        است. callback `compose_temp_activate:<model_id>:<chat_id>` آن را
+        به temp-activate route می‌برد و سپس re-submit می‌کند.
+        """
+        tg = self._telegram()
+        candidates = blocked.get("candidates", []) or []
+        mime = blocked.get("mime_type") or "image/*"
+        missing_files = blocked.get("missing_files", []) or []
+
+        text_lines = [
+            "🔓 *مدل بصری برای استخراج فایل پیوست لازم است*",
+            "",
+            f"فایل‌های زیر نیاز به vision model دارند (mime: `{mime}`):",
+        ]
+        for mf in missing_files[:3]:
+            text_lines.append(f"  • {mf.get('filename', '?')}")
+        if len(missing_files) > 3:
+            text_lines.append(f"  • … و {len(missing_files) - 3} فایل دیگر")
+        text_lines.append("")
+        text_lines.append("یک مدل را موقتاً فعال کن — کار انجام می‌شود سپس")
+        text_lines.append("خودکار غیرفعال می‌شود (با اطلاع تلگرام).")
+
+        # inline keyboard rows
+        rows: List[List[Dict[str, str]]] = []
+        for i, c in enumerate(candidates[:6]):
+            cid = c.get("id") or ""
+            cname = (c.get("name") or cid)[:35]
+            prov = c.get("provider") or ""
+            star = "⭐ " if i == 0 else ""
+            rows.append([{
+                "text": f"{star}🔓 {cname} ({prov})",
+                "callback_data": f"compose_temp_activate:{cid}",
+            }])
+        rows.append([
+            {"text": "❌ لغو", "callback_data": "compose_cancel_picker"},
+        ])
+
+        await tg.send(
+            "\n".join(text_lines),
+            silent=False,
+            reply_markup={"inline_keyboard": rows},
+        )
+
     async def _compose_submit_project(
         self, chat_id_str: str, buf: Any,
     ) -> Dict[str, Any]:
@@ -2516,6 +2565,29 @@ class NotificationService:
                 progress_track_id=buf.task_draft_id,
                 multi_pass_mode="always",
             )
+        except ValueError as e:
+            # 🛡 (audit fix) — اگر blocked_no_vision_model است، toggle UI
+            # به جای error پیام نشان بده.
+            blocked = getattr(e, "blocked_payload", None)
+            if blocked:
+                await tracker.complete(
+                    buf.task_draft_id, stage="blocked",
+                    error="vision model unavailable",
+                )
+                await self._send_compose_vision_toggle(chat_id_str, buf, blocked)
+                # mark_submitting را un-mark می‌کنیم تا کاربر بتواند بعد از
+                # toggle دوباره submit بزند
+                await compose_svc.mark_submitting(chat_id_str, False)
+                return {
+                    "ok": True,
+                    "handled": "compose_blocked_no_vision",
+                    "candidates": blocked.get("candidates", []),
+                }
+            await tracker.complete(
+                buf.task_draft_id, stage="failed",
+                error=f"idea_to_prompt failed: {e}",
+            )
+            raise RuntimeError(f"idea_to_prompt failed: {e}")
         except Exception as e:
             await tracker.complete(
                 buf.task_draft_id, stage="failed",
@@ -3004,6 +3076,34 @@ class NotificationService:
         if data == "compose_cancel_picker":
             await tg.send("⏸ انتخاب پروژه لغو شد — می‌توانی همچنان آیتم بفرستی یا با ❌ لغو همه ببندی.", silent=True)
             return {"ok": True, "handled": "compose_picker_cancelled"}
+
+        # 🛡 (audit fix) — Telegram معادل modal toggle:
+        # compose_temp_activate:<model_id> → temp-activate + retry submit
+        if data.startswith("compose_temp_activate:"):
+            model_id = data.split(":", 1)[1].strip()
+            if not model_id:
+                await tg.send("⚠️ model_id خالی است.", silent=True)
+                return {"ok": True, "handled": "compose_temp_activate_bad"}
+            from .oversight_model_temp_activate import temp_activate_model
+            try:
+                res = await temp_activate_model(
+                    model_id, trigger=f"telegram-compose-{chat_id_str}",
+                )
+                await tg.send(
+                    f"✅ مدل `{res.get('name', model_id)}` موقتاً فعال شد. "
+                    f"اکنون submit را دوباره اجرا می‌کنم...",
+                    silent=True,
+                )
+            except Exception as e:
+                await tg.send(f"❌ فعال‌سازی موقت ناموفق: {str(e)[:200]}", silent=False)
+                return {"ok": True, "handled": "compose_temp_activate_failed"}
+            # retry submit — compose buffer هنوز در سرور است (لغو نشده)
+            from .oversight_telegram_compose import get_compose_service
+            buf = get_compose_service().get(chat_id_str)
+            if buf is None:
+                await tg.send("⚠️ compose منقضی شد. دوباره فایل بفرست.", silent=True)
+                return {"ok": True, "handled": "compose_expired_after_activate"}
+            return await self._compose_submit(chat_id_str, mode=buf.mode)
 
         # creator_confirm:push:<token> یا creator_confirm:local:<token>
         if data.startswith("creator_confirm:"):

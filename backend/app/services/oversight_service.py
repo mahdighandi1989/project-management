@@ -2814,22 +2814,39 @@ class OversightService:
         # می‌اندازیم تا API route بتواند 409 با candidates برگرداند → frontend
         # modal نشان می‌دهد.
         missing_vision_for: List[Dict[str, Any]] = []
+        # 🛡 (audit fix) — لیست extensionهای کد و آرشیو که vision نیاز ندارند
+        # (extraction آن‌ها به‌صورت text/structured صورت می‌گیرد)
+        _no_vision_text_mimes = {
+            "application/json", "application/xml", "application/yaml",
+            "application/x-yaml", "application/toml", "application/x-toml",
+            "application/x-ndjson",
+            # archives — extracted to inner text files
+            "application/zip", "application/x-tar", "application/gzip",
+            "application/x-7z-compressed", "application/x-zip-compressed",
+            # ipynb — JSON parsed
+            "application/x-ipynb+json",
+        }
+        _no_vision_extensions = (
+            ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".c", ".cpp",
+            ".h", ".hpp", ".go", ".rs", ".rb", ".php", ".html", ".htm",
+            ".css", ".scss", ".sql", ".sh", ".bash", ".ps1", ".kt",
+            ".swift", ".dart", ".r", ".lua", ".pl", ".scala", ".clj",
+            ".ex", ".exs", ".elm", ".vue", ".cs",
+            # archives + ipynb (by extension fallback)
+            ".zip", ".tar", ".gz", ".7z", ".ipynb",
+            # text-like
+            ".md", ".markdown", ".txt", ".csv", ".tsv", ".log", ".ini",
+            ".yml", ".yaml", ".toml", ".json", ".xml",
+        )
         for s in sessions:
             mt = (s.mime_type or "").lower()
-            # text/code/json نیاز به vision model ندارند — skip
-            if mt.startswith("text/") or mt in (
-                "application/json", "application/xml", "application/yaml",
-                "application/x-yaml", "application/toml", "application/x-toml",
-                "application/x-ndjson",
-            ):
+            fname_lower = (s.original_filename or "").lower()
+            # 🛡 text/code/archive/ipynb — vision نیاز ندارند
+            if mt.startswith("text/") or mt in _no_vision_text_mimes:
                 continue
-            # برای fileهای code-extension (mime=application/octet-stream)
-            # هم skip — extraction آن‌ها text-mode می‌شود
-            try:
-                from ..core.models_registry import _EXT_TO_MIME, _guess_mime_from_extension
-                # نسخهٔ alternative — هم import می‌کنیم اگر در deep_scan موجود است
-            except Exception:
-                pass
+            # 🛡 extension fallback — برای application/octet-stream یا mime عمومی
+            if any(fname_lower.endswith(ext) for ext in _no_vision_extensions):
+                continue
             avail = check_extraction_model_availability(mt)
             if not avail.get("available"):
                 missing_vision_for.append({
