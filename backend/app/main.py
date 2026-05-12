@@ -129,6 +129,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"extraction boot recovery failed (non-fatal): {e}")
 
+    # 🆕 (Telegram Compose Stage 1) — bufferهای expired را حذف کن
+    try:
+        from .services.oversight_telegram_compose import get_compose_service
+        n = await get_compose_service().cleanup_expired()
+        if n:
+            logger.info(f"📦 cleaned up {n} expired compose buffer(s) on boot")
+    except Exception as e:
+        logger.warning(f"compose boot cleanup failed (non-fatal): {e}")
+
     yield
 
     # Shutdown
