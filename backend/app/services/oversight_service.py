@@ -223,7 +223,7 @@ class OversightTask:
     title: str
     prompt: str
     raw_idea: str = ""
-    type: str = "other"  # idea | bug | feature_request | refactor | docs | other
+    type: str = "other"  # idea | bug | feature_request | refactor | docs | reminder | other
     priority: str = "medium"  # low | medium | high | critical
     status: str = "pending"  # pending | running | awaiting_review | done | failed | cancelled | suggested
     models_used: List[str] = field(default_factory=list)
@@ -309,6 +309,23 @@ class OversightTask:
     # (page_url, captured_at, screenshot timestamps, session id, ...) —
     # مستقل از task.prompt که فقط core است.
     inspector_meta_summary: Optional[str] = None
+
+    # 🆕 (Reminder feature) — فعال فقط زمانی که type=="reminder":
+    # reminder_at: ISO datetime زمان firing بعدی (UTC).
+    # reminder_state: گردش کار یادآوری.
+    #   none      = نوع reminder نیست
+    #   scheduled = منتظر firing
+    #   fired     = الان firing شده، منتظر پاسخ کاربر (snooze / done / tick)
+    #   snoozed   = کاربر snooze زده، reminder_at به آینده رفته
+    #   done      = همهٔ آیتم‌ها انجام شدند، archived
+    reminder_at: Optional[str] = None
+    reminder_state: str = "none"
+    # هر آیتم: {ts, action: "scheduled"|"fired"|"snoozed"|"done"|"step_ticked", payload}
+    reminder_history: List[Dict[str, Any]] = field(default_factory=list)
+    # message_id آخرین پیام یادآوری در تلگرام — برای edit (cross out items)
+    reminder_message_id: Optional[int] = None
+    # rule تکرار (آینده): "daily" | "weekly" | None
+    reminder_repeat_rule: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -1531,6 +1548,17 @@ class OversightService:
                 ).to_dict()
         # ─────────────────────────────────────────────────────────────────
 
+        # 🔔 (Reminder feature) — اگر type==reminder، reminder_at لازم است و
+        # reminder_state اولیه = "scheduled". اگر type!=reminder، این فیلدها
+        # پاک می‌مانند (default).
+        _type = payload.get("type", "other")
+        _is_reminder = (_type or "").lower().strip() == "reminder"
+        _reminder_at = payload.get("reminder_at") if _is_reminder else None
+        _reminder_state = "scheduled" if (_is_reminder and _reminder_at) else "none"
+        _reminder_repeat_rule = (
+            payload.get("reminder_repeat_rule") if _is_reminder else None
+        )
+
         t = OversightTask(
             id=str(uuid.uuid4()),
             watched_id=watched_id,
@@ -1538,7 +1566,7 @@ class OversightService:
             title=title,
             prompt=prompt,
             raw_idea=raw_idea,
-            type=payload.get("type", "other"),
+            type=_type,
             priority=payload.get("priority", "medium"),
             status=payload.get("status", "pending"),
             deadline=payload.get("deadline"),
@@ -1546,7 +1574,17 @@ class OversightService:
             execution_mode=execution_mode,
             target_files=target_files,
             acceptance_criteria=acceptance_criteria,
+            reminder_at=_reminder_at,
+            reminder_state=_reminder_state,
+            reminder_repeat_rule=_reminder_repeat_rule,
         )
+        # اگر reminder، یک رکورد scheduled در history ثبت کن
+        if _is_reminder and _reminder_at:
+            t.reminder_history.append({
+                "ts": now_iso(),
+                "action": "scheduled",
+                "at": _reminder_at,
+            })
         # 🆕 (Multi-pass Checklist) — اگر idea_to_prompt مراحل تولید کرده، آن‌ها را
         # به تسک متصل کن. هر مرحله شامل id/title/scope و وضعیت اولیه pending است.
         incoming_steps = payload.get("task_steps") or []
@@ -3016,6 +3054,175 @@ class OversightService:
             augmented = idea
         return augmented, attachments_meta
 
+    # ====================================================================
+    # 🔔 Reminder feature
+    # ====================================================================
+
+    async def _idea_to_prompt_reminder(
+        self,
+        *,
+        idea: str,
+        priority: str,
+        model_id: Optional[str],
+        upload_session_ids: Optional[List[str]],
+        attachments_meta: List[Dict[str, Any]],
+        progress_track_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """مسیر اختصاصی برای type=="reminder".
+
+        خروجی JSON با شکل:
+          {
+            "title": str,        # عنوان کوتاه یادآوری
+            "summary": str,      # شرح کوتاه (1-3 جمله)
+            "checklist": List[str],  # action items قابل تیک
+          }
+        سپس با build_strong_prompt(type_="reminder", ...) به متن
+        پرامپت (که در واقع متن یادآوری است) تبدیل می‌شود.
+        """
+        from .ai_manager import get_ai_manager
+        from .ai_base import Message
+        from .oversight_strong_prompt import build_strong_prompt
+
+        # title پیش‌فرض از اولین خط idea
+        first_line = (idea or "").strip().splitlines()[:1]
+        default_title = (first_line[0] if first_line else "یادآوری")[:80]
+
+        # انتخاب مدل: اگر فایل پیوست بود، حتماً مدل بصری
+        effective_model = model_id
+        if attachments_meta:
+            try:
+                from ..core.models_registry import (
+                    pick_best_extraction_model, DEFAULT_EXTRACTION_MODEL_ID,
+                )
+                from .oversight_settings import (
+                    get_default_extraction_model_id_from_db,
+                )
+                user_default = get_default_extraction_model_id_from_db()
+                first_mime = (
+                    attachments_meta[0].get("mime_type") or "image/png"
+                ).lower()
+                pref = user_default or DEFAULT_EXTRACTION_MODEL_ID
+                m = pick_best_extraction_model(first_mime, preferred_model_id=pref)
+                if m is not None:
+                    effective_model = m.id
+            except Exception as e:
+                logger.debug(f"reminder: vision model pick failed: {e}")
+
+        if not effective_model:
+            from ..core.models_registry import get_default_model_id
+            effective_model = get_default_model_id()
+
+        # System prompt یادآوری‌محور
+        system_content = (
+            "تو یک دستیار شخصی هستی. کاربر یک یادآوری توصیف می‌کند "
+            "(احتمالاً شامل پیام صوتی یا فایل پیوست). وظیفهٔ تو این است "
+            "که آن را به یک ساختار ساده و قابل تیک تبدیل کنی — مثل "
+            "to-do list شخصی. این یادآوری برای انجام کارهای روزمره "
+            "است، نه برای engineer کدنویس.\n\n"
+            "خروجی JSON معتبر با ساختار زیر بده (هیچ متن دیگری بیرون JSON ننویس):\n"
+            "{\n"
+            '  "title": "<عنوان کوتاه ≤80 کاراکتر؛ خلاصهٔ مفهوم یادآوری>",\n'
+            '  "summary": "<شرح کوتاه 1-3 جمله که چرا/برای چه این یادآوری است>",\n'
+            '  "checklist": ["<آیتم اول>", "<آیتم دوم>", ...]\n'
+            "}\n\n"
+            "قواعد سخت‌گیرانه:\n"
+            "1. هر آیتم چک‌لیست باید یک action واحد، کوتاه (≤120 کاراکتر)، "
+            "و قابل تیک باشد — مثل «به فلانی زنگ بزن» یا «دارو بخر».\n"
+            "2. هیچ‌چیز را خلاصه نکن — اگر کاربر ۸ مورد گفت، ۸ آیتم بده.\n"
+            "3. ترتیب آیتم‌ها = ترتیبی که کاربر گفت (مگر یک ترتیب طبیعی‌تر باشد).\n"
+            "4. نام‌ها، URLها، آدرس‌ها، اعداد را verbatim حفظ کن.\n"
+            "5. این یک تسک کدنویسی نیست — هیچ ارجاع به فایل/تابع/repo نده.\n"
+            "6. اگر متن کاربر فقط یک کار است، فقط یک آیتم در checklist بگذار."
+        )
+
+        # 🔔 اگر فایل پیوست داشت، augment idea با محتوای استخراج‌شده
+        # (resolve_attachments قبلاً انجام شده — متن در idea تزریق شده است)
+        user_content = (
+            "متن کاربر (همراه استخراج فایل پیوست در صورت موجود بودن):\n\n"
+            f"{idea}\n\n"
+            "JSON معتبر برگردان."
+        )
+
+        messages = [
+            Message(role="system", content=system_content),
+            Message(role="user", content=user_content),
+        ]
+
+        mgr = get_ai_manager()
+        try:
+            resp = await mgr.generate(
+                model_id=effective_model,
+                messages=messages,
+                max_tokens=4000,
+                temperature=0.2,
+                allow_fallback=False,
+            )
+            raw = (resp.content or "").strip()
+        except Exception as e:
+            logger.warning(f"reminder AI failed: {e}")
+            raw = ""
+
+        title = default_title
+        summary = idea[:300]
+        checklist: List[str] = []
+        try:
+            import re as _re_rem
+            m = _re_rem.search(r"\{.*\}", raw, _re_rem.DOTALL)
+            if m:
+                data = json.loads(m.group(0))
+                title = (data.get("title") or default_title)[:80]
+                summary = (data.get("summary") or summary)[:1000]
+                cl = data.get("checklist") or []
+                if isinstance(cl, list):
+                    checklist = [str(x)[:200] for x in cl if str(x).strip()][:30]
+        except Exception as e:
+            logger.warning(f"reminder JSON parse failed: {e}")
+
+        # اگر AI شکست خورد، fallback مینیمال: idea به‌عنوان title، یک
+        # آیتم چک‌لیست از idea
+        if not checklist:
+            if idea and idea.strip():
+                checklist = [idea.strip()[:200]]
+            else:
+                checklist = ["انجام کار یادآوری‌شده"]
+
+        # ساخت task_steps با ساختار همخوان با verifier (هر استپ id/status)
+        task_steps: List[Dict[str, Any]] = []
+        for i, item in enumerate(checklist, start=1):
+            task_steps.append({
+                "id": i,
+                "title": item,
+                "scope": item,
+                "status": "pending",
+                "completion_pct": 0,
+                "remaining": item,
+                "done": False,  # 🔔 reminder-specific tick flag
+            })
+
+        # ساخت پرامپت یادآوری با build_strong_prompt(type_="reminder", ...)
+        prompt_text = build_strong_prompt(
+            title=title,
+            raw_user_request=idea,
+            description=summary,
+            acceptance_criteria=checklist,
+            type_="reminder",
+            priority=priority,
+        )
+
+        return {
+            "title": title,
+            "prompt": prompt_text,
+            "type": "reminder",
+            "priority": priority,
+            "raw_idea": idea,
+            "target_files": [],
+            "acceptance_criteria": checklist,
+            "task_steps": task_steps,
+            "overall_completion_pct": 0,
+            "models_used": [effective_model] if effective_model else [],
+            "attachments_meta": attachments_meta,
+        }
+
     async def idea_to_prompt(
         self,
         idea: str,
@@ -3099,6 +3306,21 @@ class OversightService:
             logger.info(
                 f"idea_to_prompt: attachments present ({len(attachments_meta)} files) "
                 f"→ force multi_pass_mode='always' برای تضمین checklist"
+            )
+
+        # 🔔 (Reminder feature) — اگر type_=="reminder"، مسیر اختصاصی:
+        # AI با system prompt یادآوری‌محور (نه code-grounded) اجرا می‌شود.
+        # خروجی: title + description + checklist (action items)، بدون
+        # target_locations/AC تکنیکی/risks/validation_commands. حلقهٔ
+        # multi-pass code-grounded برای reminder بی‌معناست.
+        if (type_ or "").lower().strip() == "reminder":
+            return await self._idea_to_prompt_reminder(
+                idea=idea,
+                priority=priority,
+                model_id=model_id,
+                upload_session_ids=upload_session_ids,
+                attachments_meta=attachments_meta,
+                progress_track_id=progress_track_id,
             )
 
         # 🆕 (Stage 10 audit fix #1 — CRITICAL) — وقتی فایل پیوست هست، طبق
@@ -5435,6 +5657,48 @@ class OversightService:
         except Exception as _be:
             logger.debug(f"AI balance check skipped: {_be}")
 
+        # 🔔 (Reminder feature) — یافتن یادآوری‌هایی که موعدشان رسیده و firing
+        # اولین/بعدی آن‌ها. خارج از حلقهٔ watched است چون reminders می‌توانند
+        # watched_id=None هم داشته باشند (یادآوری شخصی بدون پروژه).
+        fired_reminders: List[str] = []
+        try:
+            due_tasks = [
+                t for t in list(self.tasks)
+                if t.type == "reminder"
+                and t.reminder_state in ("scheduled", "snoozed")
+                and t.reminder_at
+                and not t.archived
+            ]
+            for t in due_tasks:
+                try:
+                    due_dt = datetime.fromisoformat(t.reminder_at.replace("Z", "+00:00"))
+                    if due_dt.tzinfo is None:
+                        due_dt = due_dt.replace(tzinfo=timezone.utc)
+                except Exception as _de:
+                    logger.debug(f"reminder {t.id} bad reminder_at: {_de}")
+                    continue
+                if due_dt > now:
+                    continue
+                try:
+                    from .notification_service import notification_service
+                    sent = await notification_service.send_reminder_due(t)
+                    if sent:
+                        async with self._lock:
+                            t.reminder_state = "fired"
+                            t.reminder_message_id = sent.get("message_id")
+                            t.reminder_history.append({
+                                "ts": now.isoformat(),
+                                "action": "fired",
+                                "message_id": sent.get("message_id"),
+                            })
+                            t.updated_at = now.isoformat()
+                            self._save_tasks()
+                        fired_reminders.append(t.id)
+                except Exception as _re:
+                    logger.warning(f"reminder fire failed for {t.id}: {_re}")
+        except Exception as _e:
+            logger.warning(f"reminder scheduler block failed: {_e}")
+
         return {
             "ran": ran,
             "ran_count": len(ran),
@@ -5443,6 +5707,8 @@ class OversightService:
             "daily_report_sent": daily_sent,
             "verified": verified,
             "verified_count": len(verified),
+            "fired_reminders": fired_reminders,
+            "fired_reminders_count": len(fired_reminders),
             "tick_at": now.isoformat(),
         }
 

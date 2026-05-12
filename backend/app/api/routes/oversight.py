@@ -100,6 +100,9 @@ class TaskCreate(BaseModel):
     overall_completion_pct: Optional[int] = None
     # 🆕 (Stage 7 — File Attachment) — sessionهای آپلودشده برای ربط به این تسک
     upload_session_ids: Optional[List[str]] = None
+    # 🔔 Reminder feature — وقتی type="reminder"، این فیلدها استفاده می‌شوند
+    reminder_at: Optional[str] = None   # ISO datetime زمان firing بعدی
+    reminder_repeat_rule: Optional[str] = None  # daily|weekly|None
 
 
 class SimilarityCheckRequest(BaseModel):
@@ -408,6 +411,108 @@ async def unarchive_task(task_id: str):
     if not res:
         raise HTTPException(status_code=404, detail="تسک یافت نشد")
     return {"success": True, "task": res}
+
+
+# 🔔 Reminder endpoints
+class ReminderSnoozeRequest(BaseModel):
+    until: Optional[str] = None        # ISO datetime — مقصد دقیق
+    delta_seconds: Optional[int] = None  # یا delta از الان
+
+
+class ReminderStepToggleRequest(BaseModel):
+    done: bool
+
+
+@router.post("/tasks/{task_id}/reminder/snooze")
+async def reminder_snooze(task_id: str, payload: ReminderSnoozeRequest):
+    from datetime import datetime, timedelta, timezone
+    service = get_oversight_service()
+    task = next((t for t in service.tasks if t.id == task_id), None)
+    if not task or task.type != "reminder":
+        raise HTTPException(status_code=404, detail="یادآوری یافت نشد")
+    if payload.until:
+        try:
+            new_at = datetime.fromisoformat(payload.until.replace("Z", "+00:00"))
+            if new_at.tzinfo is None:
+                new_at = new_at.replace(tzinfo=timezone.utc)
+        except Exception:
+            raise HTTPException(status_code=400, detail="فرمت زمان نامعتبر")
+    elif payload.delta_seconds is not None:
+        new_at = datetime.now(timezone.utc) + timedelta(seconds=int(payload.delta_seconds))
+    else:
+        raise HTTPException(status_code=400, detail="until یا delta_seconds لازم است")
+    from app.services.oversight_service import now_iso
+    async with service._lock:
+        task.reminder_at = new_at.isoformat()
+        task.reminder_state = "snoozed"
+        task.reminder_history.append({
+            "ts": now_iso(), "action": "snoozed", "new_at": new_at.isoformat(),
+        })
+        task.updated_at = now_iso()
+        service._save_tasks()
+    return {"success": True, "task": task.to_dict()}
+
+
+@router.post("/tasks/{task_id}/reminder/done")
+async def reminder_done(task_id: str):
+    service = get_oversight_service()
+    task = next((t for t in service.tasks if t.id == task_id), None)
+    if not task or task.type != "reminder":
+        raise HTTPException(status_code=404, detail="یادآوری یافت نشد")
+    from app.services.oversight_service import now_iso
+    async with service._lock:
+        for s in task.task_steps or []:
+            s["done"] = True
+            s["status"] = "done"
+            s["completion_pct"] = 100
+        task.reminder_state = "done"
+        task.archived = True
+        task.archived_at = now_iso()
+        task.reminder_history.append({
+            "ts": now_iso(), "action": "done", "via": "frontend_button",
+        })
+        task.updated_at = now_iso()
+        service._save_tasks()
+    return {"success": True, "task": task.to_dict()}
+
+
+@router.patch("/tasks/{task_id}/reminder/step/{step_id}")
+async def reminder_step_toggle(
+    task_id: str, step_id: int, payload: ReminderStepToggleRequest,
+):
+    service = get_oversight_service()
+    task = next((t for t in service.tasks if t.id == task_id), None)
+    if not task or task.type != "reminder":
+        raise HTTPException(status_code=404, detail="یادآوری یافت نشد")
+    from app.services.oversight_service import now_iso
+    found = False
+    async with service._lock:
+        for s in task.task_steps or []:
+            if s.get("id") == step_id:
+                s["done"] = bool(payload.done)
+                s["status"] = "done" if payload.done else "pending"
+                s["completion_pct"] = 100 if payload.done else 0
+                if payload.done:
+                    s["completed_at"] = now_iso()
+                found = True
+                break
+        if not found:
+            raise HTTPException(status_code=404, detail="مرحله یافت نشد")
+        task.reminder_history.append({
+            "ts": now_iso(), "action": "step_ticked" if payload.done else "step_unticked",
+            "step_id": step_id,
+        })
+        # اگر همه done شدند، خودکار done
+        if all(s.get("done") for s in (task.task_steps or [])):
+            task.reminder_state = "done"
+            task.archived = True
+            task.archived_at = now_iso()
+            task.reminder_history.append({
+                "ts": now_iso(), "action": "done", "via": "all_steps_ticked",
+            })
+        task.updated_at = now_iso()
+        service._save_tasks()
+    return {"success": True, "task": task.to_dict()}
 
 
 # 🆕 (P4) regenerate prompt — بازتولید پرامپت بدون ساخت تسک جدید
