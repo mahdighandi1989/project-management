@@ -11,6 +11,7 @@ Oversight Verifier
 
 from __future__ import annotations
 
+import time
 import uuid
 import logging
 from datetime import datetime, timezone, timedelta
@@ -20,6 +21,7 @@ import aiohttp
 
 from .oversight_service import (
     GITHUB_API,
+    STORAGE_DIR,
     get_oversight_service,
     OversightTask,
     OversightReport,
@@ -954,6 +956,88 @@ async def verify_task(
     )
     machine_evidence_blob = _format_machine_evidence_for_prompt(machine_evidence)
 
+    # 🔬 (Runtime Verify Stage 5) — probe های runtime را اجرا کن (Playwright/HTTP/pytest)
+    # هر probe که شکست خورد، fail-soft می‌شود — verify ادامه می‌دهد.
+    # نتایج به prompt verify اضافه می‌شود تا AI شواهد runtime را در ارزیابی
+    # خود لحاظ کند.
+    runtime_probe_results: List[Any] = []
+    runtime_evidence_blob = ""
+    runtime_override_hints: Dict[str, str] = {}  # ac_text → "passed" | "failed"
+    runtime_run_id: Optional[str] = None
+    try:
+        import os as _os
+        import uuid as _uuid
+        from pathlib import Path as _Path
+        runtime_enabled = (
+            _os.environ.get("RUNTIME_VERIFY_ENABLED", "true").lower() != "false"
+        )
+        if runtime_enabled and acceptance_criteria:
+            from .verify_runtime import run_probes_for_task
+            from .verify_runtime.storage import (
+                ensure_run_dir, write_manifest, cleanup_old_runs,
+            )
+            runtime_run_id = f"run_{int(time.time() * 1000)}_{_uuid.uuid4().hex[:6]}"
+            run_dir = ensure_run_dir(
+                _Path(STORAGE_DIR), str(task.id), runtime_run_id,
+            )
+            runtime_started_at = now_iso()
+            runtime_probe_results = await run_probes_for_task(
+                task,
+                watched=watched,
+                repo_path=(
+                    getattr(watched, "runtime_repo_path", None) if watched else None
+                ),
+                evidence_dir=str(run_dir),
+            )
+            # manifest.json
+            try:
+                write_manifest(
+                    run_dir,
+                    task_id=str(task.id),
+                    run_id=runtime_run_id,
+                    probe_results=[r.to_dict() for r in runtime_probe_results],
+                    started_at=runtime_started_at,
+                    finished_at=now_iso(),
+                )
+                cleanup_old_runs(_Path(STORAGE_DIR), str(task.id), keep=5)
+            except Exception as _me:
+                logger.debug(f"manifest write/cleanup failed: {_me}")
+            if runtime_probe_results:
+                rt_lines = [
+                    "# 🔬 شواهد Runtime (probe های اجرا شده)",
+                    "",
+                    "**این شواهد دقیق‌تر از تحلیل کد است.** اگر probe می‌گوید passed،",
+                    "بسیار محتمل است AC done باشد. اگر probe می‌گوید failed، AC nicht done است.",
+                    "",
+                ]
+                for r in runtime_probe_results:
+                    rt_lines.append(f"### {r.summary()}")
+                    rt_lines.append(f"  - AC: «{r.ac_text[:200]}»")
+                    if r.evidence:
+                        # خلاصهٔ شواهد بدون ذکر paths فایل (که برای AI mعنی ندارد)
+                        ev = {k: v for k, v in r.evidence.items()
+                              if k not in ("step_results", "screenshots", "stdout_excerpt", "stderr_excerpt")}
+                        if ev:
+                            rt_lines.append(f"  - evidence: {ev}")
+                    rt_lines.append("")
+                    # override hint برای AI
+                    if r.status == "passed":
+                        runtime_override_hints[r.ac_text[:200]] = "passed"
+                    elif r.status == "failed":
+                        runtime_override_hints[r.ac_text[:200]] = "failed"
+                runtime_evidence_blob = "\n".join(rt_lines)
+                logger.info(
+                    f"verify {task.id}: runtime probes ran — "
+                    f"{sum(1 for r in runtime_probe_results if r.status == 'passed')} passed, "
+                    f"{sum(1 for r in runtime_probe_results if r.status == 'failed')} failed, "
+                    f"{sum(1 for r in runtime_probe_results if r.status == 'skipped')} skipped, "
+                    f"{sum(1 for r in runtime_probe_results if r.status == 'error')} errors"
+                )
+    except Exception as _re:
+        logger.warning(f"runtime probes block failed: {_re}", exc_info=False)
+        runtime_probe_results = []
+        runtime_evidence_blob = ""
+
     user_goal = (watched.user_notes if watched else "") or ""
 
     ac_lines = "\n".join(f"- {_ac_text_of(c)}" for c in acceptance_criteria)
@@ -1058,6 +1142,8 @@ async def verify_task(
 \"\"\"
 {task.prompt[:6000]}
 \"\"\"
+
+{runtime_evidence_blob}
 
 # معیارهای پذیرش (Acceptance Criteria)
 {ac_lines}
@@ -1220,6 +1306,46 @@ async def verify_task(
     ):
         status_val = VERIFICATION_PARTIAL
 
+    # 🔬 (Runtime Verify Stage 5) — Runtime probe override policy:
+    # اگر probe ها نتیجهٔ روشن دادند، نظر AI را override کن. این برای
+    # حذف false-positive (AI گفت done ولی runtime fail است) و
+    # false-negative (AI گفت not_done ولی runtime pass است) ضروری است.
+    if runtime_probe_results:
+        runtime_failed = [
+            r for r in runtime_probe_results if r.status == "failed"
+        ]
+        runtime_passed = [
+            r for r in runtime_probe_results if r.status == "passed"
+        ]
+        # اگر ≥۱ probe runtime fail شد و AI گفت done → به partial تنزل
+        if runtime_failed and status_val == VERIFICATION_DONE:
+            logger.info(
+                f"verify {task.id}: AI گفت done ولی {len(runtime_failed)} probe runtime fail شد — "
+                f"به partial override می‌کنیم"
+            )
+            status_val = VERIFICATION_PARTIAL
+            # remaining_parts را با AC هایی که runtime fail شدند پر کن
+            failed_acs = [r.ac_text for r in runtime_failed]
+            existing_remaining = list(parsed.get("remaining_parts") or [])
+            for fa in failed_acs:
+                if fa and fa not in existing_remaining:
+                    existing_remaining.append(fa)
+            parsed["remaining_parts"] = existing_remaining[:10]
+        # اگر همهٔ probe ها runtime pass شدند و AI گفت not_done →
+        # به partial ارتقا (نه done مستقیم — AI ممکن است دلیلی داشته باشد)
+        elif (
+            runtime_passed
+            and not runtime_failed
+            and len(runtime_passed) >= len(runtime_probe_results) * 0.8
+            and status_val == VERIFICATION_NOT_DONE
+        ):
+            logger.info(
+                f"verify {task.id}: AI گفت not_done ولی {len(runtime_passed)}/"
+                f"{len(runtime_probe_results)} probe runtime pass شد — "
+                f"به partial override می‌کنیم"
+            )
+            status_val = VERIFICATION_PARTIAL
+
     touched_codex: Dict[str, Any] = {}
     if watched and target_files:
         try:
@@ -1251,6 +1377,21 @@ async def verify_task(
     # تمام اطلاعات معیارها در done_parts/remaining_parts است
     if parsed.get("summary"):
         report.evidence["summary"] = parsed["summary"]
+
+    # 🔬 (Runtime Verify Stage 5+6) — probe results را در evidence ذخیره کن
+    if runtime_probe_results:
+        report.evidence["runtime_probes"] = [
+            r.to_dict() for r in runtime_probe_results
+        ]
+        report.evidence["runtime_probes_summary"] = {
+            "total": len(runtime_probe_results),
+            "passed": sum(1 for r in runtime_probe_results if r.status == "passed"),
+            "failed": sum(1 for r in runtime_probe_results if r.status == "failed"),
+            "skipped": sum(1 for r in runtime_probe_results if r.status == "skipped"),
+            "error": sum(1 for r in runtime_probe_results if r.status == "error"),
+        }
+        if runtime_run_id:
+            report.evidence["runtime_run_id"] = runtime_run_id
 
     # 🛡 fallback warning: اگر AI status=partial داد ولی remaining_parts خالی،
     # یا status=not_done ولی همه پر، یک warning log کن

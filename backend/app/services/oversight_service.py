@@ -208,6 +208,18 @@ class WatchedProject:
     # 🆕 (Smart Task Lifecycle) فعال‌سازی dedup در ایجاد دستی + آستانهٔ امتیاز
     dedup_in_manual_create: bool = True
     dedup_score_threshold: float = 0.65  # 0..1
+
+    # 🔬 (Runtime Verify Stage 4) — base URLs برای probe های runtime
+    # اگر تنظیم نشده باشد، UI/API probe ها برای این پروژه skip می‌شوند.
+    frontend_base_url: Optional[str] = None  # مثلاً https://ai-creator-frontend.onrender.com
+    backend_base_url: Optional[str] = None   # مثلاً https://ai-creator-backend.onrender.com
+    # احراز هویت برای probe ها — dict {"type": "bearer"|"cookie", "value": "..."}
+    # نمونه: {"type": "cookie", "value": "session=abc; csrf=xyz"}
+    runtime_auth: Optional[Dict[str, Any]] = None
+    # path مطلق به repo (clone شده) برای static + test probe
+    # اگر None، probe های static/backend_test skip می‌شوند
+    runtime_repo_path: Optional[str] = None
+
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
 
@@ -1521,6 +1533,22 @@ class OversightService:
         # evidence_history} تبدیل می‌کند. اگر هیچ AC ای نبود، از پرامپت extract می‌شود.
         raw_ac = payload.get("acceptance_criteria") or extract_acceptance_criteria(prompt)
         acceptance_criteria = normalize_ac_list(raw_ac)
+        # 🔬 (Runtime Verify Stage 2) — AC ها را با AI enrich کن تا verify_method
+        # و verify_plan ساختاریافته بگیرند. این یک best-effort call است — اگر
+        # شکست بخورد، AC ها با method=static باقی می‌مانند.
+        # فقط برای task هایی که تازه ساخته می‌شوند (نه merge/duplicate) لازم
+        # است، چون یکبار است و سرعت ایجاد را کم می‌کند.
+        try:
+            from .verify_runtime import enrich_acs_with_verify_plans
+            acceptance_criteria = await enrich_acs_with_verify_plans(
+                acceptance_criteria,
+                title=title,
+                description=raw_idea or prompt[:500],
+                target_files=target_files,
+                model_id=(payload.get("model_id") or None),
+            )
+        except Exception as _e:
+            logger.debug(f"AC enrich at create_task skipped: {_e}")
 
         execution_mode = payload.get("execution_mode")
         if not execution_mode:

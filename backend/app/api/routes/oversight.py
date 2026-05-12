@@ -59,6 +59,11 @@ class WatchedUpdate(BaseModel):
     prompt_quality_threshold: Optional[int] = None  # 0..100
     dedup_in_manual_create: Optional[bool] = None
     dedup_score_threshold: Optional[float] = None  # 0..1
+    # 🔬 (Runtime Verify Stage 4) — base URLs + auth + repo_path برای probe ها
+    frontend_base_url: Optional[str] = None
+    backend_base_url: Optional[str] = None
+    runtime_auth: Optional[Dict[str, Any]] = None   # {type, value}
+    runtime_repo_path: Optional[str] = None
 
 
 class IdeaToPromptRequest(BaseModel):
@@ -263,6 +268,77 @@ async def update_watched(watched_id: str, payload: WatchedUpdate):
     if not result:
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
     return result
+
+
+# 🔬 (Runtime Verify Stage 6) — لیست runهای evidence یک task
+@router.get("/tasks/{task_id}/evidence/runs")
+async def list_evidence_runs(task_id: str):
+    """فهرست همهٔ run های verify که evidence ذخیره کرده‌اند، newest first."""
+    from pathlib import Path
+    from app.services.oversight_service import STORAGE_DIR
+    from app.services.verify_runtime.storage import list_runs_for_task
+    runs = list_runs_for_task(Path(STORAGE_DIR), task_id)
+    return {"task_id": task_id, "runs": runs}
+
+
+# 🔬 (Runtime Verify Stage 6) — یک فایل evidence (screenshot/JSON) را serve می‌کند
+@router.get("/tasks/{task_id}/evidence/{run_id}/{file_path:path}")
+async def get_evidence_file(task_id: str, run_id: str, file_path: str):
+    """فایل evidence (screenshot یا JSON) را با محافظت در برابر traversal serve می‌کند."""
+    from pathlib import Path
+    from fastapi.responses import FileResponse
+    from app.services.oversight_service import STORAGE_DIR
+    from app.services.verify_runtime.storage import resolve_evidence_file
+    p = resolve_evidence_file(Path(STORAGE_DIR), task_id, run_id, file_path)
+    if p is None:
+        raise HTTPException(status_code=404, detail="فایل evidence یافت نشد")
+    # تشخیص media type ساده
+    suffix = p.suffix.lower()
+    media = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".json": "application/json",
+        ".txt": "text/plain; charset=utf-8",
+    }.get(suffix, "application/octet-stream")
+    return FileResponse(str(p), media_type=media)
+
+
+# 🔬 (Runtime Verify Stage 4) — تست اتصال probe
+@router.post("/watched/{watched_id}/runtime/test-connection")
+async def runtime_test_connection(watched_id: str):
+    """ping به frontend و backend base URL تنظیم‌شدهٔ این watched.
+
+    خروجی: {frontend: {ok, status, error?}, backend: {ok, status, error?}}
+    """
+    service = get_oversight_service()
+    w = next((x for x in service.watched if x.id == watched_id), None)
+    if not w:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+    out: Dict[str, Any] = {}
+    try:
+        import httpx
+    except ImportError:
+        raise HTTPException(status_code=500, detail="httpx در سرور نصب نیست")
+    for label, url in (
+        ("frontend", getattr(w, "frontend_base_url", None)),
+        ("backend", getattr(w, "backend_base_url", None)),
+    ):
+        if not url:
+            out[label] = {"ok": False, "error": "URL تنظیم نشده"}
+            continue
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+                r = await c.get(url)
+            out[label] = {
+                "ok": 200 <= r.status_code < 500,
+                "status": r.status_code,
+                "url": url,
+            }
+        except Exception as e:
+            out[label] = {"ok": False, "error": str(e)[:200], "url": url}
+    return out
 
 
 @router.delete("/watched/{watched_id}")
