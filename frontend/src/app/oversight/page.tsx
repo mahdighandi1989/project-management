@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import Link from 'next/link';
+import TaskFilePicker, { type UploadSessionState } from '@/components/TaskFilePicker';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -857,6 +858,25 @@ export default function OversightPage() {
   // Idea inbox
   const [idea, setIdea] = useState('');
   const [ideaWatchedIds, setIdeaWatchedIds] = useState<string[]>([]);
+  // 🆕 (Stage 3 — File Attachment) — یک taskDraftId پایدار برای گروه فایل‌ها
+  // در طول lifecycle این فرم. وقتی تسک ساخته می‌شود یا کاربر idea را reset کند،
+  // یک id جدید تولید می‌شود.
+  const [taskDraftId, setTaskDraftId] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem('oversight-current-task-draft-id');
+      if (saved) return saved;
+    } catch {}
+    const v = `draft-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    try { localStorage.setItem('oversight-current-task-draft-id', v); } catch {}
+    return v;
+  });
+  const [uploadedSessions, setUploadedSessions] = useState<UploadSessionState[]>([]);
+  const resetTaskDraft = useCallback(() => {
+    const v = `draft-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    try { localStorage.setItem('oversight-current-task-draft-id', v); } catch {}
+    setTaskDraftId(v);
+    setUploadedSessions([]);
+  }, []);
   const [ideaType, setIdeaType] = useState('idea');
   const [ideaPriority, setIdeaPriority] = useState('medium');
   const [ideaDeadline, setIdeaDeadline] = useState('');
@@ -1396,6 +1416,10 @@ export default function OversightPage() {
       setIdea('');
       setIdeaDeadline('');
       setPreviewPrompt(null);
+      // 🆕 (Stage 3 — File Attachment) — draft id را reset کن تا فایل‌های قبلی
+      // در تسک بعدی نباشند. (sessions در سرور persist هستند ولی به task_id
+      // مربوطه ربط خورده‌اند — UI آنها را نمایش نمی‌دهد.)
+      resetTaskDraft();
       showSuccess(`${created} تسک ساخته شد`);
       reloadStatus();
       setTab('tasks');
@@ -2461,6 +2485,14 @@ export default function OversightPage() {
                 </select>
               </div>
             </div>
+
+            {/* 🆕 (Stage 3 — File Attachment) — drag-drop چند فایل با chunked upload */}
+            <TaskFilePicker
+              taskDraftId={taskDraftId}
+              apiBase={API_BASE}
+              onSessionsChange={setUploadedSessions}
+              disabled={generating}
+            />
 
             <textarea
               value={idea}
