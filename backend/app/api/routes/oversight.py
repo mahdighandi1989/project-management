@@ -361,6 +361,12 @@ async def task_from_idea(payload: IdeaToPromptRequest):
             progress_track_id=payload.progress_track_id,
         )
     except ValueError as e:
+        # 🛡 (audit fix CRITICAL) — اگر blocked_no_vision_model است،
+        # ساختار کامل (candidates، missing_files) را در detail برگردان
+        # تا frontend modal toggle نشان دهد.
+        blocked = getattr(e, "blocked_payload", None)
+        if blocked:
+            raise HTTPException(status_code=409, detail=blocked)
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
