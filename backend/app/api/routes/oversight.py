@@ -62,7 +62,7 @@ class WatchedUpdate(BaseModel):
 
 
 class IdeaToPromptRequest(BaseModel):
-    idea: str
+    idea: str = ""
     watched_id: Optional[str] = None
     type: str = "other"
     priority: str = "medium"
@@ -71,6 +71,8 @@ class IdeaToPromptRequest(BaseModel):
     # 🆕 multi_pass_mode: "auto" | "always" | "never"
     # auto = heuristic، always = همیشه تقسیم مرحله‌ای، never = single-pass
     multi_pass_mode: str = "auto"
+    # 🆕 (Stage 7 — File Attachment) — sessionهای آپلودشده برای پیوست
+    upload_session_ids: Optional[List[str]] = None
 
 
 class TaskCreate(BaseModel):
@@ -93,6 +95,8 @@ class TaskCreate(BaseModel):
     # ساخته می‌شود، مراحل از پیش‌نمایش پرامپت برای ذخیره به همراه می‌آیند.
     task_steps: Optional[List[Dict[str, Any]]] = None
     overall_completion_pct: Optional[int] = None
+    # 🆕 (Stage 7 — File Attachment) — sessionهای آپلودشده برای ربط به این تسک
+    upload_session_ids: Optional[List[str]] = None
 
 
 class SimilarityCheckRequest(BaseModel):
@@ -335,7 +339,11 @@ async def create_task(payload: TaskCreate):
 
 @router.post("/tasks/from-idea")
 async def task_from_idea(payload: IdeaToPromptRequest):
-    """تبدیل ایدهٔ خام به پرامپت قدرتمند (پیش‌نمایش، ذخیره نمی‌شود)."""
+    """تبدیل ایدهٔ خام به پرامپت قدرتمند (پیش‌نمایش، ذخیره نمی‌شود).
+
+    🆕 (Stage 7) — اگر `upload_session_ids` داده شده، فایل‌های پیوست
+    قبل از تولید پرامپت استخراج می‌شوند و متن کامل به idea append می‌شود.
+    """
     service = get_oversight_service()
     try:
         return await service.idea_to_prompt(
@@ -346,6 +354,7 @@ async def task_from_idea(payload: IdeaToPromptRequest):
             model_id=payload.model_id,
             model_ids=payload.model_ids,
             multi_pass_mode=payload.multi_pass_mode,
+            upload_session_ids=payload.upload_session_ids,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

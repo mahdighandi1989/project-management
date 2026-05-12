@@ -1574,6 +1574,19 @@ class OversightService:
         async with self._lock:
             self.tasks.append(t)
             self._save_tasks()
+
+        # 🆕 (Stage 7 — File Attachment) — اگر sessionهای آپلود همراه payload
+        # داده شده، آن‌ها را به این task ربط بده تا verify/extraction بعدی
+        # بتواند به متن استخراج‌شده دسترسی داشته باشد. این outside lock است
+        # چون UploadSessionService خودش lock مستقل دارد.
+        attached_sids = payload.get("upload_session_ids") or []
+        if isinstance(attached_sids, list) and attached_sids:
+            try:
+                from .oversight_upload_session import get_upload_session_service
+                upload_svc = get_upload_session_service()
+                await upload_svc.attach_to_task(attached_sids, t.id)
+            except Exception as e:
+                logger.warning(f"create_task: attach upload sessions failed: {e}")
         return CreateTaskResult(
             status="created",
             task=t.to_dict(),
@@ -2734,6 +2747,108 @@ class OversightService:
             _skip_multi_pass=True,
         )
 
+    async def _resolve_attachments_for_idea(
+        self,
+        idea: str,
+        upload_session_ids: List[str],
+    ) -> "Tuple[str, List[Dict[str, Any]]]":
+        """فایل‌های پیوست را به متن استخراج‌شده تبدیل می‌کند و به idea append.
+
+        - برای هر session_id، اگر extraction انجام نشده، آن را trigger می‌کند
+          (با auto_temp_activate اگر مدل enabled نباشد).
+        - متن کامل هر فایل به‌ترتیب file_order ASC append می‌شود.
+        - sentinel `## 📎 فایل پیوست #N: {filename} (mime, model)` بین فایل‌ها.
+
+        خروجی: (augmented_idea, attachments_meta)
+        attachments_meta: [{session_id, file_order, filename, mime, extraction_id,
+                            total_segments, status, char_count, model_used, error}]
+        """
+        from .oversight_upload_session import get_upload_session_service
+        from .oversight_extraction import (
+            extract_session, get_extraction_repo,
+        )
+        upload_svc = get_upload_session_service()
+        repo = get_extraction_repo()
+
+        # رزولو sessions + sort by file_order
+        sessions = []
+        for sid in upload_session_ids:
+            s = upload_svc.get(sid)
+            if s is None:
+                logger.warning(f"upload session not found: {sid}")
+                continue
+            sessions.append(s)
+        sessions.sort(key=lambda s: s.file_order)
+
+        attachments_meta: List[Dict[str, Any]] = []
+        appended_parts: List[str] = []
+
+        for s in sessions:
+            entry: Dict[str, Any] = {
+                "session_id": s.id,
+                "file_order": s.file_order,
+                "filename": s.original_filename,
+                "mime_type": s.mime_type,
+                "status": s.status,
+            }
+            # اگر هنوز upload کامل نشده، skip با warning
+            if s.status not in ("completed", "extracting", "extracted"):
+                entry["error"] = f"upload not completed (status={s.status})"
+                attachments_meta.append(entry)
+                appended_parts.append(
+                    f"\n\n## 📎 فایل پیوست #{s.file_order}: {s.original_filename}\n"
+                    f"⚠️ این فایل هنوز کامل آپلود نشده (status={s.status}) — نادیده گرفته شد.\n"
+                )
+                continue
+
+            # extraction موجود؟ اگر نه، trigger کن
+            existing = repo.list_by_session(s.id)
+            fe = existing[0] if existing else None
+            if fe is None or fe.status != "extracted":
+                try:
+                    fe = await extract_session(s.id, user_idea=idea[:2000])
+                except Exception as e:
+                    entry["error"] = f"extraction failed: {str(e)[:300]}"
+                    attachments_meta.append(entry)
+                    appended_parts.append(
+                        f"\n\n## 📎 فایل پیوست #{s.file_order}: {s.original_filename}\n"
+                        f"❌ استخراج با خطا روبه‌رو شد: {str(e)[:200]}\n"
+                    )
+                    continue
+
+            entry["extraction_id"] = fe.id
+            entry["total_segments"] = fe.total_segments
+            entry["model_used"] = fe.model_used
+            full_text = repo.full_text(fe.id) or fe.full_text_cache or ""
+            entry["char_count"] = len(full_text)
+            attachments_meta.append(entry)
+
+            # cap هر فایل به 80KB در idea (متن کامل در DB قابل دسترسی است)
+            FILE_CAP = 80_000
+            head = full_text[:FILE_CAP]
+            tail_note = ""
+            if len(full_text) > FILE_CAP:
+                tail_note = (
+                    f"\n\n_[…فایل بزرگ‌تر است؛ کل متن ({len(full_text):,} char) "
+                    f"در extraction_id={fe.id} در DB قابل بازیابی است.]_"
+                )
+            appended_parts.append(
+                f"\n\n## 📎 فایل پیوست #{s.file_order}: {s.original_filename}\n"
+                f"_mime={s.mime_type} • model={fe.model_used} • "
+                f"{fe.total_segments} segment استخراج شد_\n\n"
+                f"{head}{tail_note}"
+            )
+
+        if appended_parts:
+            augmented = (
+                idea
+                + "\n\n---\n## 📎 فایل‌های پیوست (به ترتیب آپلود = ترتیب بخش‌ها)"
+                + "".join(appended_parts)
+            )
+        else:
+            augmented = idea
+        return augmented, attachments_meta
+
     async def idea_to_prompt(
         self,
         idea: str,
@@ -2744,9 +2859,27 @@ class OversightService:
         model_ids: Optional[List[str]] = None,
         multi_pass_mode: str = "auto",  # 🆕 "auto" | "always" | "never"
         _skip_multi_pass: bool = False,  # internal flag — جلوگیری از recursion
+        # 🆕 (Stage 7 — File Attachment Integration) — وقتی فایل پیوست شده،
+        # extraction قبلاً انجام شده (یا اینجا انجام می‌شود) و متن کامل
+        # هر فایل به‌ترتیب file_order به idea append می‌شود.
+        upload_session_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        if not idea.strip():
+        if not idea.strip() and not upload_session_ids:
             raise ValueError("ایده خالی است")
+        if not idea.strip():
+            idea = "[ایدهٔ متنی خالی — تحلیل فایل‌های پیوست]"
+
+        # 🆕 پیش از multi-pass، فایل‌های پیوست را resolve کن
+        attachments_meta: List[Dict[str, Any]] = []
+        if upload_session_ids:
+            try:
+                idea, attachments_meta = await self._resolve_attachments_for_idea(
+                    idea, upload_session_ids
+                )
+            except Exception as _att_e:
+                logger.warning(f"idea_to_prompt: attachment resolve failed: {_att_e}")
+                # ادامه می‌دهیم بدون attachments — تسک ساخته می‌شود ولی پرامپت
+                # ضعیف‌تر است (کاربر از طریق UI متوجه می‌شود)
 
         # 🆕 (Multi-pass) — تقسیم به مراحل کوچک برای کیفیت بهتر.
         # سه حالت با parameter `multi_pass_mode`:
@@ -2776,6 +2909,9 @@ class OversightService:
                     model_ids=model_ids,
                 )
                 if result:
+                    if attachments_meta:
+                        result["attachments"] = attachments_meta
+                        result["upload_session_ids"] = upload_session_ids or []
                     return result
             except Exception as _mp_e:
                 logger.warning(
@@ -3324,7 +3460,7 @@ class OversightService:
                 "- یا پرامپت را دستی ویرایش کنید\n\n"
                 "## معیار پذیرش\n- (تعریف نشده — لطفاً regenerate یا edit کنید)\n"
             )
-            return {
+            result_minimal = {
                 "title": safe_title,
                 "prompt": EXECUTOR_DISCLAIMER + "\n" + safe_prompt_body,
                 "target_files": [],
@@ -3337,6 +3473,10 @@ class OversightService:
                 "raw_response": response,
                 "_quality_flag": "json_parse_failed",
             }
+            if attachments_meta:
+                result_minimal["attachments"] = attachments_meta
+                result_minimal["upload_session_ids"] = upload_session_ids or []
+            return result_minimal
 
         # locations جدید + fallback به target_files قدیمی
         target_locations = parsed.get("target_locations") or []
@@ -3382,7 +3522,7 @@ class OversightService:
             logger.warning("idea_to_prompt: DISCLAIMER در full_prompt نبود — prepend می‌شود")
             full_prompt = EXECUTOR_DISCLAIMER + "\n" + full_prompt
 
-        return {
+        result_final = {
             "title": title,
             "prompt": full_prompt,
             "target_files": target_files,
@@ -3394,6 +3534,10 @@ class OversightService:
             "estimate": parsed.get("estimated_complexity") or parsed.get("estimate") or "medium",
             "raw_response": response,
         }
+        if attachments_meta:
+            result_final["attachments"] = attachments_meta
+            result_final["upload_session_ids"] = upload_session_ids or []
+        return result_final
 
     # ====================================================================
     # Run task -> evaluate via AI

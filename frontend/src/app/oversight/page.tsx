@@ -1300,6 +1300,12 @@ export default function OversightPage() {
       // برای multi-project: یک پرامپت تولید می‌شود اما هنگام ذخیره برای هر پروژه یکی ساخته می‌شود
       const firstId = ideaWatchedIds[0] || null;
       setTimeout(() => setGenPhase('در حال ساخت پرامپت قدرتمند...'), 800);
+      // 🆕 (Stage 7) — sessionهای آپلود کامل‌شده (completed/extracting/extracted)
+      // را به idea_to_prompt می‌فرستیم تا extraction قبل از پرامپت‌سازی انجام شود
+      const validSessionIds = uploadedSessions
+        .filter((s) => ['completed', 'extracting', 'extracted'].includes(s.status))
+        .sort((a, b) => a.file_order - b.file_order)
+        .map((s) => s.session_id);
       const res = await fetch(`${API_BASE}/api/oversight/tasks/from-idea`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1311,6 +1317,7 @@ export default function OversightPage() {
           model_id: selectedModelIds[0],
           model_ids: selectedModelIds.length > 1 ? selectedModelIds : undefined,
           multi_pass_mode: multiPassMode,
+          upload_session_ids: validSessionIds.length ? validSessionIds : undefined,
         }),
       });
       if (res.ok) {
@@ -1380,6 +1387,11 @@ export default function OversightPage() {
             force_create: forceCreate,
             task_steps: previewPrompt.task_steps || [],
             overall_completion_pct: previewPrompt.overall_completion_pct ?? null,
+            // 🆕 (Stage 7) — sessionهای آپلود (با ترتیب file_order) به این تسک ربط می‌خورند
+            upload_session_ids: uploadedSessions
+              .filter((s) => ['completed', 'extracting', 'extracted'].includes(s.status))
+              .sort((a, b) => a.file_order - b.file_order)
+              .map((s) => s.session_id),
           }),
         });
         if (res.ok) {
