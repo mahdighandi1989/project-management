@@ -1431,6 +1431,10 @@ async def verify_task(
     # 🔔 notification — silent skip اگر env تنظیم نشده باشد
     try:
         from .notification_service import notification_service
+        from .oversight_verify_pdf import (
+            build_verify_checklist_message,
+            build_verify_report_pdf,
+        )
         # نگاشت status → event دقیق
         status_to_event = {
             "done": "verify_done",
@@ -1440,29 +1444,27 @@ async def verify_task(
             "needs_clarification": "verify_clarification",
         }
         event = status_to_event.get(task.verification_status, "verify_done")
-        status_emoji = {
-            "done": "✅", "partial": "🟡", "not_done": "❌",
-            "regressed": "🔴", "needs_clarification": "🟠",
-        }.get(task.verification_status, "ℹ️")
 
-        msg_lines = [
-            f"{status_emoji} *Verify: {task.verification_status}*",
-            f"📌 _{task.title[:120]}_",
-            f"📁 `{task.project_full_name}`",
-            f"🔖 priority: *{task.priority}* • نوع: `{task.type}`",
-        ]
-        # streak اطلاعاتی
-        if task.confirmation_streak and streak_required > 1:
-            msg_lines.append(f"🔁 streak: {task.confirmation_streak}/{streak_required}")
-        # خلاصهٔ گزارش
-        if report.evidence:
-            summary = report.evidence.get("summary") or report.evidence.get("ai_summary")
-            if summary:
-                msg_lines.append(f"\n💬 {str(summary)[:300]}")
-        # done/remaining/next_actions/confidence — لیست‌های ساختاریافته
-        details = format_done_remaining_for_message(report, max_per_section=5)
-        if details:
-            msg_lines.append(details)
+        # 🆕 (Checklist Notification) — متن چک‌لیستی کوتاه به‌عنوان caption،
+        # و PDF کامل (شامل متن کامل پرامپت + جزئیات همهٔ مراحل) به‌عنوان پیوست.
+        # اگر playwright در دسترس نباشد، fallback به HTML attachment.
+        msg_text = build_verify_checklist_message(task, report)
+        # streak تکمیلی در caption
+        if task.confirmation_streak and streak_required > 1 and "streak:" not in msg_text:
+            msg_text += f"\n🔁 streak: {task.confirmation_streak}/{streak_required}"
+
+        # تولید PDF (best-effort — اگر failed، attachment=None و فقط متن می‌رود)
+        attachment_payload: Optional[Dict[str, Any]] = None
+        try:
+            pdf_bytes, pdf_filename = await build_verify_report_pdf(task, report)
+            attachment_payload = {
+                "bytes": pdf_bytes,
+                "filename": pdf_filename,
+            }
+        except Exception as _pdf_err:
+            logger.warning(f"verify pdf generation failed: {_pdf_err}")
+            attachment_payload = None
+
         # PR link اگر موجود
         extra_buttons = None
         if task.applied_evidence:
@@ -1477,13 +1479,14 @@ async def verify_task(
 
         await notification_service.notify_event(
             event,
-            "\n".join(msg_lines),
+            msg_text,
             subject=f"Verify {task.verification_status}",
             priority=priority,
             project_name=task.project_full_name,
             watched_id=task.watched_id,
             extra_hashtags=[task.type] if task.type else None,
             extra_buttons=extra_buttons,
+            attachment=attachment_payload,
         )
     except Exception as e:
         logger.debug(f"notification skipped: {e}")
