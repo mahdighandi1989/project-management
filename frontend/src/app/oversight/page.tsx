@@ -1333,10 +1333,13 @@ export default function OversightPage() {
           } catch {}
         }, 2000);
       }
-      // 🛡 (audit fix #3) — اگر فایل پیوست شده، multi_pass_mode را به always
-      // override کن تا چک‌لیست تضمین شود (heuristic auto در ایده‌های کوتاه با
-      // فایل حجیم کافی نیست).
-      const effectiveMultiPassMode = validSessionIds.length ? 'always' : multiPassMode;
+      // 🛡 (audit fix #3 + HIGH #1) — اگر فایل پیوست شده و کاربر در حالت 'auto'
+      // است (نه explicit 'never')، multi_pass را به 'always' override کن.
+      // اگر کاربر صراحتاً 'never' را انتخاب کرده، انتخابش محترم است.
+      const effectiveMultiPassMode =
+        validSessionIds.length && multiPassMode === 'auto'
+          ? 'always'
+          : multiPassMode;
       const res = await fetch(`${API_BASE}/api/oversight/tasks/from-idea`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

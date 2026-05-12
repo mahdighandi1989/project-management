@@ -3093,11 +3093,15 @@ class NotificationService:
                 }
 
             # ───── (2) مشابه ندارد → ادامهٔ مسیر طبیعی (idea→prompt) ─────
+            # 🛡 (audit fix CRITICAL #1) — همهٔ مسیرهای Telegram باید
+            # multi_pass_mode='always' را پاس بدهند تا چک‌لیست تضمین شود.
+            # این مسیر legacy (/new_task متنی بدون compose) از قبل گم شده بود!
             data = await _oversight.idea_to_prompt(
                 idea=idea,
                 watched_id=watched_id,
                 type_="other",
                 priority="medium",
+                multi_pass_mode="always",
             )
             # ایجاد تسک از طریق create_task (با force_create=True چون قبلاً
             # dedup check کردیم و قطعاً مشابه نیست)
@@ -3393,11 +3397,13 @@ class NotificationService:
             # ایجاد جداگانه — مسیر کامل idea_to_prompt + create_task با force_create
             await tg.send("⏳ ایجاد تسک جداگانه — در حال تولید پرامپت...", silent=True)
             try:
+                # 🛡 (audit fix CRITICAL #1) — multi_pass_mode='always' برای checklist
                 data_p = await _oversight.idea_to_prompt(
                     idea=idea,
                     watched_id=watched_id,
                     type_="other",
                     priority="medium",
+                    multi_pass_mode="always",
                 )
                 result = await _oversight.create_task({
                     "watched_id": watched_id,
