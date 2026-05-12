@@ -11,6 +11,7 @@ Oversight Verifier
 
 from __future__ import annotations
 
+import time
 import uuid
 import logging
 from datetime import datetime, timezone, timedelta
@@ -962,30 +963,45 @@ async def verify_task(
     runtime_probe_results: List[Any] = []
     runtime_evidence_blob = ""
     runtime_override_hints: Dict[str, str] = {}  # ac_text → "passed" | "failed"
+    runtime_run_id: Optional[str] = None
     try:
         import os as _os
+        import uuid as _uuid
+        from pathlib import Path as _Path
         runtime_enabled = (
             _os.environ.get("RUNTIME_VERIFY_ENABLED", "true").lower() != "false"
         )
         if runtime_enabled and acceptance_criteria:
             from .verify_runtime import run_probes_for_task
-            evidence_dir = _os.path.join(
-                str(STORAGE_DIR), "verify_evidence",
-                str(task.id),
+            from .verify_runtime.storage import (
+                ensure_run_dir, write_manifest, cleanup_old_runs,
             )
-            try:
-                from pathlib import Path as _Path
-                _Path(evidence_dir).mkdir(parents=True, exist_ok=True)
-            except Exception:
-                pass
+            runtime_run_id = f"run_{int(time.time() * 1000)}_{_uuid.uuid4().hex[:6]}"
+            run_dir = ensure_run_dir(
+                _Path(STORAGE_DIR), str(task.id), runtime_run_id,
+            )
+            runtime_started_at = now_iso()
             runtime_probe_results = await run_probes_for_task(
                 task,
                 watched=watched,
                 repo_path=(
                     getattr(watched, "runtime_repo_path", None) if watched else None
                 ),
-                evidence_dir=evidence_dir,
+                evidence_dir=str(run_dir),
             )
+            # manifest.json
+            try:
+                write_manifest(
+                    run_dir,
+                    task_id=str(task.id),
+                    run_id=runtime_run_id,
+                    probe_results=[r.to_dict() for r in runtime_probe_results],
+                    started_at=runtime_started_at,
+                    finished_at=now_iso(),
+                )
+                cleanup_old_runs(_Path(STORAGE_DIR), str(task.id), keep=5)
+            except Exception as _me:
+                logger.debug(f"manifest write/cleanup failed: {_me}")
             if runtime_probe_results:
                 rt_lines = [
                     "# 🔬 شواهد Runtime (probe های اجرا شده)",
@@ -1362,7 +1378,7 @@ async def verify_task(
     if parsed.get("summary"):
         report.evidence["summary"] = parsed["summary"]
 
-    # 🔬 (Runtime Verify Stage 5) — probe results را در evidence ذخیره کن
+    # 🔬 (Runtime Verify Stage 5+6) — probe results را در evidence ذخیره کن
     if runtime_probe_results:
         report.evidence["runtime_probes"] = [
             r.to_dict() for r in runtime_probe_results
@@ -1374,6 +1390,8 @@ async def verify_task(
             "skipped": sum(1 for r in runtime_probe_results if r.status == "skipped"),
             "error": sum(1 for r in runtime_probe_results if r.status == "error"),
         }
+        if runtime_run_id:
+            report.evidence["runtime_run_id"] = runtime_run_id
 
     # 🛡 fallback warning: اگر AI status=partial داد ولی remaining_parts خالی،
     # یا status=not_done ولی همه پر، یک warning log کن

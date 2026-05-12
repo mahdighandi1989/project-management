@@ -270,6 +270,41 @@ async def update_watched(watched_id: str, payload: WatchedUpdate):
     return result
 
 
+# 🔬 (Runtime Verify Stage 6) — لیست runهای evidence یک task
+@router.get("/tasks/{task_id}/evidence/runs")
+async def list_evidence_runs(task_id: str):
+    """فهرست همهٔ run های verify که evidence ذخیره کرده‌اند، newest first."""
+    from pathlib import Path
+    from app.services.oversight_service import STORAGE_DIR
+    from app.services.verify_runtime.storage import list_runs_for_task
+    runs = list_runs_for_task(Path(STORAGE_DIR), task_id)
+    return {"task_id": task_id, "runs": runs}
+
+
+# 🔬 (Runtime Verify Stage 6) — یک فایل evidence (screenshot/JSON) را serve می‌کند
+@router.get("/tasks/{task_id}/evidence/{run_id}/{file_path:path}")
+async def get_evidence_file(task_id: str, run_id: str, file_path: str):
+    """فایل evidence (screenshot یا JSON) را با محافظت در برابر traversal serve می‌کند."""
+    from pathlib import Path
+    from fastapi.responses import FileResponse
+    from app.services.oversight_service import STORAGE_DIR
+    from app.services.verify_runtime.storage import resolve_evidence_file
+    p = resolve_evidence_file(Path(STORAGE_DIR), task_id, run_id, file_path)
+    if p is None:
+        raise HTTPException(status_code=404, detail="فایل evidence یافت نشد")
+    # تشخیص media type ساده
+    suffix = p.suffix.lower()
+    media = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".json": "application/json",
+        ".txt": "text/plain; charset=utf-8",
+    }.get(suffix, "application/octet-stream")
+    return FileResponse(str(p), media_type=media)
+
+
 # 🔬 (Runtime Verify Stage 4) — تست اتصال probe
 @router.post("/watched/{watched_id}/runtime/test-connection")
 async def runtime_test_connection(watched_id: str):
