@@ -683,8 +683,13 @@ async def verify_task(
     *,
     model_id: Optional[str] = None,
     triggered_by: str = "manual",
+    include_runtime: bool = True,
 ) -> Dict[str, Any]:
-    """اجرای verify روی یک تسک — مستقل از execution."""
+    """اجرای verify روی یک تسک — مستقل از execution.
+
+    include_runtime: اگر False، فقط grep + AI (verify سریع، بدون probe).
+    اگر True (پیش‌فرض)، probe های runtime نیز اجرا می‌شوند.
+    """
     service = get_oversight_service()
     task = next((t for t in service.tasks if t.id == task_id), None)
     if task is None:
@@ -969,6 +974,7 @@ async def verify_task(
         import uuid as _uuid
         from pathlib import Path as _Path
         runtime_enabled = (
+            include_runtime and
             _os.environ.get("RUNTIME_VERIFY_ENABLED", "true").lower() != "false"
         )
         if runtime_enabled and acceptance_criteria:
@@ -989,8 +995,17 @@ async def verify_task(
                 ),
                 evidence_dir=str(run_dir),
             )
-            # manifest.json
+            # manifest.json + size cap enforcement
             try:
+                from .verify_runtime.storage import enforce_size_cap
+                # size cap قبل از manifest، تا اگر حذف شد، manifest تازه باشد
+                _cap = enforce_size_cap(run_dir)
+                if _cap.get("compressed") or _cap.get("deleted"):
+                    logger.info(
+                        f"verify {task.id}: size cap — "
+                        f"compressed={_cap.get('compressed')}, deleted={_cap.get('deleted')}, "
+                        f"{_cap.get('initial_bytes')}b → {_cap.get('final_bytes')}b"
+                    )
                 write_manifest(
                     run_dir,
                     task_id=str(task.id),
@@ -1331,20 +1346,28 @@ async def verify_task(
                 if fa and fa not in existing_remaining:
                     existing_remaining.append(fa)
             parsed["remaining_parts"] = existing_remaining[:10]
-        # اگر همهٔ probe ها runtime pass شدند و AI گفت not_done →
-        # به partial ارتقا (نه done مستقیم — AI ممکن است دلیلی داشته باشد)
+        # اگر **همهٔ** probe ها runtime pass شدند (با حداقل 1 probe non-skipped
+        # و هیچ failed) و AI گفت not_done یا partial → به done ارتقا.
+        # این طبق spec: «اگر runtime ✅ ولی AI گفت not_done → AI override کن به done»
         elif (
-            runtime_passed
+            len(runtime_passed) >= 1
             and not runtime_failed
-            and len(runtime_passed) >= len(runtime_probe_results) * 0.8
-            and status_val == VERIFICATION_NOT_DONE
+            and not any(r.status == "error" for r in runtime_probe_results)
+            and status_val in (VERIFICATION_NOT_DONE, VERIFICATION_PARTIAL)
         ):
             logger.info(
-                f"verify {task.id}: AI گفت not_done ولی {len(runtime_passed)}/"
-                f"{len(runtime_probe_results)} probe runtime pass شد — "
-                f"به partial override می‌کنیم"
+                f"verify {task.id}: AI گفت {status_val} ولی {len(runtime_passed)} probe "
+                f"runtime همه pass و هیچ probe fail/error نداریم — به done override می‌کنیم"
             )
-            status_val = VERIFICATION_PARTIAL
+            status_val = VERIFICATION_DONE
+            # done_parts را با AC هایی که runtime pass شدند پر کن
+            existing_done = list(parsed.get("done_parts") or [])
+            for rp in runtime_passed:
+                if rp.ac_text and rp.ac_text not in existing_done:
+                    existing_done.append(rp.ac_text)
+            parsed["done_parts"] = existing_done[:20]
+            # remaining_parts را خالی کن
+            parsed["remaining_parts"] = []
 
     touched_codex: Dict[str, Any] = {}
     if watched and target_files:

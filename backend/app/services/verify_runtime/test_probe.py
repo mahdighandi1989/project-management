@@ -70,11 +70,25 @@ async def run_test_probe(
             error_message=f"cwd not found: {cwd}",
         )
 
-    # subprocess
+    # subprocess — اگر pytest-json-report نصب است، JSON دقیق پارس می‌کنیم
+    # وگرنه fallback به return-code + stdout (همان رفتار قبلی)
+    import tempfile as _tempfile
+    try:
+        import pytest_jsonreport  # noqa: F401
+        _has_jsonreport = True
+    except ImportError:
+        try:
+            import importlib.util as _u
+            _has_jsonreport = _u.find_spec("pytest_jsonreport") is not None
+        except Exception:
+            _has_jsonreport = False
+    json_report_path = _tempfile.mktemp(suffix=".json") if _has_jsonreport else None
     cmd = [
         "python", "-m", "pytest", test_node,
         "-v", "--tb=short", "--no-header", "--color=no",
     ]
+    if _has_jsonreport and json_report_path:
+        cmd += ["--json-report", f"--json-report-file={json_report_path}"]
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -134,6 +148,36 @@ async def run_test_probe(
         "stdout_excerpt": stdout_text[-3000:],
         "stderr_excerpt": stderr_text[-1500:] if stderr_text else "",
     }
+
+    # اگر pytest-json-report نتیجه را نوشت، parse کن و در evidence بگذار
+    # این جزئیات per-test (passed/failed/skipped count + outcome) را می‌دهد
+    try:
+        from pathlib import Path as _Path
+        import json as _json
+        jrp = _Path(json_report_path) if json_report_path else None
+        if jrp is not None and jrp.is_file():
+            try:
+                rd = _json.loads(jrp.read_text(encoding="utf-8"))
+                evidence["json_report"] = {
+                    "summary": rd.get("summary", {}),
+                    "exitcode": rd.get("exitcode"),
+                    "duration": rd.get("duration"),
+                    "tests": [
+                        {
+                            "nodeid": t.get("nodeid"),
+                            "outcome": t.get("outcome"),
+                        }
+                        for t in (rd.get("tests") or [])[:50]
+                    ],
+                }
+            except Exception as _je:
+                logger.debug(f"json-report parse fail: {_je}")
+            try:
+                jrp.unlink()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     # pytest return codes: 0=all passed, 1=tests failed, 2=internal error,
     # 3=test collection error, 4=usage error, 5=no tests collected

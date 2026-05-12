@@ -47,15 +47,35 @@ _PLAYWRIGHT_AVAILABLE: Optional[bool] = None
 
 
 def _check_playwright_available() -> bool:
-    """one-shot import check (cached)."""
+    """one-shot import + browser-binary check (cached).
+
+    True تنها وقتی:
+    1) package `playwright` import می‌شود
+    2) chromium binary در محل پیش‌فرض Playwright وجود دارد
+    """
     global _PLAYWRIGHT_AVAILABLE
     if _PLAYWRIGHT_AVAILABLE is not None:
         return _PLAYWRIGHT_AVAILABLE
     try:
         import playwright.async_api  # noqa: F401
-        _PLAYWRIGHT_AVAILABLE = True
     except ImportError:
         _PLAYWRIGHT_AVAILABLE = False
+        return False
+    # check browser binaries — اگر env override نباشد، در ~/.cache/ms-playwright
+    import os
+    cache_dir = os.environ.get(
+        "PLAYWRIGHT_BROWSERS_PATH"
+    ) or os.path.expanduser("~/.cache/ms-playwright")
+    if not os.path.isdir(cache_dir):
+        _PLAYWRIGHT_AVAILABLE = False
+        return False
+    # حداقل یک پوشهٔ chromium باید باشد
+    try:
+        names = os.listdir(cache_dir)
+        has_chromium = any("chromium" in n.lower() for n in names)
+    except Exception:
+        has_chromium = False
+    _PLAYWRIGHT_AVAILABLE = has_chromium
     return _PLAYWRIGHT_AVAILABLE
 
 
@@ -272,65 +292,68 @@ async def run_ui_probe(
     screenshots: List[str] = []
     all_passed = True
 
+    # 🛡 (Stage 9) — از browser pool استفاده کن (به جای launch/close هر بار)
     try:
-        from playwright.async_api import async_playwright
+        from .browser_pool import get_browser_pool
     except ImportError as e:
         return RuntimeProbeResult(
             ac_id=ac_id,
             ac_text=ac_text,
             method="ui_interaction",
             status=PROBE_STATUS_ERROR,
-            evidence={"reason": "playwright import failed"},
+            evidence={"reason": "browser_pool import failed"},
             duration_ms=int((time.monotonic() - start) * 1000),
             error_message=str(e),
         )
 
+    pool = get_browser_pool()
+    browser = await pool.get_browser()
+    if browser is None:
+        return RuntimeProbeResult(
+            ac_id=ac_id,
+            ac_text=ac_text,
+            method="ui_interaction",
+            status=PROBE_STATUS_ERROR,
+            evidence={"reason": "browser pool returned None (playwright unavailable یا launch fail)"},
+            duration_ms=int((time.monotonic() - start) * 1000),
+            error_message="browser unavailable",
+        )
+
+    context = None
     try:
-        async with async_playwright() as pw:
-            try:
-                browser = await pw.chromium.launch(headless=True)
-            except Exception as e:
-                return RuntimeProbeResult(
-                    ac_id=ac_id,
-                    ac_text=ac_text,
-                    method="ui_interaction",
-                    status=PROBE_STATUS_ERROR,
-                    evidence={"reason": f"chromium launch failed: {e}"},
-                    duration_ms=int((time.monotonic() - start) * 1000),
-                    error_message=str(e),
+        try:
+            context = await browser.new_context()
+            await _apply_auth(context, ctx, base_url)
+            page = await context.new_page()
+            page.set_default_timeout(ctx.ui_timeout_ms)
+
+            for idx, step in enumerate(normalized_steps, start=1):
+                success, msg, shot = await _run_step(
+                    page, step, evidence_path, idx,
                 )
-            try:
-                context = await browser.new_context()
-                await _apply_auth(context, ctx, base_url)
-                page = await context.new_page()
-                page.set_default_timeout(ctx.ui_timeout_ms)
+                step_results.append({
+                    "step": idx,
+                    "action": step.get("action"),
+                    "success": success,
+                    "message": msg,
+                    "screenshot": shot,
+                })
+                if shot:
+                    screenshots.append(shot)
+                if not success:
+                    all_passed = False
+                    break
 
-                for idx, step in enumerate(normalized_steps, start=1):
-                    success, msg, shot = await _run_step(
-                        page, step, evidence_path, idx,
-                    )
-                    step_results.append({
-                        "step": idx,
-                        "action": step.get("action"),
-                        "success": success,
-                        "message": msg,
-                        "screenshot": shot,
-                    })
-                    if shot:
-                        screenshots.append(shot)
-                    if not success:
-                        all_passed = False
-                        break  # توقف پس از اولین failure
-
-                # یک screenshot نهایی برای evidence
-                final_shot = await _take_screenshot(page, evidence_path, "final")
-                if final_shot:
-                    screenshots.append(final_shot)
-            finally:
+            final_shot = await _take_screenshot(page, evidence_path, "final")
+            if final_shot:
+                screenshots.append(final_shot)
+        finally:
+            if context is not None:
                 try:
-                    await browser.close()
+                    await context.close()
                 except Exception:
                     pass
+            pool.touch()  # browser idle timer را بازنشانی کن
     except Exception as e:
         return RuntimeProbeResult(
             ac_id=ac_id,

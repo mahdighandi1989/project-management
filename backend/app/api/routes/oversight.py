@@ -183,6 +183,9 @@ class TaskUpdate(BaseModel):
 class RunTaskRequest(BaseModel):
     model_id: Optional[str] = None
     model_ids: Optional[List[str]] = None
+    # 🔬 (Runtime Verify Stage 8) — controls runtime probes in verify-now
+    # default True (همان رفتار قبلی + probe ها)؛ False = verify سریع بدون probe
+    include_runtime: bool = True
 
 
 class ScanRequest(BaseModel):
@@ -881,6 +884,7 @@ async def verify_task_now(task_id: str, payload: Optional[RunTaskRequest] = None
             task_id,
             model_id=payload.model_id if payload else None,
             triggered_by="manual",
+            include_runtime=payload.include_runtime if payload else True,
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
