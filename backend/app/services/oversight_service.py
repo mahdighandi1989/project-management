@@ -21,7 +21,7 @@ import logging
 import base64
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field, asdict
 import aiohttp
 
@@ -2421,17 +2421,59 @@ class OversightService:
 
 خروجی این تسک به یک ابزار کدنویس خارجی (Cursor/Copilot/ChatGPT) داده می‌شود — پس فیلدها باید **کاملاً مشخص، grounded در کد واقعی، و قابل اعمال** باشند.
 
+# 🧠 چارچوب فکر کردن (الزامی — قبل از تولید JSON، این مراحل را ذهنی طی کن)
+
+**مرحله ۱ — تحلیل کامل متن کاربر** (هیچ‌چیز را skip نکن):
+- *چه می‌خواهد؟* — کاربر دقیقاً چه کاری می‌خواهد انجام شود؟ یک مورد یا چند مورد؟
+- *کجا؟* — کدام صفحه، endpoint، فایل، component، service خاص اشاره شده؟
+- *کلیدواژه‌ها چیست؟* — همهٔ URL ها، آدرس‌ها، نام‌ها (فایل، تابع، endpoint، repo، service، library)، error message ها
+- *Context چیست؟* — «وقتی Y رخ می‌دهد»، «در حالت Z»، «بعد از W»، شرایط واقعی استفاده
+- *نشانه‌های مشکل؟* — error log، behavior غلط، expectation متفاوت
+- *چه دلیلی؟* — کاربر چرا این را می‌خواهد؟ پشت ظاهر مسئله، علت اصلی چیست؟
+
+**مرحله ۲ — مطابقت با کد واقعی** (deep_context را عمیق بخوان):
+- کدام فایل‌ها از deep_context با درخواست کاربر مرتبط است؟
+- ساختار آن فایل‌ها چیست؟ کدام function/class/import روی این تأثیر می‌گذارد؟
+- کدام فایل‌ها این موارد را call می‌کنند یا state share می‌کنند؟
+- چه stack و libraries استفاده شده؟ آیا approach کاربر با این stack سازگار است؟
+- نقاط risk کدام‌ها هستند؟ تغییر این کد روی چه چیزی اثر می‌گذارد؟
+
+**مرحله ۳ — طراحی راه‌حل**:
+- دقیق‌ترین تغییرات چه هستند؟ کدام خط‌ها، توابع، فایل‌ها؟
+- چه ترتیبی برای پیاده‌سازی منطقی است؟
+- چه تست‌هایی باید برای verify اضافه/تنظیم شوند؟
+- معیارهای پذیرش قابل اندازه‌گیری چه چیست؟
+
+**مرحله ۴ — ساخت خروجی**:
+- وقتی JSON می‌سازی، هر فیلد را با outputهای ۳ مرحلهٔ بالا پر کن
+- **پاسخ سطحی غیرقابل قبول است** — اگر description تو ۳ جمله است، می‌فهمم که عمیق فکر نکرده‌ای
+- **اگر deep_context داده شده، باید حداقل ۵ فایل واقعی reference کنی** (در target_locations + related_files)
+
 # 🚨 قانون طلایی (نقض = شکست تسک)
 **متن خام کاربر مرجع اصلی است.** تو فقط ساختار اضافه می‌کنی، **هرگز اطلاعات را نمی‌حذفی**:
 
 1. **همهٔ URL ها، لینک‌ها، آدرس‌ها** که کاربر ذکر کرده، در `description` کپی شوند — verbatim، بدون تغییر.
 2. **همهٔ نام‌ها** (نام فایل، تابع، endpoint، repo، sandbox، service خاص) که کاربر گفته، در `description` تکرار شوند.
-3. **همهٔ context** که کاربر داده (مثلاً «در صفحهٔ X»، «وقتی Y رخ می‌دهد»، «در حالت Z»)، در `description` حفظ شود.
-4. **هرگز** کلمات اختصاصی، technical terms، یا کلمات کلیدی کاربر را با مترادف عمومی جایگزین نکن.
+3. **همهٔ context** که کاربر داده، در `description` حفظ شود.
+4. **هرگز** کلمات اختصاصی را با مترادف عمومی جایگزین نکن.
 5. `description` باید **حداقل ۸۰٪** حجم متن خام کاربر را داشته باشد + توضیحات تو.
-6. اگر کاربر چندین مورد در درخواست خود گفته (مثلاً ۵ تغییر مختلف)، **همهٔ ۵ مورد** باید در `description` ذکر شوند — هیچ‌کدام را حذف نکن.
+6. اگر کاربر چندین مورد گفته (مثلاً ۵ تغییر)، **همهٔ ۵ مورد** ذکر شوند.
 
 ساختار تو، **پوشش** متن کاربر است، نه **جایگزینی** آن.
+
+# 📏 معیارهای کیفیت قابل اندازه‌گیری (پاسخ‌های زیر این آستانه‌ها رد می‌شوند)
+
+| فیلد | حداقل |
+|---|---|
+| `description` | ≥ 500 کاراکتر، شامل: تحلیل + کلیدواژه‌های کاربر + شواهد در کد |
+| `proposed_action` | ≥ 300 کاراکتر، با مراحل عددی واضح |
+| `target_locations` | ≥ 2 مورد با path واقعی + snippet کد واقعی + lines |
+| `related_files` | ≥ 3 مورد با reason مشخص |
+| `acceptance_criteria` | ≥ 4 مورد قابل تست، نه عمومی |
+| `dependency_summary` | ≥ 200 کاراکتر، با نام واقعی فایل‌ها |
+| `risks` | ≥ 100 کاراکتر، با ذکر فایل/تابع — نه «احتیاط در deploy» |
+
+اگر deep_context موجود است و این آستانه‌ها را رعایت نکنی، **پاسخ سطحی است**.
 
 # 🎯 هدف اصلی پروژه (از زبان کاربر)
 {user_goal or '(کاربر یادداشتی ثبت نکرده است)'}
@@ -2517,8 +2559,11 @@ class OversightService:
             #   - JSON ناقص → پرامپت ناقص
             # temperature پایین برای grounding بیشتر در کد واقعی.
             effective_models = model_ids or ([model_id] if model_id else None)
-            grounded_max_tokens = 10000 if deep_ctx.get("ok") else 6000
-            grounded_temperature = 0.15 if deep_ctx.get("ok") else 0.3
+            # 🆕 max_tokens بالاتر برای پرامپت‌های غنی (description >=500، target_locations
+            # با snippet کد واقعی، AC چندتایی، …)
+            grounded_max_tokens = 16000 if deep_ctx.get("ok") else 10000
+            # 🆕 temperature خیلی پایین برای grounding بیشتر در deep_context واقعی
+            grounded_temperature = 0.1 if deep_ctx.get("ok") else 0.25
             if effective_models and len(effective_models) > 1:
                 multi = await self._ai_generate_multi(
                     system_prompt,
@@ -2620,8 +2665,78 @@ class OversightService:
 
         parsed = self._extract_json(response)
 
-        # 🆕 اگر parsed خیلی ناقص است (کلیدهای حیاتی نیست)، تلاش دوم با retry
-        # و قانون‌های سخت‌گیرانه
+        # 🆕 (Quality Check) ارزیابی عمق پاسخ بر اساس معیارهای کیفیت قابل اندازه‌گیری
+        # علاوه بر چک ناقص بودن، عمق هر فیلد را اندازه می‌گیریم — اگر سطحی، retry با feedback specific
+        def _evaluate_quality(p: Dict[str, Any], raw_idea: str) -> Tuple[bool, List[str]]:
+            """خروجی: (is_quality_acceptable, feedback_issues_list)
+            مشکلات گزارش‌شده در feedback به AI نشان داده می‌شود تا retry بهبود دهد.
+            """
+            issues: List[str] = []
+            if not isinstance(p, dict):
+                return False, ["JSON معتبر نیست"]
+
+            desc = (p.get("description") or "").strip()
+            if len(desc) < 500:
+                issues.append(
+                    f"`description` فقط {len(desc)} کاراکتر است (حداقل ۵۰۰ نیاز است). "
+                    f"باید شامل: تحلیل کامل + همهٔ URL/نام‌های کاربر + شواهد در کد"
+                )
+
+            pa = (p.get("proposed_action") or "").strip()
+            if len(pa) < 300:
+                issues.append(
+                    f"`proposed_action` فقط {len(pa)} کاراکتر است (حداقل ۳۰۰). "
+                    f"باید مراحل عددی واضح داشته باشد"
+                )
+
+            tl = p.get("target_locations") or []
+            if not isinstance(tl, list) or len(tl) < 2:
+                issues.append(
+                    f"`target_locations` فقط {len(tl) if isinstance(tl, list) else 0} مورد. حداقل ۲ مورد"
+                )
+            else:
+                missing_snippet = sum(
+                    1 for x in tl if isinstance(x, dict) and not (x.get("snippet") or "").strip()
+                )
+                if missing_snippet > len(tl) // 2:
+                    issues.append(
+                        f"{missing_snippet} از {len(tl)} target_locations بدون snippet هستند. "
+                        f"از deep_context کد واقعی کپی کن"
+                    )
+
+            rf = p.get("related_files") or []
+            if not isinstance(rf, list) or len(rf) < 3:
+                issues.append(
+                    f"`related_files` فقط {len(rf) if isinstance(rf, list) else 0} مورد. حداقل ۳ مورد با reason"
+                )
+
+            ac = p.get("acceptance_criteria") or []
+            if not isinstance(ac, list) or len(ac) < 4:
+                issues.append(
+                    f"`acceptance_criteria` فقط {len(ac) if isinstance(ac, list) else 0} مورد. حداقل ۴ مورد قابل تست"
+                )
+
+            dep = (p.get("dependency_summary") or "").strip()
+            if len(dep) < 200:
+                issues.append(
+                    f"`dependency_summary` فقط {len(dep)} کاراکتر. حداقل ۲۰۰ با نام فایل‌ها"
+                )
+
+            # حفظ کلیدواژه‌های کاربر در description
+            raw_lower = (raw_idea or "").lower()
+            desc_lower = desc.lower()
+            # استخراج URL ها از raw_idea
+            import re as _re
+            urls_in_raw = _re.findall(r'https?://[^\s\)\]\}]+', raw_idea or "")
+            missing_urls = [u for u in urls_in_raw if u.lower() not in desc_lower]
+            if missing_urls:
+                issues.append(
+                    f"URL های کاربر در description نیامده‌اند: {', '.join(missing_urls[:3])}"
+                )
+
+            return (len(issues) == 0), issues
+
+        # چک ناقص بودن primary
         critical_keys = {"description", "target_locations", "acceptance_criteria"}
         parsed_keys = set(parsed.keys()) if isinstance(parsed, dict) else set()
         is_too_thin = (
@@ -2631,22 +2746,33 @@ class OversightService:
             or not (parsed.get("description") or "").strip()
         )
 
-        if is_too_thin:
+        # quality check جدید — حتی اگر JSON کامل بود، عمق پاسخ را اندازه می‌گیریم
+        quality_ok, quality_issues = (False, []) if is_too_thin else _evaluate_quality(parsed, idea)
+        needs_retry = is_too_thin or not quality_ok
+
+        if needs_retry:
             logger.warning(
-                f"idea_to_prompt: parsed JSON ناقص است "
-                f"(keys={list(parsed_keys)[:8] if parsed_keys else 'None'}) — retry سخت‌گیرانه"
+                f"idea_to_prompt: نیاز به retry — "
+                f"thin={is_too_thin}, quality_issues={len(quality_issues)}"
             )
             try:
+                issues_text = ""
+                if quality_issues:
+                    issues_text = "\n".join(f"   ❌ {i}" for i in quality_issues[:8])
                 strict_suffix = (
-                    "\n\n# 🚨 توجه: پاسخ قبلی JSON معتبر/کامل نبود.\n"
-                    "این بار:\n"
-                    "1. فقط یک JSON object معتبر — هیچ متن قبل/بعد JSON نباشد.\n"
-                    "2. هیچ ``` یا توضیح اضافه نباشد.\n"
-                    "3. حتماً این فیلدها را پر کن: title, description, proposed_action,\n"
-                    "   target_locations (حداقل ۱), acceptance_criteria (حداقل ۲),\n"
-                    "   type, priority.\n"
-                    "4. اگر فضا کم است، تعداد target_locations را کم کن (نه description).\n"
-                    "5. JSON با } بسته شود — هیچ field ناقص نگذار.\n"
+                    f"\n\n# 🚨 توجه: پاسخ قبلی سطحی/ناقص بود.\n"
+                    f"این بار با دقت بیشتر و عمق کافی تولید کن.\n\n"
+                    f"## مشکلات پاسخ قبلی:\n{issues_text}\n\n"
+                    f"## این بار:\n"
+                    f"1. فقط یک JSON object معتبر — هیچ متن قبل/بعد JSON نباشد.\n"
+                    f"2. هیچ ``` یا توضیح اضافه نباشد.\n"
+                    f"3. `description` باید >= 500 کاراکتر باشد — تحلیل عمیق + همهٔ URL/نام‌های کاربر\n"
+                    f"4. `target_locations` حداقل ۲ مورد با snippet کد واقعی از deep_context\n"
+                    f"5. `related_files` حداقل ۳ مورد با reason دقیق\n"
+                    f"6. `acceptance_criteria` حداقل ۴ مورد قابل تست\n"
+                    f"7. `dependency_summary` >= 200 کاراکتر با نام فایل‌های واقعی\n"
+                    f"8. **همهٔ URL/لینک از متن کاربر در description باشند** (verbatim)\n"
+                    f"9. JSON با }} بسته شود — هیچ field ناقص نگذار.\n"
                 )
                 retry_max2 = min(20000, grounded_max_tokens + 6000)
                 if effective_models and len(effective_models) > 1:
@@ -2671,14 +2797,40 @@ class OversightService:
                     )
                 if response2 and len(response2) > 200:
                     parsed2 = self._extract_json(response2)
-                    if isinstance(parsed2, dict) and (parsed2.get("description") or "").strip():
-                        parsed = parsed2
-                        response = response2
-                        logger.info("idea_to_prompt: retry سخت‌گیرانه موفق بود")
-                    elif isinstance(parsed2, dict) and len(parsed2.keys()) > len(parsed_keys):
-                        # حتی اگر description خالی، اگر keys بیشتر دارد بهتر است
-                        parsed = parsed2
-                        response = response2
+                    if isinstance(parsed2, dict):
+                        # 🆕 quality comparison: parsed2 را با parsed قبلی مقایسه کن
+                        # هر کدام عمیق‌تر، نگه دار. اگر هر دو سطحی، parsed2 (تازه) را نگه دار.
+                        if not isinstance(parsed, dict) or not parsed:
+                            parsed = parsed2
+                            response = response2
+                            logger.info("idea_to_prompt: retry replaced empty/invalid parsed")
+                        else:
+                            # امتیاز عمق: طول description + تعداد target_locations + تعداد AC
+                            def _depth_score(p: Dict[str, Any]) -> int:
+                                desc_len = len((p.get("description") or "").strip())
+                                tl = p.get("target_locations") or []
+                                rf = p.get("related_files") or []
+                                ac = p.get("acceptance_criteria") or []
+                                return (
+                                    desc_len
+                                    + (len(tl) if isinstance(tl, list) else 0) * 200
+                                    + (len(rf) if isinstance(rf, list) else 0) * 100
+                                    + (len(ac) if isinstance(ac, list) else 0) * 80
+                                )
+                            score_old = _depth_score(parsed)
+                            score_new = _depth_score(parsed2)
+                            if score_new > score_old:
+                                parsed = parsed2
+                                response = response2
+                                logger.info(
+                                    f"idea_to_prompt: retry بهتر بود "
+                                    f"(score {score_old} → {score_new})"
+                                )
+                            else:
+                                logger.info(
+                                    f"idea_to_prompt: retry بهبود نداشت "
+                                    f"(score {score_new} <= {score_old}) — نسخهٔ اول حفظ شد"
+                                )
             except Exception as _strict_e:
                 logger.warning(f"idea_to_prompt strict retry failed: {_strict_e}")
 
