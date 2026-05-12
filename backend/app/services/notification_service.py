@@ -1757,7 +1757,13 @@ class NotificationService:
         if media:
             # auto-start اگر compose فعال نیست
             if current is None:
-                current = await compose_svc.start(chat_id_str, mode="task")
+                # 🆕 (Stage 5) — تشخیص mode بر اساس chat_state فعلی:
+                # اگر کاربر در creator_awaiting_idea phase است، mode=project.
+                # در غیر این صورت mode=task.
+                cur_state = _chat_state.get(chat_id_str) or {}
+                cur_phase = cur_state.get("phase", "")
+                detected_mode = "project" if cur_phase == "creator_awaiting_idea" else "task"
+                current = await compose_svc.start(chat_id_str, mode=detected_mode)
                 await self._compose_send_welcome(chat_id_str, current)
 
             await self._compose_add_media(chat_id_str, current, media, caption)
@@ -2117,21 +2123,160 @@ class NotificationService:
     async def _compose_submit_project(
         self, chat_id_str: str, buf: Any,
     ) -> Dict[str, Any]:
-        """submit برای mode=project (Stage 5 — اینجا stub).
+        """submit برای mode=project:
 
-        موقتاً به کاربر می‌گویم که این feature در Stage 5 می‌آید.
+        1. validate (creator state موجود است؟)
+        2. resolve attachments → extracted text
+        3. text_parts + extracted text → full idea (augmented)
+        4. state.creator_data.idea = augmented_idea
+        5. continue creator flow:
+           - `_receive_creator_idea` که name picker را نشان می‌دهد
+           - یا اگر name از قبل ست شده، مستقیم preview
+        6. compose buffer finalize (sessions حفظ، به new project ربط می‌خورند
+           پس از موفقیت _execute_creator_v2)
         """
         from .oversight_telegram_compose import get_compose_service
+        from .oversight_service import get_oversight_service
         tg = self._telegram()
+        compose_svc = get_compose_service()
+
+        # state creator باید موجود باشد
+        state = _chat_state.get(chat_id_str) or {}
+        cdata = state.get("creator_data") or {}
+        if not cdata.get("model_ids"):
+            await tg.send(
+                "⚠️ creator state موجود نیست. /new\\_project بزن و مدل‌ها را اول انتخاب کن.",
+                silent=False,
+            )
+            await compose_svc.cancel(chat_id_str)
+            await tg.remove_reply_keyboard("compose پاک شد.")
+            return {"ok": True, "handled": "compose_project_no_creator_state"}
+
+        # validate buffer
+        if not buf.items:
+            await tg.send(
+                "⚠️ buffer خالی است — حداقل یک فایل یا متن بفرست.",
+                silent=True,
+            )
+            return {"ok": True, "handled": "compose_project_empty"}
+
+        if buf.submitting:
+            return {"ok": True, "handled": "compose_project_already_running"}
+
+        await compose_svc.mark_submitting(chat_id_str, True)
+        await tg.remove_reply_keyboard("⏳ شروع پردازش...")
+
+        try:
+            return await self._compose_run_pipeline_project(chat_id_str, buf, state)
+        except Exception as e:
+            logger.exception(f"compose submit project failed: {e}")
+            await compose_svc.mark_submitting(chat_id_str, False)
+            await tg.send_with_reply_keyboard(
+                f"❌ خطا در پردازش submit پروژه:\n`{str(e)[:300]}`\n\n"
+                f"می‌توانی دوباره تلاش کنی.",
+                keyboard_rows=[
+                    [self._COMPOSE_BTN_SUBMIT_PROJECT],
+                    [self._COMPOSE_BTN_CANCEL],
+                ],
+                silent=False,
+            )
+            return {"ok": False, "handled": "compose_project_failed", "error": str(e)[:300]}
+
+    async def _compose_run_pipeline_project(
+        self, chat_id_str: str, buf: Any, state: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """resolve attachments → augment idea → continue creator flow."""
+        from .oversight_telegram_compose import get_compose_service
+        from .oversight_service import get_oversight_service
+        tg = self._telegram()
+        compose_svc = get_compose_service()
+        _ov = get_oversight_service()
+        cdata = state.setdefault("creator_data", {})
+
+        # متن‌ها + extraction
+        text_parts: List[str] = []
+        for it in buf.text_items_sorted():
+            t = (it.text or "").strip()
+            if t:
+                text_parts.append(t)
+        user_text = "\n\n".join(text_parts).strip()
+        session_ids = buf.session_ids_in_order()
+
+        if not session_ids and not user_text:
+            await tg.send("⚠️ نه فایلی صحیح، نه متنی — submit ممکن نیست.", silent=True)
+            await compose_svc.mark_submitting(chat_id_str, False)
+            return {"ok": True, "handled": "compose_project_no_content"}
+
+        # placeholder text-only هم OK
+        if not user_text:
+            user_text = (
+                "[ایدهٔ متنی همراه نیست — دستورالعمل/درخواست کاربر داخل "
+                "محتوای فایل‌های پیوست است.]"
+            )
+
+        # پیام شروع
         await tg.send(
-            "⏳ ساخت پروژهٔ ترکیبی هنوز پیاده‌سازی نشده (Stage 5).\n"
-            "فعلاً برای ساخت پروژه از /new\\_project بدون پیوست استفاده کن.",
+            "⏳ *در حال پردازش submit پروژهٔ جدید*\n"
+            f"📎 {buf.total_files()} فایل، 📝 {len(text_parts)} متن\n\n"
+            "مراحل:\n"
+            "  1. استخراج متن از فایل‌ها\n"
+            "  2. تولید پرامپت پروژه (creator)\n"
+            "  3. نمایش preview برای تأیید\n",
             silent=False,
         )
-        # buffer را cancel کن تا گیج کننده نباشد
-        await get_compose_service().cancel(chat_id_str)
-        await tg.remove_reply_keyboard("compose پاک شد.")
-        return {"ok": True, "handled": "compose_submit_project_stub"}
+
+        # 1) extraction از طریق _resolve_attachments_for_idea (همان وب)
+        augmented_idea = user_text
+        if session_ids:
+            try:
+                augmented_idea, attachments_meta = await _ov._resolve_attachments_for_idea(
+                    user_text, session_ids,
+                )
+            except Exception as e:
+                logger.warning(f"compose project extraction failed: {e}")
+                # ادامه با user_text ساده
+                augmented_idea = user_text + f"\n\n[خطا در استخراج فایل‌ها: {str(e)[:200]}]"
+                attachments_meta = []
+
+        # 2) ذخیره در state و انتقال به phase نام
+        cdata["idea"] = augmented_idea
+        # auto-suggest name از augmented_idea
+        import re as _re
+        words = _re.findall(r"[a-zA-Z]+", augmented_idea.lower())[:3]
+        suggested = "-".join(words) if words else "telegram-project"
+        cdata["suggested_name"] = suggested
+
+        state["phase"] = "creator_awaiting_name_or_skip"
+        state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+        _chat_state[chat_id_str] = state
+
+        # 3) finalize compose (sessions حفظ — بعداً اگر لازم به new project ربط داده می‌شوند)
+        await compose_svc.finalize_after_submit(chat_id_str)
+
+        # 4) نمایش name picker
+        idea_len = len(augmented_idea)
+        kb = {
+            "inline_keyboard": [
+                [{"text": f"✅ استفاده از: {suggested}", "callback_data": "creator_use_suggested_name"}],
+                [{"text": "✏️ نام دلخواه", "callback_data": "creator_custom_name"}],
+                [{"text": "❌ لغو", "callback_data": "flow:cancel"}],
+            ]
+        }
+        await tg.send(
+            f"💡 *ایدهٔ پروژه از پیوست‌ها استخراج شد*\n\n"
+            f"📋 طول idea: {idea_len:,} کاراکتر\n"
+            f"📎 {buf.total_files()} فایل پیوست بود → متن کامل در idea ادغام شد\n\n"
+            f"📦 *مرحلهٔ بعد: نام پروژه*\n"
+            f"پیشنهاد: `{suggested}`",
+            silent=True,
+            reply_markup=kb,
+        )
+        return {
+            "ok": True,
+            "handled": "compose_project_idea_resolved",
+            "idea_len": idea_len,
+            "files": buf.total_files(),
+        }
 
     async def _compose_pick_project(
         self, chat_id_str: str, buf: Any,
