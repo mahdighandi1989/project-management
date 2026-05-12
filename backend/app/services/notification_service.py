@@ -2322,9 +2322,11 @@ class NotificationService:
         """اصل اجرای پایپ‌لاین task mode — بعد از validate + remove_keyboard."""
         from .oversight_service import get_oversight_service
         from .oversight_telegram_compose import get_compose_service
+        from .oversight_progress import get_progress_tracker
         tg = self._telegram()
         _ov = get_oversight_service()
         compose_svc = get_compose_service()
+        tracker = get_progress_tracker()
         prefs = _read_prefs()
         base = (prefs.get("app_base_url", "") or "").rstrip("/")
 
@@ -2345,18 +2347,63 @@ class NotificationService:
             await compose_svc.mark_submitting(chat_id_str, False)
             return {"ok": True, "handled": "compose_submit_no_content"}
 
-        # 3) پیام شروع
-        await tg.send(
-            "⏳ *در حال پردازش submit*\n"
-            f"📎 {buf.total_files()} فایل ({buf.total_size_bytes() // 1024 // 1024 + 1}MB)\n"
-            f"📝 {len(text_parts)} متن ({sum(len(t) for t in text_parts)} char)\n\n"
-            "این می‌تواند چند دقیقه طول بکشد — مراحل:\n"
-            "  1. استخراج متن از فایل‌ها (با مدل بصری)\n"
-            "  2. تولید پرامپت قدرتمند (idea→prompt)\n"
-            "  3. ذخیرهٔ تسک + ارسال PDF فیدبک\n\n"
-            "وضعیت در پیام‌های بعدی به‌روز می‌شود.",
-            silent=False,
+        # 3) پیام شروع + register progress tracker با Telegram callback
+        await tracker.start(
+            buf.task_draft_id,
+            stage="starting",
+            total=buf.total_files() + 2,  # +1 idea_to_prompt + +1 create_task
+            detail="شروع پردازش",
         )
+        # send initial status message + ذخیرهٔ message_id برای edit
+        status_msg_id = None
+        try:
+            import aiohttp as _ah
+            initial_text = (
+                "⏳ *در حال پردازش submit*\n"
+                f"📎 {buf.total_files()} فایل ({buf.total_size_bytes() // 1024 // 1024 + 1}MB) + "
+                f"{len(text_parts)} متن\n"
+                f"📊 progress: 0/{buf.total_files() + 2}\n\n"
+                "این پیام در حین پیشرفت به‌روز می‌شود."
+            )
+            url = f"https://api.telegram.org/bot{tg.bot_token}/sendMessage"
+            payload = {
+                "chat_id": tg.chat_id, "text": initial_text,
+                "parse_mode": "Markdown", "disable_notification": False,
+            }
+            timeout = _ah.ClientTimeout(total=15)
+            async with _ah.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json=payload) as r:
+                    body = await r.json()
+                    if body.get("ok"):
+                        status_msg_id = (body.get("result") or {}).get("message_id")
+        except Exception as e:
+            logger.debug(f"compose progress: initial send failed: {e}")
+
+        # progress callback — هر بار update با throttle، پیام را edit می‌کند
+        if status_msg_id:
+            async def _on_progress(snap):
+                try:
+                    pct = int(snap.percent)
+                    bar_len = 12
+                    filled = int(bar_len * pct / 100)
+                    bar = "█" * filled + "░" * (bar_len - filled)
+                    text = (
+                        f"⏳ *در حال پردازش submit*\n"
+                        f"📊 `[{bar}]` {pct}%\n"
+                        f"مرحله: *{snap.stage}*\n"
+                        f"{snap.detail or '...'}"
+                    )
+                    if snap.completed:
+                        if snap.error:
+                            text = f"❌ *خطا*\n{snap.error[:300]}"
+                        else:
+                            text = f"✅ *پردازش کامل شد*\nطول: {snap.elapsed_seconds():.1f}s\n{snap.detail or ''}"
+                    await tg.edit_message_text(
+                        tg.chat_id, status_msg_id, text, parse_mode="Markdown",
+                    )
+                except Exception as e:
+                    logger.debug(f"progress callback edit failed: {e}")
+            tracker.register_callback(buf.task_draft_id, _on_progress)
 
         # 4) idea_to_prompt
         if files_only:
@@ -2371,14 +2418,35 @@ class NotificationService:
         else:
             idea_for_ai = idea
 
+        await tracker.update(
+            buf.task_draft_id,
+            stage="extracting_and_prompting",
+            current=1,
+            detail=f"استخراج {buf.total_files()} فایل و تولید پرامپت...",
+            throttle_sec=2.0,
+        )
+
         try:
             preview = await _ov.idea_to_prompt(
                 idea=idea_for_ai,
                 watched_id=buf.watched_id,
                 upload_session_ids=session_ids or None,
+                progress_track_id=buf.task_draft_id,
             )
         except Exception as e:
+            await tracker.complete(
+                buf.task_draft_id, stage="failed",
+                error=f"idea_to_prompt failed: {e}",
+            )
             raise RuntimeError(f"idea_to_prompt failed: {e}")
+
+        await tracker.update(
+            buf.task_draft_id,
+            stage="creating_task",
+            current=buf.total_files() + 1,
+            detail="ذخیرهٔ تسک و آماده‌سازی PDF فیدبک...",
+            throttle_sec=2.0,
+        )
 
         # 5) dedup check (find_similar_active_tasks)
         title = preview.get("title") or (text_parts[0][:80] if text_parts else "تسک ترکیبی از تلگرام")
@@ -2425,6 +2493,13 @@ class NotificationService:
             for m in similar[:3]:
                 lines.append(f"  • «{m.title[:50]}» — شباهت {int(m.score * 100)}٪")
             await self._telegram().send("\n".join(lines), silent=True)
+
+        # progress complete
+        await tracker.complete(
+            buf.task_draft_id, stage="done",
+            detail=f"✅ تسک «{(new_task.get('title') or '')[:60]}» ساخته شد",
+            result={"task_id": new_task.get("id")},
+        )
 
         return {
             "ok": True,

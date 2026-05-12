@@ -1313,6 +1313,26 @@ export default function OversightPage() {
         .filter((s) => ['completed', 'extracting', 'extracted'].includes(s.status))
         .sort((a, b) => a.file_order - b.file_order)
         .map((s) => s.session_id);
+      // 🆕 (Stage 6 — Progress) اگر فایل پیوست شده، progress live را poll کن
+      let pollInterval: any = null;
+      if (validSessionIds.length > 0) {
+        pollInterval = setInterval(async () => {
+          try {
+            const pr = await fetch(`${API_BASE}/api/oversight/progress/${taskDraftId}`);
+            if (pr.ok) {
+              const pd = await pr.json();
+              if (pd.found) {
+                setGenPhase(`${pd.stage}: ${pd.detail || ''}`);
+                if (typeof pd.percent === 'number') setGenPct(Math.max(8, Math.min(99, pd.percent)));
+                if (pd.completed) {
+                  clearInterval(pollInterval);
+                  pollInterval = null;
+                }
+              }
+            }
+          } catch {}
+        }, 2000);
+      }
       const res = await fetch(`${API_BASE}/api/oversight/tasks/from-idea`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1325,8 +1345,13 @@ export default function OversightPage() {
           model_ids: selectedModelIds.length > 1 ? selectedModelIds : undefined,
           multi_pass_mode: multiPassMode,
           upload_session_ids: validSessionIds.length ? validSessionIds : undefined,
+          progress_track_id: validSessionIds.length ? taskDraftId : undefined,
         }),
       });
+      if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+      }
       if (res.ok) {
         const data = await res.json();
         setPreviewPrompt({
