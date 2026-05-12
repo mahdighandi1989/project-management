@@ -84,23 +84,32 @@ def build_verify_checklist_message(
     *,
     max_steps_inline: int = 30,
     char_budget: int = 900,
+    header_override: Optional[str] = None,
 ) -> str:
     """ساخت متن چک‌لیستی برای caption پیام تلگرام (≤ ~900 char).
 
     عناوین کوتاه نگه داشته می‌شوند — جزئیات کامل در PDF پیوست است.
+
+    اگر `report` None باشد (مثلاً برای تسک تازه ساخته‌شده که هنوز verify
+    نشده)، حالت "task created" استفاده می‌شود — وضعیت‌ها صرفاً pending هستند
+    و بخش‌های done/remaining/next_actions نمایش داده نمی‌شوند.
     """
     lines: List[str] = []
-    status = getattr(task, "verification_status", None) or getattr(report, "status", "?")
-    emoji, label, _ = _STATUS_BADGE.get(status, ("ℹ️", status, "#000"))
-
     title = getattr(task, "title", "") or ""
     project = getattr(task, "project_full_name", "") or ""
     priority = getattr(task, "priority", "") or ""
     task_type = getattr(task, "type", "") or ""
     streak = getattr(task, "confirmation_streak", 0) or 0
-    confidence = float(getattr(report, "confidence_score", 0.0) or 0.0)
+    confidence = float(getattr(report, "confidence_score", 0.0) or 0.0) if report else 0.0
 
-    lines.append(f"{emoji} *Verify: {label.lower()}*")
+    if header_override:
+        lines.append(header_override)
+    else:
+        status = getattr(task, "verification_status", None) or (
+            getattr(report, "status", "?") if report else "pending"
+        )
+        emoji, label, _ = _STATUS_BADGE.get(status, ("ℹ️", status, "#000"))
+        lines.append(f"{emoji} *Verify: {label.lower()}*")
     # عنوان داخل `_..._` (italic) — کاراکترهای _ * ` [ را escape کن تا
     # parser Markdown تلگرام نشکند (مثلاً برای task با underscore در نام).
     lines.append(f"📌 _{_md_escape(_short_title(title, 100))}_")
@@ -149,17 +158,18 @@ def build_verify_checklist_message(
             lines.append(line)
             shown += 1
     else:
-        # تسک بدون چک‌لیست — fallback به done/remaining قدیمی
-        done_parts = list(getattr(report, "done_parts", None) or [])
-        remaining_parts = list(getattr(report, "remaining_parts", None) or [])
-        if done_parts:
-            lines.append(f"\n✅ *انجام‌شده ({len(done_parts)}):*")
-            for item in done_parts[:5]:
-                lines.append(f"• {_short_title(str(item), 110)}")
-        if remaining_parts:
-            lines.append(f"\n⏳ *باقی‌مانده ({len(remaining_parts)}):*")
-            for item in remaining_parts[:5]:
-                lines.append(f"• {_short_title(str(item), 110)}")
+        # تسک بدون چک‌لیست — fallback به done/remaining قدیمی (فقط اگر report موجود است)
+        if report is not None:
+            done_parts = list(getattr(report, "done_parts", None) or [])
+            remaining_parts = list(getattr(report, "remaining_parts", None) or [])
+            if done_parts:
+                lines.append(f"\n✅ *انجام‌شده ({len(done_parts)}):*")
+                for item in done_parts[:5]:
+                    lines.append(f"• {_md_escape(_short_title(str(item), 110))}")
+            if remaining_parts:
+                lines.append(f"\n⏳ *باقی‌مانده ({len(remaining_parts)}):*")
+                for item in remaining_parts[:5]:
+                    lines.append(f"• {_md_escape(_short_title(str(item), 110))}")
 
     # PR link (compact)
     applied = getattr(task, "applied_evidence", None) or {}
@@ -175,15 +185,21 @@ def build_verify_checklist_message(
 
 
 def _build_verify_report_html(task: Any, report: Any) -> str:
-    """ساخت HTML با ساختار RTL برای رندر به PDF."""
+    """ساخت HTML با ساختار RTL برای رندر به PDF.
+
+    اگر report=None باشد (تسک تازه ساخته‌شده)، حالت "task brief" تولید
+    می‌شود: متن کامل پرامپت + چک‌لیست مراحل (همه pending) + AC ها.
+    """
     title = getattr(task, "title", "") or ""
     project = getattr(task, "project_full_name", "") or ""
     priority = getattr(task, "priority", "") or ""
     task_type = getattr(task, "type", "") or ""
     streak = getattr(task, "confirmation_streak", 0) or 0
     streak_required = getattr(task, "confirmation_streak_required", None)
-    status = getattr(task, "verification_status", None) or getattr(report, "status", "?")
-    confidence = float(getattr(report, "confidence_score", 0.0) or 0.0)
+    status = getattr(task, "verification_status", None) or (
+        getattr(report, "status", "?") if report else "pending"
+    )
+    confidence = float(getattr(report, "confidence_score", 0.0) or 0.0) if report else 0.0
     last_verified = getattr(task, "last_verified_at", "") or ""
     overall = getattr(task, "overall_completion_pct", None)
     prompt = getattr(task, "prompt", "") or ""
@@ -191,13 +207,19 @@ def _build_verify_report_html(task: Any, report: Any) -> str:
 
     emoji, label, color = _STATUS_BADGE.get(status, ("ℹ️", status, "#374151"))
     steps = list(getattr(task, "task_steps", None) or [])
-    done_parts = list(getattr(report, "done_parts", None) or [])
-    remaining_parts = list(getattr(report, "remaining_parts", None) or [])
-    next_actions = list(getattr(report, "next_actions", None) or [])
-    evidence = getattr(report, "evidence", None) or {}
-    summary = ""
-    if isinstance(evidence, dict):
-        summary = str(evidence.get("summary") or evidence.get("ai_summary") or "")
+    if report is not None:
+        done_parts = list(getattr(report, "done_parts", None) or [])
+        remaining_parts = list(getattr(report, "remaining_parts", None) or [])
+        next_actions = list(getattr(report, "next_actions", None) or [])
+        evidence = getattr(report, "evidence", None) or {}
+        summary = ""
+        if isinstance(evidence, dict):
+            summary = str(evidence.get("summary") or evidence.get("ai_summary") or "")
+    else:
+        done_parts = []
+        remaining_parts = []
+        next_actions = []
+        summary = ""
     acs = list(getattr(task, "acceptance_criteria", None) or [])
     target_files = list(getattr(task, "target_files", None) or [])
 
@@ -375,17 +397,22 @@ section {{ margin: 10px 0; }}
 """
 
 
-async def build_verify_report_pdf(task: Any, report: Any) -> Tuple[bytes, str]:
-    """تولید PDF از گزارش verify. خروجی: (bytes, filename).
+async def build_verify_report_pdf(
+    task: Any, report: Any = None, *, filename_prefix: str = "verify",
+) -> Tuple[bytes, str]:
+    """تولید PDF از گزارش verify (یا brief تسک اگر report=None).
+    خروجی: (bytes, filename).
 
     اگر playwright در دسترس نباشد، خروجی به‌صورت HTML خام برمی‌گردد
     (filename با پسوند .html). استفاده‌کننده می‌تواند آن را به‌عنوان
     سند ارسال کند (telegram سند به هر فرمتی می‌پذیرد).
+
+    `filename_prefix` پیشوند نام فایل را تعیین می‌کند ("verify" یا "task").
     """
     html_doc = _build_verify_report_html(task, report)
-    safe_title = (getattr(task, "title", "") or "verify").strip()[:50]
-    safe_title = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in safe_title) or "verify"
-    filename_base = f"verify-{safe_title}-{getattr(task, 'id', '')[:8]}"
+    safe_title = (getattr(task, "title", "") or filename_prefix).strip()[:50]
+    safe_title = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in safe_title) or filename_prefix
+    filename_base = f"{filename_prefix}-{safe_title}-{(getattr(task, 'id', '') or '')[:8]}"
 
     try:
         from .browser_automation import PLAYWRIGHT_AVAILABLE  # noqa
