@@ -2936,7 +2936,54 @@ class OversightService:
             entry["model_used"] = fe.model_used
             full_text = repo.full_text(fe.id) or fe.full_text_cache or ""
             entry["char_count"] = len(full_text)
+
+            # 🛡 (audit fix CRITICAL) — تشخیص "همهٔ segmentها fail شدند":
+            # اگر متن استخراج‌شده فقط شامل placeholderهای خطا (`[خطا: ...]`،
+            # `[timeout ...]`) است و هیچ محتوای واقعی استخراج نشده، این فایل
+            # نباید به‌عنوان محتوای کاربر به prompt-builder پاس داده شود —
+            # وگرنه مدل، خود پیام‌های خطا را به‌عنوان درخواست کاربر تفسیر
+            # می‌کند و پرامپت توهمی تولید می‌شود (مثلاً «یک endpoint
+            # transcribe بساز» در حالی که کاربر فقط می‌خواست یک ویس بدهد).
+            import re as _re_fail
+            non_error_text = _re_fail.sub(
+                r"\[(?:خطا|timeout)[^\]]*\]",
+                "",
+                full_text,
+            )
+            # heading lines (## ...) را هم حذف کن — اگر بدون error placeholder
+            # فقط headings باقی بماند یعنی هیچ محتوای واقعی نبوده
+            non_error_text = _re_fail.sub(
+                r"^##\s+.*$",
+                "",
+                non_error_text,
+                flags=_re_fail.MULTILINE,
+            ).strip()
+            extraction_all_failed = (
+                fe.total_segments > 0
+                and len(non_error_text) < 20
+                and "[خطا" in full_text
+            )
+            entry["all_segments_failed"] = extraction_all_failed
             attachments_meta.append(entry)
+
+            if extraction_all_failed:
+                # محتوای خراب را به prompt پاس نده — یک پیام صریح خطا قرار بده
+                logger.warning(
+                    f"resolve_attachments: همهٔ {fe.total_segments} segment فایل "
+                    f"#{s.file_order} ({s.original_filename}) با خطا برگشتند "
+                    f"— محتوای ناقص به prompt-builder پاس نمی‌شود"
+                )
+                appended_parts.append(
+                    f"\n\n## 📎 فایل پیوست #{s.file_order}: {s.original_filename}\n"
+                    f"❌ **استخراج این فایل ناموفق بود** "
+                    f"(mime={s.mime_type} • model={fe.model_used} • "
+                    f"همهٔ {fe.total_segments} segment با خطا برگشتند).\n\n"
+                    f"⚠️ این فایل به‌عنوان محتوای ورودی به مدل تولید پرامپت "
+                    f"پاس داده **نمی‌شود** — وگرنه مدل پیام‌های خطا را به‌عنوان "
+                    f"درخواست کاربر تفسیر می‌کند. لطفاً فایل را با مدل دیگری "
+                    f"دوباره آپلود کنید، یا متن درخواست را به‌صورت تایپی ارسال کنید.\n"
+                )
+                continue
 
             # 🛡 (Stage 10 audit fix #2) — طبق درخواست کاربر «محدودیت استخراج
             # متن اصلاً نداشته باشه»، cap به 1MB افزایش یافت. متن کامل (هر چه
@@ -2993,6 +3040,9 @@ class OversightService:
 
         # 🆕 پیش از multi-pass، فایل‌های پیوست را resolve کن
         attachments_meta: List[Dict[str, Any]] = []
+        idea_was_empty_initially = not idea.strip() or idea.strip().startswith(
+            "[ایدهٔ متنی خالی"
+        )
         if upload_session_ids:
             try:
                 idea, attachments_meta = await self._resolve_attachments_for_idea(
@@ -3007,6 +3057,39 @@ class OversightService:
                 logger.warning(f"idea_to_prompt: attachment resolve failed: {_att_e}")
             except Exception as _att_e:
                 logger.warning(f"idea_to_prompt: attachment resolve failed: {_att_e}")
+
+        # 🛡 (audit fix CRITICAL) — اگر کاربر متن نفرستاد و **همهٔ** فایل‌های
+        # پیوست در استخراج fail شدند، اجازه نده prompt-builder بر اساس
+        # پیام‌های خطا یک پرامپت توهمی بسازد. به‌جای آن یک خطای واضح
+        # برگردان تا UI/Telegram به کاربر بگوید یا با مدل دیگر دوباره
+        # تلاش کند یا متن را تایپی بفرستد.
+        if (
+            attachments_meta
+            and idea_was_empty_initially
+            and all(
+                (m.get("all_segments_failed") or m.get("error"))
+                for m in attachments_meta
+            )
+        ):
+            failed_names = [
+                m.get("filename") or f"file#{m.get('file_order')}"
+                for m in attachments_meta
+            ]
+            err = ValueError(
+                "استخراج **هیچ‌یک** از فایل‌های پیوست موفق نبود و متن کاربر "
+                "هم خالی است — تولید پرامپت متوقف شد تا از پرامپت توهمی "
+                "(بر اساس پیام‌های خطا) جلوگیری شود.\n"
+                f"فایل‌ها: {', '.join(failed_names)}\n"
+                "راه‌حل: یک مدل بصری دیگر (مثلاً gemini-2.5-pro) از /models "
+                "انتخاب کنید و دوباره ارسال کنید، یا متن درخواست را به‌صورت "
+                "تایپی همراه فایل ارسال کنید."
+            )
+            setattr(err, "blocked_payload", {
+                "reason": "all_extractions_failed",
+                "failed_files": failed_names,
+                "attachments_meta": attachments_meta,
+            })
+            raise err
 
         # 🛡 (audit fix #3 CRITICAL) — اگر فایل پیوست هست، **همیشه** multi-pass
         # اجبار می‌شود تا چک‌لیست تولید شود. heuristic `_is_complex_idea` کافی

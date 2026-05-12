@@ -2596,6 +2596,51 @@ class NotificationService:
             # به جای error پیام نشان بده.
             blocked = getattr(e, "blocked_payload", None)
             if blocked:
+                reason = blocked.get("reason") or "blocked_no_vision_model"
+
+                # 🆕 (audit fix CRITICAL) — تمام استخراج‌ها fail شدند و کاربر
+                # متن نفرستاد: یک پیام واضح به کاربر بفرست، نه toggle UI
+                if reason == "all_extractions_failed":
+                    await tracker.complete(
+                        buf.task_draft_id, stage="failed",
+                        error="all extractions failed",
+                    )
+                    failed_files = blocked.get("failed_files") or []
+                    files_list = "\n".join(
+                        f"  • {n}" for n in failed_files[:10]
+                    ) or "  • (نام فایل‌ها در دسترس نیست)"
+                    msg = (
+                        "❌ <b>استخراج هیچ‌یک از فایل‌های پیوست موفق نبود.</b>\n\n"
+                        f"فایل‌ها:\n{files_list}\n\n"
+                        "از آنجا که متن همراه هم نفرستادید، نمی‌توانم درخواست شما "
+                        "را حدس بزنم و پرامپتی بر اساس پیام‌های خطا نمی‌سازم "
+                        "(تا پرامپت توهمی تولید نشود).\n\n"
+                        "🔧 <b>راه‌حل‌ها:</b>\n"
+                        "  1) از <code>/models</code> یک مدل بصری دیگر "
+                        "(مثلاً <code>gemini-2.5-pro</code>) را به‌عنوان "
+                        "default extraction تنظیم کنید و دوباره ارسال کنید.\n"
+                        "  2) متن درخواست را به‌صورت تایپی همراه فایل ارسال کنید.\n"
+                        "  3) یا فایل صوتی/ویدئویی را با کیفیت بالاتر یا "
+                        "فرمت دیگری (mp3/wav) دوباره بفرستید."
+                    )
+                    try:
+                        tg = self._telegram()
+                        # markdown parse_mode (helper default) — تگ‌های HTML را
+                        # به معادل markdown برمی‌گردانیم
+                        md = (
+                            msg.replace("<b>", "*").replace("</b>", "*")
+                               .replace("<code>", "`").replace("</code>", "`")
+                        )
+                        await tg.send(md, silent=False)
+                    except Exception as _send_e:
+                        logger.debug(f"send all-failed notify failed: {_send_e}")
+                    await compose_svc.mark_submitting(chat_id_str, False)
+                    return {
+                        "ok": True,
+                        "handled": "compose_all_extractions_failed",
+                        "failed_files": failed_files,
+                    }
+
                 await tracker.complete(
                     buf.task_draft_id, stage="blocked",
                     error="vision model unavailable",

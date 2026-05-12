@@ -17,7 +17,12 @@ class Message(BaseModel):
     """پیام در مکالمه"""
     role: str  # system, user, assistant
     content: str
-    images: Optional[List[str]] = None  # base64 تصاویر
+    images: Optional[List[str]] = None  # base64 تصاویر (PNG/JPEG)
+    # 🆕 رسانهٔ inline با MIME صریح: لیست (mime, base64).
+    # برای فایل‌های غیر-تصویری مانند audio/*, video/*, application/pdf, ...
+    # که نمی‌توان MIME را از prefix base64 حدس زد. اگر provider از این
+    # رسانه پشتیبانی نمی‌کند، باید AIServiceError بدهد (بدون سنیف غلط).
+    inline_files: Optional[List[tuple]] = None  # List[Tuple[mime: str, b64: str]]
 
 
 class AIResponse(BaseModel):
