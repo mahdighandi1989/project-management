@@ -565,12 +565,43 @@ def pick_best_extraction_model(
         _key_available[prov] = has
         return has
 
+    # 🛡 (audit fix CRITICAL #2) — کش DB enabled status. ai_manager از
+    # `ModelSettings.enabled` به‌عنوان منبع اصلی استفاده می‌کند. اگر اینجا
+    # هم چک نکنیم، picker یک مدل برمی‌گرداند که ai_manager بعداً به
+    # deepseek fallback می‌کند (silent failure).
+    _db_enabled_cache: Dict[str, bool] = {}
+
+    def _db_enabled(model_id: str) -> bool:
+        if model_id in _db_enabled_cache:
+            return _db_enabled_cache[model_id]
+        try:
+            from ..core.database import SessionLocal
+            from ..models.ai_profile import ModelSettings as _MS
+            db = SessionLocal()
+            try:
+                row = db.query(_MS).filter(_MS.model_id == model_id).first()
+                if row is not None:
+                    val = bool(row.enabled)
+                else:
+                    # اگر row در DB نیست، registry default (معمولاً True)
+                    val = True
+            finally:
+                db.close()
+        except Exception:
+            # DB در دسترس نیست — fall back به True (نگذاریم crash کند)
+            val = True
+        _db_enabled_cache[model_id] = val
+        return val
+
     def _qualifies(m: AIModel) -> bool:
         if enabled_only and not m.enabled:
             return False
         if db_enabled_ids is not None and m.id not in db_enabled_ids:
             return False
         if require_api_key and not _provider_has_key(m.provider):
+            return False
+        # 🛡 (audit fix CRITICAL #2) — اگر DB گفته disabled، رد کن
+        if enabled_only and not _db_enabled(m.id):
             return False
         if required == ModelCapability.TEXT:
             return True

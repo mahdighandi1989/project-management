@@ -449,11 +449,16 @@ async def _ai_extract_text(
         )),
         Message(role="user", content=prompt + extra_text, images=images),
     ]
+    # 🛡 (audit fix CRITICAL) — allow_fallback=False تا اگر مدل بصری در DB
+    # disabled است، ai_manager به deepseek fallback نکند و خروجی غلط
+    # «نمی‌توانم تصویر را ببینم» تولید نشود. در عوض exception می‌خوریم،
+    # که بالاتر در _resolve_attachments_for_idea handle می‌شود.
     resp = await mgr.generate(
         model_id=model_id,
         messages=messages,
         max_tokens=max_tokens,
         temperature=0.1,
+        allow_fallback=False,
     )
     return (resp.content or "").strip()
 
@@ -478,7 +483,10 @@ async def _plan_headings(model_id: str, user_idea: str, filename: str, mime: str
                 "خروجی فقط JSON: {\"headings\": [\"...\", \"...\"]}"
             )),
         ]
-        resp = await mgr.generate(model_id=model_id, messages=messages, max_tokens=2000, temperature=0.2)
+        resp = await mgr.generate(
+            model_id=model_id, messages=messages, max_tokens=2000, temperature=0.2,
+            allow_fallback=False,  # 🛡 (audit fix CRITICAL)
+        )
         # parse
         import re
         m = re.search(r'\{[^{}]*"headings"\s*:\s*\[.*?\]\s*\}', resp.content or "", re.DOTALL)
@@ -972,6 +980,7 @@ async def _run_pdf_extraction(
                 mgr.generate(
                     model_id=fe.model_used, messages=messages,
                     max_tokens=32000, temperature=0.1,
+                    allow_fallback=False,  # 🛡 (audit fix CRITICAL)
                 ),
                 timeout=PER_SEGMENT_TIMEOUT_SEC,
             )
