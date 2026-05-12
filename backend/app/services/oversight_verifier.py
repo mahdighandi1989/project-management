@@ -1315,10 +1315,10 @@ async def verify_task(
         total_steps = len(updated_steps)
         overall_pct = int(round(completion_sum / total_steps)) if total_steps else 0
         all_steps_done = total_steps > 0 and done_count == total_steps
-        # apply
-        task.task_steps = updated_steps
-        task.overall_completion_pct = overall_pct
-        task_steps_list = updated_steps  # برای بخش followup که در ادامه می‌آید
+        # apply — به‌جای mutation مستقیم روی task، نتایج را در متغیر نگه می‌داریم
+        # تا داخل service._lock اعمال شوند (جلوگیری از race با خواننده‌های همزمان).
+        _checklist_computed_steps = updated_steps
+        _checklist_overall_pct = overall_pct
 
         # 🆕 اگر AI همه را done نشان داد ولی status کلی را done نگفت، در صورت
         # کامل بودن چک‌لیست، status_val را به done بالا ببر تا transition عادی
@@ -1336,13 +1336,28 @@ async def verify_task(
             # report.status هم به‌روز شود
             report.status = VERIFICATION_PARTIAL
 
-        # 🆕 markdown checkbox state در task.prompt را به‌روز کن
+        # 🆕 markdown checkbox state — محاسبه بیرون lock، اعمال داخل lock
         try:
-            task.prompt = _sync_prompt_checkboxes(task.prompt or "", updated_steps)
+            _checklist_synced_prompt: Optional[str] = _sync_prompt_checkboxes(
+                task.prompt or "", updated_steps
+            )
         except Exception as _e:
             logger.debug(f"sync prompt checkboxes failed: {_e}")
+            _checklist_synced_prompt = None
+    else:
+        _checklist_computed_steps = None
+        _checklist_overall_pct = None
+        _checklist_synced_prompt = None
 
     async with service._lock:
+        # 🔒 اعمال نتایج checklist روی task (داخل lock — atomic با بقیهٔ به‌روزرسانی‌ها)
+        if _checklist_computed_steps is not None:
+            task.task_steps = _checklist_computed_steps
+            if _checklist_overall_pct is not None:
+                task.overall_completion_pct = _checklist_overall_pct
+            if _checklist_synced_prompt is not None and _checklist_synced_prompt != task.prompt:
+                task.prompt = _checklist_synced_prompt
+
         service.reports.insert(0, report)
         task.last_verification_report_id = report.id
         task.last_verified_at = now_iso()
