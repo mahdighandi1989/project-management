@@ -3128,7 +3128,25 @@ class NotificationService:
             # extraction خودکار revert شود
             from .oversight_telegram_compose import get_compose_service
             cs = get_compose_service()
-            await cs.set_temp_activated_model(chat_id_str, model_id)
+            # 🛡 (audit fix CRITICAL) — اگر set_temp_activated_model به‌خاطر
+            # I/O fail کند (مثلاً disk full)، نباید کل callback crash کند.
+            # در بدترین حالت، revert خودکار اتفاق نمی‌افتد ولی boot recovery
+            # آن را پاک می‌کند. کاربر می‌تواند ادامه دهد.
+            try:
+                await cs.set_temp_activated_model(chat_id_str, model_id)
+            except Exception as _set_e:
+                logger.warning(
+                    f"set_temp_activated_model failed (will skip auto-revert "
+                    f"for this submission): {_set_e}"
+                )
+                # fallback: try direct setattr روی buf — حداقل اگر I/O فقط در
+                # _save() مشکل دارد، در حافظه track می‌ماند
+                try:
+                    _buf_inner = cs.get(chat_id_str)
+                    if _buf_inner is not None:
+                        _buf_inner.temp_activated_model_id = model_id
+                except Exception:
+                    pass
             buf = cs.get(chat_id_str)
             if buf is None:
                 await tg.send("⚠️ compose منقضی شد. دوباره فایل بفرست.", silent=True)
