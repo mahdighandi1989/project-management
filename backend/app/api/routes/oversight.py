@@ -73,6 +73,9 @@ class IdeaToPromptRequest(BaseModel):
     multi_pass_mode: str = "auto"
     # 🆕 (Stage 7 — File Attachment) — sessionهای آپلودشده برای پیوست
     upload_session_ids: Optional[List[str]] = None
+    # 🆕 (Stage 6 — Progress tracker) — اگر داده شد، progress updates روی این track_id
+    # ثبت می‌شود تا frontend با /progress/{track_id} poll کند
+    progress_track_id: Optional[str] = None
 
 
 class TaskCreate(BaseModel):
@@ -355,6 +358,7 @@ async def task_from_idea(payload: IdeaToPromptRequest):
             model_ids=payload.model_ids,
             multi_pass_mode=payload.multi_pass_mode,
             upload_session_ids=payload.upload_session_ids,
+            progress_track_id=payload.progress_track_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1650,6 +1654,30 @@ async def upload_cleanup_orphans(ttl_hours: int = Query(24, ge=1, le=720)):
     svc = get_upload_session_service()
     removed = await svc.cleanup_orphans(ttl_hours=ttl_hours)
     return {"removed": removed}
+
+
+# 🆕 (Telegram Compose Stage 6) — progress tracker endpoint
+@router.get("/progress/{track_id}")
+async def progress_get(track_id: str):
+    """snapshot از progress یک operation طولانی — frontend هر چند ثانیه poll می‌کند.
+
+    خروجی: {track_id, stage, current, total, percent, detail, completed, error?, result?}
+    اگر track_id ناشناخته → {found: False}.
+    """
+    from ...services.oversight_progress import get_progress_tracker
+    snap = get_progress_tracker().get(track_id)
+    if snap is None:
+        return {"found": False, "track_id": track_id}
+    return {"found": True, **snap.to_dict()}
+
+
+@router.get("/progress")
+async def progress_list_active():
+    """لیست عملیات‌های فعال (برای debug/monitoring)."""
+    from ...services.oversight_progress import get_progress_tracker
+    return {
+        "active": [s.to_dict() for s in get_progress_tracker().list_active()],
+    }
 
 
 # ============================================================

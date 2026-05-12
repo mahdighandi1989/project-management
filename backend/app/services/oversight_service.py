@@ -2762,6 +2762,8 @@ class OversightService:
         self,
         idea: str,
         upload_session_ids: List[str],
+        *,
+        progress_track_id: Optional[str] = None,
     ) -> "Tuple[str, List[Dict[str, Any]]]":
         """فایل‌های پیوست را به متن استخراج‌شده تبدیل می‌کند و به idea append.
 
@@ -2794,7 +2796,29 @@ class OversightService:
         attachments_meta: List[Dict[str, Any]] = []
         appended_parts: List[str] = []
 
-        for s in sessions:
+        # 🆕 (Stage 6) — progress tracker (اختیاری)
+        tracker = None
+        if progress_track_id:
+            try:
+                from .oversight_progress import get_progress_tracker
+                tracker = get_progress_tracker()
+            except Exception:
+                tracker = None
+
+        total_files = len(sessions)
+        for idx_file, s in enumerate(sessions, start=1):
+            if tracker:
+                try:
+                    await tracker.update(
+                        progress_track_id,
+                        stage=f"extracting_file_{idx_file}",
+                        current=idx_file - 1,  # هنوز این فایل تمام نشده
+                        total=total_files,
+                        detail=f"📎 فایل {idx_file}/{total_files}: {s.original_filename[:50]}",
+                        throttle_sec=2.0,
+                    )
+                except Exception:
+                    pass
             entry: Dict[str, Any] = {
                 "session_id": s.id,
                 "file_order": s.file_order,
@@ -2879,6 +2903,8 @@ class OversightService:
         # extraction قبلاً انجام شده (یا اینجا انجام می‌شود) و متن کامل
         # هر فایل به‌ترتیب file_order به idea append می‌شود.
         upload_session_ids: Optional[List[str]] = None,
+        # 🆕 (Stage 6) — اگر داده شد، progress updates روی این track_id ثبت می‌شود
+        progress_track_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         if not idea.strip() and not upload_session_ids:
             raise ValueError("ایده خالی است")
@@ -2890,7 +2916,8 @@ class OversightService:
         if upload_session_ids:
             try:
                 idea, attachments_meta = await self._resolve_attachments_for_idea(
-                    idea, upload_session_ids
+                    idea, upload_session_ids,
+                    progress_track_id=progress_track_id,
                 )
             except Exception as _att_e:
                 logger.warning(f"idea_to_prompt: attachment resolve failed: {_att_e}")
@@ -4980,6 +5007,20 @@ class OversightService:
         scanned: List[str] = []
         verified: List[str] = []
         max_runs = int(self.settings.get("max_parallel_runs") or 2)
+
+        # 🛡 (audit fix N2) — progress tracker memory cleanup (snapshotهای completed
+        # که بیش از 1 ساعت پیش به پایان رسیدند)
+        try:
+            from .oversight_progress import get_progress_tracker
+            await get_progress_tracker().cleanup(older_than_seconds=3600)
+        except Exception:
+            pass
+        # 🛡 compose buffer expired cleanup
+        try:
+            from .oversight_telegram_compose import get_compose_service
+            await get_compose_service().cleanup_expired()
+        except Exception:
+            pass
 
         for w in list(self.watched):
             # ----- 1) Scan دوره‌ای -----

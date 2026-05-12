@@ -623,6 +623,390 @@ def _extract_xlsx_sheets(path: Path) -> List[Tuple[str, str]]:
         raise ExtractionError(f"openpyxl failed: {e}")
 
 
+# ─────────────── Format Diversity (Stage 9) ───────────────
+
+_EXT_TO_MIME: Dict[str, str] = {
+    # text
+    ".txt": "text/plain", ".md": "text/markdown", ".markdown": "text/markdown",
+    ".csv": "text/csv", ".tsv": "text/tab-separated-values",
+    ".log": "text/plain", ".ini": "text/plain",
+    ".json": "application/json", ".jsonl": "application/x-ndjson",
+    ".ndjson": "application/x-ndjson",
+    ".xml": "application/xml", ".html": "text/html", ".htm": "text/html",
+    ".yaml": "application/yaml", ".yml": "application/yaml",
+    ".toml": "application/toml",
+    # code
+    ".py": "text/x-python", ".pyw": "text/x-python",
+    ".js": "application/javascript", ".mjs": "application/javascript",
+    ".ts": "application/typescript", ".tsx": "application/typescript",
+    ".jsx": "application/javascript",
+    ".java": "text/x-java", ".kt": "text/x-kotlin",
+    ".c": "text/x-c", ".h": "text/x-c", ".cpp": "text/x-c++",
+    ".hpp": "text/x-c++",
+    ".cs": "text/x-csharp", ".go": "text/x-go", ".rs": "text/x-rust",
+    ".rb": "text/x-ruby", ".php": "application/x-php",
+    ".scala": "text/x-scala", ".clj": "text/x-clojure",
+    ".swift": "text/x-swift", ".dart": "text/x-dart",
+    ".lua": "text/x-lua", ".pl": "text/x-perl",
+    ".sh": "application/x-shellscript", ".bash": "application/x-shellscript",
+    ".ps1": "text/x-powershell",
+    ".sql": "application/sql",
+    ".css": "text/css", ".scss": "text/x-scss",
+    ".r": "text/x-r",
+    ".ex": "text/x-elixir", ".exs": "text/x-elixir",
+    ".elm": "text/x-elm", ".vue": "text/x-vue",
+    ".ipynb": "application/x-ipynb+json",
+    "dockerfile": "text/x-dockerfile",
+    # documents
+    ".pdf": "application/pdf",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".rtf": "application/rtf",
+    ".odt": "application/vnd.oasis.opendocument.text",
+    ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+    ".odp": "application/vnd.oasis.opendocument.presentation",
+    ".epub": "application/epub+zip",
+    # image
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
+    ".bmp": "image/bmp", ".tiff": "image/tiff", ".tif": "image/tiff",
+    ".heic": "image/heic", ".svg": "image/svg+xml",
+    # audio
+    ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg",
+    ".m4a": "audio/mp4", ".flac": "audio/flac", ".aac": "audio/aac",
+    ".opus": "audio/opus",
+    # video
+    ".mp4": "video/mp4", ".mov": "video/quicktime", ".avi": "video/x-msvideo",
+    ".mkv": "video/x-matroska", ".webm": "video/webm", ".m4v": "video/mp4",
+    # archive
+    ".zip": "application/zip", ".tar": "application/x-tar",
+    ".gz": "application/gzip", ".7z": "application/x-7z-compressed",
+}
+
+
+def _guess_mime_from_extension(filename: str) -> Optional[str]:
+    """تخمین mime از پسوند فایل. اگر mime موجود application/octet-stream است،
+    این تابع mime دقیق‌تر می‌دهد.
+    """
+    import os
+    if not filename:
+        return None
+    base = os.path.basename(filename).lower()
+    # special: Dockerfile
+    if base == "dockerfile" or base.startswith("dockerfile."):
+        return "text/x-dockerfile"
+    _, ext = os.path.splitext(base)
+    return _EXT_TO_MIME.get(ext)
+
+
+async def _extract_ipynb(
+    path: Path, fe: "FileExtraction", repo: "ExtractionRepo",
+    completed: set, persist_segment_fn,
+) -> None:
+    """parse Jupyter Notebook → هر cell یک segment.
+
+    cells: code, markdown, raw. outputs (اگر هست) به‌عنوان suffix.
+    """
+    import json as _json
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception as e:
+        raise ExtractionError(f"ipynb parse failed: {e}")
+    cells = data.get("cells") or []
+    await repo.update_extraction(fe.id, total_segments=len(cells))
+    for idx, cell in enumerate(cells, start=1):
+        if idx in completed:
+            continue
+        ctype = cell.get("cell_type") or "unknown"
+        src_raw = cell.get("source") or ""
+        src = "".join(src_raw) if isinstance(src_raw, list) else str(src_raw)
+        out_text = ""
+        outputs = cell.get("outputs") or []
+        if outputs and ctype == "code":
+            out_parts: List[str] = []
+            for o in outputs[:20]:
+                if "text" in o:
+                    t = o["text"]
+                    out_parts.append("".join(t) if isinstance(t, list) else str(t))
+                elif o.get("data", {}).get("text/plain"):
+                    tp = o["data"]["text/plain"]
+                    out_parts.append("".join(tp) if isinstance(tp, list) else str(tp))
+            if out_parts:
+                out_text = "\n=== OUTPUT ===\n" + "\n".join(out_parts)[:5000]
+        full = f"# Cell type: {ctype}\n{src}{out_text}"
+        await persist_segment_fn(
+            idx, f"cell {idx} ({ctype})", full, f"cell_idx={idx}",
+        )
+
+
+async def _extract_zip_archive(
+    path: Path, fe: "FileExtraction", repo: "ExtractionRepo",
+    completed: set, persist_segment_fn,
+) -> None:
+    """extract محتویات zip — هر فایل text-readable یک segment با path-as-title.
+    فایل‌های binary فقط با نام و حجم درج می‌شوند.
+    """
+    import zipfile
+    try:
+        zf = zipfile.ZipFile(str(path), "r")
+    except Exception as e:
+        raise ExtractionError(f"zip open failed: {e}")
+    try:
+        names = [n for n in zf.namelist() if not n.endswith("/")]
+        # سقف ایمنی: ۱۰۰۰ فایل
+        if len(names) > 1000:
+            names = names[:1000]
+        await repo.update_extraction(fe.id, total_segments=len(names) + 1)
+        # text-decode safe per file
+        for idx, name in enumerate(names, start=1):
+            if idx in completed:
+                continue
+            try:
+                with zf.open(name) as f:
+                    raw = f.read(2 * 1024 * 1024)  # تا ۲MB per inner file
+            except Exception as e:
+                await persist_segment_fn(
+                    idx, name, f"[خطا در خواندن: {str(e)[:100]}]", f"zip_entry={name}",
+                )
+                continue
+            # تلاش text decode
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                try:
+                    text = raw.decode("latin-1")
+                except Exception:
+                    # binary — فقط متادیتا
+                    text = f"[binary file، size={len(raw)} bytes — متن قابل extract نیست]"
+            await persist_segment_fn(idx, name, text, f"zip_entry={name}")
+        # summary segment
+        summary_idx = len(names) + 1
+        if summary_idx not in completed:
+            summary = (
+                f"📦 *جمع‌بندی archive*\n"
+                f"- نام: `{fe.original_filename}`\n"
+                f"- {len(names)} فایل داخلی پردازش شد\n"
+                f"- نمونه: {', '.join(names[:5])}{'...' if len(names) > 5 else ''}"
+            )
+            await persist_segment_fn(summary_idx, "📋 جمع‌بندی archive", summary, "meta=zip")
+    finally:
+        try:
+            zf.close()
+        except Exception:
+            pass
+
+
+# ─────────────── PDF 4-page chunking (Stage 7) ───────────────
+
+PDF_CHUNK_SIZE: int = 4  # هر batch چند صفحه (قابل تنظیم)
+
+
+async def _run_pdf_extraction(
+    fe: "FileExtraction",
+    session: Any,
+    user_idea: str,
+    repo: "ExtractionRepo",
+    path: Path,
+    completed: set,
+    persist_segment_fn,
+) -> None:
+    """منطق PDF با 4-page chunking + final جمع‌بندی segment.
+
+    1. pypdf همهٔ صفحات را extract می‌کند → text-pages (که متن دارند) و
+       scan-pages (که خالی هستند، نیاز به OCR)
+    2. text-pages: هر صفحه یک segment مجزا (سریع، بدون AI call)
+    3. scan-pages: گروه‌بندی به batchهای 4-تایی، هر batch:
+       - render هر صفحه با pdftoppm → PNG → base64
+       - یک AI call با ۴ تصویر به Gemini، prompt: "متن کامل ۴ صفحه به
+         ترتیب صفحه، literal، بدون خلاصه‌سازی"
+       - یک segment با عنوان "صفحات N-M (OCR)" و متن کل ۴ صفحه
+    4. در پایان یک segment با عنوان "📋 جمع‌بندی نهایی" که شامل
+       متادیتای پروسه است (NOT summarization of content):
+       - تعداد کل صفحات
+       - text-pages vs scan-pages
+       - تعداد AI call های انجام‌شده
+       - زمان شروع/پایان (پر می‌شود توسط repo.update_extraction)
+       - hash sha256 از full text
+       - char count
+       - مدل استفاده‌شده
+
+    progress: per batch update روی tracker (اگر set شده).
+    """
+    import hashlib
+    from time import time as _now
+    pages = _extract_pdf_pages(path)
+    total_pages = len(pages)
+
+    # جدا کردن text-pages از scan-pages
+    text_pages: List[Tuple[int, str]] = []
+    scan_pages: List[int] = []
+    for page_num, txt in pages:
+        if txt.strip():
+            text_pages.append((page_num, txt))
+        else:
+            scan_pages.append(page_num)
+
+    # 🛡 (audit fix C1 — refined) — batchهای scan فقط شامل صفحات
+    # **متوالی** هستند تا ordering در full_text درست بماند.
+    # مثال: scan_pages=[2, 4, 5, 6, 9] → runs=[[2],[4,5,6],[9]] →
+    # هر run با CHUNK_SIZE=4 split می‌شود.
+    scan_batches: List[List[int]] = []
+    if scan_pages:
+        current_run: List[int] = [scan_pages[0]]
+        for p in scan_pages[1:]:
+            if p == current_run[-1] + 1:
+                current_run.append(p)
+            else:
+                # split run
+                for i in range(0, len(current_run), PDF_CHUNK_SIZE):
+                    scan_batches.append(current_run[i:i + PDF_CHUNK_SIZE])
+                current_run = [p]
+        # last run
+        for i in range(0, len(current_run), PDF_CHUNK_SIZE):
+            scan_batches.append(current_run[i:i + PDF_CHUNK_SIZE])
+
+    # total_segments: هر text-page یک، هر batch یک، plus 1 جمع‌بندی
+    estimated_total = len(text_pages) + len(scan_batches) + 1
+    await repo.update_extraction(fe.id, total_segments=estimated_total)
+
+    start_time = _now()
+    ai_calls = 0
+
+    # 🛡 (audit fix C1) — segment_index بر اساس multiplier از 100 تا ترتیب
+    # ادغام full_text درست بماند حتی در PDFهای مخلوط text/scan.
+    # هر page شماره اصلی * 100 می‌گیرد (page 1 → 100، page 50 → 5000).
+    # text-pages با ID = page_num * 100
+    # scan-batches با ID = first_page_num * 100 + 1 (تا کمی بعد از همان page)
+    # final جمع‌بندی با ID خیلی بزرگ.
+    PAGE_ID_MULT = 100
+
+    # 1) text-pages — هر کدام یک segment (سریع، resume-friendly)
+    for page_num, txt in text_pages:
+        seg_id = page_num * PAGE_ID_MULT
+        if seg_id in completed:
+            continue
+        await _wait_for_memory_headroom()
+        await persist_segment_fn(
+            seg_id, f"صفحه {page_num}", txt, f"page={page_num}",
+        )
+
+    # 2) scan-batches — هر batch یک segment با OCR. id = first_page*100+1
+    # تا بعد از text page با همان page_num قرار بگیرد (در صورت مخلوط)
+    for b_idx, batch_pages in enumerate(scan_batches, start=1):
+        first_p = batch_pages[0]
+        last_p = batch_pages[-1]
+        seg_id = first_p * PAGE_ID_MULT + 1
+        if seg_id in completed:
+            continue
+        await _wait_for_memory_headroom()
+        title = f"صفحات {first_p}–{last_p} (OCR — {len(batch_pages)} صفحه)"
+        # render همهٔ صفحات batch به base64
+        imgs: List[str] = []
+        render_errors: List[str] = []
+        for p_num in batch_pages:
+            try:
+                b64 = await _render_pdf_page_to_b64(path, p_num)
+                if b64:
+                    imgs.append(b64)
+                else:
+                    render_errors.append(f"page {p_num}: render returned None")
+            except Exception as e:
+                render_errors.append(f"page {p_num}: {str(e)[:100]}")
+
+        if not imgs:
+            # هیچ‌چیز render نشد — placeholder
+            await persist_segment_fn(
+                seg_id, title + " (render failed)",
+                "[render تصویری همهٔ صفحات این batch ناموفق بود — "
+                f"احتمالاً pdftoppm در سیستم نیست یا PDF خراب است.]\n"
+                f"خطاها: {'; '.join(render_errors[:3])}",
+                f"pages={first_p}-{last_p}",
+            )
+            continue
+
+        # ساخت prompt — همهٔ تصاویر را با هم بفرست
+        prompt = (
+            f"این {len(imgs)} تصویر صفحات {first_p} تا {last_p} از یک PDF هستند.\n\n"
+            f"**وظیفه**: متن کامل و literal هر صفحه را به ترتیب صفحه (از {first_p} به {last_p}) "
+            f"استخراج کن. قبل از متن هر صفحه، یک header `## صفحه N` بگذار.\n\n"
+            "قواعد سختگیرانه:\n"
+            "- هیچ‌چیز را خلاصه نکن.\n"
+            "- هیچ خطی، header، footer، شماره صفحه drop نشود.\n"
+            "- اگر فارسی است، فارسی بنویس.\n"
+            "- اگر جدولی هست، خطی‌سازی کن (با |).\n"
+            "- اگر تصویری بدون متن هست، توصیف کن «[تصویر: ...]».\n"
+        )
+        try:
+            # _ai_extract_text فقط یک image می‌گیرد در پارامتر `image_b64`،
+            # اما در داخلش `images` لیست است. برای چند تصویر، باید custom call
+            # داشته باشیم. ساده‌ترین راه: همهٔ تصاویر را به `_ai_extract_text`
+            # بفرستیم با inline_file_data به‌عنوان لیست (اما فعلاً API single).
+            # راه‌حل: اولین تصویر به image_b64، بقیه via inline_file_data fake
+            # نمی‌شود — لذا ai_manager.generate را مستقیم با images=[...] صدا می‌زنیم.
+            from .ai_manager import get_ai_manager
+            from .ai_base import Message
+            mgr = get_ai_manager()
+            messages = [
+                Message(role="system", content=(
+                    "تو یک OCR و استخراج‌گر متن دقیق هستی. متن کامل و literal "
+                    "از تصاویر داده‌شده بنویس. هیچ‌چیز خلاصه نکن."
+                )),
+                Message(role="user", content=prompt, images=imgs),
+            ]
+            resp = await asyncio.wait_for(
+                mgr.generate(
+                    model_id=fe.model_used, messages=messages,
+                    max_tokens=32000, temperature=0.1,
+                ),
+                timeout=PER_SEGMENT_TIMEOUT_SEC,
+            )
+            ai_calls += 1
+            text = (resp.content or "").strip()
+        except asyncio.TimeoutError:
+            text = f"[timeout بعد از {PER_SEGMENT_TIMEOUT_SEC}s — batch صفحات {first_p}-{last_p}]"
+        except Exception as e:
+            text = f"[OCR خطا: {str(e)[:200]}]"
+
+        await persist_segment_fn(seg_id, title, text, f"pages={first_p}-{last_p}")
+
+    # 3) جمع‌بندی نهایی — متادیتای پروسه (NOT content summary)
+    # ID خیلی بزرگ‌تر از هر page → همیشه آخرین segment
+    final_seg_id = (total_pages + 1) * PAGE_ID_MULT + 999
+    if final_seg_id not in completed:
+        end_time = _now()
+        elapsed = end_time - start_time
+        # full text برای hash
+        all_segs = repo.get_segments(fe.id)
+        all_text_parts = []
+        for s in sorted(all_segs, key=lambda x: x.segment_index):
+            if s.status == "done":
+                all_text_parts.append(s.text)
+        full_text = "\n\n".join(all_text_parts)
+        h = hashlib.sha256(full_text.encode("utf-8")).hexdigest()[:16]
+        meta_text = (
+            f"📋 **جمع‌بندی پروسه استخراج PDF**\n\n"
+            f"- فایل: `{fe.original_filename}`\n"
+            f"- تعداد کل صفحات: **{total_pages}**\n"
+            f"- صفحات متنی (pypdf): **{len(text_pages)}**\n"
+            f"- صفحات اسکن‌شده (OCR): **{len(scan_pages)}** "
+            f"(در {len(scan_batches)} batch ۴تایی)\n"
+            f"- مدل OCR: `{fe.model_used}`\n"
+            f"- تعداد AI calls: **{ai_calls}**\n"
+            f"- زمان کل: **{elapsed:.1f}s**\n"
+            f"- char count کل متن: **{len(full_text):,}**\n"
+            f"- sha256 (16 char): `{h}`\n\n"
+            "✅ متن کامل در segmentهای قبلی به ترتیب صفحه قابل بازیابی است. "
+            "این segment فقط متادیتای پروسه است — *نه خلاصه‌سازی محتوا*."
+        )
+        await persist_segment_fn(
+            final_seg_id, "📋 جمع‌بندی نهایی", meta_text, "meta=process",
+        )
+
+
 # ─────────────── main entry ───────────────
 
 async def extract_session(
@@ -737,56 +1121,61 @@ async def _run_extraction(
         )
         await repo.add_segment(fe.id, seg)
 
+    # 🆕 (Stage 9) — mime override بر اساس extension اگر mime عمومی است
+    if mime in ("application/octet-stream", "", "binary/octet-stream"):
+        guessed = _guess_mime_from_extension(fe.original_filename)
+        if guessed and guessed != mime:
+            logger.info(f"extraction: mime override {mime!r} → {guessed!r} based on extension")
+            mime = guessed
+
     # ─────────── routing ───────────
-    if mime.startswith("text/") or mime in ("application/json", "application/xml"):
+    # متن خام (txt/md/csv/json/xml/yaml/toml/log/ini)
+    if (mime.startswith("text/")
+            or mime in (
+                "application/json", "application/xml", "application/x-yaml",
+                "application/yaml", "application/toml", "application/x-toml",
+                "application/x-ndjson",
+            )):
         text = _read_text_file(path)
-        # یک segment کل فایل (یا تقسیم بر اساس heading اگر بزرگ است)
         if 0 not in completed:
             await _persist_segment(0, fe.original_filename, text, "")
         await repo.update_extraction(fe.id, total_segments=1)
         return
 
+    # 🆕 (Stage 9) — Jupyter Notebook
+    if mime in ("application/x-ipynb+json",) or fe.original_filename.lower().endswith(".ipynb"):
+        await _extract_ipynb(path, fe, repo, completed, _persist_segment)
+        return
+
+    # 🆕 (Stage 9) — کد منبع: source code با extension
+    code_exts = (
+        ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".c", ".cpp", ".h", ".hpp",
+        ".go", ".rs", ".rb", ".php", ".html", ".htm", ".css", ".scss", ".sql",
+        ".sh", ".bash", ".ps1", ".dockerfile", ".kt", ".swift", ".dart", ".r",
+        ".lua", ".pl", ".scala", ".clj", ".ex", ".exs", ".elm", ".vue",
+    )
+    if (mime.startswith("text/")
+            or any(fe.original_filename.lower().endswith(e) for e in code_exts)
+            or mime in (
+                "application/x-python-code", "application/javascript",
+                "application/typescript", "application/x-shellscript",
+            )):
+        text = _read_text_file(path)
+        if 0 not in completed:
+            await _persist_segment(0, fe.original_filename, text, "code")
+        await repo.update_extraction(fe.id, total_segments=1)
+        return
+
+    # 🆕 (Stage 9) — archive (zip) — extract recursive
+    if (mime in ("application/zip", "application/x-zip-compressed")
+            or fe.original_filename.lower().endswith(".zip")):
+        await _extract_zip_archive(path, fe, repo, completed, _persist_segment)
+        return
+
     if mime == "application/pdf":
-        pages = _extract_pdf_pages(path)
-        await repo.update_extraction(fe.id, total_segments=len(pages))
-        # برای صفحاتی که pypdf متن نگرفت → AI extraction (Gemini)
-        for page_num, txt in pages:
-            if page_num in completed:
-                continue
-            await _wait_for_memory_headroom()
-            if txt.strip():
-                await _persist_segment(page_num, f"صفحه {page_num}", txt, f"page={page_num}")
-            else:
-                # 🆕 (Stage 9) — صفحه scan-only: render شده با Gemini Vision
-                # خواندن صفحه به‌صورت image و ارسال به مدل
-                try:
-                    img_b64 = await _render_pdf_page_to_b64(path, page_num)
-                except Exception as e:
-                    img_b64 = None
-                    logger.warning(f"PDF page {page_num} render failed: {e}")
-                if img_b64 is None:
-                    await _persist_segment(
-                        page_num, f"صفحه {page_num} (scan)",
-                        "[این صفحه scan-only است و render تصویری ناموفق بود. "
-                        "اگر pypdf نسخهٔ متن استخراج نمی‌کند، احتمالاً encrypted/کیفیت پایین است.]",
-                        f"page={page_num}",
-                    )
-                    continue
-                prompt = (
-                    f"این تصویر صفحهٔ {page_num} از یک PDF است. "
-                    "متن کامل و literal این صفحه را OCR کن — هیچ‌چیز را خلاصه نکن، "
-                    "هیچ خطی drop نشود. اگر متن فارسی است، فارسی بنویس."
-                )
-                try:
-                    text = await asyncio.wait_for(
-                        _ai_extract_text(fe.model_used, prompt=prompt, image_b64=img_b64, max_tokens=16000),
-                        timeout=PER_SEGMENT_TIMEOUT_SEC,
-                    )
-                except asyncio.TimeoutError:
-                    text = f"[timeout بعد از {PER_SEGMENT_TIMEOUT_SEC}s — page {page_num}]"
-                except Exception as e:
-                    text = f"[OCR خطا: {str(e)[:200]}]"
-                await _persist_segment(page_num, f"صفحه {page_num} (OCR)", text, f"page={page_num}")
+        await _run_pdf_extraction(
+            fe, session, user_idea, repo, path, completed, _persist_segment,
+        )
         return
 
     if mime in (

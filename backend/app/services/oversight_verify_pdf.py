@@ -287,6 +287,65 @@ def _build_verify_report_html(task: Any, report: Any) -> str:
     summary_html = f'<section><h2>💬 خلاصهٔ verifier</h2><blockquote>{_esc(summary)}</blockquote></section>' if summary else ""
     raw_idea_html = f'<section><h2>💡 ایدهٔ خام</h2><pre>{_esc(raw_idea)}</pre></section>' if raw_idea else ""
 
+    # 🆕 (Stage 8) — متن کامل extraction فایل‌های پیوست (همهٔ segmentها)
+    # طبق درخواست صریح کاربر: «در فایل پیوستش متن کامل پرامپت و متن کامل
+    # استخراج شده رو بفرسته»
+    extractions_html = ""
+    task_id_for_ext = getattr(task, "id", "") or ""
+    if task_id_for_ext:
+        try:
+            from .oversight_extraction import get_extraction_repo
+            repo = get_extraction_repo()
+            file_extractions = repo.list_by_task(task_id_for_ext)
+            if file_extractions:
+                ext_sections: List[str] = []
+                for fe in file_extractions:
+                    segs = sorted(repo.get_segments(fe.id), key=lambda s: s.segment_index)
+                    if not segs:
+                        continue
+                    # متادیتای هر فایل
+                    file_header = (
+                        f'<div class="extraction-file-header">'
+                        f'<b>📎 #{fe.file_order} — {_esc(fe.original_filename)}</b>'
+                        f'<span class="ext-meta">'
+                        f'mime: <code>{_esc(fe.mime_type)}</code> • '
+                        f'model: <code>{_esc(fe.model_used)}</code> • '
+                        f'{fe.completed_segments}/{fe.total_segments} segment • '
+                        f'status: {_esc(fe.status)}'
+                        f'</span></div>'
+                    )
+                    # همهٔ segmentها به ترتیب — متن کامل (نه truncated)
+                    seg_html_parts: List[str] = []
+                    for s in segs:
+                        seg_html_parts.append(
+                            f'<div class="extraction-segment">'
+                            f'<div class="seg-head">'
+                            f'<b>#{s.segment_index} — {_esc(s.segment_title)}</b>'
+                            + (f' <span class="seg-loc">[{_esc(s.page_or_timestamp)}]</span>'
+                               if s.page_or_timestamp else '')
+                            + f'</div>'
+                            f'<pre class="seg-text">{_esc(s.text)}</pre>'
+                            f'</div>'
+                        )
+                    ext_sections.append(
+                        f'<div class="extraction-file">{file_header}'
+                        f'{"".join(seg_html_parts)}</div>'
+                    )
+                if ext_sections:
+                    extractions_html = (
+                        f'<section><h2>📎 متن کامل استخراج‌شده از فایل‌های پیوست '
+                        f'({len(file_extractions)} فایل)</h2>'
+                        + "".join(ext_sections)
+                        + '</section>'
+                    )
+        except Exception as _ext_e:
+            logger.warning(f"PDF extractions section build failed: {_ext_e}")
+            extractions_html = (
+                f'<section><h2>📎 متن استخراج‌شده</h2>'
+                f'<p class="muted">⚠️ خطا در بارگذاری extractionها: '
+                f'{_esc(str(_ext_e)[:200])}</p></section>'
+            )
+
     # ───── full prompt
     prompt_html = f'<section><h2>📜 پرامپت کامل تسک</h2><pre class="prompt">{_esc(prompt)}</pre></section>' if prompt else ""
 
@@ -358,6 +417,18 @@ blockquote {{
 .step-evidence {{ font-size: 10.5px; color: #166534; background: #dcfce7;
   padding: 4px 8px; border-radius: 4px; margin: 4px 0; }}
 .step-meta {{ font-size: 9.5px; color: #9ca3af; margin-top: 2px; }}
+.extraction-file {{ margin: 12px 0; padding: 8px; background: #fafafa;
+  border: 1px solid #e5e7eb; border-radius: 6px; }}
+.extraction-file-header {{ font-size: 12px; padding-bottom: 6px;
+  border-bottom: 1px dashed #d1d5db; margin-bottom: 6px; }}
+.ext-meta {{ display: block; font-size: 9.5px; color: #6b7280; margin-top: 3px; }}
+.extraction-segment {{ margin: 6px 0; padding: 6px 8px;
+  background: #fff; border-left: 3px solid #6366f1; border-radius: 3px; }}
+.seg-head {{ font-size: 11px; margin-bottom: 3px; color: #1f2937; }}
+.seg-loc {{ font-size: 9.5px; color: #6b7280; }}
+.seg-text {{ font-size: 10px; line-height: 1.5; white-space: pre-wrap;
+  word-break: break-word; max-height: none;
+  background: transparent; border: none; padding: 0; margin: 0; }}
 section {{ margin: 10px 0; }}
 .footer {{
   margin-top: 22px; padding-top: 8px; border-top: 1px solid #e5e7eb;
@@ -387,6 +458,7 @@ section {{ margin: 10px 0; }}
   {acs_html}
   {tf_html}
   {raw_idea_html}
+  {extractions_html}
   {prompt_html}
 
   <div class="footer">
