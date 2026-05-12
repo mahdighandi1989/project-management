@@ -197,6 +197,21 @@ EVENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "default_sound": False,
         "icon": "💡",
     },
+    # 🆕 (Stage 10 audit fix #3) — eventهای اختصاصی برای فعال/غیرفعال موقت مدل
+    "model_temp_activated": {
+        "label": "🔓 مدل موقتاً فعال شد",
+        "help": "وقتی مدل بصری برای extraction یک فایل پیوست موقتاً فعال می‌شود",
+        "default_enabled": True,
+        "default_sound": True,  # مهم — کاربر باید بداند مدل فعال شده
+        "icon": "🔓",
+    },
+    "model_temp_reverted": {
+        "label": "🔒 مدل به حالت قبل برگشت",
+        "help": "وقتی فعال‌سازی موقت مدل پس از اتمام کار، خودکار revert می‌شود",
+        "default_enabled": True,
+        "default_sound": False,
+        "icon": "🔒",
+    },
     "pr_created": {
         "label": "🔀 PR ساخته شد",
         "help": "وقتی Inspector یک PR از تسک می‌سازد",

@@ -60,14 +60,14 @@ def _md_escape(s: str) -> str:
     return "".join(out)
 
 
-async def _notify(message: str) -> None:
+async def _notify(message: str, *, event: str = "model_temp_activated", subject: str = "فعال‌سازی موقت مدل") -> None:
     """ارسال notification (best-effort) — اگر کانال‌ها پیکربندی نشده، silent."""
     try:
         from .notification_service import notification_service
         await notification_service.notify_event(
-            "verify_partial",  # event با default_enabled=True که caption متن دلخواه را قبول می‌کند
+            event,  # 🛡 (audit fix #3) — event اختصاصی به‌جای reuse از verify_partial
             message,
-            subject="فعال‌سازی موقت مدل",
+            subject=subject,
             priority="medium",
         )
     except Exception as e:
@@ -121,7 +121,9 @@ async def temp_activate_model(model_id: str, trigger: str = "") -> Dict[str, Any
     await _notify(
         f"🔓 *مدل {_md_escape(m.name)} موقتاً فعال شد*\n"
         f"📌 برای: `{(trigger or '-')[:200].replace('`', 'ʼ')}`\n"
-        f"⏳ پس از اتمام کار، خودکار به وضعیت قبل برمی‌گردد."
+        f"⏳ پس از اتمام کار، خودکار به وضعیت قبل برمی‌گردد.",
+        event="model_temp_activated",
+        subject="فعال‌سازی موقت مدل",
     )
     return {
         "model_id": model_id,
@@ -172,7 +174,9 @@ async def temp_revert_model(model_id: str, trigger: str = "") -> Dict[str, Any]:
     await _notify(
         f"🔒 *مدل {_md_escape(m.name)} غیرفعال شد*\n"
         f"📌 trigger: `{safe_trigger}`\n"
-        f"✅ کار خاتمه یافت — مدل به حالت قبل ({'enabled' if original_enabled else 'disabled'}) برگشت."
+        f"✅ کار خاتمه یافت — مدل به حالت قبل ({'enabled' if original_enabled else 'disabled'}) برگشت.",
+        event="model_temp_reverted",
+        subject="غیرفعال‌سازی مدل",
     )
     return {
         "model_id": model_id,

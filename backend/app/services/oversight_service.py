@@ -2834,14 +2834,19 @@ class OversightService:
             entry["char_count"] = len(full_text)
             attachments_meta.append(entry)
 
-            # cap هر فایل به 80KB در idea (متن کامل در DB قابل دسترسی است)
-            FILE_CAP = 80_000
+            # 🛡 (Stage 10 audit fix #2) — طبق درخواست کاربر «محدودیت استخراج
+            # متن اصلاً نداشته باشه»، cap به 1MB افزایش یافت. متن کامل (هر چه
+            # بزرگ هست) همیشه در DB قابل بازیابی است.
+            # توجه: این cap فقط در آنچه به idea→prompt پاس می‌شود اعمال می‌شود
+            # — model context window خود محدودیت بعدی دارد.
+            FILE_CAP = 1_000_000
             head = full_text[:FILE_CAP]
             tail_note = ""
             if len(full_text) > FILE_CAP:
                 tail_note = (
-                    f"\n\n_[…فایل بزرگ‌تر است؛ کل متن ({len(full_text):,} char) "
-                    f"در extraction_id={fe.id} در DB قابل بازیابی است.]_"
+                    f"\n\n_[…متن کامل ({len(full_text):,} char) در DB موجود است. "
+                    f"این بخش اول 1MB از متن است؛ بقیه با extraction_id={fe.id} "
+                    f"از endpoint /extractions/{{id}}/full-text قابل بازیابی است.]_"
                 )
             appended_parts.append(
                 f"\n\n## 📎 فایل پیوست #{s.file_order}: {s.original_filename}\n"
@@ -2891,6 +2896,51 @@ class OversightService:
                 logger.warning(f"idea_to_prompt: attachment resolve failed: {_att_e}")
                 # ادامه می‌دهیم بدون attachments — تسک ساخته می‌شود ولی پرامپت
                 # ضعیف‌تر است (کاربر از طریق UI متوجه می‌شود)
+
+        # 🆕 (Stage 10 audit fix #1 — CRITICAL) — وقتی فایل پیوست هست، طبق
+        # درخواست صریح کاربر، **همهٔ کارها از تبدیل به پرامپت تا شرح فایل**
+        # باید با مدل بصری (Gemini یا جایگزین پویا) انجام شود — نه با مدل
+        # عمومی که کاربر در UI انتخاب کرده. اگر model_id کاربر مدل بصری
+        # نیست، آن را با بهترین مدل extraction جایگزین می‌کنیم.
+        if attachments_meta:
+            try:
+                from ..core.models_registry import (
+                    pick_best_extraction_model, mime_to_required_capability,
+                    DEFAULT_EXTRACTION_MODEL_ID, get_model, MODEL_REGISTRY,
+                )
+                from .oversight_settings import get_default_extraction_model_id_from_db
+                # اولویت: تنظیمات کاربر در DB > preferred default > heuristic
+                user_default = get_default_extraction_model_id_from_db()
+                target_pref = user_default or DEFAULT_EXTRACTION_MODEL_ID
+                # mime عمومی برای picker: اگر ترکیبی است، MULTIMODAL را بخواه
+                first_mime = (attachments_meta[0].get("mime_type") or "image/png").lower()
+                m = pick_best_extraction_model(
+                    first_mime, preferred_model_id=target_pref
+                )
+                if m is not None:
+                    # وقتی فایل پیوست هست، حتماً از مدل بصری استفاده می‌کنیم
+                    if model_id != m.id:
+                        logger.info(
+                            f"idea_to_prompt: فایل پیوست → جایگزینی model_id "
+                            f"از '{model_id}' به مدل بصری '{m.id}' (طبق درخواست کاربر)"
+                        )
+                    model_id = m.id
+                    # model_ids هم اگر داده شده، fallbackها باید همگی vision باشند
+                    # یا حذف شوند تا multi-pass به اشتباه مدل ضعیف استفاده نکند
+                    if model_ids:
+                        from ..core.models_registry import (
+                            list_extraction_model_candidates,
+                        )
+                        vision_ids = [
+                            c.id for c in list_extraction_model_candidates(
+                                first_mime, include_disabled=False
+                            )
+                        ]
+                        model_ids = [mi for mi in model_ids if mi in vision_ids]
+                        if not model_ids:
+                            model_ids = [m.id]
+            except Exception as _force_e:
+                logger.warning(f"force-vision-model logic failed: {_force_e}")
 
         # 🆕 (Multi-pass) — تقسیم به مراحل کوچک برای کیفیت بهتر.
         # سه حالت با parameter `multi_pass_mode`:

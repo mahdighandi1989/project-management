@@ -1805,6 +1805,76 @@ async def models_temp_activations():
     return {"active": get_active_temp_activations()}
 
 
+# 🆕 (Stage 10 audit fix #4) — تنظیم/خواندن «مدل پیش‌فرض extraction»
+# کاربر در /models می‌تواند این را عوض کند، بدون نیاز به deploy.
+
+class SetDefaultExtractionModelRequest(BaseModel):
+    model_id: Optional[str] = Field(None, description="model_id جدید — None یا خالی = استفاده از hard-coded default")
+
+
+@router.get("/models/extraction-default")
+async def get_extraction_default():
+    """مدل پیش‌فرض extraction فعلی — کاربر در /models می‌بیند و عوض می‌کند.
+
+    اولویت: DB > hard-coded default (gemini-2.5-flash)
+    """
+    from ...services.oversight_settings import get_default_extraction_model_id_from_db
+    from ...core.models_registry import (
+        DEFAULT_EXTRACTION_MODEL_ID, list_extraction_model_candidates,
+        get_model,
+    )
+    user_pick = get_default_extraction_model_id_from_db()
+    effective_id = user_pick or DEFAULT_EXTRACTION_MODEL_ID
+    eff_model = get_model(effective_id)
+    # کاندیداهای ممکن: همهٔ مدل‌های multimodal capable
+    cands = list_extraction_model_candidates("application/pdf", include_disabled=True)
+    return {
+        "user_pick": user_pick,
+        "effective_id": effective_id,
+        "effective_name": eff_model.name if eff_model else effective_id,
+        "hard_coded_default": DEFAULT_EXTRACTION_MODEL_ID,
+        "candidates": [
+            {
+                "id": c.id, "name": c.name, "provider": c.provider.value,
+                "priority": c.priority, "enabled": c.enabled,
+                "capabilities": [str(cap) for cap in c.capabilities],
+            }
+            for c in cands
+        ],
+    }
+
+
+@router.post("/models/extraction-default")
+async def set_extraction_default(payload: SetDefaultExtractionModelRequest):
+    """تنظیم مدل پیش‌فرض extraction (در DB ذخیره می‌شود — restart-safe)."""
+    from ...services.oversight_settings import set_default_extraction_model_id_in_db
+    from ...core.models_registry import (
+        DEFAULT_EXTRACTION_MODEL_ID, get_model, list_extraction_model_candidates,
+    )
+    mid = (payload.model_id or "").strip() or None
+    # اعتبارسنجی — اگر داده شد، باید در registry موجود و capable multimodal باشد
+    if mid:
+        m = get_model(mid)
+        if m is None:
+            raise HTTPException(status_code=404, detail=f"model_id ناشناخته: {mid}")
+        capable_ids = {
+            c.id for c in list_extraction_model_candidates("application/pdf", include_disabled=True)
+        }
+        if mid not in capable_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"مدل {mid} توان extraction (multimodal) ندارد",
+            )
+    ok = set_default_extraction_model_id_in_db(mid)
+    if not ok:
+        raise HTTPException(status_code=500, detail="ذخیره تنظیمات ناموفق")
+    return {
+        "success": True,
+        "user_pick": mid,
+        "effective_id": mid or DEFAULT_EXTRACTION_MODEL_ID,
+    }
+
+
 @router.get("/tasks/{task_id}/extractions")
 async def task_extractions(task_id: str):
     """لیست همهٔ فایل‌های استخراج‌شدهٔ یک تسک."""
