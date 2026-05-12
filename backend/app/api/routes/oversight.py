@@ -1650,33 +1650,150 @@ async def upload_cleanup_orphans(ttl_hours: int = Query(24, ge=1, le=720)):
 class ExtractSessionRequest(BaseModel):
     user_idea: str = Field("", description="متن ایدهٔ کاربر — برای plan headings داینامیک")
     preferred_model_id: Optional[str] = None  # override default (gemini-2.5-flash)
+    auto_temp_activate: bool = Field(
+        False,
+        description="اگر True و هیچ مدل enabled نبود، اولین candidate را موقتاً فعال کن",
+    )
+
+
+@router.post("/uploads/{session_id}/check-model")
+async def upload_check_model(session_id: str, preferred_model_id: Optional[str] = Query(None)):
+    """بررسی: آیا برای mime این session مدل enabled داریم؟
+    اگر نه، لیست کاندیداها (disabled) برمی‌گردد تا UI prompt activate نشان دهد.
+    """
+    from ...services.oversight_upload_session import get_upload_session_service
+    from ...services.oversight_model_temp_activate import check_extraction_model_availability
+    s = get_upload_session_service().get(session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session یافت نشد")
+    return {
+        "session_id": session_id,
+        "mime_type": s.mime_type,
+        **check_extraction_model_availability(s.mime_type, preferred_model_id=preferred_model_id),
+    }
 
 
 @router.post("/uploads/{session_id}/extract")
 async def upload_extract(session_id: str, payload: ExtractSessionRequest):
     """شروع استخراج متن از یک upload session.
 
-    این endpoint blocking است (تا پایان extraction صبر می‌کند). برای UI
-    بهتر است در background فراخوانی شود (در Stage 7 / Stage 9 با queue).
+    Flow:
+      1. اگر هیچ مدل enabled برای این mime نیست:
+         - اگر auto_temp_activate=False → 409 + candidates (UI prompt می‌دهد)
+         - اگر auto_temp_activate=True → اولین candidate را موقتاً فعال کن
+      2. extraction را اجرا کن
+      3. اگر در گام 1 فعال‌سازی موقت داشتیم → پس از اتمام revert کن
+         (در try/finally — حتی اگر extraction fail کند).
 
-    خروجی: FileExtraction در حالت نهایی + لیست segments.
+    خروجی: FileExtraction + segments.
     """
     from ...services.oversight_extraction import (
         extract_session, get_extraction_repo,
     )
+    from ...services.oversight_upload_session import get_upload_session_service
+    from ...services.oversight_model_temp_activate import (
+        check_extraction_model_availability, temp_activate_model, temp_revert_model,
+    )
+
+    upload_svc = get_upload_session_service()
+    s = upload_svc.get(session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session یافت نشد")
+
+    # check availability
+    avail = check_extraction_model_availability(
+        s.mime_type, preferred_model_id=payload.preferred_model_id
+    )
+    temp_activated_id: Optional[str] = None
+    if not avail.get("available"):
+        cands = avail.get("candidates") or []
+        if not cands:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "هیچ مدلی با قابلیت لازم پیدا نشد (نه enabled نه disabled)",
+                    "mime_type": s.mime_type,
+                },
+            )
+        if not payload.auto_temp_activate:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "blocked_no_vision_model",
+                    "message": f"هیچ مدل بصری enabled برای mime {s.mime_type} نیست",
+                    "candidates": cands,
+                    "session_id": session_id,
+                    "hint": (
+                        "از /api/oversight/uploads/{id}/extract با auto_temp_activate=true "
+                        "صدا بزن یا قبل از آن /api/models/settings/{model_id}/temp-activate"
+                    ),
+                },
+            )
+        # auto-activate اولین candidate
+        chosen = cands[0]["id"]
+        try:
+            await temp_activate_model(chosen, trigger=f"extract:session={session_id}")
+            temp_activated_id = chosen
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"temp activation failed: {e}")
+
     try:
         fe = await extract_session(
             session_id,
             user_idea=payload.user_idea,
-            preferred_model_id=payload.preferred_model_id,
+            preferred_model_id=payload.preferred_model_id or temp_activated_id,
         )
     except Exception as e:
+        # حتی اگر extraction fail کرد، باید revert کنیم
+        if temp_activated_id:
+            try:
+                await temp_revert_model(temp_activated_id, trigger=f"extract:failed:session={session_id}")
+            except Exception:
+                pass
         raise HTTPException(status_code=500, detail=str(e))
+
+    # success → revert (اگر temp بوده)
+    if temp_activated_id:
+        try:
+            await temp_revert_model(temp_activated_id, trigger=f"extract:done:session={session_id}")
+        except Exception as e:
+            logger.warning(f"temp revert failed (non-fatal): {e}") if False else None  # safe no-op
+
     repo = get_extraction_repo()
     return {
         "extraction": fe.to_dict(),
         "segments": [s.to_dict() for s in repo.get_segments(fe.id)],
+        "temp_activated_model": temp_activated_id,
     }
+
+
+# ── Model temp-activate endpoints (manual user-driven flow) ──
+
+@router.post("/models/{model_id}/temp-activate")
+async def model_temp_activate(model_id: str, trigger: Optional[str] = Query(None)):
+    """فعال‌سازی دستی موقتی یک مدل (در پاسخ به prompt UI).
+    کاربر بعد از pickup فایل، اگر مدل disabled بود، این endpoint را صدا می‌زند.
+    """
+    from ...services.oversight_model_temp_activate import temp_activate_model
+    try:
+        res = await temp_activate_model(model_id, trigger=trigger or "manual")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return res
+
+
+@router.post("/models/{model_id}/temp-revert")
+async def model_temp_revert(model_id: str, trigger: Optional[str] = Query(None)):
+    """برگرداندن مدل به حالت قبل از temp-activate (در صورت لزوم دستی)."""
+    from ...services.oversight_model_temp_activate import temp_revert_model
+    return await temp_revert_model(model_id, trigger=trigger or "manual")
+
+
+@router.get("/models/temp-activations")
+async def models_temp_activations():
+    """فهرست مدل‌هایی که در حال حاضر موقتاً فعال‌اند."""
+    from ...services.oversight_model_temp_activate import get_active_temp_activations
+    return {"active": get_active_temp_activations()}
 
 
 @router.get("/tasks/{task_id}/extractions")

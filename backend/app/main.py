@@ -109,6 +109,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"upload orphan cleanup failed (non-fatal): {e}")
 
+    # 🆕 (Stage 6 — temp model activation) — revert stale temp_enabled flags
+    try:
+        from .services.oversight_model_temp_activate import cleanup_stale_temp_activations_on_boot
+        n = await cleanup_stale_temp_activations_on_boot()
+        if n:
+            logger.info(f"🔒 reset temporary_enabled flag for {n} models on boot")
+    except Exception as e:
+        logger.warning(f"temp-activate boot cleanup failed (non-fatal): {e}")
+
     yield
 
     # Shutdown
