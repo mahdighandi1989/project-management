@@ -139,14 +139,25 @@ async def _fetch_repo_tree(
         return []
 
 
+def _ac_text_of(ac: Any) -> str:
+    """🔬 (Runtime Verify Stage 1) — متن AC را برمی‌گرداند، خواه str قدیمی،
+    خواه dict جدید با فیلد text."""
+    if isinstance(ac, dict):
+        return str(ac.get("text") or "").strip()
+    return str(ac).strip() if ac is not None else ""
+
+
 def _evaluate_acs_against_files(
-    acceptance_criteria: List[str],
+    acceptance_criteria: List[Any],
     file_contents: Dict[str, Optional[str]],
     repo_tree: List[str],
 ) -> List[Dict[str, Any]]:
     """شواهد ماشینی per-AC: برای هر AC، تعداد hit کلمات کلیدی در هر فایل.
     این یک baseline deterministic به AI verifier می‌دهد — AI نمی‌تواند ادعا
     کند فایل وجود ندارد یا قابلیت پیاده نشده، اگر hit‌ها واقعی هستند.
+
+    🔬 (Runtime Verify Stage 1) — AC می‌تواند str یا dict باشد. متن از
+    `_ac_text_of` استخراج می‌شود.
 
     خروجی per AC:
     {
@@ -160,7 +171,8 @@ def _evaluate_acs_against_files(
     """
     out: List[Dict[str, Any]] = []
     for ac in acceptance_criteria:
-        ac_keywords = _build_keywords_from_acs([ac])
+        ac_text = _ac_text_of(ac)
+        ac_keywords = _build_keywords_from_acs([ac_text])
         hits_in_files: Dict[str, int] = {}
         matched_keywords_per_file: Dict[str, List[str]] = {}
         # شمارش hit در محتوای فایل‌ها
@@ -214,7 +226,7 @@ def _evaluate_acs_against_files(
             )
 
         out.append({
-            "ac": ac[:200],
+            "ac": ac_text[:200],
             "keywords": ac_keywords[:8],
             "hits_in_files": hits_in_files,
             "matched_keywords_per_file": matched_keywords_per_file,
@@ -341,13 +353,16 @@ def _extract_relevant_chunks(
     return "\n".join(out_parts)
 
 
-def _build_keywords_from_acs(acceptance_criteria: List[str], task_prompt: str = "") -> List[str]:
+def _build_keywords_from_acs(acceptance_criteria: List[Any], task_prompt: str = "") -> List[str]:
     """استخراج کلمات کلیدی از معیارهای پذیرش (فارسی + انگلیسی) برای جستجو در فایل‌ها.
     این کلمات کلیدی برای chunk extraction استفاده می‌شوند تا فقط بخش‌های مرتبط
     فایل‌های بزرگ به verifier داده شود.
+
+    🔬 (Runtime Verify Stage 1) — AC می‌تواند str یا dict باشد. text را استخراج می‌کنیم.
     """
     import re
-    text = " ".join(acceptance_criteria) + " " + (task_prompt or "")
+    ac_texts = [_ac_text_of(c) for c in acceptance_criteria]
+    text = " ".join(ac_texts) + " " + (task_prompt or "")
     keywords: set = set()
     # کلمات کلیدی انگلیسی (CamelCase + snake_case طولانی)
     for m in re.findall(r"\b[A-Z][a-zA-Z0-9]{3,}\b", text):
@@ -789,7 +804,7 @@ async def verify_task(
         "ui", "component", "page", "tsx", "frontend", "فرانت", "فرانت‌اند",
         "دکمه", "نمایش", "کپی", "panel", "view", "modal",
     ]
-    prompt_lower = (task.prompt or "").lower() + " ".join(acceptance_criteria).lower()
+    prompt_lower = (task.prompt or "").lower() + " ".join(_ac_text_of(c) for c in acceptance_criteria).lower()
     needs_frontend = any(kw in prompt_lower for kw in frontend_keywords)
     auto_frontend_files: List[str] = []
     if needs_frontend and repo_tree:
@@ -941,7 +956,7 @@ async def verify_task(
 
     user_goal = (watched.user_notes if watched else "") or ""
 
-    ac_lines = "\n".join(f"- {c}" for c in acceptance_criteria)
+    ac_lines = "\n".join(f"- {_ac_text_of(c)}" for c in acceptance_criteria)
 
     # 🆕 (Multi-pass Checklist) — اگر تسک task_steps دارد، برای verifier هم
     # checklist می‌سازیم تا هر مرحله را جداگانه ارزیابی کند.
@@ -1162,7 +1177,7 @@ async def verify_task(
             run_at=now_iso(),
             status=VERIFICATION_ERROR,
             done_parts=[],
-            remaining_parts=acceptance_criteria,
+            remaining_parts=[_ac_text_of(c) for c in acceptance_criteria],
             evidence={"error": str(e)},
             next_actions=["تلاش مجدد در دور verify بعدی"],
             confidence_score=0.0,
@@ -1244,9 +1259,9 @@ async def verify_task(
             f"verify: status=partial ولی remaining_parts خالی است (task={task.id}). "
             f"AI verifier prompt را رعایت نکرده. fallback: استفاده از acceptance_criteria."
         )
-        report.remaining_parts = list(acceptance_criteria[:5])
+        report.remaining_parts = [_ac_text_of(c) for c in acceptance_criteria[:5]]
     if status_val == "not_done" and not report.remaining_parts:
-        report.remaining_parts = list(acceptance_criteria[:5])
+        report.remaining_parts = [_ac_text_of(c) for c in acceptance_criteria[:5]]
 
     # به‌روزرسانی task
     streak_required = 2

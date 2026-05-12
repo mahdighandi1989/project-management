@@ -101,6 +101,27 @@ interface Watched {
   next_verify_at?: string | null;
 }
 
+// 🔬 (Runtime Verify Stage 1) — ساختار AC جدید
+// از این به بعد AC می‌تواند یک رشته (legacy) یا این dict (جدید) باشد.
+interface AcceptanceCriterion {
+  text: string;
+  verify_method: 'static' | 'ui_interaction' | 'api_response' | 'backend_test' | 'manual_only';
+  verify_plan?: Record<string, unknown> | null;
+  evidence_history?: Array<{ run_id: string; ts: string; status: string; summary?: string }>;
+  last_status?: 'passed' | 'failed' | 'error' | 'skipped' | null;
+  last_run_at?: string | null;
+}
+
+// Helper برای استخراج متن AC (هم از string قدیمی هم از dict جدید)
+function acText(ac: string | AcceptanceCriterion | unknown): string {
+  if (!ac) return '';
+  if (typeof ac === 'string') return ac;
+  if (typeof ac === 'object' && ac !== null && 'text' in ac) {
+    return String((ac as AcceptanceCriterion).text || '');
+  }
+  return String(ac);
+}
+
 interface Task {
   id: string;
   watched_id?: string | null;
@@ -131,7 +152,8 @@ interface Task {
   last_verified_at?: string | null;
   confirmation_streak?: number;
   target_files?: string[];
-  acceptance_criteria?: string[];
+  // 🔬 (Runtime Verify Stage 1) — AC می‌تواند string قدیمی یا dict ساختاریافته باشد
+  acceptance_criteria?: Array<string | AcceptanceCriterion>;
   applied_evidence?: {
     pr_url?: string;
     pr_branch?: string;
@@ -146,7 +168,7 @@ interface Task {
   followup_prompt?: string;
   followup_generated_at?: string | null;
   followup_target_locations?: Array<{path: string; lines?: string; symbol?: string; snippet?: string; note?: string}>;
-  followup_acceptance_criteria?: string[];
+  followup_acceptance_criteria?: Array<string | AcceptanceCriterion>;
   followup_round?: number;
   archived?: boolean;
   archived_at?: string | null;
@@ -963,7 +985,8 @@ export default function OversightPage() {
       title: string;
       raw_idea: string;
       prompt: string;
-      acceptance_criteria?: string[];
+      // 🔬 (Runtime Verify Stage 1) — AC ممکن است string قدیمی یا dict جدید باشد
+      acceptance_criteria?: Array<string | AcceptanceCriterion>;
       target_files?: string[];
     };
     similarity_score: number;

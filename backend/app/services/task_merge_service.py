@@ -121,31 +121,35 @@ class TaskMergeService:
 
     @staticmethod
     def _merge_acceptance_criteria(
-        existing_ac: List[str], candidate_ac: List[str],
-    ) -> List[str]:
+        existing_ac: List[Any], candidate_ac: List[Any],
+    ) -> List[Any]:
         """ادغام دو لیست AC: AC های candidate که با AC های existing شباهت زیادی
         ندارند (Jaccard < 0.6) به انتها append می‌شوند.
+
+        🔬 (Runtime Verify Stage 1) — AC می‌تواند str قدیمی یا dict جدید باشد.
+        برای dedup فقط متن (`text`) مقایسه می‌شود، ولی ساختار اصلی AC حفظ می‌گردد.
         """
         if not candidate_ac:
             return list(existing_ac or [])
         from .oversight_service import OversightService as _OS
         out = list(existing_ac or [])
         for c in candidate_ac:
-            cs = (c or "").strip()
+            cs = _OS._ac_text(c)
             if not cs:
                 continue
             is_dup = False
             for e in out:
+                e_text = _OS._ac_text(e)
                 try:
-                    if _OS._jaccard(cs, e) >= 0.6:
+                    if _OS._jaccard(cs, e_text) >= 0.6:
                         is_dup = True
                         break
                 except Exception:
-                    if cs.lower() == (e or "").lower():
+                    if cs.lower() == e_text.lower():
                         is_dup = True
                         break
             if not is_dup:
-                out.append(cs)
+                out.append(c)  # حفظ ساختار اصلی (str یا dict)
         return out
 
     @staticmethod
