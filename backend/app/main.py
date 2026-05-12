@@ -118,6 +118,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"temp-activate boot cleanup failed (non-fatal): {e}")
 
+    # 🆕 (Stage 9 — extraction recovery) — extractionهای stale را mark failed کن
+    try:
+        from .services.oversight_extraction import boot_recover_stale_extractions
+        rec = await boot_recover_stale_extractions()
+        if rec.get("cleared_stale_extractions"):
+            logger.info(
+                f"📎 cleared {rec['cleared_stale_extractions']} stale extraction(s) on boot"
+            )
+    except Exception as e:
+        logger.warning(f"extraction boot recovery failed (non-fatal): {e}")
+
     yield
 
     # Shutdown

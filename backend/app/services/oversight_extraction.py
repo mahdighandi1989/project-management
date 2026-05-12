@@ -50,15 +50,85 @@ logger = logging.getLogger(__name__)
 
 EXTRACTIONS_FILE: Path = STORAGE_DIR / "extractions.json"
 
-# ─────────── سقف‌های ایمنی (Stage 9 سختگیرانه‌ترش می‌کند) ───────────
+# ─────────── سقف‌های ایمنی ───────────
 MAX_PAGES_PER_PDF: int = 5000  # عملاً unlimited
 MAX_PARAGRAPHS_PER_DOCX: int = 100_000
 MAX_ROWS_PER_SHEET: int = 1_000_000
 SEGMENT_TEXT_MAX_CHARS: int = 200_000  # هر segment تا 200K char
 PER_SEGMENT_TIMEOUT_SEC: int = 300  # 5 دقیقه
+INLINE_MEDIA_BYTES_LIMIT: int = 18 * 1024 * 1024  # 18MB
+AV_CHUNK_SECONDS: int = 300  # 5 دقیقه per audio/video chunk
+MEMORY_THRESHOLD_PCT: float = 80.0  # اگر RAM >80%, تأخیر بده
 
 # ─────────── extraction concurrency ───────────
 _EXTRACTION_SEMAPHORE = asyncio.Semaphore(1)
+
+
+async def _wait_for_memory_headroom(max_wait_sec: int = 60) -> None:
+    """اگر RAM سیستم بالای آستانه است، تا max_wait صبر کن (به جای OOM crash).
+    در صورت عدم وجود psutil، silent pass.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return
+    waited = 0
+    while waited < max_wait_sec:
+        try:
+            pct = psutil.virtual_memory().percent
+        except Exception:
+            return
+        if pct < MEMORY_THRESHOLD_PCT:
+            return
+        logger.warning(
+            f"memory at {pct}% > {MEMORY_THRESHOLD_PCT}% — تأخیر extraction (waited {waited}s)"
+        )
+        await asyncio.sleep(5)
+        waited += 5
+    logger.warning(f"memory still high after {max_wait_sec}s — ادامه می‌دهیم (best-effort)")
+
+
+def _ffmpeg_available() -> bool:
+    """آیا ffmpeg در PATH هست؟"""
+    import shutil
+    return shutil.which("ffmpeg") is not None
+
+
+async def _ffmpeg_chunk_av(
+    input_path: Path,
+    output_dir: Path,
+    chunk_seconds: int = AV_CHUNK_SECONDS,
+) -> List[Path]:
+    """تقسیم audio/video به chunkهای N ثانیه‌ای. خروجی: لیست chunk paths.
+
+    استفاده از segment muxer — copy stream، بدون re-encode → سریع و
+    لاجواب لیترال. اگر ffmpeg موجود نباشد، RuntimeError.
+    """
+    if not _ffmpeg_available():
+        raise RuntimeError("ffmpeg در PATH نیست — chunking ممکن نیست")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pattern = str(output_dir / "chunk_%04d" + input_path.suffix)
+    # cmd: ffmpeg -i input -c copy -f segment -segment_time N -reset_timestamps 1 pattern
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-i", str(input_path),
+        "-c", "copy", "-f", "segment",
+        "-segment_time", str(chunk_seconds),
+        "-reset_timestamps", "1",
+        pattern,
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg returned {proc.returncode}: {stderr.decode('utf-8', errors='ignore')[:500]}"
+        )
+    chunks = sorted(output_dir.glob(f"chunk_*{input_path.suffix}"))
+    return chunks
 
 
 # ====================================================================
@@ -253,6 +323,52 @@ def get_extraction_repo() -> ExtractionRepo:
     return _repo_instance
 
 
+async def boot_recover_stale_extractions() -> Dict[str, int]:
+    """در startup، extractionهای stale (status='extracting' بدون فعالیت) را شناسایی
+    و mark failed کنیم. session مرتبط هم به 'failed' برگردانده می‌شود.
+
+    این به کاربر اجازه می‌دهد دوباره trigger کند و از segmentهای done ادامه دهد
+    (extract_session خودش resume-friendly است).
+    """
+    from datetime import datetime, timezone, timedelta
+    repo = get_extraction_repo()
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+    cleared = 0
+    for fe in list(repo._extractions.values()):
+        if fe.status != "extracting":
+            continue
+        # last activity = آخرین segment finished_at، یا started_at
+        last_active = fe.started_at
+        segs = repo.get_segments(fe.id)
+        if segs:
+            done_segs = [s for s in segs if s.finished_at]
+            if done_segs:
+                last_active = max(s.finished_at for s in done_segs if s.finished_at)
+        try:
+            ts = datetime.fromisoformat((last_active or "").replace("Z", "+00:00"))
+        except Exception:
+            ts = datetime.min.replace(tzinfo=timezone.utc)
+        if ts < cutoff:
+            await repo.update_extraction(
+                fe.id,
+                status="failed",
+                error="boot recovery: extraction interrupted by restart",
+                finished_at=datetime.now(timezone.utc).isoformat(),
+            )
+            # session هم به failed (تا کاربر بفهمد و دوباره trigger کند)
+            try:
+                from .oversight_upload_session import get_upload_session_service
+                up = get_upload_session_service()
+                s = up.get(fe.session_id)
+                if s and s.status == "extracting":
+                    await up.set_status(s.id, "completed",  # نه failed — بتواند resume
+                                        error="extraction interrupted by restart")
+            except Exception as e:
+                logger.debug(f"boot recovery session update failed: {e}")
+            cleared += 1
+    return {"cleared_stale_extractions": cleared}
+
+
 # ====================================================================
 # Extraction service
 # ====================================================================
@@ -373,6 +489,49 @@ def _read_text_file(path: Path) -> str:
         return path.read_text(encoding="utf-8", errors="replace")
     except Exception as e:
         raise ExtractionError(f"read text failed: {e}")
+
+
+async def _render_pdf_page_to_b64(path: Path, page_num: int) -> Optional[str]:
+    """رندر یک صفحهٔ PDF به PNG → base64.
+
+    🆕 (Stage 9) — برای صفحات scan-only که pypdf متن استخراج نمی‌کند.
+    ابتدا pdftoppm (poppler) را امتحان می‌کنیم (نتیجهٔ بهتر، سریع‌تر).
+    اگر در دسترس نبود، fallback به render via Pillow + پیغام.
+
+    خروجی: PNG base64 string، یا None اگر هیچ ابزار rendering موجود نباشد.
+    """
+    import shutil, tempfile
+    pdftoppm = shutil.which("pdftoppm")
+    if pdftoppm:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_prefix = Path(tmp) / "p"
+            cmd = [
+                pdftoppm,
+                "-png", "-r", "150",
+                "-f", str(page_num), "-l", str(page_num),
+                str(path), str(out_prefix),
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                logger.debug(
+                    f"pdftoppm exit {proc.returncode}: {stderr.decode('utf-8', errors='ignore')[:200]}"
+                )
+                return None
+            # pdftoppm naming: p-1.png یا p-01.png …
+            candidates = sorted(Path(tmp).glob("p-*.png"))
+            if not candidates:
+                return None
+            try:
+                return base64.b64encode(candidates[0].read_bytes()).decode("ascii")
+            except Exception:
+                return None
+    # fallback نهایی — هیچ rendering در دسترس نیست
+    return None
 
 
 def _extract_pdf_pages(path: Path) -> List[Tuple[int, str]]:
@@ -573,15 +732,40 @@ async def _run_extraction(
         for page_num, txt in pages:
             if page_num in completed:
                 continue
+            await _wait_for_memory_headroom()
             if txt.strip():
                 await _persist_segment(page_num, f"صفحه {page_num}", txt, f"page={page_num}")
             else:
-                # صفحه scan شده — fallback به AI (placeholder، Stage 9 پر می‌کند)
-                await _persist_segment(
-                    page_num, f"صفحه {page_num} (scan)",
-                    "[این صفحه scan-only است؛ نیاز به OCR بصری — در Stage 9 با Gemini Vision]",
-                    f"page={page_num}",
+                # 🆕 (Stage 9) — صفحه scan-only: render شده با Gemini Vision
+                # خواندن صفحه به‌صورت image و ارسال به مدل
+                try:
+                    img_b64 = await _render_pdf_page_to_b64(path, page_num)
+                except Exception as e:
+                    img_b64 = None
+                    logger.warning(f"PDF page {page_num} render failed: {e}")
+                if img_b64 is None:
+                    await _persist_segment(
+                        page_num, f"صفحه {page_num} (scan)",
+                        "[این صفحه scan-only است و render تصویری ناموفق بود. "
+                        "اگر pypdf نسخهٔ متن استخراج نمی‌کند، احتمالاً encrypted/کیفیت پایین است.]",
+                        f"page={page_num}",
+                    )
+                    continue
+                prompt = (
+                    f"این تصویر صفحهٔ {page_num} از یک PDF است. "
+                    "متن کامل و literal این صفحه را OCR کن — هیچ‌چیز را خلاصه نکن، "
+                    "هیچ خطی drop نشود. اگر متن فارسی است، فارسی بنویس."
                 )
+                try:
+                    text = await asyncio.wait_for(
+                        _ai_extract_text(fe.model_used, prompt=prompt, image_b64=img_b64, max_tokens=16000),
+                        timeout=PER_SEGMENT_TIMEOUT_SEC,
+                    )
+                except asyncio.TimeoutError:
+                    text = f"[timeout بعد از {PER_SEGMENT_TIMEOUT_SEC}s — page {page_num}]"
+                except Exception as e:
+                    text = f"[OCR خطا: {str(e)[:200]}]"
+                await _persist_segment(page_num, f"صفحه {page_num} (OCR)", text, f"page={page_num}")
         return
 
     if mime in (
@@ -625,6 +809,7 @@ async def _run_extraction(
         for idx, h in enumerate(headings, start=1):
             if idx in completed:
                 continue
+            await _wait_for_memory_headroom()
             prompt = (
                 f"در این تصویر، **متن کامل و literal** مرتبط با heading زیر را استخراج کن:\n"
                 f"  HEADING: {h}\n\n"
@@ -644,18 +829,84 @@ async def _run_extraction(
         return
 
     if mime.startswith("audio/") or mime.startswith("video/"):
-        # برای فایل‌های کوچک، inline base64. برای بزرگ‌تر، در Stage 9 ffmpeg chunking.
         size = path.stat().st_size if path.exists() else 0
-        if size > 18 * 1024 * 1024:
-            # placeholder — Stage 9 ffmpeg chunking
-            await repo.update_extraction(fe.id, total_segments=1)
-            await _persist_segment(
-                1, fe.original_filename,
-                "[فایل audio/video بزرگ‌تر از 18MB — برای استخراج کامل به chunking ffmpeg نیاز است (Stage 9). "
-                "فعلاً متن خام در دسترس نیست؛ پس از Stage 9 خودکار دوباره pickup خواهد شد.]",
-                "size>18MB",
+        # 🆕 (Stage 9) — برای فایل‌های بزرگ، ffmpeg chunking 5-دقیقه‌ای
+        if size > INLINE_MEDIA_BYTES_LIMIT:
+            if not _ffmpeg_available():
+                # ffmpeg در سیستم نیست — به‌جای fail، placeholder بسازیم
+                # تا کاربر بداند چرا
+                await repo.update_extraction(fe.id, total_segments=1)
+                await _persist_segment(
+                    1, fe.original_filename,
+                    "[فایل بزرگ‌تر از 18MB و ffmpeg در سیستم نصب نیست. "
+                    "برای استخراج کامل، ffmpeg را نصب کنید یا فایل را به chunk های ≤18MB "
+                    "خرد کنید و دوباره آپلود کنید.]",
+                    f"size={size}B",
+                )
+                return
+            # chunk
+            chunks_dir = path.parent / f"{path.stem}_chunks"
+            try:
+                chunk_files = await _ffmpeg_chunk_av(path, chunks_dir, AV_CHUNK_SECONDS)
+            except Exception as e:
+                raise ExtractionError(f"ffmpeg chunking failed: {e}")
+            if not chunk_files:
+                raise ExtractionError("ffmpeg تولید chunk نکرد")
+            # عناوین فقط بر اساس user_idea
+            base_headings = await _plan_headings(
+                fe.model_used, user_idea, fe.original_filename, mime
             )
+            heading_default = base_headings[0] if base_headings else "محتوای کامل"
+            await repo.update_extraction(fe.id, total_segments=len(chunk_files))
+            try:
+                for idx, ch_path in enumerate(chunk_files, start=1):
+                    if idx in completed:
+                        continue
+                    await _wait_for_memory_headroom()
+                    try:
+                        ch_bytes = ch_path.read_bytes()
+                    except Exception as e:
+                        await _persist_segment(idx, f"chunk {idx}", f"[خواندن chunk: {e}]",
+                                                f"t={idx*AV_CHUNK_SECONDS-AV_CHUNK_SECONDS}s..")
+                        continue
+                    prompt = (
+                        f"این chunk شمارهٔ {idx} از یک فایل "
+                        f"{('صوتی' if mime.startswith('audio/') else 'ویدئویی')} است "
+                        f"(تقریباً ثانیه {idx*AV_CHUNK_SECONDS-AV_CHUNK_SECONDS} تا {idx*AV_CHUNK_SECONDS}).\n"
+                        f"raw transcript کامل و literal این chunk را بنویس. هیچ‌چیز را خلاصه نکن.\n"
+                        f"اگر دیالوگ هست، با هویت گوینده‌ها (اگر مشخص). اگر صحنه است، توصیف صریح."
+                    )
+                    try:
+                        text = await asyncio.wait_for(
+                            _ai_extract_text(
+                                fe.model_used, prompt=prompt,
+                                inline_file_data=(mime, ch_bytes),
+                                max_tokens=16000,
+                            ),
+                            timeout=PER_SEGMENT_TIMEOUT_SEC,
+                        )
+                    except asyncio.TimeoutError:
+                        text = f"[timeout بعد از {PER_SEGMENT_TIMEOUT_SEC}s — chunk {idx}]"
+                    except Exception as e:
+                        text = f"[خطا: {str(e)[:200]}]"
+                    ts = f"t={(idx-1)*AV_CHUNK_SECONDS}s..{idx*AV_CHUNK_SECONDS}s"
+                    await _persist_segment(idx, f"chunk {idx}: {heading_default}", text, ts)
+            finally:
+                # cleanup chunks
+                try:
+                    for f in chunk_files:
+                        try:
+                            f.unlink()
+                        except Exception:
+                            pass
+                    try:
+                        chunks_dir.rmdir()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
             return
+        # فایل کوچک — inline base64 (همان مسیر قبلی)
         try:
             raw = path.read_bytes()
         except Exception as e:
@@ -665,6 +916,7 @@ async def _run_extraction(
         for idx, h in enumerate(headings, start=1):
             if idx in completed:
                 continue
+            await _wait_for_memory_headroom()
             prompt = (
                 f"در این فایل {('صوتی' if mime.startswith('audio/') else 'تصویری/ویدئویی')}، "
                 f"**رونویسی/توصیف کامل و literal** مرتبط با heading زیر را بنویس:\n"
