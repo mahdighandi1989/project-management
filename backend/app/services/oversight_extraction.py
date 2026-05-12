@@ -129,8 +129,13 @@ async def _ffmpeg_chunk_av(
         # 🛡 (audit fix MINOR) — timeout 10 دقیقه برای chunking یک فایل بزرگ
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
     except asyncio.TimeoutError:
+        # 🛡 (audit fix L1 CRITICAL) — kill + wait برای جلوگیری از zombie
         try:
             proc.kill()
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
         except Exception:
             pass
         raise RuntimeError("ffmpeg chunking timeout after 10 minutes")
@@ -531,8 +536,14 @@ async def _render_pdf_page_to_b64(path: Path, page_num: int) -> Optional[str]:
                 # 🛡 (audit fix MINOR) — timeout سخت تا روی PDF مخدوش hang نکند
                 _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
             except asyncio.TimeoutError:
+                # 🛡 (audit fix L1 CRITICAL) — kill + wait برای جلوگیری از zombie
                 try:
                     proc.kill()
+                except Exception:
+                    pass
+                try:
+                    # حداکثر ۵ ثانیه صبر کن تا process واقعاً مرده
+                    await asyncio.wait_for(proc.wait(), timeout=5)
                 except Exception:
                     pass
                 logger.warning(f"pdftoppm timeout on page {page_num} after 30s")
@@ -1129,6 +1140,22 @@ async def _run_extraction(
             mime = guessed
 
     # ─────────── routing ───────────
+    # 🛡 (audit fix K1+K2 CRITICAL) — ipynb و archive باید **قبل** از text branch
+    # چک شوند. وگرنه .ipynb با mime=text/plain یا application/json به‌اشتباه به
+    # text routing می‌رود و ساختار cells گم می‌شود.
+    fname_lower = (fe.original_filename or "").lower()
+
+    # Jupyter Notebook (اولویت بالا، بر اساس extension)
+    if fname_lower.endswith(".ipynb") or mime == "application/x-ipynb+json":
+        await _extract_ipynb(path, fe, repo, completed, _persist_segment)
+        return
+
+    # archive (zip) — قبل از text چون .zip ممکن است mime عمومی داشته باشد
+    if (mime in ("application/zip", "application/x-zip-compressed")
+            or fname_lower.endswith(".zip")):
+        await _extract_zip_archive(path, fe, repo, completed, _persist_segment)
+        return
+
     # متن خام (txt/md/csv/json/xml/yaml/toml/log/ini)
     if (mime.startswith("text/")
             or mime in (
@@ -1142,11 +1169,6 @@ async def _run_extraction(
         await repo.update_extraction(fe.id, total_segments=1)
         return
 
-    # 🆕 (Stage 9) — Jupyter Notebook
-    if mime in ("application/x-ipynb+json",) or fe.original_filename.lower().endswith(".ipynb"):
-        await _extract_ipynb(path, fe, repo, completed, _persist_segment)
-        return
-
     # 🆕 (Stage 9) — کد منبع: source code با extension
     code_exts = (
         ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".c", ".cpp", ".h", ".hpp",
@@ -1154,8 +1176,7 @@ async def _run_extraction(
         ".sh", ".bash", ".ps1", ".dockerfile", ".kt", ".swift", ".dart", ".r",
         ".lua", ".pl", ".scala", ".clj", ".ex", ".exs", ".elm", ".vue",
     )
-    if (mime.startswith("text/")
-            or any(fe.original_filename.lower().endswith(e) for e in code_exts)
+    if (any(fname_lower.endswith(e) for e in code_exts)
             or mime in (
                 "application/x-python-code", "application/javascript",
                 "application/typescript", "application/x-shellscript",
@@ -1164,12 +1185,6 @@ async def _run_extraction(
         if 0 not in completed:
             await _persist_segment(0, fe.original_filename, text, "code")
         await repo.update_extraction(fe.id, total_segments=1)
-        return
-
-    # 🆕 (Stage 9) — archive (zip) — extract recursive
-    if (mime in ("application/zip", "application/x-zip-compressed")
-            or fe.original_filename.lower().endswith(".zip")):
-        await _extract_zip_archive(path, fe, repo, completed, _persist_segment)
         return
 
     if mime == "application/pdf":

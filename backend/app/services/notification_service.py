@@ -823,13 +823,20 @@ def _cleanup_expired_state() -> None:
     """
     now = _now_epoch()
     # ابتدا لیست chat_idهایی که compose فعال دارند
+    # 🛡 (audit fix H1 CRITICAL) — snapshot dict قبل از iterate تا اگر یک
+    # add_item همزمان modify کند، RuntimeError "dict changed size during
+    # iteration" نگیریم.
     active_compose_chats: set = set()
     try:
         from .oversight_telegram_compose import get_compose_service
         cs = get_compose_service()
-        for cid, b in (cs._buffers.items() if hasattr(cs, "_buffers") else {}):
-            if not b.is_expired():
-                active_compose_chats.add(cid)
+        snapshot = dict(getattr(cs, "_buffers", {}) or {})
+        for cid, b in snapshot.items():
+            try:
+                if not b.is_expired():
+                    active_compose_chats.add(cid)
+            except Exception:
+                continue
     except Exception:
         pass
     for k in list(_chat_state.keys()):
@@ -1785,16 +1792,43 @@ class NotificationService:
         if media:
             # auto-start اگر compose فعال نیست
             if current is None:
-                # 🆕 (Stage 5) — تشخیص mode بر اساس chat_state فعلی:
-                # اگر کاربر در creator_awaiting_idea phase است، mode=project.
-                # در غیر این صورت mode=task.
+                # 🆕 (Stage 5) — تشخیص mode بر اساس chat_state فعلی.
+                # 🛡 (audit fix B1 CRITICAL — refined) — compose mode=project
+                # فقط در phase دقیق `creator_awaiting_idea` فعال می‌شود (همان
+                # نقطه‌ای که کاربر باید idea را تایپ کند). در سایر phaseهای
+                # creator (awaiting_models, awaiting_type, awaiting_name_or_skip,
+                # awaiting_prompt_preview)، compose hijack نشود — به‌جای آن
+                # هشدار به کاربر می‌دهیم که باید /new_project را به آن مرحله
+                # برساند، یا اگر می‌خواهد تسک بسازد، /cancel کند.
                 cur_state = _chat_state.get(chat_id_str) or {}
-                cur_phase = cur_state.get("phase", "")
+                cur_phase = cur_state.get("phase", "") or ""
+                CREATOR_BLOCKED_PHASES = {
+                    "creator_awaiting_models",
+                    "creator_awaiting_model_choice",
+                    "creator_awaiting_name",
+                    "creator_awaiting_name_or_skip",
+                    "creator_awaiting_custom_name",
+                    "creator_awaiting_type",
+                    "creator_awaiting_tech",
+                    "creator_awaiting_prompt_preview",
+                    "creator_awaiting_desc",
+                }
+                if cur_phase in CREATOR_BLOCKED_PHASES:
+                    # کاربر در نیمهٔ راه /new_project است ولی هنوز نه به idea
+                    # رسیده — media را به compose نبر، یک هشدار بده.
+                    await self._telegram().send(
+                        "⚠️ شما در میانهٔ /new_project هستید (فاز فعلی: "
+                        f"`{cur_phase}`). برای پیوست فایل، یا این flow را با "
+                        "/cancel ببندید، یا تا رسیدن به مرحلهٔ «ایده» صبر کنید "
+                        "و آنجا فایل بفرستید.",
+                        silent=False,
+                    )
+                    return {"ok": True, "handled": "compose_blocked_creator_phase"}
                 detected_mode = "project" if cur_phase == "creator_awaiting_idea" else "task"
-                # 🛡 (audit fix M2) — اگر کاربر در /new_task picker مرحلهٔ
-                # awaiting_idea بود و watched_id را قبلاً انتخاب کرده، آن را
-                # به compose buffer منتقل کن (تا picker دوباره ظاهر نشود).
-                inherited_watched_id = cur_state.get("watched_id") if cur_phase == "awaiting_idea" else None
+                # 🛡 watched_id فقط در مسیر /new_task picker معنا دارد
+                inherited_watched_id = None
+                if cur_phase == "awaiting_idea":
+                    inherited_watched_id = cur_state.get("watched_id")
                 current = await compose_svc.start(
                     chat_id_str, mode=detected_mode,
                     watched_id=inherited_watched_id,
