@@ -188,6 +188,21 @@ interface Task {
     merged_fields?: string[];
     similarity_score?: number;
   }>;
+  // 🆕 (Multi-pass Checklist) — مراحل تسک با وضعیت per-step که verifier به‌روز می‌کند
+  task_steps?: Array<{
+    id: number;
+    title: string;
+    scope?: string;
+    raw_excerpt?: string;
+    key_terms?: string[];
+    status: 'pending' | 'done' | 'partial' | 'not_done' | 'error';
+    completion_pct: number;
+    remaining?: string;
+    evidence?: string;
+    last_verified_at?: string | null;
+    completed_at?: string | null;
+  }>;
+  overall_completion_pct?: number | null;
 }
 
 interface Report {
@@ -851,7 +866,12 @@ export default function OversightPage() {
   const [generating, setGenerating] = useState(false);
   const [genPhase, setGenPhase] = useState('');
   const [genPct, setGenPct] = useState(0);
-  const [previewPrompt, setPreviewPrompt] = useState<{ title: string; prompt: string } | null>(null);
+  const [previewPrompt, setPreviewPrompt] = useState<{
+    title: string;
+    prompt: string;
+    task_steps?: any[];
+    overall_completion_pct?: number;
+  } | null>(null);
 
   // 🆕 (Smart Task Lifecycle) Dedup state — وقتی save تسک با duplicate_detected برمی‌گردد
   const [duplicatePrompt, setDuplicatePrompt] = useState<null | {
@@ -1275,7 +1295,12 @@ export default function OversightPage() {
       });
       if (res.ok) {
         const data = await res.json();
-        setPreviewPrompt({ title: data.title, prompt: data.prompt });
+        setPreviewPrompt({
+          title: data.title,
+          prompt: data.prompt,
+          task_steps: data.task_steps || [],
+          overall_completion_pct: data.overall_completion_pct,
+        });
         setGenPhase('پرامپت آماده شد');
         setGenPct(100);
         // 🆕 (Smart Task Lifecycle) اگر AI نتوانست JSON معتبر تولید کند،
@@ -1333,6 +1358,8 @@ export default function OversightPage() {
             status: 'pending',
             deadline: ideaDeadline || null,
             force_create: forceCreate,
+            task_steps: previewPrompt.task_steps || [],
+            overall_completion_pct: previewPrompt.overall_completion_pct ?? null,
           }),
         });
         if (res.ok) {
@@ -2526,6 +2553,22 @@ export default function OversightPage() {
                   <p className="text-xs text-purple-700 dark:text-purple-300 mt-2">
                     ℹ️ هنگام ذخیره، {ideaWatchedIds.length} تسک جداگانه (یکی برای هر پروژه) ساخته می‌شود.
                   </p>
+                )}
+                {/* 🆕 (Multi-pass Checklist) — اگر multi-pass مراحل تولید کرد، در preview نشان بده */}
+                {Array.isArray(previewPrompt.task_steps) && previewPrompt.task_steps.length > 0 && (
+                  <div className="mt-3 p-3 bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800 rounded">
+                    <div className="text-sm font-semibold text-indigo-800 dark:text-indigo-200 mb-1">
+                      📋 چک‌لیست مراحل ({previewPrompt.task_steps.length} مرحله) — پس از ذخیره، verifier هر مرحله را به‌صورت خودکار تیک می‌زند
+                    </div>
+                    <ul className="text-xs text-indigo-700 dark:text-indigo-300 space-y-1 mt-1">
+                      {previewPrompt.task_steps.map((s: any) => (
+                        <li key={s.id} className="flex gap-1.5 items-start">
+                          <span className="mt-0.5">⬜</span>
+                          <span><b>مرحله {s.id}: {s.title}</b>{s.scope ? ` — ${String(s.scope).slice(0, 200)}` : ''}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 )}
                 {similarityHints.length > 0 && (
                   <div className="mt-3 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded">
@@ -4641,6 +4684,66 @@ function TasksPanel({
                 </pre>
               </details>
             )}
+            {/* 🆕 (Multi-pass Checklist) — وضعیت per-step + progress bar */}
+            {Array.isArray(t.task_steps) && t.task_steps.length > 0 && (() => {
+              const steps = t.task_steps!;
+              const total = steps.length;
+              const doneN = steps.filter((s) => s.status === 'done').length;
+              const partialN = steps.filter((s) => s.status === 'partial').length;
+              const pct = typeof t.overall_completion_pct === 'number'
+                ? t.overall_completion_pct
+                : Math.round(steps.reduce((a, s) => a + (s.completion_pct || 0), 0) / total);
+              return (
+                <details
+                  className="mt-2 text-[11px] bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800 rounded p-2"
+                  open={doneN < total}
+                >
+                  <summary className="cursor-pointer font-semibold text-indigo-700 dark:text-indigo-300 flex items-center gap-2 flex-wrap">
+                    <span>📋 چک‌لیست مراحل ({doneN}/{total} انجام‌شده{partialN > 0 ? `, ${partialN} ناقص` : ''})</span>
+                    <span className="text-[10px] text-indigo-600 dark:text-indigo-400">— پیشرفت کلی: <b>{pct}%</b></span>
+                  </summary>
+                  {/* progress bar */}
+                  <div className="mt-2 h-1.5 w-full bg-indigo-100 dark:bg-indigo-900/40 rounded overflow-hidden">
+                    <div
+                      className={`h-full ${pct >= 100 ? 'bg-green-500' : pct >= 60 ? 'bg-indigo-500' : pct >= 30 ? 'bg-amber-500' : 'bg-red-400'}`}
+                      style={{ width: `${Math.max(2, Math.min(100, pct))}%` }}
+                    />
+                  </div>
+                  <ul className="mt-2 space-y-1">
+                    {steps.map((s) => {
+                      const st = s.status || 'pending';
+                      const icon = st === 'done' ? '✅' : st === 'partial' ? '🟡' : st === 'error' ? '⚠️' : '⬜';
+                      const titleCls = st === 'done'
+                        ? 'line-through text-gray-500 dark:text-gray-400'
+                        : 'text-indigo-900 dark:text-indigo-100';
+                      return (
+                        <li key={s.id} className="flex gap-1.5 items-start">
+                          <span className="mt-0.5">{icon}</span>
+                          <div className="flex-1 min-w-0">
+                            <div className={`text-[11px] ${titleCls}`}>
+                              <b>مرحله {s.id}: {s.title}</b>
+                              {typeof s.completion_pct === 'number' && st !== 'done' && st !== 'pending' && (
+                                <span className="ml-1.5 text-[10px] text-gray-500 dark:text-gray-400">({s.completion_pct}%)</span>
+                              )}
+                            </div>
+                            {st !== 'done' && s.remaining && (
+                              <div className="text-[10px] text-amber-700 dark:text-amber-300 mt-0.5">
+                                ⏳ باقی‌مانده: {s.remaining}
+                              </div>
+                            )}
+                            {s.evidence && st === 'done' && (
+                              <div className="text-[10px] text-green-700 dark:text-green-300 mt-0.5 truncate">
+                                📎 {s.evidence}
+                              </div>
+                            )}
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </details>
+              );
+            })()}
             {t.last_summary && (
               <p className="text-xs text-gray-600 dark:text-gray-300 mt-1 line-clamp-2">
                 {t.last_summary}

@@ -426,6 +426,36 @@ async def _github_code_search(
     return results
 
 
+def _sync_prompt_checkboxes(prompt: str, steps: List[Dict[str, Any]]) -> str:
+    """به‌روزرسانی markdown checkbox‌های موجود در `prompt` بر اساس وضعیت `steps`.
+
+    Pattern: `- [ ] **مرحله N: ...**` یا `- [~] **مرحله N: ...**` یا `- [x] **مرحله N: ...**`
+    map:  done → [x],  partial → [~],  not_done/pending → [ ]
+    """
+    if not prompt or not steps:
+        return prompt
+    import re as _re
+    status_to_mark = {
+        "done": "x",
+        "partial": "~",
+        "not_done": " ",
+        "pending": " ",
+        "error": " ",
+    }
+    out = prompt
+    for s in steps:
+        sid = s.get("id")
+        if sid is None:
+            continue
+        mark = status_to_mark.get((s.get("status") or "pending"), " ")
+        # pattern: یا [ ] یا [~] یا [x]، بعد فضای خالی، بعد **مرحله N:
+        pattern = _re.compile(
+            rf"-\s*\[[ x~]\]\s+(\*\*مرحله\s*{_re.escape(str(sid))}\b)",
+        )
+        out = pattern.sub(lambda m: f"- [{mark}] {m.group(1)}", out, count=1)
+    return out
+
+
 def _recover_partial_json(response: str) -> Dict[str, Any]:
     """تلاش برای استخراج فیلدهای اصلی از JSON ناقص/truncated.
 
@@ -471,6 +501,55 @@ def _recover_partial_json(response: str) -> Dict[str, Any]:
                 ]
             except Exception:
                 pass
+
+    # 🆕 (Multi-pass Checklist) — steps_status: لیست dict‌ها
+    m = re.search(r'"steps_status"\s*:\s*\[(.*?)\]\s*[,}]', response, re.DOTALL)
+    if m:
+        try:
+            steps_blob = m.group(1)
+            # هر object را با brace-matching ساده extract کن
+            items: List[Dict[str, Any]] = []
+            depth = 0
+            buf = []
+            for ch in steps_blob:
+                if ch == "{":
+                    depth += 1
+                    buf.append(ch)
+                elif ch == "}":
+                    depth -= 1
+                    buf.append(ch)
+                    if depth == 0:
+                        obj_str = "".join(buf).strip()
+                        buf = []
+                        try:
+                            import json as _json
+                            items.append(_json.loads(obj_str))
+                        except Exception:
+                            # fallback: regex extract id/status/completion/remaining
+                            entry: Dict[str, Any] = {}
+                            mid = re.search(r'"id"\s*:\s*"?(\d+)"?', obj_str)
+                            if mid:
+                                entry["id"] = int(mid.group(1))
+                            mst = re.search(r'"status"\s*:\s*"([^"]+)"', obj_str)
+                            if mst:
+                                entry["status"] = mst.group(1)
+                            mcp = re.search(r'"completion_pct"\s*:\s*([0-9]+)', obj_str)
+                            if mcp:
+                                entry["completion_pct"] = int(mcp.group(1))
+                            mre = re.search(r'"remaining"\s*:\s*"((?:[^"\\]|\\.)*)"', obj_str)
+                            if mre:
+                                entry["remaining"] = mre.group(1).replace('\\"', '"')
+                            mev = re.search(r'"evidence"\s*:\s*"((?:[^"\\]|\\.)*)"', obj_str)
+                            if mev:
+                                entry["evidence"] = mev.group(1).replace('\\"', '"')
+                            if entry:
+                                items.append(entry)
+                elif depth > 0:
+                    buf.append(ch)
+            if items:
+                out["steps_status"] = items
+        except Exception:
+            pass
 
     return out
 
@@ -864,6 +943,42 @@ async def verify_task(
 
     ac_lines = "\n".join(f"- {c}" for c in acceptance_criteria)
 
+    # 🆕 (Multi-pass Checklist) — اگر تسک task_steps دارد، برای verifier هم
+    # checklist می‌سازیم تا هر مرحله را جداگانه ارزیابی کند.
+    task_steps_list: List[Dict[str, Any]] = list(task.task_steps or [])
+    steps_blob = ""
+    steps_json_template = ""
+    if task_steps_list:
+        steps_lines = [
+            "# 📋 چک‌لیست مراحل تسک (مهم — هر مرحله را جداگانه ارزیابی کن)",
+            "",
+            "تسک به مراحل مشخص تقسیم شده. علاوه بر AC کلی، **برای هر مرحله جداگانه**",
+            "وضعیت آن را در `steps_status` خروجی برگردان: `done` (کامل)، `partial`",
+            "(ناقص — چیزی باقی مانده)، یا `not_done` (هنوز شروع نشده).",
+            "اگر `partial` بود، حتماً در فیلد `remaining` بنویس **چه چیزی هنوز باقی مانده**.",
+            "",
+        ]
+        for s in task_steps_list:
+            cur = (s.get("status") or "pending")
+            steps_lines.append(
+                f"- **مرحله {s.get('id')}** ({cur}): "
+                f"{(s.get('title') or '')[:120]} — "
+                f"{(s.get('scope') or '')[:280]}"
+            )
+        steps_blob = "\n".join(steps_lines)
+        # ساخت template نمونه (id‌ها واقعی) برای کاهش خطای AI
+        sample_ids = [str(s.get("id", i + 1)) for i, s in enumerate(task_steps_list[:3])]
+        sample_lines = ",\n    ".join(
+            f'{{"id": {sid}, "status": "done|partial|not_done", "completion_pct": 0, "remaining": "...", "evidence": "..."}}'
+            for sid in sample_ids
+        )
+        steps_json_template = (
+            ',\n  "steps_status": [\n    '
+            + sample_lines
+            + (",\n    ..." if len(task_steps_list) > 3 else "")
+            + "\n  ]"
+        )
+
     verify_prompt = f"""تو یک QA حرفه‌ای هستی. وظیفه‌ات بررسی این است که آیا کارهای خواسته‌شده در پرامپت تسک واقعاً در وضعیت فعلی پروژه انجام شده‌اند یا نه — **بدون اهمیت دادن به اینکه چه کسی یا با چه ابزاری انجام داده**. فقط وضعیت فعلی را با معیارهای پذیرش مقایسه کن.
 
 # 🧠 اصل ارزیابی (مهم — قبل از تصمیم بخوان)
@@ -932,6 +1047,8 @@ async def verify_task(
 # معیارهای پذیرش (Acceptance Criteria)
 {ac_lines}
 
+{steps_blob}
+
 {machine_evidence_blob}
 
 # محتوای فعلی فایل‌های مرتبط (از repository)
@@ -992,7 +1109,7 @@ async def verify_task(
   "evidence": {{ "commits": ["sha"], "files": ["path"], "issues": [] }},
   "next_actions": ["قدم بعدی concrete 1", "..."],
   "confidence_score": 0.95,
-  "summary": "خلاصه یک‌پاراگرافی"
+  "summary": "خلاصه یک‌پاراگرافی"{steps_json_template}
 }}"""
 
     try:
@@ -1135,6 +1252,95 @@ async def verify_task(
     streak_required = 2
     if watched and getattr(watched, "confirmation_streak_required", None):
         streak_required = max(1, int(watched.confirmation_streak_required))
+
+    # 🆕 (Multi-pass Checklist) — اگر task_steps دارد، استاتوس هر مرحله را
+    # از parsed["steps_status"] روی task.task_steps اعمال کن.
+    steps_status_raw = parsed.get("steps_status") or []
+    all_steps_done = False
+    if task_steps_list and isinstance(steps_status_raw, list):
+        # index by id
+        status_by_id: Dict[Any, Dict[str, Any]] = {}
+        for entry in steps_status_raw:
+            if not isinstance(entry, dict):
+                continue
+            sid = entry.get("id")
+            if sid is None:
+                continue
+            try:
+                status_by_id[int(sid)] = entry
+            except Exception:
+                status_by_id[sid] = entry
+
+        updated_steps: List[Dict[str, Any]] = []
+        completion_sum = 0
+        done_count = 0
+        for s in task_steps_list:
+            sid = s.get("id")
+            try:
+                sid_key = int(sid)
+            except Exception:
+                sid_key = sid
+            new_entry = dict(s)
+            upd = status_by_id.get(sid_key) or status_by_id.get(str(sid_key)) or {}
+            new_status = (upd.get("status") or s.get("status") or "pending").strip().lower()
+            if new_status not in ("done", "partial", "not_done", "pending", "error"):
+                new_status = "pending"
+            # completion_pct
+            try:
+                pct = int(upd.get("completion_pct", s.get("completion_pct", 0)) or 0)
+            except Exception:
+                pct = 0
+            if new_status == "done":
+                pct = 100
+            elif new_status == "not_done":
+                pct = 0
+            elif new_status == "partial":
+                pct = max(1, min(99, pct or 50))
+            new_entry["status"] = new_status
+            new_entry["completion_pct"] = pct
+            new_entry["remaining"] = (upd.get("remaining") or "").strip() if new_status != "done" else ""
+            if upd.get("evidence"):
+                new_entry["evidence"] = str(upd.get("evidence"))[:300]
+            new_entry["last_verified_at"] = now_iso()
+            if new_status == "done":
+                done_count += 1
+                if not new_entry.get("completed_at"):
+                    new_entry["completed_at"] = now_iso()
+            else:
+                new_entry["completed_at"] = None
+            completion_sum += pct
+            updated_steps.append(new_entry)
+
+        # overall %
+        total_steps = len(updated_steps)
+        overall_pct = int(round(completion_sum / total_steps)) if total_steps else 0
+        all_steps_done = total_steps > 0 and done_count == total_steps
+        # apply
+        task.task_steps = updated_steps
+        task.overall_completion_pct = overall_pct
+        task_steps_list = updated_steps  # برای بخش followup که در ادامه می‌آید
+
+        # 🆕 اگر AI همه را done نشان داد ولی status کلی را done نگفت، در صورت
+        # کامل بودن چک‌لیست، status_val را به done بالا ببر تا transition عادی
+        # streak/auto-done اجرا شود (verifier ممکن است محافظه‌کار باشد).
+        if all_steps_done and status_val != VERIFICATION_DONE:
+            status_val = VERIFICATION_DONE
+        # 🆕 برعکس: اگر AI status=done گفت ولی همهٔ مراحل done نیستند،
+        # به partial تنزل بده — تسک واقعاً تمام نشده.
+        elif (not all_steps_done) and status_val == VERIFICATION_DONE and total_steps > 0:
+            logger.info(
+                f"verify: AI گفت done ولی {done_count}/{total_steps} مرحله done است — "
+                f"به partial تنزل می‌دهیم."
+            )
+            status_val = VERIFICATION_PARTIAL
+            # report.status هم به‌روز شود
+            report.status = VERIFICATION_PARTIAL
+
+        # 🆕 markdown checkbox state در task.prompt را به‌روز کن
+        try:
+            task.prompt = _sync_prompt_checkboxes(task.prompt or "", updated_steps)
+        except Exception as _e:
+            logger.debug(f"sync prompt checkboxes failed: {_e}")
 
     async with service._lock:
         service.reports.insert(0, report)

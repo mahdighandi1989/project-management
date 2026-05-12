@@ -89,6 +89,10 @@ class TaskCreate(BaseModel):
     merge_into_task_id: Optional[str] = None
     target_files: Optional[List[str]] = None
     acceptance_criteria: Optional[List[str]] = None
+    # 🆕 (Multi-pass Checklist) — وقتی تسک از طریق idea_to_prompt با multi-pass
+    # ساخته می‌شود، مراحل از پیش‌نمایش پرامپت برای ذخیره به همراه می‌آیند.
+    task_steps: Optional[List[Dict[str, Any]]] = None
+    overall_completion_pct: Optional[int] = None
 
 
 class SimilarityCheckRequest(BaseModel):

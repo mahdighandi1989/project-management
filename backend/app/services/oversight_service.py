@@ -288,6 +288,19 @@ class OversightTask:
     last_quality_audit_at: Optional[str] = None
     # manual_seen_count: چندبار از طریق manual create به همین تسک ادغام شده
     manual_seen_count: int = 0
+    # 🆕 (Multi-pass Checklist) لیست مراحل تسک (از multi-pass plan).
+    # هر مرحله یک dict با:
+    #   {id, title, scope, raw_excerpt, key_terms,
+    #    status: pending|done|partial|not_done|error,
+    #    completion_pct: 0-100,
+    #    remaining: str (آنچه هنوز باقی مانده),
+    #    evidence: str (شواهد از verify),
+    #    last_verified_at: ISO,
+    #    completed_at: ISO}
+    # verify خودکار این فیلدها را به‌روز می‌کند.
+    task_steps: List[Dict[str, Any]] = field(default_factory=list)
+    # درصد کلی پیشرفت (محاسبه‌شده از مراحل) — اگر task_steps خالی است، None
+    overall_completion_pct: Optional[int] = None
     # 🆕 (Inspector → Oversight) reference به context کامل (screenshots/logs/urls)
     # که در inspector_context/{id}.json ذخیره شده. None برای تسک‌های غیر-inspector.
     inspector_context_id: Optional[str] = None
@@ -1534,6 +1547,30 @@ class OversightService:
             target_files=target_files,
             acceptance_criteria=acceptance_criteria,
         )
+        # 🆕 (Multi-pass Checklist) — اگر idea_to_prompt مراحل تولید کرده، آن‌ها را
+        # به تسک متصل کن. هر مرحله شامل id/title/scope و وضعیت اولیه pending است.
+        incoming_steps = payload.get("task_steps") or []
+        if isinstance(incoming_steps, list) and incoming_steps:
+            normalized_steps: List[Dict[str, Any]] = []
+            for s in incoming_steps:
+                if not isinstance(s, dict):
+                    continue
+                normalized_steps.append({
+                    "id": s.get("id") or (len(normalized_steps) + 1),
+                    "title": (s.get("title") or "").strip() or f"مرحله {len(normalized_steps) + 1}",
+                    "scope": (s.get("scope") or "").strip(),
+                    "raw_excerpt": s.get("raw_excerpt", ""),
+                    "key_terms": s.get("key_terms") or [],
+                    "status": s.get("status") or "pending",
+                    "completion_pct": int(s.get("completion_pct") or 0),
+                    "remaining": s.get("remaining", ""),
+                    "evidence": s.get("evidence", ""),
+                    "last_verified_at": s.get("last_verified_at"),
+                    "completed_at": s.get("completed_at"),
+                })
+            if normalized_steps:
+                t.task_steps = normalized_steps
+                t.overall_completion_pct = int(payload.get("overall_completion_pct") or 0)
         async with self._lock:
             self.tasks.append(t)
             self._save_tasks()
@@ -1873,6 +1910,11 @@ class OversightService:
                 task.target_files = new_target_files
             if new_ac:
                 task.acceptance_criteria = new_ac
+            # 🆕 (Multi-pass Checklist) — task_steps را به‌روز کن
+            new_steps = new_data.get("task_steps") or []
+            if new_steps:
+                task.task_steps = new_steps
+                task.overall_completion_pct = 0  # reset
             if model_id:
                 task.models_used = [model_id]
             task.updated_at = now_iso()
@@ -2544,13 +2586,15 @@ class OversightService:
         )
         merged_parts.append("")
 
-        # نقشهٔ مراحل
+        # 🆕 چک‌لیست مراحل (verify خودکار این را به‌روز می‌کند)
         merged_parts.append(
-            f"## 🗺 نقشهٔ راه ({len(steps)} مرحله)\n\n"
-            "این تسک به مراحل کوچک‌تر تقسیم شده. هر مرحله به‌طور مستقل قابل پیاده‌سازی است.\n"
+            f"## 📋 چک‌لیست مراحل ({len(steps)} مرحله)\n\n"
+            "این تسک به مراحل کوچک‌تر تقسیم شده. **در هر verify خودکار، وضعیت هر مرحله "
+            "به‌صورت `[ ]` (انجام نشده)، `[~]` (ناقص)، یا `[x]` (انجام شده) به‌روز می‌شود.**\n"
+            "وقتی تمام مراحل `[x]` شدند، تسک به‌طور خودکار به «انجام شده» منتقل می‌شود.\n"
         )
         for s in steps:
-            merged_parts.append(f"{s['id']}. **{s['title']}** — {s['scope'][:200]}")
+            merged_parts.append(f"- [ ] **مرحله {s['id']}: {s['title']}** — {s['scope'][:300]}")
 
         # عناصر متادیتای ادغام‌شده
         all_target_files: List[str] = []
@@ -2623,6 +2667,24 @@ class OversightService:
             "raw_response": f"[multi-pass with {len(steps)} steps]",
             "_multi_pass": True,
             "_step_count": len(steps),
+            # 🆕 چک‌لیست مراحل برای ذخیره در OversightTask.task_steps
+            "task_steps": [
+                {
+                    "id": s["id"],
+                    "title": s["title"],
+                    "scope": s["scope"],
+                    "raw_excerpt": s.get("raw_excerpt", ""),
+                    "key_terms": s.get("key_terms", []),
+                    "status": "pending",  # pending|done|partial|not_done|error
+                    "completion_pct": 0,
+                    "remaining": "",
+                    "evidence": "",
+                    "last_verified_at": None,
+                    "completed_at": None,
+                }
+                for s in steps
+            ],
+            "overall_completion_pct": 0,
         }
 
     @staticmethod
@@ -4238,6 +4300,18 @@ class OversightService:
         next_actions = report.next_actions or []
         verifier_summary = (report.summary or "").strip()
 
+        # 🆕 (Multi-pass Checklist) — اگر task_steps دارد، مراحل ناقص/انجام‌نشده
+        # را به‌عنوان منبع اصلی remaining/AC استفاده کن. این focused تر است
+        # چون مدل دقیقاً می‌داند چه مرحله‌ای را تکمیل کند.
+        pending_steps: List[Dict[str, Any]] = []
+        done_steps: List[Dict[str, Any]] = []
+        for s in (task.task_steps or []):
+            st = (s.get("status") or "pending").lower()
+            if st == "done":
+                done_steps.append(s)
+            else:
+                pending_steps.append(s)
+
         # اگر remaining خالی است، از next_actions به‌عنوان AC استفاده کن
         new_ac = list(remaining) if remaining else list(next_actions)
         if not new_ac:
@@ -4245,6 +4319,18 @@ class OversightService:
             new_ac = list(task.acceptance_criteria or [])
         if not new_ac:
             new_ac = ["تکمیل کامل خواسته‌های اصلی تسک"]
+        # 🆕 اگر مراحل ناتمام داریم، AC را غنی‌تر کن
+        if pending_steps:
+            step_acs: List[str] = []
+            for s in pending_steps:
+                title = (s.get("title") or "").strip()
+                rem = (s.get("remaining") or "").strip()
+                if rem:
+                    step_acs.append(f"[مرحله {s.get('id')} — {title}] باقی‌مانده: {rem[:200]}")
+                else:
+                    step_acs.append(f"[مرحله {s.get('id')} — {title}] {(s.get('scope') or '')[:200]}")
+            # مراحل را پیش‌نشان (focus کاربر) و سپس remaining قبلی
+            new_ac = step_acs + [a for a in new_ac if a not in step_acs]
 
         # description مفصل
         desc_parts: List[str] = []
@@ -4252,6 +4338,27 @@ class OversightService:
             f"این پرامپت برای **دور {next_round}** ادامهٔ کار است. "
             "verifier در دور قبلی نشان داد کار به‌طور کامل انجام نشده."
         )
+        # 🆕 (Multi-pass Checklist) — وضعیت چک‌لیست در صدر description
+        if task.task_steps:
+            overall = task.overall_completion_pct
+            overall_str = f" — پیشرفت کلی: **{overall}%**" if overall is not None else ""
+            check_lines = [
+                f"📋 وضعیت چک‌لیست مراحل ({len(done_steps)}/{len(task.task_steps)} انجام‌شده){overall_str}:"
+            ]
+            for s in task.task_steps:
+                st = (s.get("status") or "pending").lower()
+                mark = "[x]" if st == "done" else ("[~]" if st == "partial" else "[ ]")
+                line = f"  - {mark} **مرحله {s.get('id')}: {(s.get('title') or '')[:120]}**"
+                if st != "done" and s.get("remaining"):
+                    line += f" — باقی‌مانده: {(s.get('remaining') or '')[:200]}"
+                check_lines.append(line)
+            desc_parts.append("\n".join(check_lines))
+            if pending_steps:
+                desc_parts.append(
+                    "🎯 **در این دور، فقط روی مراحل بالا که `[ ]` یا `[~]` دارند تمرکز کن.** "
+                    "مراحلی که `[x]` خورده‌اند قبلاً تأیید شده‌اند — نگران آن‌ها نباش، "
+                    "ولی regression نکن."
+                )
         if done_parts:
             desc_parts.append(
                 "✅ بخش‌هایی که در دور قبل انجام شد:\n"
@@ -4367,6 +4474,32 @@ class OversightService:
         except Exception as _e:
             logger.warning(f"build_strong_prompt for follow-up failed: {_e}")
             return None
+
+        # 🆕 (Multi-pass Checklist) — اگر task_steps هست، چک‌لیست را به انتهای
+        # پرامپت append کن تا در دور بعدی verify بتواند checkbox‌ها را همگام کند.
+        # وضعیت همان وضعیت فعلی است ([x] برای done، [~] برای partial، [ ] برای بقیه).
+        if task.task_steps:
+            checklist_lines: List[str] = [
+                "",
+                f"## 📋 چک‌لیست مراحل (دور {next_round})",
+                "",
+                "این مراحل از پرامپت اصلی نگه داشته شده‌اند تا verifier در هر دور "
+                "وضعیت هر مرحله را به‌روز کند. `[x]` = انجام‌شده، `[~]` = ناقص، "
+                "`[ ]` = هنوز انجام نشده.",
+                "",
+            ]
+            for s in task.task_steps:
+                st = (s.get("status") or "pending").lower()
+                mark = "x" if st == "done" else ("~" if st == "partial" else " ")
+                line = (
+                    f"- [{mark}] **مرحله {s.get('id')}: "
+                    f"{(s.get('title') or '')[:120]}** — "
+                    f"{(s.get('scope') or '')[:300]}"
+                )
+                if st != "done" and s.get("remaining"):
+                    line += f"\n      _باقی‌مانده: {(s.get('remaining') or '')[:200]}_"
+                checklist_lines.append(line)
+            new_prompt = (new_prompt or "") + "\n" + "\n".join(checklist_lines)
 
         return new_prompt
 
