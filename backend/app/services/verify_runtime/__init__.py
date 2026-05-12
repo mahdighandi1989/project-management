@@ -21,6 +21,18 @@ from .ac_schema import (
     normalize_task_steps,
 )
 from .ac_enricher import enrich_acs_with_verify_plans
+from .base import (
+    PROBE_STATUS_ERROR,
+    PROBE_STATUS_FAILED,
+    PROBE_STATUS_PASSED,
+    PROBE_STATUS_SKIPPED,
+    PROBE_STATUSES,
+    ProbeContext,
+    ProbeError,
+    RuntimeProbeResult,
+)
+from .static_probe import run_static_probe
+from .manual_probe import run_manual_probe
 
 __all__ = [
     "AC_METHODS",
@@ -30,4 +42,14 @@ __all__ = [
     "normalize_task_step",
     "normalize_task_steps",
     "enrich_acs_with_verify_plans",
+    "PROBE_STATUS_PASSED",
+    "PROBE_STATUS_FAILED",
+    "PROBE_STATUS_ERROR",
+    "PROBE_STATUS_SKIPPED",
+    "PROBE_STATUSES",
+    "ProbeContext",
+    "ProbeError",
+    "RuntimeProbeResult",
+    "run_static_probe",
+    "run_manual_probe",
 ]
