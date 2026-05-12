@@ -9,15 +9,29 @@ Oversight Verify PDF Export
 
 اگر playwright در دسترس نباشد (مثلاً در تست‌های unit بدون browser)،
 fallback به متن plain که با فرمت .txt به‌جای .pdf فرستاده می‌شود.
+
+نکات runtime:
+- از `wait_until="domcontentloaded"` استفاده می‌شود (نه `networkidle`) چون
+  CDN فونت ممکن است در محیط Render قابل دسترسی نباشد و `networkidle`
+  تا ۱۵ ثانیه بلاک می‌کند. فونت‌های fallback (Tahoma/Arial) Persian را
+  درست رندر می‌کنند.
+- یک Semaphore سراسری PDF generation را serialize می‌کند تا چند verify
+  هم‌زمان OOM نکنند (هر playwright instance ~150-250MB).
 """
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# 🔒 PDF generation یک منبع سنگین است — chromium instance حدود 200MB RAM
+# می‌گیرد. این semaphore تضمین می‌کند فقط یک render هم‌زمان رخ دهد تا روی
+# پلتفرم‌هایی با RAM محدود (مثل Render free tier) OOM نشویم.
+_PDF_RENDER_SEMAPHORE = asyncio.Semaphore(1)
 
 
 _STATUS_BADGE = {
@@ -50,6 +64,20 @@ def _short_title(title: str, max_len: int = 80) -> str:
     return t[: max_len - 1].rstrip() + "…"
 
 
+def _md_escape(s: str) -> str:
+    """escape کاراکترهای Markdown که می‌توانند parse caption تلگرام را
+    بشکنند: `_`، `*`، `` ` ``، `[`. (parser legacy Markdown تلگرام)."""
+    if not s:
+        return ""
+    out = []
+    for ch in s:
+        if ch in ("_", "*", "`", "["):
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def build_verify_checklist_message(
     task: Any,
     report: Any,
@@ -73,14 +101,18 @@ def build_verify_checklist_message(
     confidence = float(getattr(report, "confidence_score", 0.0) or 0.0)
 
     lines.append(f"{emoji} *Verify: {label.lower()}*")
-    lines.append(f"📌 _{_short_title(title, 100)}_")
+    # عنوان داخل `_..._` (italic) — کاراکترهای _ * ` [ را escape کن تا
+    # parser Markdown تلگرام نشکند (مثلاً برای task با underscore در نام).
+    lines.append(f"📌 _{_md_escape(_short_title(title, 100))}_")
     if project:
-        lines.append(f"📁 `{project}`")
+        # backticks برای code — کافیست خود backtick داخل project نباشد
+        safe_project = project.replace("`", "ʼ")
+        lines.append(f"📁 `{safe_project}`")
     meta_bits = []
     if priority:
-        meta_bits.append(f"priority: *{priority}*")
+        meta_bits.append(f"priority: *{_md_escape(priority)}*")
     if task_type:
-        meta_bits.append(f"نوع: `{task_type}`")
+        meta_bits.append(f"نوع: `{task_type.replace('`', 'ʼ')}`")
     if streak:
         meta_bits.append(f"streak: {streak}")
     if confidence > 0:
@@ -108,11 +140,11 @@ def build_verify_checklist_message(
             st = (s.get("status") or "pending").lower()
             mark, _ = _STEP_MARK.get(st, ("⬜", "#6b7280"))
             sid = s.get("id", "?")
-            t_short = _short_title(s.get("title") or "", 70)
+            t_short = _md_escape(_short_title(s.get("title") or "", 70))
             line = f"{mark} مرحله {sid}: {t_short}"
             # اگر partial و remaining خیلی کوتاه است، یک hint اضافه کن
             if st in ("partial", "not_done") and s.get("remaining"):
-                rem = _short_title(s.get("remaining"), 50)
+                rem = _md_escape(_short_title(s.get("remaining"), 50))
                 line += f"\n    ⏳ {rem}"
             lines.append(line)
             shown += 1
@@ -360,25 +392,48 @@ async def build_verify_report_pdf(task: Any, report: Any) -> Tuple[bytes, str]:
         if not PLAYWRIGHT_AVAILABLE:
             raise RuntimeError("playwright not available")
         from playwright.async_api import async_playwright
-        playwright = await async_playwright().start()
-        try:
-            browser = await playwright.chromium.launch(
-                headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"]
-            )
+        # 🔒 serialize کن — جلوگیری از چند chromium instance هم‌زمان
+        async with _PDF_RENDER_SEMAPHORE:
+            playwright = await async_playwright().start()
             try:
-                context = await browser.new_context()
-                page = await context.new_page()
-                await page.set_content(html_doc, wait_until="networkidle", timeout=15000)
-                pdf_bytes = await page.pdf(
-                    format="A4",
-                    margin={"top": "15mm", "right": "15mm", "bottom": "15mm", "left": "15mm"},
-                    print_background=True,
+                browser = await playwright.chromium.launch(
+                    headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"]
                 )
-                return pdf_bytes, f"{filename_base}.pdf"
+                try:
+                    context = await browser.new_context()
+                    page = await context.new_page()
+                    # ⚠ از `networkidle` استفاده نکن — اگر CDN فونت قابل
+                    # دسترسی نباشد، تا ۱۵ ثانیه می‌چرخد. `domcontentloaded`
+                    # سریع است و فونت‌های fallback (Tahoma/Arial) Persian
+                    # را به‌خوبی رندر می‌کنند.
+                    await page.set_content(
+                        html_doc,
+                        wait_until="domcontentloaded",
+                        timeout=8000,
+                    )
+                    # یک فرصت کوتاه به مرورگر بده تا CSS را اعمال کند
+                    # (شامل تلاش غیرblocking برای فونت). اگر CDN در دسترس
+                    # نبود، بعد از 600ms با fallback ادامه می‌دهیم.
+                    try:
+                        await page.wait_for_timeout(600)
+                    except Exception:
+                        pass
+                    pdf_bytes = await page.pdf(
+                        format="A4",
+                        margin={"top": "15mm", "right": "15mm", "bottom": "15mm", "left": "15mm"},
+                        print_background=True,
+                    )
+                    return pdf_bytes, f"{filename_base}.pdf"
+                finally:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
             finally:
-                await browser.close()
-        finally:
-            await playwright.stop()
+                try:
+                    await playwright.stop()
+                except Exception:
+                    pass
     except Exception as e:
         logger.warning(f"PDF render via playwright failed ({e}); falling back to HTML attachment")
         return html_doc.encode("utf-8"), f"{filename_base}.html"

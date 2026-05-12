@@ -1428,68 +1428,78 @@ async def verify_task(
     except Exception:
         pass
 
-    # 🔔 notification — silent skip اگر env تنظیم نشده باشد
-    try:
-        from .notification_service import notification_service
-        from .oversight_verify_pdf import (
-            build_verify_checklist_message,
-            build_verify_report_pdf,
-        )
-        # نگاشت status → event دقیق
-        status_to_event = {
-            "done": "verify_done",
-            "partial": "verify_partial",
-            "not_done": "verify_not_done",
-            "regressed": "verify_regressed",
-            "needs_clarification": "verify_clarification",
-        }
-        event = status_to_event.get(task.verification_status, "verify_done")
-
-        # 🆕 (Checklist Notification) — متن چک‌لیستی کوتاه به‌عنوان caption،
-        # و PDF کامل (شامل متن کامل پرامپت + جزئیات همهٔ مراحل) به‌عنوان پیوست.
-        # اگر playwright در دسترس نباشد، fallback به HTML attachment.
-        msg_text = build_verify_checklist_message(task, report)
-        # streak تکمیلی در caption
-        if task.confirmation_streak and streak_required > 1 and "streak:" not in msg_text:
-            msg_text += f"\n🔁 streak: {task.confirmation_streak}/{streak_required}"
-
-        # تولید PDF (best-effort — اگر failed، attachment=None و فقط متن می‌رود)
-        attachment_payload: Optional[Dict[str, Any]] = None
+    # 🔔 notification — در background اجرا می‌شود تا API verify بدون انتظار
+    # برای PDF generation (که ممکن است چند ثانیه طول بکشد) پاسخ دهد.
+    async def _send_verify_notification_bg(_task: "OversightTask", _report: "OversightReport") -> None:
         try:
-            pdf_bytes, pdf_filename = await build_verify_report_pdf(task, report)
-            attachment_payload = {
-                "bytes": pdf_bytes,
-                "filename": pdf_filename,
+            from .notification_service import notification_service
+            from .oversight_verify_pdf import (
+                build_verify_checklist_message,
+                build_verify_report_pdf,
+            )
+            # نگاشت status → event دقیق
+            status_to_event = {
+                "done": "verify_done",
+                "partial": "verify_partial",
+                "not_done": "verify_not_done",
+                "regressed": "verify_regressed",
+                "needs_clarification": "verify_clarification",
             }
-        except Exception as _pdf_err:
-            logger.warning(f"verify pdf generation failed: {_pdf_err}")
-            attachment_payload = None
+            event = status_to_event.get(_task.verification_status, "verify_done")
 
-        # PR link اگر موجود
-        extra_buttons = None
-        if task.applied_evidence:
-            pr_url = task.applied_evidence.get("pr_url")
-            if pr_url:
-                extra_buttons = [{"text": "🔀 دیدن PR", "url": pr_url}]
-        # priority برای gate و hashtag
-        priority = task.priority or "low"
-        # regressed همیشه بحرانی محسوب می‌شود
-        if task.verification_status == "regressed":
-            priority = "critical"
+            # 🆕 (Checklist Notification) — متن چک‌لیستی کوتاه به‌عنوان caption،
+            # و PDF کامل (شامل متن کامل پرامپت + جزئیات همهٔ مراحل) به‌عنوان پیوست.
+            msg_text = build_verify_checklist_message(_task, _report)
+            # streak تکمیلی در caption
+            if _task.confirmation_streak and streak_required > 1 and "streak:" not in msg_text:
+                msg_text += f"\n🔁 streak: {_task.confirmation_streak}/{streak_required}"
 
-        await notification_service.notify_event(
-            event,
-            msg_text,
-            subject=f"Verify {task.verification_status}",
-            priority=priority,
-            project_name=task.project_full_name,
-            watched_id=task.watched_id,
-            extra_hashtags=[task.type] if task.type else None,
-            extra_buttons=extra_buttons,
-            attachment=attachment_payload,
-        )
-    except Exception as e:
-        logger.debug(f"notification skipped: {e}")
+            # تولید PDF (best-effort — اگر failed، attachment=None و فقط متن می‌رود)
+            attachment_payload: Optional[Dict[str, Any]] = None
+            try:
+                pdf_bytes, pdf_filename = await build_verify_report_pdf(_task, _report)
+                attachment_payload = {
+                    "bytes": pdf_bytes,
+                    "filename": pdf_filename,
+                }
+            except Exception as _pdf_err:
+                logger.warning(f"verify pdf generation failed: {_pdf_err}")
+                attachment_payload = None
+
+            # PR link اگر موجود — applied_evidence ممکن است dict/None/خراب باشد
+            extra_buttons = None
+            ae = _task.applied_evidence
+            if isinstance(ae, dict):
+                pr_url = ae.get("pr_url")
+                if pr_url:
+                    extra_buttons = [{"text": "🔀 دیدن PR", "url": pr_url}]
+            # priority برای gate و hashtag
+            priority = _task.priority or "low"
+            # regressed همیشه بحرانی محسوب می‌شود
+            if _task.verification_status == "regressed":
+                priority = "critical"
+
+            await notification_service.notify_event(
+                event,
+                msg_text,
+                subject=f"Verify {_task.verification_status}",
+                priority=priority,
+                project_name=_task.project_full_name,
+                watched_id=_task.watched_id,
+                extra_hashtags=[_task.type] if _task.type else None,
+                extra_buttons=extra_buttons,
+                attachment=attachment_payload,
+            )
+        except Exception as e:
+            logger.debug(f"notification skipped: {e}")
+
+    try:
+        # snapshot از task فعلی بگیر — اگر بعد از این تغییری روی task شد،
+        # background task نسخهٔ خوانده‌شده در همین لحظه را می‌فرستد.
+        import asyncio as _asyncio
+        _asyncio.create_task(_send_verify_notification_bg(task, report))
+    except Exception as _e:
+        logger.debug(f"schedule notification failed: {_e}")
 
     return {
         "task": task.to_dict(),
