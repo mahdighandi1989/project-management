@@ -68,6 +68,9 @@ class IdeaToPromptRequest(BaseModel):
     priority: str = "medium"
     model_id: Optional[str] = None
     model_ids: Optional[List[str]] = None
+    # 🆕 multi_pass_mode: "auto" | "always" | "never"
+    # auto = heuristic، always = همیشه تقسیم مرحله‌ای، never = single-pass
+    multi_pass_mode: str = "auto"
 
 
 class TaskCreate(BaseModel):
@@ -338,6 +341,7 @@ async def task_from_idea(payload: IdeaToPromptRequest):
             priority=payload.priority,
             model_id=payload.model_id,
             model_ids=payload.model_ids,
+            multi_pass_mode=payload.multi_pass_mode,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

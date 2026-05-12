@@ -2680,16 +2680,30 @@ class OversightService:
         priority: str = "medium",
         model_id: Optional[str] = None,
         model_ids: Optional[List[str]] = None,
-        _skip_multi_pass: bool = False,  # 🆕 internal flag — جلوگیری از recursion
+        multi_pass_mode: str = "auto",  # 🆕 "auto" | "always" | "never"
+        _skip_multi_pass: bool = False,  # internal flag — جلوگیری از recursion
     ) -> Dict[str, Any]:
         if not idea.strip():
             raise ValueError("ایده خالی است")
 
-        # 🆕 (Multi-pass) — اگر ایده پیچیده است، آن را به مراحل کوچک می‌شکنیم
-        # و هر مرحله را جدا به پرامپت تبدیل می‌کنیم. برای مدل‌های کم‌قدرت
-        # (مثل DeepSeek Chat) این بسیار قوی‌تر از single-pass است.
+        # 🆕 (Multi-pass) — تقسیم به مراحل کوچک برای کیفیت بهتر.
+        # سه حالت با parameter `multi_pass_mode`:
+        #   "auto" (default): اگر heuristic (طول، bullet، URL، connectors) پیچیدگی
+        #     تشخیص داد، multi-pass. وگرنه single-pass (سریع‌تر).
+        #   "always": همیشه multi-pass — حتی idea ساده. AI پلن می‌سازد، اگر فقط
+        #     ۱ step تشخیص داد، خودکار به single-pass fallback می‌شود.
+        #   "never": همیشه single-pass — overhead AI plan ندارد.
+        #
         # `_skip_multi_pass` parameter (نه instance attribute) برای concurrency-safety.
-        if self._is_complex_idea(idea) and not _skip_multi_pass:
+        mode = (multi_pass_mode or "auto").lower().strip()
+        should_try_multi_pass = (
+            not _skip_multi_pass
+            and (
+                mode == "always"
+                or (mode == "auto" and self._is_complex_idea(idea))
+            )
+        )
+        if should_try_multi_pass:
             try:
                 result = await self._idea_to_prompt_multi_pass(
                     idea=idea,

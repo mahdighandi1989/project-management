@@ -845,6 +845,9 @@ export default function OversightPage() {
   const [ideaType, setIdeaType] = useState('idea');
   const [ideaPriority, setIdeaPriority] = useState('medium');
   const [ideaDeadline, setIdeaDeadline] = useState('');
+  // 🆕 (Multi-pass) حالت تبدیل ایده به پرامپت
+  // "auto" = heuristic، "always" = همیشه تقسیم مرحله‌ای، "never" = single-pass
+  const [multiPassMode, setMultiPassMode] = useState<'auto' | 'always' | 'never'>('auto');
   const [generating, setGenerating] = useState(false);
   const [genPhase, setGenPhase] = useState('');
   const [genPct, setGenPct] = useState(0);
@@ -1267,6 +1270,7 @@ export default function OversightPage() {
           priority: ideaPriority,
           model_id: selectedModelIds[0],
           model_ids: selectedModelIds.length > 1 ? selectedModelIds : undefined,
+          multi_pass_mode: multiPassMode,
         }),
       });
       if (res.ok) {
@@ -2411,6 +2415,23 @@ export default function OversightPage() {
                   onChange={(e) => setIdeaDeadline(e.target.value)}
                   className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
                 />
+              </div>
+              <div>
+                <label
+                  className="block text-xs mb-1 dark:text-gray-300"
+                  title="auto: heuristic. always: همیشه AI ایده را به مراحل تقسیم می‌کند (کیفیت بهتر، ~10s overhead). never: تک‌مرحله."
+                >
+                  حالت تبدیل
+                </label>
+                <select
+                  value={multiPassMode}
+                  onChange={(e) => setMultiPassMode(e.target.value as 'auto' | 'always' | 'never')}
+                  className="w-full p-2 border rounded-lg dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                >
+                  <option value="auto">🤖 Auto (هوشمند — پیش‌فرض)</option>
+                  <option value="always">🎯 همیشه تقسیم مرحله‌ای</option>
+                  <option value="never">⚡ تک‌مرحله سریع</option>
+                </select>
               </div>
             </div>
 
