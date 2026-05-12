@@ -2446,7 +2446,33 @@ class NotificationService:
     async def _compose_run_pipeline_task(
         self, chat_id_str: str, buf: Any,
     ) -> Dict[str, Any]:
-        """اصل اجرای پایپ‌لاین task mode — بعد از validate + remove_keyboard."""
+        """اصل اجرای پایپ‌لاین task mode — بعد از validate + remove_keyboard.
+
+        🛡 (audit fix) — wrapper try/finally تضمین می‌کند که اگر
+        `buf.temp_activated_model_id` ست شده (یعنی کاربر مدلی را در همین
+        session موقتاً فعال کرد)، پس از اتمام pipeline (موفقیت یا خطا)
+        خودکار revert می‌شود.
+        """
+        # capture activated model_id قبل از اجرا (در صورت finalize buf،
+        # ممکن است reference بعداً به‌روز نشود).
+        temp_activated_id = getattr(buf, "temp_activated_model_id", None)
+        try:
+            return await self._compose_run_pipeline_task_inner(chat_id_str, buf)
+        finally:
+            if temp_activated_id:
+                try:
+                    from .oversight_model_temp_activate import temp_revert_model
+                    await temp_revert_model(
+                        temp_activated_id,
+                        trigger=f"telegram-compose-done-{chat_id_str}",
+                    )
+                except Exception as _rev_e:
+                    logger.warning(f"compose temp revert failed: {_rev_e}")
+
+    async def _compose_run_pipeline_task_inner(
+        self, chat_id_str: str, buf: Any,
+    ) -> Dict[str, Any]:
+        """بدنهٔ اصلی pipeline (همان _compose_run_pipeline_task سابق)."""
         from .oversight_service import get_oversight_service
         from .oversight_telegram_compose import get_compose_service
         from .oversight_progress import get_progress_tracker
@@ -3091,15 +3117,19 @@ class NotificationService:
                 )
                 await tg.send(
                     f"✅ مدل `{res.get('name', model_id)}` موقتاً فعال شد. "
-                    f"اکنون submit را دوباره اجرا می‌کنم...",
+                    f"اکنون submit را دوباره اجرا می‌کنم...\n"
+                    f"_(پس از اتمام، خودکار غیرفعال خواهد شد.)_",
                     silent=True,
                 )
             except Exception as e:
                 await tg.send(f"❌ فعال‌سازی موقت ناموفق: {str(e)[:200]}", silent=False)
                 return {"ok": True, "handled": "compose_temp_activate_failed"}
-            # retry submit — compose buffer هنوز در سرور است (لغو نشده)
+            # 🆕 (audit fix) — track activated model در buffer تا پس از اتمام
+            # extraction خودکار revert شود
             from .oversight_telegram_compose import get_compose_service
-            buf = get_compose_service().get(chat_id_str)
+            cs = get_compose_service()
+            await cs.set_temp_activated_model(chat_id_str, model_id)
+            buf = cs.get(chat_id_str)
             if buf is None:
                 await tg.send("⚠️ compose منقضی شد. دوباره فایل بفرست.", silent=True)
                 return {"ok": True, "handled": "compose_expired_after_activate"}
