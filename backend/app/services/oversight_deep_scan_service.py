@@ -935,10 +935,30 @@ async def build_deep_context_for_idea(
         files_summary = "\n".join(
             f"{kinds.get(p, 'other'):>10}  {p}" for p in all_files[:max_files_summary]
         )
-        deep_files_blob = "\n\n".join(
-            f"=== {p} ===\n{_with_line_numbers(c, max_file_lines)}"
-            for p, c in list(deep_contents.items())[:max_deep_read]
-        )
+        # 🛡 (audit fix CRITICAL #2) — سقف total bytes برای جلوگیری از context overflow.
+        # 60 فایل × 120KB = 7.2MB → برای GPT-4o/Claude خیلی زیاد. سقف ~3MB
+        # (~750K tokens، در محدودهٔ Gemini 1M و Claude 200K). فایل‌های اولویت
+        # بالاتر (با امتیاز بیشتر) اول می‌آیند، اگر cap رد شد توقف.
+        TOTAL_BYTES_CAP = 3_000_000  # ~3MB total deep context
+        deep_blob_parts: List[str] = []
+        running_total = 0
+        added_count = 0
+        truncated_count = 0
+        for p, c in list(deep_contents.items())[:max_deep_read]:
+            piece = f"=== {p} ===\n{_with_line_numbers(c, max_file_lines)}"
+            if running_total + len(piece) > TOTAL_BYTES_CAP:
+                truncated_count = len(deep_contents) - added_count
+                break
+            deep_blob_parts.append(piece)
+            running_total += len(piece) + 2  # +2 for "\n\n" separator
+            added_count += 1
+        if truncated_count > 0:
+            deep_blob_parts.append(
+                f"\n\n... [TOTAL CONTEXT CAP {TOTAL_BYTES_CAP // 1024 // 1024}MB رسید — "
+                f"{truncated_count} فایل دیگر در deep_files نیامد. files_summary بالا "
+                f"همهٔ فایل‌ها را نشان می‌دهد.]"
+            )
+        deep_files_blob = "\n\n".join(deep_blob_parts)
         package_files_blob = "\n\n".join(
             f"=== {n} ===\n{c[:4000]}" for n, c in dep_contents.items()
         )
