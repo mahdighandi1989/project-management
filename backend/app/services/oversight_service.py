@@ -2446,11 +2446,11 @@ class OversightService:
         logger.info(f"multi-pass: {len(steps)} مرحله شناسایی شد")
 
         # Pass 2..N: برای هر مرحله، single-pass idea_to_prompt با scope محدود
-        # نکته: scope هر step به‌عنوان مینی-idea به idea_to_prompt داده می‌شود.
-        # برای جلوگیری از infinite recursion، _is_complex_idea را روی sub-step
-        # bypass می‌کنیم — یعنی single-pass استفاده می‌شود.
-        sub_results: List[Dict[str, Any]] = []
-        for step in steps:
+        # 🆕 PARALLEL execution — کاهش زمان از O(N × 30s) به O(30s) برای N step
+        import asyncio as _asyncio
+
+        async def _generate_for_step(step: Dict[str, Any]) -> Dict[str, Any]:
+            """نسل sub-prompt برای یک مرحله — fail-safe (fallback به placeholder)."""
             mini_idea = (
                 f"{step['title']}\n\n"
                 f"{step['scope']}\n\n"
@@ -2459,10 +2459,8 @@ class OversightService:
                 f"--- کلیدواژه‌ها ---\n"
                 f"{', '.join(step['key_terms']) if step['key_terms'] else '(ندارد)'}"
             )
-            logger.info(f"multi-pass: Pass {step['id']} — generating for «{step['title'][:60]}»")
+            logger.info(f"multi-pass: Pass {step['id']} — «{step['title'][:60]}»")
             try:
-                # فراخوانی idea_to_prompt با bypass complex-check
-                # روش: مستقیم single-pass logic را invoke می‌کنیم با یک flag
                 sub = await self._idea_to_prompt_single_pass(
                     idea=mini_idea,
                     watched_id=watched_id,
@@ -2471,21 +2469,57 @@ class OversightService:
                     model_id=model_id,
                     model_ids=model_ids,
                 )
-                sub_results.append({"step": step, "result": sub})
+                return {"step": step, "result": sub}
             except Exception as se:
                 logger.warning(f"multi-pass: step {step['id']} failed: {se}")
-                # fallback: یک sub minimal با فقط title + scope
+                return {
+                    "step": step,
+                    "result": {
+                        "title": step["title"],
+                        "prompt": (
+                            f"## هدف\n{step['scope']}\n\n"
+                            f"## بخش مربوط از متن کاربر\n```\n{step['raw_excerpt']}\n```\n\n"
+                            f"## معیار پذیرش\n- پیاده‌سازی موفق این مرحله"
+                        ),
+                        "target_files": [],
+                        "target_locations": [],
+                        "related_files": [],
+                        "acceptance_criteria": [],
+                    },
+                }
+
+        # موازی اجرا — تا 6 step هم در ~30s تمام شوند (نه 3 دقیقه)
+        # return_exceptions=True برای ایمنی: حتی اگر یک step به‌طور غیرمنتظره
+        # exception throw کرد، بقیه ادامه می‌دهند.
+        gathered = await _asyncio.gather(
+            *[_generate_for_step(step) for step in steps],
+            return_exceptions=True,
+        )
+        # فیلتر valid + placeholder برای exception ها
+        sub_results = []
+        for i, r in enumerate(gathered):
+            if isinstance(r, Exception):
+                step = steps[i]
+                logger.warning(f"multi-pass: step {step['id']} raised: {r}")
                 sub_results.append({
                     "step": step,
                     "result": {
                         "title": step["title"],
-                        "prompt": f"## هدف\n{step['scope']}\n\n## معیار پذیرش\n- پیاده‌سازی موفق",
+                        "prompt": (
+                            f"## هدف\n{step['scope']}\n\n"
+                            f"## ⚠️ خطا در تولید جزئیات\n`{str(r)[:200]}`\n\n"
+                            f"## معیار پذیرش\n- پیاده‌سازی موفق این مرحله"
+                        ),
                         "target_files": [],
                         "target_locations": [],
                         "related_files": [],
                         "acceptance_criteria": [],
                     },
                 })
+            elif isinstance(r, dict):
+                sub_results.append(r)
+        # حفظ ترتیب بر اساس step.id
+        sub_results.sort(key=lambda r: r["step"]["id"])
 
         if not sub_results:
             return None
@@ -2629,18 +2663,14 @@ class OversightService:
     ) -> Dict[str, Any]:
         """invocation single-pass بدون چک complex (برای استفاده داخل multi-pass).
 
-        این تابع همان منطق idea_to_prompt است ولی **بدون** redirect به multi-pass.
-        برای جلوگیری از infinite recursion.
+        برای جلوگیری از infinite recursion، parameter `_skip_multi_pass=True`
+        به idea_to_prompt پاس می‌شود (نه instance attribute — تا concurrency-safe باشد).
         """
-        # یک flag در state موقت می‌گذاریم
-        self._skip_multi_pass = True
-        try:
-            return await self.idea_to_prompt(
-                idea=idea, watched_id=watched_id, type_=type_,
-                priority=priority, model_id=model_id, model_ids=model_ids,
-            )
-        finally:
-            self._skip_multi_pass = False
+        return await self.idea_to_prompt(
+            idea=idea, watched_id=watched_id, type_=type_,
+            priority=priority, model_id=model_id, model_ids=model_ids,
+            _skip_multi_pass=True,
+        )
 
     async def idea_to_prompt(
         self,
@@ -2650,6 +2680,7 @@ class OversightService:
         priority: str = "medium",
         model_id: Optional[str] = None,
         model_ids: Optional[List[str]] = None,
+        _skip_multi_pass: bool = False,  # 🆕 internal flag — جلوگیری از recursion
     ) -> Dict[str, Any]:
         if not idea.strip():
             raise ValueError("ایده خالی است")
@@ -2657,9 +2688,8 @@ class OversightService:
         # 🆕 (Multi-pass) — اگر ایده پیچیده است، آن را به مراحل کوچک می‌شکنیم
         # و هر مرحله را جدا به پرامپت تبدیل می‌کنیم. برای مدل‌های کم‌قدرت
         # (مثل DeepSeek Chat) این بسیار قوی‌تر از single-pass است.
-        # `_skip_multi_pass` برای جلوگیری از infinite recursion (وقتی خودش از
-        # داخل multi-pass فراخوانی می‌شود).
-        if self._is_complex_idea(idea) and not getattr(self, "_skip_multi_pass", False):
+        # `_skip_multi_pass` parameter (نه instance attribute) برای concurrency-safety.
+        if self._is_complex_idea(idea) and not _skip_multi_pass:
             try:
                 result = await self._idea_to_prompt_multi_pass(
                     idea=idea,
