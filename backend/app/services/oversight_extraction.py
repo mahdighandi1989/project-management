@@ -623,6 +623,183 @@ def _extract_xlsx_sheets(path: Path) -> List[Tuple[str, str]]:
         raise ExtractionError(f"openpyxl failed: {e}")
 
 
+# ─────────────── Format Diversity (Stage 9) ───────────────
+
+_EXT_TO_MIME: Dict[str, str] = {
+    # text
+    ".txt": "text/plain", ".md": "text/markdown", ".markdown": "text/markdown",
+    ".csv": "text/csv", ".tsv": "text/tab-separated-values",
+    ".log": "text/plain", ".ini": "text/plain",
+    ".json": "application/json", ".jsonl": "application/x-ndjson",
+    ".ndjson": "application/x-ndjson",
+    ".xml": "application/xml", ".html": "text/html", ".htm": "text/html",
+    ".yaml": "application/yaml", ".yml": "application/yaml",
+    ".toml": "application/toml",
+    # code
+    ".py": "text/x-python", ".pyw": "text/x-python",
+    ".js": "application/javascript", ".mjs": "application/javascript",
+    ".ts": "application/typescript", ".tsx": "application/typescript",
+    ".jsx": "application/javascript",
+    ".java": "text/x-java", ".kt": "text/x-kotlin",
+    ".c": "text/x-c", ".h": "text/x-c", ".cpp": "text/x-c++",
+    ".hpp": "text/x-c++",
+    ".cs": "text/x-csharp", ".go": "text/x-go", ".rs": "text/x-rust",
+    ".rb": "text/x-ruby", ".php": "application/x-php",
+    ".scala": "text/x-scala", ".clj": "text/x-clojure",
+    ".swift": "text/x-swift", ".dart": "text/x-dart",
+    ".lua": "text/x-lua", ".pl": "text/x-perl",
+    ".sh": "application/x-shellscript", ".bash": "application/x-shellscript",
+    ".ps1": "text/x-powershell",
+    ".sql": "application/sql",
+    ".css": "text/css", ".scss": "text/x-scss",
+    ".r": "text/x-r",
+    ".ex": "text/x-elixir", ".exs": "text/x-elixir",
+    ".elm": "text/x-elm", ".vue": "text/x-vue",
+    ".ipynb": "application/x-ipynb+json",
+    "dockerfile": "text/x-dockerfile",
+    # documents
+    ".pdf": "application/pdf",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".rtf": "application/rtf",
+    ".odt": "application/vnd.oasis.opendocument.text",
+    ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+    ".odp": "application/vnd.oasis.opendocument.presentation",
+    ".epub": "application/epub+zip",
+    # image
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
+    ".bmp": "image/bmp", ".tiff": "image/tiff", ".tif": "image/tiff",
+    ".heic": "image/heic", ".svg": "image/svg+xml",
+    # audio
+    ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg",
+    ".m4a": "audio/mp4", ".flac": "audio/flac", ".aac": "audio/aac",
+    ".opus": "audio/opus",
+    # video
+    ".mp4": "video/mp4", ".mov": "video/quicktime", ".avi": "video/x-msvideo",
+    ".mkv": "video/x-matroska", ".webm": "video/webm", ".m4v": "video/mp4",
+    # archive
+    ".zip": "application/zip", ".tar": "application/x-tar",
+    ".gz": "application/gzip", ".7z": "application/x-7z-compressed",
+}
+
+
+def _guess_mime_from_extension(filename: str) -> Optional[str]:
+    """تخمین mime از پسوند فایل. اگر mime موجود application/octet-stream است،
+    این تابع mime دقیق‌تر می‌دهد.
+    """
+    import os
+    if not filename:
+        return None
+    base = os.path.basename(filename).lower()
+    # special: Dockerfile
+    if base == "dockerfile" or base.startswith("dockerfile."):
+        return "text/x-dockerfile"
+    _, ext = os.path.splitext(base)
+    return _EXT_TO_MIME.get(ext)
+
+
+async def _extract_ipynb(
+    path: Path, fe: "FileExtraction", repo: "ExtractionRepo",
+    completed: set, persist_segment_fn,
+) -> None:
+    """parse Jupyter Notebook → هر cell یک segment.
+
+    cells: code, markdown, raw. outputs (اگر هست) به‌عنوان suffix.
+    """
+    import json as _json
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception as e:
+        raise ExtractionError(f"ipynb parse failed: {e}")
+    cells = data.get("cells") or []
+    await repo.update_extraction(fe.id, total_segments=len(cells))
+    for idx, cell in enumerate(cells, start=1):
+        if idx in completed:
+            continue
+        ctype = cell.get("cell_type") or "unknown"
+        src_raw = cell.get("source") or ""
+        src = "".join(src_raw) if isinstance(src_raw, list) else str(src_raw)
+        out_text = ""
+        outputs = cell.get("outputs") or []
+        if outputs and ctype == "code":
+            out_parts: List[str] = []
+            for o in outputs[:20]:
+                if "text" in o:
+                    t = o["text"]
+                    out_parts.append("".join(t) if isinstance(t, list) else str(t))
+                elif o.get("data", {}).get("text/plain"):
+                    tp = o["data"]["text/plain"]
+                    out_parts.append("".join(tp) if isinstance(tp, list) else str(tp))
+            if out_parts:
+                out_text = "\n=== OUTPUT ===\n" + "\n".join(out_parts)[:5000]
+        full = f"# Cell type: {ctype}\n{src}{out_text}"
+        await persist_segment_fn(
+            idx, f"cell {idx} ({ctype})", full, f"cell_idx={idx}",
+        )
+
+
+async def _extract_zip_archive(
+    path: Path, fe: "FileExtraction", repo: "ExtractionRepo",
+    completed: set, persist_segment_fn,
+) -> None:
+    """extract محتویات zip — هر فایل text-readable یک segment با path-as-title.
+    فایل‌های binary فقط با نام و حجم درج می‌شوند.
+    """
+    import zipfile
+    try:
+        zf = zipfile.ZipFile(str(path), "r")
+    except Exception as e:
+        raise ExtractionError(f"zip open failed: {e}")
+    try:
+        names = [n for n in zf.namelist() if not n.endswith("/")]
+        # سقف ایمنی: ۱۰۰۰ فایل
+        if len(names) > 1000:
+            names = names[:1000]
+        await repo.update_extraction(fe.id, total_segments=len(names) + 1)
+        # text-decode safe per file
+        for idx, name in enumerate(names, start=1):
+            if idx in completed:
+                continue
+            try:
+                with zf.open(name) as f:
+                    raw = f.read(2 * 1024 * 1024)  # تا ۲MB per inner file
+            except Exception as e:
+                await persist_segment_fn(
+                    idx, name, f"[خطا در خواندن: {str(e)[:100]}]", f"zip_entry={name}",
+                )
+                continue
+            # تلاش text decode
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                try:
+                    text = raw.decode("latin-1")
+                except Exception:
+                    # binary — فقط متادیتا
+                    text = f"[binary file، size={len(raw)} bytes — متن قابل extract نیست]"
+            await persist_segment_fn(idx, name, text, f"zip_entry={name}")
+        # summary segment
+        summary_idx = len(names) + 1
+        if summary_idx not in completed:
+            summary = (
+                f"📦 *جمع‌بندی archive*\n"
+                f"- نام: `{fe.original_filename}`\n"
+                f"- {len(names)} فایل داخلی پردازش شد\n"
+                f"- نمونه: {', '.join(names[:5])}{'...' if len(names) > 5 else ''}"
+            )
+            await persist_segment_fn(summary_idx, "📋 جمع‌بندی archive", summary, "meta=zip")
+    finally:
+        try:
+            zf.close()
+        except Exception:
+            pass
+
+
 # ─────────────── PDF 4-page chunking (Stage 7) ───────────────
 
 PDF_CHUNK_SIZE: int = 4  # هر batch چند صفحه (قابل تنظیم)
@@ -922,13 +1099,55 @@ async def _run_extraction(
         )
         await repo.add_segment(fe.id, seg)
 
+    # 🆕 (Stage 9) — mime override بر اساس extension اگر mime عمومی است
+    if mime in ("application/octet-stream", "", "binary/octet-stream"):
+        guessed = _guess_mime_from_extension(fe.original_filename)
+        if guessed and guessed != mime:
+            logger.info(f"extraction: mime override {mime!r} → {guessed!r} based on extension")
+            mime = guessed
+
     # ─────────── routing ───────────
-    if mime.startswith("text/") or mime in ("application/json", "application/xml"):
+    # متن خام (txt/md/csv/json/xml/yaml/toml/log/ini)
+    if (mime.startswith("text/")
+            or mime in (
+                "application/json", "application/xml", "application/x-yaml",
+                "application/yaml", "application/toml", "application/x-toml",
+                "application/x-ndjson",
+            )):
         text = _read_text_file(path)
-        # یک segment کل فایل (یا تقسیم بر اساس heading اگر بزرگ است)
         if 0 not in completed:
             await _persist_segment(0, fe.original_filename, text, "")
         await repo.update_extraction(fe.id, total_segments=1)
+        return
+
+    # 🆕 (Stage 9) — Jupyter Notebook
+    if mime in ("application/x-ipynb+json",) or fe.original_filename.lower().endswith(".ipynb"):
+        await _extract_ipynb(path, fe, repo, completed, _persist_segment)
+        return
+
+    # 🆕 (Stage 9) — کد منبع: source code با extension
+    code_exts = (
+        ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".c", ".cpp", ".h", ".hpp",
+        ".go", ".rs", ".rb", ".php", ".html", ".htm", ".css", ".scss", ".sql",
+        ".sh", ".bash", ".ps1", ".dockerfile", ".kt", ".swift", ".dart", ".r",
+        ".lua", ".pl", ".scala", ".clj", ".ex", ".exs", ".elm", ".vue",
+    )
+    if (mime.startswith("text/")
+            or any(fe.original_filename.lower().endswith(e) for e in code_exts)
+            or mime in (
+                "application/x-python-code", "application/javascript",
+                "application/typescript", "application/x-shellscript",
+            )):
+        text = _read_text_file(path)
+        if 0 not in completed:
+            await _persist_segment(0, fe.original_filename, text, "code")
+        await repo.update_extraction(fe.id, total_segments=1)
+        return
+
+    # 🆕 (Stage 9) — archive (zip) — extract recursive
+    if (mime in ("application/zip", "application/x-zip-compressed")
+            or fe.original_filename.lower().endswith(".zip")):
+        await _extract_zip_archive(path, fe, repo, completed, _persist_segment)
         return
 
     if mime == "application/pdf":
