@@ -1644,6 +1644,87 @@ async def upload_cleanup_orphans(ttl_hours: int = Query(24, ge=1, le=720)):
 
 
 # ============================================================
+# 🆕 (Stage 4+5 — Extraction) — استخراج متن از فایل پیوست
+# ============================================================
+
+class ExtractSessionRequest(BaseModel):
+    user_idea: str = Field("", description="متن ایدهٔ کاربر — برای plan headings داینامیک")
+    preferred_model_id: Optional[str] = None  # override default (gemini-2.5-flash)
+
+
+@router.post("/uploads/{session_id}/extract")
+async def upload_extract(session_id: str, payload: ExtractSessionRequest):
+    """شروع استخراج متن از یک upload session.
+
+    این endpoint blocking است (تا پایان extraction صبر می‌کند). برای UI
+    بهتر است در background فراخوانی شود (در Stage 7 / Stage 9 با queue).
+
+    خروجی: FileExtraction در حالت نهایی + لیست segments.
+    """
+    from ...services.oversight_extraction import (
+        extract_session, get_extraction_repo,
+    )
+    try:
+        fe = await extract_session(
+            session_id,
+            user_idea=payload.user_idea,
+            preferred_model_id=payload.preferred_model_id,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    repo = get_extraction_repo()
+    return {
+        "extraction": fe.to_dict(),
+        "segments": [s.to_dict() for s in repo.get_segments(fe.id)],
+    }
+
+
+@router.get("/tasks/{task_id}/extractions")
+async def task_extractions(task_id: str):
+    """لیست همهٔ فایل‌های استخراج‌شدهٔ یک تسک."""
+    from ...services.oversight_extraction import get_extraction_repo
+    repo = get_extraction_repo()
+    items = repo.list_by_task(task_id)
+    return {
+        "task_id": task_id,
+        "count": len(items),
+        "extractions": [e.to_dict() for e in items],
+    }
+
+
+@router.get("/extractions/{extraction_id}/segments")
+async def extraction_segments(extraction_id: str):
+    """segmentهای استخراج‌شدهٔ یک فایل، به ترتیب segment_index."""
+    from ...services.oversight_extraction import get_extraction_repo
+    repo = get_extraction_repo()
+    fe = repo.get(extraction_id)
+    if fe is None:
+        raise HTTPException(status_code=404, detail="extraction یافت نشد")
+    segs = sorted(repo.get_segments(extraction_id), key=lambda s: s.segment_index)
+    return {
+        "extraction": fe.to_dict(),
+        "segments": [s.to_dict() for s in segs],
+    }
+
+
+@router.get("/extractions/{extraction_id}/full-text")
+async def extraction_full_text(extraction_id: str):
+    """متن کامل ادغام‌شدهٔ یک extraction."""
+    from ...services.oversight_extraction import get_extraction_repo
+    repo = get_extraction_repo()
+    fe = repo.get(extraction_id)
+    if fe is None:
+        raise HTTPException(status_code=404, detail="extraction یافت نشد")
+    return {
+        "extraction_id": extraction_id,
+        "filename": fe.original_filename,
+        "mime_type": fe.mime_type,
+        "status": fe.status,
+        "full_text": repo.full_text(extraction_id),
+    }
+
+
+# ============================================================
 # Bridge router → /api/projects/{project_id}/...
 # اتصال صفحهٔ /projects به سیستم Oversight (بخش ۷.۳ و ۱۱.۳ اسپک)
 # ============================================================
