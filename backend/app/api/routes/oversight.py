@@ -311,37 +311,44 @@ async def get_evidence_file(task_id: str, run_id: str, file_path: str):
 # 🔬 (Runtime Verify Stage 4) — تست اتصال probe
 @router.post("/watched/{watched_id}/runtime/test-connection")
 async def runtime_test_connection(watched_id: str):
-    """ping به frontend و backend base URL تنظیم‌شدهٔ این watched.
+    """ping به frontend و backend base URL — نتیجه ذخیره می‌شود.
 
-    خروجی: {frontend: {ok, status, error?}, backend: {ok, status, error?}}
+    خروجی: {frontend: {ok, status, error?}, backend: {...}, at: ISO}
     """
     service = get_oversight_service()
     w = next((x for x in service.watched if x.id == watched_id), None)
     if not w:
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
-    out: Dict[str, Any] = {}
-    try:
-        import httpx
-    except ImportError:
-        raise HTTPException(status_code=500, detail="httpx در سرور نصب نیست")
-    for label, url in (
-        ("frontend", getattr(w, "frontend_base_url", None)),
-        ("backend", getattr(w, "backend_base_url", None)),
-    ):
-        if not url:
-            out[label] = {"ok": False, "error": "URL تنظیم نشده"}
-            continue
-        try:
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
-                r = await c.get(url)
-            out[label] = {
-                "ok": 200 <= r.status_code < 500,
-                "status": r.status_code,
-                "url": url,
-            }
-        except Exception as e:
-            out[label] = {"ok": False, "error": str(e)[:200], "url": url}
-    return out
+    result = await service._test_runtime_connection_inner(w)
+    # ذخیره برای نمایش بعدی در UI
+    from app.services.oversight_service import now_iso
+    async with service._lock:
+        w.runtime_connection_test = result
+        w.updated_at = now_iso()
+        service._save_watched()
+    return result
+
+
+# 🔬 (Runtime Verify auto-detect) — discover URLs از Render
+@router.post("/watched/{watched_id}/runtime/autodetect")
+async def runtime_autodetect(watched_id: str):
+    """auto-detect frontend/backend URL از Render API + تست اتصال + ذخیره.
+
+    اگر RENDER_API_KEY نباشد، URL ها تغییر نمی‌کنند ولی تست اتصال روی
+    URL های موجود اجرا می‌شود.
+    """
+    service = get_oversight_service()
+    w = next((x for x in service.watched if x.id == watched_id), None)
+    if not w:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+    await service._autodetect_and_test_runtime(watched_id)
+    # تسک به‌روزشده را برگردان
+    w = next((x for x in service.watched if x.id == watched_id), None)
+    return {
+        "watched": w.to_dict() if w else None,
+        "runtime_autodetected": getattr(w, "runtime_autodetected", False) if w else False,
+        "runtime_connection_test": getattr(w, "runtime_connection_test", None) if w else None,
+    }
 
 
 @router.delete("/watched/{watched_id}")

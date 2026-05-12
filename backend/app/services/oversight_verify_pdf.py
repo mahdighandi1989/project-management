@@ -407,15 +407,24 @@ def _build_verify_report_html(task: Any, report: Any) -> str:
                         try:
                             from pathlib import Path as _Path
                             import base64 as _b64
+                            import os.path as _osp
                             from app.services.oversight_service import STORAGE_DIR
                             ac_id_dir = p.get("ac_id") or ""
                             base_dir = (
                                 _Path(STORAGE_DIR) / "verify_evidence"
                                 / task_id / run_id / ac_id_dir
-                            )
+                            ).resolve()
                             imgs = []
                             for s in screenshots[:4]:  # حداکثر 4 تصویر در PDF
-                                fp = base_dir / s
+                                # 🛡 path-traversal guard — فقط basename
+                                safe_name = _osp.basename(str(s or ""))
+                                if not safe_name or safe_name in (".", ".."):
+                                    continue
+                                fp = (base_dir / safe_name).resolve()
+                                try:
+                                    fp.relative_to(base_dir)
+                                except ValueError:
+                                    continue  # خارج از base_dir
                                 if not fp.is_file():
                                     continue
                                 try:

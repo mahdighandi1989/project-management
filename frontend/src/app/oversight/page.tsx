@@ -104,6 +104,12 @@ interface Watched {
   backend_base_url?: string | null;
   runtime_auth?: { type?: 'bearer' | 'cookie' | null; value?: string | null } | null;
   runtime_repo_path?: string | null;
+  runtime_autodetected?: boolean;
+  runtime_connection_test?: {
+    at?: string;
+    frontend?: { ok?: boolean; status?: number; error?: string; url?: string };
+    backend?: { ok?: boolean; status?: number; error?: string; url?: string };
+  } | null;
 }
 
 // 🔬 (Runtime Verify Stage 1) — ساختار AC جدید
@@ -4238,6 +4244,9 @@ function WatchedCard({
   const [tagInput, setTagInput] = useState('');
   const [intervalH, setIntervalH] = useState(w.interval_hours);
   const [scanH, setScanH] = useState(w.scan_interval_hours ?? 168);
+  // 🔬 (Runtime Verify) — collapsible section state, closed by default
+  const [runtimeOpen, setRuntimeOpen] = useState(false);
+  const [runtimeBusy, setRuntimeBusy] = useState(false);
 
   useEffect(() => {
     setNotes(w.user_notes);
@@ -4903,117 +4912,217 @@ function WatchedCard({
         </div>
       </div>
 
-      {/* 🔬 (Runtime Verify Stage 4) — Runtime Verify config */}
-      <div className="mt-3 p-2 border border-cyan-300 dark:border-cyan-700 rounded bg-cyan-50/40 dark:bg-cyan-900/10">
-        <div className="text-xs font-semibold dark:text-cyan-200 mb-1.5">
-          🔬 Runtime Verify (probe ها)
-        </div>
-        <div className="text-[10px] text-gray-500 dark:text-gray-400 mb-2">
-          base URL ها برای UI/API probe ها. اگر تنظیم نشده، probe ها skip می‌شوند.
-        </div>
-        <label className="block text-xs mb-1.5 dark:text-gray-200">
-          <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Frontend Base URL</span>
-          <input
-            type="url"
-            defaultValue={w.frontend_base_url || ''}
-            placeholder="https://my-app.example.com"
-            onBlur={(e) => {
-              const v = e.target.value.trim() || null;
-              if (v !== (w.frontend_base_url || null)) onChange({ frontend_base_url: v });
-            }}
-            className="w-full p-1.5 border rounded text-xs dark:bg-gray-700 dark:text-white dark:border-gray-600"
-            dir="ltr"
-          />
-        </label>
-        <label className="block text-xs mb-1.5 dark:text-gray-200">
-          <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Backend Base URL</span>
-          <input
-            type="url"
-            defaultValue={w.backend_base_url || ''}
-            placeholder="https://my-api.example.com"
-            onBlur={(e) => {
-              const v = e.target.value.trim() || null;
-              if (v !== (w.backend_base_url || null)) onChange({ backend_base_url: v });
-            }}
-            className="w-full p-1.5 border rounded text-xs dark:bg-gray-700 dark:text-white dark:border-gray-600"
-            dir="ltr"
-          />
-        </label>
-        <label className="block text-xs mb-1.5 dark:text-gray-200">
-          <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Repo Path (محلی)</span>
-          <input
-            type="text"
-            defaultValue={w.runtime_repo_path || ''}
-            placeholder="/path/to/cloned/repo"
-            onBlur={(e) => {
-              const v = e.target.value.trim() || null;
-              if (v !== (w.runtime_repo_path || null)) onChange({ runtime_repo_path: v });
-            }}
-            className="w-full p-1.5 border rounded text-xs dark:bg-gray-700 dark:text-white dark:border-gray-600"
-            dir="ltr"
-          />
-        </label>
-        <div className="grid grid-cols-3 gap-1 mb-1.5">
-          <label className="text-xs col-span-1 dark:text-gray-200">
-            <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Auth Type</span>
-            <select
-              value={w.runtime_auth?.type || ''}
-              onChange={(e) => {
-                const v = (e.target.value || null) as 'bearer' | 'cookie' | null;
-                onChange({
-                  runtime_auth: v
-                    ? { type: v, value: w.runtime_auth?.value || '' }
-                    : null,
-                });
-              }}
-              className="w-full p-1.5 border rounded text-xs dark:bg-gray-700 dark:text-white dark:border-gray-600"
-            >
-              <option value="">none</option>
-              <option value="bearer">Bearer</option>
-              <option value="cookie">Cookie</option>
-            </select>
-          </label>
-          <label className="text-xs col-span-2 dark:text-gray-200">
-            <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Auth Value</span>
-            <input
-              type="text"
-              defaultValue={w.runtime_auth?.value || ''}
-              placeholder={w.runtime_auth?.type === 'cookie' ? 'name=val; name2=val2' : 'token...'}
-              onBlur={(e) => {
-                const v = e.target.value.trim();
-                if (v !== (w.runtime_auth?.value || '')) {
-                  onChange({
-                    runtime_auth: v
-                      ? { type: w.runtime_auth?.type || 'bearer', value: v }
-                      : null,
-                  });
-                }
-              }}
-              className="w-full p-1.5 border rounded text-xs dark:bg-gray-700 dark:text-white dark:border-gray-600"
-              dir="ltr"
-            />
-          </label>
-        </div>
+      {/* 🔬 (Runtime Verify Stage 4) — Collapsible Runtime Verify section */}
+      <div className="mt-3 border border-cyan-300 dark:border-cyan-700 rounded bg-cyan-50/40 dark:bg-cyan-900/10">
         <button
-          onClick={async () => {
-            try {
-              const r = await fetch(
-                `${API_BASE}/api/oversight/watched/${w.id}/runtime/test-connection`,
-                { method: 'POST' },
-              );
-              const data = await r.json();
-              alert(
-                `Frontend: ${data.frontend?.ok ? '✅' : '❌'} ${data.frontend?.status || data.frontend?.error || ''}\n` +
-                `Backend:  ${data.backend?.ok ? '✅' : '❌'} ${data.backend?.status || data.backend?.error || ''}`,
-              );
-            } catch (e: any) {
-              alert(`خطا: ${e.message}`);
-            }
-          }}
-          className="text-[11px] px-2 py-1 bg-cyan-600 text-white rounded hover:bg-cyan-700"
+          type="button"
+          onClick={() => setRuntimeOpen(!runtimeOpen)}
+          className="w-full flex items-center justify-between p-2 text-xs hover:bg-cyan-100/50 dark:hover:bg-cyan-900/30 rounded"
         >
-          🔌 تست اتصال
+          <span className="font-semibold dark:text-cyan-200 flex items-center gap-2">
+            🔬 Runtime Verify (probe ها)
+            {w.runtime_autodetected && (
+              <span
+                className="px-1.5 py-0.5 rounded text-[9px] bg-blue-500 text-white"
+                title="URL ها از Render خودکار استخراج شدند"
+              >
+                auto
+              </span>
+            )}
+            {w.runtime_connection_test && (() => {
+              const fe = w.runtime_connection_test.frontend;
+              const be = w.runtime_connection_test.backend;
+              const feOk = fe?.ok;
+              const beOk = be?.ok;
+              return (
+                <span className="text-[10px] text-gray-500 dark:text-gray-400">
+                  · last: FE {feOk ? '✅' : (fe?.url ? '❌' : '—')} · BE {beOk ? '✅' : (be?.url ? '❌' : '—')}
+                </span>
+              );
+            })()}
+          </span>
+          <span className="text-gray-500 dark:text-gray-400 text-sm">
+            {runtimeOpen ? '▾' : '▸'}
+          </span>
         </button>
+
+        {runtimeOpen && (
+          <div className="p-2 border-t border-cyan-200 dark:border-cyan-800">
+            <div className="text-[10px] text-gray-500 dark:text-gray-400 mb-2">
+              base URL ها برای UI/API probe ها. اگر RENDER_API_KEY در تنظیمات
+              هست و این repo در Render deploy شده، URL ها خودکار پر می‌شوند.
+            </div>
+
+            <label className="block text-xs mb-1.5 dark:text-gray-200">
+              <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Frontend Base URL</span>
+              <input
+                type="url"
+                defaultValue={w.frontend_base_url || ''}
+                placeholder="https://my-app.example.com"
+                onBlur={(e) => {
+                  const v = e.target.value.trim() || null;
+                  if (v !== (w.frontend_base_url || null)) onChange({ frontend_base_url: v });
+                }}
+                className="w-full p-1.5 border rounded text-xs dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                dir="ltr"
+              />
+            </label>
+            <label className="block text-xs mb-1.5 dark:text-gray-200">
+              <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Backend Base URL</span>
+              <input
+                type="url"
+                defaultValue={w.backend_base_url || ''}
+                placeholder="https://my-api.example.com"
+                onBlur={(e) => {
+                  const v = e.target.value.trim() || null;
+                  if (v !== (w.backend_base_url || null)) onChange({ backend_base_url: v });
+                }}
+                className="w-full p-1.5 border rounded text-xs dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                dir="ltr"
+              />
+            </label>
+            <label className="block text-xs mb-1.5 dark:text-gray-200">
+              <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Repo Path (محلی)</span>
+              <input
+                type="text"
+                defaultValue={w.runtime_repo_path || ''}
+                placeholder="/path/to/cloned/repo"
+                onBlur={(e) => {
+                  const v = e.target.value.trim() || null;
+                  if (v !== (w.runtime_repo_path || null)) onChange({ runtime_repo_path: v });
+                }}
+                className="w-full p-1.5 border rounded text-xs dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                dir="ltr"
+              />
+            </label>
+            <div className="grid grid-cols-3 gap-1 mb-1.5">
+              <label className="text-xs col-span-1 dark:text-gray-200">
+                <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Auth Type</span>
+                <select
+                  value={w.runtime_auth?.type || ''}
+                  onChange={(e) => {
+                    const v = (e.target.value || null) as 'bearer' | 'cookie' | null;
+                    onChange({
+                      runtime_auth: v
+                        ? { type: v, value: w.runtime_auth?.value || '' }
+                        : null,
+                    });
+                  }}
+                  className="w-full p-1.5 border rounded text-xs dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                >
+                  <option value="">none</option>
+                  <option value="bearer">Bearer</option>
+                  <option value="cookie">Cookie</option>
+                </select>
+              </label>
+              <label className="text-xs col-span-2 dark:text-gray-200">
+                <span className="block text-gray-500 dark:text-gray-400 mb-0.5">
+                  Auth Value
+                  <span className="text-[10px] text-gray-400 ms-1">
+                    (اختیاری — برای ریپوهای متصل به GitHub با توکن سراسری، لازم نیست)
+                  </span>
+                </span>
+                <input
+                  type="text"
+                  defaultValue={w.runtime_auth?.value || ''}
+                  placeholder={w.runtime_auth?.type === 'cookie' ? 'name=val; name2=val2' : 'token...'}
+                  onBlur={(e) => {
+                    const v = e.target.value.trim();
+                    if (v !== (w.runtime_auth?.value || '')) {
+                      onChange({
+                        runtime_auth: v
+                          ? { type: w.runtime_auth?.type || 'bearer', value: v }
+                          : null,
+                      });
+                    }
+                  }}
+                  className="w-full p-1.5 border rounded text-xs dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                  dir="ltr"
+                />
+              </label>
+            </div>
+
+            {/* persisted last test result */}
+            {w.runtime_connection_test && (
+              <div className="mb-2 p-2 bg-white/60 dark:bg-gray-900/40 rounded border border-gray-200 dark:border-gray-700">
+                <div className="text-[10px] text-gray-500 dark:text-gray-400 mb-1">
+                  آخرین تست اتصال: {w.runtime_connection_test.at ? new Date(w.runtime_connection_test.at).toLocaleString('fa-IR') : ''}
+                </div>
+                {(['frontend', 'backend'] as const).map((k) => {
+                  const r = w.runtime_connection_test?.[k];
+                  if (!r) return null;
+                  return (
+                    <div key={k} className="text-[11px] dark:text-gray-200">
+                      {r.ok ? '✅' : '❌'}{' '}
+                      <span className="text-gray-500">{k}:</span>{' '}
+                      {r.status ? <span>HTTP {r.status}</span> : <span className="text-red-600 dark:text-red-400">{r.error}</span>}
+                      {r.url && (
+                        <span className="text-gray-400 ms-1" dir="ltr">— {r.url}</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="flex gap-1 flex-wrap">
+              <button
+                disabled={runtimeBusy}
+                onClick={async () => {
+                  setRuntimeBusy(true);
+                  try {
+                    const r = await fetch(
+                      `${API_BASE}/api/oversight/watched/${w.id}/runtime/autodetect`,
+                      { method: 'POST' },
+                    );
+                    if (r.ok) {
+                      const data = await r.json();
+                      if (data.watched) onChange(data.watched);
+                      alert('✅ استخراج خودکار + تست اتصال انجام شد');
+                    } else {
+                      alert('❌ autodetect ناموفق');
+                    }
+                  } catch (e: any) {
+                    alert(`خطا: ${e.message}`);
+                  } finally {
+                    setRuntimeBusy(false);
+                  }
+                }}
+                className="text-[11px] px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
+                title="استخراج خودکار URL ها از Render + تست اتصال"
+              >
+                🤖 استخراج + تست خودکار
+              </button>
+              <button
+                disabled={runtimeBusy}
+                onClick={async () => {
+                  setRuntimeBusy(true);
+                  try {
+                    const r = await fetch(
+                      `${API_BASE}/api/oversight/watched/${w.id}/runtime/test-connection`,
+                      { method: 'POST' },
+                    );
+                    if (r.ok) {
+                      const data = await r.json();
+                      // patch local view با نتیجهٔ تست تا UI تازه بشه
+                      onChange({ runtime_connection_test: data });
+                      alert('✅ تست اتصال انجام شد');
+                    } else {
+                      alert('❌ تست اتصال ناموفق');
+                    }
+                  } catch (e: any) {
+                    alert(`خطا: ${e.message}`);
+                  } finally {
+                    setRuntimeBusy(false);
+                  }
+                }}
+                className="text-[11px] px-2 py-1 bg-cyan-600 text-white rounded hover:bg-cyan-700 disabled:opacity-50"
+              >
+                🔌 تست اتصال
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 🆕 (auto-loop) — ping-pong continuous: فقط اگر autonomy=auto و verify_only=false */}
