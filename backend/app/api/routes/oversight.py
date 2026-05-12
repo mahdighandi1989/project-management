@@ -1491,6 +1491,159 @@ async def manual_tick():
 
 
 # ============================================================
+# 🆕 (Stage 2 — File Attachment) — chunked resumable upload sessions
+# ============================================================
+
+from fastapi import Request as _FastAPIRequest
+
+
+class StartUploadRequest(BaseModel):
+    task_draft_id: str = Field(..., description="گروه برای ربط چند فایل به یک تسک (client-generated)")
+    original_filename: str
+    mime_type: str
+    total_size: int = Field(..., ge=1)
+    file_order: Optional[int] = None  # اگر None، خودکار بر اساس آخرین + 1
+
+
+@router.post("/uploads/start")
+async def upload_start(payload: StartUploadRequest):
+    """شروع یک سشن آپلود chunked. خروجی شامل session_id و chunk_size پیشنهادی."""
+    from ...services.oversight_upload_session import (
+        get_upload_session_service, CLIENT_CHUNK_SIZE, DEFAULT_MAX_FILE_BYTES,
+    )
+    svc = get_upload_session_service()
+    try:
+        s = await svc.start_session(
+            task_draft_id=payload.task_draft_id,
+            original_filename=payload.original_filename,
+            mime_type=payload.mime_type,
+            total_size=payload.total_size,
+            file_order=payload.file_order,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"start session failed: {e}")
+    return {
+        "session_id": s.id,
+        "chunk_size": CLIENT_CHUNK_SIZE,
+        "max_file_bytes": DEFAULT_MAX_FILE_BYTES,
+        "file_order": s.file_order,
+        "session": s.to_dict(),
+    }
+
+
+@router.post("/uploads/{session_id}/chunk")
+async def upload_chunk(
+    session_id: str,
+    request: _FastAPIRequest,
+    offset: int = Query(..., ge=0, description="بایت شروع این chunk از ابتدای فایل"),
+):
+    """دریافت یک chunk از فایل (raw body). به‌صورت streaming به temp_path append می‌شود.
+
+    ⚠ Client باید Content-Type = `application/octet-stream` بفرستد و `offset`
+    دقیقاً همان `bytes_received` فعلی session باشد (در غیر این صورت 400 با
+    expected_offset برمی‌گردد و client باید resume کند).
+    """
+    from ...services.oversight_upload_session import get_upload_session_service
+    svc = get_upload_session_service()
+    s = svc.get(session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session یافت نشد")
+    if s.is_terminal():
+        raise HTTPException(
+            status_code=400,
+            detail=f"session در وضعیت {s.status} است — chunk پذیرفته نمی‌شود",
+        )
+
+    # خواندن body با streaming — جلوگیری از load در RAM (هر iter ~64KB یا کمتر)
+    # FastAPI/Starlette با request.stream() این را native می‌دهد، اما append_chunk
+    # یک bytes واحد می‌خواهد. برای سادگی و امنیت RAM، chunk را به‌صورت یکجا اما
+    # محدود به یک iteration می‌خوانیم. client هر بار حداکثر CLIENT_CHUNK_SIZE
+    # (5MB) می‌فرستد — RAM peak ~5MB OK است.
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="body خالی است")
+    try:
+        s2 = await svc.append_chunk(session_id, offset, body)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="session یافت نشد")
+    except ValueError as e:
+        # offset mismatch یا overrun → client باید با expected_offset resume کند
+        raise HTTPException(status_code=400, detail={
+            "error": str(e),
+            "expected_offset": s.bytes_received,
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"chunk append failed: {e}")
+    return {
+        "session_id": s2.id,
+        "bytes_received": s2.bytes_received,
+        "total_size": s2.total_size,
+        "status": s2.status,
+        "next_offset": s2.bytes_received,
+        "completed": s2.status in ("completed", "extracting", "extracted"),
+    }
+
+
+@router.post("/uploads/{session_id}/complete")
+async def upload_complete(session_id: str):
+    """علامت‌گذاری پایان upload. اگر bytes_received != total_size خطا می‌دهد."""
+    from ...services.oversight_upload_session import get_upload_session_service
+    svc = get_upload_session_service()
+    try:
+        s = await svc.mark_completed(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="session یافت نشد")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return s.to_dict()
+
+
+@router.get("/uploads/{session_id}")
+async def upload_status(session_id: str):
+    """وضعیت یک session — برای resume."""
+    from ...services.oversight_upload_session import get_upload_session_service
+    svc = get_upload_session_service()
+    s = svc.get(session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session یافت نشد")
+    return s.to_dict()
+
+
+@router.get("/uploads")
+async def upload_list_by_draft(task_draft_id: Optional[str] = Query(None), task_id: Optional[str] = Query(None)):
+    """لیست sessionها بر اساس task_draft_id (قبل از create_task) یا task_id (بعد از آن)."""
+    from ...services.oversight_upload_session import get_upload_session_service
+    svc = get_upload_session_service()
+    if task_draft_id:
+        return [s.to_dict() for s in svc.list_by_draft(task_draft_id)]
+    if task_id:
+        return [s.to_dict() for s in svc.list_by_task(task_id)]
+    raise HTTPException(status_code=400, detail="task_draft_id یا task_id لازم است")
+
+
+@router.delete("/uploads/{session_id}")
+async def upload_cancel(session_id: str):
+    """لغو session و حذف temp."""
+    from ...services.oversight_upload_session import get_upload_session_service
+    svc = get_upload_session_service()
+    s = await svc.cancel(session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session یافت نشد")
+    return {"success": True, "session": s.to_dict()}
+
+
+@router.post("/uploads/cleanup-orphans")
+async def upload_cleanup_orphans(ttl_hours: int = Query(24, ge=1, le=720)):
+    """حذف temp file هایی که >ttl_hours بدون activity مانده‌اند. (best-effort)"""
+    from ...services.oversight_upload_session import get_upload_session_service
+    svc = get_upload_session_service()
+    removed = await svc.cleanup_orphans(ttl_hours=ttl_hours)
+    return {"removed": removed}
+
+
+# ============================================================
 # Bridge router → /api/projects/{project_id}/...
 # اتصال صفحهٔ /projects به سیستم Oversight (بخش ۷.۳ و ۱۱.۳ اسپک)
 # ============================================================

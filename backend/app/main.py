@@ -100,6 +100,15 @@ async def lifespan(app: FastAPI):
         app.state.oversight_stop_event = None
         app.state.oversight_task = None
 
+    # 🆕 (Stage 2 — File Attachment) — orphan upload cleanup on boot
+    try:
+        from .services.oversight_upload_session import get_upload_session_service
+        removed = await get_upload_session_service().cleanup_orphans()
+        if removed:
+            logger.info(f"📎 cleaned up {removed} orphan upload temp files on boot")
+    except Exception as e:
+        logger.warning(f"upload orphan cleanup failed (non-fatal): {e}")
+
     yield
 
     # Shutdown
