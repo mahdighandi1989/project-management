@@ -521,6 +521,7 @@ def pick_best_extraction_model(
     db_enabled_ids: Optional[List[str]] = None,
     prefer_provider: Optional[ModelProvider] = ModelProvider.GEMINI,
     preferred_model_id: Optional[str] = None,
+    require_api_key: bool = True,
 ) -> Optional[AIModel]:
     """انتخاب بهترین مدل enabled برای استخراج فایلی با mime مشخص.
 
@@ -531,18 +532,45 @@ def pick_best_extraction_model(
       1. مدل باید قابلیت لازم (mime_to_required_capability) را داشته باشد.
       2. اگر `db_enabled_ids` داده شده، فقط آن‌ها (فیلتر نهایی روی panel
          «مدیریت مدل‌ها»). اگر None، صرفاً `m.enabled` registry را نگاه کن.
-      3. priority پایین‌تر = بهتر (در registry تعریف شده).
-      4. در صورت تساوی، مدل با `prefer_provider` ترجیح داده می‌شود
+      3. 🛡 (audit fix CRITICAL) `require_api_key=True` (پیش‌فرض): provider
+         API key باید واقعاً در env تنظیم باشد. اگر نه، مدل واجد شرایط نیست
+         (جلوگیری از fallback silent به مدل غیرvision در ai_manager که
+         خروجی غلط «نمی‌توانم تصویر را ببینم» تولید می‌کند).
+      4. priority پایین‌تر = بهتر (در registry تعریف شده).
+      5. در صورت تساوی، مدل با `prefer_provider` ترجیح داده می‌شود
          (پیش‌فرض Gemini — multimodal native).
 
     خروجی: AIModel یا None اگر هیچ مدلی نه قابلیت دارد نه enabled است.
     """
     required = mime_to_required_capability(mime_type)
 
+    # 🛡 (audit fix CRITICAL) — کش provider key availability
+    import os as _os
+    _key_available: Dict[ModelProvider, bool] = {}
+    _provider_env_map = {
+        ModelProvider.OPENAI: "OPENAI_API_KEY",
+        ModelProvider.CLAUDE: "CLAUDE_API_KEY",
+        ModelProvider.GEMINI: "GEMINI_API_KEY",
+        ModelProvider.DEEPSEEK: "DEEPSEEK_API_KEY",
+        ModelProvider.OPENROUTER: "OPENROUTER_API_KEY",
+        ModelProvider.GROQ: "GROQ_API_KEY",
+        ModelProvider.PERPLEXITY: "PERPLEXITY_API_KEY",
+    }
+
+    def _provider_has_key(prov: ModelProvider) -> bool:
+        if prov in _key_available:
+            return _key_available[prov]
+        env_var = _provider_env_map.get(prov)
+        has = bool(_os.environ.get(env_var or "", "").strip()) if env_var else False
+        _key_available[prov] = has
+        return has
+
     def _qualifies(m: AIModel) -> bool:
         if enabled_only and not m.enabled:
             return False
         if db_enabled_ids is not None and m.id not in db_enabled_ids:
+            return False
+        if require_api_key and not _provider_has_key(m.provider):
             return False
         if required == ModelCapability.TEXT:
             return True

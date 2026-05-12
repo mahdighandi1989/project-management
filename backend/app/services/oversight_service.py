@@ -2785,11 +2785,16 @@ class OversightService:
         خروجی: (augmented_idea, attachments_meta)
         attachments_meta: [{session_id, file_order, filename, mime, extraction_id,
                             total_segments, status, char_count, model_used, error}]
+
+        🛡 (audit fix CRITICAL) — اگر فایل غیرمتنی (image/video/audio) هست
+        ولی هیچ مدل بصری با API key فعال نیست، یک ValueError با اطلاعات
+        کامل candidates می‌اندازد تا caller بتواند modal toggle نشان دهد.
         """
         from .oversight_upload_session import get_upload_session_service
         from .oversight_extraction import (
             extract_session, get_extraction_repo,
         )
+        from .oversight_model_temp_activate import check_extraction_model_availability
         upload_svc = get_upload_session_service()
         repo = get_extraction_repo()
 
@@ -2802,6 +2807,54 @@ class OversightService:
                 continue
             sessions.append(s)
         sessions.sort(key=lambda s: s.file_order)
+
+        # 🛡 (audit fix CRITICAL) — قبل از شروع extraction، چک کن آیا
+        # **همهٔ** sessionهای غیرمتنی یک مدل بصری معتبر (با API key) موجود
+        # دارند. اگر نه، یک ValueError با ساختار blocked_no_vision_model
+        # می‌اندازیم تا API route بتواند 409 با candidates برگرداند → frontend
+        # modal نشان می‌دهد.
+        missing_vision_for: List[Dict[str, Any]] = []
+        for s in sessions:
+            mt = (s.mime_type or "").lower()
+            # text/code/json نیاز به vision model ندارند — skip
+            if mt.startswith("text/") or mt in (
+                "application/json", "application/xml", "application/yaml",
+                "application/x-yaml", "application/toml", "application/x-toml",
+                "application/x-ndjson",
+            ):
+                continue
+            # برای fileهای code-extension (mime=application/octet-stream)
+            # هم skip — extraction آن‌ها text-mode می‌شود
+            try:
+                from ..core.models_registry import _EXT_TO_MIME, _guess_mime_from_extension
+                # نسخهٔ alternative — هم import می‌کنیم اگر در deep_scan موجود است
+            except Exception:
+                pass
+            avail = check_extraction_model_availability(mt)
+            if not avail.get("available"):
+                missing_vision_for.append({
+                    "session_id": s.id,
+                    "filename": s.original_filename,
+                    "mime_type": s.mime_type,
+                    "file_order": s.file_order,
+                    "candidates": avail.get("candidates") or [],
+                })
+        if missing_vision_for:
+            # یک خطای structured بساز — API route آن را به 409 تبدیل می‌کند
+            err = ValueError("blocked_no_vision_model")
+            err.blocked_payload = {  # type: ignore[attr-defined]
+                "error": "blocked_no_vision_model",
+                "message": (
+                    "برای استخراج فایل‌های بصری/صوتی، یک مدل multimodal با "
+                    "API key معتبر باید فعال باشد. لطفاً Gemini یا مدل "
+                    "مشابه را در /models فعال کن و کلید API را در env تنظیم کن."
+                ),
+                "missing_files": missing_vision_for,
+                # candidates اول را از اولین file ناتوان برمی‌داریم
+                "candidates": missing_vision_for[0].get("candidates", []),
+                "mime_type": missing_vision_for[0].get("mime_type"),
+            }
+            raise err
 
         attachments_meta: List[Dict[str, Any]] = []
         appended_parts: List[str] = []
@@ -2929,10 +2982,14 @@ class OversightService:
                     idea, upload_session_ids,
                     progress_track_id=progress_track_id,
                 )
+            except ValueError as _att_e:
+                # 🛡 (audit fix CRITICAL) — اگر blocked_no_vision_model است،
+                # exception را propagate کن تا API route 409 برگرداند.
+                if getattr(_att_e, "blocked_payload", None) is not None:
+                    raise
+                logger.warning(f"idea_to_prompt: attachment resolve failed: {_att_e}")
             except Exception as _att_e:
                 logger.warning(f"idea_to_prompt: attachment resolve failed: {_att_e}")
-                # ادامه می‌دهیم بدون attachments — تسک ساخته می‌شود ولی پرامپت
-                # ضعیف‌تر است (کاربر از طریق UI متوجه می‌شود)
 
         # 🛡 (audit fix #3 CRITICAL) — اگر فایل پیوست هست، **همیشه** multi-pass
         # اجبار می‌شود تا چک‌لیست تولید شود. heuristic `_is_complex_idea` کافی
