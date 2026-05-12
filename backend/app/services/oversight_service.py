@@ -219,6 +219,11 @@ class WatchedProject:
     # path مطلق به repo (clone شده) برای static + test probe
     # اگر None، probe های static/backend_test skip می‌شوند
     runtime_repo_path: Optional[str] = None
+    # 🔬 (Auto-detect) — اگر URL ها از Render auto-detect شدند، اینجا
+    # علامت می‌خوریم. کاربر می‌تواند manually override کند.
+    runtime_autodetected: bool = False
+    # نتیجهٔ آخرین تست اتصال — {frontend: {ok, status, error?}, backend: {...}, at: ISO}
+    runtime_connection_test: Optional[Dict[str, Any]] = None
 
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
@@ -1151,7 +1156,102 @@ class OversightService:
         async with self._lock:
             self.watched.append(w)
             self._save_watched()
+
+        # 🔬 (Runtime Verify auto-detect) — اگر RENDER_API_KEY تنظیم است،
+        # سرویس‌های مرتبط با این repo را پیدا کن و URLها را خودکار پر کن.
+        # این یک best-effort call است که در background اجرا می‌شود تا
+        # add_watched سریع بازگردد.
+        try:
+            asyncio.create_task(self._autodetect_and_test_runtime(w.id))
+        except Exception as _e:
+            logger.debug(f"autodetect schedule failed: {_e}")
         return w.to_dict()
+
+    async def autodetect_runtime_for_all_watched(self) -> Dict[str, Any]:
+        """🔬 backfill — برای همهٔ watched هایی که هنوز URL ندارند یا
+        test-result ندارند، autodetect + test را اجرا می‌کند.
+
+        برای lifespan startup ایده‌آل است.
+        """
+        ids_to_run: List[str] = []
+        for w in self.watched:
+            needs_detect = not w.frontend_base_url and not w.backend_base_url
+            needs_test = (
+                (w.frontend_base_url or w.backend_base_url)
+                and not w.runtime_connection_test
+            )
+            if needs_detect or needs_test:
+                ids_to_run.append(w.id)
+        for wid in ids_to_run:
+            try:
+                await self._autodetect_and_test_runtime(wid)
+            except Exception as e:
+                logger.debug(f"backfill {wid} failed: {e}")
+        return {"processed": len(ids_to_run), "watched_count": len(self.watched)}
+
+    async def _autodetect_and_test_runtime(self, watched_id: str) -> None:
+        """🔬 background task — auto-detect frontend/backend URLs از Render
+        + اجرای تست اتصال + ذخیرهٔ نتیجه."""
+        try:
+            w = next((x for x in self.watched if x.id == watched_id), None)
+            if w is None:
+                return
+            # 1) auto-detect URLs
+            from .verify_runtime.render_autodetect import (
+                detect_render_urls_for_repo, detect_repo_url,
+            )
+            detected = await detect_render_urls_for_repo(w.repo_full_name)
+            changed = False
+            if detected.get("frontend_base_url") and not w.frontend_base_url:
+                w.frontend_base_url = detected["frontend_base_url"]
+                changed = True
+            if detected.get("backend_base_url") and not w.backend_base_url:
+                w.backend_base_url = detected["backend_base_url"]
+                changed = True
+            # repo_url is fine — clone URL از قبل ثبت شده. در آینده اگر کاربر
+            # repo را clone کرد و local path اضافه کند، runtime_repo_path پر می‌شود.
+            if changed:
+                w.runtime_autodetected = True
+                w.updated_at = now_iso()
+                async with self._lock:
+                    self._save_watched()
+                logger.info(
+                    f"autodetect watched {watched_id}: "
+                    f"frontend={w.frontend_base_url}, backend={w.backend_base_url}"
+                )
+
+            # 2) تست اتصال (اگر حداقل یک URL داریم)
+            if w.frontend_base_url or w.backend_base_url:
+                test_result = await self._test_runtime_connection_inner(w)
+                w.runtime_connection_test = test_result
+                w.updated_at = now_iso()
+                async with self._lock:
+                    self._save_watched()
+        except Exception as e:
+            logger.warning(f"autodetect_and_test_runtime {watched_id} failed: {e}")
+
+    async def _test_runtime_connection_inner(self, w: "WatchedProject") -> Dict[str, Any]:
+        """تست GET به base URLs و برگرداندن نتیجه با timestamp."""
+        import httpx
+        out: Dict[str, Any] = {"at": now_iso()}
+        for label, url in (
+            ("frontend", w.frontend_base_url),
+            ("backend", w.backend_base_url),
+        ):
+            if not url:
+                out[label] = {"ok": False, "error": "URL تنظیم نشده"}
+                continue
+            try:
+                async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+                    r = await c.get(url)
+                out[label] = {
+                    "ok": 200 <= r.status_code < 500,
+                    "status": r.status_code,
+                    "url": url,
+                }
+            except Exception as e:
+                out[label] = {"ok": False, "error": str(e)[:200], "url": url}
+        return out
 
     async def auto_register_watched(
         self,
@@ -1229,6 +1329,12 @@ class OversightService:
         result = w.to_dict()
         result["_was_duplicate"] = False
 
+        # 🔬 (Runtime Verify auto-detect) — همان منطق add_watched
+        try:
+            asyncio.create_task(self._autodetect_and_test_runtime(w.id))
+        except Exception as _e:
+            logger.debug(f"autodetect schedule (auto_register) failed: {_e}")
+
         # notification (silent skip اگر env vars نباشد)
         try:
             from .notification_service import notification_service
@@ -1285,6 +1391,13 @@ class OversightService:
                         "prompt_quality_threshold",
                         "dedup_in_manual_create",
                         "dedup_score_threshold",
+                        # 🔬 (Runtime Verify Stage 4) — UI/API probe config
+                        "frontend_base_url",
+                        "backend_base_url",
+                        "runtime_auth",
+                        "runtime_repo_path",
+                        "runtime_autodetected",
+                        "runtime_connection_test",
                     }
                     for k, v in updates.items():
                         if k in allowed:

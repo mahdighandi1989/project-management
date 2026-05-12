@@ -109,6 +109,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"upload orphan cleanup failed (non-fatal): {e}")
 
+    # 🔬 (Runtime Verify auto-detect) — برای watched های موجود که هنوز
+    # frontend/backend URL ندارند، در background autodetect را بزن.
+    # غیر-blocking است؛ create_task می‌سازیم.
+    try:
+        import asyncio as _asyncio
+        from .services.oversight_service import get_oversight_service as _gos
+
+        async def _runtime_backfill_bg():
+            try:
+                res = await _gos().autodetect_runtime_for_all_watched()
+                logger.info(f"🔬 runtime autodetect backfill: {res}")
+            except Exception as _e:
+                logger.warning(f"runtime autodetect backfill failed: {_e}")
+
+        _asyncio.create_task(_runtime_backfill_bg())
+    except Exception as _e:
+        logger.warning(f"runtime autodetect schedule failed: {_e}")
+
     # 🆕 (Stage 6 — temp model activation) — revert stale temp_enabled flags
     try:
         from .services.oversight_model_temp_activate import cleanup_stale_temp_activations_on_boot
