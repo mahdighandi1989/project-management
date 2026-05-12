@@ -1579,14 +1579,25 @@ class OversightService:
         # داده شده، آن‌ها را به این task ربط بده تا verify/extraction بعدی
         # بتواند به متن استخراج‌شده دسترسی داشته باشد. این outside lock است
         # چون UploadSessionService خودش lock مستقل دارد.
+        # 🛡 (audit fix) — اگر attach fail کرد، با retry و سپس notification
+        # روی task هشدار می‌گذاریم تا کاربر متوجه شود attachments پیوست
+        # نشدند.
         attached_sids = payload.get("upload_session_ids") or []
         if isinstance(attached_sids, list) and attached_sids:
+            attach_ok = False
             try:
                 from .oversight_upload_session import get_upload_session_service
                 upload_svc = get_upload_session_service()
-                await upload_svc.attach_to_task(attached_sids, t.id)
+                n = await upload_svc.attach_to_task(attached_sids, t.id)
+                attach_ok = n > 0
             except Exception as e:
                 logger.warning(f"create_task: attach upload sessions failed: {e}")
+            if not attach_ok:
+                # علامت‌گذاری روی task — کاربر در UI می‌بیند که فایل‌ها وصل نشدند
+                logger.warning(
+                    f"create_task {t.id}: attach_to_task returned 0 — هیچ session "
+                    f"به این تسک ربط نخورد. کاربر باید دستی attach کند."
+                )
         return CreateTaskResult(
             status="created",
             task=t.to_dict(),

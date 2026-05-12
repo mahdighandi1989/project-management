@@ -864,11 +864,11 @@ export default function OversightPage() {
   // یک id جدید تولید می‌شود.
   const [taskDraftId, setTaskDraftId] = useState<string>(() => {
     try {
-      const saved = localStorage.getItem('oversight-current-task-draft-id');
+      const saved = sessionStorage.getItem('oversight-current-task-draft-id');
       if (saved) return saved;
     } catch {}
     const v = `draft-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    try { localStorage.setItem('oversight-current-task-draft-id', v); } catch {}
+    try { sessionStorage.setItem('oversight-current-task-draft-id', v); } catch {}
     return v;
   });
   const [uploadedSessions, setUploadedSessions] = useState<UploadSessionState[]>([]);
@@ -880,7 +880,7 @@ export default function OversightPage() {
   } | null>(null);
   const resetTaskDraft = useCallback(() => {
     const v = `draft-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    try { localStorage.setItem('oversight-current-task-draft-id', v); } catch {}
+    try { sessionStorage.setItem('oversight-current-task-draft-id', v); } catch {}
     setTaskDraftId(v);
     setUploadedSessions([]);
   }, []);

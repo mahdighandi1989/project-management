@@ -122,7 +122,15 @@ async def _ffmpeg_chunk_av(
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
-    _, stderr = await proc.communicate()
+    try:
+        # 🛡 (audit fix MINOR) — timeout 10 دقیقه برای chunking یک فایل بزرگ
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise RuntimeError("ffmpeg chunking timeout after 10 minutes")
     if proc.returncode != 0:
         raise RuntimeError(
             f"ffmpeg returned {proc.returncode}: {stderr.decode('utf-8', errors='ignore')[:500]}"
@@ -516,7 +524,16 @@ async def _render_pdf_page_to_b64(path: Path, page_num: int) -> Optional[str]:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
-            _, stderr = await proc.communicate()
+            try:
+                # 🛡 (audit fix MINOR) — timeout سخت تا روی PDF مخدوش hang نکند
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                logger.warning(f"pdftoppm timeout on page {page_num} after 30s")
+                return None
             if proc.returncode != 0:
                 logger.debug(
                     f"pdftoppm exit {proc.returncode}: {stderr.decode('utf-8', errors='ignore')[:200]}"
@@ -629,35 +646,36 @@ async def extract_session(
             f"session در وضعیت {session.status} است — completed لازم است"
         )
 
-    # موجود است؟ resume
-    existing = repo.list_by_session(session_id)
-    fe = existing[0] if existing else None
-    if fe is None:
-        # انتخاب مدل
-        model = pick_best_extraction_model(
-            session.mime_type,
-            preferred_model_id=preferred_model_id,
-            db_enabled_ids=db_enabled_ids,
-        )
-        if model is None:
-            raise ExtractionError(
-                f"هیچ مدل بصری enabled برای mime {session.mime_type} پیدا نشد — "
-                f"از /models یک مدل multimodal فعال کن"
-            )
-        fe = FileExtraction(
-            id=str(uuid.uuid4()),
-            task_id=session.task_id,
-            session_id=session.id,
-            file_order=session.file_order,
-            original_filename=session.original_filename,
-            mime_type=session.mime_type,
-            model_used=model.id,
-            status="extracting",
-        )
-        await repo.create_extraction(fe)
-
-    # serialize کن — هم‌زمان فقط یک extraction
+    # serialize کن — هم‌زمان فقط یک extraction (atomic check-create-run)
     async with _EXTRACTION_SEMAPHORE:
+        # 🆕 (audit fix CRITICAL) — check-create داخل semaphore تا race condition
+        # نداشته باشیم. اگر دو caller هم‌زمان trigger کنند، دومی صبر می‌کند
+        # و سپس extraction قبلی را resume می‌کند.
+        existing = repo.list_by_session(session_id)
+        fe = existing[0] if existing else None
+        if fe is None:
+            model = pick_best_extraction_model(
+                session.mime_type,
+                preferred_model_id=preferred_model_id,
+                db_enabled_ids=db_enabled_ids,
+            )
+            if model is None:
+                raise ExtractionError(
+                    f"هیچ مدل بصری enabled برای mime {session.mime_type} پیدا نشد — "
+                    f"از /models یک مدل multimodal فعال کن"
+                )
+            fe = FileExtraction(
+                id=str(uuid.uuid4()),
+                task_id=session.task_id,
+                session_id=session.id,
+                file_order=session.file_order,
+                original_filename=session.original_filename,
+                mime_type=session.mime_type,
+                model_used=model.id,
+                status="extracting",
+            )
+            await repo.create_extraction(fe)
+
         try:
             await upload_svc.set_status(session.id, "extracting")
             await repo.update_extraction(fe.id, status="extracting", started_at=now_iso())

@@ -175,15 +175,36 @@ class UploadSessionService:
             raise ValueError("task_draft_id خالی است")
 
         sid = str(uuid.uuid4())
-        # فایل‌نام امن — فقط extension اصلی نگه داشته می‌شود
+        # 🛡 (audit fix MEDIUM) فایل‌نام امن:
+        # - فقط basename (هیچ path component) — جلوگیری از path traversal
+        # - extension با whitelist سختگیرانه
+        # - حذف null bytes و کاراکترهای کنترلی
         ext = ""
         try:
-            ext = os.path.splitext(original_filename)[1].lower()
-            # whitelist ساده — جلوگیری از path traversal یا executable upload
-            ext = "".join(c for c in ext if c.isalnum() or c == ".")[:10]
+            clean_name = os.path.basename(original_filename or "")
+            # حذف null bytes و کنترلی
+            clean_name = "".join(c for c in clean_name if ord(c) >= 32 and c != "\x7f")
+            # اگر هنوز slash دارد → reject
+            if "/" in clean_name or "\\" in clean_name or ".." in clean_name:
+                raise ValueError("filename شامل path component غیرمجاز است")
+            _, ext = os.path.splitext(clean_name)
+            ext = ext.lower()
+            # whitelist فقط alphanumeric + یک نقطه ابتدا
+            ext = "".join(c for c in ext if c.isalnum() or c == ".")
+            ext = ext[:10]
+            if ext and not ext.startswith("."):
+                ext = "." + ext
+        except ValueError:
+            raise
         except Exception:
             ext = ""
         temp_path = UPLOAD_DIR / f"{sid}{ext or '.bin'}"
+        # 🛡 sanity: تأیید کن temp_path داخل UPLOAD_DIR است
+        try:
+            if not str(temp_path.resolve()).startswith(str(UPLOAD_DIR.resolve())):
+                raise ValueError("temp_path resolved خارج از UPLOAD_DIR — refuse")
+        except Exception as e:
+            raise ValueError(f"path validation failed: {e}")
 
         # auto file_order — اگر داده نشده، آخرین + 1 برای همین task_draft_id
         async with self._lock:

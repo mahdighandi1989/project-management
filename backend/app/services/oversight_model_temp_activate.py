@@ -47,6 +47,19 @@ def _db_setting(db: Session, model_id: str) -> ModelSettings:
     return s
 
 
+def _md_escape(s: str) -> str:
+    """escape کاراکترهای Markdown — جلوگیری از injection در caption."""
+    if not s:
+        return ""
+    out = []
+    for ch in s:
+        if ch in ("_", "*", "`", "["):
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 async def _notify(message: str) -> None:
     """ارسال notification (best-effort) — اگر کانال‌ها پیکربندی نشده، silent."""
     try:
@@ -106,8 +119,8 @@ async def temp_activate_model(model_id: str, trigger: str = "") -> Dict[str, Any
             db.close()
 
     await _notify(
-        f"🔓 *مدل {m.name} موقتاً فعال شد*\n"
-        f"📌 برای: `{trigger or '-'}`\n"
+        f"🔓 *مدل {_md_escape(m.name)} موقتاً فعال شد*\n"
+        f"📌 برای: `{(trigger or '-')[:200].replace('`', 'ʼ')}`\n"
         f"⏳ پس از اتمام کار، خودکار به وضعیت قبل برمی‌گردد."
     )
     return {
@@ -155,9 +168,10 @@ async def temp_revert_model(model_id: str, trigger: str = "") -> Dict[str, Any]:
         # هیچ‌گاه فعال نشده بود از طریق این service — silent
         return {"model_id": model_id, "reverted": False, "reason": "not in active list"}
 
+    safe_trigger = ((trigger or info.get('trigger', '-')) or '-')[:200].replace('`', 'ʼ')
     await _notify(
-        f"🔒 *مدل {m.name} غیرفعال شد*\n"
-        f"📌 trigger: `{trigger or info.get('trigger', '-')}`\n"
+        f"🔒 *مدل {_md_escape(m.name)} غیرفعال شد*\n"
+        f"📌 trigger: `{safe_trigger}`\n"
         f"✅ کار خاتمه یافت — مدل به حالت قبل ({'enabled' if original_enabled else 'disabled'}) برگشت."
     )
     return {
