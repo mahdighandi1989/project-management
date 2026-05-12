@@ -27,6 +27,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from .ac_schema import normalize_ac_list
 from .base import (
     PROBE_STATUS_ERROR,
+    PROBE_STATUS_SKIPPED,
     ProbeContext,
     RuntimeProbeResult,
 )
@@ -35,6 +36,7 @@ from .manual_probe import run_manual_probe
 from .static_probe import run_static_probe
 from .test_probe import run_test_probe
 from .ui_probe import run_ui_probe
+from .safety import get_breaker, is_runtime_enabled, is_ui_probe_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -62,46 +64,68 @@ async def _run_single_probe(
 ) -> RuntimeProbeResult:
     """یک AC را با probe مناسب اجرا می‌کند، با semaphore + timeout."""
     method = ac.get("verify_method") or "static"
+
+    # 🛡 (Stage 9) — UI probe در صورت غیرفعال بودن flag، skipped
+    if method == "ui_interaction" and not is_ui_probe_enabled():
+        return RuntimeProbeResult(
+            ac_id=ac_id,
+            ac_text=str(ac.get("text") or ""),
+            method=method,
+            status=PROBE_STATUS_SKIPPED,
+            evidence={"reason": "RUNTIME_VERIFY_UI_ENABLED=false"},
+        )
+
+    # 🛡 (Stage 9) — circuit breaker: اگر method open است، skip کن
+    breaker = get_breaker()
+    if breaker.is_open(method):
+        return RuntimeProbeResult(
+            ac_id=ac_id,
+            ac_text=str(ac.get("text") or ""),
+            method=method,
+            status=PROBE_STATUS_SKIPPED,
+            evidence={"reason": f"circuit breaker open for {method}"},
+        )
+
     async with semaphore:
         # synchronous probes را در executor اجرا کن
+        result: RuntimeProbeResult
         try:
             if method == "static":
-                # static synchronous است
-                return await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     asyncio.to_thread(run_static_probe, ac, ctx, ac_id),
                     timeout=_PER_PROBE_TIMEOUT_S,
                 )
-            if method == "manual_only":
-                return await asyncio.wait_for(
+            elif method == "manual_only":
+                result = await asyncio.wait_for(
                     asyncio.to_thread(run_manual_probe, ac, ctx, ac_id),
                     timeout=_PER_PROBE_TIMEOUT_S,
                 )
-            if method == "api_response":
-                return await asyncio.wait_for(
+            elif method == "api_response":
+                result = await asyncio.wait_for(
                     run_api_probe(ac, ctx, ac_id),
                     timeout=_PER_PROBE_TIMEOUT_S,
                 )
-            if method == "backend_test":
-                return await asyncio.wait_for(
+            elif method == "backend_test":
+                result = await asyncio.wait_for(
                     run_test_probe(ac, ctx, ac_id),
                     timeout=_PER_PROBE_TIMEOUT_S,
                 )
-            if method == "ui_interaction":
-                return await asyncio.wait_for(
+            elif method == "ui_interaction":
+                result = await asyncio.wait_for(
                     run_ui_probe(ac, ctx, ac_id),
                     timeout=_PER_PROBE_TIMEOUT_S,
                 )
-            # method ناشناخته → ERROR
-            return RuntimeProbeResult(
-                ac_id=ac_id,
-                ac_text=str(ac.get("text") or ""),
-                method=method,
-                status=PROBE_STATUS_ERROR,
-                evidence={"reason": f"method ناشناخته: {method}"},
-                error_message=f"unknown method: {method}",
-            )
+            else:
+                result = RuntimeProbeResult(
+                    ac_id=ac_id,
+                    ac_text=str(ac.get("text") or ""),
+                    method=method,
+                    status=PROBE_STATUS_ERROR,
+                    evidence={"reason": f"method ناشناخته: {method}"},
+                    error_message=f"unknown method: {method}",
+                )
         except asyncio.TimeoutError:
-            return RuntimeProbeResult(
+            result = RuntimeProbeResult(
                 ac_id=ac_id,
                 ac_text=str(ac.get("text") or ""),
                 method=method,
@@ -111,7 +135,7 @@ async def _run_single_probe(
             )
         except Exception as e:
             logger.warning(f"probe {method} crashed for {ac_id}: {e}", exc_info=False)
-            return RuntimeProbeResult(
+            result = RuntimeProbeResult(
                 ac_id=ac_id,
                 ac_text=str(ac.get("text") or ""),
                 method=method,
@@ -119,6 +143,13 @@ async def _run_single_probe(
                 evidence={"reason": f"probe crashed: {e}"},
                 error_message=str(e)[:300],
             )
+
+        # 🛡 (Stage 9) — circuit breaker را به‌روز کن
+        try:
+            breaker.record_result(method, result.status)
+        except Exception:
+            pass
+        return result
 
 
 def build_probe_context(
@@ -160,6 +191,19 @@ async def run_probes_for_acs(
     normalized = normalize_ac_list(acs)
     if not normalized:
         return []
+
+    # 🛡 (Stage 9) — اگر runtime layer کلاً disabled است، همه را skip کن
+    if not is_runtime_enabled():
+        return [
+            RuntimeProbeResult(
+                ac_id=_ac_id_for(ac, i),
+                ac_text=str(ac.get("text") or ""),
+                method=str(ac.get("verify_method") or "static"),
+                status=PROBE_STATUS_SKIPPED,
+                evidence={"reason": "RUNTIME_VERIFY_ENABLED=false"},
+            )
+            for i, ac in enumerate(normalized)
+        ]
 
     semaphore = asyncio.Semaphore(max_parallel)
     tasks_coros = []

@@ -41,6 +41,12 @@ from .runner import (
     run_probes_for_acs,
     run_probes_for_task,
 )
+from .safety import (
+    CircuitBreaker,
+    get_breaker,
+    is_runtime_enabled,
+    is_ui_probe_enabled,
+)
 
 __all__ = [
     "AC_METHODS",
@@ -66,4 +72,8 @@ __all__ = [
     "build_probe_context",
     "run_probes_for_acs",
     "run_probes_for_task",
+    "CircuitBreaker",
+    "get_breaker",
+    "is_runtime_enabled",
+    "is_ui_probe_enabled",
 ]
