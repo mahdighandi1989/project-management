@@ -46,6 +46,22 @@ class GeminiService(AIServiceBase):
                             }
                         })
 
+                # 🆕 رسانهٔ inline با MIME صریح (audio/video/PDF/...) — بدون سنیف
+                if getattr(msg, "inline_files", None):
+                    for entry in msg.inline_files:
+                        try:
+                            mime_type, b64 = entry[0], entry[1]
+                        except Exception:
+                            continue
+                        if not mime_type or not b64:
+                            continue
+                        parts.append({
+                            "inline_data": {
+                                "mime_type": mime_type,
+                                "data": b64,
+                            }
+                        })
+
                 contents.append({"role": role, "parts": parts})
 
         return system_instruction, contents

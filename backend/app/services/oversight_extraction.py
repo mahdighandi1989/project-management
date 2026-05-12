@@ -416,8 +416,11 @@ async def _ai_extract_text(
     if image_b64:
         images = [image_b64]
 
-    # برای Gemini با audio/video، در حال حاضر inline base64 — برای فایل‌های
-    # کوچک کفایت می‌کند. در Stage 9 با Files API + ffmpeg chunking.
+    # 🛡 (audit fix CRITICAL) — رسانهٔ غیر-تصویری (audio/video/PDF/...) باید
+    # با MIME صریح به provider ارسال شود، نه از طریق `images` (که در
+    # GeminiService همیشه به image/png|jpeg سنیف می‌شد → خطای
+    # "Unable to process input image" برای فایل‌های صوتی/ویدئویی).
+    inline_files: Optional[List[tuple]] = None
     extra_text = ""
     if inline_file_data is not None:
         mime, raw = inline_file_data
@@ -432,10 +435,13 @@ async def _ai_extract_text(
             f"\n\n[فایل پیوست به‌صورت base64 با mime={mime}؛ "
             f"حجم = {len(raw)} bytes؛ متن کامل را استخراج کن.]"
         )
-        # برای provider Gemini، images را برای هر inline_data استفاده می‌کنیم
-        # (ai_base.Message.images هم برای image هم برای generic inline قابل
-        # استفاده است در GeminiService.)
-        images = (images or []) + [b64]
+        # تصمیم routing بر اساس mime واقعی:
+        # - image/* → از کانال `images` (سازگار با همهٔ providerها)
+        # - بقیه (audio, video, pdf, ...) → از کانال `inline_files` با MIME صریح
+        if (mime or "").lower().startswith("image/"):
+            images = (images or []) + [b64]
+        else:
+            inline_files = (inline_files or []) + [(mime, b64)]
 
     mgr = get_ai_manager()
     messages = [
@@ -447,7 +453,12 @@ async def _ai_extract_text(
             "4) اگر متن داخل تصویر/سند به زبان فارسی است، فارسی بنویس.\n"
             "5) اگر صدا است، transcript کامل بنویس با timestamp اگر ممکن است.\n"
         )),
-        Message(role="user", content=prompt + extra_text, images=images),
+        Message(
+            role="user",
+            content=prompt + extra_text,
+            images=images,
+            inline_files=inline_files,
+        ),
     ]
     # 🛡 (audit fix CRITICAL) — allow_fallback=False تا اگر مدل بصری در DB
     # disabled است، ai_manager به deepseek fallback نکند و خروجی غلط
