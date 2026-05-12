@@ -548,8 +548,19 @@ def pick_best_extraction_model(
             return True
         return required in m.capabilities
 
-    # گام ۰ — اگر preferred_model_id (یا default Flash) واجد شرایط است، همان
-    pref_id = preferred_model_id or DEFAULT_EXTRACTION_MODEL_ID
+    # گام ۰ — اگر preferred_model_id ست شده، آن. وگرنه DB > hard-coded default.
+    if preferred_model_id:
+        pref_id = preferred_model_id
+    else:
+        pref_id = None
+        # تلاش برای خواندن از DB (silent fail اگر import circular)
+        try:
+            from ..services.oversight_settings import get_default_extraction_model_id_from_db
+            pref_id = get_default_extraction_model_id_from_db()
+        except Exception:
+            pref_id = None
+        if not pref_id:
+            pref_id = DEFAULT_EXTRACTION_MODEL_ID
     if pref_id:
         resolved_pref_id = MODEL_ALIASES.get(pref_id, pref_id)
         pref_model = MODEL_REGISTRY.get(resolved_pref_id)

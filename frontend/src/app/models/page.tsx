@@ -6,6 +6,7 @@
 
 import { useState, useEffect } from 'react';
 import { modelsApi, Model, ProviderStatus } from '@/services/api';
+import ExtractionDefaultPicker from '@/components/ExtractionDefaultPicker';
 import {
   CheckCircleIcon,
   XCircleIcon,
@@ -294,6 +295,9 @@ export default function ModelsPage() {
           {errorMessage}
         </div>
       )}
+
+      {/* 🆕 (Stage 10 audit fix #4) — انتخاب مدل پیش‌فرض extraction */}
+      <ExtractionDefaultPicker apiBase={API_BASE} />
 
       {/* Header */}
       <div className="flex items-center justify-between">

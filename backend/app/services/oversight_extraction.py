@@ -51,10 +51,13 @@ logger = logging.getLogger(__name__)
 EXTRACTIONS_FILE: Path = STORAGE_DIR / "extractions.json"
 
 # ─────────── سقف‌های ایمنی ───────────
-MAX_PAGES_PER_PDF: int = 5000  # عملاً unlimited
-MAX_PARAGRAPHS_PER_DOCX: int = 100_000
-MAX_ROWS_PER_SHEET: int = 1_000_000
-SEGMENT_TEXT_MAX_CHARS: int = 200_000  # هر segment تا 200K char
+MAX_PAGES_PER_PDF: int = 100_000  # عملاً unlimited
+MAX_PARAGRAPHS_PER_DOCX: int = 10_000_000
+MAX_ROWS_PER_SHEET: int = 100_000_000
+# 🛡 (Stage 10 audit fix #2) — طبق درخواست صریح کاربر «محدودیت استخراج متن
+# اصلاً نداشته باشه»، این سقف فقط محافظ JSON store در برابر فایل JSON عظیم
+# است (≥10MB). در عمل، هیچ segment معمولی به این سقف نمی‌رسد.
+SEGMENT_TEXT_MAX_CHARS: int = 10_000_000  # 10M char per segment (~10MB)
 PER_SEGMENT_TIMEOUT_SEC: int = 300  # 5 دقیقه
 INLINE_MEDIA_BYTES_LIMIT: int = 18 * 1024 * 1024  # 18MB
 AV_CHUNK_SECONDS: int = 300  # 5 دقیقه per audio/video chunk
