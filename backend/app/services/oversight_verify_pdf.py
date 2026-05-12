@@ -368,6 +368,7 @@ def _build_verify_report_html(task: Any, report: Any) -> str:
 
     # 🔬 (Runtime Verify Stage 7) — Runtime evidence section
     runtime_html = ""
+    task_id = str(getattr(task, "id", "") or "")
     try:
         ev = getattr(report, "evidence", None) or {}
         if isinstance(ev, dict):
@@ -398,16 +399,55 @@ def _build_verify_report_html(task: Any, report: Any) -> str:
                         f'<div class="muted">خطا: {err}</div>' if err else ""
                     )
                     ev_blob = p.get("evidence") or {}
-                    # screenshots inline (فقط نام‌ها — viewer جداست در frontend)
+                    # screenshots inline — به‌صورت base64 در img embed می‌شوند
+                    # تا PDF کاملاً self-contained باشد (به URL سرور وابسته نباشد)
                     screenshots = ev_blob.get("screenshots") or []
-                    if screenshots:
+                    shots_html = ""
+                    if screenshots and run_id:
+                        try:
+                            from pathlib import Path as _Path
+                            import base64 as _b64
+                            from app.services.oversight_service import STORAGE_DIR
+                            ac_id_dir = p.get("ac_id") or ""
+                            base_dir = (
+                                _Path(STORAGE_DIR) / "verify_evidence"
+                                / task_id / run_id / ac_id_dir
+                            )
+                            imgs = []
+                            for s in screenshots[:4]:  # حداکثر 4 تصویر در PDF
+                                fp = base_dir / s
+                                if not fp.is_file():
+                                    continue
+                                try:
+                                    raw = fp.read_bytes()
+                                    if len(raw) > 1_500_000:
+                                        continue  # تصویر خیلی بزرگ — skip
+                                    b64 = _b64.b64encode(raw).decode("ascii")
+                                    mime = (
+                                        "image/jpeg" if fp.suffix.lower() in (".jpg", ".jpeg")
+                                        else "image/png"
+                                    )
+                                    imgs.append(
+                                        f'<img src="data:{mime};base64,{b64}" '
+                                        f'class="probe-shot" alt="{_esc(s)}" />'
+                                    )
+                                except Exception:
+                                    continue
+                            if imgs:
+                                shots_html = (
+                                    '<div class="probe-shots">'
+                                    + "".join(imgs)
+                                    + '</div>'
+                                )
+                        except Exception as _se:
+                            logger.debug(f"PDF embed screenshots failed: {_se}")
+                    elif screenshots:
+                        # fallback به نام‌ها
                         shots_html = (
                             '<div class="muted">screenshots: '
                             + ", ".join(_esc(s) for s in screenshots[:5])
                             + '</div>'
                         )
-                    else:
-                        shots_html = ""
                     # response/stdout excerpt
                     extra_html = ""
                     if p.get("method") == "api_response":
@@ -494,6 +534,8 @@ pre.code {{ font-size: 10.5px; line-height: 1.4; background:#0f172a; color:#e2e8
 .probe-card.probe-muted {{ border-color:#d1d5db; background:#f9fafb; }}
 .probe-head {{ font-size:11.5px; margin-bottom:4px; }}
 .probe-ac {{ font-size:10.5px; color:#374151; margin:3px 0; font-style:italic; }}
+.probe-shots {{ display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }}
+.probe-shot {{ max-width:230px; max-height:160px; border:1px solid #d1d5db; border-radius:4px; }}
 .badge-ok {{ background:#16a34a; color:#fff; padding:1px 6px; border-radius:8px; font-size:10px; }}
 .badge-fail {{ background:#dc2626; color:#fff; padding:1px 6px; border-radius:8px; font-size:10px; }}
 .badge-warn {{ background:#d97706; color:#fff; padding:1px 6px; border-radius:8px; font-size:10px; }}

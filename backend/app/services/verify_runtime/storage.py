@@ -35,6 +35,100 @@ logger = logging.getLogger(__name__)
 
 MAX_RUNS_PER_TASK = 5
 MAX_BYTES_PER_RUN = 50 * 1024 * 1024
+# آستانه برای compress: اگر تصویر PNG > 500KB، به JPEG q=70 تبدیل
+PNG_COMPRESS_THRESHOLD = 500 * 1024
+JPEG_QUALITY = 70
+
+
+def _run_size_bytes(run_dir: Path) -> int:
+    total = 0
+    try:
+        for p in run_dir.rglob("*"):
+            if p.is_file():
+                try:
+                    total += p.stat().st_size
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return total
+
+
+def compress_large_screenshots(run_dir: Path) -> int:
+    """PNG های بزرگ‌تر از PNG_COMPRESS_THRESHOLD را به JPEG q=70 تبدیل کن.
+
+    خروجی: تعداد فایل‌های compress شده. اگر Pillow نصب نباشد، silent skip.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.debug("Pillow not installed — skipping screenshot compression")
+        return 0
+    converted = 0
+    try:
+        for p in run_dir.rglob("*.png"):
+            try:
+                size = p.stat().st_size
+            except Exception:
+                continue
+            if size <= PNG_COMPRESS_THRESHOLD:
+                continue
+            try:
+                img = Image.open(p)
+                if img.mode in ("RGBA", "LA", "P"):
+                    bg = Image.new("RGB", img.size, (255, 255, 255))
+                    if img.mode == "P":
+                        img = img.convert("RGBA")
+                    bg.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+                    img = bg
+                jpeg_path = p.with_suffix(".jpg")
+                img.save(jpeg_path, "JPEG", quality=JPEG_QUALITY, optimize=True)
+                # PNG قبلی را پاک کن
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+                converted += 1
+            except Exception as e:
+                logger.debug(f"compress {p}: {e}")
+                continue
+    except Exception as e:
+        logger.warning(f"compress_large_screenshots error: {e}")
+    return converted
+
+
+def enforce_size_cap(run_dir: Path, max_bytes: int = MAX_BYTES_PER_RUN) -> Dict[str, Any]:
+    """اگر run dir بزرگ‌تر از max_bytes است:
+    1. اول compress_large_screenshots اجرا کن
+    2. اگر هنوز بزرگ‌تر، قدیمی‌ترین screenshots را حذف کن
+    """
+    info = {"initial_bytes": _run_size_bytes(run_dir), "compressed": 0, "deleted": 0}
+    if info["initial_bytes"] <= max_bytes:
+        info["final_bytes"] = info["initial_bytes"]
+        return info
+    info["compressed"] = compress_large_screenshots(run_dir)
+    cur = _run_size_bytes(run_dir)
+    if cur <= max_bytes:
+        info["final_bytes"] = cur
+        return info
+    # هنوز بزرگ‌تر — قدیمی‌ترین تصاویر را حذف کن
+    try:
+        imgs = sorted(
+            [p for p in run_dir.rglob("*") if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg")],
+            key=lambda p: p.stat().st_mtime,
+        )
+        for p in imgs:
+            if _run_size_bytes(run_dir) <= max_bytes:
+                break
+            try:
+                p.unlink()
+                info["deleted"] += 1
+            except Exception:
+                continue
+    except Exception as e:
+        logger.warning(f"enforce_size_cap delete pass: {e}")
+    info["final_bytes"] = _run_size_bytes(run_dir)
+    return info
 
 
 def ensure_run_dir(storage_root: Path, task_id: str, run_id: str) -> Path:

@@ -164,6 +164,13 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    # 🔬 (Runtime Verify Stage 9) — browser pool را shutdown کن
+    try:
+        from .services.verify_runtime.browser_pool import shutdown_browser_pool
+        await shutdown_browser_pool()
+    except Exception as e:
+        logger.warning(f"browser pool shutdown error: {e}")
+
     # Stop all running project containers
     try:
         from .services.runtime_executor import get_runtime_executor

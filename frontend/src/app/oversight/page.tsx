@@ -1917,13 +1917,16 @@ export default function OversightPage() {
   };
 
   // ============================ Verifier / Manual external ============================
-  const verifyTaskNow = async (id: string) => {
+  const verifyTaskNow = async (id: string, includeRuntime: boolean = true) => {
     setRunningTaskIds((p) => new Set(p).add(id));
     try {
       const res = await fetch(`${API_BASE}/api/oversight/tasks/${id}/verify-now`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model_id: selectedModelIds[0] || undefined }),
+        body: JSON.stringify({
+          model_id: selectedModelIds[0] || undefined,
+          include_runtime: includeRuntime,
+        }),
       });
       if (res.ok) {
         const data = await res.json();
@@ -5219,7 +5222,7 @@ function TasksPanel({
   onUpdate: (id: string, u: Partial<Task>) => void;
   onDelete: (id: string) => void;
   onView: (t: Task) => void;
-  onVerify: (id: string) => void;
+  onVerify: (id: string, includeRuntime?: boolean) => void;
   onMarkExternal: (id: string) => void;
   onCopyPrompt: (id: string) => void;
   onShowHistory: (id: string) => void;
@@ -5514,12 +5517,20 @@ function TasksPanel({
               </button>
             )}
             <button
-              onClick={() => onVerify(t.id)}
+              onClick={() => onVerify(t.id, false)}
               disabled={isRunning}
-              title="بررسی الان: آیا کار انجام شده؟ مستقل از روش execution"
+              title="verify سریع: فقط تحلیل کد، بدون probe های runtime (Playwright/HTTP/pytest)"
               className="px-3 py-1 bg-cyan-500 text-white rounded text-xs hover:bg-cyan-600 disabled:opacity-50"
             >
               🔍 verify
+            </button>
+            <button
+              onClick={() => onVerify(t.id, true)}
+              disabled={isRunning}
+              title="verify کامل: تحلیل کد + probe های runtime (مرورگر/API/تست) — کندتر ولی دقیق‌تر"
+              className="px-3 py-1 bg-purple-500 text-white rounded text-xs hover:bg-purple-600 disabled:opacity-50"
+            >
+              🔬 verify + runtime
             </button>
             <button
               onClick={() => onExecuteWithAi(t)}
