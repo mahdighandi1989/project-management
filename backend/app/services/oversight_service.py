@@ -4781,6 +4781,10 @@ class OversightService:
             )
 
         # ساخت پرامپت قوی با ساختار غنی
+        # 🛡 (audit fix CRITICAL) — اگر build_strong_prompt fail کند، فالبک به
+        # یک پرامپت مینیمال ولی قابل‌استفاده می‌دهیم، نه None. این تضمین می‌کند
+        # task.prompt همیشه به یک نسخهٔ جدید به‌روز شود (با remaining steps).
+        new_prompt: Optional[str] = None
         try:
             new_prompt = build_strong_prompt(
                 title=new_title,
@@ -4800,8 +4804,35 @@ class OversightService:
                 estimate="medium",
             )
         except Exception as _e:
-            logger.warning(f"build_strong_prompt for follow-up failed: {_e}")
-            return None
+            logger.warning(
+                f"build_strong_prompt for follow-up failed: {_e} — استفاده از fallback مینیمال"
+            )
+            new_prompt = None
+        # 🛡 fallback اگر build_strong_prompt هیچ‌چیز برنگرداند (None یا خالی)
+        if not new_prompt or len(new_prompt.strip()) < 50:
+            fb_parts: List[str] = []
+            fb_parts.append(
+                "## ⚠️ یادداشت\n"
+                "این پرامپت یک نسخهٔ followup ساده‌شده است (build_strong_prompt fail شد)."
+            )
+            fb_parts.append("")
+            fb_parts.append(f"# {new_title}")
+            fb_parts.append("")
+            fb_parts.append(new_description)
+            fb_parts.append("")
+            fb_parts.append("## ✅ معیارهای پذیرش باقی‌مانده (تمرکز این دور)")
+            for a in new_ac[:20]:
+                fb_parts.append(f"- [ ] {a}")
+            if risks_text:
+                fb_parts.append("")
+                fb_parts.append("## ⚠️ ریسک‌ها / اقدامات پیشنهادی")
+                fb_parts.append(risks_text)
+            if validation_commands:
+                fb_parts.append("")
+                fb_parts.append("## 🧪 دستورات اعتبارسنجی")
+                for c in validation_commands:
+                    fb_parts.append(f"- `{c}`")
+            new_prompt = "\n".join(fb_parts)
 
         # 🆕 (Multi-pass Checklist) — اگر task_steps هست، چک‌لیست را به انتهای
         # پرامپت append کن تا در دور بعدی verify بتواند checkbox‌ها را همگام کند.
