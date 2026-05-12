@@ -3716,6 +3716,102 @@ export default function OversightPage() {
                 </div>
               )}
 
+              {/* 🔬 (Runtime Verify Stage 8) — probe results */}
+              {viewingReport.evidence?.runtime_probes && Array.isArray(viewingReport.evidence.runtime_probes) && (viewingReport.evidence.runtime_probes as any[]).length > 0 && (
+                <div className="border border-cyan-300 dark:border-cyan-700 rounded-lg p-3 bg-cyan-50/40 dark:bg-cyan-900/10">
+                  <h4 className="text-sm font-bold dark:text-cyan-200 mb-2">
+                    🔬 شواهد Runtime ({(viewingReport.evidence.runtime_probes as any[]).length} probe)
+                  </h4>
+                  {viewingReport.evidence.runtime_probes_summary && (
+                    <p className="text-[11px] text-gray-600 dark:text-gray-400 mb-2">
+                      ✅ {(viewingReport.evidence.runtime_probes_summary as any).passed || 0} pass
+                      {' · '}❌ {(viewingReport.evidence.runtime_probes_summary as any).failed || 0} fail
+                      {' · '}⏭ {(viewingReport.evidence.runtime_probes_summary as any).skipped || 0} skip
+                      {' · '}⚠️ {(viewingReport.evidence.runtime_probes_summary as any).error || 0} error
+                    </p>
+                  )}
+                  <div className="space-y-2">
+                    {(viewingReport.evidence.runtime_probes as any[]).map((p, i) => {
+                      const runId = viewingReport.evidence?.runtime_run_id;
+                      const statusColor: Record<string, string> = {
+                        passed: 'bg-green-100 dark:bg-green-900/30 border-green-300 dark:border-green-700',
+                        failed: 'bg-red-100 dark:bg-red-900/30 border-red-300 dark:border-red-700',
+                        error: 'bg-yellow-100 dark:bg-yellow-900/30 border-yellow-300 dark:border-yellow-700',
+                        skipped: 'bg-gray-100 dark:bg-gray-800 border-gray-300 dark:border-gray-700',
+                      };
+                      const methodEmoji: Record<string, string> = {
+                        static: '🔍', ui_interaction: '🖱', api_response: '🌐',
+                        backend_test: '🧪', manual_only: '👁',
+                      };
+                      return (
+                        <div
+                          key={i}
+                          className={`border rounded p-2 text-xs ${statusColor[p.status] || statusColor.skipped}`}
+                        >
+                          <div className="flex items-center gap-2 mb-1">
+                            <span>{methodEmoji[p.method] || '•'}</span>
+                            <span className="font-semibold dark:text-white">{p.method}</span>
+                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-white/60 dark:bg-black/30 dark:text-white">
+                              {p.status}
+                            </span>
+                            {p.duration_ms ? (
+                              <span className="text-[10px] text-gray-500 dark:text-gray-400">
+                                {p.duration_ms}ms
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="text-[11px] dark:text-gray-200 italic mb-1">
+                            «{(p.ac_text || '').slice(0, 200)}»
+                          </div>
+                          {p.error_message && (
+                            <div className="text-[11px] text-red-700 dark:text-red-300 mb-1">
+                              {p.error_message.slice(0, 200)}
+                            </div>
+                          )}
+                          {/* Screenshots */}
+                          {p.evidence?.screenshots && Array.isArray(p.evidence.screenshots) && p.evidence.screenshots.length > 0 && runId && (
+                            <div className="flex gap-1 flex-wrap mt-1">
+                              {(p.evidence.screenshots as string[]).slice(0, 6).map((sn, si) => {
+                                const url = `${API_BASE}/api/oversight/tasks/${viewingReport.task_id}/evidence/${runId}/${p.ac_id}/${sn}`;
+                                return (
+                                  <a
+                                    key={si}
+                                    href={url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="block"
+                                    title={sn}
+                                  >
+                                    <img
+                                      src={url}
+                                      alt={sn}
+                                      className="h-16 w-auto rounded border border-gray-300 dark:border-gray-600 hover:scale-125 transition-transform"
+                                      onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                    />
+                                  </a>
+                                );
+                              })}
+                            </div>
+                          )}
+                          {/* API response excerpt */}
+                          {p.method === 'api_response' && p.evidence?.response_excerpt && (
+                            <pre className="text-[10px] bg-gray-900 text-gray-100 p-2 rounded mt-1 overflow-x-auto max-h-32">
+                              {(p.evidence.response_excerpt as string).slice(0, 600)}
+                            </pre>
+                          )}
+                          {/* pytest stdout excerpt */}
+                          {p.method === 'backend_test' && p.evidence?.stdout_excerpt && (
+                            <pre className="text-[10px] bg-gray-900 text-gray-100 p-2 rounded mt-1 overflow-x-auto max-h-32">
+                              {(p.evidence.stdout_excerpt as string).slice(-800)}
+                            </pre>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {viewingReport.evidence?.criteria_results && (
                 <div>
                   <h4 className="text-sm font-medium mb-2 dark:text-gray-200">
