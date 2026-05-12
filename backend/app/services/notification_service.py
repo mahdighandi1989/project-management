@@ -496,9 +496,21 @@ class TelegramChannel(NotificationChannel):
             data.add_field("disable_notification", "true")
         if reply_markup:
             data.add_field("reply_markup", json.dumps(reply_markup))
+        # تشخیص content_type از پسوند filename — برای PDF/HTML/JSON/MD
+        fname_low = filename.lower()
+        if fname_low.endswith(".pdf"):
+            ctype = "application/pdf"
+        elif fname_low.endswith(".html") or fname_low.endswith(".htm"):
+            ctype = "text/html"
+        elif fname_low.endswith(".json"):
+            ctype = "application/json"
+        elif fname_low.endswith(".txt"):
+            ctype = "text/plain"
+        else:
+            ctype = "text/markdown"
         data.add_field(
             "document", file_bytes,
-            filename=filename, content_type="text/markdown",
+            filename=filename, content_type=ctype,
         )
         try:
             timeout = aiohttp.ClientTimeout(total=30)
@@ -506,6 +518,24 @@ class TelegramChannel(NotificationChannel):
                 async with session.post(url, data=data) as r:
                     if r.status != 200:
                         body = await r.text()
+                        # اگر Markdown parse fail شد، یک بار retry بدون parse_mode
+                        if caption and "can't parse" in body.lower():
+                            retry = aiohttp.FormData()
+                            retry.add_field("chat_id", str(self.chat_id))
+                            retry.add_field("caption", caption[:1020])
+                            if silent:
+                                retry.add_field("disable_notification", "true")
+                            if reply_markup:
+                                retry.add_field("reply_markup", json.dumps(reply_markup))
+                            retry.add_field(
+                                "document", file_bytes,
+                                filename=filename, content_type=ctype,
+                            )
+                            async with session.post(url, data=retry) as r2:
+                                if r2.status == 200:
+                                    return {"ok": True, "channel": self.name, "filename": filename}
+                                body2 = await r2.text()
+                                return {"ok": False, "channel": self.name, "error": f"HTTP {r2.status}: {body2[:300]}"}
                         return {"ok": False, "channel": self.name, "error": f"HTTP {r.status}: {body[:300]}"}
                     return {"ok": True, "channel": self.name, "filename": filename}
         except Exception as e:
@@ -943,7 +973,17 @@ class NotificationService:
         watched_id: Optional[str] = None,
         extra_hashtags: Optional[List[str]] = None,
         extra_buttons: Optional[List[Dict[str, str]]] = None,
+        attachment: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
+        """ارسال نوتیفیکیشن.
+
+        attachment (اختیاری): اگر داده شود، در کانال‌هایی که از سند پشتیبانی
+        می‌کنند (مثل Telegram) فایل به‌جای متن ساده ارسال می‌شود — متن
+        نوتیفیکیشن به‌عنوان caption فایل می‌رود. کانال‌های بدون پشتیبانی
+        (مثل email در نسخهٔ فعلی) به ارسال متن fallback می‌کنند.
+
+        ساختار: {"bytes": bytes, "filename": str, "mime": Optional[str]}
+        """
         prefs = _read_prefs()
         events = prefs.get("events", {})
         if not events.get(event, EVENT_REGISTRY.get(event, {}).get("default_enabled", False)):
@@ -977,9 +1017,27 @@ class NotificationService:
             ch_prefs = prefs.get("channels", {}).get(ch.name, {})
             if not ch_prefs.get("enabled", True):
                 continue
-            res = await ch.send(
-                full_message, subject=subject, silent=silent, reply_markup=reply_markup,
-            )
+            # 🆕 اگر attachment داده شده و کانال از send_document پشتیبانی می‌کند،
+            # سند را با caption=full_message بفرست. در غیر این صورت متن ساده.
+            if attachment and hasattr(ch, "send_document"):
+                try:
+                    res = await ch.send_document(  # type: ignore[attr-defined]
+                        attachment["bytes"],
+                        attachment.get("filename") or "attachment",
+                        caption=full_message,
+                        silent=silent,
+                        reply_markup=reply_markup,
+                    )
+                except Exception as _e:
+                    # fallback به ارسال متن
+                    logger.warning(f"send_document failed on {ch.name}: {_e}; falling back to text")
+                    res = await ch.send(
+                        full_message, subject=subject, silent=silent, reply_markup=reply_markup,
+                    )
+            else:
+                res = await ch.send(
+                    full_message, subject=subject, silent=silent, reply_markup=reply_markup,
+                )
             results.append(res)
         return results
 
