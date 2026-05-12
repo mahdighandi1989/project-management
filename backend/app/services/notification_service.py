@@ -556,6 +556,150 @@ class TelegramChannel(NotificationChannel):
         except Exception as e:
             return {"ok": False, "channel": self.name, "error": str(e)[:300]}
 
+    # 🆕 (Compose Stage 2) — کمک‌کننده‌ها برای download کردن media از Telegram
+    async def get_file(self, file_id: str) -> Optional[Dict[str, Any]]:
+        """تماس با Bot API getFile → file_path و file_size می‌گیریم.
+
+        خروجی None اگر file_id نامعتبر است یا فایل بزرگ‌تر از 20MB.
+        """
+        if not self.bot_token:
+            return None
+        url = f"https://api.telegram.org/bot{self.bot_token}/getFile"
+        try:
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json={"file_id": file_id}) as r:
+                    body = await r.json()
+                    if not body.get("ok"):
+                        return None
+                    return body.get("result") or None
+        except Exception as e:
+            logger.warning(f"telegram getFile failed: {e}")
+            return None
+
+    async def download_file(self, file_path: str) -> Optional[bytes]:
+        """download فایل از Telegram CDN.
+
+        ⚠ محدودیت Bot API: حداکثر 20MB. برای بزرگ‌تر None.
+        """
+        if not self.bot_token or not file_path:
+            return None
+        url = f"https://api.telegram.org/file/bot{self.bot_token}/{file_path}"
+        try:
+            timeout = aiohttp.ClientTimeout(total=120)  # برای فایل ۲۰MB
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as r:
+                    if r.status != 200:
+                        return None
+                    return await r.read()
+        except Exception as e:
+            logger.warning(f"telegram downloadFile failed: {e}")
+            return None
+
+    async def edit_message_text(
+        self, chat_id: Any, message_id: int, text: str, *,
+        reply_markup: Optional[Dict[str, Any]] = None,
+        parse_mode: Optional[str] = "Markdown",
+    ) -> Dict[str, Any]:
+        """ویرایش پیام موجود (برای status updateهای idempotent در compose)."""
+        if not self.is_configured():
+            return {"ok": False, "error": "not configured"}
+        if len(text) > 4000:
+            text = text[:3990] + "\n…[truncated]"
+        url = f"https://api.telegram.org/bot{self.bot_token}/editMessageText"
+        payload: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "disable_web_page_preview": True,
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        try:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json=payload) as r:
+                    body = await r.json()
+                    if not body.get("ok"):
+                        err = (body.get("description") or "").lower()
+                        # "message is not modified" → no-op، OK
+                        if "not modified" in err:
+                            return {"ok": True, "no_change": True}
+                        # markdown parse fail → retry بدون parse_mode
+                        if "can't parse" in err and parse_mode:
+                            return await self.edit_message_text(
+                                chat_id, message_id, text,
+                                reply_markup=reply_markup, parse_mode=None,
+                            )
+                        return {"ok": False, "error": body.get("description")}
+                    return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:300]}
+
+    async def send_with_reply_keyboard(
+        self, message: str, keyboard_rows: List[List[str]], *,
+        silent: bool = False, parse_mode: Optional[str] = "Markdown",
+    ) -> Dict[str, Any]:
+        """ارسال پیام با ReplyKeyboard دائم پایین صفحه (دکمه‌های بزرگ).
+
+        keyboard_rows: [['متن دکمه ۱', 'متن دکمه ۲'], ['متن دکمه ۳']]
+        """
+        if not self.is_configured():
+            return {"ok": False, "error": "not configured"}
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        payload: Dict[str, Any] = {
+            "chat_id": self.chat_id,
+            "text": message,
+            "disable_web_page_preview": True,
+            "disable_notification": bool(silent),
+            "reply_markup": {
+                "keyboard": [[{"text": btn} for btn in row] for row in keyboard_rows],
+                "resize_keyboard": True,
+                "one_time_keyboard": False,
+                "is_persistent": True,
+            },
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        try:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json=payload) as r:
+                    if r.status != 200:
+                        body = await r.text()
+                        if "can't parse" in body.lower() and parse_mode:
+                            payload.pop("parse_mode", None)
+                            async with session.post(url, json=payload) as r2:
+                                if r2.status == 200:
+                                    return {"ok": True}
+                        return {"ok": False, "error": f"HTTP {r.status}: {body[:300]}"}
+                    body = await r.json()
+                    msg = body.get("result") or {}
+                    return {"ok": True, "message_id": msg.get("message_id")}
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:300]}
+
+    async def remove_reply_keyboard(self, message: str = "✅", silent: bool = True) -> Dict[str, Any]:
+        """حذف ReplyKeyboard با ارسال پیام کوتاه + reply_markup remove."""
+        if not self.is_configured():
+            return {"ok": False, "error": "not configured"}
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        payload = {
+            "chat_id": self.chat_id,
+            "text": message,
+            "disable_notification": bool(silent),
+            "reply_markup": {"remove_keyboard": True},
+        }
+        try:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json=payload) as r:
+                    return {"ok": r.status == 200}
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:300]}
+
     async def set_webhook(self, webhook_url: str) -> Dict[str, Any]:
         if not self.bot_token:
             return {"ok": False, "error": "TELEGRAM_BOT_TOKEN تنظیم نشده"}
@@ -1215,6 +1359,15 @@ class NotificationService:
         text = (msg.get("text") or "").strip()
         chat = (msg.get("chat") or {})
         chat_id = chat.get("id")
+
+        # 🆕 (Compose Stage 2) — اگر این پیام media است (یا compose mode فعال
+        # است و پیام text بدون command است)، آن را به compose buffer هدایت کن.
+        if chat_id:
+            configured_id_pre = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+            if not configured_id_pre or str(chat_id) == configured_id_pre:
+                media_handled = await self._maybe_route_to_compose(str(chat_id), msg, text)
+                if media_handled is not None:
+                    return media_handled
         # 🆕 alias دکمه‌های persistent reply keyboard → command واقعی
         # وقتی کاربر روی دکمهٔ menu کلیک می‌کند، اگر در یک flow بود، state را پاک
         # می‌کنیم تا alias با fast-path command به‌جای text-handler flow اجرا شود.
@@ -1435,6 +1588,325 @@ class NotificationService:
             silent=True,
         )
         return {"ok": True, "handled": "unknown"}
+
+    # -----------------------------------------------------------------------
+    # 🆕 (Compose Stage 2) — Telegram media routing → compose buffer
+    # -----------------------------------------------------------------------
+
+    # متن دکمه‌های ReplyKeyboard compose (Stage 3 آنها را می‌فرستد، اینجا alias‌گذاری
+    # می‌شوند تا hit بگیرد)
+    _COMPOSE_BTN_SUBMIT = "✅ ساخت تسک با همه پیوست‌ها"
+    _COMPOSE_BTN_SUBMIT_PROJECT = "✅ ساخت پروژه با همه پیوست‌ها"
+    _COMPOSE_BTN_CANCEL = "❌ لغو همه"
+    _COMPOSE_BTN_TEXT_HINT = "📝 افزودن متن"
+
+    @staticmethod
+    def _detect_media(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """تشخیص نوع media در پیام Telegram. خروجی None اگر فقط متن است.
+
+        خروجی: {type, file_id, filename, mime_type, size, width?, height?, duration?}
+        """
+        # voice (.ogg recording)
+        v = msg.get("voice")
+        if isinstance(v, dict) and v.get("file_id"):
+            return {
+                "type": "voice",
+                "file_id": v["file_id"],
+                "filename": f"voice_{v.get('file_unique_id', 'msg')}.ogg",
+                "mime_type": v.get("mime_type") or "audio/ogg",
+                "size": v.get("file_size"),
+                "duration": v.get("duration"),
+            }
+        # video_note (circular video)
+        vn = msg.get("video_note")
+        if isinstance(vn, dict) and vn.get("file_id"):
+            return {
+                "type": "video_note",
+                "file_id": vn["file_id"],
+                "filename": f"video_note_{vn.get('file_unique_id', 'msg')}.mp4",
+                "mime_type": "video/mp4",
+                "size": vn.get("file_size"),
+                "duration": vn.get("duration"),
+            }
+        # video
+        vd = msg.get("video")
+        if isinstance(vd, dict) and vd.get("file_id"):
+            return {
+                "type": "video",
+                "file_id": vd["file_id"],
+                "filename": (vd.get("file_name") or f"video_{vd.get('file_unique_id', 'msg')}.mp4"),
+                "mime_type": vd.get("mime_type") or "video/mp4",
+                "size": vd.get("file_size"),
+                "width": vd.get("width"),
+                "height": vd.get("height"),
+                "duration": vd.get("duration"),
+            }
+        # photo — لیستی از سایزها، بزرگ‌ترین را بگیر
+        ph = msg.get("photo")
+        if isinstance(ph, list) and ph:
+            largest = max(ph, key=lambda x: (x.get("file_size") or 0))
+            return {
+                "type": "photo",
+                "file_id": largest["file_id"],
+                "filename": f"photo_{largest.get('file_unique_id', 'msg')}.jpg",
+                "mime_type": "image/jpeg",
+                "size": largest.get("file_size"),
+                "width": largest.get("width"),
+                "height": largest.get("height"),
+            }
+        # audio (مثل mp3, m4a)
+        au = msg.get("audio")
+        if isinstance(au, dict) and au.get("file_id"):
+            return {
+                "type": "audio",
+                "file_id": au["file_id"],
+                "filename": (au.get("file_name") or f"audio_{au.get('file_unique_id', 'msg')}.mp3"),
+                "mime_type": au.get("mime_type") or "audio/mpeg",
+                "size": au.get("file_size"),
+                "duration": au.get("duration"),
+            }
+        # animation (gif / mp4 animated)
+        an = msg.get("animation")
+        if isinstance(an, dict) and an.get("file_id"):
+            return {
+                "type": "animation",
+                "file_id": an["file_id"],
+                "filename": (an.get("file_name") or f"animation_{an.get('file_unique_id', 'msg')}.mp4"),
+                "mime_type": an.get("mime_type") or "video/mp4",
+                "size": an.get("file_size"),
+                "width": an.get("width"),
+                "height": an.get("height"),
+                "duration": an.get("duration"),
+            }
+        # document (هر نوع فایل دیگر)
+        doc = msg.get("document")
+        if isinstance(doc, dict) and doc.get("file_id"):
+            return {
+                "type": "document",
+                "file_id": doc["file_id"],
+                "filename": doc.get("file_name") or f"document_{doc.get('file_unique_id', 'msg')}.bin",
+                "mime_type": doc.get("mime_type") or "application/octet-stream",
+                "size": doc.get("file_size"),
+            }
+        return None
+
+    async def _maybe_route_to_compose(
+        self, chat_id_str: str, msg: Dict[str, Any], text: str,
+    ) -> Optional[Dict[str, Any]]:
+        """اگر این پیام را باید به compose buffer هدایت کنیم، انجام بده و dict
+        نتیجه برگردان. اگر نه، None برگردان (تا handler عادی ادامه دهد).
+
+        منطق:
+        - اگر پیام media دارد → compose mode را auto-start کن (اگر فعال نیست)
+          و آیتم را اضافه کن.
+        - اگر compose mode فعال است و پیام text بدون command/alias است →
+          آن را به buffer به‌عنوان text item اضافه کن.
+        - اگر متن دکمهٔ ReplyKeyboard است (submit/cancel) → handler مخصوص
+          (Stage 4) به آن می‌رسد، اینجا None می‌دهیم تا flow عادی ادامه یابد.
+        - در غیر این صورت → None.
+        """
+        from .oversight_telegram_compose import (
+            get_compose_service, ComposeItem,
+        )
+
+        media = self._detect_media(msg)
+        # caption هم می‌تواند همراه media آمده باشد
+        caption = (msg.get("caption") or "").strip()
+        compose_svc = get_compose_service()
+        current = compose_svc.get(chat_id_str)
+
+        # اگر text دقیقاً برابر یکی از دکمه‌های ReplyKeyboard است، اینجا rout
+        # نکنیم — handler مخصوص (Stage 4) آن را می‌گیرد
+        if text in (
+            self._COMPOSE_BTN_SUBMIT,
+            self._COMPOSE_BTN_SUBMIT_PROJECT,
+            self._COMPOSE_BTN_CANCEL,
+            self._COMPOSE_BTN_TEXT_HINT,
+        ):
+            return None
+
+        # /commands → flow عادی، compose را قطع نمی‌کنیم (اگر کاربر در میانهٔ
+        # compose دستوری زد، یعنی می‌خواهد flow دیگری شروع شود — current buffer
+        # کنار می‌رود ولی auto-cleanup با TTL یا cancel صریح اتفاق می‌افتد)
+        if text and text.startswith("/"):
+            return None
+
+        if media:
+            # auto-start اگر compose فعال نیست
+            if current is None:
+                current = await compose_svc.start(chat_id_str, mode="task")
+                await self._compose_send_welcome(chat_id_str, current)
+
+            await self._compose_add_media(chat_id_str, current, media, caption)
+            await self._compose_refresh_ui(chat_id_str, current)
+            return {"ok": True, "handled": "compose_media_added", "type": media["type"]}
+
+        # text فقط — اگر compose فعال است، به buffer اضافه کن
+        if current is not None and text:
+            await compose_svc.add_item(
+                chat_id_str,
+                ComposeItem(order=0, type="text", text=text),
+            )
+            current = compose_svc.get(chat_id_str)
+            if current is not None:
+                await self._compose_refresh_ui(chat_id_str, current)
+            return {"ok": True, "handled": "compose_text_added"}
+
+        return None
+
+    async def _compose_send_welcome(self, chat_id_str: str, buf: Any) -> None:
+        """پیام راهنمای اولین ورود به compose mode."""
+        tg = self._telegram()
+        await tg.send(
+            "📦 *حالت ساخت تسک ترکیبی فعال شد*\n\n"
+            "هر تعداد فایل (صوت، ویدئو، عکس، سند، کد) و متن می‌توانی بفرستی.\n"
+            "ترتیب رسیدن = ترتیب در پرامپت (اولی → بخش اول).\n\n"
+            "وقتی همهٔ پیوست‌ها/متن‌ها را فرستادی، دکمهٔ پایین صفحه را بزن:\n"
+            f"   `{self._COMPOSE_BTN_SUBMIT}`\n"
+            "یا برای لغو: \n"
+            f"   `{self._COMPOSE_BTN_CANCEL}`",
+            silent=True,
+        )
+
+    async def _compose_add_media(
+        self,
+        chat_id_str: str,
+        buf: Any,
+        media: Dict[str, Any],
+        caption: str = "",
+    ) -> None:
+        """download فایل از Telegram → start UploadSession → append chunk →
+        add ComposeItem به buffer.
+
+        اگر caption هم داشت، یک text item جدا اضافه می‌شود (با همان order).
+        """
+        from .oversight_telegram_compose import (
+            get_compose_service, ComposeItem,
+        )
+        from .oversight_upload_session import (
+            get_upload_session_service, DEFAULT_MAX_FILE_BYTES,
+        )
+        tg = self._telegram()
+        compose_svc = get_compose_service()
+        up_svc = get_upload_session_service()
+
+        size = int(media.get("size") or 0)
+        # محدودیت Bot API: ~20MB
+        if size > 20 * 1024 * 1024:
+            await tg.send(
+                f"⚠️ فایل {media.get('filename', '?')} حدود {size // 1024 // 1024}MB است. "
+                f"محدودیت دانلود Bot API تلگرام 20MB است.\n"
+                f"برای فایل‌های بزرگ‌تر، لطفاً از پنل وب آپلود کنید.",
+                silent=False,
+            )
+            return
+
+        # 1) getFile
+        info = await tg.get_file(media["file_id"])
+        if not info or not info.get("file_path"):
+            await tg.send(
+                f"❌ نتوانستم اطلاعات فایل {media.get('filename', '?')} را از تلگرام بگیرم.",
+                silent=False,
+            )
+            return
+        file_path = info["file_path"]
+        actual_size = int(info.get("file_size") or size or 0)
+        if actual_size <= 0:
+            await tg.send(f"⚠️ فایل خالی است — نادیده گرفته شد.", silent=True)
+            return
+
+        # 2) download
+        data = await tg.download_file(file_path)
+        if not data:
+            await tg.send(
+                f"❌ download فایل {media.get('filename', '?')} ناموفق بود.",
+                silent=False,
+            )
+            return
+
+        # 3) start UploadSession + append + complete
+        try:
+            sess = await up_svc.start_session(
+                task_draft_id=buf.task_draft_id,
+                original_filename=media["filename"],
+                mime_type=media["mime_type"],
+                total_size=len(data),
+            )
+            await up_svc.append_chunk(sess.id, 0, data)
+            # complete اگر هنوز نشده
+            sess2 = up_svc.get(sess.id)
+            if sess2 and sess2.status != "completed":
+                await up_svc.mark_completed(sess.id)
+            upload_session_id = sess.id
+            error_msg = None
+        except Exception as e:
+            logger.exception(f"compose add_media: upload failed: {e}")
+            upload_session_id = None
+            error_msg = str(e)[:200]
+
+        # 4) ComposeItem
+        item = ComposeItem(
+            order=0,  # ست خواهد شد در add_item
+            type=media["type"],
+            telegram_file_id=media["file_id"],
+            telegram_file_path=file_path,
+            filename=media["filename"],
+            mime_type=media["mime_type"],
+            size_bytes=actual_size,
+            upload_session_id=upload_session_id,
+            width=media.get("width"),
+            height=media.get("height"),
+            duration_seconds=media.get("duration"),
+            error=error_msg,
+        )
+        await compose_svc.add_item(chat_id_str, item)
+
+        # 5) caption (در صورت داشتن) به‌عنوان text item جدا
+        if caption:
+            await compose_svc.add_item(
+                chat_id_str,
+                ComposeItem(order=0, type="text", text=caption),
+            )
+
+    async def _compose_refresh_ui(self, chat_id_str: str, buf: Any) -> None:
+        """به‌روزرسانی UI compose — status message + ReplyKeyboard.
+
+        Stage 3 این تابع را پر می‌کند. در Stage 2 فعلاً فقط یک confirm کوتاه
+        می‌فرستیم تا کاربر بداند آیتم اضافه شد.
+        """
+        tg = self._telegram()
+        files = buf.file_items_sorted()
+        texts = buf.text_items_sorted()
+        last = buf.items[-1] if buf.items else None
+        if last and last.is_file():
+            await tg.send(
+                f"✅ #{last.order} اضافه شد: {self._fmt_compose_item(last)}",
+                silent=True,
+            )
+        elif last and last.type == "text":
+            await tg.send(
+                f"✅ متن #{last.order} اضافه شد ({len(last.text or '')} char).",
+                silent=True,
+            )
+
+    @staticmethod
+    def _fmt_compose_item(it: Any) -> str:
+        type_icon = {
+            "voice": "🎙",
+            "video_note": "🎬",
+            "video": "🎞",
+            "photo": "🖼",
+            "audio": "🎵",
+            "document": "📄",
+            "animation": "🌀",
+            "text": "📝",
+        }.get(it.type, "📎")
+        size_mb = ((it.size_bytes or 0) / 1024.0 / 1024.0)
+        size_str = f"{size_mb:.2f}MB" if size_mb >= 1 else f"{(it.size_bytes or 0) // 1024}KB"
+        parts = [type_icon, it.filename or it.type, f"({size_str})"]
+        if it.duration_seconds:
+            parts.append(f"⏱{int(it.duration_seconds)}s")
+        return " ".join(parts)
 
     # -----------------------------------------------------------------------
     # 🆕 (P5) /new_task flow — ثبت تسک از تلگرام با انتخاب پروژه
