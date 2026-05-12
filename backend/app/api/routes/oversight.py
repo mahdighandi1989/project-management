@@ -62,7 +62,7 @@ class WatchedUpdate(BaseModel):
 
 
 class IdeaToPromptRequest(BaseModel):
-    idea: str
+    idea: str = ""
     watched_id: Optional[str] = None
     type: str = "other"
     priority: str = "medium"
@@ -71,6 +71,8 @@ class IdeaToPromptRequest(BaseModel):
     # 🆕 multi_pass_mode: "auto" | "always" | "never"
     # auto = heuristic، always = همیشه تقسیم مرحله‌ای، never = single-pass
     multi_pass_mode: str = "auto"
+    # 🆕 (Stage 7 — File Attachment) — sessionهای آپلودشده برای پیوست
+    upload_session_ids: Optional[List[str]] = None
 
 
 class TaskCreate(BaseModel):
@@ -93,6 +95,8 @@ class TaskCreate(BaseModel):
     # ساخته می‌شود، مراحل از پیش‌نمایش پرامپت برای ذخیره به همراه می‌آیند.
     task_steps: Optional[List[Dict[str, Any]]] = None
     overall_completion_pct: Optional[int] = None
+    # 🆕 (Stage 7 — File Attachment) — sessionهای آپلودشده برای ربط به این تسک
+    upload_session_ids: Optional[List[str]] = None
 
 
 class SimilarityCheckRequest(BaseModel):
@@ -335,7 +339,11 @@ async def create_task(payload: TaskCreate):
 
 @router.post("/tasks/from-idea")
 async def task_from_idea(payload: IdeaToPromptRequest):
-    """تبدیل ایدهٔ خام به پرامپت قدرتمند (پیش‌نمایش، ذخیره نمی‌شود)."""
+    """تبدیل ایدهٔ خام به پرامپت قدرتمند (پیش‌نمایش، ذخیره نمی‌شود).
+
+    🆕 (Stage 7) — اگر `upload_session_ids` داده شده، فایل‌های پیوست
+    قبل از تولید پرامپت استخراج می‌شوند و متن کامل به idea append می‌شود.
+    """
     service = get_oversight_service()
     try:
         return await service.idea_to_prompt(
@@ -346,6 +354,7 @@ async def task_from_idea(payload: IdeaToPromptRequest):
             model_id=payload.model_id,
             model_ids=payload.model_ids,
             multi_pass_mode=payload.multi_pass_mode,
+            upload_session_ids=payload.upload_session_ids,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1488,6 +1497,357 @@ async def manual_tick():
     """اجرای دستی یک نوبت scheduler (مفید برای تست)."""
     service = get_oversight_service()
     return await service.scheduler_tick()
+
+
+# ============================================================
+# 🆕 (Stage 2 — File Attachment) — chunked resumable upload sessions
+# ============================================================
+
+from fastapi import Request as _FastAPIRequest
+
+
+class StartUploadRequest(BaseModel):
+    task_draft_id: str = Field(..., description="گروه برای ربط چند فایل به یک تسک (client-generated)")
+    original_filename: str
+    mime_type: str
+    total_size: int = Field(..., ge=1)
+    file_order: Optional[int] = None  # اگر None، خودکار بر اساس آخرین + 1
+
+
+@router.post("/uploads/start")
+async def upload_start(payload: StartUploadRequest):
+    """شروع یک سشن آپلود chunked. خروجی شامل session_id و chunk_size پیشنهادی."""
+    from ...services.oversight_upload_session import (
+        get_upload_session_service, CLIENT_CHUNK_SIZE, DEFAULT_MAX_FILE_BYTES,
+    )
+    svc = get_upload_session_service()
+    try:
+        s = await svc.start_session(
+            task_draft_id=payload.task_draft_id,
+            original_filename=payload.original_filename,
+            mime_type=payload.mime_type,
+            total_size=payload.total_size,
+            file_order=payload.file_order,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"start session failed: {e}")
+    return {
+        "session_id": s.id,
+        "chunk_size": CLIENT_CHUNK_SIZE,
+        "max_file_bytes": DEFAULT_MAX_FILE_BYTES,
+        "file_order": s.file_order,
+        "session": s.to_dict(),
+    }
+
+
+@router.post("/uploads/{session_id}/chunk")
+async def upload_chunk(
+    session_id: str,
+    request: _FastAPIRequest,
+    offset: int = Query(..., ge=0, description="بایت شروع این chunk از ابتدای فایل"),
+):
+    """دریافت یک chunk از فایل (raw body). به‌صورت streaming به temp_path append می‌شود.
+
+    ⚠ Client باید Content-Type = `application/octet-stream` بفرستد و `offset`
+    دقیقاً همان `bytes_received` فعلی session باشد (در غیر این صورت 400 با
+    expected_offset برمی‌گردد و client باید resume کند).
+    """
+    from ...services.oversight_upload_session import get_upload_session_service
+    svc = get_upload_session_service()
+    s = svc.get(session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session یافت نشد")
+    if s.is_terminal():
+        raise HTTPException(
+            status_code=400,
+            detail=f"session در وضعیت {s.status} است — chunk پذیرفته نمی‌شود",
+        )
+
+    # خواندن body با streaming — جلوگیری از load در RAM (هر iter ~64KB یا کمتر)
+    # FastAPI/Starlette با request.stream() این را native می‌دهد، اما append_chunk
+    # یک bytes واحد می‌خواهد. برای سادگی و امنیت RAM، chunk را به‌صورت یکجا اما
+    # محدود به یک iteration می‌خوانیم. client هر بار حداکثر CLIENT_CHUNK_SIZE
+    # (5MB) می‌فرستد — RAM peak ~5MB OK است.
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="body خالی است")
+    try:
+        s2 = await svc.append_chunk(session_id, offset, body)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="session یافت نشد")
+    except ValueError as e:
+        # offset mismatch یا overrun → client باید با expected_offset resume کند
+        raise HTTPException(status_code=400, detail={
+            "error": str(e),
+            "expected_offset": s.bytes_received,
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"chunk append failed: {e}")
+    return {
+        "session_id": s2.id,
+        "bytes_received": s2.bytes_received,
+        "total_size": s2.total_size,
+        "status": s2.status,
+        "next_offset": s2.bytes_received,
+        "completed": s2.status in ("completed", "extracting", "extracted"),
+    }
+
+
+@router.post("/uploads/{session_id}/complete")
+async def upload_complete(session_id: str):
+    """علامت‌گذاری پایان upload. اگر bytes_received != total_size خطا می‌دهد."""
+    from ...services.oversight_upload_session import get_upload_session_service
+    svc = get_upload_session_service()
+    try:
+        s = await svc.mark_completed(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="session یافت نشد")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return s.to_dict()
+
+
+@router.get("/uploads/{session_id}")
+async def upload_status(session_id: str):
+    """وضعیت یک session — برای resume."""
+    from ...services.oversight_upload_session import get_upload_session_service
+    svc = get_upload_session_service()
+    s = svc.get(session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session یافت نشد")
+    return s.to_dict()
+
+
+@router.get("/uploads")
+async def upload_list_by_draft(task_draft_id: Optional[str] = Query(None), task_id: Optional[str] = Query(None)):
+    """لیست sessionها بر اساس task_draft_id (قبل از create_task) یا task_id (بعد از آن)."""
+    from ...services.oversight_upload_session import get_upload_session_service
+    svc = get_upload_session_service()
+    if task_draft_id:
+        return [s.to_dict() for s in svc.list_by_draft(task_draft_id)]
+    if task_id:
+        return [s.to_dict() for s in svc.list_by_task(task_id)]
+    raise HTTPException(status_code=400, detail="task_draft_id یا task_id لازم است")
+
+
+@router.delete("/uploads/{session_id}")
+async def upload_cancel(session_id: str):
+    """لغو session و حذف temp."""
+    from ...services.oversight_upload_session import get_upload_session_service
+    svc = get_upload_session_service()
+    s = await svc.cancel(session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session یافت نشد")
+    return {"success": True, "session": s.to_dict()}
+
+
+@router.post("/uploads/cleanup-orphans")
+async def upload_cleanup_orphans(ttl_hours: int = Query(24, ge=1, le=720)):
+    """حذف temp file هایی که >ttl_hours بدون activity مانده‌اند. (best-effort)"""
+    from ...services.oversight_upload_session import get_upload_session_service
+    svc = get_upload_session_service()
+    removed = await svc.cleanup_orphans(ttl_hours=ttl_hours)
+    return {"removed": removed}
+
+
+# ============================================================
+# 🆕 (Stage 4+5 — Extraction) — استخراج متن از فایل پیوست
+# ============================================================
+
+class ExtractSessionRequest(BaseModel):
+    user_idea: str = Field("", description="متن ایدهٔ کاربر — برای plan headings داینامیک")
+    preferred_model_id: Optional[str] = None  # override default (gemini-2.5-flash)
+    auto_temp_activate: bool = Field(
+        False,
+        description="اگر True و هیچ مدل enabled نبود، اولین candidate را موقتاً فعال کن",
+    )
+
+
+@router.post("/uploads/{session_id}/check-model")
+async def upload_check_model(session_id: str, preferred_model_id: Optional[str] = Query(None)):
+    """بررسی: آیا برای mime این session مدل enabled داریم؟
+    اگر نه، لیست کاندیداها (disabled) برمی‌گردد تا UI prompt activate نشان دهد.
+    """
+    from ...services.oversight_upload_session import get_upload_session_service
+    from ...services.oversight_model_temp_activate import check_extraction_model_availability
+    s = get_upload_session_service().get(session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session یافت نشد")
+    return {
+        "session_id": session_id,
+        "mime_type": s.mime_type,
+        **check_extraction_model_availability(s.mime_type, preferred_model_id=preferred_model_id),
+    }
+
+
+@router.post("/uploads/{session_id}/extract")
+async def upload_extract(session_id: str, payload: ExtractSessionRequest):
+    """شروع استخراج متن از یک upload session.
+
+    Flow:
+      1. اگر هیچ مدل enabled برای این mime نیست:
+         - اگر auto_temp_activate=False → 409 + candidates (UI prompt می‌دهد)
+         - اگر auto_temp_activate=True → اولین candidate را موقتاً فعال کن
+      2. extraction را اجرا کن
+      3. اگر در گام 1 فعال‌سازی موقت داشتیم → پس از اتمام revert کن
+         (در try/finally — حتی اگر extraction fail کند).
+
+    خروجی: FileExtraction + segments.
+    """
+    from ...services.oversight_extraction import (
+        extract_session, get_extraction_repo,
+    )
+    from ...services.oversight_upload_session import get_upload_session_service
+    from ...services.oversight_model_temp_activate import (
+        check_extraction_model_availability, temp_activate_model, temp_revert_model,
+    )
+
+    upload_svc = get_upload_session_service()
+    s = upload_svc.get(session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session یافت نشد")
+
+    # check availability
+    avail = check_extraction_model_availability(
+        s.mime_type, preferred_model_id=payload.preferred_model_id
+    )
+    temp_activated_id: Optional[str] = None
+    if not avail.get("available"):
+        cands = avail.get("candidates") or []
+        if not cands:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "هیچ مدلی با قابلیت لازم پیدا نشد (نه enabled نه disabled)",
+                    "mime_type": s.mime_type,
+                },
+            )
+        if not payload.auto_temp_activate:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "blocked_no_vision_model",
+                    "message": f"هیچ مدل بصری enabled برای mime {s.mime_type} نیست",
+                    "candidates": cands,
+                    "session_id": session_id,
+                    "hint": (
+                        "از /api/oversight/uploads/{id}/extract با auto_temp_activate=true "
+                        "صدا بزن یا قبل از آن /api/models/settings/{model_id}/temp-activate"
+                    ),
+                },
+            )
+        # auto-activate اولین candidate
+        chosen = cands[0]["id"]
+        try:
+            await temp_activate_model(chosen, trigger=f"extract:session={session_id}")
+            temp_activated_id = chosen
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"temp activation failed: {e}")
+
+    try:
+        fe = await extract_session(
+            session_id,
+            user_idea=payload.user_idea,
+            preferred_model_id=payload.preferred_model_id or temp_activated_id,
+        )
+    except Exception as e:
+        # حتی اگر extraction fail کرد، باید revert کنیم
+        if temp_activated_id:
+            try:
+                await temp_revert_model(temp_activated_id, trigger=f"extract:failed:session={session_id}")
+            except Exception:
+                pass
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # success → revert (اگر temp بوده)
+    if temp_activated_id:
+        try:
+            await temp_revert_model(temp_activated_id, trigger=f"extract:done:session={session_id}")
+        except Exception as e:
+            logger.warning(f"temp revert failed (non-fatal): {e}") if False else None  # safe no-op
+
+    repo = get_extraction_repo()
+    return {
+        "extraction": fe.to_dict(),
+        "segments": [s.to_dict() for s in repo.get_segments(fe.id)],
+        "temp_activated_model": temp_activated_id,
+    }
+
+
+# ── Model temp-activate endpoints (manual user-driven flow) ──
+
+@router.post("/models/{model_id}/temp-activate")
+async def model_temp_activate(model_id: str, trigger: Optional[str] = Query(None)):
+    """فعال‌سازی دستی موقتی یک مدل (در پاسخ به prompt UI).
+    کاربر بعد از pickup فایل، اگر مدل disabled بود، این endpoint را صدا می‌زند.
+    """
+    from ...services.oversight_model_temp_activate import temp_activate_model
+    try:
+        res = await temp_activate_model(model_id, trigger=trigger or "manual")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return res
+
+
+@router.post("/models/{model_id}/temp-revert")
+async def model_temp_revert(model_id: str, trigger: Optional[str] = Query(None)):
+    """برگرداندن مدل به حالت قبل از temp-activate (در صورت لزوم دستی)."""
+    from ...services.oversight_model_temp_activate import temp_revert_model
+    return await temp_revert_model(model_id, trigger=trigger or "manual")
+
+
+@router.get("/models/temp-activations")
+async def models_temp_activations():
+    """فهرست مدل‌هایی که در حال حاضر موقتاً فعال‌اند."""
+    from ...services.oversight_model_temp_activate import get_active_temp_activations
+    return {"active": get_active_temp_activations()}
+
+
+@router.get("/tasks/{task_id}/extractions")
+async def task_extractions(task_id: str):
+    """لیست همهٔ فایل‌های استخراج‌شدهٔ یک تسک."""
+    from ...services.oversight_extraction import get_extraction_repo
+    repo = get_extraction_repo()
+    items = repo.list_by_task(task_id)
+    return {
+        "task_id": task_id,
+        "count": len(items),
+        "extractions": [e.to_dict() for e in items],
+    }
+
+
+@router.get("/extractions/{extraction_id}/segments")
+async def extraction_segments(extraction_id: str):
+    """segmentهای استخراج‌شدهٔ یک فایل، به ترتیب segment_index."""
+    from ...services.oversight_extraction import get_extraction_repo
+    repo = get_extraction_repo()
+    fe = repo.get(extraction_id)
+    if fe is None:
+        raise HTTPException(status_code=404, detail="extraction یافت نشد")
+    segs = sorted(repo.get_segments(extraction_id), key=lambda s: s.segment_index)
+    return {
+        "extraction": fe.to_dict(),
+        "segments": [s.to_dict() for s in segs],
+    }
+
+
+@router.get("/extractions/{extraction_id}/full-text")
+async def extraction_full_text(extraction_id: str):
+    """متن کامل ادغام‌شدهٔ یک extraction."""
+    from ...services.oversight_extraction import get_extraction_repo
+    repo = get_extraction_repo()
+    fe = repo.get(extraction_id)
+    if fe is None:
+        raise HTTPException(status_code=404, detail="extraction یافت نشد")
+    return {
+        "extraction_id": extraction_id,
+        "filename": fe.original_filename,
+        "mime_type": fe.mime_type,
+        "status": fe.status,
+        "full_text": repo.full_text(extraction_id),
+    }
 
 
 # ============================================================

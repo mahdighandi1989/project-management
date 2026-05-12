@@ -28,6 +28,14 @@ psutil>=5.9.0
 # Browser Automation
 playwright>=1.40.0
 
+# 🆕 File extraction (Stage 1 — multimodal task attachments)
+# سبک — فقط متادیتا/متن. خود تحلیل بصری/صوتی/ویدیو با Gemini انجام می‌شود.
+pypdf>=4.0.0
+python-docx>=1.1.0
+openpyxl>=3.1.0
+Pillow>=10.0.0
+pydub>=0.25.0
+
 # Scheduler for background tasks
 apscheduler>=3.10.0
 

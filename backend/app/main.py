@@ -100,6 +100,35 @@ async def lifespan(app: FastAPI):
         app.state.oversight_stop_event = None
         app.state.oversight_task = None
 
+    # 🆕 (Stage 2 — File Attachment) — orphan upload cleanup on boot
+    try:
+        from .services.oversight_upload_session import get_upload_session_service
+        removed = await get_upload_session_service().cleanup_orphans()
+        if removed:
+            logger.info(f"📎 cleaned up {removed} orphan upload temp files on boot")
+    except Exception as e:
+        logger.warning(f"upload orphan cleanup failed (non-fatal): {e}")
+
+    # 🆕 (Stage 6 — temp model activation) — revert stale temp_enabled flags
+    try:
+        from .services.oversight_model_temp_activate import cleanup_stale_temp_activations_on_boot
+        n = await cleanup_stale_temp_activations_on_boot()
+        if n:
+            logger.info(f"🔒 reset temporary_enabled flag for {n} models on boot")
+    except Exception as e:
+        logger.warning(f"temp-activate boot cleanup failed (non-fatal): {e}")
+
+    # 🆕 (Stage 9 — extraction recovery) — extractionهای stale را mark failed کن
+    try:
+        from .services.oversight_extraction import boot_recover_stale_extractions
+        rec = await boot_recover_stale_extractions()
+        if rec.get("cleared_stale_extractions"):
+            logger.info(
+                f"📎 cleared {rec['cleared_stale_extractions']} stale extraction(s) on boot"
+            )
+    except Exception as e:
+        logger.warning(f"extraction boot recovery failed (non-fatal): {e}")
+
     yield
 
     # Shutdown

@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import Link from 'next/link';
+import TaskFilePicker, { type UploadSessionState } from '@/components/TaskFilePicker';
+import ExtractedFilesPanel from '@/components/ExtractedFilesPanel';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -857,6 +859,31 @@ export default function OversightPage() {
   // Idea inbox
   const [idea, setIdea] = useState('');
   const [ideaWatchedIds, setIdeaWatchedIds] = useState<string[]>([]);
+  // 🆕 (Stage 3 — File Attachment) — یک taskDraftId پایدار برای گروه فایل‌ها
+  // در طول lifecycle این فرم. وقتی تسک ساخته می‌شود یا کاربر idea را reset کند،
+  // یک id جدید تولید می‌شود.
+  const [taskDraftId, setTaskDraftId] = useState<string>(() => {
+    try {
+      const saved = sessionStorage.getItem('oversight-current-task-draft-id');
+      if (saved) return saved;
+    } catch {}
+    const v = `draft-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    try { sessionStorage.setItem('oversight-current-task-draft-id', v); } catch {}
+    return v;
+  });
+  const [uploadedSessions, setUploadedSessions] = useState<UploadSessionState[]>([]);
+  // 🆕 (Stage 8) — modal برای پیشنهاد فعال‌سازی موقت مدل بصری
+  const [modelBlockModal, setModelBlockModal] = useState<{
+    candidates: Array<{ id: string; name: string; provider: string; priority: number }>;
+    mime_type?: string;
+    session_id?: string;
+  } | null>(null);
+  const resetTaskDraft = useCallback(() => {
+    const v = `draft-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    try { sessionStorage.setItem('oversight-current-task-draft-id', v); } catch {}
+    setTaskDraftId(v);
+    setUploadedSessions([]);
+  }, []);
   const [ideaType, setIdeaType] = useState('idea');
   const [ideaPriority, setIdeaPriority] = useState('medium');
   const [ideaDeadline, setIdeaDeadline] = useState('');
@@ -1280,6 +1307,12 @@ export default function OversightPage() {
       // برای multi-project: یک پرامپت تولید می‌شود اما هنگام ذخیره برای هر پروژه یکی ساخته می‌شود
       const firstId = ideaWatchedIds[0] || null;
       setTimeout(() => setGenPhase('در حال ساخت پرامپت قدرتمند...'), 800);
+      // 🆕 (Stage 7) — sessionهای آپلود کامل‌شده (completed/extracting/extracted)
+      // را به idea_to_prompt می‌فرستیم تا extraction قبل از پرامپت‌سازی انجام شود
+      const validSessionIds = uploadedSessions
+        .filter((s) => ['completed', 'extracting', 'extracted'].includes(s.status))
+        .sort((a, b) => a.file_order - b.file_order)
+        .map((s) => s.session_id);
       const res = await fetch(`${API_BASE}/api/oversight/tasks/from-idea`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1291,6 +1324,7 @@ export default function OversightPage() {
           model_id: selectedModelIds[0],
           model_ids: selectedModelIds.length > 1 ? selectedModelIds : undefined,
           multi_pass_mode: multiPassMode,
+          upload_session_ids: validSessionIds.length ? validSessionIds : undefined,
         }),
       });
       if (res.ok) {
@@ -1315,13 +1349,53 @@ export default function OversightPage() {
         }
       } else {
         const err = await res.json().catch(() => ({}));
-        showError(err.detail || 'خطا در تولید پرامپت');
+        // 🆕 (Stage 8) — detect "blocked_no_vision_model" → modal
+        // backend در /uploads/{id}/extract این status را برمی‌گرداند،
+        // اما idea_to_prompt هنگام extraction به ExtractionError می‌رسد که
+        // در detail پیامش `هیچ مدل بصری enabled` دارد.
+        const detail = err.detail;
+        const msg = typeof detail === 'string' ? detail : (detail?.message || detail?.error || '');
+        if (typeof detail === 'object' && detail?.error === 'blocked_no_vision_model') {
+          setModelBlockModal({
+            candidates: detail.candidates || [],
+            mime_type: detail.mime_type,
+            session_id: detail.session_id,
+          });
+        } else if (typeof msg === 'string' && msg.includes('هیچ مدل بصری enabled')) {
+          // fallback parsing — اگر extraction از طریق idea_to_prompt صدا زده شد
+          setModelBlockModal({ candidates: [] });
+          showError(msg);
+        } else {
+          showError(msg || 'خطا در تولید پرامپت');
+        }
       }
     } catch (e: any) {
       showError(e.message);
     } finally {
       setGenerating(false);
       setTimeout(() => setGenPhase(''), 1500);
+    }
+  };
+
+  // 🆕 (Stage 8) — فعال‌سازی موقت مدل و retry pull
+  const activateModelAndRetry = async (modelId: string) => {
+    try {
+      const r = await fetch(
+        `${API_BASE}/api/oversight/models/${encodeURIComponent(modelId)}/temp-activate?trigger=ui-task-create`,
+        { method: 'POST' },
+      );
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        showError(e.detail || 'فعال‌سازی موقت ناموفق');
+        return;
+      }
+      const d = await r.json();
+      showSuccess(`✅ ${d.name} موقتاً فعال شد — درحال تولید پرامپت...`);
+      setModelBlockModal(null);
+      // retry generatePrompt — اکنون extraction باید کار کند
+      await generatePrompt();
+    } catch (e: any) {
+      showError(e?.message || 'خطا');
     }
   };
 
@@ -1360,6 +1434,11 @@ export default function OversightPage() {
             force_create: forceCreate,
             task_steps: previewPrompt.task_steps || [],
             overall_completion_pct: previewPrompt.overall_completion_pct ?? null,
+            // 🆕 (Stage 7) — sessionهای آپلود (با ترتیب file_order) به این تسک ربط می‌خورند
+            upload_session_ids: uploadedSessions
+              .filter((s) => ['completed', 'extracting', 'extracted'].includes(s.status))
+              .sort((a, b) => a.file_order - b.file_order)
+              .map((s) => s.session_id),
           }),
         });
         if (res.ok) {
@@ -1396,6 +1475,10 @@ export default function OversightPage() {
       setIdea('');
       setIdeaDeadline('');
       setPreviewPrompt(null);
+      // 🆕 (Stage 3 — File Attachment) — draft id را reset کن تا فایل‌های قبلی
+      // در تسک بعدی نباشند. (sessions در سرور persist هستند ولی به task_id
+      // مربوطه ربط خورده‌اند — UI آنها را نمایش نمی‌دهد.)
+      resetTaskDraft();
       showSuccess(`${created} تسک ساخته شد`);
       reloadStatus();
       setTab('tasks');
@@ -2462,6 +2545,14 @@ export default function OversightPage() {
               </div>
             </div>
 
+            {/* 🆕 (Stage 3 — File Attachment) — drag-drop چند فایل با chunked upload */}
+            <TaskFilePicker
+              taskDraftId={taskDraftId}
+              apiBase={API_BASE}
+              onSessionsChange={setUploadedSessions}
+              disabled={generating}
+            />
+
             <textarea
               value={idea}
               onChange={(e) => {
@@ -2601,6 +2692,65 @@ export default function OversightPage() {
                   >
                     لغو
                   </button>
+                </div>
+              </div>
+            )}
+
+            {/* 🆕 (Stage 8 — File Attachment) — modal فعال‌سازی موقت مدل بصری */}
+            {modelBlockModal && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+                <div className="bg-white dark:bg-gray-800 rounded-lg w-full max-w-xl p-5 shadow-2xl">
+                  <h3 className="font-bold text-lg mb-2 text-orange-700 dark:text-orange-300">
+                    🔓 مدل بصری فعال نیست
+                  </h3>
+                  <p className="text-sm text-gray-700 dark:text-gray-300 mb-2">
+                    فایل پیوست کردی، اما هیچ مدل multimodal فعال (enabled) برای استخراج
+                    {modelBlockModal.mime_type && (
+                      <> <code className="text-xs bg-gray-100 dark:bg-gray-700 px-1 rounded">{modelBlockModal.mime_type}</code></>
+                    )}
+                    {' '}نیست. می‌توانم یکی را موقتاً فعال کنم، کار را انجام دهم، و دوباره غیرفعال کنم.
+                    در هر دو نقطه به تلگرام اطلاع می‌رسد.
+                  </p>
+                  {modelBlockModal.candidates && modelBlockModal.candidates.length > 0 ? (
+                    <div className="space-y-2 my-3">
+                      {modelBlockModal.candidates.map((c, i) => (
+                        <button
+                          key={c.id}
+                          onClick={() => activateModelAndRetry(c.id)}
+                          className={`w-full text-left p-2 border rounded transition-colors ${
+                            i === 0
+                              ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20 hover:bg-emerald-100'
+                              : 'border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold dark:text-white">
+                              {i === 0 ? '⭐ ' : ''}
+                              {c.name}
+                            </span>
+                            <span className="text-[10px] text-gray-500 ml-auto">
+                              {c.provider} · priority {c.priority}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">
+                            <code>{c.id}</code>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-amber-700 dark:text-amber-300 my-3">
+                      ⚠️ هیچ مدل multimodal در registry پیدا نشد. لطفاً از <a href="/models" className="underline">صفحهٔ مدل‌ها</a> یک مدل وارد کنید.
+                    </p>
+                  )}
+                  <div className="flex gap-2 mt-3">
+                    <button
+                      onClick={() => setModelBlockModal(null)}
+                      className="flex-1 py-2 bg-gray-200 dark:bg-gray-600 dark:text-white rounded hover:bg-gray-300"
+                    >
+                      انصراف
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -4684,6 +4834,8 @@ function TasksPanel({
                 </pre>
               </details>
             )}
+            {/* 🆕 (Stage 8 — File Attachment) — فایل‌های پیوست + متن استخراج‌شده */}
+            <ExtractedFilesPanel taskId={t.id} apiBase={API_BASE} />
             {/* 🆕 (Multi-pass Checklist) — وضعیت per-step + progress bar */}
             {Array.isArray(t.task_steps) && t.task_steps.length > 0 && (() => {
               const steps = t.task_steps!;

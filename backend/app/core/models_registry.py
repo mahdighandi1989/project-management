@@ -31,6 +31,11 @@ class ModelCapability(str, Enum):
     LONG_CONTEXT = "long-context"
     THINKING = "thinking"
     MULTIMODAL = "multimodal"
+    # 🆕 (Stage 1 — multimodal extraction) قابلیت‌های پیشرفته‌تر
+    # برای انتخاب «بهترین مدل بصری» در زمان استخراج فایل.
+    VIDEO_UNDERSTANDING = "video-understanding"    # تحلیل ویدئو (فریم + صدا)
+    AUDIO_UNDERSTANDING = "audio-understanding"    # رونویسی/تحلیل صوت
+    DOCUMENT_UNDERSTANDING = "document-understanding"  # PDF/DOCX/XLSX/...
 
 
 class AIModel(BaseModel):
@@ -72,6 +77,8 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
             ModelCapability.TEXT,
             ModelCapability.IMAGE_ANALYSIS,
             ModelCapability.VISION,
+            ModelCapability.MULTIMODAL,
+            ModelCapability.DOCUMENT_UNDERSTANDING,
             ModelCapability.CODE,
             ModelCapability.REASONING
         ],
@@ -278,12 +285,17 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
             ModelCapability.TEXT,
             ModelCapability.CODE,
             ModelCapability.IMAGE_ANALYSIS,
+            ModelCapability.VISION,
+            ModelCapability.MULTIMODAL,
             ModelCapability.LONG_CONTEXT,
-            ModelCapability.THINKING
+            ModelCapability.THINKING,
+            ModelCapability.VIDEO_UNDERSTANDING,
+            ModelCapability.AUDIO_UNDERSTANDING,
+            ModelCapability.DOCUMENT_UNDERSTANDING,
         ],
         max_tokens=65536,
         context_window=1048576,
-        strengths=["long-context", "multimodal", "video", "reasoning", "thinking"],
+        strengths=["long-context", "multimodal", "video", "audio", "reasoning", "thinking"],
         cost_per_1k_tokens=0.00125,
         priority=1,
         supports_images=True,
@@ -299,11 +311,17 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
             ModelCapability.TEXT,
             ModelCapability.FAST_RESPONSE,
             ModelCapability.IMAGE_ANALYSIS,
-            ModelCapability.THINKING
+            ModelCapability.VISION,
+            ModelCapability.MULTIMODAL,
+            ModelCapability.LONG_CONTEXT,
+            ModelCapability.THINKING,
+            ModelCapability.VIDEO_UNDERSTANDING,
+            ModelCapability.AUDIO_UNDERSTANDING,
+            ModelCapability.DOCUMENT_UNDERSTANDING,
         ],
         max_tokens=65536,
         context_window=1048576,
-        strengths=["speed", "cost-effective", "video", "thinking"],
+        strengths=["speed", "cost-effective", "video", "audio", "thinking", "extraction-default"],
         cost_per_1k_tokens=0.00015,
         priority=2,
         supports_images=True,
@@ -318,11 +336,17 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
         capabilities=[
             ModelCapability.TEXT,
             ModelCapability.FAST_RESPONSE,
-            ModelCapability.IMAGE_ANALYSIS
+            ModelCapability.IMAGE_ANALYSIS,
+            ModelCapability.VISION,
+            ModelCapability.MULTIMODAL,
+            ModelCapability.LONG_CONTEXT,
+            ModelCapability.VIDEO_UNDERSTANDING,
+            ModelCapability.AUDIO_UNDERSTANDING,
+            ModelCapability.DOCUMENT_UNDERSTANDING,
         ],
         max_tokens=8192,
         context_window=1048576,
-        strengths=["speed", "cost-effective", "video"],
+        strengths=["speed", "cost-effective", "video", "audio"],
         cost_per_1k_tokens=0.00001,
         priority=3,
         supports_images=True,
@@ -445,3 +469,123 @@ def get_image_generator_models() -> List[AIModel]:
 def get_vision_models() -> List[AIModel]:
     """دریافت مدل‌های با قابلیت تحلیل تصویر"""
     return [m for m in MODEL_REGISTRY.values() if m.supports_images]
+
+
+# ====================================================================
+# 🆕 (Stage 1 — multimodal extraction) — mapping mime → capability
+# و انتخاب «بهترین مدل» برای استخراج متن از فایل پیوست تسک.
+# ====================================================================
+
+def mime_to_required_capability(mime_type: str) -> ModelCapability:
+    """تطبیق mime → قابلیت مدل لازم برای استخراج کامل.
+
+    - تصویر → IMAGE_ANALYSIS
+    - ویدئو → VIDEO_UNDERSTANDING
+    - صوت → AUDIO_UNDERSTANDING
+    - سند (PDF/DOCX/XLSX/...) → DOCUMENT_UNDERSTANDING
+    - متن خام → TEXT (هر مدل enabled کفایت می‌کند)
+    """
+    mt = (mime_type or "").lower().strip()
+    if mt.startswith("image/"):
+        return ModelCapability.IMAGE_ANALYSIS
+    if mt.startswith("video/"):
+        return ModelCapability.VIDEO_UNDERSTANDING
+    if mt.startswith("audio/"):
+        return ModelCapability.AUDIO_UNDERSTANDING
+    if mt in (
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-powerpoint",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/rtf",
+    ):
+        return ModelCapability.DOCUMENT_UNDERSTANDING
+    if mt.startswith("text/"):
+        return ModelCapability.TEXT
+    # پیش‌فرض ایمن — مدل بصری چندوجهی
+    return ModelCapability.MULTIMODAL
+
+
+# پیش‌فرض extraction — کاربر در gemini-2.5-flash استقرار را تأیید کرد.
+# قابل بازنویسی توسط هر caller از طریق `preferred_model_id`.
+DEFAULT_EXTRACTION_MODEL_ID: str = "gemini-2.5-flash"
+
+
+def pick_best_extraction_model(
+    mime_type: str,
+    *,
+    enabled_only: bool = True,
+    db_enabled_ids: Optional[List[str]] = None,
+    prefer_provider: Optional[ModelProvider] = ModelProvider.GEMINI,
+    preferred_model_id: Optional[str] = None,
+) -> Optional[AIModel]:
+    """انتخاب بهترین مدل enabled برای استخراج فایلی با mime مشخص.
+
+    منطق ranking:
+      0. اگر `preferred_model_id` (یا default Flash) قابلیت لازم را دارد
+         و enabled است → همان (داینامیک: کاربر می‌تواند از /models این
+         پیش‌فرض را عوض کند).
+      1. مدل باید قابلیت لازم (mime_to_required_capability) را داشته باشد.
+      2. اگر `db_enabled_ids` داده شده، فقط آن‌ها (فیلتر نهایی روی panel
+         «مدیریت مدل‌ها»). اگر None، صرفاً `m.enabled` registry را نگاه کن.
+      3. priority پایین‌تر = بهتر (در registry تعریف شده).
+      4. در صورت تساوی، مدل با `prefer_provider` ترجیح داده می‌شود
+         (پیش‌فرض Gemini — multimodal native).
+
+    خروجی: AIModel یا None اگر هیچ مدلی نه قابلیت دارد نه enabled است.
+    """
+    required = mime_to_required_capability(mime_type)
+
+    def _qualifies(m: AIModel) -> bool:
+        if enabled_only and not m.enabled:
+            return False
+        if db_enabled_ids is not None and m.id not in db_enabled_ids:
+            return False
+        if required == ModelCapability.TEXT:
+            return True
+        return required in m.capabilities
+
+    # گام ۰ — اگر preferred_model_id (یا default Flash) واجد شرایط است، همان
+    pref_id = preferred_model_id or DEFAULT_EXTRACTION_MODEL_ID
+    if pref_id:
+        resolved_pref_id = MODEL_ALIASES.get(pref_id, pref_id)
+        pref_model = MODEL_REGISTRY.get(resolved_pref_id)
+        if pref_model and _qualifies(pref_model):
+            return pref_model
+
+    # گام ۱ — fallback به ranking عمومی
+    candidates: List[AIModel] = [m for m in MODEL_REGISTRY.values() if _qualifies(m)]
+    if not candidates:
+        return None
+
+    def _rank(m: AIModel) -> tuple:
+        prov_pref = 0 if (prefer_provider and m.provider == prefer_provider) else 1
+        return (m.priority, prov_pref, m.cost_per_1k_tokens)
+
+    candidates.sort(key=_rank)
+    return candidates[0]
+
+
+def list_extraction_model_candidates(
+    mime_type: str,
+    *,
+    include_disabled: bool = True,
+) -> List[AIModel]:
+    """لیست همهٔ مدل‌های توانمند برای این mime (هم enabled هم disabled).
+    برای UI «مدل بصری فعال نیست — کدام را فعال کنیم؟».
+    """
+    required = mime_to_required_capability(mime_type)
+    out: List[AIModel] = []
+    for m in MODEL_REGISTRY.values():
+        if not include_disabled and not m.enabled:
+            continue
+        if required == ModelCapability.TEXT:
+            out.append(m)
+            continue
+        if required in m.capabilities:
+            out.append(m)
+    out.sort(key=lambda m: (m.priority, m.cost_per_1k_tokens))
+    return out
