@@ -1376,7 +1376,14 @@ async def verify_task(
 
         if status_val == VERIFICATION_DONE:
             task.confirmation_streak += 1
-            if task.confirmation_streak >= streak_required:
+            # 🆕 (audit fix) — وقتی task_steps دارد و *همهٔ* مراحل done شدند
+            # (per-step verified)، streak guard دور زده می‌شود. این سیگنال
+            # دقیق‌تر از یک verify کلی است و کاربر منتظر «verify بعدی»
+            # نمی‌ماند برای کاری که ۱۰۰٪ checklist تأیید شده.
+            bypass_streak = bool(
+                all_steps_done and (task.task_steps or [])
+            )
+            if task.confirmation_streak >= streak_required or bypass_streak:
                 task.verification_status = "done"
                 task.status = "done"
                 # 🆕 (P3) auto-archive وقتی هم status هم verification_status = done
