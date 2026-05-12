@@ -815,10 +815,29 @@ def _now_epoch() -> float:
 
 
 def _cleanup_expired_state() -> None:
-    """حذف state و draft های منقضی — هر بار update اجرا می‌شود."""
+    """حذف state و draft های منقضی — هر بار update اجرا می‌شود.
+
+    🛡 (audit fix M1) — اگر chat یک compose buffer فعال دارد، state آن
+    حفظ می‌شود (TTL compose بلندتر از state است؛ نباید state گم شود
+    وقتی کاربر در حال جمع‌آوری فایل است).
+    """
     now = _now_epoch()
+    # ابتدا لیست chat_idهایی که compose فعال دارند
+    active_compose_chats: set = set()
+    try:
+        from .oversight_telegram_compose import get_compose_service
+        cs = get_compose_service()
+        for cid, b in (cs._buffers.items() if hasattr(cs, "_buffers") else {}):
+            if not b.is_expired():
+                active_compose_chats.add(cid)
+    except Exception:
+        pass
     for k in list(_chat_state.keys()):
         if _chat_state[k].get("expires_at", 0) < now:
+            if k in active_compose_chats:
+                # extend state TTL تا compose زنده است
+                _chat_state[k]["expires_at"] = now + _STATE_TTL_SECONDS
+                continue
             del _chat_state[k]
     for k in list(_idea_drafts.keys()):
         if _idea_drafts[k].get("expires_at", 0) < now:
@@ -1628,14 +1647,23 @@ class NotificationService:
         """تشخیص نوع media در پیام Telegram. خروجی None اگر فقط متن است.
 
         خروجی: {type, file_id, filename, mime_type, size, width?, height?, duration?}
+
+        🛡 (audit fix M5) — filename نام منحصربه‌فرد با timestamp + file_unique_id
+        می‌گیرد تا collision بین چند upload در یک session غیرممکن باشد.
         """
+        import time as _t, uuid as _uuid
+        _ts = int(_t.time() * 1000) % 1000000
+        def _u(prefix: str, unique_id: str, ext: str) -> str:
+            # ترکیب timestamp ms + 4-char از uuid برای uniqueness قطعی
+            tail = (unique_id or _uuid.uuid4().hex[:4])[:8]
+            return f"{prefix}_{_ts}_{tail}{ext}"
         # voice (.ogg recording)
         v = msg.get("voice")
         if isinstance(v, dict) and v.get("file_id"):
             return {
                 "type": "voice",
                 "file_id": v["file_id"],
-                "filename": f"voice_{v.get('file_unique_id', 'msg')}.ogg",
+                "filename": _u("voice", v.get("file_unique_id", ""), ".ogg"),
                 "mime_type": v.get("mime_type") or "audio/ogg",
                 "size": v.get("file_size"),
                 "duration": v.get("duration"),
@@ -1646,7 +1674,7 @@ class NotificationService:
             return {
                 "type": "video_note",
                 "file_id": vn["file_id"],
-                "filename": f"video_note_{vn.get('file_unique_id', 'msg')}.mp4",
+                "filename": _u("video_note", vn.get("file_unique_id", ""), ".mp4"),
                 "mime_type": "video/mp4",
                 "size": vn.get("file_size"),
                 "duration": vn.get("duration"),
@@ -1657,7 +1685,7 @@ class NotificationService:
             return {
                 "type": "video",
                 "file_id": vd["file_id"],
-                "filename": (vd.get("file_name") or f"video_{vd.get('file_unique_id', 'msg')}.mp4"),
+                "filename": (vd.get("file_name") or _u("video", vd.get("file_unique_id", ""), ".mp4")),
                 "mime_type": vd.get("mime_type") or "video/mp4",
                 "size": vd.get("file_size"),
                 "width": vd.get("width"),
@@ -1671,7 +1699,7 @@ class NotificationService:
             return {
                 "type": "photo",
                 "file_id": largest["file_id"],
-                "filename": f"photo_{largest.get('file_unique_id', 'msg')}.jpg",
+                "filename": _u("photo", largest.get("file_unique_id", ""), ".jpg"),
                 "mime_type": "image/jpeg",
                 "size": largest.get("file_size"),
                 "width": largest.get("width"),
@@ -1683,7 +1711,7 @@ class NotificationService:
             return {
                 "type": "audio",
                 "file_id": au["file_id"],
-                "filename": (au.get("file_name") or f"audio_{au.get('file_unique_id', 'msg')}.mp3"),
+                "filename": (au.get("file_name") or _u("audio", au.get("file_unique_id", ""), ".mp3")),
                 "mime_type": au.get("mime_type") or "audio/mpeg",
                 "size": au.get("file_size"),
                 "duration": au.get("duration"),
@@ -1694,7 +1722,7 @@ class NotificationService:
             return {
                 "type": "animation",
                 "file_id": an["file_id"],
-                "filename": (an.get("file_name") or f"animation_{an.get('file_unique_id', 'msg')}.mp4"),
+                "filename": (an.get("file_name") or _u("animation", an.get("file_unique_id", ""), ".mp4")),
                 "mime_type": an.get("mime_type") or "video/mp4",
                 "size": an.get("file_size"),
                 "width": an.get("width"),
@@ -1707,7 +1735,7 @@ class NotificationService:
             return {
                 "type": "document",
                 "file_id": doc["file_id"],
-                "filename": doc.get("file_name") or f"document_{doc.get('file_unique_id', 'msg')}.bin",
+                "filename": doc.get("file_name") or _u("document", doc.get("file_unique_id", ""), ".bin"),
                 "mime_type": doc.get("mime_type") or "application/octet-stream",
                 "size": doc.get("file_size"),
             }
@@ -1763,7 +1791,14 @@ class NotificationService:
                 cur_state = _chat_state.get(chat_id_str) or {}
                 cur_phase = cur_state.get("phase", "")
                 detected_mode = "project" if cur_phase == "creator_awaiting_idea" else "task"
-                current = await compose_svc.start(chat_id_str, mode=detected_mode)
+                # 🛡 (audit fix M2) — اگر کاربر در /new_task picker مرحلهٔ
+                # awaiting_idea بود و watched_id را قبلاً انتخاب کرده، آن را
+                # به compose buffer منتقل کن (تا picker دوباره ظاهر نشود).
+                inherited_watched_id = cur_state.get("watched_id") if cur_phase == "awaiting_idea" else None
+                current = await compose_svc.start(
+                    chat_id_str, mode=detected_mode,
+                    watched_id=inherited_watched_id,
+                )
                 await self._compose_send_welcome(chat_id_str, current)
 
             await self._compose_add_media(chat_id_str, current, media, caption)
@@ -1965,11 +2000,14 @@ class NotificationService:
             )
             return
 
-        # 1) getFile
+        # 🛡 (audit fix M4) — getFile و download را اول انجام بده. فقط
+        # اگر هر دو موفق شدند، آیتم را به buffer اضافه کن. در نتیجه
+        # بافر هیچ‌گاه ComposeItem با error نخواهد داشت (مگر start_session
+        # شکست بخورد که عملاً غیرممکن است).
         info = await tg.get_file(media["file_id"])
         if not info or not info.get("file_path"):
             await tg.send(
-                f"❌ نتوانستم اطلاعات فایل {media.get('filename', '?')} را از تلگرام بگیرم.",
+                f"❌ نتوانستم اطلاعات فایل {media.get('filename', '?')} را از تلگرام بگیرم. لطفاً دوباره ارسال کن.",
                 silent=False,
             )
             return
@@ -1979,16 +2017,15 @@ class NotificationService:
             await tg.send(f"⚠️ فایل خالی است — نادیده گرفته شد.", silent=True)
             return
 
-        # 2) download
         data = await tg.download_file(file_path)
         if not data:
             await tg.send(
-                f"❌ download فایل {media.get('filename', '?')} ناموفق بود.",
+                f"❌ download فایل {media.get('filename', '?')} ناموفق بود. لطفاً دوباره ارسال کن.",
                 silent=False,
             )
             return
 
-        # 3) start UploadSession + append + complete
+        # ـ ۲) UploadSession را بساز (data آماده و موجود است)
         try:
             sess = await up_svc.start_session(
                 task_draft_id=buf.task_draft_id,
@@ -1997,18 +2034,19 @@ class NotificationService:
                 total_size=len(data),
             )
             await up_svc.append_chunk(sess.id, 0, data)
-            # complete اگر هنوز نشده
             sess2 = up_svc.get(sess.id)
             if sess2 and sess2.status != "completed":
                 await up_svc.mark_completed(sess.id)
             upload_session_id = sess.id
-            error_msg = None
         except Exception as e:
             logger.exception(f"compose add_media: upload failed: {e}")
-            upload_session_id = None
-            error_msg = str(e)[:200]
+            await tg.send(
+                f"❌ خطای داخلی در ذخیرهٔ {media.get('filename', '?')}: {str(e)[:200]}",
+                silent=False,
+            )
+            return  # هیچ‌چیز به buffer اضافه نمی‌کنیم
 
-        # 4) ComposeItem
+        # ـ ۳) فقط اگر همه‌چیز موفق بود، آیتم را به buffer اضافه کن
         item = ComposeItem(
             order=0,  # ست خواهد شد در add_item
             type=media["type"],
@@ -2021,7 +2059,7 @@ class NotificationService:
             width=media.get("width"),
             height=media.get("height"),
             duration_seconds=media.get("duration"),
-            error=error_msg,
+            error=None,
         )
         await compose_svc.add_item(chat_id_str, item)
 
@@ -2090,16 +2128,20 @@ class NotificationService:
             # double-click protection
             return {"ok": True, "handled": "compose_submit_already_running"}
 
+        # 🛡 (audit fix M3) — atomic submit-lock قبل از همهٔ async calls، تا
+        # دو callback همزمان (race) هر دو نگذرند. اگر یکی سریع‌تر mark کرد،
+        # دومی در پایان if buf.submitting بالا می‌گیرد.
+        await compose_svc.mark_submitting(chat_id_str, True)
+
         # Stage 5: mode=project مسیر دیگری دارد
         if mode == "project":
             return await self._compose_submit_project(chat_id_str, buf)
 
         # 🆕 task mode: اگر پروژه انتخاب نشده، picker
         if not buf.watched_id:
+            # un-mark تا انتخاب پروژه مسدود نشود
+            await compose_svc.mark_submitting(chat_id_str, False)
             return await self._compose_pick_project(chat_id_str, buf)
-
-        # mark submitting
-        await compose_svc.mark_submitting(chat_id_str, True)
 
         # remove ReplyKeyboard
         await tg.remove_reply_keyboard("⏳ شروع پردازش...")
@@ -2163,7 +2205,9 @@ class NotificationService:
         if buf.submitting:
             return {"ok": True, "handled": "compose_project_already_running"}
 
+        # 🛡 (audit fix M3) — قبل از حتی validate state، lock بزن
         await compose_svc.mark_submitting(chat_id_str, True)
+
         await tg.remove_reply_keyboard("⏳ شروع پردازش...")
 
         try:

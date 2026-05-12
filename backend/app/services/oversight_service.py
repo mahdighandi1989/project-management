@@ -5008,6 +5008,20 @@ class OversightService:
         verified: List[str] = []
         max_runs = int(self.settings.get("max_parallel_runs") or 2)
 
+        # 🛡 (audit fix N2) — progress tracker memory cleanup (snapshotهای completed
+        # که بیش از 1 ساعت پیش به پایان رسیدند)
+        try:
+            from .oversight_progress import get_progress_tracker
+            await get_progress_tracker().cleanup(older_than_seconds=3600)
+        except Exception:
+            pass
+        # 🛡 compose buffer expired cleanup
+        try:
+            from .oversight_telegram_compose import get_compose_service
+            await get_compose_service().cleanup_expired()
+        except Exception:
+            pass
+
         for w in list(self.watched):
             # ----- 1) Scan دوره‌ای -----
             try:

@@ -850,10 +850,24 @@ async def _run_pdf_extraction(
         else:
             scan_pages.append(page_num)
 
-    # batchهای scan (هر 4 صفحه)
+    # 🛡 (audit fix C1 — refined) — batchهای scan فقط شامل صفحات
+    # **متوالی** هستند تا ordering در full_text درست بماند.
+    # مثال: scan_pages=[2, 4, 5, 6, 9] → runs=[[2],[4,5,6],[9]] →
+    # هر run با CHUNK_SIZE=4 split می‌شود.
     scan_batches: List[List[int]] = []
-    for i in range(0, len(scan_pages), PDF_CHUNK_SIZE):
-        scan_batches.append(scan_pages[i:i + PDF_CHUNK_SIZE])
+    if scan_pages:
+        current_run: List[int] = [scan_pages[0]]
+        for p in scan_pages[1:]:
+            if p == current_run[-1] + 1:
+                current_run.append(p)
+            else:
+                # split run
+                for i in range(0, len(current_run), PDF_CHUNK_SIZE):
+                    scan_batches.append(current_run[i:i + PDF_CHUNK_SIZE])
+                current_run = [p]
+        # last run
+        for i in range(0, len(current_run), PDF_CHUNK_SIZE):
+            scan_batches.append(current_run[i:i + PDF_CHUNK_SIZE])
 
     # total_segments: هر text-page یک، هر batch یک، plus 1 جمع‌بندی
     estimated_total = len(text_pages) + len(scan_batches) + 1
@@ -862,26 +876,33 @@ async def _run_pdf_extraction(
     start_time = _now()
     ai_calls = 0
 
+    # 🛡 (audit fix C1) — segment_index بر اساس multiplier از 100 تا ترتیب
+    # ادغام full_text درست بماند حتی در PDFهای مخلوط text/scan.
+    # هر page شماره اصلی * 100 می‌گیرد (page 1 → 100، page 50 → 5000).
+    # text-pages با ID = page_num * 100
+    # scan-batches با ID = first_page_num * 100 + 1 (تا کمی بعد از همان page)
+    # final جمع‌بندی با ID خیلی بزرگ.
+    PAGE_ID_MULT = 100
+
     # 1) text-pages — هر کدام یک segment (سریع، resume-friendly)
     for page_num, txt in text_pages:
-        if page_num in completed:
-            continue
-        await _wait_for_memory_headroom()
-        await persist_segment_fn(
-            page_num, f"صفحه {page_num}", txt, f"page={page_num}",
-        )
-
-    # 2) scan-batches — هر batch یک segment با OCR
-    # هر batch با شماره batch_index (نه page_num، تا overlap با text-pages نباشد):
-    # از 10000 + batch_index استفاده می‌کنیم برای ID یکتا
-    batch_id_offset = max(total_pages + 1, 10001)
-    for b_idx, batch_pages in enumerate(scan_batches, start=1):
-        seg_id = batch_id_offset + b_idx
+        seg_id = page_num * PAGE_ID_MULT
         if seg_id in completed:
             continue
         await _wait_for_memory_headroom()
+        await persist_segment_fn(
+            seg_id, f"صفحه {page_num}", txt, f"page={page_num}",
+        )
+
+    # 2) scan-batches — هر batch یک segment با OCR. id = first_page*100+1
+    # تا بعد از text page با همان page_num قرار بگیرد (در صورت مخلوط)
+    for b_idx, batch_pages in enumerate(scan_batches, start=1):
         first_p = batch_pages[0]
         last_p = batch_pages[-1]
+        seg_id = first_p * PAGE_ID_MULT + 1
+        if seg_id in completed:
+            continue
+        await _wait_for_memory_headroom()
         title = f"صفحات {first_p}–{last_p} (OCR — {len(batch_pages)} صفحه)"
         # render همهٔ صفحات batch به base64
         imgs: List[str] = []
@@ -953,7 +974,8 @@ async def _run_pdf_extraction(
         await persist_segment_fn(seg_id, title, text, f"pages={first_p}-{last_p}")
 
     # 3) جمع‌بندی نهایی — متادیتای پروسه (NOT content summary)
-    final_seg_id = batch_id_offset + len(scan_batches) + 1
+    # ID خیلی بزرگ‌تر از هر page → همیشه آخرین segment
+    final_seg_id = (total_pages + 1) * PAGE_ID_MULT + 999
     if final_seg_id not in completed:
         end_time = _now()
         elapsed = end_time - start_time
