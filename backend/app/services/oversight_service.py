@@ -3377,13 +3377,18 @@ class OversightService:
         #   "never": همیشه single-pass — overhead AI plan ندارد.
         #
         # `_skip_multi_pass` parameter (نه instance attribute) برای concurrency-safety.
+        # 🛡 (audit fix CRITICAL) — کاربر صریحاً خواسته که چک‌لیست **همیشه**
+        # روی اولین ارسال هم ساخته شود (همان رفتار تلگرام). heuristic قبلی
+        # `_is_complex_idea` برای ایده‌های کوتاه (مثل «این باگ را رفع کن»)
+        # multi-pass را trigger نمی‌کرد و کاربر برای هر ایدهٔ کوتاه مجبور به
+        # «بازتولید» می‌شد. حالا mode="auto" را معادل "always" می‌گیریم.
+        # اگر کاربر صریحاً "never" پاس کند، single-pass باقی می‌ماند.
         mode = (multi_pass_mode or "auto").lower().strip()
+        if mode == "auto":
+            mode = "always"
         should_try_multi_pass = (
             not _skip_multi_pass
-            and (
-                mode == "always"
-                or (mode == "auto" and self._is_complex_idea(idea))
-            )
+            and mode == "always"
         )
         if should_try_multi_pass:
             try:
