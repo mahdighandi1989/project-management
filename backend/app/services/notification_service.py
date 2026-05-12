@@ -656,6 +656,14 @@ _chat_state: Dict[str, Dict[str, Any]] = {}  # chat_id -> {phase, watched_id, id
 _idea_drafts: Dict[str, Dict[str, Any]] = {}  # token -> {watched_id, idea, expires_at}
 _STATE_TTL_SECONDS = 600  # 10 دقیقه
 
+# 🆕 (telegram callback dedup) — وقتی کاربر روی «ثبت کن» چندبار کلیک می‌کند یا
+# Telegram به‌خاطر کندی پاسخ webhook، callback را retry می‌کند، دومی draft را
+# delete شده می‌بیند و «منقضی شده» می‌فرستد در حالی که اولی هنوز در حال
+# پردازش است. این dict tokenهای در حال پردازش را track می‌کند تا تکراری‌ها
+# silent skip شوند.
+_processing_tokens: Dict[str, float] = {}  # token -> start_ts
+_PROCESSING_TIMEOUT_SECONDS = 300  # 5 دقیقه — بعد از این پاک می‌شود
+
 
 def _now_epoch() -> float:
     import time
@@ -671,6 +679,10 @@ def _cleanup_expired_state() -> None:
     for k in list(_idea_drafts.keys()):
         if _idea_drafts[k].get("expires_at", 0) < now:
             del _idea_drafts[k]
+    # cleanup tokenهای processing که timeout شده‌اند
+    for k in list(_processing_tokens.keys()):
+        if _processing_tokens[k] + _PROCESSING_TIMEOUT_SECONDS < now:
+            del _processing_tokens[k]
 
 
 def _short_token() -> str:
@@ -1600,16 +1612,28 @@ class NotificationService:
         # confirm:<token> — ثبت نهایی
         if data.startswith("confirm:"):
             token = data.split(":", 1)[1]
+            # 🆕 (callback dedup fix) — اگر token در حال پردازش است (دومین کلیک
+            # یا retry تلگرام)، silent skip کن — نه پیام «منقضی شده». اولین
+            # callback همچنان کار اصلی را انجام می‌دهد.
+            if token in _processing_tokens:
+                logger.debug(f"confirm: duplicate callback for token={token[:8]}.. — skipping")
+                return {"ok": True, "handled": "confirm_duplicate"}
             draft = _idea_drafts.get(token)
             if not draft:
+                # token نه در drafts است نه در processing — واقعاً منقضی است
                 await tg.send("⚠️ draft منقضی شده. /new\\_task بزنید.", silent=True)
                 return {"ok": True, "handled": "confirm_expired"}
-            # حذف draft (یک‌بار مصرف)
+            # atomic: حذف draft + علامت‌گذاری به‌عنوان in-progress
             del _idea_drafts[token]
-            await tg.send("⏳ در حال ساخت پرامپت با AI (15-30 ثانیه)...", silent=True)
-            return await self._call_idea_to_prompt(
-                chat_id_str, draft["watched_id"], draft["idea"],
-            )
+            _processing_tokens[token] = _now_epoch()
+            await tg.send("⏳ در حال ساخت پرامپت با AI (تا چند دقیقه، به‌ویژه با فایل پیوست)...", silent=True)
+            try:
+                return await self._call_idea_to_prompt(
+                    chat_id_str, draft["watched_id"], draft["idea"],
+                )
+            finally:
+                # پس از اتمام (موفقیت یا شکست)، token را پاک کن
+                _processing_tokens.pop(token, None)
 
         # 🆕 menu shortcuts
         if data == "menu:new_project":
@@ -2111,6 +2135,10 @@ class NotificationService:
             return {"ok": True, "handled": "task_dup_bad"}
         action = parts[1]
         token = parts[2]
+        # 🆕 (callback dedup) — اگر token در حال پردازش است، silent skip
+        if token in _processing_tokens:
+            logger.debug(f"task_dup: duplicate callback for token={token[:8]}.. — skipping")
+            return {"ok": True, "handled": "task_dup_duplicate"}
         draft = _idea_drafts.get(token)
         if not draft:
             await tg.send("⚠️ draft منقضی شده. /new\\_task بزنید.", silent=True)
@@ -2119,9 +2147,22 @@ class NotificationService:
         idea = draft.get("idea", "")
         watched_id = draft.get("watched_id")
         source = draft.get("source", "telegram_bot")
-        # یک‌بار مصرف
+        # یک‌بار مصرف + علامت‌گذاری processing
         del _idea_drafts[token]
+        _processing_tokens[token] = _now_epoch()
 
+        try:
+            return await self._handle_task_dup_callback_inner(
+                chat_id_str, action, parts, idea, watched_id, source, tg,
+            )
+        finally:
+            _processing_tokens.pop(token, None)
+
+    async def _handle_task_dup_callback_inner(
+        self, chat_id_str: str, action: str, parts: List[str],
+        idea: str, watched_id: Optional[str], source: str, tg: Any,
+    ) -> Dict[str, Any]:
+        """بدنهٔ اصلی task_dup callback — جدا شده تا finally token cleanup کار کند."""
         from .oversight_service import get_oversight_service
         _oversight = get_oversight_service()
 
