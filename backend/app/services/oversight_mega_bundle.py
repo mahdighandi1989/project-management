@@ -1,0 +1,396 @@
+"""Phase 2 — ساخت یک فایل Markdown کامل از همه‌ی اطلاعات verify.
+
+این فایل برای ارسال به‌عنوان ضمیمه‌ی تلگرام استفاده می‌شود تا کاربر
+بتواند در یک پیوست واحد به همه‌ی اطلاعات تسک و آخرین verify دسترسی
+داشته باشد: raw_idea + checklist + steps + prompt قدیم/جدید +
+شواهد همه‌ی probe ها + console logs + backend URLs و logs +
+analyses.
+
+تابع اصلی: build_mega_bundle_md(task, report) -> bytes
+این تابع هیچ exception ای بیرون نمی‌اندازد — در صورت شکست
+بخش‌های مشخص، آن بخش skip می‌شود.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+# سقف اندازه‌ی نهایی (به byte) — اگر بیشتر شد، trim می‌کنیم
+_MAX_SIZE_BYTES = 1_000_000  # 1MB
+
+
+def _safe_str(v: Any, limit: int = 500) -> str:
+    """تبدیل ایمن به str با cap."""
+    try:
+        s = str(v) if v is not None else ""
+    except Exception:
+        s = "<unstringable>"
+    if limit and len(s) > limit:
+        return s[:limit] + "…"
+    return s
+
+
+def _md_section(title: str, body: str) -> str:
+    return f"\n## {title}\n\n{body}\n"
+
+
+def _md_code_block(content: str, lang: str = "") -> str:
+    return f"```{lang}\n{content}\n```"
+
+
+def _fmt_iso(value: Any) -> str:
+    if not value:
+        return "—"
+    try:
+        s = str(value)
+        # cut microseconds for readability
+        if "T" in s and "." in s:
+            base, _ = s.split(".", 1)
+            return base.replace("T", " ")
+        return s.replace("T", " ")[:20]
+    except Exception:
+        return _safe_str(value, 30)
+
+
+def build_mega_bundle_md(task: Any, report: Any) -> bytes:
+    """ساخت فایل markdown کامل از task + report.
+
+    Args:
+      task: OversightTask
+      report: OversightReport
+
+    Returns:
+      bytes (UTF-8 encoded markdown)
+    """
+    parts: List[str] = []
+
+    # --- header ---
+    title = _safe_str(getattr(task, "title", "") or getattr(task, "id", "task"), 120)
+    parts.append(f"# 📦 Bundle کامل — {title}\n")
+    parts.append(
+        f"_فایل تولیدشده در: {datetime.now(timezone.utc).isoformat()}_\n"
+    )
+
+    # --- 1) شناسه‌ی تسک ---
+    try:
+        identity_rows = [
+            f"- **id:** `{_safe_str(getattr(task, 'id', ''), 64)}`",
+            f"- **project:** {_safe_str(getattr(task, 'project_full_name', ''), 100)}",
+            f"- **watched_id:** {_safe_str(getattr(task, 'watched_id', ''), 64)}",
+            f"- **type:** {_safe_str(getattr(task, 'type', ''), 30)}",
+            f"- **priority:** {_safe_str(getattr(task, 'priority', ''), 30)}",
+            f"- **status:** {_safe_str(getattr(task, 'status', ''), 30)}",
+            f"- **verification_status:** {_safe_str(getattr(task, 'verification_status', ''), 30)}",
+            f"- **last_verified_at:** {_fmt_iso(getattr(task, 'last_verified_at', None))}",
+            f"- **followup_round:** {_safe_str(getattr(task, 'followup_round', 0), 10)}",
+            f"- **source:** {_safe_str(getattr(task, 'source', ''), 30)}",
+            f"- **execution_mode:** {_safe_str(getattr(task, 'execution_mode', ''), 30)}",
+            f"- **runs_count:** {_safe_str(getattr(task, 'runs_count', 0), 10)}",
+            f"- **created_at:** {_fmt_iso(getattr(task, 'created_at', None))}",
+            f"- **updated_at:** {_fmt_iso(getattr(task, 'updated_at', None))}",
+        ]
+        parts.append(_md_section("۱. شناسه‌ی تسک", "\n".join(identity_rows)))
+    except Exception as e:
+        logger.debug(f"mega_bundle identity failed: {e}")
+
+    # --- 2) raw_idea ---
+    try:
+        raw = _safe_str(getattr(task, "raw_idea", "") or "", 10000)
+        if raw.strip():
+            parts.append(_md_section(
+                "۲. ایده‌ی خام (raw_idea)",
+                _md_code_block(raw)
+            ))
+    except Exception as e:
+        logger.debug(f"mega_bundle raw_idea failed: {e}")
+
+    # --- 3) acceptance_criteria checklist ---
+    try:
+        acs = list(getattr(task, "acceptance_criteria", None) or [])
+        if acs:
+            ac_lines = []
+            for i, ac in enumerate(acs):
+                if isinstance(ac, dict):
+                    text = _safe_str(ac.get("text") or "", 300)
+                    method = _safe_str(ac.get("verify_method") or "static", 30)
+                    last = _safe_str(ac.get("last_status") or "—", 20)
+                    emoji = {"passed": "✅", "failed": "❌", "error": "⚠️",
+                             "skipped": "⏭", "—": "·"}.get(last, "·")
+                    ac_lines.append(f"- {emoji} **[{method}]** «{text}» — last: `{last}`")
+                else:
+                    ac_lines.append(f"- · «{_safe_str(ac, 300)}»")
+            parts.append(_md_section(
+                f"۳. چک‌لیست acceptance_criteria ({len(acs)})",
+                "\n".join(ac_lines)
+            ))
+    except Exception as e:
+        logger.debug(f"mega_bundle ACs failed: {e}")
+
+    # --- 4) task_steps ---
+    try:
+        steps = list(getattr(task, "task_steps", None) or [])
+        if steps:
+            step_lines = ["| # | عنوان | وضعیت | % | scope |", "|---|---|---|---|---|"]
+            for s in steps:
+                if not isinstance(s, dict):
+                    continue
+                sid = _safe_str(s.get("id", ""), 5)
+                stitle = _safe_str(s.get("title", ""), 80).replace("|", "/")
+                sstatus = _safe_str(s.get("status", ""), 20)
+                scomp = _safe_str(s.get("completion_pct", ""), 5)
+                sscope = _safe_str(s.get("scope", ""), 100).replace("|", "/")
+                step_lines.append(f"| {sid} | {stitle} | {sstatus} | {scomp} | {sscope} |")
+            parts.append(_md_section(f"۴. مراحل (task_steps) — {len(steps)}", "\n".join(step_lines)))
+    except Exception as e:
+        logger.debug(f"mega_bundle steps failed: {e}")
+
+    # --- 5) prompt فعلی ---
+    try:
+        prompt_now = _safe_str(getattr(task, "prompt", "") or "", 30000)
+        history = getattr(task, "prompt_history", None) or []
+        version_label = f"نسخه #{len(history) + 1}" if history else "نسخه‌ی فعلی"
+        parts.append(_md_section(
+            f"۵. پرامپت فعلی ({version_label})",
+            _md_code_block(prompt_now)
+        ))
+    except Exception as e:
+        logger.debug(f"mega_bundle current prompt failed: {e}")
+
+    # --- 6) تاریخچه‌ی پرامپت‌ها ---
+    try:
+        history = list(getattr(task, "prompt_history", None) or [])
+        if history:
+            hist_parts: List[str] = []
+            # newest archived first
+            for i, h in enumerate(reversed(history)):
+                if not isinstance(h, dict):
+                    continue
+                ridx = len(history) - i
+                reason = _safe_str(h.get("reason", ""), 30)
+                archived = _fmt_iso(h.get("archived_at"))
+                status_at = _safe_str(h.get("verify_status_at_archive", ""), 30)
+                round_n = _safe_str(h.get("round", 0), 5)
+                old_prompt = _safe_str(h.get("prompt", ""), 30000)
+                hist_parts.append(
+                    f"### نسخه #{ridx} — {reason}\n\n"
+                    f"- بایگانی: {archived}\n"
+                    f"- وضعیت آن لحظه: `{status_at}`\n"
+                    f"- round: {round_n}\n\n"
+                    + _md_code_block(old_prompt)
+                )
+            parts.append(_md_section(
+                f"۶. تاریخچه‌ی پرامپت‌ها ({len(history)})",
+                "\n\n".join(hist_parts)
+            ))
+    except Exception as e:
+        logger.debug(f"mega_bundle history failed: {e}")
+
+    # --- 7) report فعلی ---
+    try:
+        report_lines = [
+            f"- **status:** `{_safe_str(getattr(report, 'status', ''), 20)}`",
+            f"- **confidence_score:** {_safe_str(getattr(report, 'confidence_score', 0), 10)}",
+            f"- **run_at:** {_fmt_iso(getattr(report, 'run_at', None))}",
+            f"- **model_id:** {_safe_str(getattr(report, 'model_id', ''), 50)}",
+        ]
+        done = list(getattr(report, "done_parts", None) or [])
+        remaining = list(getattr(report, "remaining_parts", None) or [])
+        next_actions = list(getattr(report, "next_actions", None) or [])
+        if done:
+            report_lines.append(f"\n**✅ انجام‌شده ({len(done)}):**")
+            for d in done[:30]:
+                report_lines.append(f"- {_safe_str(d, 300)}")
+        if remaining:
+            report_lines.append(f"\n**⏳ باقی‌مانده ({len(remaining)}):**")
+            for d in remaining[:30]:
+                report_lines.append(f"- {_safe_str(d, 300)}")
+        if next_actions:
+            report_lines.append(f"\n**🪜 اقدامات بعدی ({len(next_actions)}):**")
+            for d in next_actions[:30]:
+                report_lines.append(f"- {_safe_str(d, 300)}")
+        # summary اگر در evidence هست
+        ev = getattr(report, "evidence", None) or {}
+        if isinstance(ev, dict) and ev.get("summary"):
+            report_lines.append(f"\n**📝 خلاصه:** {_safe_str(ev['summary'], 1500)}")
+        parts.append(_md_section("۷. گزارش verify فعلی", "\n".join(report_lines)))
+    except Exception as e:
+        logger.debug(f"mega_bundle report failed: {e}")
+
+    # --- 8) runtime probes (دانه‌ی به دانه) ---
+    try:
+        ev = getattr(report, "evidence", None) or {}
+        probes = ev.get("runtime_probes", []) if isinstance(ev, dict) else []
+        if isinstance(probes, list) and probes:
+            probe_parts: List[str] = []
+            for idx, p in enumerate(probes, start=1):
+                if not isinstance(p, dict):
+                    continue
+                method = _safe_str(p.get("method", ""), 30)
+                status = _safe_str(p.get("status", ""), 20)
+                duration = _safe_str(p.get("duration_ms", 0), 10)
+                ac_text = _safe_str(p.get("ac_text", ""), 300)
+                pev = p.get("evidence") or {}
+                # شناسایی step probe vs system probe vs AC probe
+                marker = ""
+                if isinstance(pev, dict):
+                    if pev.get("step_id"):
+                        marker = f" 🪜 [step #{pev.get('step_id')}]"
+                    elif p.get("ac_id") == "system_home":
+                        marker = " 🏠 [system]"
+                emoji = {"passed": "✅", "failed": "❌", "error": "⚠️",
+                         "skipped": "⏭"}.get(status, "·")
+                pb_lines = [
+                    f"### probe {idx}{marker} — {emoji} `{method}` — `{status}` — {duration}ms",
+                    f"- **AC/step:** «{ac_text}»",
+                ]
+                if isinstance(pev, dict):
+                    if pev.get("step_inferred_route"):
+                        pb_lines.append(f"- **route (inferred):** `{pev['step_inferred_route']}`")
+                    if pev.get("final_url"):
+                        pb_lines.append(f"- **frontend URL ناوبری‌شده:** {_safe_str(pev['final_url'], 300)}")
+                    # actions_taken
+                    acts = pev.get("actions_taken") or []
+                    if isinstance(acts, list) and acts:
+                        pb_lines.append("- **actions_taken:**")
+                        for a in acts[:10]:
+                            if isinstance(a, dict):
+                                pb_lines.append(
+                                    f"  - `{a.get('action','')}` "
+                                    f"{a.get('url') or a.get('selector') or a.get('label') or ''} "
+                                    f"({a.get('duration_ms', 0)}ms, success={a.get('success', '?')})"
+                                )
+                    # assertion_results
+                    assertions = pev.get("assertion_results") or []
+                    if isinstance(assertions, list) and assertions:
+                        pb_lines.append("- **assertion_results:**")
+                        for asr in assertions[:10]:
+                            if isinstance(asr, dict):
+                                m = "✓" if asr.get("met") else "✗"
+                                pb_lines.append(
+                                    f"  - {m} {_safe_str(asr.get('expectation', ''), 100)}"
+                                    f" — {_safe_str(asr.get('reason', ''), 150)}"
+                                )
+                    # backend URLs called
+                    be_urls = pev.get("backend_urls_called") or []
+                    if isinstance(be_urls, list) and be_urls:
+                        pb_lines.append("- **backend URLs فراخوانی‌شده:**")
+                        for bu in be_urls[:20]:
+                            if isinstance(bu, dict):
+                                pb_lines.append(
+                                    f"  - `{bu.get('method', 'GET')}` "
+                                    f"{_safe_str(bu.get('url', ''), 250)} → "
+                                    f"{bu.get('status', '?')}"
+                                )
+                    # console errors
+                    ce = pev.get("console_errors") or []
+                    if isinstance(ce, list) and ce:
+                        pb_lines.append(f"- **console errors ({len(ce)}):**")
+                        for c in ce[:10]:
+                            if isinstance(c, dict):
+                                pb_lines.append(
+                                    f"  - `[{c.get('level', '?')}]` "
+                                    f"{_safe_str(c.get('message', ''), 200)}"
+                                )
+                    # backend log summary
+                    if pev.get("backend_log_summary"):
+                        pb_lines.append(
+                            f"- **backend log summary:** "
+                            f"{_safe_str(pev['backend_log_summary'], 600)}"
+                        )
+                    # screenshots: label + vision
+                    shots = pev.get("screenshots") or []
+                    if isinstance(shots, list) and shots:
+                        pb_lines.append("- **screenshots:**")
+                        for s in shots:
+                            if isinstance(s, dict):
+                                label = _safe_str(s.get("label", ""), 50)
+                                vd = _safe_str(s.get("vision_description", ""), 2000)
+                                vs = _safe_str(s.get("vision_source", ""), 40)
+                                archived = "✅ آرشیو شده در تلگرام" if s.get("archived_to_telegram") else "روی دیسک"
+                                pb_lines.append(f"  - **{label}** ({archived}, source=`{vs}`)")
+                                if vd:
+                                    pb_lines.append(f"    > {vd}")
+                    # inspector session deep-link reference
+                    if pev.get("inspector_session_id"):
+                        pb_lines.append(
+                            f"- **inspector_session_id:** {pev['inspector_session_id']}"
+                        )
+                    # error_message
+                    if p.get("error_message"):
+                        pb_lines.append(f"- **error:** {_safe_str(p['error_message'], 300)}")
+                probe_parts.append("\n".join(pb_lines))
+            parts.append(_md_section(
+                f"۸. شواهد runtime probes ({len(probes)})",
+                "\n\n".join(probe_parts)
+            ))
+    except Exception as e:
+        logger.debug(f"mega_bundle probes failed: {e}")
+
+    # --- 9) URLs (aggregate) ---
+    try:
+        ev = getattr(report, "evidence", None) or {}
+        probes = ev.get("runtime_probes", []) if isinstance(ev, dict) else []
+        all_frontend_urls: List[str] = []
+        all_backend_urls: List[Dict[str, Any]] = []
+        for p in probes:
+            if not isinstance(p, dict):
+                continue
+            pev = p.get("evidence") or {}
+            if not isinstance(pev, dict):
+                continue
+            fu = pev.get("final_url")
+            if fu and fu not in all_frontend_urls:
+                all_frontend_urls.append(fu)
+            for bu in (pev.get("backend_urls_called") or []):
+                if isinstance(bu, dict):
+                    # dedup by url
+                    if not any(
+                        x.get("url") == bu.get("url") and x.get("method") == bu.get("method")
+                        for x in all_backend_urls
+                    ):
+                        all_backend_urls.append(bu)
+        url_lines: List[str] = []
+        if all_frontend_urls:
+            url_lines.append(f"**Frontend URLs ناوبری‌شده ({len(all_frontend_urls)}):**")
+            for u in all_frontend_urls:
+                url_lines.append(f"- {_safe_str(u, 300)}")
+        if all_backend_urls:
+            url_lines.append(f"\n**Backend URLs فراخوانی‌شده ({len(all_backend_urls)}):**")
+            for b in all_backend_urls[:50]:
+                url_lines.append(
+                    f"- `{b.get('method', 'GET')}` "
+                    f"{_safe_str(b.get('url', ''), 250)} → {b.get('status', '?')}"
+                )
+        if url_lines:
+            parts.append(_md_section("۹. URL ها (aggregate)", "\n".join(url_lines)))
+    except Exception as e:
+        logger.debug(f"mega_bundle urls failed: {e}")
+
+    # --- 10) AI verifier raw response (debug) ---
+    try:
+        raw_resp = _safe_str(getattr(report, "raw_response", "") or "", 3000)
+        if raw_resp.strip():
+            parts.append(_md_section(
+                "۱۰. AI verifier raw response (debug)",
+                _md_code_block(raw_resp, "json")
+            ))
+    except Exception as e:
+        logger.debug(f"mega_bundle raw_resp failed: {e}")
+
+    # --- compose ---
+    full = "".join(parts)
+    encoded = full.encode("utf-8")
+    # cap به MAX_SIZE
+    if len(encoded) > _MAX_SIZE_BYTES:
+        # trim نهایی — هشدار trim در پایان
+        cut = _MAX_SIZE_BYTES - 300
+        warn_msg = (
+            "\n\n---\n_⚠️ این فایل به سقف ۱MB رسیده — "
+            "برای دیدن کامل، به منابع DB مراجعه شود._\n"
+        )
+        encoded = encoded[:cut] + warn_msg.encode("utf-8")
+    return encoded

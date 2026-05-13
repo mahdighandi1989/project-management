@@ -679,6 +679,69 @@ async def _fetch_recent_commits(
 
 
 # ============================================================================
+# 🆕 (Phase 2) — ارسال mega-bundle.md کامل به Telegram
+# ============================================================================
+
+async def _send_mega_bundle(task: "OversightTask") -> None:
+    """یک فایل bundle.md کامل از همه‌ی اطلاعات تسک + آخرین گزارش بساز
+    و به‌عنوان document به Telegram بفرست.
+
+    شامل: raw_idea + checklist + steps + prompt قدیم/جدید + همه‌ی
+    probe ها (با vision/console/backend URLs/logs) + URLs aggregate.
+    silent fail.
+    """
+    import time as _time_lc
+
+    # تسک و آخرین report را از service بگیر (نسخهٔ بروز پس از prompt update)
+    try:
+        from .oversight_service import get_oversight_service as _gos
+        svc = _gos()
+        fresh_task = next((t for t in svc.tasks if t.id == task.id), None)
+        if fresh_task is None:
+            return
+        # آخرین report برای این تسک
+        last_report = None
+        for r in svc.reports:
+            if r.task_id == task.id:
+                last_report = r
+                break
+        if last_report is None:
+            return
+    except Exception as e:
+        logger.debug(f"_send_mega_bundle: fetch task/report failed: {e}")
+        return
+
+    try:
+        from .oversight_mega_bundle import build_mega_bundle_md
+        md_bytes = build_mega_bundle_md(fresh_task, last_report)
+    except Exception as e:
+        logger.debug(f"_send_mega_bundle: build failed: {e}")
+        return
+
+    if not md_bytes or len(md_bytes) < 100:
+        return
+
+    safe_tid = "".join(c if c.isalnum() else "_" for c in str(task.id))[:24]
+    fname = f"bundle_{safe_tid}_{int(_time_lc.time())}.md"
+    title_for_caption = (fresh_task.title or fresh_task.id)[:80]
+    caption = f"📦 بسته‌ی کامل verify — «{title_for_caption}»"
+
+    try:
+        from .notification_service import notification_service, TelegramChannel
+    except Exception:
+        return
+    for ch in notification_service._build_channels():
+        if not isinstance(ch, TelegramChannel):
+            continue
+        if not ch.is_configured():
+            continue
+        try:
+            await ch.send_document(md_bytes, fname, caption=caption, silent=True)
+        except Exception as e:
+            logger.debug(f"mega bundle send_document failed: {e}")
+
+
+# ============================================================================
 # 🔬 (inspector_probe Phase 1 — relevance fix) — تشخیص route مرتبط با تسک
 # ============================================================================
 
@@ -2521,6 +2584,15 @@ async def verify_task(
                 await _send_followup_prompt_as_md(_task)
             except Exception as _fse:
                 logger.debug(f"send followup_prompt md failed: {_fse}")
+            # 🆕 (Phase 2) — bundle کامل (raw_idea + checklist + پرامپت قدیم/جدید +
+            # همه‌ی probe ها + URLs + logs + analyses) در یک فایل .md.
+            # این بعد از followup .md اجرا می‌شود تا task.prompt به نسخه‌ی جدید
+            # تغییر کرده باشد (apply_followup_as_new_prompt در apply_followup_after_verify
+            # ست می‌شود).
+            try:
+                await _send_mega_bundle(_task)
+            except Exception as _mbe:
+                logger.debug(f"send mega bundle failed: {_mbe}")
         except Exception as e:
             logger.debug(f"notification skipped: {e}")
 
