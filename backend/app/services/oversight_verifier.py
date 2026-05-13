@@ -2150,6 +2150,23 @@ async def verify_task(
                     from .verify_runtime.backend_log_probe import (
                         _extract_endpoints_from_text, _extract_python_symbols,
                     )
+                    # 🆕 (Phase 4 fix) — signal extraction از کل task context
+                    # نه فقط ac.text. AC های کلی (مثل "تست‌ها بدون خطا") در
+                    # متن خود endpoint ندارند ولی task_steps + target_files
+                    # دارند، پس از همان full context decision می‌گیریم.
+                    _task_context_text = (
+                        (task.title or "") + " "
+                        + " ".join(
+                            f"{s.get('title', '')} {s.get('scope', '')}"
+                            for s in (task.task_steps or [])
+                            if isinstance(s, dict)
+                        ) + " "
+                        + " ".join(str(f) for f in (task.target_files or []))
+                    )
+                    _task_eps = _extract_endpoints_from_text(_task_context_text)
+                    _task_syms = _extract_python_symbols(_task_context_text)
+                    _task_has_backend_signal = bool(_task_eps or _task_syms)
+
                     _bp_diag["total_acs"] = len(acceptance_criteria)
                     _bp_count = 0
                     for _ac_idx, _ac in enumerate(acceptance_criteria):
@@ -2164,9 +2181,10 @@ async def verify_task(
                         if str(_ac_method).lower() == "ui_interaction":
                             _bp_diag["skipped_ui"] += 1
                             continue
+                        # signal یا در ac.text، یا در task context کلی
                         _eps = _extract_endpoints_from_text(_ac_text)
                         _syms = _extract_python_symbols(_ac_text)
-                        if not _eps and not _syms:
+                        if not _eps and not _syms and not _task_has_backend_signal:
                             _bp_diag["skipped_no_signal"] += 1
                             continue
                         _bp_res = await run_backend_log_probe(
