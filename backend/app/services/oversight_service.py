@@ -287,11 +287,9 @@ class OversightTask:
     # backward-compat: اگر در JSON نباشد، False خوانده می‌شود
     archived: bool = False
     archived_at: Optional[str] = None
-    # 🆕 (Phase 2) Prompt versioning — هر بار followup منجر به update پرامپت
-    # شد، نسخهٔ قدیمی task.prompt اینجا بایگانی می‌شود (FIFO، حداکثر ۱۰).
-    # هر entry: {prompt, archived_at, reason, verify_status_at_archive, round}
-    # reason ∈ {"verify_followup", "manual_revert", "regenerate"}
-    prompt_history: List[Dict[str, Any]] = field(default_factory=list)
+    # ❌ Phase 2 prompt_history duplicate حذف شد — تعریف موجود در خط ۳۰۲
+    # (P4) همان نیاز را پوشش می‌دهد. apply_followup_as_new_prompt و
+    # revert_prompt_from_history با همان schema هماهنگ شده‌اند.
     # 🆕 (P1) metadata scan که این task را تولید کرده — برای شفافیت در UI
     # هر تسک نمایش می‌دهد: مدل، depth، passes، files_count، scan_id
     # برای task‌های قدیمی (قبل از این تغییر): None
@@ -5570,18 +5568,30 @@ class OversightService:
             # backward-compat: اگر prompt_history وجود نداشت (داده legacy)
             if not isinstance(task.prompt_history, list):
                 task.prompt_history = []
-            # archive نسخهٔ فعلی
+            # 🆕 (Phase 2) — schema هماهنگ با entry های موجود که UI آن‌ها را
+            # رندر می‌کند (raw_idea, model_id, generated_at, source). فیلدهای
+            # Phase 2 (archived_at, verify_status_at_archive, round) به‌عنوان
+            # اضافه نگه‌داری می‌شوند.
+            current_round = int(task.followup_round or 0)
+            source_label = (
+                f"followup_round_{current_round}"
+                if reason == "verify_followup" else reason
+            )
             entry = {
                 "prompt": old_prompt,
+                "raw_idea": task.raw_idea or "",
+                "model_id": (task.models_used[0] if task.models_used else "") or "",
+                "generated_at": task.updated_at or task.created_at or now_iso(),
+                "source": source_label,
+                # extras
                 "archived_at": now_iso(),
-                "reason": reason,
                 "verify_status_at_archive": status,
-                "round": int(task.followup_round or 0),
+                "round": current_round,
             }
-            task.prompt_history.append(entry)
-            # FIFO cap = ۱۰
-            if len(task.prompt_history) > 10:
-                task.prompt_history = task.prompt_history[-10:]
+            # newest-first (مطابق با کد موجود)
+            task.prompt_history.insert(0, entry)
+            # FIFO cap = ۱۰ (همان حد existing)
+            task.prompt_history = task.prompt_history[:10]
             # اعمال نسخهٔ جدید
             task.prompt = new_prompt
             task.followup_prompt = ""
@@ -5606,13 +5616,14 @@ class OversightService:
     ) -> Dict[str, Any]:
         """نسخه‌ای از prompt_history (index) را به‌عنوان prompt فعلی بازنشانی کن.
 
-        - history_index = -1 یعنی آخرین (newest archived = یک قدم به عقب)
-        - history_index = 0 یعنی قدیمی‌ترین
-        - نسخه‌ی فعلی task.prompt به history منتقل می‌شود
-          (با reason="manual_revert").
+        ⚠️ ترتیب history همیشه «newest first» است (مطابق با existing code):
+        - history_index = 0 یعنی جدیدترین نسخه‌ی بایگانی (یک قدم به عقب).
+        - history_index = -1 یعنی قدیمی‌ترین.
+        - نسخه‌ی فعلی task.prompt به history منتقل می‌شود (با source="manual_revert").
+        - entry هدف از history حذف می‌شود تا تکراری نشود.
         """
         result: Dict[str, Any] = {
-            "applied": False, "reverted_to_round": None,
+            "applied": False, "reverted_to_index": None,
             "history_size_after": 0, "skipped_reason": "",
         }
         async with self._lock:
@@ -5636,27 +5647,35 @@ class OversightService:
             if len(target_prompt) < 30:
                 result["skipped_reason"] = "target_prompt_too_short"
                 return result
-            # archive نسخهٔ فعلی به history
+            # archive نسخهٔ فعلی به history (newest-first → insert(0, ...))
             current = (task.prompt or "").strip()
-            task.prompt_history.append({
+            current_round = int(task.followup_round or 0)
+            archive_entry = {
                 "prompt": current,
+                "raw_idea": task.raw_idea or "",
+                "model_id": (task.models_used[0] if task.models_used else "") or "",
+                "generated_at": task.updated_at or task.created_at or now_iso(),
+                "source": "manual_revert",
                 "archived_at": now_iso(),
-                "reason": "manual_revert",
                 "verify_status_at_archive": task.verification_status or "",
-                "round": int(task.followup_round or 0),
-            })
-            # حذف entry که داریم به آن revert می‌کنیم (تا تکراری نشود)
-            task.prompt_history.pop(idx)
+                "round": current_round,
+            }
+            task.prompt_history.insert(0, archive_entry)
+            # idx پس از insert یکی شیفت شده (چون عنصر جدید در index 0 آمد)
+            # و target حالا در index = idx + 1 است
+            try:
+                task.prompt_history.pop(idx + 1)
+            except IndexError:
+                pass
             # cap
-            if len(task.prompt_history) > 10:
-                task.prompt_history = task.prompt_history[-10:]
+            task.prompt_history = task.prompt_history[:10]
             # ست کردن prompt به target
             task.prompt = target_prompt
             task.updated_at = now_iso()
             self._save_tasks()
 
             result["applied"] = True
-            result["reverted_to_round"] = int(target.get("round") or 0)
+            result["reverted_to_index"] = history_index
             result["history_size_after"] = len(task.prompt_history)
         return result
 
