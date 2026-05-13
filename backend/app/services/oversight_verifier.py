@@ -894,6 +894,100 @@ async def _send_mega_bundle(task: "OversightTask") -> None:
 
 
 # ============================================================================
+# 🆕 (Phase 4) — Task Type Classification
+# ============================================================================
+
+# نوع تسک به route routing probe ها کمک می‌کند:
+# - "ui": تسک‌های UI خالص → Smart Navigation + per-step UI probe
+# - "backend": تسک‌های backend خالص → Backend Log Probe + Code-aware
+# - "mixed": هر دو
+# - "unknown": fallback به همه (با هزینه‌ی AI بیشتر)
+
+_UI_KEYWORDS = (
+    "button", "دکمه", "panel", "پنل", "form", "فرم", "modal", "page",
+    "صفحه", "view", "تب", "tab", "sidebar", "navbar", "click", "کلیک",
+    "input", "فیلد", "ui", "ux", "design", "color", "layout", "نمایش",
+    "modal", "popup", "tooltip", "icon", "آیکن", "menu", "منو",
+    "frontend", "فرانت", "render", "show", "display",
+)
+
+_BACKEND_KEYWORDS = (
+    "endpoint", "api", "model", "مدل داده", "model data",
+    "function", "تابع", "service", "سرویس", "database", "دیتابیس",
+    "middleware", "cron", "thread", "lifecycle", "crud", "schema",
+    "migration", "migrate", "router", "controller", "manager",
+    "auth", "session", "token", "validator", "validation",
+    "logger", "queue", "worker", "task scheduler", "celery",
+    "backend", "بک‌اند", "بک اند", "logic", "منطق", "rebuild",
+    "trigger", "post-build", "thread safety",
+)
+
+
+def _classify_task_type(task: "OversightTask") -> str:
+    """تشخیص نوع تسک بر اساس فایل‌های هدف + متن AC.
+
+    Returns: 'ui' | 'backend' | 'mixed' | 'unknown'
+
+    منطق:
+      1. اگر هیچ target_file و هیچ AC نیست → 'unknown'
+      2. شمارش extension files: .py vs .ts/.tsx/.jsx/.js
+      3. شمارش keyword در AC text
+      4. ترکیب signal ها برای تصمیم
+    """
+    files = list(task.target_files or [])
+    py_count = sum(1 for f in files if str(f).lower().endswith(".py"))
+    ts_count = sum(
+        1 for f in files
+        if str(f).lower().endswith((".ts", ".tsx", ".jsx", ".js"))
+    )
+
+    # متن همه AC ها + task title + raw_idea
+    all_text_parts = [(task.title or ""), (task.raw_idea or "")]
+    for ac in (task.acceptance_criteria or []):
+        if isinstance(ac, dict):
+            all_text_parts.append(str(ac.get("text") or ""))
+        else:
+            all_text_parts.append(str(ac))
+    for s in (task.task_steps or []):
+        if isinstance(s, dict):
+            all_text_parts.append(str(s.get("title") or ""))
+            all_text_parts.append(str(s.get("scope") or ""))
+    all_text = " ".join(all_text_parts).lower()
+
+    ui_score = sum(1 for kw in _UI_KEYWORDS if kw in all_text)
+    backend_score = sum(1 for kw in _BACKEND_KEYWORDS if kw in all_text)
+
+    # هیچ signal — unknown
+    if not files and ui_score == 0 and backend_score == 0:
+        return "unknown"
+
+    # فقط backend file ها + backend keyword غالب → backend
+    if py_count > 0 and ts_count == 0:
+        if backend_score >= ui_score:
+            return "backend"
+        return "mixed"
+
+    # فقط ts/tsx + ui keyword غالب → ui
+    if ts_count > 0 and py_count == 0:
+        if ui_score >= backend_score:
+            return "ui"
+        return "mixed"
+
+    # هم py هم ts → mixed
+    if py_count > 0 and ts_count > 0:
+        return "mixed"
+
+    # فقط متن — تصمیم با ratio
+    if backend_score >= ui_score * 2 and backend_score >= 2:
+        return "backend"
+    if ui_score >= backend_score * 2 and ui_score >= 2:
+        return "ui"
+    if ui_score == 0 and backend_score == 0:
+        return "unknown"
+    return "mixed"
+
+
+# ============================================================================
 # 🔬 (inspector_probe Phase 1 — relevance fix) — تشخیص route مرتبط با تسک
 # ============================================================================
 
