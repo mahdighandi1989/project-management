@@ -45,6 +45,13 @@ _TIMEOUT_S = 60
 _MAX_SCREENSHOTS = 2
 _MAX_SCREENSHOT_BYTES = 500_000  # ~500KB
 _MAX_CONSOLE_LOGS = 50
+# 🆕 (Phase 2) محدودیت ضبط network requests
+_MAX_NETWORK_CALLS = 30
+_STATIC_EXTENSIONS = (
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg",
+    ".woff", ".woff2", ".ttf", ".otf",
+    ".css", ".js", ".mjs", ".map", ".ico",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +369,46 @@ async def _run_inspector_inner(
 
             page.on("console", _on_console)
 
+            # 🆕 (Phase 2) — network capture: همه‌ی درخواست‌های API را ضبط کن
+            # تا «ادرس‌های بک‌اند که فرانت در حین لود زده» در evidence باشد.
+            # استاتیک‌ها (image/font/css/js) filter می‌شوند.
+            network_calls: List[Dict[str, Any]] = []
+
+            def _on_request(req: Any) -> None:
+                try:
+                    if len(network_calls) >= _MAX_NETWORK_CALLS:
+                        return
+                    url = (getattr(req, "url", "") or "")
+                    if not url or url.startswith(("data:", "blob:")):
+                        return
+                    low = url.lower().split("?", 1)[0]
+                    if any(low.endswith(ext) for ext in _STATIC_EXTENSIONS):
+                        return
+                    network_calls.append({
+                        "url": url[:500],
+                        "method": (getattr(req, "method", None) or "GET")[:10],
+                        "resource_type": (getattr(req, "resource_type", None) or "")[:30],
+                        "status": None,
+                        "timestamp": _now_iso(),
+                    })
+                except Exception:
+                    pass
+
+            def _on_response(resp: Any) -> None:
+                try:
+                    url = (getattr(resp, "url", "") or "")
+                    status = getattr(resp, "status", None)
+                    # status فقط برای request اولی که هنوز status ندارد ست شود
+                    for item in network_calls:
+                        if item.get("url") == url and item.get("status") is None:
+                            item["status"] = status
+                            break
+                except Exception:
+                    pass
+
+            page.on("request", _on_request)
+            page.on("response", _on_response)
+
             # ---- navigate ----
             nav_start = time.monotonic()
             try:
@@ -384,6 +431,7 @@ async def _run_inspector_inner(
                 return _build_result_after_failure(
                     ac_id, ac_text, ctx, start_mono, actions_taken, screenshots,
                     console_errors, "navigate failed", html_excerpt, final_url,
+                    network_calls=network_calls,
                 )
 
             actions_taken.append({
@@ -544,6 +592,28 @@ async def _run_inspector_inner(
                 "reason": "" if selector_ok else "selector not visible",
             })
 
+        # 🆕 (Phase 2) — جدا کردن URL های بک‌اند که فرانت در حین لود زد
+        backend_root = (ctx.backend_base_url or "").rstrip("/")
+        backend_urls_called: List[Dict[str, Any]] = [
+            {"url": n.get("url"), "method": n.get("method"),
+             "status": n.get("status")}
+            for n in network_calls
+            if backend_root and (n.get("url") or "").startswith(backend_root)
+        ]
+        if backend_urls_called and ctx.inspector_session_id:
+            _be_count = len(backend_urls_called)
+            _be_sample = ", ".join(
+                f"{b.get('method')} {(b.get('url') or '').split(backend_root, 1)[-1][:40]}→{b.get('status')}"
+                for b in backend_urls_called[:3]
+            )
+            try:
+                await _msg(
+                    ctx.inspector_session_id, "system",
+                    f"🌐 {_be_count} درخواست backend ثبت شد — نمونه: {_be_sample}",
+                )
+            except Exception:
+                pass
+
         return RuntimeProbeResult(
             ac_id=ac_id, ac_text=ac_text, method="ui_interaction",
             status=status,
@@ -552,6 +622,8 @@ async def _run_inspector_inner(
                 "actions_taken": actions_taken,
                 "screenshots": screenshots,
                 "console_errors": console_errors,
+                "network_calls": network_calls,
+                "backend_urls_called": backend_urls_called,
                 "backend_log_summary": backend_summary,
                 "final_url": final_url,
                 "assertion_results": assertion_results,
@@ -566,6 +638,7 @@ async def _run_inspector_inner(
             ctx.inspector_session_id, "system",
             f"💥 probe inner crash: {str(e)[:200]}",
         )
+        _nc = locals().get("network_calls") or []
         return RuntimeProbeResult(
             ac_id=ac_id, ac_text=ac_text, method="ui_interaction",
             status=PROBE_STATUS_ERROR,
@@ -575,6 +648,7 @@ async def _run_inspector_inner(
                 "actions_taken": actions_taken,
                 "screenshots": screenshots,
                 "console_errors": console_errors,
+                "network_calls": _nc,
             },
             duration_ms=int((time.monotonic() - start_mono) * 1000),
             error_message=str(e)[:300],
@@ -657,19 +731,30 @@ def _build_result_after_failure(
     actions: List[Dict[str, Any]], screenshots: List[Dict[str, Any]],
     console_errors: List[Dict[str, Any]], reason: str,
     html_excerpt: str, final_url: str,
+    network_calls: Optional[List[Dict[str, Any]]] = None,
 ) -> RuntimeProbeResult:
+    evid: Dict[str, Any] = {
+        "inspector_session_id": ctx.inspector_session_id,
+        "actions_taken": actions,
+        "screenshots": screenshots,
+        "console_errors": console_errors,
+        "final_url": final_url,
+        "reason": reason,
+        "probe_type": "inspector_phase1",
+    }
+    if network_calls is not None:
+        evid["network_calls"] = network_calls
+        backend_root = (ctx.backend_base_url or "").rstrip("/")
+        evid["backend_urls_called"] = [
+            {"url": n.get("url"), "method": n.get("method"),
+             "status": n.get("status")}
+            for n in network_calls
+            if backend_root and (n.get("url") or "").startswith(backend_root)
+        ]
     return RuntimeProbeResult(
         ac_id=ac_id, ac_text=ac_text, method="ui_interaction",
         status=PROBE_STATUS_FAILED,
-        evidence={
-            "inspector_session_id": ctx.inspector_session_id,
-            "actions_taken": actions,
-            "screenshots": screenshots,
-            "console_errors": console_errors,
-            "final_url": final_url,
-            "reason": reason,
-            "probe_type": "inspector_phase1",
-        },
+        evidence=evid,
         duration_ms=int((time.monotonic() - start_mono) * 1000),
         error_message=reason,
     )
