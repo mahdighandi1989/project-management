@@ -32,10 +32,11 @@ logger = logging.getLogger(__name__)
 
 # محدودیت‌ها
 _MAX_ACS_PER_BATCH = 10
-_MAX_COMMITS_TO_FETCH = 20
+_MAX_COMMITS_TO_FETCH = 60  # 🆕 از 20 به 60 — feature های قدیمی‌تر هم در بازه می‌آیند
 _MAX_FILES_PER_COMMIT = 8
-_MAX_PATCH_CHARS = 1500  # هر patch trim شود تا context AI نشکند
-_AI_TIMEOUT_S = 30
+_MAX_PATCH_CHARS = 1200  # هر patch trim شود تا context AI نشکند
+_AI_TIMEOUT_S = 45  # 🆕 با 60 commit، AI زمان بیشتری می‌خواهد
+_REPO_TREE_CACHE_TTL = 300  # ۵ دقیقه
 
 
 async def analyze_acs_with_commit_diffs(
@@ -227,18 +228,26 @@ async def _ai_analyze_batch(
 
     prompt = (
         "تو یک Code Reviewer هستی. وظیفه‌ات بررسی این است که آیا AC های زیر\n"
-        "در commit های اخیر repo پیاده شده‌اند یا نه. تشخیص خود را با شواهد\n"
-        "صریح (نام فایل، تابع، تغییر کد) ثابت کن.\n\n"
-        f"📁 فایل‌های هدف تسک: {target_files_text}\n\n"
+        "در repo پیاده شده‌اند یا نه. تشخیص خود را با شواهد صریح ثابت کن.\n\n"
+        f"📁 فایل‌های هدف تسک (target_files از task metadata — این‌ها\n"
+        f"    فایل‌هایی هستند که قبلاً یا در این تسک باید ساخته شوند):\n"
+        f"    {target_files_text}\n\n"
         f"📋 AC ها (با index):\n{ac_block}\n\n"
-        f"📦 commit های اخیر:\n{commits_block}\n\n"
-        "⚠️ راهنما:\n"
-        "- 'implemented': diff صریحاً این AC را پیاده می‌کند (مدل، تابع، یا\n"
-        "  endpoint مرتبط در commits دیده می‌شود).\n"
+        f"📦 commit های اخیر (تا {len(commits)} commit):\n{commits_block}\n\n"
+        "⚠️ راهنمای verdict:\n"
+        "- 'implemented': یا diff های اخیر این AC را صریحاً پیاده کرده‌اند،\n"
+        "  **یا** فایل/تابع/endpoint مرتبط در target_files ذکر شده (یعنی\n"
+        "  قبلاً ساخته شده ولی در ۶۰ commit اخیر تغییر نکرده). در این\n"
+        "  حالت matching_commits می‌تواند خالی باشد و در reason ذکر کن\n"
+        "  «پیش‌ساخته در target_files».\n"
         "- 'partial': بخشی پیاده شده ولی ناقص (مثلاً مدل ساخته شده ولی\n"
         "  endpoint نه).\n"
-        "- 'not_found': هیچ نشانه‌ای از این AC در diff ها نیست.\n"
+        "- 'not_found': نه در diff های اخیر و نه در target_files نشانه‌ای\n"
+        "  از این AC نیست — احتمالاً ساخته نشده.\n"
         "- 'unclear': مطمئن نیستی یا اطلاعات کافی نیست.\n\n"
+        "🛑 قانون مهم: اگر یک AC به فایلی اشاره می‌کند که در target_files\n"
+        "   لیست شده ولی در commit ها diff ندارد، عموماً 'implemented'\n"
+        "   است (نه 'not_found') — چون فایل وجود دارد فقط جدید نیست.\n\n"
         "خروجی فقط JSON خالص (بدون ``` یا متن دیگر):\n"
         "{\n"
         '  "results": [\n'

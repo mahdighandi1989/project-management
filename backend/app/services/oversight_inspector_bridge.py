@@ -121,6 +121,17 @@ async def describe_screenshot_with_vision(
             "  یا صفحه ۴۰۴ یا خطا است، یا یک صفحه‌ی نامرتبط است.\n"
             '- "unclear": فقط در ابهام واقعی — مثلاً ممکن است feature پشت scroll\n'
             "  باشد، یا نام مشابه ولی نه دقیق دیدی.\n\n"
+            "🛑 مثال ضد-hallucination (بسیار مهم — این الگو را اشتباه نکن):\n"
+            "  AC: «تولید verify_plan توسط AI»\n"
+            "  صفحه: یک dashboard با عنوان «پروژه‌ها» و چند کارت پروژه\n"
+            "  پاسخ غلط: yes («پنل با عنوان و دکمه دیده می‌شود») ❌\n"
+            "  پاسخ درست: no («کلمات کلیدی verify_plan/AI generator در صفحه\n"
+            "                   نوشته نشده — فقط dashboard کلی است») ✓\n\n"
+            "🔍 الزام keyword: اگر AC شامل اسم خاصی مثل\n"
+            "   verify_plan, smart_nav, backend_log, RoutingDiagram, …\n"
+            "   است، آن **رشتهٔ دقیق** باید در ocr_text یا ui_elements\n"
+            "   دیده شود تا feature_present=yes بدهی. اگر این رشته در\n"
+            "   متن صفحه نیست، **یا 'no' یا 'unclear'** بده — نه 'yes'.\n\n"
             "‼️ پیش‌فرض ایمن: اگر شک داری، 'no' بده، نه 'yes'."
         )
 
@@ -141,18 +152,56 @@ async def describe_screenshot_with_vision(
             if start != -1 and end > start:
                 try:
                     parsed = json.loads(txt[start:end + 1])
-                    # 🆕 (Phase 2 fix 3) — feature_present را normalize کن
                     fp_raw = str(parsed.get("feature_present", "") or "").strip().lower()
                     if fp_raw not in ("yes", "no", "unclear"):
                         fp_raw = "unclear"
+                    _ocr = str(parsed.get("ocr_text", ""))[:4000]
+                    _ui_elems = str(parsed.get("ui_elements", ""))[:2000]
+                    _fp_reason = str(parsed.get("feature_reason", ""))[:600]
+
+                    # 🆕 (Phase 4 fix) — keyword-overlap override: اگر AI گفت
+                    # feature_present=yes ولی هیچ یک از کلیدواژه‌های «ویژه»
+                    # AC (نام فایل، تابع، CamelCase، snake_case) در ocr_text
+                    # یا ui_elements دیده نمی‌شود، احتمالاً hallucination است
+                    # و باید override به unclear شود.
+                    if fp_raw == "yes" and user_context:
+                        import re as _re
+                        _ac_specific = set(_re.findall(
+                            r"\b([A-Z][a-zA-Z0-9]{3,}|[a-z][a-z0-9_]{4,}_[a-z0-9_]+)\b",
+                            user_context,
+                        ))
+                        # حذف کلمات بسیار generic
+                        _generic = {
+                            "AI", "API", "URL", "JSON", "HTML", "CSS", "true",
+                            "false", "None", "self", "data", "page", "step",
+                            "probe", "Stage", "stage",
+                        }
+                        _ac_specific = {
+                            k for k in _ac_specific if k not in _generic
+                        } - {"step_probe", "auto_verify"}
+                        if _ac_specific:
+                            _haystack = (_ocr + " " + _ui_elems).lower()
+                            _matched = [
+                                k for k in _ac_specific
+                                if k.lower() in _haystack
+                            ]
+                            if not _matched:
+                                fp_raw = "unclear"
+                                _fp_reason = (
+                                    f"⚠️ keyword-override: AI گفت yes ولی هیچ "
+                                    f"از {sorted(list(_ac_specific))[:5]} در "
+                                    f"متن صفحه دیده نمی‌شود — احتمال "
+                                    f"hallucination. اصلی: {_fp_reason[:200]}"
+                                )
+
                     return {
                         "scene": str(parsed.get("scene", ""))[:2000],
-                        "ocr_text": str(parsed.get("ocr_text", ""))[:4000],
-                        "ui_elements": str(parsed.get("ui_elements", ""))[:2000],
+                        "ocr_text": _ocr,
+                        "ui_elements": _ui_elems,
                         "error_signals": str(parsed.get("error_signals", ""))[:1500],
                         "layout_hints": str(parsed.get("layout_hints", ""))[:1500],
                         "feature_present": fp_raw,
-                        "feature_reason": str(parsed.get("feature_reason", ""))[:600],
+                        "feature_reason": _fp_reason,
                         "vision_model_used": picked.id,
                     }
                 except Exception as je:
