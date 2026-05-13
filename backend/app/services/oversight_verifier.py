@@ -679,38 +679,88 @@ async def _fetch_recent_commits(
 
 
 # ============================================================================
+# 🔬 (inspector_probe Phase 1 — relevance fix) — تشخیص route مرتبط با تسک
+# ============================================================================
+
+def _infer_frontend_route_for_task(task: "OversightTask") -> str:
+    """تلاش برای استخراج یک route فرانت‌اند مرتبط با تسک.
+
+    منطق:
+      1) target_files شامل الگوهای Next.js App Router (frontend/src/app/X/page.tsx)
+         یا Pages Router (pages/X.tsx) → /X
+      2) prompt/raw_idea شامل URL مستقیم (مثل /debate) → آن
+      3) fallback: "/"
+    """
+    import re as _re
+    for f in (task.target_files or []):
+        path = str(f or "").lower()
+        # frontend/src/app/X/page.tsx  → /X
+        # frontend/src/app/X/Y/page.tsx → /X/Y
+        m = _re.search(r"(?:frontend/src/)?app/([^/]+(?:/[^/]+)*)/page\.[jt]sx?$", path)
+        if m:
+            route = m.group(1).strip("/")
+            # حذف layout/_app/_document
+            if route and not route.startswith(("layout", "_app", "_document")):
+                return "/" + route
+        # pages/X.tsx
+        m2 = _re.search(r"pages/([^/]+)\.[jt]sx?$", path)
+        if m2:
+            route = m2.group(1).strip("/")
+            if route not in ("index", "_app", "_document"):
+                return "/" + route
+    # سعی برای URL در prompt
+    blob = ((task.prompt or "") + " " + (task.raw_idea or ""))[:2000]
+    m3 = _re.search(r"(?:/oversight|/debate|/projects|/projects/\w+|/dashboard|/admin|/login|/signup|/profile|/settings)\b", blob.lower())
+    if m3:
+        return m3.group(0)
+    return "/"
+
+
+# ============================================================================
 # 🔬 (inspector_probe Phase 1 — gap fix) — followup_prompt به‌عنوان .md به Telegram
 # ============================================================================
 
 async def _send_followup_prompt_as_md(task: "OversightTask") -> None:
     """اگر task.followup_prompt پر است، آن را به‌عنوان فایل .md به Telegram بفرست.
 
-    به دلیل race با apply_followup_after_verify (که در همان event loop verify
-    اجرا می‌شود)، یک sleep کوتاه می‌گذاریم و سپس task را از service re-fetch
-    می‌کنیم. این تابع silent fail است.
+    apply_followup_after_verify یک AI call می‌زند که می‌تواند ۵-۳۰ ثانیه طول
+    بکشد. به‌جای یک sleep ثابت، با polling هر ۲ ثانیه چک می‌کنیم تا حداکثر
+    ۴۵ ثانیه. اگر در این بازه آماده نشد، silent skip.
     """
     import asyncio as _asyncio_lc
-    # تأخیر کوتاه تا apply_followup_after_verify فرصت اجرا داشته باشد
-    try:
-        await _asyncio_lc.sleep(2.5)
-    except Exception:
-        pass
-
-    # re-fetch
     fresh_followup: str = ""
     fresh_title: str = task.title or task.id
-    try:
-        from .oversight_service import get_oversight_service as _gos
-        svc = _gos()
-        fresh = next((t for t in svc.tasks if t.id == task.id), None)
-        if fresh is not None:
-            fresh_followup = (fresh.followup_prompt or "").strip()
-            fresh_title = (fresh.title or fresh.id) or fresh_title
-    except Exception:
-        fresh_followup = (task.followup_prompt or "").strip()
+    fresh_status: str = ""
+
+    max_wait_s = 45
+    poll_interval_s = 2.0
+    elapsed = 0.0
+
+    while elapsed < max_wait_s:
+        try:
+            await _asyncio_lc.sleep(poll_interval_s)
+            elapsed += poll_interval_s
+            from .oversight_service import get_oversight_service as _gos
+            svc = _gos()
+            fresh = next((t for t in svc.tasks if t.id == task.id), None)
+            if fresh is not None:
+                fresh_followup = (fresh.followup_prompt or "").strip()
+                fresh_title = (fresh.title or fresh.id) or fresh_title
+                fresh_status = str(getattr(fresh, "verification_status", "") or "")
+                # اگر followup ست شد یا status=done (پاک شده) خروج
+                if fresh_followup and len(fresh_followup) >= 30:
+                    break
+                if fresh_status == "done":
+                    # followup عمداً reset شده — ارسال لازم نیست
+                    return
+        except Exception:
+            continue
 
     if not fresh_followup or len(fresh_followup) < 30:
-        # یا تولید نشد، یا خیلی کوتاه — ارزش پیوست ندارد
+        logger.debug(
+            f"followup .md skipped for task {task.id}: "
+            f"not ready after {max_wait_s}s (status={fresh_status})"
+        )
         return
 
     try:
@@ -1554,19 +1604,29 @@ async def verify_task(
                 acceptance_criteria, _probe_ctx,
             )
             # 🔬 (inspector_probe Phase 1 — system check) — مستقل از AC ها،
-            # یک probe «homepage» اجرا شود تا اگر هیچ AC نوع ui_interaction
-            # نبود، هم گزارش screenshot/vision/console/backend log از صفحه
-            # اصلی deployed داشته باشیم. این probe synthetic است و در
-            # task.acceptance_criteria ذخیره نمی‌شود.
+            # یک probe «صفحه مرتبط با تسک» اجرا شود تا اگر هیچ AC نوع ui_interaction
+            # نبود، هم گزارش screenshot/vision/console/backend log از صفحه‌ای
+            # که واقعاً به تسک ربط دارد داشته باشیم. این probe synthetic است و
+            # در task.acceptance_criteria ذخیره نمی‌شود.
             try:
                 if _probe_ctx.frontend_base_url:
                     from .verify_runtime.inspector_probe import (
                         run_inspector_probe as _run_sys_probe,
                     )
+                    # تلاش برای استخراج route مرتبط با تسک از target_files
+                    _route = _infer_frontend_route_for_task(task)
+                    _sys_ac_text = (
+                        f"(auto-verify system probe) صفحه‌ی «{_route}» قابل دسترسی است"
+                        if _route != "/" else
+                        "(auto-verify system probe) صفحه اصلی deployed قابل دسترسی است"
+                    )
                     _sys_ac = {
-                        "text": "(auto-verify system probe) صفحه اصلی deployed قابل دسترسی است",
+                        "text": _sys_ac_text,
                         "verify_method": "ui_interaction",
-                        "verify_plan": {"base": "frontend", "ui_steps": []},
+                        "verify_plan": {
+                            "base": "frontend",
+                            "ui_steps": [{"action": "navigate", "url": _route}],
+                        },
                     }
                     _sys_res = await _run_sys_probe(_sys_ac, _probe_ctx, "system_home")
                     if _sys_res is not None:
