@@ -1032,13 +1032,34 @@ async def verify_task(
                 _Path(STORAGE_DIR), str(task.id), runtime_run_id,
             )
             runtime_started_at = now_iso()
-            runtime_probe_results = await run_probes_for_task(
-                task,
-                watched=watched,
+            # 🛡 (critical fix) — `run_probes_for_task` فقط `task.acceptance_criteria`
+            # را می‌خواند. اگر آن خالی باشد و AC از پرامپت extract شده باشد، probe
+            # هرگز fire نمی‌شود. به جای آن، از run_probes_for_acs استفاده می‌کنیم
+            # که مستقیماً لیست AC را می‌گیرد.
+            from .verify_runtime import run_probes_for_acs, build_probe_context
+            _probe_ctx = build_probe_context(
+                task_id=str(task.id),
                 repo_path=(
                     getattr(watched, "runtime_repo_path", None) if watched else None
                 ),
+                frontend_base_url=(
+                    getattr(watched, "frontend_base_url", None) if watched else None
+                ),
+                backend_base_url=(
+                    getattr(watched, "backend_base_url", None) if watched else None
+                ),
+                auth_type=(
+                    (getattr(watched, "runtime_auth", None) or {}).get("type")
+                    if watched else None
+                ),
+                auth_value=(
+                    (getattr(watched, "runtime_auth", None) or {}).get("value")
+                    if watched else None
+                ),
                 evidence_dir=str(run_dir),
+            )
+            runtime_probe_results = await run_probes_for_acs(
+                acceptance_criteria, _probe_ctx,
             )
             # manifest.json + size cap enforcement
             try:
