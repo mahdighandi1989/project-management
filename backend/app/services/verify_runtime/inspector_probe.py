@@ -685,20 +685,14 @@ async def _run_inspector_inner(
                 vision_missing_reason = _shot.get("vision_feature_reason") or "vision AI: feature not visible"
                 break
 
-        passed = (
+        # 🔢 (Phase 3) — passed نهایی بعد از vision_pair و expected_api_calls
+        # محاسبه می‌شود (پایین‌تر در کد). فعلاً initial passed برای assertion ها.
+        passed_initial = (
             nav_ok
             and (not has_console_error)
             and selector_ok
             and (not vision_says_feature_missing)
-            and (not auth_required)  # 🔐 (Phase 3) — auth redirect → failed
-        )
-        status = PROBE_STATUS_PASSED if passed else PROBE_STATUS_FAILED
-        emoji = "✅" if passed else "❌"
-        await _msg(
-            ctx.inspector_session_id, "system",
-            f"{emoji} probe {status}"
-            + (f" — feature missing: {vision_missing_reason[:200]}"
-               if vision_says_feature_missing else ""),
+            and (not auth_required)
         )
 
         assertion_results: List[Dict[str, Any]] = [
@@ -707,6 +701,110 @@ async def _run_inspector_inner(
             {"expectation": "no console errors", "met": (not has_console_error),
              "reason": f"{sum(1 for c in console_errors if c.get('level') == 'error')} errors"},
         ]
+        # 🆕 (Phase 3) — vision pair analysis اگر ≥۲ screenshot داریم
+        # و sequence اجرا شده (یعنی interaction واقعی بود)
+        vision_pair_result: Optional[Dict[str, Any]] = None
+        try:
+            if extra_steps_executed and len(screenshots) >= 2:
+                # اولین و آخرین screenshot معتبر را به‌عنوان before/after بگیر
+                _valid_shots = [s for s in screenshots if s.get("path")]
+                if len(_valid_shots) >= 2:
+                    _before = _valid_shots[0]
+                    _after = _valid_shots[-1]
+                    from .vision_helper import analyze_screenshot_pair
+                    vision_pair_result = await analyze_screenshot_pair(
+                        _before["path"], _after["path"],
+                        {
+                            "ac_text": ac_text,
+                            "actions_taken": actions_taken,
+                        },
+                    )
+                    if vision_pair_result and ctx.inspector_session_id:
+                        try:
+                            _diff = vision_pair_result.get("diff_description") or ""
+                            _suc = vision_pair_result.get("interaction_succeeded") or "unclear"
+                            _fp = vision_pair_result.get("feature_present") or "unclear"
+                            await _msg(
+                                ctx.inspector_session_id, "system",
+                                f"🔬 vision pair: interaction={_suc}, "
+                                f"feature_present={_fp} — {_diff[:200]}",
+                            )
+                        except Exception:
+                            pass
+        except Exception as _vpe:
+            logger.debug(f"inspector_probe vision pair failed: {_vpe}")
+
+        # 🆕 (Phase 3) — expected_api_calls assertion
+        expected_api_calls_results: List[Dict[str, Any]] = []
+        try:
+            expected = plan.get("expected_api_calls") or []
+            if isinstance(expected, list) and expected:
+                for exp in expected:
+                    if not isinstance(exp, dict):
+                        continue
+                    exp_method = str(exp.get("method") or "GET").upper()
+                    exp_path = str(exp.get("path_contains") or "").strip()
+                    if not exp_path:
+                        continue
+                    matched = any(
+                        str(c.get("method") or "").upper() == exp_method
+                        and exp_path in str(c.get("url") or "")
+                        for c in network_calls
+                    )
+                    expected_api_calls_results.append({
+                        "expectation": f"API call {exp_method} {exp_path}",
+                        "met": matched,
+                        "reason": "ثبت شد" if matched else "ثبت نشد",
+                    })
+        except Exception as _eae:
+            logger.debug(f"inspector_probe expected_api_calls failed: {_eae}")
+
+        # اگر expected_api_calls فیلد داشت و حداقل یکی نشد → احتمالاً feature
+        # واقعی کار نکرده — این علاوه بر vision یک signal دیگر است
+        api_calls_failed = bool(expected_api_calls_results) and any(
+            not r.get("met") for r in expected_api_calls_results
+        )
+
+        # vision_pair interaction signal
+        vision_pair_interaction_failed = bool(
+            vision_pair_result
+            and vision_pair_result.get("interaction_succeeded") == "no"
+        )
+
+        # assertion ها از vision_pair و expected_api_calls
+        if vision_pair_result and vision_pair_result.get("interaction_succeeded") != "unclear":
+            _ok = vision_pair_result.get("interaction_succeeded") == "yes"
+            assertion_results.append({
+                "expectation": "interaction قابل مشاهده‌ای انجام شد",
+                "met": _ok,
+                "reason": vision_pair_result.get("diff_description", "")[:300],
+            })
+        assertion_results.extend(expected_api_calls_results)
+
+        # 🆕 passed نهایی Phase 3
+        passed = (
+            passed_initial
+            and not vision_pair_interaction_failed
+            and not api_calls_failed
+        )
+        status = PROBE_STATUS_PASSED if passed else PROBE_STATUS_FAILED
+        emoji = "✅" if passed else "❌"
+        # علت اولویت‌دار برای پیام session
+        _why_failed = ""
+        if vision_says_feature_missing:
+            _why_failed = f" — feature missing: {vision_missing_reason[:200]}"
+        elif auth_required:
+            _why_failed = " — redirect به login (auth recipe لازم است)"
+        elif vision_pair_interaction_failed:
+            _why_failed = f" — interaction انجام نشد: {(vision_pair_result or {}).get('diff_description', '')[:200]}"
+        elif api_calls_failed:
+            _missed = [r for r in expected_api_calls_results if not r.get('met')]
+            _why_failed = f" — {len(_missed)} API call مورد انتظار ثبت نشد"
+        await _msg(
+            ctx.inspector_session_id, "system",
+            f"{emoji} probe {status}{_why_failed}",
+        )
+
         # 🆕 (Phase 2 fix 3) — assertion vision feature_present
         if vision_says_feature_missing:
             assertion_results.append({
@@ -770,6 +868,9 @@ async def _run_inspector_inner(
                 "backend_log_summary": backend_summary,
                 "final_url": final_url,
                 "assertion_results": assertion_results,
+                # 🆕 (Phase 3) — vision pair + expected_api_calls
+                "vision_pair": vision_pair_result,
+                "expected_api_calls_results": expected_api_calls_results,
                 # 🔐 (Phase 3) — auth state
                 "auth_required": auth_required,
                 "auth_state": (
