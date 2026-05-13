@@ -2247,6 +2247,7 @@ async def verify_task(
                     # حداکثر ۵ مرحله — تا verify طول نکشد
                     for _step in _ts_list[:5]:
                         try:
+                            _smart_nav_result: Optional[Dict[str, Any]] = None
                             _sroute, _route_specific = _infer_route_for_step(_step, task)
                             _sid = _step.get("id", 0)
                             _stitle = str(_step.get("title") or "")[:80]
@@ -2286,7 +2287,6 @@ async def verify_task(
                                 # 🆕 (Phase 4) — قبل از skip، Smart Navigation
                                 # تلاش کن: شاید AI بتواند از روی nav menu
                                 # لینک مرتبط را پیدا کند.
-                                _smart_nav_result: Optional[Dict[str, Any]] = None
                                 if not _route_specific:
                                     try:
                                         from .verify_runtime.navigation_helper import (
@@ -2373,6 +2373,17 @@ async def verify_task(
                                     _step_res.evidence["step_id"] = _sid
                                     _step_res.evidence["step_title"] = _stitle
                                     _step_res.evidence["step_inferred_route"] = _sroute
+                                    # 🆕 (Phase 4) — اگر smart_nav موفق بود،
+                                    # تصمیم AI را به evidence اضافه کن
+                                    if _smart_nav_result and _smart_nav_result.get("href"):
+                                        _step_res.evidence["smart_nav"] = {
+                                            "chosen_text": _smart_nav_result.get("chosen_text"),
+                                            "chosen_href": _smart_nav_result.get("href"),
+                                            "confidence": _smart_nav_result.get("confidence"),
+                                            "reason": _smart_nav_result.get("reason"),
+                                            "links_count": _smart_nav_result.get("links_count"),
+                                            "duration_ms": _smart_nav_result.get("duration_ms"),
+                                        }
                                 step_probe_results.append(_step_res)
                         except Exception as _ssee:
                             logger.debug(
