@@ -907,10 +907,29 @@ def _resolve_inspector_project_id(
 ) -> str:
     """تشخیص project_id که در InspectorSession ذخیره می‌شود.
 
-    inspector_session.project_id همان repo_full_name (مثل
-    «mahdighandi1989/project-management») است که از watched گرفته می‌شود.
-    در نبود watched، fallback به task.project_full_name است.
+    منطق دو-مرحله:
+      الف) تلاش برای resolve به Project.id محلی (از طریق resolve_project_for_task)
+           تا session در تب «بازرس ویژه» همان پروژه نمایش داده شود.
+      ب) در صورت شکست (پروژه‌ی محلی نیست)، fallback به repo_full_name
+         (session ذخیره می‌شود ولی در UI ظاهر نخواهد بود).
     """
+    try:
+        from ..core.database import SessionLocal
+        from .oversight_service import get_oversight_service
+        service = get_oversight_service()
+        db = SessionLocal()
+        try:
+            info = service.resolve_project_for_task(db, str(task.id))
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+        if isinstance(info, dict) and info.get("matched") and info.get("project_id"):
+            return str(info["project_id"])
+    except Exception as e:
+        logger.debug(f"_resolve_inspector_project_id: resolve failed: {e}")
+    # fallback
     if watched and getattr(watched, "repo_full_name", None):
         return str(watched.repo_full_name)
     return str(getattr(task, "project_full_name", "") or "unknown")
@@ -1366,7 +1385,9 @@ async def verify_task(
             # تا probe ها بتوانند اقدامات قدم‌به‌قدم را در تب «بازرس ویژه» نشان دهند.
             # اگر ساخت شکست خورد، probe ها بدون session اجرا می‌شوند (graceful).
             auto_verify_session_id: Optional[int] = None
+            auto_verify_project_id: Optional[str] = None
             try:
+                auto_verify_project_id = _resolve_inspector_project_id(task, watched)
                 auto_verify_session_id = await _create_auto_verify_inspector_session(
                     task=task, watched=watched,
                 )
@@ -1844,6 +1865,13 @@ async def verify_task(
         }
         if runtime_run_id:
             report.evidence["runtime_run_id"] = runtime_run_id
+    # 🔬 (inspector_probe Phase 1) — اطلاعات لازم برای لینک به تب بازرس ویژه
+    _avs_id_local = locals().get("auto_verify_session_id")
+    if _avs_id_local is not None:
+        report.evidence["auto_verify_session_id"] = _avs_id_local
+    _avp_id_local = locals().get("auto_verify_project_id")
+    if _avp_id_local:
+        report.evidence["auto_verify_project_id"] = _avp_id_local
 
     # 🛡 fallback warning: اگر AI status=partial داد ولی remaining_parts خالی،
     # یا status=not_done ولی همه پر، یک warning log کن
