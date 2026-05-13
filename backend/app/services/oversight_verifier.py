@@ -1553,6 +1553,29 @@ async def verify_task(
             runtime_probe_results = await run_probes_for_acs(
                 acceptance_criteria, _probe_ctx,
             )
+            # 🔬 (inspector_probe Phase 1 — system check) — مستقل از AC ها،
+            # یک probe «homepage» اجرا شود تا اگر هیچ AC نوع ui_interaction
+            # نبود، هم گزارش screenshot/vision/console/backend log از صفحه
+            # اصلی deployed داشته باشیم. این probe synthetic است و در
+            # task.acceptance_criteria ذخیره نمی‌شود.
+            try:
+                if _probe_ctx.frontend_base_url:
+                    from .verify_runtime.inspector_probe import (
+                        run_inspector_probe as _run_sys_probe,
+                    )
+                    _sys_ac = {
+                        "text": "(auto-verify system probe) صفحه اصلی deployed قابل دسترسی است",
+                        "verify_method": "ui_interaction",
+                        "verify_plan": {"base": "frontend", "ui_steps": []},
+                    }
+                    _sys_res = await _run_sys_probe(_sys_ac, _probe_ctx, "system_home")
+                    if _sys_res is not None:
+                        # prepend تا در گزارش بالای لیست probe ها ظاهر شود
+                        runtime_probe_results.insert(0, _sys_res)
+                else:
+                    logger.debug("system inspector probe skipped: no frontend_base_url")
+            except Exception as _spe:
+                logger.debug(f"system inspector probe failed: {_spe}")
             # manifest.json + size cap enforcement
             try:
                 from .verify_runtime.storage import enforce_size_cap
