@@ -45,6 +45,7 @@ async def describe_screenshot_with_vision(
     base64_img: str,
     user_context: str,
     page_url: str = "",
+    dom_text: str = "",
 ) -> Dict[str, Any]:
     """با vision model عکس را به متن غنی تبدیل می‌کند.
 
@@ -161,16 +162,18 @@ async def describe_screenshot_with_vision(
 
                     # 🆕 (Phase 4 fix) — keyword-overlap override: اگر AI گفت
                     # feature_present=yes ولی هیچ یک از کلیدواژه‌های «ویژه»
-                    # AC (نام فایل، تابع، CamelCase، snake_case) در ocr_text
-                    # یا ui_elements دیده نمی‌شود، احتمالاً hallucination است
-                    # و باید override به unclear شود.
+                    # AC (CamelCase / snake_case) در DOM واقعی (html source
+                    # از Playwright) دیده نمی‌شود، احتمالاً hallucination است
+                    # و باید override به unclear شود. **مهم:** ما اینجا
+                    # روی dom_text (zاد حقیقت Playwright) چک می‌کنیم،
+                    # نه روی ocr_text/ui_elements که خود AI تولید کرده —
+                    # چون AI می‌تواند کلمات AC را در OCR fake کند.
                     if fp_raw == "yes" and user_context:
                         import re as _re
                         _ac_specific = set(_re.findall(
                             r"\b([A-Z][a-zA-Z0-9]{3,}|[a-z][a-z0-9_]{4,}_[a-z0-9_]+)\b",
                             user_context,
                         ))
-                        # حذف کلمات بسیار generic
                         _generic = {
                             "AI", "API", "URL", "JSON", "HTML", "CSS", "true",
                             "false", "None", "self", "data", "page", "step",
@@ -180,18 +183,33 @@ async def describe_screenshot_with_vision(
                             k for k in _ac_specific if k not in _generic
                         } - {"step_probe", "auto_verify"}
                         if _ac_specific:
-                            _haystack = (_ocr + " " + _ui_elems).lower()
-                            _matched = [
+                            # zاد حقیقت: DOM واقعی + OCR vision به عنوان
+                            # fallback (اگر dom_text در دسترس نباشد)
+                            _dom_low = (dom_text or "").lower()
+                            _ocr_low = (_ocr + " " + _ui_elems).lower()
+                            # match در DOM (اعتماد بالا) یا fallback به OCR
+                            _matched_dom = [
                                 k for k in _ac_specific
-                                if k.lower() in _haystack
+                                if k.lower() in _dom_low
                             ]
-                            if not _matched:
+                            _matched_ocr_only = [
+                                k for k in _ac_specific
+                                if k.lower() in _ocr_low
+                                and k.lower() not in _dom_low
+                            ]
+                            if not _matched_dom and not (_matched_ocr_only and not dom_text):
+                                # هیچ keyword در DOM نیست و یا dom_text داریم
+                                # و در آن هم نیست → hallucination
                                 fp_raw = "unclear"
+                                _ocr_hint = (
+                                    f" (OCR ادعا کرد {_matched_ocr_only} ولی DOM نه — "
+                                    f"احتمال OCR fake)" if _matched_ocr_only else ""
+                                )
                                 _fp_reason = (
-                                    f"⚠️ keyword-override: AI گفت yes ولی هیچ "
-                                    f"از {sorted(list(_ac_specific))[:5]} در "
-                                    f"متن صفحه دیده نمی‌شود — احتمال "
-                                    f"hallucination. اصلی: {_fp_reason[:200]}"
+                                    f"⚠️ keyword-override (DOM): AI گفت yes ولی هیچ "
+                                    f"از {sorted(list(_ac_specific))[:5]} در DOM واقعی "
+                                    f"دیده نمی‌شود{_ocr_hint}. "
+                                    f"اصلی: {_fp_reason[:160]}"
                                 )
 
                     return {

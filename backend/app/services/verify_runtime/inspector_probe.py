@@ -516,6 +516,32 @@ async def _run_inspector_inner(
             except Exception:
                 pass
 
+            # 🆕 (Phase 4 fix) — HTTP 4xx/5xx response هم باید vision را
+            # skip کند. Vision روی صفحه‌ی واقعی 404/500 محتوای ساختگی
+            # می‌سازد که کلمات AC را در آن fake می‌کند.
+            http_error_detected = False
+            try:
+                if isinstance(nav_status, int) and nav_status >= 400:
+                    http_error_detected = True
+            except Exception:
+                pass
+
+            # یک flag مشترک برای skip شدن vision در هر دو حالت
+            page_unusable = spa_404_detected or http_error_detected
+
+            if http_error_detected and not spa_404_detected:
+                # nav_ok را false کن (احتمالاً قبلاً false بود ولی تأکید)
+                nav_ok = False
+                if ctx.inspector_session_id:
+                    try:
+                        await _msg(
+                            ctx.inspector_session_id, "system",
+                            f"⚠️ HTTP error detected: status={nav_status} "
+                            f"— probe FAIL، vision skip می‌شود ({full_url[:120]})",
+                        )
+                    except Exception:
+                        pass
+
             if spa_404_detected:
                 # nav_ok را به false تنظیم کن تا probe failed باشد
                 nav_ok = False
@@ -664,24 +690,31 @@ async def _run_inspector_inner(
         for shot in screenshots:
             if not shot.get("path"):
                 continue
-            # 🆕 (Phase 4 fix) — اگر SPA-404 detected شد، vision را اصلاً
-            # صدا نزن — vision معمولاً از روی URL/title hallucinate می‌کند
-            # و feature_present=yes برمی‌گرداند با محتوای ساختگی. به‌جای
-            # آن، مستقیماً feature_present=no با reason صریح ست می‌کنیم.
-            if spa_404_detected:
+            # 🆕 (Phase 4 fix) — اگر صفحه قابل استفاده نیست (SPA-404 یا
+            # HTTP 4xx/5xx)، vision را اصلاً صدا نزن — vision معمولاً
+            # از روی URL/title hallucinate می‌کند و feature_present=yes
+            # برمی‌گرداند با محتوای ساختگی که حتی کلمات AC را در OCR
+            # fake می‌کند. به‌جای آن، مستقیماً feature_present=no با
+            # reason صریح ست می‌کنیم.
+            if page_unusable:
+                _err_label = (
+                    f"HTTP {nav_status}" if http_error_detected else "SPA-404"
+                )
                 shot["vision_description"] = (
-                    "(صفحه SPA-404 — body شامل 'Not Found' / 404 است؛ "
+                    f"(صفحه قابل استفاده نیست — {_err_label}؛ "
                     "Vision صدا زده نشد تا hallucination رخ ندهد)"
                 )
-                shot["vision_source"] = "skipped_spa_404"
+                shot["vision_source"] = (
+                    "skipped_http_error" if http_error_detected else "skipped_spa_404"
+                )
                 shot["vision_feature_present"] = "no"
                 shot["vision_feature_reason"] = (
-                    "SPA-404 page detected — feature can't be present on a 404 page"
+                    f"page returned {_err_label} — feature can't be present"
                 )
                 try:
                     await _msg(
                         ctx.inspector_session_id, "system",
-                        f"🚫 vision ({shot['label']}) skipped — SPA-404 detected",
+                        f"🚫 vision ({shot['label']}) skipped — {_err_label}",
                     )
                 except Exception:
                     pass
