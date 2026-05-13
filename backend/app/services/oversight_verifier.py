@@ -1933,6 +1933,56 @@ async def verify_task(
                     from .verify_runtime.inspector_probe import (
                         run_inspector_probe as _run_step_probe,
                     )
+                    # 🆕 (Phase 3 fix) — برای هر step، AC مشابه را با شباهت
+                    # متنی پیدا کن و plan غنی آن را استفاده کن (به‌جای
+                    # navigate-only). این کاری می‌کند action loop واقعاً
+                    # برای step probes هم فعال شود.
+                    _all_acs = list(task.acceptance_criteria or [])
+
+                    def _ac_text_low(_a: Any) -> str:
+                        if isinstance(_a, dict):
+                            return str(_a.get("text") or "").lower()
+                        return str(_a or "").lower()
+
+                    def _find_matching_ac(_step_title: str, _step_scope: str) -> Optional[Dict[str, Any]]:
+                        """بهترین AC با ui_interaction plan را برای این step پیدا کن."""
+                        _title_low = (_step_title or "").lower()
+                        _scope_low = (_step_scope or "").lower()
+                        _step_tokens = set(
+                            tok for tok in (_title_low + " " + _scope_low).split()
+                            if len(tok) >= 4
+                        )
+                        if not _step_tokens:
+                            return None
+                        _best: Optional[Dict[str, Any]] = None
+                        _best_score = 0
+                        for _ac in _all_acs:
+                            if not isinstance(_ac, dict):
+                                continue
+                            if str(_ac.get("verify_method") or "").lower() != "ui_interaction":
+                                continue
+                            _plan = _ac.get("verify_plan") or {}
+                            _steps = _plan.get("ui_steps") or []
+                            # فقط plan های با حداقل ۲ step غیر-navigate
+                            _real = sum(
+                                1 for s in _steps if isinstance(s, dict)
+                                and str(s.get("action") or "").lower() not in ("", "navigate", "screenshot")
+                            ) if isinstance(_steps, list) else 0
+                            if _real < 2:
+                                continue
+                            _ac_low = _ac_text_low(_ac)
+                            _ac_tokens = set(
+                                tok for tok in _ac_low.split() if len(tok) >= 4
+                            )
+                            _score = len(_step_tokens & _ac_tokens)
+                            if _score > _best_score:
+                                _best_score = _score
+                                _best = _ac
+                        # حداقل ۲ token مشترک تا match قابل اعتماد باشد
+                        if _best is not None and _best_score >= 2:
+                            return _best
+                        return None
+
                     # حداکثر ۵ مرحله — تا verify طول نکشد
                     for _step in _ts_list[:5]:
                         try:
@@ -1940,19 +1990,47 @@ async def verify_task(
                             _sid = _step.get("id", 0)
                             _stitle = str(_step.get("title") or "")[:80]
                             _sscope = str(_step.get("scope") or "")[:200]
-                            _synth_ac = {
-                                "text": f"(step probe #{_sid}) {_stitle}",
-                                "verify_method": "ui_interaction",
-                                "verify_plan": {
-                                    "base": "frontend",
-                                    "ui_steps": [
-                                        {"action": "navigate", "url": _sroute},
-                                    ],
-                                    "step_id": _sid,
-                                    "step_title": _stitle,
-                                    "step_scope": _sscope,
-                                },
-                            }
+                            # 🆕 (Phase 3 fix) — به‌جای plan navigate-only،
+                            # plan AC مشابه را اگر هست استفاده کن
+                            _matched_ac = _find_matching_ac(_stitle, _sscope)
+                            if _matched_ac is not None:
+                                _matched_plan = dict(_matched_ac.get("verify_plan") or {})
+                                # مطمئن شو navigate به route step اشاره دارد
+                                _existing_steps = _matched_plan.get("ui_steps") or []
+                                # اگر اولین step navigate نبود، یکی اضافه کن
+                                if (not _existing_steps
+                                    or not isinstance(_existing_steps[0], dict)
+                                    or str(_existing_steps[0].get("action") or "") != "navigate"):
+                                    _existing_steps = (
+                                        [{"action": "navigate", "url": _sroute}]
+                                        + list(_existing_steps)
+                                    )
+                                _matched_plan["ui_steps"] = _existing_steps
+                                _matched_plan["base"] = "frontend"
+                                _matched_plan["step_id"] = _sid
+                                _matched_plan["step_title"] = _stitle
+                                _matched_plan["step_scope"] = _sscope
+                                _matched_plan["_recipe_source"] = "matched_ac"
+                                _synth_ac = {
+                                    "text": f"(step probe #{_sid}) {_stitle}",
+                                    "verify_method": "ui_interaction",
+                                    "verify_plan": _matched_plan,
+                                }
+                            else:
+                                _synth_ac = {
+                                    "text": f"(step probe #{_sid}) {_stitle}",
+                                    "verify_method": "ui_interaction",
+                                    "verify_plan": {
+                                        "base": "frontend",
+                                        "ui_steps": [
+                                            {"action": "navigate", "url": _sroute},
+                                        ],
+                                        "step_id": _sid,
+                                        "step_title": _stitle,
+                                        "step_scope": _sscope,
+                                        "_recipe_source": "fallback_navigate",
+                                    },
+                                }
                             _step_res = await _run_step_probe(
                                 _synth_ac, _probe_ctx, f"step_{_sid}",
                             )
