@@ -679,6 +679,132 @@ async def _fetch_recent_commits(
 
 
 # ============================================================================
+# 🔬 (inspector_probe Phase 1 — gap fix) — followup_prompt به‌عنوان .md به Telegram
+# ============================================================================
+
+async def _send_followup_prompt_as_md(task: "OversightTask") -> None:
+    """اگر task.followup_prompt پر است، آن را به‌عنوان فایل .md به Telegram بفرست.
+
+    به دلیل race با apply_followup_after_verify (که در همان event loop verify
+    اجرا می‌شود)، یک sleep کوتاه می‌گذاریم و سپس task را از service re-fetch
+    می‌کنیم. این تابع silent fail است.
+    """
+    import asyncio as _asyncio_lc
+    # تأخیر کوتاه تا apply_followup_after_verify فرصت اجرا داشته باشد
+    try:
+        await _asyncio_lc.sleep(2.5)
+    except Exception:
+        pass
+
+    # re-fetch
+    fresh_followup: str = ""
+    fresh_title: str = task.title or task.id
+    try:
+        from .oversight_service import get_oversight_service as _gos
+        svc = _gos()
+        fresh = next((t for t in svc.tasks if t.id == task.id), None)
+        if fresh is not None:
+            fresh_followup = (fresh.followup_prompt or "").strip()
+            fresh_title = (fresh.title or fresh.id) or fresh_title
+    except Exception:
+        fresh_followup = (task.followup_prompt or "").strip()
+
+    if not fresh_followup or len(fresh_followup) < 30:
+        # یا تولید نشد، یا خیلی کوتاه — ارزش پیوست ندارد
+        return
+
+    try:
+        from .notification_service import notification_service, TelegramChannel
+    except Exception:
+        return
+
+    md_body = (
+        f"# 📝 پرامپت ادامه — {fresh_title[:120]}\n\n"
+        f"این پرامپت بر اساس آخرین verify ساخته شده. برای دور بعدی apply استفاده کن.\n\n"
+        f"---\n\n"
+        f"{fresh_followup}\n"
+    )
+    md_bytes = md_body.encode("utf-8")
+    safe_tid = "".join(c if c.isalnum() else "_" for c in str(task.id))[:24]
+    fname = f"followup_{safe_tid}_{int(time.time())}.md"
+    caption = f"📝 پرامپت ادامه برای تسک «{fresh_title[:80]}»"
+
+    for ch in notification_service._build_channels():
+        if not isinstance(ch, TelegramChannel):
+            continue
+        if not ch.is_configured():
+            continue
+        try:
+            await ch.send_document(md_bytes, fname, caption=caption, silent=True)
+        except Exception as e:
+            logger.debug(f"followup .md send_document failed: {e}")
+
+
+# ============================================================================
+# 🔬 (inspector_probe Phase 1 — gap fix) — Startup recovery برای session های orphan
+# ============================================================================
+
+def recover_orphan_auto_verify_sessions(max_age_minutes: int = 60) -> Dict[str, int]:
+    """session های auto-verify که بیش از max_age_minutes پیش ساخته شده‌اند ولی
+    هنوز status=active دارند را به archived تغییر بده.
+
+    این تابع در lifespan startup فراخوانی می‌شود — اگر سرور قبل از archive
+    شدن session crash کرده باشد، این تابع تمیزکاری می‌کند.
+
+    خروجی: {archived_count, scanned_count}
+    """
+    try:
+        from ..core.database import SessionLocal
+        from ..models.inspector_session import InspectorSession
+    except Exception as e:
+        logger.debug(f"recover_orphan_sessions: import failed: {e}")
+        return {"archived_count": 0, "scanned_count": 0}
+
+    cutoff = datetime.utcnow() - timedelta(minutes=max_age_minutes)
+    db = SessionLocal()
+    archived = 0
+    scanned = 0
+    try:
+        rows = (
+            db.query(InspectorSession)
+            .filter(InspectorSession.status == "active")
+            .filter(InspectorSession.title.like("🤖%"))
+            .all()
+        )
+        for r in rows:
+            scanned += 1
+            ca = r.created_at
+            if ca is None:
+                continue
+            try:
+                if ca.tzinfo is not None:
+                    ca = ca.replace(tzinfo=None)
+                if ca < cutoff:
+                    r.status = "archived"
+                    r.closed_at = datetime.utcnow()
+                    archived += 1
+            except Exception:
+                continue
+        if archived:
+            db.commit()
+            logger.info(
+                f"recover_orphan_auto_verify_sessions: archived {archived} of {scanned}"
+            )
+    except Exception as e:
+        logger.debug(f"recover_orphan_sessions query failed: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+    return {"archived_count": archived, "scanned_count": scanned}
+
+
+# ============================================================================
 # 🔬 (inspector_probe Phase 1) — TTL cleanup برای screenshot های orphan
 # ============================================================================
 
@@ -2143,6 +2269,15 @@ async def verify_task(
                 await _send_runtime_screenshots_and_cleanup(_task, _report)
             except Exception as _se:
                 logger.debug(f"send runtime screenshots failed: {_se}")
+            # 🔬 (inspector_probe Phase 1 — gap fix) — پرامپت ادامه (followup_prompt)
+            # بعد از screenshots به‌عنوان فایل .md پیوست می‌شود. به دلیل race با
+            # apply_followup_after_verify که در همان event loop اجرا می‌شود، یک
+            # تأخیر کوتاه می‌گذاریم و تسک را re-fetch می‌کنیم تا نسخهٔ به‌روز
+            # followup_prompt را داشته باشیم.
+            try:
+                await _send_followup_prompt_as_md(_task)
+            except Exception as _fse:
+                logger.debug(f"send followup_prompt md failed: {_fse}")
         except Exception as e:
             logger.debug(f"notification skipped: {e}")
 

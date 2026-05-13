@@ -127,6 +127,27 @@ async def lifespan(app: FastAPI):
     except Exception as _e:
         logger.warning(f"runtime autodetect schedule failed: {_e}")
 
+    # 🔬 (inspector_probe Phase 1) — Startup recovery برای auto-verify sessions
+    # اگر سرور قبل از archive شدن session هایی که verify ساخته بود crash کرده
+    # باشد، آن‌ها را به archived تغییر بدهیم تا تب «بازرس ویژه» تمیز بماند.
+    try:
+        import asyncio as _asyncio_av
+        from .services.oversight_verifier import recover_orphan_auto_verify_sessions
+
+        async def _recover_av_sessions_bg():
+            try:
+                res = await _asyncio_av.to_thread(
+                    recover_orphan_auto_verify_sessions, 60,
+                )
+                if res.get("archived_count"):
+                    logger.info(f"🔬 auto-verify orphan sessions: {res}")
+            except Exception as _e:
+                logger.debug(f"auto-verify orphan recovery failed: {_e}")
+
+        _asyncio_av.create_task(_recover_av_sessions_bg())
+    except Exception as _e:
+        logger.debug(f"schedule auto-verify recovery failed: {_e}")
+
     # 🆕 (Stage 6 — temp model activation) — revert stale temp_enabled flags
     try:
         from .services.oversight_model_temp_activate import cleanup_stale_temp_activations_on_boot
