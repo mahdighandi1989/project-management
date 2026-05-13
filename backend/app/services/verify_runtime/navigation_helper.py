@@ -270,6 +270,44 @@ async def try_smart_navigation_for_step(
 
         # extract nav links
         links = await extract_nav_links_from_page(page)
+
+        # 🆕 (Phase 4 fix) — اگر صفحه root nav menu نداشت، احتمالاً
+        # landing page است. روی fallback path های متداول تلاش کن تا
+        # دشبورد واقعی را پیدا کنیم.
+        if not links:
+            _fallbacks = ("/dashboard", "/app", "/home", "/main")
+            base_norm = base_url.rstrip("/")
+            for _fb in _fallbacks:
+                try:
+                    await asyncio.wait_for(
+                        page.goto(
+                            base_norm + _fb,
+                            wait_until="domcontentloaded", timeout=8000,
+                        ),
+                        timeout=12,
+                    )
+                except Exception:
+                    continue
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=2500)
+                except Exception:
+                    pass
+                # SPA-404 check سریع
+                try:
+                    _body = (await page.content())[:3000].lower()
+                    if "not found" in _body or "404" in _body:
+                        continue
+                except Exception:
+                    pass
+                _candidate_links = await extract_nav_links_from_page(page)
+                if _candidate_links:
+                    links = _candidate_links
+                    logger.info(
+                        f"navigation_helper: nav menu found via "
+                        f"fallback path '{_fb}' ({len(links)} links)"
+                    )
+                    break
+
         if not links:
             return {
                 **result_none, "reason": "no nav links found",
