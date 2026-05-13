@@ -1036,6 +1036,64 @@ export default function OversightPage() {
     setTimeout(() => setSuccess(''), 3500);
   };
 
+  // 🔬 (Runtime Verify backfill) — اجرای AI enricher روی AC تسک‌های قدیمی
+  const [backfillState, setBackfillState] = useState<{
+    running: boolean;
+    started_at: string | null;
+    finished_at: string | null;
+    current_index: number;
+    total: number;
+    summary: Record<string, any> | null;
+    error: string | null;
+  } | null>(null);
+
+  const runBackfillACClassification = async () => {
+    const confirmed = window.confirm(
+      'این عملیات با AI روی همه تسک‌ها اجرا می‌شود تا AC ها به متد درست (UI/API/test/manual) کلاسیفای شوند.\n\nبسته به تعداد تسک‌ها ممکن است ۲ تا ۵ دقیقه طول بکشد. ادامه می‌دهید؟'
+    );
+    if (!confirmed) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/oversight/runtime/backfill-ac-classification`,
+        { method: 'POST' }
+      );
+      const data = await res.json();
+      if (data.status === 'already_running') {
+        showError('یک backfill قبلی هنوز در حال اجراست');
+      } else {
+        showSuccess('backfill شروع شد — وضعیت در همین دکمه نمایش داده می‌شود');
+      }
+      setBackfillState(data);
+      // poll هر ۳ ثانیه تا تمام شود
+      const interval = setInterval(async () => {
+        try {
+          const sres = await fetch(
+            `${API_BASE}/api/oversight/runtime/backfill-ac-classification/status`
+          );
+          const sdata = await sres.json();
+          setBackfillState(sdata);
+          if (!sdata.running) {
+            clearInterval(interval);
+            if (sdata.error) {
+              showError(`backfill شکست خورد: ${sdata.error}`);
+            } else if (sdata.summary) {
+              const s = sdata.summary;
+              showSuccess(
+                `backfill تمام شد — ${s.tasks_enriched} تسک enrich شد` +
+                  ` (${s.tasks_already_classified} از قبل کلاسیفای بودند، ${s.tasks_errored} خطا)`
+              );
+            }
+          }
+        } catch (e) {
+          clearInterval(interval);
+          showError('خطا در دریافت وضعیت backfill');
+        }
+      }, 3000);
+    } catch (e: any) {
+      showError(`خطا در شروع backfill: ${e?.message || e}`);
+    }
+  };
+
   useEffect(() => {
     init();
     return () => {
@@ -2251,12 +2309,23 @@ export default function OversightPage() {
               مدیریت یکپارچه مخازن گیت‌هاب با AI - ایده، پرامپت، اجرا، گزارش
             </p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 items-center flex-wrap">
             <button
               onClick={init}
               className="px-4 py-2 bg-white dark:bg-gray-800 dark:text-white border dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700"
             >
               🔄 بروزرسانی
+            </button>
+            {/* 🔬 (Runtime Verify) — backfill AI classification AC ها */}
+            <button
+              onClick={runBackfillACClassification}
+              disabled={!!backfillState?.running}
+              title="با AI همه AC های تسک‌های قدیمی را به متد درست (UI/API/test/manual) کلاسیفای می‌کند تا runtime probes واقعاً اجرا شوند."
+              className="px-3 py-2 bg-cyan-50 dark:bg-cyan-900/40 text-cyan-700 dark:text-cyan-200 border border-cyan-300 dark:border-cyan-700 rounded-lg text-sm hover:bg-cyan-100 dark:hover:bg-cyan-900/60 disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {backfillState?.running
+                ? `🔬 backfill ${backfillState.current_index}/${backfillState.total}…`
+                : '🔬 backfill AC ها'}
             </button>
             <Link
               href="/"

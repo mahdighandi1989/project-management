@@ -493,6 +493,142 @@ async def runtime_diagnostics():
     }
 
 
+# 🔬 (Runtime Verify backfill) — AI enrichment روی AC تسک‌های قدیمی
+# state ماژولی (single instance — backend درون یک container است)
+_BACKFILL_STATE: Dict[str, Any] = {
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "current_index": 0,
+    "total": 0,
+    "summary": None,
+    "error": None,
+}
+
+
+async def _run_backfill_ac_classification(model_id: Optional[str]) -> None:
+    """در پس‌زمینه روی همه تسک‌ها AI enricher را اجرا می‌کند تا AC هایی
+    که هنوز method=static دارند به ui/api/test/manual کلاسیفای شوند.
+    """
+    import asyncio as _asyncio
+    from datetime import datetime as _dt
+    from app.services.oversight_service import (
+        get_oversight_service as _gos,
+        now_iso as _now_iso,
+    )
+    from app.services.verify_runtime import enrich_acs_with_verify_plans
+    from app.services.verify_runtime.ac_enricher import _ac_already_classified
+    from app.services.verify_runtime.ac_schema import normalize_ac_list
+
+    service = _gos()
+    summary: Dict[str, Any] = {
+        "tasks_scanned": 0,
+        "tasks_with_no_acs": 0,
+        "tasks_already_classified": 0,
+        "tasks_enriched": 0,
+        "tasks_errored": 0,
+        "ac_method_after": {
+            "static": 0, "ui_interaction": 0, "api_response": 0,
+            "backend_test": 0, "manual_only": 0,
+        },
+    }
+
+    try:
+        # snapshot لیست — اگر در حین کار تسک جدید اضافه شود لمسش نمی‌کنیم
+        task_ids = [t.id for t in service.tasks]
+        _BACKFILL_STATE["total"] = len(task_ids)
+        _BACKFILL_STATE["current_index"] = 0
+
+        for idx, tid in enumerate(task_ids):
+            _BACKFILL_STATE["current_index"] = idx + 1
+            task = next((t for t in service.tasks if t.id == tid), None)
+            if task is None:
+                continue
+            summary["tasks_scanned"] += 1
+            acs = task.acceptance_criteria or []
+            if not acs:
+                summary["tasks_with_no_acs"] += 1
+                continue
+            normalized = normalize_ac_list(acs)
+            if not any(not _ac_already_classified(ac) for ac in normalized):
+                summary["tasks_already_classified"] += 1
+                # شمارش متد فعلی برای آمار نهایی
+                for ac in normalized:
+                    m = str(ac.get("verify_method") or "static").lower()
+                    summary["ac_method_after"][m] = summary["ac_method_after"].get(m, 0) + 1
+                continue
+            try:
+                enriched = await enrich_acs_with_verify_plans(
+                    acs,
+                    title=task.title,
+                    description=task.raw_idea or (task.prompt or "")[:500],
+                    target_files=list(task.target_files or []),
+                    model_id=model_id,
+                )
+                if enriched:
+                    async with service._lock:
+                        # تسک ممکن است در حین صبر برای AI تغییر کرده باشد — دوباره fetch
+                        live = next((t for t in service.tasks if t.id == tid), None)
+                        if live is not None:
+                            live.acceptance_criteria = enriched
+                            live.updated_at = _now_iso()
+                            service._save_tasks()
+                    summary["tasks_enriched"] += 1
+                    for ac in enriched:
+                        m = str(ac.get("verify_method") or "static").lower() if isinstance(ac, dict) else "static"
+                        summary["ac_method_after"][m] = summary["ac_method_after"].get(m, 0) + 1
+                else:
+                    summary["tasks_errored"] += 1
+            except Exception as _e:
+                summary["tasks_errored"] += 1
+                # ادامه می‌دهیم — یک تسک نباید کل backfill را خراب کند
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    f"backfill: task {tid} enrich failed: {_e}"
+                )
+            # یک کمی تنفس بین فراخوانی‌ها تا rate-limit AI نخوریم
+            await _asyncio.sleep(0.2)
+
+        _BACKFILL_STATE["summary"] = summary
+        _BACKFILL_STATE["error"] = None
+    except Exception as _e:
+        _BACKFILL_STATE["error"] = str(_e)[:500]
+    finally:
+        _BACKFILL_STATE["finished_at"] = _dt.utcnow().isoformat()
+        _BACKFILL_STATE["running"] = False
+
+
+@router.post("/runtime/backfill-ac-classification")
+async def start_backfill_ac_classification(model_id: Optional[str] = None):
+    """شروع backfill در پس‌زمینه — AC های تسک‌های قدیمی را با AI به method
+    درست (ui_interaction / api_response / backend_test / manual_only) کلاسیفای می‌کند.
+
+    اگر کاری در حال اجراست، state فعلی برگردانده می‌شود (تکراری شروع نمی‌شود).
+    """
+    import asyncio as _asyncio
+    from datetime import datetime as _dt
+
+    if _BACKFILL_STATE["running"]:
+        return {"status": "already_running", **_BACKFILL_STATE}
+
+    _BACKFILL_STATE["running"] = True
+    _BACKFILL_STATE["started_at"] = _dt.utcnow().isoformat()
+    _BACKFILL_STATE["finished_at"] = None
+    _BACKFILL_STATE["current_index"] = 0
+    _BACKFILL_STATE["total"] = 0
+    _BACKFILL_STATE["summary"] = None
+    _BACKFILL_STATE["error"] = None
+
+    _asyncio.create_task(_run_backfill_ac_classification(model_id))
+    return {"status": "started", **_BACKFILL_STATE}
+
+
+@router.get("/runtime/backfill-ac-classification/status")
+async def get_backfill_ac_classification_status():
+    """وضعیت فعلی backfill — running, progress, summary."""
+    return dict(_BACKFILL_STATE)
+
+
 @router.delete("/watched/{watched_id}")
 async def delete_watched(watched_id: str):
     service = get_oversight_service()
