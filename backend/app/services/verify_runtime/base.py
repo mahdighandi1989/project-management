@@ -83,6 +83,7 @@ class ProbeContext:
     - auth (cookie/bearer)
     - repo path برای static probe + test probe
     - evidence_dir برای ذخیرهٔ screenshot/JSON
+    - inspector_session_id برای ثبت اقدامات auto-verify در تب بازرس ویژه
     """
     task_id: str
     run_id: str
@@ -96,3 +97,10 @@ class ProbeContext:
     ui_timeout_ms: int = 30000
     api_timeout_s: int = 10
     test_timeout_s: int = 120
+    # 🔬 (inspector_probe Phase 1) — اگر set باشد، inspector_probe پیام‌ها/شواهد
+    # خود را در این session ذخیره می‌کند تا کاربر بتواند از تب بازرس ویژه ببیند.
+    inspector_session_id: Optional[int] = None
+    # 🔬 verify_model_id برای fallback Vision (text-only تحلیل) و auto-verify pipeline
+    verify_model_id: Optional[str] = None
+    # 🔬 watched_id برای جستجوی RenderLog مرتبط با سرویس
+    watched_id: Optional[str] = None
