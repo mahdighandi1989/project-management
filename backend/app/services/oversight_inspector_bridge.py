@@ -87,20 +87,35 @@ async def describe_screenshot_with_vision(
                 "vision_model_used": None,
             }
 
+        # 🆕 (Phase 2 fix 3) — علاوه بر توصیف کلی، در صورت ارائهٔ
+        # user_context (مثلاً AC یا توضیح step) صریحاً تشخیص بده که آیا
+        # «ویژگی مورد نظر» در این screenshot دیده می‌شود یا نه. این به
+        # inspector_probe امکان می‌دهد بفهمد یک feature ساخته شده یا فقط
+        # یک صفحه‌ی عمومی باز شده.
         prompt_text = (
             "این یک screenshot از صفحهٔ یک پروژهٔ نرم‌افزاری است. وظیفهٔ تو این است\n"
             "که محتوای آن را به‌صورت متن غنی توصیف کنی، تا یک مدل غیر بصری بتواند\n"
             "بدون دیدن عکس بفهمد چه چیزی روی صفحه است.\n\n"
-            f"درخواست کاربر: {user_context[:500]}\n"
+            f"📋 ویژگی/AC مورد بررسی: {user_context[:500]}\n"
             f"URL صفحه: {page_url}\n\n"
+            "علاوه بر توصیف، **بسنج که آیا ویژگی فوق در صفحه دیده می‌شود یا نه**.\n"
+            "این یک تشخیص بصری دقیق است — اگر AC از یک دکمه/پنل/فرم خاص حرف می‌زند،\n"
+            "ببین آن المان واقعاً در صفحه موجود است یا نه.\n\n"
             "خروجی فقط JSON خالص (بدون ``` یا توضیح اضافی):\n"
             "{\n"
             '  "scene": "توصیف کلی صحنه در ۲-۴ جمله",\n'
             '  "ocr_text": "متن کامل قابل مشاهده در عکس (همهٔ کلمات، دکمه‌ها، label ها)",\n'
             '  "ui_elements": "لیست عناصر UI (دکمه‌ها، فرم‌ها، nav، panel ها) با موقعیت تقریبی",\n'
             '  "error_signals": "هر گونه نشانهٔ خطا، warning، یا state غیرعادی که قابل تشخیص است",\n'
-            '  "layout_hints": "ساختار کلی صفحه — مثلاً sidebar چپ، main center، widget راست"\n'
-            "}"
+            '  "layout_hints": "ساختار کلی صفحه — مثلاً sidebar چپ، main center، widget راست",\n'
+            '  "feature_present": "yes|no|unclear — آیا ویژگی AC در صفحه دیده می‌شود؟",\n'
+            '  "feature_reason": "یک جمله: چرا این تشخیص (چه چیزی دیدی یا ندیدی)"\n'
+            "}\n\n"
+            "راهنما برای feature_present:\n"
+            '- "yes": کاملاً دیده می‌شود (المان مورد نظر AC در صفحه هست)\n'
+            '- "no": اصلاً دیده نمی‌شود (صفحه عمومی است، feature ساخته نشده)\n'
+            '- "unclear": نمی‌توان از روی تنها این screenshot قطعی گفت\n'
+            "اگر AC کلی است (بدون اشاره به المان UI خاص)، unclear بده."
         )
 
         ai_mgr = get_ai_manager()
@@ -120,12 +135,18 @@ async def describe_screenshot_with_vision(
             if start != -1 and end > start:
                 try:
                     parsed = json.loads(txt[start:end + 1])
+                    # 🆕 (Phase 2 fix 3) — feature_present را normalize کن
+                    fp_raw = str(parsed.get("feature_present", "") or "").strip().lower()
+                    if fp_raw not in ("yes", "no", "unclear"):
+                        fp_raw = "unclear"
                     return {
                         "scene": str(parsed.get("scene", ""))[:2000],
                         "ocr_text": str(parsed.get("ocr_text", ""))[:4000],
                         "ui_elements": str(parsed.get("ui_elements", ""))[:2000],
                         "error_signals": str(parsed.get("error_signals", ""))[:1500],
                         "layout_hints": str(parsed.get("layout_hints", ""))[:1500],
+                        "feature_present": fp_raw,
+                        "feature_reason": str(parsed.get("feature_reason", ""))[:600],
                         "vision_model_used": picked.id,
                     }
                 except Exception as je:

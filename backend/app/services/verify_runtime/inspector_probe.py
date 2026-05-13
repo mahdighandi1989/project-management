@@ -554,16 +554,28 @@ async def _run_inspector_inner(
                 )
                 shot["vision_description"] = (vres.get("description") or "")[:2000]
                 shot["vision_source"] = vres.get("source") or "none"
+                # 🆕 (Phase 2 fix 3) — feature_present تشخیص بصری
+                shot["vision_feature_present"] = (vres.get("feature_present") or "unclear")
+                shot["vision_feature_reason"] = (vres.get("feature_reason") or "")[:600]
                 # خلاصه‌ای در session
                 if shot["vision_description"]:
+                    fp = shot["vision_feature_present"]
+                    fp_emoji = {"yes": "✅", "no": "❌", "unclear": "❓"}.get(fp, "❓")
+                    fp_line = (
+                        f" — feature_present: {fp_emoji} {fp}"
+                        if fp != "unclear" else ""
+                    )
                     await _msg(
                         ctx.inspector_session_id, "system",
-                        f"🔍 vision ({shot['label']}): {shot['vision_description'][:300]}",
+                        f"🔍 vision ({shot['label']}){fp_line}: "
+                        f"{shot['vision_description'][:300]}",
                     )
             except Exception as e:
                 logger.debug(f"inspector_probe vision failed: {e}")
                 shot["vision_description"] = ""
                 shot["vision_source"] = "none"
+                shot["vision_feature_present"] = "unclear"
+                shot["vision_feature_reason"] = ""
 
         # ---- pass/fail decision ----
         has_console_error = any(c.get("level") == "error" for c in console_errors)
@@ -571,12 +583,31 @@ async def _run_inspector_inner(
         # if there's a selector_hint, it must be found
         selector_ok = (selector_hint is None) or selector_found
 
-        passed = nav_ok and (not has_console_error) and selector_ok
+        # 🆕 (Phase 2 fix 3) — اگر vision قطعاً گفت feature_present="no"،
+        # probe باید FAILED شود (حتی اگر navigate ok بود + console error
+        # نبود). این مهم‌ترین سیگنال برای تشخیص feature که هنوز ساخته
+        # نشده است.
+        vision_says_feature_missing = False
+        vision_missing_reason = ""
+        for _shot in screenshots:
+            if (_shot.get("vision_feature_present") or "").lower() == "no":
+                vision_says_feature_missing = True
+                vision_missing_reason = _shot.get("vision_feature_reason") or "vision AI: feature not visible"
+                break
+
+        passed = (
+            nav_ok
+            and (not has_console_error)
+            and selector_ok
+            and (not vision_says_feature_missing)
+        )
         status = PROBE_STATUS_PASSED if passed else PROBE_STATUS_FAILED
         emoji = "✅" if passed else "❌"
         await _msg(
             ctx.inspector_session_id, "system",
-            f"{emoji} probe {status}",
+            f"{emoji} probe {status}"
+            + (f" — feature missing: {vision_missing_reason[:200]}"
+               if vision_says_feature_missing else ""),
         )
 
         assertion_results: List[Dict[str, Any]] = [
@@ -585,6 +616,13 @@ async def _run_inspector_inner(
             {"expectation": "no console errors", "met": (not has_console_error),
              "reason": f"{sum(1 for c in console_errors if c.get('level') == 'error')} errors"},
         ]
+        # 🆕 (Phase 2 fix 3) — assertion vision feature_present
+        if vision_says_feature_missing:
+            assertion_results.append({
+                "expectation": f"feature «{ac_text[:80]}» در صفحه دیده شود",
+                "met": False,
+                "reason": vision_missing_reason[:300],
+            })
         if selector_hint:
             assertion_results.append({
                 "expectation": f"selector «{selector_hint}» found",
@@ -696,6 +734,8 @@ async def _take_and_record_screenshot(
             "label": label,
             "vision_description": "",
             "vision_source": None,
+            "vision_feature_present": "unclear",
+            "vision_feature_reason": "",
             "archived_to_telegram": False,
         })
         actions_taken.append({
