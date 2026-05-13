@@ -2678,7 +2678,7 @@ class OversightService:
 1. هر مرحله یک **scope مشخص** و **یک action اصلی** دارد (مثل «اضافه کردن endpoint X»، «اصلاح UI Y»، «نوشتن تست Z»، «integration A با B»).
 2. مراحل را به ترتیب منطقی پیاده‌سازی مرتب کن (foundation → core → integration → UI → tests → audit).
 3. **بدون خلاصه‌سازی و بدون فشرده‌سازی**: اگر کاربر ۸ کار جداگانه را خواسته، **۸ مرحله** بده — نه ۴ مرحلهٔ ادغام‌شده. هدف: **هیچ requirement کاربر گم نشود**.
-4. حداکثر ۱۲ مرحله (پیش‌فرض). اگر بیشتر لازم بود، مهم‌ترین‌ها را اول بگذار و در آخرین مرحله اشاره کن «X موارد دیگر هم در فاز بعدی».
+4. حداکثر ۳۰ مرحله. اگر کاربر صراحتاً موارد بیشتری شمارش کرده، **همه را** بساز (تا سقف ۳۰). فقط در صورتی که واقعاً بیش از ۳۰ کار مستقل وجود دارد، مهم‌ترین‌ها را اول بگذار و در آخرین مرحله اشاره کن «X موارد دیگر هم در فاز بعدی».
 5. **`raw_excerpt`**: بخش‌هایی از متن کاربر که به این مرحله مربوط است — **verbatim و کامل**، با URLs و نام‌ها. حداقل ۱۰۰ کاراکتر اگر متن کاربر اجازه دهد.
 6. **`scope`**: حداقل ۲-۳ جمله — چه چیزی شامل این مرحله است، چه چیزی خارج از این مرحله است، چه نکته‌ای حیاتی است. **نه یک جمله سرسری**.
 7. **`key_terms`**: همهٔ نام‌ها (فایل، endpoint، function، URL، library، dataclass، table، …) که کاربر در این بخش گفته. حداقل ۳ آیتم اگر در متن وجود دارد.
@@ -2739,7 +2739,7 @@ class OversightService:
                     "raw_excerpt": (s.get("raw_excerpt") or "").strip()[:4000],  # از 2000 به 4000
                     "key_terms": [str(k) for k in (s.get("key_terms") or [])[:25]],  # از 15 به 25
                 })
-            return valid_steps[:12]  # 🛡 از 6 به 12
+            return valid_steps[:30]  # 🛡 6 → 12 → 30 (پشتیبانی تسک‌های پیچیده)
         except Exception as e:
             logger.warning(f"_ai_plan_steps_from_idea failed: {e}")
             return []
@@ -2954,6 +2954,16 @@ class OversightService:
 
         master_prompt = "\n".join(merged_parts)
 
+        # 🆕 بزرگ‌ترین تعداد فایل‌های deep-read در sub-pass ها (هر pass
+        # تقریباً همان مجموعه را می‌خواند، پس max نماینده‌ی خوبی است)
+        _mp_deep_count = max(
+            (
+                (sr.get("result") or {}).get("deep_files_count", 0)
+                for sr in sub_results if isinstance(sr, dict)
+            ),
+            default=0,
+        )
+
         return {
             "title": master_title,
             "prompt": master_prompt,
@@ -2967,6 +2977,7 @@ class OversightService:
             "raw_response": f"[multi-pass with {len(steps)} steps]",
             "_multi_pass": True,
             "_step_count": len(steps),
+            "deep_files_count": _mp_deep_count,
             # 🆕 چک‌لیست مراحل برای ذخیره در OversightTask.task_steps
             "task_steps": [
                 {
@@ -4255,6 +4266,9 @@ class OversightService:
             "priority": parsed.get("priority") or priority,
             "estimate": parsed.get("estimated_complexity") or parsed.get("estimate") or "medium",
             "raw_response": response,
+            # 🆕 تعداد واقعی فایل‌های deep-read شده تا UI به‌جای متن hardcoded
+            # «۱۸ فایل»، تعداد واقعی را نشان دهد
+            "deep_files_count": len(deep_ctx.get("deep_paths", [])) if isinstance(deep_ctx, dict) else 0,
         }
         if attachments_meta:
             result_final["attachments"] = attachments_meta

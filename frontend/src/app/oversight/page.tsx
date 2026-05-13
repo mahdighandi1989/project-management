@@ -977,6 +977,7 @@ export default function OversightPage() {
     prompt: string;
     task_steps?: any[];
     overall_completion_pct?: number;
+    deep_files_count?: number;
   } | null>(null);
 
   // 🆕 (Smart Task Lifecycle) Dedup state — وقتی save تسک با duplicate_detected برمی‌گردد
@@ -1537,6 +1538,7 @@ export default function OversightPage() {
           prompt: data.prompt,
           task_steps: data.task_steps || [],
           overall_completion_pct: data.overall_completion_pct,
+          deep_files_count: data.deep_files_count ?? 0,
         });
         setGenPhase('پرامپت آماده شد');
         setGenPct(100);
@@ -2927,11 +2929,16 @@ export default function OversightPage() {
             <button
               onClick={generatePrompt}
               disabled={generating || !idea.trim()}
-              title="AI کل ساختار پروژه را اسکن می‌کند، ۱۸ فایل کلیدی را می‌خواند، گراف importها را می‌سازد، و پرامپت را با ارجاع به کد واقعی (file:line) می‌نویسد. ممکن است ۱۰–۳۰ ثانیه طول بکشد."
+              title="AI کل ساختار پروژه را اسکن می‌کند، تا ۶۰ فایل کلیدی مرتبط با ایده را می‌خواند، گراف importها را می‌سازد، و پرامپت را با ارجاع به کد واقعی (file:line) می‌نویسد. ممکن است ۱۰–۳۰ ثانیه طول بکشد."
               className="w-full py-3 bg-purple-500 text-white rounded-lg font-bold hover:bg-purple-600 disabled:opacity-50"
             >
-              {generating ? '⏳ در حال خواندن پروژه (۱۸ فایل کلیدی) و ساخت پرامپت grounded...' : '🪄 تبدیل به پرامپت با AI (با خواندن کد پروژه)'}
+              {generating ? '⏳ در حال خواندن فایل‌های کلیدی پروژه و ساخت پرامپت grounded...' : '🪄 تبدیل به پرامپت با AI (با خواندن کد پروژه)'}
             </button>
+            {previewPrompt && (previewPrompt.deep_files_count ?? 0) > 0 && (
+              <div className="text-xs text-purple-700 dark:text-purple-300 -mt-1 mb-2 text-center">
+                📂 {previewPrompt.deep_files_count} فایل کلیدی خوانده شد و در پرامپت لحاظ گردید
+              </div>
+            )}
 
             {previewPrompt && (
               <div className="mt-6 p-4 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg">
