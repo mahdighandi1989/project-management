@@ -679,6 +679,157 @@ async def _fetch_recent_commits(
 
 
 # ============================================================================
+# 🔬 (inspector_probe Phase 1) — ضمیمه‌ی screenshot ها به تلگرام + پاک‌سازی
+# ============================================================================
+
+def _collect_runtime_screenshot_entries(
+    report: "OversightReport",
+) -> List[Dict[str, Any]]:
+    """لیست screenshot هایی که هنوز روی دیسک هستند را از evidence استخراج کن.
+
+    خروجی: list of dicts با کلیدهای path + label + vision_description.
+    """
+    out: List[Dict[str, Any]] = []
+    try:
+        probes = (report.evidence or {}).get("runtime_probes") or []
+    except Exception:
+        return out
+    if not isinstance(probes, list):
+        return out
+    for p in probes:
+        if not isinstance(p, dict):
+            continue
+        ev = p.get("evidence") or {}
+        if not isinstance(ev, dict):
+            continue
+        shots = ev.get("screenshots") or []
+        if not isinstance(shots, list):
+            continue
+        for s in shots:
+            if not isinstance(s, dict):
+                continue
+            path = s.get("path")
+            if not path or s.get("archived_to_telegram"):
+                continue
+            try:
+                import os as _os
+                if not _os.path.isfile(path):
+                    continue
+            except Exception:
+                continue
+            out.append({
+                "path": path,
+                "label": s.get("label") or "screenshot",
+                "vision_description": s.get("vision_description") or "",
+                "ac_text": p.get("ac_text") or "",
+                "_ref_probe": p,
+                "_ref_shot": s,
+            })
+    return out
+
+
+async def _send_runtime_screenshots_and_cleanup(
+    task: "OversightTask",
+    report: "OversightReport",
+    max_send: int = 5,
+) -> None:
+    """screenshot های runtime را به تلگرام بفرست و در صورت موفقیت پاک کن.
+
+    رفتار:
+    - فقط تا max_send screenshot ارسال می‌شود (limit Telegram + reasonable)
+    - بقیه روی دیسک می‌مانند، TTL cleanup آن‌ها را برمی‌دارد
+    - photo های موفق → از دیسک پاک می‌شوند + در evidence
+      archived_to_telegram=True ست می‌شود + path=None (vision_description می‌ماند)
+    - اگر کانال تلگرام configured نیست → silent skip
+    """
+    try:
+        from .notification_service import notification_service
+    except Exception:
+        return
+
+    entries = _collect_runtime_screenshot_entries(report)
+    if not entries:
+        return
+    entries = entries[:max_send]
+
+    paths = [e["path"] for e in entries]
+    captions: List[str] = []
+    for e in entries:
+        ac_excerpt = (e.get("ac_text") or "")[:80]
+        vis = (e.get("vision_description") or "")[:300]
+        cap = f"📸 {e['label']}\nAC: {ac_excerpt}"
+        if vis:
+            cap += f"\n👁 {vis}"
+        captions.append(cap)
+
+    try:
+        results = await notification_service.send_extra_photos(
+            paths, captions, silent=True,
+        )
+    except Exception as _e:
+        logger.debug(f"send_extra_photos crashed: {_e}")
+        return
+
+    # موفق‌ها را پاک کن، evidence را آپدیت کن
+    by_path = {r.get("path"): r for r in (results or []) if isinstance(r, dict)}
+    import os as _os
+    deleted_count = 0
+    for e in entries:
+        r = by_path.get(e["path"])
+        if not r or not r.get("ok"):
+            continue
+        try:
+            _os.remove(e["path"])
+            deleted_count += 1
+        except Exception as _de:
+            logger.debug(f"unlink screenshot failed: {_de}")
+        try:
+            e["_ref_shot"]["archived_to_telegram"] = True
+            e["_ref_shot"]["path"] = None
+        except Exception:
+            pass
+
+    # یک نوت در inspector_session
+    try:
+        sid = (report.evidence or {}).get("auto_verify_session_id")
+        if sid is None:
+            # یا از اولین probe بگیر
+            probes = (report.evidence or {}).get("runtime_probes") or []
+            for p in probes:
+                ev = (p.get("evidence") if isinstance(p, dict) else None) or {}
+                if ev.get("inspector_session_id"):
+                    sid = ev["inspector_session_id"]
+                    break
+        if sid is not None and deleted_count > 0:
+            from .verify_runtime.inspector_probe import _msg as _ip_msg
+            await _ip_msg(
+                int(sid), "system",
+                f"📦 {deleted_count} screenshot به تلگرام آرشیو شد و از دیسک پاک شد",
+            )
+    except Exception:
+        pass
+
+    # ذخیره نهایی reports روی دیسک تا evidence جدید (path=None) محفوظ بماند
+    try:
+        from .oversight_service import get_oversight_service as _gos
+        service = _gos()
+        async with service._lock:
+            service._save_reports()  # type: ignore[attr-defined]
+    except Exception:
+        # برخی نسخه‌ها _save_reports ندارند یا اسم متفاوت دارند
+        try:
+            from .oversight_service import get_oversight_service as _gos
+            service = _gos()
+            async with service._lock:
+                if hasattr(service, "_save_reports"):
+                    service._save_reports()
+                elif hasattr(service, "_save"):
+                    service._save()
+        except Exception as _se2:
+            logger.debug(f"could not persist updated evidence: {_se2}")
+
+
+# ============================================================================
 # 🔬 (inspector_probe Phase 1) — مدیریت چرخه‌حیات auto-verify inspector_session
 # ============================================================================
 
@@ -1886,6 +2037,16 @@ async def verify_task(
                 extra_buttons=extra_buttons,
                 attachment=attachment_payload,
             )
+
+            # 🔬 (inspector_probe Phase 1) — ضمیمه کردن screenshot های auto-verify
+            # به همان نوتیفیکیشن (به‌عنوان پیام‌های پی‌درپی photo). در صورت موفقیت
+            # ارسال هر screenshot، فایل آن از دیسک پاک می‌شود و در evidence نشان
+            # archived_to_telegram=True ست می‌گردد. اگر تلگرام شکست بخورد، فایل
+            # روی دیسک می‌ماند و TTL cleanup در آینده آن را برمی‌دارد.
+            try:
+                await _send_runtime_screenshots_and_cleanup(_task, _report)
+            except Exception as _se:
+                logger.debug(f"send runtime screenshots failed: {_se}")
         except Exception as e:
             logger.debug(f"notification skipped: {e}")
 

@@ -578,6 +578,45 @@ class TelegramChannel(NotificationChannel):
         except Exception as e:
             return {"ok": False, "channel": self.name, "error": str(e)[:300]}
 
+    async def send_photo(
+        self, photo_path: str, *,
+        caption: Optional[str] = None, silent: bool = True,
+    ) -> Dict[str, Any]:
+        """ارسال یک عکس (PNG/JPG) به Telegram. مسیر absolute روی دیسک می‌گیرد.
+
+        کاربرد: ضمیمه‌ی screenshot های auto-verify در کنار گزارش متنی.
+        """
+        if not self.is_configured():
+            return {"ok": False, "channel": self.name, "error": "TELEGRAM_BOT_TOKEN/CHAT_ID خالی است"}
+        try:
+            with open(photo_path, "rb") as f:
+                photo_bytes = f.read()
+        except Exception as e:
+            return {"ok": False, "channel": self.name, "error": f"read photo failed: {e}"}
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendPhoto"
+        data = aiohttp.FormData()
+        data.add_field("chat_id", str(self.chat_id))
+        if caption:
+            cap = caption[:1020] + ("…" if len(caption) > 1020 else "")
+            data.add_field("caption", cap)
+        if silent:
+            data.add_field("disable_notification", "true")
+        # نوع content_type بر اساس پسوند
+        fname = photo_path.rsplit("/", 1)[-1]
+        ctype = "image/jpeg" if fname.lower().endswith((".jpg", ".jpeg")) else "image/png"
+        data.add_field("photo", photo_bytes, filename=fname, content_type=ctype)
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, data=data) as r:
+                    if r.status != 200:
+                        body = await r.text()
+                        return {"ok": False, "channel": self.name,
+                                "error": f"HTTP {r.status}: {body[:300]}"}
+                    return {"ok": True, "channel": self.name, "filename": fname}
+        except Exception as e:
+            return {"ok": False, "channel": self.name, "error": str(e)[:300]}
+
     # 🆕 (Compose Stage 2) — کمک‌کننده‌ها برای download کردن media از Telegram
     async def get_file(self, file_id: str) -> Optional[Dict[str, Any]]:
         """تماس با Bot API getFile → file_path و file_size می‌گیریم.
@@ -1271,6 +1310,45 @@ class NotificationService:
                     full_message, subject=subject, silent=silent, reply_markup=reply_markup,
                 )
             results.append(res)
+        return results
+
+    # ====================================================================
+    # 🔬 (inspector_probe Phase 1) — ارسال screenshot های اضافی به Telegram
+    # ====================================================================
+
+    async def send_extra_photos(
+        self,
+        photo_paths: List[str],
+        captions: Optional[List[str]] = None,
+        *,
+        silent: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """photo ها را روی همان کانال Telegram (اگر configured است) می‌فرستد.
+
+        برای ضمیمه‌ی screenshot های auto-verify بعد از پیام اصلی verify.
+
+        خروجی: لیست نتایج (یک item به ازای هر photo که تلاش شد).
+        photo هایی که خواندنی نبودند skip می‌شوند.
+        """
+        if not photo_paths:
+            return []
+        # فقط Telegram را پیدا کن
+        results: List[Dict[str, Any]] = []
+        for ch in self._build_channels():
+            if not isinstance(ch, TelegramChannel):
+                continue
+            if not ch.is_configured():
+                continue
+            for idx, p in enumerate(photo_paths):
+                cap = None
+                if captions and idx < len(captions):
+                    cap = captions[idx]
+                try:
+                    res = await ch.send_photo(p, caption=cap, silent=silent)
+                except Exception as e:
+                    res = {"ok": False, "channel": ch.name, "error": f"send_photo exception: {e}"}
+                res["path"] = p
+                results.append(res)
         return results
 
     # ====================================================================
