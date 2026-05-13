@@ -348,6 +348,129 @@ def build_mega_bundle_md(task: Any, report: Any) -> bytes:
     except Exception as e:
         logger.debug(f"mega_bundle probes failed: {e}")
 
+    # --- 8.1) Smart Navigation decisions (Phase 4) ---
+    try:
+        ev = getattr(report, "evidence", None) or {}
+        probes = ev.get("runtime_probes", []) if isinstance(ev, dict) else []
+        nav_lines: List[str] = []
+        for p in probes:
+            if not isinstance(p, dict):
+                continue
+            pev = p.get("evidence") or {}
+            if not isinstance(pev, dict):
+                continue
+            sn = pev.get("smart_nav")
+            if not isinstance(sn, dict):
+                continue
+            label = _safe_str(pev.get("step_title") or p.get("ac_text", ""), 80)
+            conf = _safe_str(sn.get("confidence", ""), 20)
+            href = _safe_str(sn.get("chosen_href", ""), 200)
+            text = _safe_str(sn.get("chosen_text", ""), 80)
+            reason = _safe_str(sn.get("reason", ""), 200)
+            links_count = sn.get("links_count", 0)
+            dur = sn.get("duration_ms", 0)
+            nav_lines.append(
+                f"- 🧭 **{label}** → `{href}` "
+                f"(link=«{text}», confidence={conf}, links={links_count}, {dur}ms)\n"
+                f"  - reason: {reason}"
+            )
+        if nav_lines:
+            parts.append(_md_section(
+                f"۸.۱ تصمیم‌های Smart Navigation ({len(nav_lines)})",
+                "\n".join(nav_lines),
+            ))
+    except Exception as e:
+        logger.debug(f"mega_bundle smart_nav failed: {e}")
+
+    # --- 8.2) Backend Log Analysis (Phase 4) ---
+    try:
+        ev = getattr(report, "evidence", None) or {}
+        probes = ev.get("runtime_probes", []) if isinstance(ev, dict) else []
+        bl_lines: List[str] = []
+        for p in probes:
+            if not isinstance(p, dict):
+                continue
+            if p.get("method") != "backend_log":
+                continue
+            pev = p.get("evidence") or {}
+            if not isinstance(pev, dict):
+                continue
+            ac_text = _safe_str(p.get("ac_text", ""), 200)
+            verdict = _safe_str(pev.get("verdict", ""), 40)
+            verdict_emoji = {
+                "deployed_working": "✅",
+                "deployed_with_errors": "⚠️",
+                "deployed_not_called": "🔇",
+                "not_deployed": "❌",
+                "unclear": "❓",
+            }.get(verdict, "·")
+            eps = pev.get("endpoints_extracted") or []
+            syms = pev.get("symbols_extracted") or []
+            reason = _safe_str(pev.get("reason", ""), 300)
+            evidence_lines = pev.get("evidence_lines") or []
+            log_count = pev.get("log_count", 0)
+            window_h = pev.get("log_window_hours", 0)
+            bl_lines.append(
+                f"### {verdict_emoji} `{verdict}` — «{ac_text}»\n"
+                f"- **endpoints:** {', '.join(eps[:6]) or '—'}\n"
+                f"- **symbols:** {', '.join(syms[:6]) or '—'}\n"
+                f"- **logs scanned:** {log_count} (window={window_h}h)\n"
+                f"- **reason:** {reason}"
+            )
+            if evidence_lines:
+                bl_lines.append("- **evidence_lines:**")
+                for ln in evidence_lines[:5]:
+                    bl_lines.append(f"  - `{_safe_str(ln, 250)}`")
+        if bl_lines:
+            parts.append(_md_section(
+                "۸.۲ تحلیل Backend Logs",
+                "\n\n".join(bl_lines),
+            ))
+    except Exception as e:
+        logger.debug(f"mega_bundle backend_log failed: {e}")
+
+    # --- 8.3) Code-aware Verdict (Phase 4) ---
+    try:
+        ev = getattr(report, "evidence", None) or {}
+        probes = ev.get("runtime_probes", []) if isinstance(ev, dict) else []
+        ca_lines: List[str] = []
+        for p in probes:
+            if not isinstance(p, dict):
+                continue
+            if p.get("method") != "code_analysis":
+                continue
+            pev = p.get("evidence") or {}
+            if not isinstance(pev, dict):
+                continue
+            ac_text = _safe_str(p.get("ac_text", ""), 200)
+            verdict = _safe_str(pev.get("code_verdict", ""), 40)
+            verdict_emoji = {
+                "implemented": "✅",
+                "partial": "🟡",
+                "not_found": "❌",
+                "unclear": "❓",
+            }.get(verdict, "·")
+            commits = pev.get("matching_commits") or []
+            key_changes = pev.get("key_changes") or []
+            reason = _safe_str(pev.get("reason", ""), 300)
+            ca_lines.append(
+                f"### {verdict_emoji} `{verdict}` — «{ac_text}»\n"
+                f"- **matching commits:** "
+                f"{', '.join(f'`{c}`' for c in commits[:6]) or '—'}\n"
+                f"- **reason:** {reason}"
+            )
+            if key_changes:
+                ca_lines.append("- **key changes:**")
+                for kc in key_changes[:6]:
+                    ca_lines.append(f"  - `{_safe_str(kc, 200)}`")
+        if ca_lines:
+            parts.append(_md_section(
+                "۸.۳ تحلیل Code-aware (commit diffs)",
+                "\n\n".join(ca_lines),
+            ))
+    except Exception as e:
+        logger.debug(f"mega_bundle code_aware failed: {e}")
+
     # --- 9) URLs (aggregate) ---
     try:
         ev = getattr(report, "evidence", None) or {}

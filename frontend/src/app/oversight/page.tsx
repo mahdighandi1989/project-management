@@ -3904,11 +3904,17 @@ export default function OversightPage() {
                       const methodEmoji: Record<string, string> = {
                         static: '🔍', ui_interaction: '🖱', api_response: '🌐',
                         backend_test: '🧪', manual_only: '👁',
+                        code_analysis: '🔍', backend_log: '📊',
                       };
+                      const methodAccent: Record<string, string> = {
+                        code_analysis: 'border-l-4 border-l-indigo-500',
+                        backend_log: 'border-l-4 border-l-emerald-500',
+                      };
+                      const hasSmartNav = !!(p.evidence && p.evidence.smart_nav);
                       return (
                         <div
                           key={i}
-                          className={`border rounded p-2 text-xs ${statusColor[p.status] || statusColor.skipped}`}
+                          className={`border rounded p-2 text-xs ${statusColor[p.status] || statusColor.skipped} ${methodAccent[p.method] || ''}`}
                         >
                           <div className="flex items-center gap-2 mb-1">
                             <span>{methodEmoji[p.method] || '•'}</span>
@@ -4006,6 +4012,84 @@ export default function OversightPage() {
                             <pre className="text-[10px] bg-gray-900 text-gray-100 p-2 rounded mt-1 overflow-x-auto max-h-32">
                               {(p.evidence.stdout_excerpt as string).slice(-800)}
                             </pre>
+                          )}
+                          {/* 🆕 (Phase 4) — Smart Navigation decision */}
+                          {hasSmartNav && (
+                            <div className="mt-1 text-[10px] rounded px-1.5 py-1 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700">
+                              <span className="font-semibold text-amber-800 dark:text-amber-200">🧭 smart-nav:</span>{' '}
+                              <span className="dark:text-gray-200">
+                                «{String(p.evidence.smart_nav?.chosen_text || '').slice(0, 60)}» →{' '}
+                                <code className="bg-amber-100 dark:bg-amber-900/50 px-1 rounded">
+                                  {String(p.evidence.smart_nav?.chosen_href || '')}
+                                </code>
+                              </span>
+                              <span className="mr-1 text-amber-700 dark:text-amber-300">
+                                (confidence={String(p.evidence.smart_nav?.confidence || '?')})
+                              </span>
+                              {p.evidence.smart_nav?.reason && (
+                                <div className="italic text-amber-700 dark:text-amber-300 mt-0.5">
+                                  {String(p.evidence.smart_nav.reason).slice(0, 200)}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          {/* 🆕 (Phase 4) — Code-aware verdict */}
+                          {p.method === 'code_analysis' && p.evidence?.code_verdict && (
+                            <div className="mt-1 text-[10px] rounded px-1.5 py-1 bg-indigo-50 dark:bg-indigo-900/30 border border-indigo-200 dark:border-indigo-700">
+                              <div className="font-semibold text-indigo-800 dark:text-indigo-200">
+                                🔍 code-aware: <code>{String(p.evidence.code_verdict)}</code>
+                              </div>
+                              {Array.isArray(p.evidence.matching_commits) && (p.evidence.matching_commits as any[]).length > 0 && (
+                                <div className="mt-0.5 dark:text-gray-200">
+                                  commits:{' '}
+                                  {(p.evidence.matching_commits as any[]).slice(0, 5).map((c, ci) => (
+                                    <code key={ci} className="bg-indigo-100 dark:bg-indigo-900/50 px-1 rounded ml-1">
+                                      {String(c)}
+                                    </code>
+                                  ))}
+                                </div>
+                              )}
+                              {Array.isArray(p.evidence.key_changes) && (p.evidence.key_changes as any[]).length > 0 && (
+                                <ul className="mt-0.5 text-indigo-700 dark:text-indigo-300 list-disc pr-4">
+                                  {(p.evidence.key_changes as any[]).slice(0, 4).map((k, ki) => (
+                                    <li key={ki} className="truncate">{String(k).slice(0, 120)}</li>
+                                  ))}
+                                </ul>
+                              )}
+                              {p.evidence?.reason && (
+                                <div className="italic text-indigo-700 dark:text-indigo-300 mt-0.5">
+                                  {String(p.evidence.reason).slice(0, 200)}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          {/* 🆕 (Phase 4) — Backend log verdict */}
+                          {p.method === 'backend_log' && p.evidence?.verdict && (
+                            <div className="mt-1 text-[10px] rounded px-1.5 py-1 bg-emerald-50 dark:bg-emerald-900/30 border border-emerald-200 dark:border-emerald-700">
+                              <div className="font-semibold text-emerald-800 dark:text-emerald-200">
+                                📊 backend-log: <code>{String(p.evidence.verdict)}</code>
+                                <span className="mr-2 font-normal text-emerald-700 dark:text-emerald-300">
+                                  ({Number(p.evidence.log_count) || 0} logs, {Number(p.evidence.log_window_hours) || 0}h window)
+                                </span>
+                              </div>
+                              {Array.isArray(p.evidence.endpoints_extracted) && (p.evidence.endpoints_extracted as any[]).length > 0 && (
+                                <div className="mt-0.5 dark:text-gray-200">
+                                  endpoints: {(p.evidence.endpoints_extracted as any[]).slice(0, 4).map((e, ei) => (
+                                    <code key={ei} className="bg-emerald-100 dark:bg-emerald-900/50 px-1 rounded ml-1">{String(e)}</code>
+                                  ))}
+                                </div>
+                              )}
+                              {Array.isArray(p.evidence.evidence_lines) && (p.evidence.evidence_lines as any[]).length > 0 && (
+                                <pre className="text-[9px] bg-gray-900 text-gray-100 p-1.5 rounded mt-1 overflow-x-auto max-h-24">
+                                  {(p.evidence.evidence_lines as any[]).slice(0, 5).join('\n')}
+                                </pre>
+                              )}
+                              {p.evidence?.reason && (
+                                <div className="italic text-emerald-700 dark:text-emerald-300 mt-0.5">
+                                  {String(p.evidence.reason).slice(0, 200)}
+                                </div>
+                              )}
+                            </div>
                           )}
                         </div>
                       );

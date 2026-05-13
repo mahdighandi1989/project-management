@@ -894,6 +894,100 @@ async def _send_mega_bundle(task: "OversightTask") -> None:
 
 
 # ============================================================================
+# 🆕 (Phase 4) — Task Type Classification
+# ============================================================================
+
+# نوع تسک به route routing probe ها کمک می‌کند:
+# - "ui": تسک‌های UI خالص → Smart Navigation + per-step UI probe
+# - "backend": تسک‌های backend خالص → Backend Log Probe + Code-aware
+# - "mixed": هر دو
+# - "unknown": fallback به همه (با هزینه‌ی AI بیشتر)
+
+_UI_KEYWORDS = (
+    "button", "دکمه", "panel", "پنل", "form", "فرم", "modal", "page",
+    "صفحه", "view", "تب", "tab", "sidebar", "navbar", "click", "کلیک",
+    "input", "فیلد", "ui", "ux", "design", "color", "layout", "نمایش",
+    "modal", "popup", "tooltip", "icon", "آیکن", "menu", "منو",
+    "frontend", "فرانت", "render", "show", "display",
+)
+
+_BACKEND_KEYWORDS = (
+    "endpoint", "api", "model", "مدل داده", "model data",
+    "function", "تابع", "service", "سرویس", "database", "دیتابیس",
+    "middleware", "cron", "thread", "lifecycle", "crud", "schema",
+    "migration", "migrate", "router", "controller", "manager",
+    "auth", "session", "token", "validator", "validation",
+    "logger", "queue", "worker", "task scheduler", "celery",
+    "backend", "بک‌اند", "بک اند", "logic", "منطق", "rebuild",
+    "trigger", "post-build", "thread safety",
+)
+
+
+def _classify_task_type(task: "OversightTask") -> str:
+    """تشخیص نوع تسک بر اساس فایل‌های هدف + متن AC.
+
+    Returns: 'ui' | 'backend' | 'mixed' | 'unknown'
+
+    منطق:
+      1. اگر هیچ target_file و هیچ AC نیست → 'unknown'
+      2. شمارش extension files: .py vs .ts/.tsx/.jsx/.js
+      3. شمارش keyword در AC text
+      4. ترکیب signal ها برای تصمیم
+    """
+    files = list(task.target_files or [])
+    py_count = sum(1 for f in files if str(f).lower().endswith(".py"))
+    ts_count = sum(
+        1 for f in files
+        if str(f).lower().endswith((".ts", ".tsx", ".jsx", ".js"))
+    )
+
+    # متن همه AC ها + task title + raw_idea
+    all_text_parts = [(task.title or ""), (task.raw_idea or "")]
+    for ac in (task.acceptance_criteria or []):
+        if isinstance(ac, dict):
+            all_text_parts.append(str(ac.get("text") or ""))
+        else:
+            all_text_parts.append(str(ac))
+    for s in (task.task_steps or []):
+        if isinstance(s, dict):
+            all_text_parts.append(str(s.get("title") or ""))
+            all_text_parts.append(str(s.get("scope") or ""))
+    all_text = " ".join(all_text_parts).lower()
+
+    ui_score = sum(1 for kw in _UI_KEYWORDS if kw in all_text)
+    backend_score = sum(1 for kw in _BACKEND_KEYWORDS if kw in all_text)
+
+    # هیچ signal — unknown
+    if not files and ui_score == 0 and backend_score == 0:
+        return "unknown"
+
+    # فقط backend file ها + backend keyword غالب → backend
+    if py_count > 0 and ts_count == 0:
+        if backend_score >= ui_score:
+            return "backend"
+        return "mixed"
+
+    # فقط ts/tsx + ui keyword غالب → ui
+    if ts_count > 0 and py_count == 0:
+        if ui_score >= backend_score:
+            return "ui"
+        return "mixed"
+
+    # هم py هم ts → mixed
+    if py_count > 0 and ts_count > 0:
+        return "mixed"
+
+    # فقط متن — تصمیم با ratio
+    if backend_score >= ui_score * 2 and backend_score >= 2:
+        return "backend"
+    if ui_score >= backend_score * 2 and ui_score >= 2:
+        return "ui"
+    if ui_score == 0 and backend_score == 0:
+        return "unknown"
+    return "mixed"
+
+
+# ============================================================================
 # 🔬 (inspector_probe Phase 1 — relevance fix) — تشخیص route مرتبط با تسک
 # ============================================================================
 
@@ -1962,6 +2056,133 @@ async def verify_task(
             runtime_probe_results = await run_probes_for_acs(
                 acceptance_criteria, _probe_ctx,
             )
+
+            # 🆕 (Phase 4) — Task type classification
+            # تعیین می‌کند کدام Phase 4 probe ها روی این تسک اجرا شوند.
+            task_type = "unknown"
+            try:
+                task_type = _classify_task_type(task)
+                if auto_verify_session_id:
+                    try:
+                        from .verify_runtime.inspector_probe import _msg as _ip_msg
+                        await _ip_msg(
+                            auto_verify_session_id, "system",
+                            f"🏷 task_type classified as: {task_type}",
+                        )
+                    except Exception:
+                        pass
+            except Exception as _cte:
+                logger.debug(f"task_type classify failed: {_cte}")
+
+            # 🆕 (Phase 4) — Code-aware Verifier per AC (همیشه برای task
+            # هایی که حداقل یک AC و repo دارند اجرا می‌شود — مستقل از type)
+            code_probe_results: List[Any] = []
+            try:
+                if acceptance_criteria and watched and getattr(watched, "repo_full_name", None):
+                    from .verify_runtime.code_aware_verifier import (
+                        analyze_acs_with_commit_diffs,
+                    )
+                    from .verify_runtime.base import (
+                        RuntimeProbeResult as _RPR,
+                        PROBE_STATUS_PASSED as _PASSED,
+                        PROBE_STATUS_FAILED as _FAILED,
+                        PROBE_STATUS_SKIPPED as _SKIPPED,
+                    )
+                    _token = get_github_token()
+                    if _token:
+                        _code_analysis = await analyze_acs_with_commit_diffs(
+                            task=task,
+                            acs=list(acceptance_criteria)[:10],
+                            repo_full_name=watched.repo_full_name,
+                            token=_token,
+                            verify_model_id=model_id,
+                        )
+                        _verdict_to_status = {
+                            "implemented": _PASSED,
+                            "partial": _FAILED,
+                            "not_found": _FAILED,
+                            "unclear": _SKIPPED,
+                        }
+                        for _ca in _code_analysis:
+                            _ca_idx = _ca.get("ac_index", 0)
+                            _ca_verdict = _ca.get("code_verdict", "unclear")
+                            _ca_status = _verdict_to_status.get(_ca_verdict, _SKIPPED)
+                            code_probe_results.append(_RPR(
+                                ac_id=f"code_ac{_ca_idx}",
+                                ac_text=_ca.get("ac_text", ""),
+                                method="code_analysis",
+                                status=_ca_status,
+                                evidence={
+                                    "code_verdict": _ca_verdict,
+                                    "matching_commits": _ca.get("matching_commits", []),
+                                    "key_changes": _ca.get("key_changes", []),
+                                    "reason": _ca.get("reason", ""),
+                                    "probe_type": "code_aware_phase4",
+                                },
+                                duration_ms=0,
+                            ))
+                        if auto_verify_session_id:
+                            try:
+                                from .verify_runtime.inspector_probe import _msg as _ip_msg
+                                _summary = (
+                                    f"🔍 code-aware: {len(code_probe_results)} AC analyzed "
+                                    f"({sum(1 for r in code_probe_results if r.status == _PASSED)}p / "
+                                    f"{sum(1 for r in code_probe_results if r.status == _FAILED)}f / "
+                                    f"{sum(1 for r in code_probe_results if r.status == _SKIPPED)}s)"
+                                )
+                                await _ip_msg(auto_verify_session_id, "system", _summary)
+                            except Exception:
+                                pass
+            except Exception as _cae:
+                logger.debug(f"code_aware_verifier failed: {_cae}")
+
+            # 🆕 (Phase 4) — Backend Log Probe برای AC های backend-flavor
+            # فقط اگر task_type in (backend, mixed, unknown)
+            backend_log_probe_results: List[Any] = []
+            try:
+                if task_type in ("backend", "mixed", "unknown") and acceptance_criteria:
+                    from .verify_runtime.backend_log_probe import run_backend_log_probe
+                    # حداکثر ۵ AC backend-flavor
+                    _bp_count = 0
+                    for _ac_idx, _ac in enumerate(acceptance_criteria):
+                        if _bp_count >= 5:
+                            break
+                        _ac_text = (
+                            _ac.get("text") if isinstance(_ac, dict) else str(_ac)
+                        ) or ""
+                        _ac_method = (
+                            _ac.get("verify_method") if isinstance(_ac, dict) else "static"
+                        ) or ""
+                        # فقط AC هایی که UI نیستن
+                        if str(_ac_method).lower() == "ui_interaction":
+                            continue
+                        # heuristic: AC باید endpoint یا symbol داشته باشه
+                        from .verify_runtime.backend_log_probe import (
+                            _extract_endpoints_from_text, _extract_python_symbols,
+                        )
+                        _eps = _extract_endpoints_from_text(_ac_text)
+                        _syms = _extract_python_symbols(_ac_text)
+                        if not _eps and not _syms:
+                            continue
+                        _bp_res = await run_backend_log_probe(
+                            _ac if isinstance(_ac, dict) else {"text": _ac_text},
+                            _probe_ctx, f"blp_ac{_ac_idx}", task,
+                        )
+                        if _bp_res is not None:
+                            backend_log_probe_results.append(_bp_res)
+                            _bp_count += 1
+                    if backend_log_probe_results and auto_verify_session_id:
+                        try:
+                            from .verify_runtime.inspector_probe import _msg as _ip_msg
+                            await _ip_msg(
+                                auto_verify_session_id, "system",
+                                f"📊 backend-log: {len(backend_log_probe_results)} AC analyzed",
+                            )
+                        except Exception:
+                            pass
+            except Exception as _ble:
+                logger.debug(f"backend_log_probe block failed: {_ble}")
+
             # 🔬 (inspector_probe Phase 2 — per-step probes) — اگر تسک
             # task_steps دارد، برای هر مرحله یک probe جداگانه با route
             # مرتبط با همان مرحله اجرا کن. این probe ها prepend به
@@ -2026,6 +2247,7 @@ async def verify_task(
                     # حداکثر ۵ مرحله — تا verify طول نکشد
                     for _step in _ts_list[:5]:
                         try:
+                            _smart_nav_result: Optional[Dict[str, Any]] = None
                             _sroute, _route_specific = _infer_route_for_step(_step, task)
                             _sid = _step.get("id", 0)
                             _stitle = str(_step.get("title") or "")[:80]
@@ -2062,11 +2284,40 @@ async def verify_task(
                                     "verify_plan": _matched_plan,
                                 }
                             else:
+                                # 🆕 (Phase 4) — قبل از skip، Smart Navigation
+                                # تلاش کن: شاید AI بتواند از روی nav menu
+                                # لینک مرتبط را پیدا کند.
+                                if not _route_specific:
+                                    try:
+                                        from .verify_runtime.navigation_helper import (
+                                            try_smart_navigation_for_step,
+                                        )
+                                        _smart_nav_result = await try_smart_navigation_for_step(
+                                            ac_text=f"{_stitle}\n{_sscope}",
+                                            base_url=_probe_ctx.frontend_base_url or "",
+                                            storage_state=_probe_ctx.storage_state,
+                                            verify_model_id=_probe_ctx.verify_model_id,
+                                        )
+                                        if _smart_nav_result and _smart_nav_result.get("href"):
+                                            _sroute = _smart_nav_result["href"]
+                                            _route_specific = True
+                                            if auto_verify_session_id:
+                                                try:
+                                                    from .verify_runtime.inspector_probe import _msg as _ip_msg
+                                                    await _ip_msg(
+                                                        auto_verify_session_id, "system",
+                                                        f"🧭 smart-nav: AI لینک «{_smart_nav_result.get('chosen_text', '')[:40]}» "
+                                                        f"→ {_sroute} (confidence={_smart_nav_result.get('confidence')})",
+                                                    )
+                                                except Exception:
+                                                    pass
+                                    except Exception as _snerr:
+                                        logger.debug(f"smart_nav failed: {_snerr}")
+
                                 # 🆕 (Phase 3 final fix) — اگر route خاصی پیدا
                                 # نکردیم (به / fallback شده) و هیچ matched AC
-                                # هم نداریم، یعنی واقعاً نمی‌توانیم این step را
-                                # با اطمینان probe کنیم. probe نزن — یا یک
-                                # "skipped" خفیف بفرست تا کاربر بداند علتش چیست.
+                                # هم نداریم و smart_nav هم نتوانست، یعنی واقعاً
+                                # نمی‌توانیم این step را با اطمینان probe کنیم.
                                 if not _route_specific:
                                     # ساخت یک synthetic skipped result بدون
                                     # واقعاً اجرای probe
@@ -2122,6 +2373,17 @@ async def verify_task(
                                     _step_res.evidence["step_id"] = _sid
                                     _step_res.evidence["step_title"] = _stitle
                                     _step_res.evidence["step_inferred_route"] = _sroute
+                                    # 🆕 (Phase 4) — اگر smart_nav موفق بود،
+                                    # تصمیم AI را به evidence اضافه کن
+                                    if _smart_nav_result and _smart_nav_result.get("href"):
+                                        _step_res.evidence["smart_nav"] = {
+                                            "chosen_text": _smart_nav_result.get("chosen_text"),
+                                            "chosen_href": _smart_nav_result.get("href"),
+                                            "confidence": _smart_nav_result.get("confidence"),
+                                            "reason": _smart_nav_result.get("reason"),
+                                            "links_count": _smart_nav_result.get("links_count"),
+                                            "duration_ms": _smart_nav_result.get("duration_ms"),
+                                        }
                                 step_probe_results.append(_step_res)
                         except Exception as _ssee:
                             logger.debug(
@@ -2177,6 +2439,13 @@ async def verify_task(
                 _insert_at = 1 if _has_system else 0
                 for _idx, _spr in enumerate(step_probe_results):
                     runtime_probe_results.insert(_insert_at + _idx, _spr)
+
+            # 🆕 (Phase 4) — append code_aware + backend_log probe results
+            # بعد از همه‌ی probe های UI، نتایج تحلیل کد و log را اضافه کن.
+            if code_probe_results:
+                runtime_probe_results.extend(code_probe_results)
+            if backend_log_probe_results:
+                runtime_probe_results.extend(backend_log_probe_results)
 
             # manifest.json + size cap enforcement
             try:
