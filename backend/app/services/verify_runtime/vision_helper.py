@@ -94,12 +94,18 @@ async def _try_vision(
         # خطای vision — اجازه بده fallback تلاش کند
         return None
 
+    # 🆕 (Phase 2 fix 3) — feature_present از vision (yes/no/unclear)
+    fp = str(result.get("feature_present") or "unclear").strip().lower()
+    if fp not in ("yes", "no", "unclear"):
+        fp = "unclear"
     return {
         "description": scene,
         "ui_elements": str(result.get("ui_elements") or ""),
         "error_signals": str(result.get("error_signals") or ""),
         "ocr_text": str(result.get("ocr_text") or ""),
         "layout_hints": str(result.get("layout_hints") or ""),
+        "feature_present": fp,
+        "feature_reason": str(result.get("feature_reason") or ""),
         "source": f"vision_{vision_model}",
         "raw": result,
     }
@@ -163,6 +169,9 @@ async def _try_text_fallback(
             "error_signals": "",
             "ocr_text": "",
             "layout_hints": "",
+            # text-only fallback نمی‌تواند feature_present بصری بدهد
+            "feature_present": "unclear",
+            "feature_reason": "",
             "source": f"fallback_text_only_{verify_model_id}",
             "raw": None,
         }
@@ -178,6 +187,8 @@ def _none_result(reason: str) -> Dict[str, Any]:
         "error_signals": "",
         "ocr_text": "",
         "layout_hints": "",
+        "feature_present": "unclear",
+        "feature_reason": "",
         "source": "none",
         "raw": {"reason": reason},
     }

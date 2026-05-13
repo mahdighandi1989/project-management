@@ -6019,6 +6019,13 @@ function TasksPanel({
                                 // اولین vision_description از screenshots
                                 const shots = Array.isArray(p.evidence?.screenshots) ? p.evidence.screenshots : [];
                                 const firstVision = shots.find((s: any) => s && s.vision_description)?.vision_description || '';
+                                // 🆕 (Phase 2 fix 3) — feature_present اگه قطعاً "no" → علامت قرمز
+                                const featureMissing = shots.some((s: any) =>
+                                  s && (s.vision_feature_present || '').toLowerCase() === 'no'
+                                );
+                                const featureReason = featureMissing
+                                  ? (shots.find((s: any) => (s.vision_feature_present || '').toLowerCase() === 'no')?.vision_feature_reason || '')
+                                  : '';
                                 // 🆕 (Phase 2) — تشخیص step / system / regular probe برای آیکن
                                 const isStepProbe = !!p.evidence?.step_id;
                                 const isSystemProbe = p.ac_id === 'system_home';
@@ -6041,6 +6048,16 @@ function TasksPanel({
                                       «{String(p.ac_text || '').slice(0, 60)}»
                                       {p.evidence?.reason ? <span className="text-gray-500"> ({String(p.evidence.reason).slice(0, 60)})</span> : null}
                                     </div>
+                                    {featureMissing && (
+                                      <div className="pr-3 text-red-700 dark:text-red-300 font-semibold">
+                                        🔴 feature ساخته نشده (vision)
+                                        {featureReason && (
+                                          <span className="font-normal text-red-600 dark:text-red-400">
+                                            {' — '}{String(featureReason).slice(0, 100)}
+                                          </span>
+                                        )}
+                                      </div>
+                                    )}
                                     {firstVision && (
                                       <div className="pr-3 text-gray-500 dark:text-gray-400 italic truncate">
                                         👁 {String(firstVision).slice(0, 100)}{String(firstVision).length > 100 ? '…' : ''}

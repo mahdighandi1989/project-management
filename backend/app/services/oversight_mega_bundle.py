@@ -1,4 +1,4 @@
-"""Phase 2 — ساخت یک فایل Markdown کامل از همه‌ی اطلاعات verify.
+"""Phase 2 — ساخت یک فایل HTML/PDF کامل از همه‌ی اطلاعات verify.
 
 این فایل برای ارسال به‌عنوان ضمیمه‌ی تلگرام استفاده می‌شود تا کاربر
 بتواند در یک پیوست واحد به همه‌ی اطلاعات تسک و آخرین verify دسترسی
@@ -6,16 +6,17 @@
 شواهد همه‌ی probe ها + console logs + backend URLs و logs +
 analyses.
 
-تابع اصلی: build_mega_bundle_md(task, report) -> bytes
-این تابع هیچ exception ای بیرون نمی‌اندازد — در صورت شکست
-بخش‌های مشخص، آن بخش skip می‌شود.
+دو تابع:
+- build_mega_bundle_md(task, report) -> bytes (HTML)
+- build_mega_bundle_pdf(task, report) -> (bytes, ext) — PDF با
+  fallback به HTML اگر playwright در دسترس نباشد.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -305,7 +306,7 @@ def build_mega_bundle_md(task: Any, report: Any) -> bytes:
                             f"- **backend log summary:** "
                             f"{_safe_str(pev['backend_log_summary'], 600)}"
                         )
-                    # screenshots: label + vision
+                    # screenshots: label + vision + feature_present
                     shots = pev.get("screenshots") or []
                     if isinstance(shots, list) and shots:
                         pb_lines.append("- **screenshots:**")
@@ -315,7 +316,20 @@ def build_mega_bundle_md(task: Any, report: Any) -> bytes:
                                 vd = _safe_str(s.get("vision_description", ""), 2000)
                                 vs = _safe_str(s.get("vision_source", ""), 40)
                                 archived = "✅ آرشیو شده در تلگرام" if s.get("archived_to_telegram") else "روی دیسک"
+                                # 🆕 (Phase 2 fix 3) — feature_present
+                                fp = _safe_str(s.get("vision_feature_present", ""), 20).lower()
+                                fp_reason = _safe_str(s.get("vision_feature_reason", ""), 500)
+                                fp_emoji = {
+                                    "yes": "✅ YES",
+                                    "no": "❌ NO",
+                                    "unclear": "❓ UNCLEAR",
+                                }.get(fp, "")
                                 pb_lines.append(f"  - **{label}** ({archived}, source=`{vs}`)")
+                                if fp_emoji and fp != "unclear":
+                                    pb_lines.append(
+                                        f"    - feature_present: {fp_emoji}"
+                                        + (f" — {fp_reason}" if fp_reason else "")
+                                    )
                                 if vd:
                                     pb_lines.append(f"    > {vd}")
                     # inspector session deep-link reference
@@ -435,3 +449,96 @@ def build_mega_bundle_md(task: Any, report: Any) -> bytes:
         # بدون BOM این بار چون قبلاً اضافه شده
         encoded = encoded[:cut] + warn_msg.encode("utf-8") + b"</pre></body></html>"
     return encoded
+
+
+# ---------------------------------------------------------------------------
+# 🆕 (Phase 2 fix 2) — PDF builder with HTML fallback
+# ---------------------------------------------------------------------------
+
+# سقف اندازه‌ی PDF (5MB — Telegram تا 20MB قبول می‌کند)
+_MAX_PDF_BYTES = 5_000_000
+
+# سمافور برای رندر PDF — تنها یک playwright render همزمان
+import asyncio as _asyncio  # noqa: E402
+_PDF_RENDER_SEM = _asyncio.Semaphore(1)
+
+
+async def build_mega_bundle_pdf(task: Any, report: Any) -> Tuple[bytes, str]:
+    """ساخت bundle به‌صورت PDF (اگر Playwright در دسترس) یا fallback به HTML.
+
+    Returns: (bytes, extension) — extension به صورت ".pdf" یا ".html"
+
+    این تابع از همان pattern build_verify_report_pdf استفاده می‌کند:
+    HTML → set_content در Chromium → page.pdf().
+    """
+    # ابتدا HTML build کن (همان منطق build_mega_bundle_md)
+    html_bytes = build_mega_bundle_md(task, report)
+    # BOM را حذف کن چون داخل set_content مشکل ساز است
+    if html_bytes.startswith(b"\xef\xbb\xbf"):
+        html_bytes = html_bytes[3:]
+    try:
+        html_doc = html_bytes.decode("utf-8")
+    except Exception as e:
+        logger.warning(f"mega_bundle: decode html failed: {e}")
+        return html_bytes, ".html"
+
+    # تلاش برای PDF با playwright
+    try:
+        try:
+            from playwright.async_api import async_playwright  # noqa: F401
+        except ImportError:
+            logger.debug("mega_bundle pdf: playwright not installed — fallback to html")
+            return _wrap_html_bom(html_doc), ".html"
+
+        async with _PDF_RENDER_SEM:
+            from playwright.async_api import async_playwright
+            playwright = await async_playwright().start()
+            try:
+                browser = await playwright.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-setuid-sandbox"],
+                )
+                try:
+                    context = await browser.new_context()
+                    page = await context.new_page()
+                    await page.set_content(
+                        html_doc, wait_until="domcontentloaded", timeout=8000,
+                    )
+                    try:
+                        await page.wait_for_timeout(600)
+                    except Exception:
+                        pass
+                    pdf_bytes = await page.pdf(
+                        format="A4",
+                        margin={"top": "12mm", "right": "12mm",
+                                "bottom": "12mm", "left": "12mm"},
+                        print_background=True,
+                    )
+                    if len(pdf_bytes) > _MAX_PDF_BYTES:
+                        # خیلی بزرگ شد — fallback به html
+                        logger.warning(
+                            f"mega_bundle pdf too large ({len(pdf_bytes)} bytes) "
+                            f"— fallback to html"
+                        )
+                        return _wrap_html_bom(html_doc), ".html"
+                    return pdf_bytes, ".pdf"
+                finally:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
+            finally:
+                try:
+                    await playwright.stop()
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.warning(
+            f"mega_bundle pdf render failed ({e}) — fallback to html"
+        )
+        return _wrap_html_bom(html_doc), ".html"
+
+
+def _wrap_html_bom(html_doc: str) -> bytes:
+    """fallback: html را با UTF-8 BOM encode کن."""
+    return b"\xef\xbb\xbf" + html_doc.encode("utf-8")
