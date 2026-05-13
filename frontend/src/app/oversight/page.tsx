@@ -3895,29 +3895,69 @@ export default function OversightPage() {
                               {p.error_message.slice(0, 200)}
                             </div>
                           )}
-                          {/* Screenshots */}
-                          {p.evidence?.screenshots && Array.isArray(p.evidence.screenshots) && p.evidence.screenshots.length > 0 && runId && (
-                            <div className="flex gap-1 flex-wrap mt-1">
-                              {(p.evidence.screenshots as string[]).slice(0, 6).map((sn, si) => {
-                                const url = `${API_BASE}/api/oversight/tasks/${viewingReport.task_id}/evidence/${runId}/${p.ac_id}/${sn}`;
+                          {/* Screenshots — هم فرمت قدیم (string filename) هم جدید (object) را پشتیبانی می‌کند */}
+                          {p.evidence?.screenshots && Array.isArray(p.evidence.screenshots) && p.evidence.screenshots.length > 0 && (
+                            <div className="mt-1 space-y-1">
+                              {(p.evidence.screenshots as any[]).slice(0, 6).map((sn: any, si: number) => {
+                                // فرمت قدیم: string filename — لینک به evidence endpoint با runId
+                                if (typeof sn === 'string') {
+                                  if (!runId) return null;
+                                  const url = `${API_BASE}/api/oversight/tasks/${viewingReport.task_id}/evidence/${runId}/${p.ac_id}/${sn}`;
+                                  return (
+                                    <a key={si} href={url} target="_blank" rel="noreferrer" className="block" title={sn}>
+                                      <img
+                                        src={url}
+                                        alt={sn}
+                                        className="h-16 w-auto rounded border border-gray-300 dark:border-gray-600 hover:scale-125 transition-transform"
+                                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                      />
+                                    </a>
+                                  );
+                                }
+                                // فرمت جدید inspector_probe: object با path/label/vision_description
+                                const obj = sn || {};
+                                const label = String(obj.label || 'screenshot');
+                                const visionDesc = String(obj.vision_description || '');
+                                const visionSource = String(obj.vision_source || '');
+                                const archived = !!obj.archived_to_telegram;
                                 return (
-                                  <a
-                                    key={si}
-                                    href={url}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="block"
-                                    title={sn}
-                                  >
-                                    <img
-                                      src={url}
-                                      alt={sn}
-                                      className="h-16 w-auto rounded border border-gray-300 dark:border-gray-600 hover:scale-125 transition-transform"
-                                      onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                                    />
-                                  </a>
+                                  <div key={si} className="text-[10px] bg-white/40 dark:bg-black/20 rounded px-1.5 py-1">
+                                    <div className="font-semibold dark:text-gray-200">
+                                      📸 {label}
+                                      {archived && (
+                                        <span className="mr-1 text-cyan-700 dark:text-cyan-300">(آرشیو شده در تلگرام)</span>
+                                      )}
+                                    </div>
+                                    {visionDesc && (
+                                      <div className="italic text-gray-700 dark:text-gray-300 mt-0.5">
+                                        👁 {visionDesc.slice(0, 400)}{visionDesc.length > 400 ? '…' : ''}
+                                      </div>
+                                    )}
+                                    {visionSource && visionSource !== 'none' && (
+                                      <div className="text-[9px] text-gray-500 dark:text-gray-400 mt-0.5">
+                                        vision source: <code>{visionSource}</code>
+                                      </div>
+                                    )}
+                                  </div>
                                 );
                               })}
+                            </div>
+                          )}
+                          {/* 🔬 (inspector_probe Phase 1) — لینک به session در تب بازرس ویژه */}
+                          {p.evidence?.inspector_session_id && viewingReport.evidence?.auto_verify_project_id && (
+                            <a
+                              href={`/projects/${encodeURIComponent(String(viewingReport.evidence.auto_verify_project_id))}?tab=inspector&session=${encodeURIComponent(String(p.evidence.inspector_session_id))}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-block mt-1 text-[10px] text-cyan-700 dark:text-cyan-300 hover:underline"
+                            >
+                              📺 مشاهده در بازرس ویژه →
+                            </a>
+                          )}
+                          {/* backend log summary */}
+                          {p.evidence?.backend_log_summary && (
+                            <div className="text-[10px] text-gray-600 dark:text-gray-400 mt-1">
+                              📋 backend: {String(p.evidence.backend_log_summary).slice(0, 200)}
                             </div>
                           )}
                           {/* API response excerpt */}
