@@ -287,6 +287,11 @@ class OversightTask:
     # backward-compat: اگر در JSON نباشد، False خوانده می‌شود
     archived: bool = False
     archived_at: Optional[str] = None
+    # 🆕 (Phase 2) Prompt versioning — هر بار followup منجر به update پرامپت
+    # شد، نسخهٔ قدیمی task.prompt اینجا بایگانی می‌شود (FIFO، حداکثر ۱۰).
+    # هر entry: {prompt, archived_at, reason, verify_status_at_archive, round}
+    # reason ∈ {"verify_followup", "manual_revert", "regenerate"}
+    prompt_history: List[Dict[str, Any]] = field(default_factory=list)
     # 🆕 (P1) metadata scan که این task را تولید کرده — برای شفافیت در UI
     # هر تسک نمایش می‌دهد: مدل، depth، passes، files_count، scan_id
     # برای task‌های قدیمی (قبل از این تغییر): None
@@ -5501,6 +5506,159 @@ class OversightService:
                 logger.debug(f"auto-loop check failed: {_e}")
 
             self._save_tasks()
+
+        # 🆕 (Phase 2) — پس از اعمال followup روی task.followup_prompt،
+        # به‌صورت خودکار آن را به‌عنوان prompt جدید روی task ست می‌کنیم،
+        # نسخهٔ قدیمی به prompt_history می‌رود. این کار باعث می‌شود کاربر
+        # در دفعهٔ بعدی که verify می‌زند، با همان «پرامپت بروز» کار کند،
+        # و دکمهٔ «کپی پرامپت» نسخهٔ به‌روز را در کلیپ‌بورد بگذارد.
+        # شکست این مرحله نباید جلوی apply_followup_after_verify را بگیرد.
+        try:
+            await self.apply_followup_as_new_prompt(
+                task_id, reason="verify_followup",
+            )
+        except Exception as _ae:
+            logger.warning(f"apply_followup_as_new_prompt failed for {task_id}: {_ae}")
+
+    # 🆕 (Phase 2) — Prompt versioning + auto-update
+    # ====================================================================
+    async def apply_followup_as_new_prompt(
+        self,
+        task_id: str,
+        *,
+        reason: str = "verify_followup",
+    ) -> Dict[str, Any]:
+        """نسخهٔ فعلی task.prompt را در prompt_history بایگانی کن و
+        task.prompt = task.followup_prompt جدید قرار بده.
+
+        شرایط:
+        - task.followup_prompt باید پر باشد (>= 30 char)
+        - task.verification_status باید in (partial, not_done, regressed,
+          needs_clarification) باشد — نه done، نه pending
+        - task.prompt و task.followup_prompt نباید برابر باشند
+
+        عملیات atomic در self._lock:
+        1) push نسخهٔ فعلی task.prompt به prompt_history (FIFO، حداکثر ۱۰)
+        2) task.prompt = task.followup_prompt (نسخهٔ جدید)
+        3) task.followup_prompt = "" (پاک — حالا شده prompt اصلی)
+        4) task.updated_at = now_iso()
+        5) self._save_tasks()
+        """
+        allowed_statuses = {"partial", "not_done", "regressed", "needs_clarification"}
+        result: Dict[str, Any] = {
+            "applied": False, "reason": reason,
+            "old_len": 0, "new_len": 0, "history_size": 0,
+            "skipped_reason": "",
+        }
+        async with self._lock:
+            task = next((t for t in self.tasks if t.id == task_id), None)
+            if task is None:
+                result["skipped_reason"] = "task_not_found"
+                return result
+            old_prompt = (task.prompt or "").strip()
+            new_prompt = (task.followup_prompt or "").strip()
+            status = (task.verification_status or "").strip()
+            if not new_prompt or len(new_prompt) < 30:
+                result["skipped_reason"] = "followup_empty_or_too_short"
+                return result
+            if status not in allowed_statuses:
+                result["skipped_reason"] = f"status_not_allowed ({status})"
+                return result
+            if old_prompt == new_prompt:
+                result["skipped_reason"] = "prompt_unchanged"
+                return result
+            # backward-compat: اگر prompt_history وجود نداشت (داده legacy)
+            if not isinstance(task.prompt_history, list):
+                task.prompt_history = []
+            # archive نسخهٔ فعلی
+            entry = {
+                "prompt": old_prompt,
+                "archived_at": now_iso(),
+                "reason": reason,
+                "verify_status_at_archive": status,
+                "round": int(task.followup_round or 0),
+            }
+            task.prompt_history.append(entry)
+            # FIFO cap = ۱۰
+            if len(task.prompt_history) > 10:
+                task.prompt_history = task.prompt_history[-10:]
+            # اعمال نسخهٔ جدید
+            task.prompt = new_prompt
+            task.followup_prompt = ""
+            task.updated_at = now_iso()
+            self._save_tasks()
+
+            result["applied"] = True
+            result["old_len"] = len(old_prompt)
+            result["new_len"] = len(new_prompt)
+            result["history_size"] = len(task.prompt_history)
+            logger.info(
+                f"prompt_history: task {task_id} prompt updated "
+                f"(old={result['old_len']} → new={result['new_len']}, "
+                f"history_size={result['history_size']}, reason={reason})"
+            )
+        return result
+
+    async def revert_prompt_from_history(
+        self,
+        task_id: str,
+        history_index: int,
+    ) -> Dict[str, Any]:
+        """نسخه‌ای از prompt_history (index) را به‌عنوان prompt فعلی بازنشانی کن.
+
+        - history_index = -1 یعنی آخرین (newest archived = یک قدم به عقب)
+        - history_index = 0 یعنی قدیمی‌ترین
+        - نسخه‌ی فعلی task.prompt به history منتقل می‌شود
+          (با reason="manual_revert").
+        """
+        result: Dict[str, Any] = {
+            "applied": False, "reverted_to_round": None,
+            "history_size_after": 0, "skipped_reason": "",
+        }
+        async with self._lock:
+            task = next((t for t in self.tasks if t.id == task_id), None)
+            if task is None:
+                result["skipped_reason"] = "task_not_found"
+                return result
+            if not isinstance(task.prompt_history, list) or not task.prompt_history:
+                result["skipped_reason"] = "empty_history"
+                return result
+            idx = history_index
+            n = len(task.prompt_history)
+            # support negative index
+            if idx < 0:
+                idx = n + idx
+            if idx < 0 or idx >= n:
+                result["skipped_reason"] = f"index_out_of_range ({history_index})"
+                return result
+            target = task.prompt_history[idx]
+            target_prompt = str(target.get("prompt") or "").strip()
+            if len(target_prompt) < 30:
+                result["skipped_reason"] = "target_prompt_too_short"
+                return result
+            # archive نسخهٔ فعلی به history
+            current = (task.prompt or "").strip()
+            task.prompt_history.append({
+                "prompt": current,
+                "archived_at": now_iso(),
+                "reason": "manual_revert",
+                "verify_status_at_archive": task.verification_status or "",
+                "round": int(task.followup_round or 0),
+            })
+            # حذف entry که داریم به آن revert می‌کنیم (تا تکراری نشود)
+            task.prompt_history.pop(idx)
+            # cap
+            if len(task.prompt_history) > 10:
+                task.prompt_history = task.prompt_history[-10:]
+            # ست کردن prompt به target
+            task.prompt = target_prompt
+            task.updated_at = now_iso()
+            self._save_tasks()
+
+            result["applied"] = True
+            result["reverted_to_round"] = int(target.get("round") or 0)
+            result["history_size_after"] = len(task.prompt_history)
+        return result
 
     # ====================================================================
     # Settings
