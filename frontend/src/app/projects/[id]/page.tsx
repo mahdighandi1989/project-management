@@ -12798,16 +12798,28 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                       <span className="text-xs font-bold text-gray-600 dark:text-gray-400">سشن‌های قبلی</span>
                       <button onClick={() => setShowArchivedSessions(false)} className="text-xs text-gray-400 hover:text-gray-600">✕</button>
                     </div>
-                    {inspectorArchivedSessions.map(s => (
-                      <button
-                        key={s.id}
-                        onClick={() => { loadArchivedSession(s.id); setShowArchivedSessions(false); }}
-                        className="w-full text-right px-2 py-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-800 transition text-xs flex items-center justify-between"
-                      >
-                        <span className="text-gray-600 dark:text-gray-400">{s.title || `سشن #${s.id}`}</span>
-                        <span className="text-gray-400 text-[10px]">{s.message_count} پیام</span>
-                      </button>
-                    ))}
+                    {inspectorArchivedSessions.map(s => {
+                      // 🔬 (inspector_probe Phase 1) — session های auto-verify با عنوان «🤖 auto-verify»
+                      // متمایز می‌شوند تا از session های دستی تشخیص داده شوند.
+                      const isAutoVerify = typeof s.title === 'string' && s.title.startsWith('🤖');
+                      return (
+                        <button
+                          key={s.id}
+                          onClick={() => { loadArchivedSession(s.id); setShowArchivedSessions(false); }}
+                          className={
+                            'w-full text-right px-2 py-1.5 rounded transition text-xs flex items-center justify-between ' +
+                            (isAutoVerify
+                              ? 'bg-cyan-50 dark:bg-cyan-900/20 hover:bg-cyan-100 dark:hover:bg-cyan-900/40'
+                              : 'hover:bg-gray-200 dark:hover:bg-gray-800')
+                          }
+                        >
+                          <span className={isAutoVerify ? 'text-cyan-700 dark:text-cyan-300' : 'text-gray-600 dark:text-gray-400'}>
+                            {s.title || `سشن #${s.id}`}
+                          </span>
+                          <span className="text-gray-400 text-[10px]">{s.message_count} پیام</span>
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
 

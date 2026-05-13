@@ -678,6 +678,354 @@ async def _fetch_recent_commits(
         return []
 
 
+# ============================================================================
+# 🔬 (inspector_probe Phase 1) — TTL cleanup برای screenshot های orphan
+# ============================================================================
+
+def cleanup_orphan_runtime_screenshots(max_age_days: int = 3) -> Dict[str, int]:
+    """screenshot هایی که بیش از max_age_days روی دیسک مانده‌اند را حذف کن.
+
+    این تابع synchronous است (فایل‌سیستم). از داخل scheduler صدا زده می‌شود.
+
+    خروجی: {deleted_count, deleted_bytes, scanned_count}
+    """
+    import os as _os
+    from pathlib import Path as _Path
+
+    try:
+        from .oversight_service import STORAGE_DIR as _SD
+    except Exception:
+        return {"deleted_count": 0, "deleted_bytes": 0, "scanned_count": 0, "error": "STORAGE_DIR unavailable"}
+
+    root = _Path(_SD) / "runtime_evidence"
+    if not root.exists():
+        return {"deleted_count": 0, "deleted_bytes": 0, "scanned_count": 0}
+
+    threshold = time.time() - (max_age_days * 86400)
+    deleted = 0
+    deleted_bytes = 0
+    scanned = 0
+    try:
+        for png in root.rglob("*.png"):
+            scanned += 1
+            try:
+                st = png.stat()
+                if st.st_mtime < threshold:
+                    sz = st.st_size
+                    png.unlink(missing_ok=True)
+                    deleted += 1
+                    deleted_bytes += sz
+            except Exception:
+                continue
+        for jpg in root.rglob("*.jpg"):
+            scanned += 1
+            try:
+                st = jpg.stat()
+                if st.st_mtime < threshold:
+                    sz = st.st_size
+                    jpg.unlink(missing_ok=True)
+                    deleted += 1
+                    deleted_bytes += sz
+            except Exception:
+                continue
+        # پوشه‌های خالی را هم پاک کن (best-effort)
+        for d in sorted(root.rglob("*"), key=lambda p: -len(str(p))):
+            try:
+                if d.is_dir() and not any(d.iterdir()):
+                    d.rmdir()
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug(f"cleanup_orphan_runtime_screenshots error: {e}")
+
+    if deleted:
+        logger.info(
+            f"runtime_evidence TTL cleanup: deleted={deleted} files, "
+            f"bytes={deleted_bytes}, scanned={scanned}"
+        )
+    return {"deleted_count": deleted, "deleted_bytes": deleted_bytes, "scanned_count": scanned}
+
+
+# ============================================================================
+# 🔬 (inspector_probe Phase 1) — ضمیمه‌ی screenshot ها به تلگرام + پاک‌سازی
+# ============================================================================
+
+def _collect_runtime_screenshot_entries(
+    report: "OversightReport",
+) -> List[Dict[str, Any]]:
+    """لیست screenshot هایی که هنوز روی دیسک هستند را از evidence استخراج کن.
+
+    خروجی: list of dicts با کلیدهای path + label + vision_description.
+    """
+    out: List[Dict[str, Any]] = []
+    try:
+        probes = (report.evidence or {}).get("runtime_probes") or []
+    except Exception:
+        return out
+    if not isinstance(probes, list):
+        return out
+    for p in probes:
+        if not isinstance(p, dict):
+            continue
+        ev = p.get("evidence") or {}
+        if not isinstance(ev, dict):
+            continue
+        shots = ev.get("screenshots") or []
+        if not isinstance(shots, list):
+            continue
+        for s in shots:
+            if not isinstance(s, dict):
+                continue
+            path = s.get("path")
+            if not path or s.get("archived_to_telegram"):
+                continue
+            try:
+                import os as _os
+                if not _os.path.isfile(path):
+                    continue
+            except Exception:
+                continue
+            out.append({
+                "path": path,
+                "label": s.get("label") or "screenshot",
+                "vision_description": s.get("vision_description") or "",
+                "ac_text": p.get("ac_text") or "",
+                "_ref_probe": p,
+                "_ref_shot": s,
+            })
+    return out
+
+
+async def _send_runtime_screenshots_and_cleanup(
+    task: "OversightTask",
+    report: "OversightReport",
+    max_send: int = 5,
+) -> None:
+    """screenshot های runtime را به تلگرام بفرست و در صورت موفقیت پاک کن.
+
+    رفتار:
+    - فقط تا max_send screenshot ارسال می‌شود (limit Telegram + reasonable)
+    - بقیه روی دیسک می‌مانند، TTL cleanup آن‌ها را برمی‌دارد
+    - photo های موفق → از دیسک پاک می‌شوند + در evidence
+      archived_to_telegram=True ست می‌شود + path=None (vision_description می‌ماند)
+    - اگر کانال تلگرام configured نیست → silent skip
+    """
+    try:
+        from .notification_service import notification_service
+    except Exception:
+        return
+
+    entries = _collect_runtime_screenshot_entries(report)
+    if not entries:
+        return
+    entries = entries[:max_send]
+
+    paths = [e["path"] for e in entries]
+    captions: List[str] = []
+    for e in entries:
+        ac_excerpt = (e.get("ac_text") or "")[:80]
+        vis = (e.get("vision_description") or "")[:300]
+        cap = f"📸 {e['label']}\nAC: {ac_excerpt}"
+        if vis:
+            cap += f"\n👁 {vis}"
+        captions.append(cap)
+
+    try:
+        results = await notification_service.send_extra_photos(
+            paths, captions, silent=True,
+        )
+    except Exception as _e:
+        logger.debug(f"send_extra_photos crashed: {_e}")
+        return
+
+    # موفق‌ها را پاک کن، evidence را آپدیت کن
+    by_path = {r.get("path"): r for r in (results or []) if isinstance(r, dict)}
+    import os as _os
+    deleted_count = 0
+    for e in entries:
+        r = by_path.get(e["path"])
+        if not r or not r.get("ok"):
+            continue
+        try:
+            _os.remove(e["path"])
+            deleted_count += 1
+        except Exception as _de:
+            logger.debug(f"unlink screenshot failed: {_de}")
+        try:
+            e["_ref_shot"]["archived_to_telegram"] = True
+            e["_ref_shot"]["path"] = None
+        except Exception:
+            pass
+
+    # یک نوت در inspector_session
+    try:
+        sid = (report.evidence or {}).get("auto_verify_session_id")
+        if sid is None:
+            # یا از اولین probe بگیر
+            probes = (report.evidence or {}).get("runtime_probes") or []
+            for p in probes:
+                ev = (p.get("evidence") if isinstance(p, dict) else None) or {}
+                if ev.get("inspector_session_id"):
+                    sid = ev["inspector_session_id"]
+                    break
+        if sid is not None and deleted_count > 0:
+            from .verify_runtime.inspector_probe import _msg as _ip_msg
+            await _ip_msg(
+                int(sid), "system",
+                f"📦 {deleted_count} screenshot به تلگرام آرشیو شد و از دیسک پاک شد",
+            )
+    except Exception:
+        pass
+
+    # ذخیره نهایی reports روی دیسک تا evidence جدید (path=None) محفوظ بماند
+    try:
+        from .oversight_service import get_oversight_service as _gos
+        service = _gos()
+        async with service._lock:
+            service._save_reports()  # type: ignore[attr-defined]
+    except Exception:
+        # برخی نسخه‌ها _save_reports ندارند یا اسم متفاوت دارند
+        try:
+            from .oversight_service import get_oversight_service as _gos
+            service = _gos()
+            async with service._lock:
+                if hasattr(service, "_save_reports"):
+                    service._save_reports()
+                elif hasattr(service, "_save"):
+                    service._save()
+        except Exception as _se2:
+            logger.debug(f"could not persist updated evidence: {_se2}")
+
+
+# ============================================================================
+# 🔬 (inspector_probe Phase 1) — مدیریت چرخه‌حیات auto-verify inspector_session
+# ============================================================================
+
+def _resolve_inspector_project_id(
+    task: "OversightTask",
+    watched: Optional["WatchedProject"],
+) -> str:
+    """تشخیص project_id که در InspectorSession ذخیره می‌شود.
+
+    منطق دو-مرحله:
+      الف) تلاش برای resolve به Project.id محلی (از طریق resolve_project_for_task)
+           تا session در تب «بازرس ویژه» همان پروژه نمایش داده شود.
+      ب) در صورت شکست (پروژه‌ی محلی نیست)، fallback به repo_full_name
+         (session ذخیره می‌شود ولی در UI ظاهر نخواهد بود).
+    """
+    try:
+        from ..core.database import SessionLocal
+        from .oversight_service import get_oversight_service
+        service = get_oversight_service()
+        db = SessionLocal()
+        try:
+            info = service.resolve_project_for_task(db, str(task.id))
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+        if isinstance(info, dict) and info.get("matched") and info.get("project_id"):
+            return str(info["project_id"])
+    except Exception as e:
+        logger.debug(f"_resolve_inspector_project_id: resolve failed: {e}")
+    # fallback
+    if watched and getattr(watched, "repo_full_name", None):
+        return str(watched.repo_full_name)
+    return str(getattr(task, "project_full_name", "") or "unknown")
+
+
+async def _create_auto_verify_inspector_session(
+    *, task: "OversightTask", watched: Optional["WatchedProject"],
+) -> Optional[int]:
+    """ایجاد یک InspectorSession جدید با عنوان «🤖 auto-verify · …».
+
+    خروجی: id session جدید، یا None در صورت شکست.
+    این تابع هیچ exception ای بیرون نمی‌اندازد.
+    """
+    project_id = _resolve_inspector_project_id(task, watched)
+    safe_title = (task.title or task.id)[:50]
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    title = f"🤖 auto-verify · {safe_title} · {ts}"
+
+    def _create_sync() -> Optional[int]:
+        try:
+            from ..core.database import SessionLocal
+            from ..models.inspector_session import InspectorSession
+        except Exception as e:
+            logger.debug(f"auto-verify session import failed: {e}")
+            return None
+        db = SessionLocal()
+        try:
+            sess = InspectorSession(
+                project_id=project_id, status="active", title=title,
+            )
+            db.add(sess)
+            db.commit()
+            db.refresh(sess)
+            return int(sess.id)
+        except Exception as e:
+            logger.debug(f"auto-verify session insert failed: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return None
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    try:
+        import asyncio as _asyncio_local
+        sid = await _asyncio_local.to_thread(_create_sync)
+        if sid is not None:
+            logger.info(f"auto-verify session created id={sid} for task={task.id}")
+        return sid
+    except Exception as e:
+        logger.debug(f"auto-verify session create wrapper failed: {e}")
+        return None
+
+
+async def _archive_auto_verify_inspector_session(session_id: int) -> None:
+    """status را به «archived» تغییر بده. silent fail."""
+    def _archive_sync() -> None:
+        try:
+            from ..core.database import SessionLocal
+            from ..models.inspector_session import InspectorSession
+            from datetime import datetime as _dt
+        except Exception:
+            return
+        db = SessionLocal()
+        try:
+            sess = db.query(InspectorSession).filter(
+                InspectorSession.id == session_id
+            ).first()
+            if sess is None:
+                return
+            sess.status = "archived"
+            sess.closed_at = _dt.utcnow()
+            db.commit()
+        except Exception as e:
+            logger.debug(f"archive session failed: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    try:
+        import asyncio as _asyncio_local
+        await _asyncio_local.to_thread(_archive_sync)
+    except Exception:
+        pass
+
+
 async def verify_task(
     task_id: str,
     *,
@@ -1032,6 +1380,20 @@ async def verify_task(
                 _Path(STORAGE_DIR), str(task.id), runtime_run_id,
             )
             runtime_started_at = now_iso()
+
+            # 🔬 (inspector_probe Phase 1) — یک inspector_session موقت بساز
+            # تا probe ها بتوانند اقدامات قدم‌به‌قدم را در تب «بازرس ویژه» نشان دهند.
+            # اگر ساخت شکست خورد، probe ها بدون session اجرا می‌شوند (graceful).
+            auto_verify_session_id: Optional[int] = None
+            auto_verify_project_id: Optional[str] = None
+            try:
+                auto_verify_project_id = _resolve_inspector_project_id(task, watched)
+                auto_verify_session_id = await _create_auto_verify_inspector_session(
+                    task=task, watched=watched,
+                )
+            except Exception as _se:
+                logger.debug(f"auto-verify session create failed: {_se}")
+
             # 🛡 (critical fix) — `run_probes_for_task` فقط `task.acceptance_criteria`
             # را می‌خواند. اگر آن خالی باشد و AC از پرامپت extract شده باشد، probe
             # هرگز fire نمی‌شود. به جای آن، از run_probes_for_acs استفاده می‌کنیم
@@ -1039,6 +1401,7 @@ async def verify_task(
             from .verify_runtime import run_probes_for_acs, build_probe_context
             _probe_ctx = build_probe_context(
                 task_id=str(task.id),
+                run_id=runtime_run_id,
                 repo_path=(
                     getattr(watched, "runtime_repo_path", None) if watched else None
                 ),
@@ -1057,6 +1420,9 @@ async def verify_task(
                     if watched else None
                 ),
                 evidence_dir=str(run_dir),
+                inspector_session_id=auto_verify_session_id,
+                verify_model_id=model_id,
+                watched_id=str(watched.id) if watched else None,
             )
             runtime_probe_results = await run_probes_for_acs(
                 acceptance_criteria, _probe_ctx,
@@ -1125,6 +1491,14 @@ async def verify_task(
         logger.warning(f"runtime probes block failed: {_re}", exc_info=False)
         runtime_probe_results = []
         runtime_evidence_blob = ""
+    finally:
+        # 🔬 (inspector_probe Phase 1) — session را archive کن (silent fail)
+        try:
+            _avs_id = locals().get("auto_verify_session_id")
+            if _avs_id is not None:
+                await _archive_auto_verify_inspector_session(int(_avs_id))
+        except Exception as _ae:
+            logger.debug(f"archive auto-verify session failed: {_ae}")
 
     user_goal = (watched.user_notes if watched else "") or ""
 
@@ -1491,6 +1865,13 @@ async def verify_task(
         }
         if runtime_run_id:
             report.evidence["runtime_run_id"] = runtime_run_id
+    # 🔬 (inspector_probe Phase 1) — اطلاعات لازم برای لینک به تب بازرس ویژه
+    _avs_id_local = locals().get("auto_verify_session_id")
+    if _avs_id_local is not None:
+        report.evidence["auto_verify_session_id"] = _avs_id_local
+    _avp_id_local = locals().get("auto_verify_project_id")
+    if _avp_id_local:
+        report.evidence["auto_verify_project_id"] = _avp_id_local
 
     # 🛡 fallback warning: اگر AI status=partial داد ولی remaining_parts خالی،
     # یا status=not_done ولی همه پر، یک warning log کن
@@ -1752,6 +2133,16 @@ async def verify_task(
                 extra_buttons=extra_buttons,
                 attachment=attachment_payload,
             )
+
+            # 🔬 (inspector_probe Phase 1) — ضمیمه کردن screenshot های auto-verify
+            # به همان نوتیفیکیشن (به‌عنوان پیام‌های پی‌درپی photo). در صورت موفقیت
+            # ارسال هر screenshot، فایل آن از دیسک پاک می‌شود و در evidence نشان
+            # archived_to_telegram=True ست می‌گردد. اگر تلگرام شکست بخورد، فایل
+            # روی دیسک می‌ماند و TTL cleanup در آینده آن را برمی‌دارد.
+            try:
+                await _send_runtime_screenshots_and_cleanup(_task, _report)
+            except Exception as _se:
+                logger.debug(f"send runtime screenshots failed: {_se}")
         except Exception as e:
             logger.debug(f"notification skipped: {e}")
 

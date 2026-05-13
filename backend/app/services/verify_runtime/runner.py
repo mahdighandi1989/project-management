@@ -36,6 +36,7 @@ from .manual_probe import run_manual_probe
 from .static_probe import run_static_probe
 from .test_probe import run_test_probe
 from .ui_probe import run_ui_probe
+from .inspector_probe import run_inspector_probe
 from .safety import get_breaker, is_runtime_enabled, is_ui_probe_enabled
 
 logger = logging.getLogger(__name__)
@@ -111,10 +112,27 @@ async def _run_single_probe(
                     timeout=_PER_PROBE_TIMEOUT_S,
                 )
             elif method == "ui_interaction":
-                result = await asyncio.wait_for(
-                    run_ui_probe(ac, ctx, ac_id),
-                    timeout=_PER_PROBE_TIMEOUT_S,
+                # 🔬 (Inspector Probe Phase 1) — اگر verify_plan ui_steps مفصل ندارد،
+                # به‌جای ui_probe ساختاریافته، probe سبک inspector را اجرا کن که
+                # navigate + click + screenshot + vision + log capture می‌کند و
+                # خروجی را در inspector_session ثبت می‌کند.
+                plan_dict = ac.get("verify_plan") or {}
+                ui_steps_raw = plan_dict.get("ui_steps") or []
+                real_steps = (
+                    [s for s in ui_steps_raw if isinstance(s, dict)
+                     and str(s.get("action") or "") not in ("", "screenshot")]
+                    if isinstance(ui_steps_raw, list) else []
                 )
+                if len(real_steps) >= 3:
+                    result = await asyncio.wait_for(
+                        run_ui_probe(ac, ctx, ac_id),
+                        timeout=_PER_PROBE_TIMEOUT_S,
+                    )
+                else:
+                    result = await asyncio.wait_for(
+                        run_inspector_probe(ac, ctx, ac_id),
+                        timeout=_PER_PROBE_TIMEOUT_S,
+                    )
             else:
                 result = RuntimeProbeResult(
                     ac_id=ac_id,
@@ -162,6 +180,9 @@ def build_probe_context(
     auth_type: Optional[str] = None,
     auth_value: Optional[str] = None,
     evidence_dir: Optional[str] = None,
+    inspector_session_id: Optional[int] = None,
+    verify_model_id: Optional[str] = None,
+    watched_id: Optional[str] = None,
 ) -> ProbeContext:
     """helper برای ساخت ProbeContext از پارامترهای ساده."""
     return ProbeContext(
@@ -173,6 +194,9 @@ def build_probe_context(
         auth_type=auth_type,
         auth_value=auth_value,
         evidence_dir=evidence_dir,
+        inspector_session_id=inspector_session_id,
+        verify_model_id=verify_model_id,
+        watched_id=watched_id,
     )
 
 

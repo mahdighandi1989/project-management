@@ -5966,22 +5966,49 @@ function TasksPanel({
                             {' · '}⚠️ {(r.evidence.runtime_probes_summary as any).error || 0} error
                           </div>
                         )}
-                        {Array.isArray(r.evidence.runtime_probes) && (r.evidence.runtime_probes as any[]).length > 0 && (
-                          <ul className="mt-1 text-[10px] text-gray-600 dark:text-gray-400 space-y-0.5">
-                            {(r.evidence.runtime_probes as any[]).slice(0, 6).map((p: any, i: number) => {
-                              const emoji = p.status === 'passed' ? '✅' : p.status === 'failed' ? '❌' : p.status === 'error' ? '⚠️' : '⏭';
-                              return (
-                                <li key={i} className="truncate">
-                                  {emoji} <span className="font-mono">{p.method}</span> — «{String(p.ac_text || '').slice(0, 60)}»
-                                  {p.evidence?.reason ? <span className="text-gray-500"> ({String(p.evidence.reason).slice(0, 60)})</span> : null}
-                                </li>
-                              );
-                            })}
-                            {(r.evidence.runtime_probes as any[]).length > 6 && (
-                              <li className="text-gray-500">… و {(r.evidence.runtime_probes as any[]).length - 6} probe دیگر</li>
-                            )}
-                          </ul>
-                        )}
+                        {Array.isArray(r.evidence.runtime_probes) && (r.evidence.runtime_probes as any[]).length > 0 && (() => {
+                          const probes = r.evidence.runtime_probes as any[];
+                          // 🔬 (inspector_probe Phase 1) — project_id از evidence میاد
+                          // (در verifier توسط resolve_project_for_task محاسبه شده)
+                          const projectIdForLink = (r.evidence?.auto_verify_project_id as string) || '';
+                          return (
+                            <ul className="mt-1 text-[10px] text-gray-600 dark:text-gray-400 space-y-1">
+                              {probes.slice(0, 6).map((p: any, i: number) => {
+                                const emoji = p.status === 'passed' ? '✅' : p.status === 'failed' ? '❌' : p.status === 'error' ? '⚠️' : '⏭';
+                                const sid = p.evidence?.inspector_session_id;
+                                // اولین vision_description از screenshots
+                                const shots = Array.isArray(p.evidence?.screenshots) ? p.evidence.screenshots : [];
+                                const firstVision = shots.find((s: any) => s && s.vision_description)?.vision_description || '';
+                                return (
+                                  <li key={i}>
+                                    <div className="truncate">
+                                      {emoji} <span className="font-mono">{p.method}</span> — «{String(p.ac_text || '').slice(0, 60)}»
+                                      {p.evidence?.reason ? <span className="text-gray-500"> ({String(p.evidence.reason).slice(0, 60)})</span> : null}
+                                    </div>
+                                    {firstVision && (
+                                      <div className="pr-3 text-gray-500 dark:text-gray-400 italic truncate">
+                                        👁 {String(firstVision).slice(0, 100)}{String(firstVision).length > 100 ? '…' : ''}
+                                      </div>
+                                    )}
+                                    {sid && projectIdForLink && (
+                                      <a
+                                        href={`/projects/${encodeURIComponent(projectIdForLink)}?tab=inspector&session=${encodeURIComponent(String(sid))}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-cyan-700 dark:text-cyan-300 hover:underline pr-3 inline-block"
+                                      >
+                                        📺 مشاهده در بازرس ویژه →
+                                      </a>
+                                    )}
+                                  </li>
+                                );
+                              })}
+                              {probes.length > 6 && (
+                                <li className="text-gray-500">… و {probes.length - 6} probe دیگر</li>
+                              )}
+                            </ul>
+                          );
+                        })()}
                       </div>
                     )}
                     {r.evidence && (Object.keys(r.evidence).length > 0) && (() => {
