@@ -1798,17 +1798,46 @@ async def verify_task(
                     "",
                 ]
                 for r in runtime_probe_results:
-                    rt_lines.append(f"### {r.summary()}")
+                    # 🆕 (Phase 2) — تشخیص step probe و header مخصوص
+                    _is_step = isinstance(r.evidence, dict) and r.evidence.get("step_id")
+                    _is_system = (r.ac_id == "system_home")
+                    if _is_step:
+                        rt_lines.append(
+                            f"### 🪜 [step #{r.evidence.get('step_id')}] "
+                            f"{r.evidence.get('step_title', '')} — {r.status}"
+                            f" (route={r.evidence.get('step_inferred_route', '')})"
+                        )
+                    elif _is_system:
+                        rt_lines.append(f"### 🏠 [system probe] — {r.status}")
+                    else:
+                        rt_lines.append(f"### {r.summary()}")
                     rt_lines.append(f"  - AC: «{r.ac_text[:200]}»")
                     if r.evidence:
-                        # خلاصهٔ شواهد بدون ذکر paths فایل (که برای AI mعنی ندارد)
+                        # خلاصهٔ شواهد — حذف فیلدهای حجیم/بی‌فایده برای AI
                         ev = {k: v for k, v in r.evidence.items()
-                              if k not in ("step_results", "screenshots", "stdout_excerpt", "stderr_excerpt")}
+                              if k not in (
+                                  "step_results", "screenshots",
+                                  "stdout_excerpt", "stderr_excerpt",
+                                  "network_calls",  # حجیم — backend_urls_called کافیست
+                              )}
+                        # vision را در یک خط جدا برای خوانایی بهتر AI
+                        _shots = r.evidence.get("screenshots") or []
+                        if isinstance(_shots, list):
+                            for _s in _shots:
+                                if isinstance(_s, dict) and _s.get("vision_description"):
+                                    rt_lines.append(
+                                        f"  - 👁 vision ({_s.get('label', 'screenshot')}): "
+                                        f"{str(_s['vision_description'])[:500]}"
+                                    )
                         if ev:
                             rt_lines.append(f"  - evidence: {ev}")
                     rt_lines.append("")
-                    # override hint برای AI
-                    if r.status == "passed":
+                    # override hint برای AI — برای step probe، در sets جدا
+                    if _is_step:
+                        # step probes را به آن AC که در remaining است map نکن
+                        # (شواهد runtime نباید AI را گیج کند)
+                        pass
+                    elif r.status == "passed":
                         runtime_override_hints[r.ac_text[:200]] = "passed"
                     elif r.status == "failed":
                         runtime_override_hints[r.ac_text[:200]] = "failed"
