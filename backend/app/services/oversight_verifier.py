@@ -972,56 +972,36 @@ def _infer_route_for_step(
                 kebab = _re.sub(r"(?<=[a-z])(?=[A-Z])", "-", name).lower()
                 return ("/" + kebab, True)
 
-    # 6) نگاشت کلمات کلیدی فارسی
-    keyword_map = [
-        ("مناظره", "/debate"),
-        ("نظارت", "/oversight"),
-        ("پروژه‌ها", "/projects"),
-        ("پروژه ها", "/projects"),
-        ("پروژه", "/projects"),
-        ("بازرس", "/projects"),
-        ("داشبورد", "/dashboard"),
-        ("لاگین", "/login"),
-        ("ثبت‌نام", "/signup"),
-        ("ثبت نام", "/signup"),
-        ("تنظیمات", "/settings"),
-        ("پروفایل", "/profile"),
-        ("نمودار", "/charts"),
-        ("ایده", "/oversight"),
-        ("خانه", "/"),
-        ("صفحه اصلی", "/"),
-        # 🆕 trading system terms
-        ("استراتژی", "/strategies"),
-        ("تونل", "/tunnels"),
-        ("معاملات", "/trades"),
-        ("ربات", "/bots"),
+    # 6) نگاشت کلمات کلیدی فارسی — فقط زمانی که کلمه صریحاً «صفحه/پنل/تب»
+    # دنبالش بیاد (تا برای AC های backend مثل «thread lifecycle» اشتباه
+    # route نسازیم).
+    # 🆕 (Phase 3 fix) — keyword های generic که قبلاً false-positive route
+    # می‌دادن (مثل "monitor"، "strateg") حذف شدند. اگر AC صریحاً «X page»
+    # نگفته باشد، probe باید SKIPPED شود (نه route حدسی).
+    fa_explicit_pages = [
+        ("صفحه مناظره", "/debate"),
+        ("صفحه نظارت", "/oversight"),
+        ("صفحه پروژه", "/projects"),
+        ("صفحه داشبورد", "/dashboard"),
+        ("صفحه لاگین", "/login"),
+        ("صفحه تنظیمات", "/settings"),
+        ("صفحه پروفایل", "/profile"),
+        ("صفحه استراتژی", "/strategies"),
+        ("صفحه تونل", "/tunnels"),
+        ("صفحه معاملات", "/trades"),
+        ("پنل نظارت", "/oversight"),
+        ("پنل استراتژی", "/strategies"),
     ]
     full_text = (scope + " " + title)
-    for kw, route in keyword_map:
+    for kw, route in fa_explicit_pages:
         if kw in full_text:
             return (route, True)
 
-    # 7) نگاشت کلمات کلیدی انگلیسی
-    en_map = [
-        ("debate", "/debate"), ("oversight", "/oversight"),
-        ("project", "/projects"), ("dashboard", "/dashboard"),
-        ("login", "/login"), ("signup", "/signup"),
-        ("setting", "/settings"), ("profile", "/profile"),
-        ("chart", "/charts"),
-        # 🆕 generic page-keywords
-        ("routing", "/routing"),
-        ("monitor", "/monitor"),
-        ("strateg", "/strategies"),  # strategy/strategies
-        ("tunnel", "/tunnels"),
-        ("admin", "/admin"),
-        ("user", "/users"),
-        ("notification", "/notifications"),
-    ]
-    for kw, route in en_map:
-        if kw in combined_low:
-            return (route, True)
-
-    # 8) fallback به task — اما با علامت is_specific=False
+    # 7) fallback به task route — اما با علامت is_specific=False
+    # نکته: keyword های انگلیسی generic حذف شدند چون باعث false-positive
+    # routes می‌شدند (مثل "monitor diagram" → /monitor در حالی که پروژه
+    # /monitor page ندارد). برای route قطعی، AC باید صریحاً "X page" یا
+    # "/path" داشته باشد (پیش‌تر در regex ها بررسی شد).
     task_route = _infer_frontend_route_for_task(task)
     return (task_route, task_route != "/")
 
