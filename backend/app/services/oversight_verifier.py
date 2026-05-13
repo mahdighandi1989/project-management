@@ -899,34 +899,80 @@ async def _send_mega_bundle(task: "OversightTask") -> None:
 
 def _infer_route_for_step(
     step: Dict[str, Any], task: "OversightTask",
-) -> str:
+) -> Tuple[str, bool]:
     """استخراج route مرتبط با یک task_step.
 
+    Returns: (route, is_specific) — اگر is_specific=False، نتوانستیم route
+    خاصی پیدا کنیم و به / fallback شده‌ایم.
+
     تلاش به ترتیب:
-      1) step.scope: اگر شامل مسیر Next.js (app/X/page.tsx یا pages/X.tsx) → /X
-      2) step.title: نگاشت کلمات کلیدی فارسی به route
-      3) fallback: _infer_frontend_route_for_task(task)
+      1) explicit URL path در scope/title (مثل /charts، /admin/users)
+      2) Next.js App Router file path (app/X/page.tsx)
+      3) pages/X.tsx
+      4) "X page" / "X panel" / "X tab" pattern → /x (kebab)
+      5) ComponentName.tsx در target_files → /component-name
+      6) نگاشت کلمات کلیدی فارسی/انگلیسی
+      7) fallback (is_specific=False)
     """
     import re as _re
     scope = str(step.get("scope") or "")
     title = str(step.get("title") or "")
-    combined = f"{scope} {title}".lower()
+    combined = f"{scope} {title}"
+    combined_low = combined.lower()
 
-    # 1) Next.js App Router: app/X/page.tsx
-    m = _re.search(r"app/([a-z0-9_\-]+(?:/[a-z0-9_\-]+)*)/page\.[jt]sx?", combined)
-    if m:
-        route = m.group(1).strip("/")
+    # 1) explicit URL path — /foo or /foo/bar (نه فقط /)
+    # حداقل ۳ حرف بعد از / تا با همان "/" تنها confuse نشود
+    m_url = _re.search(r"(?<!\w)/([a-z][a-z0-9_-]{2,}(?:/[a-z0-9_-]+)*)", combined_low)
+    if m_url:
+        return ("/" + m_url.group(1), True)
+
+    # 2) Next.js App Router file path
+    m1 = _re.search(r"app/([a-z0-9_\-]+(?:/[a-z0-9_\-]+)*)/page\.[jt]sx?", combined_low)
+    if m1:
+        route = m1.group(1).strip("/")
         if route and not route.startswith(("layout", "_app", "_document")):
-            return "/" + route
+            return ("/" + route, True)
 
-    # 2) pages/X.tsx
-    m2 = _re.search(r"pages/([a-z0-9_\-]+)\.[jt]sx?", combined)
+    # 3) pages/X.tsx
+    m2 = _re.search(r"pages/([a-z0-9_\-]+)\.[jt]sx?", combined_low)
     if m2:
         route = m2.group(1).strip("/")
         if route not in ("index", "_app", "_document"):
-            return "/" + route
+            return ("/" + route, True)
 
-    # 3) نگاشت کلمات کلیدی فارسی (روی scope + title)
+    # 4) "X page" / "X panel" / "X tab" / "X view" / "X screen" — extract X
+    # مثال: "Routing Diagram page" → /routing-diagram
+    m_pg = _re.search(
+        r"\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,2})\s+"
+        r"(?:page|panel|view|tab|screen|section|dashboard)",
+        combined,
+    )
+    if m_pg:
+        name = m_pg.group(1).strip()
+        # CamelCase/spaced → kebab
+        # "Routing Diagram" → "routing-diagram"
+        kebab = _re.sub(r"\s+", "-", name).lower()
+        # for inner CamelCase
+        kebab = _re.sub(r"(?<=[a-z])(?=[A-Z])", "-", kebab).lower()
+        if kebab and len(kebab) >= 3:
+            return ("/" + kebab, True)
+
+    # 5) ComponentName از target_files (frontend components)
+    for f in (task.target_files or []):
+        f_str = str(f)
+        # frontend/src/components/X/Y.tsx یا /SomeComponent.ts
+        m_comp = _re.search(
+            r"(?:components?|widgets?)[/\\][\w/\\]*?([A-Z][a-zA-Z0-9]+)\.(?:tsx?|jsx?)$",
+            f_str,
+        )
+        if m_comp:
+            name = m_comp.group(1)
+            # skip generic names
+            if name.lower() not in ("index", "main", "app", "utils", "types", "helpers"):
+                kebab = _re.sub(r"(?<=[a-z])(?=[A-Z])", "-", name).lower()
+                return ("/" + kebab, True)
+
+    # 6) نگاشت کلمات کلیدی فارسی
     keyword_map = [
         ("مناظره", "/debate"),
         ("نظارت", "/oversight"),
@@ -944,26 +990,40 @@ def _infer_route_for_step(
         ("ایده", "/oversight"),
         ("خانه", "/"),
         ("صفحه اصلی", "/"),
+        # 🆕 trading system terms
+        ("استراتژی", "/strategies"),
+        ("تونل", "/tunnels"),
+        ("معاملات", "/trades"),
+        ("ربات", "/bots"),
     ]
     full_text = (scope + " " + title)
     for kw, route in keyword_map:
         if kw in full_text:
-            return route
+            return (route, True)
 
-    # 4) نگاشت کلمات کلیدی انگلیسی
+    # 7) نگاشت کلمات کلیدی انگلیسی
     en_map = [
         ("debate", "/debate"), ("oversight", "/oversight"),
         ("project", "/projects"), ("dashboard", "/dashboard"),
         ("login", "/login"), ("signup", "/signup"),
         ("setting", "/settings"), ("profile", "/profile"),
         ("chart", "/charts"),
+        # 🆕 generic page-keywords
+        ("routing", "/routing"),
+        ("monitor", "/monitor"),
+        ("strateg", "/strategies"),  # strategy/strategies
+        ("tunnel", "/tunnels"),
+        ("admin", "/admin"),
+        ("user", "/users"),
+        ("notification", "/notifications"),
     ]
     for kw, route in en_map:
-        if kw in combined:
-            return route
+        if kw in combined_low:
+            return (route, True)
 
-    # 5) fallback به route تسک
-    return _infer_frontend_route_for_task(task)
+    # 8) fallback به task — اما با علامت is_specific=False
+    task_route = _infer_frontend_route_for_task(task)
+    return (task_route, task_route != "/")
 
 
 def _infer_frontend_route_for_task(task: "OversightTask") -> str:
@@ -1986,10 +2046,15 @@ async def verify_task(
                     # حداکثر ۵ مرحله — تا verify طول نکشد
                     for _step in _ts_list[:5]:
                         try:
-                            _sroute = _infer_route_for_step(_step, task)
+                            _sroute, _route_specific = _infer_route_for_step(_step, task)
                             _sid = _step.get("id", 0)
                             _stitle = str(_step.get("title") or "")[:80]
                             _sscope = str(_step.get("scope") or "")[:200]
+                            # 🆕 (Phase 3 fix) — اگر route قابل تشخیص نیست و
+                            # هیچ AC مشابه‌ای هم نداریم، probe را SKIPPED علامت
+                            # بزن — بهتر از فریب با feature_present=yes روی
+                            # صفحه homepage هست.
+                            # (این چک پایین‌تر بعد از _find_matching_ac انجام می‌شود)
                             # 🆕 (Phase 3 fix) — به‌جای plan navigate-only،
                             # plan AC مشابه را اگر هست استفاده کن
                             _matched_ac = _find_matching_ac(_stitle, _sscope)
@@ -2017,6 +2082,44 @@ async def verify_task(
                                     "verify_plan": _matched_plan,
                                 }
                             else:
+                                # 🆕 (Phase 3 final fix) — اگر route خاصی پیدا
+                                # نکردیم (به / fallback شده) و هیچ matched AC
+                                # هم نداریم، یعنی واقعاً نمی‌توانیم این step را
+                                # با اطمینان probe کنیم. probe نزن — یا یک
+                                # "skipped" خفیف بفرست تا کاربر بداند علتش چیست.
+                                if not _route_specific:
+                                    # ساخت یک synthetic skipped result بدون
+                                    # واقعاً اجرای probe
+                                    from .verify_runtime.base import (
+                                        RuntimeProbeResult, PROBE_STATUS_SKIPPED,
+                                    )
+                                    _step_res = RuntimeProbeResult(
+                                        ac_id=f"step_{_sid}",
+                                        ac_text=f"(step probe #{_sid}) {_stitle}",
+                                        method="ui_interaction",
+                                        status=PROBE_STATUS_SKIPPED,
+                                        evidence={
+                                            "inspector_session_id": _probe_ctx.inspector_session_id,
+                                            "reason": "نتوانست route خاص برای این step پیدا کند",
+                                            "step_id": _sid,
+                                            "step_title": _stitle,
+                                            "step_inferred_route": _sroute,
+                                            "_recipe_source": "skipped_no_route",
+                                            "probe_type": "inspector_phase3",
+                                        },
+                                        duration_ms=0,
+                                    )
+                                    step_probe_results.append(_step_res)
+                                    if auto_verify_session_id:
+                                        try:
+                                            from .verify_runtime.inspector_probe import _msg as _ip_msg
+                                            await _ip_msg(
+                                                auto_verify_session_id, "system",
+                                                f"⏭ step #{_sid} skipped — route خاصی پیدا نشد",
+                                            )
+                                        except Exception:
+                                            pass
+                                    continue  # بریم step بعدی
                                 _synth_ac = {
                                     "text": f"(step probe #{_sid}) {_stitle}",
                                     "verify_method": "ui_interaction",
