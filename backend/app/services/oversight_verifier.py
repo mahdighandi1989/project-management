@@ -678,6 +678,116 @@ async def _fetch_recent_commits(
         return []
 
 
+# ============================================================================
+# 🔬 (inspector_probe Phase 1) — مدیریت چرخه‌حیات auto-verify inspector_session
+# ============================================================================
+
+def _resolve_inspector_project_id(
+    task: "OversightTask",
+    watched: Optional["WatchedProject"],
+) -> str:
+    """تشخیص project_id که در InspectorSession ذخیره می‌شود.
+
+    inspector_session.project_id همان repo_full_name (مثل
+    «mahdighandi1989/project-management») است که از watched گرفته می‌شود.
+    در نبود watched، fallback به task.project_full_name است.
+    """
+    if watched and getattr(watched, "repo_full_name", None):
+        return str(watched.repo_full_name)
+    return str(getattr(task, "project_full_name", "") or "unknown")
+
+
+async def _create_auto_verify_inspector_session(
+    *, task: "OversightTask", watched: Optional["WatchedProject"],
+) -> Optional[int]:
+    """ایجاد یک InspectorSession جدید با عنوان «🤖 auto-verify · …».
+
+    خروجی: id session جدید، یا None در صورت شکست.
+    این تابع هیچ exception ای بیرون نمی‌اندازد.
+    """
+    project_id = _resolve_inspector_project_id(task, watched)
+    safe_title = (task.title or task.id)[:50]
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    title = f"🤖 auto-verify · {safe_title} · {ts}"
+
+    def _create_sync() -> Optional[int]:
+        try:
+            from ..core.database import SessionLocal
+            from ..models.inspector_session import InspectorSession
+        except Exception as e:
+            logger.debug(f"auto-verify session import failed: {e}")
+            return None
+        db = SessionLocal()
+        try:
+            sess = InspectorSession(
+                project_id=project_id, status="active", title=title,
+            )
+            db.add(sess)
+            db.commit()
+            db.refresh(sess)
+            return int(sess.id)
+        except Exception as e:
+            logger.debug(f"auto-verify session insert failed: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return None
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    try:
+        import asyncio as _asyncio_local
+        sid = await _asyncio_local.to_thread(_create_sync)
+        if sid is not None:
+            logger.info(f"auto-verify session created id={sid} for task={task.id}")
+        return sid
+    except Exception as e:
+        logger.debug(f"auto-verify session create wrapper failed: {e}")
+        return None
+
+
+async def _archive_auto_verify_inspector_session(session_id: int) -> None:
+    """status را به «archived» تغییر بده. silent fail."""
+    def _archive_sync() -> None:
+        try:
+            from ..core.database import SessionLocal
+            from ..models.inspector_session import InspectorSession
+            from datetime import datetime as _dt
+        except Exception:
+            return
+        db = SessionLocal()
+        try:
+            sess = db.query(InspectorSession).filter(
+                InspectorSession.id == session_id
+            ).first()
+            if sess is None:
+                return
+            sess.status = "archived"
+            sess.closed_at = _dt.utcnow()
+            db.commit()
+        except Exception as e:
+            logger.debug(f"archive session failed: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    try:
+        import asyncio as _asyncio_local
+        await _asyncio_local.to_thread(_archive_sync)
+    except Exception:
+        pass
+
+
 async def verify_task(
     task_id: str,
     *,
@@ -1032,6 +1142,18 @@ async def verify_task(
                 _Path(STORAGE_DIR), str(task.id), runtime_run_id,
             )
             runtime_started_at = now_iso()
+
+            # 🔬 (inspector_probe Phase 1) — یک inspector_session موقت بساز
+            # تا probe ها بتوانند اقدامات قدم‌به‌قدم را در تب «بازرس ویژه» نشان دهند.
+            # اگر ساخت شکست خورد، probe ها بدون session اجرا می‌شوند (graceful).
+            auto_verify_session_id: Optional[int] = None
+            try:
+                auto_verify_session_id = await _create_auto_verify_inspector_session(
+                    task=task, watched=watched,
+                )
+            except Exception as _se:
+                logger.debug(f"auto-verify session create failed: {_se}")
+
             # 🛡 (critical fix) — `run_probes_for_task` فقط `task.acceptance_criteria`
             # را می‌خواند. اگر آن خالی باشد و AC از پرامپت extract شده باشد، probe
             # هرگز fire نمی‌شود. به جای آن، از run_probes_for_acs استفاده می‌کنیم
@@ -1039,6 +1161,7 @@ async def verify_task(
             from .verify_runtime import run_probes_for_acs, build_probe_context
             _probe_ctx = build_probe_context(
                 task_id=str(task.id),
+                run_id=runtime_run_id,
                 repo_path=(
                     getattr(watched, "runtime_repo_path", None) if watched else None
                 ),
@@ -1057,6 +1180,9 @@ async def verify_task(
                     if watched else None
                 ),
                 evidence_dir=str(run_dir),
+                inspector_session_id=auto_verify_session_id,
+                verify_model_id=model_id,
+                watched_id=str(watched.id) if watched else None,
             )
             runtime_probe_results = await run_probes_for_acs(
                 acceptance_criteria, _probe_ctx,
@@ -1125,6 +1251,14 @@ async def verify_task(
         logger.warning(f"runtime probes block failed: {_re}", exc_info=False)
         runtime_probe_results = []
         runtime_evidence_blob = ""
+    finally:
+        # 🔬 (inspector_probe Phase 1) — session را archive کن (silent fail)
+        try:
+            _avs_id = locals().get("auto_verify_session_id")
+            if _avs_id is not None:
+                await _archive_auto_verify_inspector_session(int(_avs_id))
+        except Exception as _ae:
+            logger.debug(f"archive auto-verify session failed: {_ae}")
 
     user_goal = (watched.user_notes if watched else "") or ""
 
