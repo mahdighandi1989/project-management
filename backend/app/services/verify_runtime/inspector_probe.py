@@ -664,6 +664,28 @@ async def _run_inspector_inner(
         for shot in screenshots:
             if not shot.get("path"):
                 continue
+            # 🆕 (Phase 4 fix) — اگر SPA-404 detected شد، vision را اصلاً
+            # صدا نزن — vision معمولاً از روی URL/title hallucinate می‌کند
+            # و feature_present=yes برمی‌گرداند با محتوای ساختگی. به‌جای
+            # آن، مستقیماً feature_present=no با reason صریح ست می‌کنیم.
+            if spa_404_detected:
+                shot["vision_description"] = (
+                    "(صفحه SPA-404 — body شامل 'Not Found' / 404 است؛ "
+                    "Vision صدا زده نشد تا hallucination رخ ندهد)"
+                )
+                shot["vision_source"] = "skipped_spa_404"
+                shot["vision_feature_present"] = "no"
+                shot["vision_feature_reason"] = (
+                    "SPA-404 page detected — feature can't be present on a 404 page"
+                )
+                try:
+                    await _msg(
+                        ctx.inspector_session_id, "system",
+                        f"🚫 vision ({shot['label']}) skipped — SPA-404 detected",
+                    )
+                except Exception:
+                    pass
+                continue
             try:
                 from .vision_helper import analyze_screenshot
                 vctx = {

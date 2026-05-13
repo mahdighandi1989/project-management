@@ -2139,10 +2139,18 @@ async def verify_task(
             # 🆕 (Phase 4) — Backend Log Probe برای AC های backend-flavor
             # فقط اگر task_type in (backend, mixed, unknown)
             backend_log_probe_results: List[Any] = []
+            _bp_diag = {
+                "total_acs": 0, "skipped_ui": 0, "skipped_no_signal": 0,
+                "ran": 0, "task_type_ok": False, "block_exception": None,
+            }
             try:
-                if task_type in ("backend", "mixed", "unknown") and acceptance_criteria:
+                _bp_diag["task_type_ok"] = task_type in ("backend", "mixed", "unknown")
+                if _bp_diag["task_type_ok"] and acceptance_criteria:
                     from .verify_runtime.backend_log_probe import run_backend_log_probe
-                    # حداکثر ۵ AC backend-flavor
+                    from .verify_runtime.backend_log_probe import (
+                        _extract_endpoints_from_text, _extract_python_symbols,
+                    )
+                    _bp_diag["total_acs"] = len(acceptance_criteria)
                     _bp_count = 0
                     for _ac_idx, _ac in enumerate(acceptance_criteria):
                         if _bp_count >= 5:
@@ -2153,16 +2161,13 @@ async def verify_task(
                         _ac_method = (
                             _ac.get("verify_method") if isinstance(_ac, dict) else "static"
                         ) or ""
-                        # فقط AC هایی که UI نیستن
                         if str(_ac_method).lower() == "ui_interaction":
+                            _bp_diag["skipped_ui"] += 1
                             continue
-                        # heuristic: AC باید endpoint یا symbol داشته باشه
-                        from .verify_runtime.backend_log_probe import (
-                            _extract_endpoints_from_text, _extract_python_symbols,
-                        )
                         _eps = _extract_endpoints_from_text(_ac_text)
                         _syms = _extract_python_symbols(_ac_text)
                         if not _eps and not _syms:
+                            _bp_diag["skipped_no_signal"] += 1
                             continue
                         _bp_res = await run_backend_log_probe(
                             _ac if isinstance(_ac, dict) else {"text": _ac_text},
@@ -2171,17 +2176,47 @@ async def verify_task(
                         if _bp_res is not None:
                             backend_log_probe_results.append(_bp_res)
                             _bp_count += 1
-                    if backend_log_probe_results and auto_verify_session_id:
-                        try:
-                            from .verify_runtime.inspector_probe import _msg as _ip_msg
-                            await _ip_msg(
-                                auto_verify_session_id, "system",
-                                f"📊 backend-log: {len(backend_log_probe_results)} AC analyzed",
-                            )
-                        except Exception:
-                            pass
+                            _bp_diag["ran"] += 1
             except Exception as _ble:
+                _bp_diag["block_exception"] = f"{type(_ble).__name__}: {str(_ble)[:120]}"
                 logger.debug(f"backend_log_probe block failed: {_ble}")
+            # 🆕 (Phase 4 fix) — همیشه diagnostic بفرست تا اگر probe ها
+            # ظاهر نشدند، علتش روشن باشد (no logs / no signal / ui only)
+            if auto_verify_session_id:
+                try:
+                    from .verify_runtime.inspector_probe import _msg as _ip_msg
+                    if not _bp_diag["task_type_ok"]:
+                        await _ip_msg(
+                            auto_verify_session_id, "system",
+                            f"📊 backend-log: skipped (task_type={task_type} نیازی نبود)",
+                        )
+                    elif _bp_diag["block_exception"]:
+                        await _ip_msg(
+                            auto_verify_session_id, "system",
+                            f"📊 backend-log: ⚠️ exception: {_bp_diag['block_exception']}",
+                        )
+                    elif _bp_diag["ran"] > 0:
+                        _verdicts = [
+                            (r.evidence or {}).get("verdict", "?")
+                            for r in backend_log_probe_results
+                        ]
+                        await _ip_msg(
+                            auto_verify_session_id, "system",
+                            f"📊 backend-log: {_bp_diag['ran']} AC analyzed — "
+                            f"verdicts={_verdicts} "
+                            f"(skipped: {_bp_diag['skipped_ui']} ui, "
+                            f"{_bp_diag['skipped_no_signal']} no-signal)",
+                        )
+                    else:
+                        await _ip_msg(
+                            auto_verify_session_id, "system",
+                            f"📊 backend-log: 0 probes ran — "
+                            f"total_acs={_bp_diag['total_acs']}, "
+                            f"skipped_ui={_bp_diag['skipped_ui']}, "
+                            f"skipped_no_signal={_bp_diag['skipped_no_signal']}",
+                        )
+                except Exception:
+                    pass
 
             # 🔬 (inspector_probe Phase 2 — per-step probes) — اگر تسک
             # task_steps دارد، برای هر مرحله یک probe جداگانه با route
@@ -2252,11 +2287,52 @@ async def verify_task(
                             _sid = _step.get("id", 0)
                             _stitle = str(_step.get("title") or "")[:80]
                             _sscope = str(_step.get("scope") or "")[:200]
-                            # 🆕 (Phase 3 fix) — اگر route قابل تشخیص نیست و
-                            # هیچ AC مشابه‌ای هم نداریم، probe را SKIPPED علامت
-                            # بزن — بهتر از فریب با feature_present=yes روی
-                            # صفحه homepage هست.
-                            # (این چک پایین‌تر بعد از _find_matching_ac انجام می‌شود)
+
+                            # 🆕 (Phase 4 fix) — Smart Navigation همیشه قبل
+                            # از matched-AC check اجرا شود، تا حتی AC هایی که
+                            # match می‌شوند ولی route آنها generic است،
+                            # بتوانند از nav menu لینک واقعی بگیرند.
+                            if not _route_specific and _probe_ctx.frontend_base_url:
+                                try:
+                                    from .verify_runtime.navigation_helper import (
+                                        try_smart_navigation_for_step,
+                                    )
+                                    _smart_nav_result = await try_smart_navigation_for_step(
+                                        ac_text=f"{_stitle}\n{_sscope}",
+                                        base_url=_probe_ctx.frontend_base_url or "",
+                                        storage_state=_probe_ctx.storage_state,
+                                        verify_model_id=_probe_ctx.verify_model_id,
+                                    )
+                                    _sn_conf = (_smart_nav_result or {}).get("confidence", "?")
+                                    _sn_links = (_smart_nav_result or {}).get("links_count", 0)
+                                    if _smart_nav_result and _smart_nav_result.get("href"):
+                                        _sroute = _smart_nav_result["href"]
+                                        _route_specific = True
+                                        if auto_verify_session_id:
+                                            try:
+                                                from .verify_runtime.inspector_probe import _msg as _ip_msg
+                                                await _ip_msg(
+                                                    auto_verify_session_id, "system",
+                                                    f"🧭 smart-nav step #{_sid}: AI لینک «{_smart_nav_result.get('chosen_text', '')[:40]}» "
+                                                    f"→ {_sroute} (confidence={_sn_conf}, links={_sn_links})",
+                                                )
+                                            except Exception:
+                                                pass
+                                    else:
+                                        if auto_verify_session_id:
+                                            try:
+                                                from .verify_runtime.inspector_probe import _msg as _ip_msg
+                                                await _ip_msg(
+                                                    auto_verify_session_id, "system",
+                                                    f"🧭 smart-nav step #{_sid}: no match "
+                                                    f"(confidence={_sn_conf}, links_scanned={_sn_links}, "
+                                                    f"reason={str((_smart_nav_result or {}).get('reason', ''))[:120]})",
+                                                )
+                                            except Exception:
+                                                pass
+                                except Exception as _snerr:
+                                    logger.debug(f"smart_nav failed: {_snerr}")
+
                             # 🆕 (Phase 3 fix) — به‌جای plan navigate-only،
                             # plan AC مشابه را اگر هست استفاده کن
                             _matched_ac = _find_matching_ac(_stitle, _sscope)
@@ -2284,40 +2360,11 @@ async def verify_task(
                                     "verify_plan": _matched_plan,
                                 }
                             else:
-                                # 🆕 (Phase 4) — قبل از skip، Smart Navigation
-                                # تلاش کن: شاید AI بتواند از روی nav menu
-                                # لینک مرتبط را پیدا کند.
-                                if not _route_specific:
-                                    try:
-                                        from .verify_runtime.navigation_helper import (
-                                            try_smart_navigation_for_step,
-                                        )
-                                        _smart_nav_result = await try_smart_navigation_for_step(
-                                            ac_text=f"{_stitle}\n{_sscope}",
-                                            base_url=_probe_ctx.frontend_base_url or "",
-                                            storage_state=_probe_ctx.storage_state,
-                                            verify_model_id=_probe_ctx.verify_model_id,
-                                        )
-                                        if _smart_nav_result and _smart_nav_result.get("href"):
-                                            _sroute = _smart_nav_result["href"]
-                                            _route_specific = True
-                                            if auto_verify_session_id:
-                                                try:
-                                                    from .verify_runtime.inspector_probe import _msg as _ip_msg
-                                                    await _ip_msg(
-                                                        auto_verify_session_id, "system",
-                                                        f"🧭 smart-nav: AI لینک «{_smart_nav_result.get('chosen_text', '')[:40]}» "
-                                                        f"→ {_sroute} (confidence={_smart_nav_result.get('confidence')})",
-                                                    )
-                                                except Exception:
-                                                    pass
-                                    except Exception as _snerr:
-                                        logger.debug(f"smart_nav failed: {_snerr}")
-
                                 # 🆕 (Phase 3 final fix) — اگر route خاصی پیدا
                                 # نکردیم (به / fallback شده) و هیچ matched AC
-                                # هم نداریم و smart_nav هم نتوانست، یعنی واقعاً
-                                # نمی‌توانیم این step را با اطمینان probe کنیم.
+                                # هم نداریم و smart_nav هم (که بالاتر اجرا شد)
+                                # نتوانست، یعنی واقعاً نمی‌توانیم این step را
+                                # با اطمینان probe کنیم.
                                 if not _route_specific:
                                     # ساخت یک synthetic skipped result بدون
                                     # واقعاً اجرای probe
