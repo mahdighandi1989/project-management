@@ -351,6 +351,148 @@ async def runtime_autodetect(watched_id: str):
     }
 
 
+# 🔬 (Runtime Verify diagnostics) — چرا probe ها کار می‌کنند یا نمی‌کنند
+@router.get("/runtime/diagnostics")
+async def runtime_diagnostics():
+    """تشخیص وضعیت runtime probes — کجا تنظیم نشده و چرا probe ها skip می‌شوند.
+
+    خروجی شامل:
+    - env: وضعیت RUNTIME_VERIFY_ENABLED/UI و حضور توکن‌ها (فقط بود/نبود)
+    - watched: برای هر watched، URL ها، repo_path، نتیجه آخرین تست اتصال
+    - tasks: شمارش AC ها بر اساس verify_method (چقدر AI کلاسیفای کرده)
+    - recent_reports: خلاصه runtime_status در ۵۰ گزارش اخیر
+    - issues: لیست مشکلات شناسایی‌شده، human-readable
+    """
+    import os as _os
+    from app.services.oversight_service import get_render_token, get_github_token
+
+    service = get_oversight_service()
+
+    # ---- env flags ----
+    runtime_enabled_raw = _os.environ.get("RUNTIME_VERIFY_ENABLED", "true").lower()
+    ui_enabled_raw = _os.environ.get("RUNTIME_VERIFY_UI_ENABLED", "true").lower()
+    env_info = {
+        "RUNTIME_VERIFY_ENABLED": runtime_enabled_raw != "false",
+        "RUNTIME_VERIFY_UI_ENABLED": ui_enabled_raw != "false",
+        "RENDER_API_KEY_present": bool(get_render_token()),
+        "GITHUB_TOKEN_present": bool(get_github_token()),
+    }
+
+    # ---- watched ----
+    watched_info: List[Dict[str, Any]] = []
+    for w in service.watched:
+        watched_info.append({
+            "id": w.id,
+            "repo_full_name": w.repo_full_name,
+            "frontend_base_url": w.frontend_base_url,
+            "backend_base_url": w.backend_base_url,
+            "runtime_repo_path": w.runtime_repo_path,
+            "runtime_autodetected": w.runtime_autodetected,
+            "runtime_connection_test": w.runtime_connection_test,
+            "has_base_url": bool(w.frontend_base_url or w.backend_base_url),
+            "has_repo_path": bool(w.runtime_repo_path),
+        })
+
+    # ---- tasks AC classification ----
+    method_counts: Dict[str, int] = {
+        "static": 0, "ui_interaction": 0, "api_response": 0,
+        "backend_test": 0, "manual_only": 0, "unknown": 0,
+    }
+    tasks_without_acs = 0
+    total_tasks = 0
+    for t in service.tasks:
+        total_tasks += 1
+        acs = t.acceptance_criteria or []
+        if not acs:
+            tasks_without_acs += 1
+            continue
+        for ac in acs:
+            if isinstance(ac, dict):
+                m = str(ac.get("verify_method") or "static").lower()
+            else:
+                m = "static"
+            method_counts[m] = method_counts.get(m, 0) + 1
+
+    # ---- recent reports runtime_status ----
+    recent = service.reports[:50]
+    status_breakdown: Dict[str, int] = {}
+    for r in recent:
+        ev = r.evidence if isinstance(r.evidence, dict) else {}
+        rs = str(ev.get("runtime_status") or "missing")
+        if rs.startswith("ran"):
+            bucket = "ran"
+        elif rs.startswith("did_not_run"):
+            bucket = "did_not_run"
+        elif rs.startswith("skipped"):
+            bucket = "skipped_by_user_choice"
+        elif rs.startswith("disabled"):
+            bucket = "disabled_by_env"
+        elif rs.startswith("no acceptance"):
+            bucket = "no_acceptance_criteria"
+        else:
+            bucket = rs[:40] or "missing"
+        status_breakdown[bucket] = status_breakdown.get(bucket, 0) + 1
+
+    # ---- issues (human-readable verdict) ----
+    issues: List[str] = []
+    if not env_info["RUNTIME_VERIFY_ENABLED"]:
+        issues.append(
+            "RUNTIME_VERIFY_ENABLED=false در env — کل لایه runtime probe غیرفعال است."
+        )
+    if not env_info["RENDER_API_KEY_present"]:
+        issues.append(
+            "RENDER_API_KEY ست نشده — autodetect URL از Render کار نمی‌کند."
+        )
+    no_url = [w["repo_full_name"] for w in watched_info if not w["has_base_url"]]
+    if no_url:
+        issues.append(
+            f"این watched ها frontend/backend base_url ندارند: {no_url} — "
+            f"AI enricher صدا زده نمی‌شود و ui_interaction/api_response probe ها skip می‌شوند."
+        )
+    no_repo = [w["repo_full_name"] for w in watched_info if not w["has_repo_path"]]
+    if no_repo:
+        issues.append(
+            f"این watched ها runtime_repo_path ندارند: {no_repo} — "
+            f"static/backend_test probe ها با reason 'repo_path تنظیم نشده' skip می‌شوند."
+        )
+    non_static = (
+        method_counts["ui_interaction"]
+        + method_counts["api_response"]
+        + method_counts["backend_test"]
+    )
+    if method_counts["static"] > 0 and non_static == 0:
+        issues.append(
+            f"همه {method_counts['static']} AC هنوز verify_method=static دارند — "
+            f"AI enricher یا اجرا نشده، یا base_url نبوده، یا AI همه را static برگردانده. "
+            f"تسک‌های قدیمی (قبل از Stage 2) backfill نیاز دارند."
+        )
+    if (
+        status_breakdown.get("ran", 0) == 0
+        and (status_breakdown.get("did_not_run", 0) + status_breakdown.get("missing", 0)) > 0
+    ):
+        issues.append(
+            "هیچ‌کدام از ۵۰ گزارش اخیر runtime_status='ran' ندارند — یعنی در عمل "
+            "هیچ probe ای اجرا نشده است (همان رفتار verify سریع و verify کامل)."
+        )
+    if not issues:
+        issues.append("هیچ مشکل آشکاری پیدا نشد — runtime probes باید فعال باشند.")
+
+    return {
+        "env": env_info,
+        "watched": watched_info,
+        "tasks": {
+            "total": total_tasks,
+            "without_acs": tasks_without_acs,
+            "ac_by_method": method_counts,
+        },
+        "recent_reports": {
+            "count_inspected": len(recent),
+            "runtime_status_breakdown": status_breakdown,
+        },
+        "issues": issues,
+    }
+
+
 @router.delete("/watched/{watched_id}")
 async def delete_watched(watched_id: str):
     service = get_oversight_service()
