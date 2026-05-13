@@ -57,14 +57,18 @@ def _fmt_iso(value: Any) -> str:
 
 
 def build_mega_bundle_md(task: Any, report: Any) -> bytes:
-    """ساخت فایل markdown کامل از task + report.
+    """ساخت فایل HTML از task + report (نام تابع برای backward-compat حفظ شده).
+
+    خروجی HTML با UTF-8 BOM + RTL + lang="fa" تا روی موبایل/مرورگر تلگرام
+    فارسی درست رندر شود (نه mojibake). محتوای مارک‌داون داخل <pre> با
+    styling مناسب نمایش داده می‌شود.
 
     Args:
       task: OversightTask
       report: OversightReport
 
     Returns:
-      bytes (UTF-8 encoded markdown)
+      bytes (UTF-8 encoded HTML with BOM)
     """
     parts: List[str] = []
 
@@ -382,15 +386,52 @@ def build_mega_bundle_md(task: Any, report: Any) -> bytes:
         logger.debug(f"mega_bundle raw_resp failed: {e}")
 
     # --- compose ---
-    full = "".join(parts)
-    encoded = full.encode("utf-8")
-    # cap به MAX_SIZE
+    full_md = "".join(parts)
+    # 🆕 (encoding fix) — تبدیل به HTML با charset utf-8 + RTL تا روی
+    # تلگرام/موبایل فارسی به‌جای mojibake درست رندر شود.
+    title_for_html = _safe_str(
+        getattr(task, "title", "") or getattr(task, "id", "task"), 200,
+    )
+    # escape برای امنیت — تنها &, <, > تبدیل می‌شوند تا متن preserved بماند
+    escaped = (
+        full_md.replace("&", "&amp;")
+               .replace("<", "&lt;")
+               .replace(">", "&gt;")
+    )
+    html = (
+        '<!DOCTYPE html>\n'
+        '<html lang="fa" dir="rtl">\n'
+        '<head>\n'
+        '<meta charset="UTF-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f'<title>Bundle — {title_for_html}</title>\n'
+        '<style>\n'
+        '  body { font-family: Tahoma, Vazir, Arial, sans-serif; '
+        '         max-width: 980px; margin: 1em auto; padding: 0 1em; '
+        '         line-height: 1.6; color: #222; background: #fafafa; }\n'
+        '  pre { white-space: pre-wrap; word-wrap: break-word; '
+        '        background: #fff; border: 1px solid #ddd; '
+        '        border-radius: 6px; padding: 1em; font-family: '
+        '        Consolas, "Vazir Code", "Courier New", monospace; '
+        '        font-size: 13px; direction: ltr; text-align: left; }\n'
+        '  .rtl-text { direction: rtl; text-align: right; }\n'
+        '  h1 { font-size: 20px; }\n'
+        '</style>\n'
+        '</head>\n'
+        '<body>\n'
+        '<pre>' + escaped + '</pre>\n'
+        '</body>\n'
+        '</html>\n'
+    )
+    # BOM + utf-8 برای حداکثر سازگاری
+    encoded = b"\xef\xbb\xbf" + html.encode("utf-8")
     if len(encoded) > _MAX_SIZE_BYTES:
         # trim نهایی — هشدار trim در پایان
-        cut = _MAX_SIZE_BYTES - 300
+        cut = _MAX_SIZE_BYTES - 500
         warn_msg = (
             "\n\n---\n_⚠️ این فایل به سقف ۱MB رسیده — "
             "برای دیدن کامل، به منابع DB مراجعه شود._\n"
         )
-        encoded = encoded[:cut] + warn_msg.encode("utf-8")
+        # بدون BOM این بار چون قبلاً اضافه شده
+        encoded = encoded[:cut] + warn_msg.encode("utf-8") + b"</pre></body></html>"
     return encoded
