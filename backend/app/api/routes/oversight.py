@@ -670,6 +670,32 @@ async def get_backfill_ac_classification_status():
     return dict(_BACKFILL_STATE)
 
 
+# 🆕 (Phase 2) — revert task.prompt به یک نسخه از prompt_history
+@router.post("/tasks/{task_id}/prompt/revert")
+async def revert_task_prompt(task_id: str, index: int):
+    """نسخه index از prompt_history را به‌عنوان prompt فعلی بازنشانی کن.
+
+    index = -1 یعنی آخرین نسخه‌ی بایگانی (یک قدم به عقب).
+    index = 0 یعنی قدیمی‌ترین نسخه‌ی بایگانی.
+
+    نسخه‌ی فعلی task.prompt به history منتقل می‌شود (با reason='manual_revert')
+    و سپس entry هدف از history حذف می‌شود تا تکراری نشود.
+    """
+    service = get_oversight_service()
+    res = await service.revert_prompt_from_history(task_id, index)
+    if not res.get("applied"):
+        reason = res.get("skipped_reason") or "unknown"
+        # تمایز ۴۰۴ / ۴۰۰
+        if reason == "task_not_found":
+            raise HTTPException(status_code=404, detail="تسک یافت نشد")
+        if reason in ("empty_history", "target_prompt_too_short"):
+            raise HTTPException(status_code=400, detail=f"revert ناموفق: {reason}")
+        if reason.startswith("index_out_of_range"):
+            raise HTTPException(status_code=400, detail=reason)
+        raise HTTPException(status_code=400, detail=reason)
+    return res
+
+
 @router.delete("/watched/{watched_id}")
 async def delete_watched(watched_id: str):
     service = get_oversight_service()
