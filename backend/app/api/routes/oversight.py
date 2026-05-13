@@ -406,6 +406,11 @@ async def runtime_diagnostics():
     from app.services.verify_runtime.ac_enricher import _ac_already_classified
     ac_unclassified_count = 0
     tasks_needing_backfill = 0
+    # 🆕 (Phase 3) — تشخیص AC هایی که plan ضعیف دارند (فقط navigate یا
+    # خالی) و از قابلیت‌های Phase 3 (action loop, expected_api_calls)
+    # بهره‌مند نمی‌شوند. force-backfill این‌ها را upgrade می‌کند.
+    ac_needing_phase3_upgrade = 0
+    tasks_needing_phase3_upgrade = 0
     for t in service.tasks:
         total_tasks += 1
         acs = t.acceptance_criteria or []
@@ -413,6 +418,7 @@ async def runtime_diagnostics():
             tasks_without_acs += 1
             continue
         task_has_unclassified = False
+        task_has_phase3_gap = False
         for ac in acs:
             if isinstance(ac, dict):
                 m = str(ac.get("verify_method") or "static").lower()
@@ -424,8 +430,22 @@ async def runtime_diagnostics():
             if not _ac_already_classified(ac_dict):
                 ac_unclassified_count += 1
                 task_has_unclassified = True
+            # 🆕 Phase 3 detection: ui_interaction با plan ضعیف (≤۱ step
+            # غیر-navigate) → نیاز به upgrade
+            if m == "ui_interaction":
+                _plan = (ac.get("verify_plan") if isinstance(ac, dict) else {}) or {}
+                _steps = _plan.get("ui_steps") or []
+                _real_count = sum(
+                    1 for s in _steps if isinstance(s, dict)
+                    and str(s.get("action") or "").lower() not in ("", "navigate", "screenshot")
+                ) if isinstance(_steps, list) else 0
+                if _real_count < 2:
+                    ac_needing_phase3_upgrade += 1
+                    task_has_phase3_gap = True
         if task_has_unclassified:
             tasks_needing_backfill += 1
+        if task_has_phase3_gap:
+            tasks_needing_phase3_upgrade += 1
 
     # ---- recent reports runtime_status ----
     recent = service.reports[:50]
@@ -499,6 +519,8 @@ async def runtime_diagnostics():
             "without_acs": tasks_without_acs,
             "ac_by_method": method_counts,
             "ac_unclassified_count": ac_unclassified_count,
+            "ac_needing_phase3_upgrade": ac_needing_phase3_upgrade,
+            "tasks_needing_phase3_upgrade": tasks_needing_phase3_upgrade,
             "tasks_needing_backfill": tasks_needing_backfill,
         },
         "recent_reports": {
@@ -522,7 +544,9 @@ _BACKFILL_STATE: Dict[str, Any] = {
 }
 
 
-async def _run_backfill_ac_classification(model_id: Optional[str]) -> None:
+async def _run_backfill_ac_classification(
+    model_id: Optional[str], *, force: bool = False,
+) -> None:
     """در پس‌زمینه روی همه تسک‌ها AI enricher را اجرا می‌کند تا AC هایی
     که هنوز method=static دارند به ui/api/test/manual کلاسیفای شوند.
     """
@@ -566,7 +590,14 @@ async def _run_backfill_ac_classification(model_id: Optional[str]) -> None:
                 summary["tasks_with_no_acs"] += 1
                 continue
             normalized = normalize_ac_list(acs)
-            if not any(not _ac_already_classified(ac) for ac in normalized):
+            # 🆕 (Phase 3) — force=True: re-enrich را اجباری کن حتی برای
+            # AC هایی که قبلاً classified بودند. این برای upgrade plan ها
+            # از Phase 2 (navigate only) به Phase 3 (recipe ۳-۸ مرحله‌ای) لازم است.
+            needs_enrich = (
+                force
+                or any(not _ac_already_classified(ac) for ac in normalized)
+            )
+            if not needs_enrich:
                 summary["tasks_already_classified"] += 1
                 # شمارش متد فعلی برای آمار نهایی
                 for ac in normalized:
@@ -637,12 +668,56 @@ async def _run_backfill_ac_classification(model_id: Optional[str]) -> None:
     finally:
         _BACKFILL_STATE["finished_at"] = _dt.utcnow().isoformat()
         _BACKFILL_STATE["running"] = False
+        # 🆕 (Phase 3) — ارسال نوتیفیکیشن «backfill_ac_completed» به تلگرام
+        try:
+            from app.services.notification_service import notification_service
+            _summary = _BACKFILL_STATE.get("summary") or {}
+            _err = _BACKFILL_STATE.get("error")
+            _force_flag = _BACKFILL_STATE.get("force")
+            _mode_label = " (force)" if _force_flag else ""
+            if _err:
+                _msg_text = f"❌ backfill AC{_mode_label} با خطا تمام شد:\n```\n{_err[:400]}\n```"
+                _event = "backfill_ac_completed"
+                _priority = "high"
+            else:
+                _enriched = _summary.get("tasks_enriched", 0)
+                _already = _summary.get("tasks_already_classified", 0)
+                _errored = _summary.get("tasks_errored", 0)
+                _method = _summary.get("ac_method_after") or {}
+                _method_summary = " · ".join(
+                    f"{k}: {v}" for k, v in _method.items() if v > 0
+                ) or "—"
+                _msg_text = (
+                    f"✅ *backfill AC{_mode_label} تمام شد*\n\n"
+                    f"📊 آمار:\n"
+                    f"• enrich شد: {_enriched}\n"
+                    f"• از قبل classified: {_already}\n"
+                    f"• خطا: {_errored}\n\n"
+                    f"📋 توزیع نهایی method ها:\n{_method_summary}"
+                )
+                _event = "backfill_ac_completed"
+                _priority = "medium"
+            await notification_service.notify_event(
+                _event, _msg_text,
+                subject="Backfill AC completed",
+                priority=_priority,
+            )
+        except Exception as _ne:
+            import logging as _logging
+            _logging.getLogger(__name__).debug(f"backfill notification failed: {_ne}")
 
 
 @router.post("/runtime/backfill-ac-classification")
-async def start_backfill_ac_classification(model_id: Optional[str] = None):
+async def start_backfill_ac_classification(
+    model_id: Optional[str] = None,
+    force: bool = False,
+):
     """شروع backfill در پس‌زمینه — AC های تسک‌های قدیمی را با AI به method
     درست (ui_interaction / api_response / backend_test / manual_only) کلاسیفای می‌کند.
+
+    🆕 (Phase 3) — اگر force=True، حتی AC هایی که از قبل classified بودند
+    دوباره enrich می‌شوند. این برای upgrade plan های Phase 2 (navigate only)
+    به Phase 3 (recipe ۳-۸ مرحله‌ای) لازم است.
 
     اگر کاری در حال اجراست، state فعلی برگردانده می‌شود (تکراری شروع نمی‌شود).
     """
@@ -659,8 +734,9 @@ async def start_backfill_ac_classification(model_id: Optional[str] = None):
     _BACKFILL_STATE["total"] = 0
     _BACKFILL_STATE["summary"] = None
     _BACKFILL_STATE["error"] = None
+    _BACKFILL_STATE["force"] = bool(force)
 
-    _asyncio.create_task(_run_backfill_ac_classification(model_id))
+    _asyncio.create_task(_run_backfill_ac_classification(model_id, force=force))
     return {"status": "started", **_BACKFILL_STATE}
 
 

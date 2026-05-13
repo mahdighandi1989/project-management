@@ -309,6 +309,21 @@ EVENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "default_sound": True,
         "icon": "📥",
     },
+    # 🆕 (Phase 3) — backfill events
+    "backfill_ac_needed": {
+        "label": "🔬 backfill AC نیاز است",
+        "help": "وقتی Phase 3 detection نشان دهد AC هایی هستند که از قابلیت‌های action loop / vision_pair / expected_api_calls استفاده نمی‌کنند",
+        "default_enabled": True,
+        "default_sound": True,
+        "icon": "🔬",
+    },
+    "backfill_ac_completed": {
+        "label": "✅ backfill AC تمام شد",
+        "help": "نتیجه پایان backfill (force یا عادی) — خلاصه تعداد enrich شده، خطاها، توزیع method ها",
+        "default_enabled": True,
+        "default_sound": True,
+        "icon": "✅",
+    },
     # 🆕 (AI Balance Monitor — Tile 3)
     "ai_balance_low": {
         "label": "💰 موجودی AI کم",
@@ -1532,6 +1547,79 @@ class NotificationService:
         except Exception as e:
             logger.warning(f"send_reminder_due telegram send failed: {e}")
             return None
+
+    async def _handle_backfill_callback(
+        self, chat_id_str: str, data: str, tg: Any,
+    ) -> Dict[str, Any]:
+        """router برای callback_data با prefix backfill:*
+
+        پشتیبانی:
+          backfill:run_force  → re-enrich همه AC ها (Phase 3 upgrade)
+          backfill:run        → backfill عادی (فقط unclassified)
+        """
+        try:
+            parts = data.split(":")
+            mode = parts[1] if len(parts) > 1 else "run"
+            force = (mode == "run_force")
+
+            # 🆕 پیام «در حال شروع»
+            try:
+                await tg.send(
+                    "🔬 backfill در حال شروع... (تا چند دقیقه طول می‌کشد)",
+                    silent=True,
+                )
+            except Exception:
+                pass
+
+            # state موجود را چک کن — اگر running است، یادآور
+            try:
+                from ..api.routes.oversight import (
+                    _BACKFILL_STATE,
+                    _run_backfill_ac_classification,
+                )
+            except Exception as e:
+                await tg.send(f"⚠️ خطا در import backfill: {e}", silent=True)
+                return {"ok": False, "error": str(e)}
+
+            if _BACKFILL_STATE.get("running"):
+                await tg.send(
+                    f"⏳ backfill قبلی هنوز در حال اجراست "
+                    f"({_BACKFILL_STATE.get('current_index', 0)}/"
+                    f"{_BACKFILL_STATE.get('total', 0)})",
+                    silent=True,
+                )
+                return {"ok": True, "already_running": True}
+
+            # شروع backfill
+            from datetime import datetime as _dt
+            _BACKFILL_STATE["running"] = True
+            _BACKFILL_STATE["started_at"] = _dt.utcnow().isoformat()
+            _BACKFILL_STATE["finished_at"] = None
+            _BACKFILL_STATE["current_index"] = 0
+            _BACKFILL_STATE["total"] = 0
+            _BACKFILL_STATE["summary"] = None
+            _BACKFILL_STATE["error"] = None
+            _BACKFILL_STATE["force"] = force
+            _BACKFILL_STATE["triggered_by"] = "telegram"
+
+            import asyncio as _asyncio_lc
+            _asyncio_lc.create_task(
+                _run_backfill_ac_classification(None, force=force)
+            )
+
+            mode_label = "force (re-enrich همه)" if force else "عادی"
+            await tg.send(
+                f"✅ backfill شروع شد ({mode_label}) — نتیجه پس از تکمیل ارسال می‌شود",
+                silent=False,
+            )
+            return {"ok": True, "started": True, "force": force}
+        except Exception as e:
+            logger.warning(f"_handle_backfill_callback failed: {e}")
+            try:
+                await tg.send(f"⚠️ خطا در شروع backfill: {e}", silent=True)
+            except Exception:
+                pass
+            return {"ok": False, "error": str(e)}
 
     async def _handle_reminder_callback(
         self, chat_id_str: str, data: str, msg: Dict[str, Any],
@@ -3319,6 +3407,10 @@ class NotificationService:
         # 🔔 reminder:* callbacks (tick/done/snooze)
         if data.startswith("reminder:"):
             return await self._handle_reminder_callback(chat_id_str, data, msg)
+
+        # 🆕 (Phase 3) — backfill:run_force / backfill:run
+        if data.startswith("backfill:"):
+            return await self._handle_backfill_callback(chat_id_str, data, tg)
 
         # pick:<watched_id>
         if data.startswith("pick:"):
