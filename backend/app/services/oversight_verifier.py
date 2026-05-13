@@ -2297,8 +2297,9 @@ async def verify_task(
                             return _best
                         return None
 
-                    # حداکثر ۵ مرحله — تا verify طول نکشد
-                    for _step in _ts_list[:5]:
+                    # حداکثر ۱۲ مرحله — متناسب با cap چک‌لیست ۳۰ که هرکدام
+                    # ~1 دقیقه طول می‌کشد، 12 → ~12 دقیقه عمر مفید برای probe
+                    for _step in _ts_list[:12]:
                         try:
                             _smart_nav_result: Optional[Dict[str, Any]] = None
                             _sroute, _route_specific = _infer_route_for_step(_step, task)

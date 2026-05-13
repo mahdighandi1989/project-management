@@ -313,12 +313,17 @@ async def run_backend_log_probe(
             ac_id=ac_id, ac_text=ac_text, method="backend_log",
             status=PROBE_STATUS_SKIPPED,
             evidence={
+                # 🆕 verdict در skip-path هم ست شود تا diagnostic در
+                # orchestration به‌جای '?' علت واقعی را نشان دهد
+                "verdict": "no_logs",
                 "reason": "no relevant Render logs found in last 24h",
-                "endpoints": endpoints,
-                "symbols": symbols,
+                "endpoints_extracted": endpoints,
+                "symbols_extracted": symbols,
                 "target_files_basenames": [
                     str(f).rsplit("/", 1)[-1] for f in target_files[:5]
                 ],
+                "log_count": 0,
+                "log_window_hours": _LOG_WINDOW_HOURS,
                 "probe_type": "backend_log_phase4",
             },
             duration_ms=int((time.monotonic() - start) * 1000),

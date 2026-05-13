@@ -688,9 +688,19 @@ async def _run_inspector_inner(
                 continue
             try:
                 from .vision_helper import analyze_screenshot
+                # 🆕 (Phase 4 fix) — prefix `(step probe #N)` و
+                # `(auto-verify system probe)` فقط برای logging هستند —
+                # حذفشان قبل از پاس به vision تا AI روی scope واقعی AC
+                # تمرکز کند، نه روی تگ‌های داخلی engine.
+                import re as _re_clean
+                _clean_ac = _re_clean.sub(
+                    r"^\(\s*(step probe #\d+|auto-verify system probe)\s*\)\s*",
+                    "",
+                    ac_text or "",
+                ).strip()
                 vctx = {
                     "url": final_url,
-                    "ac_text": ac_text,
+                    "ac_text": _clean_ac,
                     "console_logs": console_errors,
                     "backend_logs": [{"level": "info", "message": backend_summary}] if backend_summary else [],
                     "html_excerpt": html_excerpt,
@@ -775,10 +785,17 @@ async def _run_inspector_inner(
                     _before = _valid_shots[0]
                     _after = _valid_shots[-1]
                     from .vision_helper import analyze_screenshot_pair
+                    # 🆕 (Phase 4 fix) — همان sanitize برای vision pair
+                    import re as _re_clean2
+                    _clean_ac_pair = _re_clean2.sub(
+                        r"^\(\s*(step probe #\d+|auto-verify system probe)\s*\)\s*",
+                        "",
+                        ac_text or "",
+                    ).strip()
                     vision_pair_result = await analyze_screenshot_pair(
                         _before["path"], _after["path"],
                         {
-                            "ac_text": ac_text,
+                            "ac_text": _clean_ac_pair,
                             "actions_taken": actions_taken,
                         },
                     )
