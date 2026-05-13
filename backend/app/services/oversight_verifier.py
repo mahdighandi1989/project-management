@@ -682,6 +682,75 @@ async def _fetch_recent_commits(
 # 🔬 (inspector_probe Phase 1 — relevance fix) — تشخیص route مرتبط با تسک
 # ============================================================================
 
+def _infer_route_for_step(
+    step: Dict[str, Any], task: "OversightTask",
+) -> str:
+    """استخراج route مرتبط با یک task_step.
+
+    تلاش به ترتیب:
+      1) step.scope: اگر شامل مسیر Next.js (app/X/page.tsx یا pages/X.tsx) → /X
+      2) step.title: نگاشت کلمات کلیدی فارسی به route
+      3) fallback: _infer_frontend_route_for_task(task)
+    """
+    import re as _re
+    scope = str(step.get("scope") or "")
+    title = str(step.get("title") or "")
+    combined = f"{scope} {title}".lower()
+
+    # 1) Next.js App Router: app/X/page.tsx
+    m = _re.search(r"app/([a-z0-9_\-]+(?:/[a-z0-9_\-]+)*)/page\.[jt]sx?", combined)
+    if m:
+        route = m.group(1).strip("/")
+        if route and not route.startswith(("layout", "_app", "_document")):
+            return "/" + route
+
+    # 2) pages/X.tsx
+    m2 = _re.search(r"pages/([a-z0-9_\-]+)\.[jt]sx?", combined)
+    if m2:
+        route = m2.group(1).strip("/")
+        if route not in ("index", "_app", "_document"):
+            return "/" + route
+
+    # 3) نگاشت کلمات کلیدی فارسی (روی scope + title)
+    keyword_map = [
+        ("مناظره", "/debate"),
+        ("نظارت", "/oversight"),
+        ("پروژه‌ها", "/projects"),
+        ("پروژه ها", "/projects"),
+        ("پروژه", "/projects"),
+        ("بازرس", "/projects"),
+        ("داشبورد", "/dashboard"),
+        ("لاگین", "/login"),
+        ("ثبت‌نام", "/signup"),
+        ("ثبت نام", "/signup"),
+        ("تنظیمات", "/settings"),
+        ("پروفایل", "/profile"),
+        ("نمودار", "/charts"),
+        ("ایده", "/oversight"),
+        ("خانه", "/"),
+        ("صفحه اصلی", "/"),
+    ]
+    full_text = (scope + " " + title)
+    for kw, route in keyword_map:
+        if kw in full_text:
+            return route
+
+    # 4) نگاشت کلمات کلیدی انگلیسی
+    en_map = [
+        ("debate", "/debate"), ("oversight", "/oversight"),
+        ("project", "/projects"), ("dashboard", "/dashboard"),
+        ("login", "/login"), ("signup", "/signup"),
+        ("setting", "/settings"), ("profile", "/profile"),
+        ("chart", "/charts"),
+    ]
+    for kw, route in en_map:
+        if kw in combined:
+            return route
+
+    # 5) fallback به route تسک
+    return _infer_frontend_route_for_task(task)
+
+
 def _infer_frontend_route_for_task(task: "OversightTask") -> str:
     """تلاش برای استخراج یک route فرانت‌اند مرتبط با تسک.
 
@@ -1603,6 +1672,53 @@ async def verify_task(
             runtime_probe_results = await run_probes_for_acs(
                 acceptance_criteria, _probe_ctx,
             )
+            # 🔬 (inspector_probe Phase 2 — per-step probes) — اگر تسک
+            # task_steps دارد، برای هر مرحله یک probe جداگانه با route
+            # مرتبط با همان مرحله اجرا کن. این probe ها prepend به
+            # runtime_probe_results می‌شوند تا در گزارش بالای بقیه ظاهر شوند.
+            step_probe_results: List[Any] = []
+            try:
+                _ts_list = list(task.task_steps or [])
+                if _ts_list and _probe_ctx.frontend_base_url:
+                    from .verify_runtime.inspector_probe import (
+                        run_inspector_probe as _run_step_probe,
+                    )
+                    # حداکثر ۵ مرحله — تا verify طول نکشد
+                    for _step in _ts_list[:5]:
+                        try:
+                            _sroute = _infer_route_for_step(_step, task)
+                            _sid = _step.get("id", 0)
+                            _stitle = str(_step.get("title") or "")[:80]
+                            _sscope = str(_step.get("scope") or "")[:200]
+                            _synth_ac = {
+                                "text": f"(step probe #{_sid}) {_stitle}",
+                                "verify_method": "ui_interaction",
+                                "verify_plan": {
+                                    "base": "frontend",
+                                    "ui_steps": [
+                                        {"action": "navigate", "url": _sroute},
+                                    ],
+                                    "step_id": _sid,
+                                    "step_title": _stitle,
+                                    "step_scope": _sscope,
+                                },
+                            }
+                            _step_res = await _run_step_probe(
+                                _synth_ac, _probe_ctx, f"step_{_sid}",
+                            )
+                            if _step_res is not None:
+                                if isinstance(_step_res.evidence, dict):
+                                    _step_res.evidence["step_id"] = _sid
+                                    _step_res.evidence["step_title"] = _stitle
+                                    _step_res.evidence["step_inferred_route"] = _sroute
+                                step_probe_results.append(_step_res)
+                        except Exception as _ssee:
+                            logger.debug(
+                                f"step probe #{_step.get('id', '?')} failed: {_ssee}"
+                            )
+            except Exception as _se_outer:
+                logger.debug(f"per-step probes block failed: {_se_outer}")
+
             # 🔬 (inspector_probe Phase 1 — system check) — مستقل از AC ها،
             # یک probe «صفحه مرتبط با تسک» اجرا شود تا اگر هیچ AC نوع ui_interaction
             # نبود، هم گزارش screenshot/vision/console/backend log از صفحه‌ای
@@ -1636,6 +1752,21 @@ async def verify_task(
                     logger.debug("system inspector probe skipped: no frontend_base_url")
             except Exception as _spe:
                 logger.debug(f"system inspector probe failed: {_spe}")
+
+            # 🔬 (inspector_probe Phase 2) — ادغام step probes:
+            # ترتیب نهایی: [system_probe, step_probe_1..N, AC_probe_1..M]
+            # system probe (اگر هست) در index 0 می‌ماند، step probes بعد آن
+            # و قبل از AC probes می‌آیند.
+            if step_probe_results:
+                _has_system = bool(
+                    runtime_probe_results
+                    and isinstance(runtime_probe_results[0].evidence, dict)
+                    and runtime_probe_results[0].ac_id == "system_home"
+                )
+                _insert_at = 1 if _has_system else 0
+                for _idx, _spr in enumerate(step_probe_results):
+                    runtime_probe_results.insert(_insert_at + _idx, _spr)
+
             # manifest.json + size cap enforcement
             try:
                 from .verify_runtime.storage import enforce_size_cap
