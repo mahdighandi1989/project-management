@@ -4074,9 +4074,14 @@ export default function OversightPage() {
                               </div>
                               {Array.isArray(p.evidence.endpoints_extracted) && (p.evidence.endpoints_extracted as any[]).length > 0 && (
                                 <div className="mt-0.5 dark:text-gray-200">
-                                  endpoints: {(p.evidence.endpoints_extracted as any[]).slice(0, 4).map((e, ei) => (
-                                    <code key={ei} className="bg-emerald-100 dark:bg-emerald-900/50 px-1 rounded ml-1">{String(e)}</code>
-                                  ))}
+                                  endpoints: {(p.evidence.endpoints_extracted as any[]).slice(0, 4).map((e, ei) => {
+                                    const text = (e && typeof e === 'object')
+                                      ? `${e.method || '*'} ${e.path || ''}`
+                                      : String(e);
+                                    return (
+                                      <code key={ei} className="bg-emerald-100 dark:bg-emerald-900/50 px-1 rounded ml-1">{text}</code>
+                                    );
+                                  })}
                                 </div>
                               )}
                               {Array.isArray(p.evidence.evidence_lines) && (p.evidence.evidence_lines as any[]).length > 0 && (

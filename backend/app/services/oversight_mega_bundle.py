@@ -410,10 +410,17 @@ def build_mega_bundle_md(task: Any, report: Any) -> bytes:
             evidence_lines = pev.get("evidence_lines") or []
             log_count = pev.get("log_count", 0)
             window_h = pev.get("log_window_hours", 0)
+            # endpoints به‌صورت dict {method, path} یا str می‌آیند
+            eps_text = ", ".join(
+                f"{e.get('method', '*')} {e.get('path', '')}"
+                if isinstance(e, dict) else str(e)
+                for e in eps[:6]
+            ) or "—"
+            syms_text = ", ".join(str(s) for s in syms[:6]) or "—"
             bl_lines.append(
                 f"### {verdict_emoji} `{verdict}` — «{ac_text}»\n"
-                f"- **endpoints:** {', '.join(eps[:6]) or '—'}\n"
-                f"- **symbols:** {', '.join(syms[:6]) or '—'}\n"
+                f"- **endpoints:** {eps_text}\n"
+                f"- **symbols:** {syms_text}\n"
                 f"- **logs scanned:** {log_count} (window={window_h}h)\n"
                 f"- **reason:** {reason}"
             )
