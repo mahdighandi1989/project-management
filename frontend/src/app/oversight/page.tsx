@@ -6013,21 +6013,42 @@ function TasksPanel({
                           const projectIdForLink = (r.evidence?.auto_verify_project_id as string) || '';
                           return (
                             <ul className="mt-1 text-[10px] text-gray-600 dark:text-gray-400 space-y-1">
-                              {probes.slice(0, 6).map((p: any, i: number) => {
+                              {probes.slice(0, 8).map((p: any, i: number) => {
                                 const emoji = p.status === 'passed' ? '✅' : p.status === 'failed' ? '❌' : p.status === 'error' ? '⚠️' : '⏭';
                                 const sid = p.evidence?.inspector_session_id;
                                 // اولین vision_description از screenshots
                                 const shots = Array.isArray(p.evidence?.screenshots) ? p.evidence.screenshots : [];
                                 const firstVision = shots.find((s: any) => s && s.vision_description)?.vision_description || '';
+                                // 🆕 (Phase 2) — تشخیص step / system / regular probe برای آیکن
+                                const isStepProbe = !!p.evidence?.step_id;
+                                const isSystemProbe = p.ac_id === 'system_home';
+                                const probeIcon = isStepProbe ? '🪜' : (isSystemProbe ? '🏠' : '•');
+                                const route = p.evidence?.step_inferred_route || p.evidence?.final_url || '';
+                                const backendCount = Array.isArray(p.evidence?.backend_urls_called)
+                                  ? p.evidence.backend_urls_called.length : 0;
                                 return (
-                                  <li key={i}>
+                                  <li key={i} className={isStepProbe ? 'border-r-2 border-cyan-300 dark:border-cyan-700 pr-2' : ''}>
                                     <div className="truncate">
-                                      {emoji} <span className="font-mono">{p.method}</span> — «{String(p.ac_text || '').slice(0, 60)}»
+                                      {emoji} <span className="mx-1">{probeIcon}</span>
+                                      {isStepProbe && (
+                                        <span className="bg-cyan-100 dark:bg-cyan-900/40 text-cyan-700 dark:text-cyan-300 px-1 rounded text-[9px] mr-1">
+                                          step #{p.evidence.step_id}
+                                        </span>
+                                      )}
+                                      <span className="font-mono">{p.method}</span>
+                                      {route && <span className="text-gray-500 mr-1">({String(route).slice(-40)})</span>}
+                                      {' — '}
+                                      «{String(p.ac_text || '').slice(0, 60)}»
                                       {p.evidence?.reason ? <span className="text-gray-500"> ({String(p.evidence.reason).slice(0, 60)})</span> : null}
                                     </div>
                                     {firstVision && (
                                       <div className="pr-3 text-gray-500 dark:text-gray-400 italic truncate">
                                         👁 {String(firstVision).slice(0, 100)}{String(firstVision).length > 100 ? '…' : ''}
+                                      </div>
+                                    )}
+                                    {backendCount > 0 && (
+                                      <div className="pr-3 text-gray-500 dark:text-gray-400 text-[9px]">
+                                        🌐 {backendCount} backend URL
                                       </div>
                                     )}
                                     {sid && projectIdForLink && (
