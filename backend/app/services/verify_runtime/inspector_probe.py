@@ -496,6 +496,40 @@ async def _run_inspector_inner(
             except Exception:
                 html_excerpt = ""
 
+            # 🆕 (Phase 3 fix) — تشخیص SPA-404 از محتوای صفحه (status=200 ولی
+            # محتوا "Not Found"). نشانه‌های 404:
+            #  - متن "Not Found" یا "404" در body
+            #  - متن کوتاه (<500 char) با hint اخطار
+            spa_404_detected = False
+            try:
+                _body_low = (html_excerpt or "").lower()
+                _markers_404 = (
+                    "not found", "404 ", " 404\b", "page not found",
+                    "صفحه پیدا نشد", "صفحه یافت نشد", "یافت نشد",
+                )
+                # اگر body شامل یکی از markers ـه و کوتاه‌ـه (نشان از 404 page minimal)
+                if any(m in _body_low for m in _markers_404):
+                    # double-check: محتوای main page باید معمولاً > 2000 char باشد
+                    _stripped_len = len(_body_low.strip())
+                    if _stripped_len < 3000:
+                        spa_404_detected = True
+            except Exception:
+                pass
+
+            if spa_404_detected:
+                # nav_ok را به false تنظیم کن تا probe failed باشد
+                nav_ok = False
+                # یک پیام در session
+                if ctx.inspector_session_id:
+                    try:
+                        await _msg(
+                            ctx.inspector_session_id, "system",
+                            f"⚠️ SPA-404 detected: page returned 200 but body indicates 'Not Found' "
+                            f"({full_url[:120]})",
+                        )
+                    except Exception:
+                        pass
+
             # 🆕 (Phase 3) — action loop: اگر verify_plan.ui_steps شامل بیش از
             # یک step غیر-navigate است، sequence را اجرا کن (interaction واقعی).
             # navigate قبلاً انجام شده، پس step های navigate در sequence skip
@@ -677,13 +711,20 @@ async def _run_inspector_inner(
         # probe باید FAILED شود (حتی اگر navigate ok بود + console error
         # نبود). این مهم‌ترین سیگنال برای تشخیص feature که هنوز ساخته
         # نشده است.
+        # 🆕 (Phase 3 fix) — system probe (ac_id="system_home") AC متادیتایی
+        # دارد، نه چیزی که روی صفحه دیده شود ("صفحه اصلی deployed قابل
+        # دسترسی است"). vision نباید آن متن را روی UI جست‌وجو کند. برای
+        # system probe، feature_present check را skip می‌کنیم — فقط
+        # nav_ok و console errors ملاک هستند.
+        is_system_probe_local = (ac_id == "system_home")
         vision_says_feature_missing = False
         vision_missing_reason = ""
-        for _shot in screenshots:
-            if (_shot.get("vision_feature_present") or "").lower() == "no":
-                vision_says_feature_missing = True
-                vision_missing_reason = _shot.get("vision_feature_reason") or "vision AI: feature not visible"
-                break
+        if not is_system_probe_local:
+            for _shot in screenshots:
+                if (_shot.get("vision_feature_present") or "").lower() == "no":
+                    vision_says_feature_missing = True
+                    vision_missing_reason = _shot.get("vision_feature_reason") or "vision AI: feature not visible"
+                    break
 
         # 🔢 (Phase 3) — passed نهایی بعد از vision_pair و expected_api_calls
         # محاسبه می‌شود (پایین‌تر در کد). فعلاً initial passed برای assertion ها.
