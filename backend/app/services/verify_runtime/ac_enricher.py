@@ -67,18 +67,28 @@ you must:
    ui_interaction:
    {
      "base": "frontend",     // "frontend" یا "backend"
-     "ui_steps": [
+     "ui_steps": [   // 🆕 (Phase 3) — یک sequence ۳ تا ۸ مرحله‌ای واقعی
+                     // (نه فقط navigate). راهنما در پایین.
        {"action": "navigate", "url": "/oversight"},
-       {"action": "wait_for_load_state", "state": "networkidle"},
+       {"action": "wait_for_load", "state": "networkidle"},
+       {"action": "screenshot", "label": "before_interaction"},
        {"action": "click", "selector": "[data-testid='btn-x']"},
-       {"action": "fill", "selector": "input[name=x]", "value": "..."},
-       {"action": "wait_for_selector", "selector": "...", "timeout_ms": 3000},
-       {"action": "assert_visible", "selector": "..."},
-       {"action": "assert_text", "selector": "...", "contains": "..."},
-       {"action": "assert_url", "contains": "/dashboard"},
-       {"action": "screenshot", "label": "after_click"}
+       {"action": "wait_for", "selector": "[data-testid='modal']", "timeout_ms": 3000},
+       {"action": "fill", "selector": "input[name=x]", "value": "test"},
+       {"action": "screenshot", "label": "after_interaction"},
+       {"action": "assert_visible", "selector": "[data-testid='success']"}
+     ],
+     "expected_api_calls": [   // 🆕 (اختیاری) API call های مورد انتظار
+       {"method": "POST", "path_contains": "/api/x"}
      ]
    }
+
+   ⚠️ راهنمای Phase 3 برای ui_steps:
+   - حداقل ۳ مرحله (navigate + wait + assert_or_screenshot)
+   - برای AC با ابعاد تعاملی، حداکثر ۸ مرحله
+   - selector ها را با `[data-testid='...']` ساختگی پیشنهاد بده —
+     مجری باید با selector واقعی جایگزین کند (در commit message ذکر شود)
+   - برای AC «نمایش بدون تعامل»، حالت کوتاه: navigate + wait + assert
 
    api_response:
    {
