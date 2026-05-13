@@ -741,21 +741,48 @@ async def _send_mega_bundle(task: "OversightTask") -> None:
         logger.debug(f"_send_mega_bundle: fetch report failed: {e}")
         return
 
+    # 🆕 (Phase 2 fix 2) — ابتدا PDF تلاش کن، fallback به HTML اگر Playwright
+    # یا فونت در دسترس نباشد. PDF تجربه‌ی بهتری روی موبایل (تلگرام Android)
+    # دارد چون مستقیماً در viewer داخلی باز می‌شود.
     try:
-        from .oversight_mega_bundle import build_mega_bundle_md
-        md_bytes = build_mega_bundle_md(fresh_task, last_report)
+        from .oversight_mega_bundle import build_mega_bundle_pdf
+        bundle_bytes, ext = await build_mega_bundle_pdf(fresh_task, last_report)
     except Exception as e:
-        logger.debug(f"_send_mega_bundle: build failed: {e}")
-        return
+        logger.debug(f"_send_mega_bundle: pdf build failed: {e}")
+        # fallback to old md/html builder
+        try:
+            from .oversight_mega_bundle import build_mega_bundle_md
+            bundle_bytes = build_mega_bundle_md(fresh_task, last_report)
+            ext = ".html"
+        except Exception as e2:
+            logger.debug(f"_send_mega_bundle: html fallback also failed: {e2}")
+            return
 
-    if not md_bytes or len(md_bytes) < 100:
+    if not bundle_bytes or len(bundle_bytes) < 100:
         return
 
     safe_tid = "".join(c if c.isalnum() else "_" for c in str(task.id))[:24]
-    # 🆕 .html به جای .md — تا تلگرام/موبایل فارسی را درست نمایش دهد
-    fname = f"bundle_{safe_tid}_{int(_time_lc.time())}.html"
-    title_for_caption = (fresh_task.title or fresh_task.id)[:80]
-    caption = f"📦 بسته‌ی کامل verify — «{title_for_caption}»"
+    # extension بر اساس فرمت واقعی تولید شده — pdf یا html
+    fname = f"bundle_{safe_tid}_{int(_time_lc.time())}{ext}"
+    # 🆕 (Phase 2 fix 1) — caption شامل خلاصهٔ چک‌لیست به‌روز task_steps است
+    # تا کاربر در همین پیام (بدون نیاز به باز کردن فایل) وضعیت مراحل را
+    # ببیند. متن کامل و بخش‌های ۱-۱۰ در فایل پیوست هستند.
+    try:
+        from .oversight_verify_pdf import build_verify_checklist_message
+        checklist_block = build_verify_checklist_message(
+            fresh_task, last_report,
+            char_budget=850,  # کمی پایین‌تر تا فضا برای trailer داشته باشیم
+            header_override="📦 *بسته‌ی کامل verify*",
+        )
+        caption = (
+            f"{checklist_block}\n\n"
+            f"📎 جزئیات کامل (raw_idea + پرامپت قدیم/جدید + همه‌ی probe ها + "
+            f"URLs + logs + analyses) در فایل پیوست."
+        )
+    except Exception as _ce:
+        logger.debug(f"build checklist caption for bundle failed: {_ce}")
+        title_for_caption = (fresh_task.title or fresh_task.id)[:80]
+        caption = f"📦 بسته‌ی کامل verify — «{title_for_caption}»"
 
     try:
         from .notification_service import notification_service, TelegramChannel
@@ -767,7 +794,7 @@ async def _send_mega_bundle(task: "OversightTask") -> None:
         if not ch.is_configured():
             continue
         try:
-            await ch.send_document(md_bytes, fname, caption=caption, silent=True)
+            await ch.send_document(bundle_bytes, fname, caption=caption, silent=True)
         except Exception as e:
             logger.debug(f"mega bundle send_document failed: {e}")
 
