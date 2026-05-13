@@ -469,6 +469,22 @@ async def _run_inspector_inner(
 
             final_url = page.url or full_url
 
+            # 🔐 (Phase 3) — Login redirect detection
+            # اگر صفحه به /login redirect خورد (و هدف تسک خود login نبود)،
+            # علامت‌گذاری کن. اگر storage_state داشتیم ولی auth منقضی شده، این
+            # هم گرفته می‌شود.
+            auth_required = False
+            try:
+                _final_lower = (final_url or "").lower()
+                _orig_lower = (full_url or "").lower()
+                _login_paths = ("/login", "/signin", "/sign-in", "/auth/login", "/auth/signin")
+                if any(p in _final_lower for p in _login_paths) and not any(
+                    p in _orig_lower for p in _login_paths
+                ):
+                    auth_required = True
+            except Exception:
+                pass
+
             # screenshot 1 (after_navigate)
             shot1 = await _take_and_record_screenshot(
                 page, shot_dir, "after_navigate", screenshots, actions_taken, ctx,
@@ -674,6 +690,7 @@ async def _run_inspector_inner(
             and (not has_console_error)
             and selector_ok
             and (not vision_says_feature_missing)
+            and (not auth_required)  # 🔐 (Phase 3) — auth redirect → failed
         )
         status = PROBE_STATUS_PASSED if passed else PROBE_STATUS_FAILED
         emoji = "✅" if passed else "❌"
@@ -696,6 +713,20 @@ async def _run_inspector_inner(
                 "expectation": f"feature «{ac_text[:80]}» در صفحه دیده شود",
                 "met": False,
                 "reason": vision_missing_reason[:300],
+            })
+        # 🔐 (Phase 3) — login redirect assertion
+        if auth_required:
+            _auth_state_label = (
+                "valid" if ctx.storage_state else
+                ("none" if not getattr(ctx, "storage_state", None) else "expired")
+            )
+            assertion_results.append({
+                "expectation": "صفحه‌ی هدف بدون redirect به login باز شود",
+                "met": False,
+                "reason": (
+                    f"redirect به {final_url[:120]} — auth_state={_auth_state_label}"
+                    f"؛ احتمالاً runtime_auth_recipe لازم است"
+                ),
             })
         if selector_hint:
             assertion_results.append({
@@ -739,6 +770,13 @@ async def _run_inspector_inner(
                 "backend_log_summary": backend_summary,
                 "final_url": final_url,
                 "assertion_results": assertion_results,
+                # 🔐 (Phase 3) — auth state
+                "auth_required": auth_required,
+                "auth_state": (
+                    "valid" if (ctx.storage_state and not auth_required) else
+                    ("expired" if (ctx.storage_state and auth_required) else
+                     ("failed" if auth_required else "none"))
+                ),
                 "probe_type": "inspector_phase3",
             },
             duration_ms=int((time.monotonic() - start_mono) * 1000),

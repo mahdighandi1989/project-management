@@ -1790,6 +1790,41 @@ async def verify_task(
                 verify_model_id=model_id,
                 watched_id=str(watched.id) if watched else None,
             )
+            # 🔐 (Phase 3) — اگر watched recipe دارد، storage_state بگیر/تازه کن
+            # و در ProbeContext بگذار تا probe ها به صفحات با لاگین دسترسی
+            # داشته باشند. شکست در این مرحله probe را block نمی‌کند — فقط
+            # بدون auth ادامه می‌دهیم.
+            try:
+                if watched and getattr(watched, "runtime_auth_recipe", None):
+                    from .verify_runtime.auth_runner import (
+                        obtain_or_refresh_storage_state,
+                    )
+                    _auth_state = await obtain_or_refresh_storage_state(watched)
+                    if _auth_state:
+                        _probe_ctx.storage_state = _auth_state
+                        if auto_verify_session_id:
+                            try:
+                                from .verify_runtime.inspector_probe import _msg as _ip_msg
+                                await _ip_msg(
+                                    auto_verify_session_id, "system",
+                                    "🔐 auth recipe اجرا شد — storage_state آماده",
+                                )
+                            except Exception:
+                                pass
+                    else:
+                        if auto_verify_session_id:
+                            try:
+                                from .verify_runtime.inspector_probe import _msg as _ip_msg
+                                await _ip_msg(
+                                    auto_verify_session_id, "system",
+                                    "⚠️ auth recipe در دسترس نیست یا شکست خورد — "
+                                    "probe ها بدون لاگین ادامه می‌دهند",
+                                )
+                            except Exception:
+                                pass
+            except Exception as _aue:
+                logger.warning(f"auth_runner integration failed: {_aue}")
+
             runtime_probe_results = await run_probes_for_acs(
                 acceptance_criteria, _probe_ctx,
             )
