@@ -670,6 +670,33 @@ async def get_backfill_ac_classification_status():
     return dict(_BACKFILL_STATE)
 
 
+# 🔐 (Phase 3) — تست login recipe و invalidate session
+@router.post("/watched/{watched_id}/auth-recipe/test")
+async def test_auth_recipe(watched_id: str):
+    """اجرای recipe یک بار (بدون cache) و گزارش موفقیت/شکست.
+
+    خروجی: {success, duration_ms, error?, success_indicator_found}
+    """
+    service = get_oversight_service()
+    w = next((x for x in service.watched if x.id == watched_id), None)
+    if not w:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+    from app.services.verify_runtime.auth_runner import test_login_recipe
+    return await test_login_recipe(w)
+
+
+@router.post("/watched/{watched_id}/auth-recipe/invalidate")
+async def invalidate_auth_recipe(watched_id: str):
+    """پاک‌کردن storage_state cached — verify بعدی recipe را دوباره اجرا
+    می‌کند."""
+    service = get_oversight_service()
+    w = next((x for x in service.watched if x.id == watched_id), None)
+    if not w:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+    from app.services.verify_runtime.auth_runner import invalidate_storage_state
+    return await invalidate_storage_state(w)
+
+
 # 🆕 (Phase 2) — revert task.prompt به یک نسخه از prompt_history
 @router.post("/tasks/{task_id}/prompt/revert")
 async def revert_task_prompt(task_id: str, index: int):
