@@ -679,6 +679,100 @@ async def _fetch_recent_commits(
 
 
 # ============================================================================
+# 🆕 (Phase 3) — یادآور Telegram برای backfill AC + دکمه trigger
+# ============================================================================
+
+# rate-limit: حداکثر یک‌بار در ۲۴ ساعت برای کل سیستم
+_BACKFILL_NEEDED_NOTIFY_LAST_AT: Optional[datetime] = None
+_BACKFILL_NEEDED_NOTIFY_COOLDOWN = timedelta(hours=24)
+
+
+async def _maybe_send_backfill_needed_notification() -> None:
+    """اگر AC هایی هستند که نیاز به Phase 3 upgrade دارند، یک نوتیفیکیشن
+    تلگرامی صدا‌دار با دکمه «اجرای force backfill» بفرست.
+
+    rate-limit: یک‌بار در ۲۴ ساعت (تا کاربر spam نشود).
+    """
+    global _BACKFILL_NEEDED_NOTIFY_LAST_AT
+
+    now = datetime.now(timezone.utc)
+    if (
+        _BACKFILL_NEEDED_NOTIFY_LAST_AT is not None
+        and (now - _BACKFILL_NEEDED_NOTIFY_LAST_AT) < _BACKFILL_NEEDED_NOTIFY_COOLDOWN
+    ):
+        return
+
+    # شمارش AC های نیاز به upgrade (همان منطق diagnostics)
+    try:
+        from .oversight_service import get_oversight_service
+        from .verify_runtime.ac_enricher import _ac_already_classified
+    except Exception:
+        return
+
+    service = get_oversight_service()
+    ac_unclassified = 0
+    ac_phase3_gap = 0
+    tasks_needing = 0
+    for t in service.tasks:
+        acs = t.acceptance_criteria or []
+        if not acs:
+            continue
+        task_needs = False
+        for ac in acs:
+            ac_dict = ac if isinstance(ac, dict) else {
+                "text": str(ac), "verify_method": "static", "verify_plan": {},
+            }
+            if not _ac_already_classified(ac_dict):
+                ac_unclassified += 1
+                task_needs = True
+            m = str(ac_dict.get("verify_method") or "static").lower()
+            if m == "ui_interaction":
+                _plan = ac_dict.get("verify_plan") or {}
+                _steps = _plan.get("ui_steps") or []
+                _real = sum(
+                    1 for s in _steps if isinstance(s, dict)
+                    and str(s.get("action") or "").lower() not in ("", "navigate", "screenshot")
+                ) if isinstance(_steps, list) else 0
+                if _real < 2:
+                    ac_phase3_gap += 1
+                    task_needs = True
+        if task_needs:
+            tasks_needing += 1
+
+    total_gap = ac_unclassified + ac_phase3_gap
+    if total_gap == 0 or tasks_needing == 0:
+        return  # چیزی برای ارسال نیست
+
+    # ارسال نوتیفیکیشن
+    try:
+        from .notification_service import notification_service
+        msg = (
+            f"🔬 *backfill AC پیشنهاد می‌شود*\n\n"
+            f"{tasks_needing} تسک شامل AC هایی هستند که از قابلیت‌های Phase 3 "
+            f"(action loop، vision_pair، expected_api_calls) استفاده نمی‌کنند.\n\n"
+            f"📊 جزئیات:\n"
+            f"• AC طبقه‌بندی نشده: {ac_unclassified}\n"
+            f"• AC با plan ناقص (نیاز Phase 3 upgrade): {ac_phase3_gap}\n\n"
+            f"با زدن دکمه زیر، enricher روی همه AC ها اجرا می‌شود "
+            f"(force re-enrich) — حدود ۳-۵ دقیقه طول می‌کشد. نتیجه با "
+            f"نوتیفیکیشن جداگانه می‌آید."
+        )
+        extra_buttons = [
+            {"text": "🔬 اجرای force backfill", "callback_data": "backfill:run_force"},
+            {"text": "✅ فقط unclassified", "callback_data": "backfill:run"},
+        ]
+        await notification_service.notify_event(
+            "backfill_ac_needed", msg,
+            subject="Backfill AC needed",
+            priority="medium",
+            extra_buttons=extra_buttons,
+        )
+        _BACKFILL_NEEDED_NOTIFY_LAST_AT = now
+    except Exception as e:
+        logger.debug(f"backfill_ac_needed notify failed: {e}")
+
+
+# ============================================================================
 # 🆕 (Phase 2) — ارسال mega-bundle.md کامل به Telegram
 # ============================================================================
 
@@ -2676,6 +2770,13 @@ async def verify_task(
                 await _send_mega_bundle(_task)
             except Exception as _mbe:
                 logger.debug(f"send mega bundle failed: {_mbe}")
+            # 🆕 (Phase 3) — اگر AC هایی هستن که نیاز به upgrade Phase 3 دارن،
+            # یک‌بار به کاربر در تلگرام یادآور بزن با دکمه‌ی trigger.
+            # rate-limit: حداکثر یک‌بار در هر ۲۴ ساعت
+            try:
+                await _maybe_send_backfill_needed_notification()
+            except Exception as _bne:
+                logger.debug(f"backfill_needed notification failed: {_bne}")
         except Exception as e:
             logger.debug(f"notification skipped: {e}")
 

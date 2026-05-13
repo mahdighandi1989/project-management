@@ -1080,16 +1080,16 @@ export default function OversightPage() {
     }
   };
 
-  const runBackfillACClassification = async () => {
+  const runBackfillACClassification = async (force = false) => {
     const confirmed = window.confirm(
-      'این عملیات با AI روی همه تسک‌ها اجرا می‌شود تا AC ها به متد درست (UI/API/test/manual) کلاسیفای شوند.\n\nبسته به تعداد تسک‌ها ممکن است ۲ تا ۵ دقیقه طول بکشد. ادامه می‌دهید؟'
+      force
+        ? '🔬 Force backfill: enricher روی *همه* AC ها (حتی classified ها) اجرا می‌شود تا plan ها به Phase 3 (recipe ۳-۸ مرحله‌ای) upgrade شوند.\n\n۳-۵ دقیقه طول می‌کشد. ادامه می‌دهید؟'
+        : 'این عملیات با AI روی همه تسک‌ها اجرا می‌شود تا AC ها به متد درست (UI/API/test/manual) کلاسیفای شوند.\n\nبسته به تعداد تسک‌ها ممکن است ۲ تا ۵ دقیقه طول بکشد. ادامه می‌دهید؟'
     );
     if (!confirmed) return;
     try {
-      const res = await fetch(
-        `${API_BASE}/api/oversight/runtime/backfill-ac-classification`,
-        { method: 'POST' }
-      );
+      const url = `${API_BASE}/api/oversight/runtime/backfill-ac-classification${force ? '?force=true' : ''}`;
+      const res = await fetch(url, { method: 'POST' });
       const data = await res.json();
       if (data.status === 'already_running') {
         showError('یک backfill قبلی هنوز در حال اجراست');
@@ -2357,7 +2357,7 @@ export default function OversightPage() {
                 فقط وقتی AC unclassified وجود دارد یا backfill در حال اجراست نشان داده می‌شود */}
             {(backfillState?.running || (backfillNeeded && backfillNeeded.ac_count > 0)) && (
               <button
-                onClick={runBackfillACClassification}
+                onClick={() => runBackfillACClassification(false)}
                 disabled={!!backfillState?.running}
                 title={
                   backfillState?.running
@@ -2373,6 +2373,16 @@ export default function OversightPage() {
                 {backfillState?.running
                   ? `🔬 backfill ${backfillState.current_index}/${backfillState.total}…`
                   : `⚠️ backfill AC ها (${backfillNeeded?.task_count ?? 0} تسک نیاز دارد)`}
+              </button>
+            )}
+            {/* 🆕 (Phase 3) — Force backfill برای upgrade AC plans به recipe ۳-۸ مرحله‌ای */}
+            {!backfillState?.running && (
+              <button
+                onClick={() => runBackfillACClassification(true)}
+                title="Force re-enrich: حتی AC هایی که از قبل classified هستند دوباره enrich می‌شوند. برای upgrade plan ها از Phase 2 (navigate only) به Phase 3 (recipe ۳-۸ مرحله‌ای)."
+                className="px-3 py-2 bg-purple-50 dark:bg-purple-900/40 text-purple-700 dark:text-purple-200 border border-purple-300 dark:border-purple-700 rounded-lg text-sm hover:bg-purple-100 dark:hover:bg-purple-900/60"
+              >
+                🔬 Force re-enrich (Phase 3)
               </button>
             )}
             <Link
