@@ -183,6 +183,7 @@ def build_probe_context(
     inspector_session_id: Optional[int] = None,
     verify_model_id: Optional[str] = None,
     watched_id: Optional[str] = None,
+    storage_state: Optional[Dict[str, Any]] = None,
 ) -> ProbeContext:
     """helper برای ساخت ProbeContext از پارامترهای ساده."""
     return ProbeContext(
@@ -197,6 +198,7 @@ def build_probe_context(
         inspector_session_id=inspector_session_id,
         verify_model_id=verify_model_id,
         watched_id=watched_id,
+        storage_state=storage_state,
     )
 
 
