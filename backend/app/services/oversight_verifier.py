@@ -683,23 +683,53 @@ async def _fetch_recent_commits(
 # ============================================================================
 
 async def _send_mega_bundle(task: "OversightTask") -> None:
-    """یک فایل bundle.md کامل از همه‌ی اطلاعات تسک + آخرین گزارش بساز
+    """یک فایل bundle.html کامل از همه‌ی اطلاعات تسک + آخرین گزارش بساز
     و به‌عنوان document به Telegram بفرست.
 
     شامل: raw_idea + checklist + steps + prompt قدیم/جدید + همه‌ی
     probe ها (با vision/console/backend URLs/logs) + URLs aggregate.
     silent fail.
+
+    🆕 (Phase 2) — قبل از ساخت bundle، تا ~۴۵ ثانیه poll می‌کنیم تا
+    apply_followup_after_verify تمام شود و فیلد task.prompt به نسخه‌ی
+    جدید آپدیت شده باشد. این تضمین می‌کند bundle شامل پرامپت بروز است،
+    نه قدیمی.
     """
+    import asyncio as _asyncio_lc
     import time as _time_lc
 
-    # تسک و آخرین report را از service بگیر (نسخهٔ بروز پس از prompt update)
+    # poll تا followup ست شود یا verify_status=done شود
+    max_wait_s = 45
+    poll_interval_s = 2.0
+    elapsed = 0.0
+    fresh_task = None
+    while elapsed < max_wait_s:
+        try:
+            await _asyncio_lc.sleep(poll_interval_s)
+            elapsed += poll_interval_s
+            from .oversight_service import get_oversight_service as _gos
+            svc = _gos()
+            fresh_task = next((t for t in svc.tasks if t.id == task.id), None)
+            if fresh_task is None:
+                return
+            # اگر prompt_history رشد کرد یا status=done شد، یعنی apply_followup
+            # تمام شده — بسته به وضعیت bundle آماده است
+            if (
+                (fresh_task.prompt_history and len(fresh_task.prompt_history) > 0)
+                or (fresh_task.verification_status == "done")
+                or elapsed >= max_wait_s - 0.1
+            ):
+                break
+        except Exception:
+            continue
+
+    if fresh_task is None:
+        return
+
+    # آخرین report برای این تسک
     try:
         from .oversight_service import get_oversight_service as _gos
         svc = _gos()
-        fresh_task = next((t for t in svc.tasks if t.id == task.id), None)
-        if fresh_task is None:
-            return
-        # آخرین report برای این تسک
         last_report = None
         for r in svc.reports:
             if r.task_id == task.id:
@@ -708,7 +738,7 @@ async def _send_mega_bundle(task: "OversightTask") -> None:
         if last_report is None:
             return
     except Exception as e:
-        logger.debug(f"_send_mega_bundle: fetch task/report failed: {e}")
+        logger.debug(f"_send_mega_bundle: fetch report failed: {e}")
         return
 
     try:
@@ -722,7 +752,8 @@ async def _send_mega_bundle(task: "OversightTask") -> None:
         return
 
     safe_tid = "".join(c if c.isalnum() else "_" for c in str(task.id))[:24]
-    fname = f"bundle_{safe_tid}_{int(_time_lc.time())}.md"
+    # 🆕 .html به جای .md — تا تلگرام/موبایل فارسی را درست نمایش دهد
+    fname = f"bundle_{safe_tid}_{int(_time_lc.time())}.html"
     title_for_caption = (fresh_task.title or fresh_task.id)[:80]
     caption = f"📦 بسته‌ی کامل verify — «{title_for_caption}»"
 
@@ -2575,20 +2606,10 @@ async def verify_task(
                 await _send_runtime_screenshots_and_cleanup(_task, _report)
             except Exception as _se:
                 logger.debug(f"send runtime screenshots failed: {_se}")
-            # 🔬 (inspector_probe Phase 1 — gap fix) — پرامپت ادامه (followup_prompt)
-            # بعد از screenshots به‌عنوان فایل .md پیوست می‌شود. به دلیل race با
-            # apply_followup_after_verify که در همان event loop اجرا می‌شود، یک
-            # تأخیر کوتاه می‌گذاریم و تسک را re-fetch می‌کنیم تا نسخهٔ به‌روز
-            # followup_prompt را داشته باشیم.
-            try:
-                await _send_followup_prompt_as_md(_task)
-            except Exception as _fse:
-                logger.debug(f"send followup_prompt md failed: {_fse}")
-            # 🆕 (Phase 2) — bundle کامل (raw_idea + checklist + پرامپت قدیم/جدید +
-            # همه‌ی probe ها + URLs + logs + analyses) در یک فایل .md.
-            # این بعد از followup .md اجرا می‌شود تا task.prompt به نسخه‌ی جدید
-            # تغییر کرده باشد (apply_followup_as_new_prompt در apply_followup_after_verify
-            # ست می‌شود).
+            # 🆕 (Phase 2 fix) — followup_prompt جداگانه دیگر فرستاده نمی‌شود
+            # چون mega-bundle شامل آن است (بخش ۵ + ۶ بسته شامل پرامپت
+            # فعلی و کل تاریخچه). اگر کاربر می‌خواهد فقط پرامپت ادامه را
+            # ببیند، در bundle.html همان بخش ۵ کافی است.
             try:
                 await _send_mega_bundle(_task)
             except Exception as _mbe:

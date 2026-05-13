@@ -617,6 +617,80 @@ class TelegramChannel(NotificationChannel):
         except Exception as e:
             return {"ok": False, "channel": self.name, "error": str(e)[:300]}
 
+    async def send_media_group_photos(
+        self,
+        photo_paths: List[str],
+        captions: Optional[List[str]] = None,
+        *,
+        silent: bool = True,
+    ) -> Dict[str, Any]:
+        """ارسال تا ۱۰ photo به‌عنوان یک media_group (یک پیام «آلبوم»).
+
+        Telegram محدودیت: ۱۰ media در هر group، caption نهایی ۱۰۲۴ char.
+        اگر تعداد بیشتر از ۱۰ باشد، فقط ۱۰ تای اول ارسال می‌شود.
+
+        خروجی: {ok, channel, count, error?}
+        """
+        if not self.is_configured():
+            return {"ok": False, "channel": self.name,
+                    "error": "TELEGRAM_BOT_TOKEN/CHAT_ID خالی است"}
+        if not photo_paths:
+            return {"ok": False, "channel": self.name, "error": "no photos"}
+
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMediaGroup"
+        data = aiohttp.FormData()
+        data.add_field("chat_id", str(self.chat_id))
+        if silent:
+            data.add_field("disable_notification", "true")
+
+        # بارگذاری فایل‌ها و ساخت آرایه media
+        media_array: List[Dict[str, Any]] = []
+        successful_paths: List[str] = []
+        for i, p in enumerate(photo_paths[:10]):
+            try:
+                with open(p, "rb") as f:
+                    photo_bytes = f.read()
+            except Exception:
+                continue
+            attach_name = f"photo_{i}"
+            fname = p.rsplit("/", 1)[-1]
+            ctype = "image/jpeg" if fname.lower().endswith((".jpg", ".jpeg")) else "image/png"
+            media_item: Dict[str, Any] = {
+                "type": "photo",
+                "media": f"attach://{attach_name}",
+            }
+            if captions and i < len(captions) and captions[i]:
+                # caption max 1024 char در Telegram
+                cap = captions[i][:1020]
+                media_item["caption"] = cap
+            media_array.append(media_item)
+            data.add_field(
+                attach_name, photo_bytes,
+                filename=fname, content_type=ctype,
+            )
+            successful_paths.append(p)
+
+        if not media_array:
+            return {"ok": False, "channel": self.name,
+                    "error": "no readable photos"}
+
+        data.add_field("media", json.dumps(media_array))
+        try:
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, data=data) as r:
+                    if r.status != 200:
+                        body = await r.text()
+                        return {"ok": False, "channel": self.name,
+                                "error": f"HTTP {r.status}: {body[:300]}",
+                                "count": len(media_array)}
+                    return {"ok": True, "channel": self.name,
+                            "count": len(media_array),
+                            "paths": successful_paths}
+        except Exception as e:
+            return {"ok": False, "channel": self.name,
+                    "error": str(e)[:300]}
+
     # 🆕 (Compose Stage 2) — کمک‌کننده‌ها برای download کردن media از Telegram
     async def get_file(self, file_id: str) -> Optional[Dict[str, Any]]:
         """تماس با Bot API getFile → file_path و file_size می‌گیریم.
@@ -1327,18 +1401,44 @@ class NotificationService:
 
         برای ضمیمه‌ی screenshot های auto-verify بعد از پیام اصلی verify.
 
+        🆕 (Phase 2 fix) — اگر تعداد photo بیشتر از یکی باشد، از
+        sendMediaGroup استفاده می‌کند تا همه در یک «آلبوم» (یک پیام)
+        ارسال شوند، نه تیکه‌تیکه. اگر media_group شکست خورد، fallback
+        به send_photo تک‌تک.
+
         خروجی: لیست نتایج (یک item به ازای هر photo که تلاش شد).
         photo هایی که خواندنی نبودند skip می‌شوند.
         """
         if not photo_paths:
             return []
-        # فقط Telegram را پیدا کن
         results: List[Dict[str, Any]] = []
         for ch in self._build_channels():
             if not isinstance(ch, TelegramChannel):
                 continue
             if not ch.is_configured():
                 continue
+            # ابتدا تلاش با media_group اگر >=2
+            if len(photo_paths) >= 2:
+                try:
+                    mg_res = await ch.send_media_group_photos(
+                        photo_paths[:10], captions=captions, silent=silent,
+                    )
+                except Exception as e:
+                    mg_res = {"ok": False, "channel": ch.name,
+                              "error": f"media_group exception: {e}"}
+                if mg_res.get("ok"):
+                    for p in (mg_res.get("paths") or photo_paths[:10]):
+                        results.append({
+                            "ok": True, "channel": ch.name, "path": p,
+                            "via": "media_group",
+                        })
+                    continue
+                # media_group شکست خورد → fallback به send_photo تک‌تک
+                logger.debug(
+                    f"media_group failed on {ch.name}: {mg_res.get('error')} "
+                    f"— falling back to individual send_photo"
+                )
+            # mode تک‌به‌تک (یا برای ۱ photo، یا fallback)
             for idx, p in enumerate(photo_paths):
                 cap = None
                 if captions and idx < len(captions):
@@ -1346,8 +1446,10 @@ class NotificationService:
                 try:
                     res = await ch.send_photo(p, caption=cap, silent=silent)
                 except Exception as e:
-                    res = {"ok": False, "channel": ch.name, "error": f"send_photo exception: {e}"}
+                    res = {"ok": False, "channel": ch.name,
+                           "error": f"send_photo exception: {e}"}
                 res["path"] = p
+                res["via"] = "send_photo"
                 results.append(res)
         return results
 
