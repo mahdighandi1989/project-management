@@ -3725,6 +3725,22 @@ export default function OversightPage() {
                 </div>
               )}
 
+              {/* 🔬 (Runtime Verify) — وضعیت اجرای runtime probes — همیشه نمایش داده می‌شود
+                 تا کاربر بفهمد چرا probe اجرا شد یا نشد */}
+              {viewingReport.evidence?.runtime_status && (
+                <div className="border border-cyan-300 dark:border-cyan-700 rounded-lg p-2 bg-cyan-50/40 dark:bg-cyan-900/10 text-xs">
+                  <span className="font-semibold dark:text-cyan-200">🔬 Runtime:</span>{' '}
+                  <span className="text-gray-700 dark:text-gray-300">
+                    {viewingReport.evidence.runtime_status as string}
+                  </span>
+                  {(viewingReport.evidence.runtime_status as string).startsWith('did_not_run') && (
+                    <div className="text-[10px] text-gray-500 dark:text-gray-400 mt-1">
+                      probe ها اجرا نشدند. علت: include_runtime=false یا AC خالی است.
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* 🔬 (Runtime Verify Stage 8) — probe results */}
               {viewingReport.evidence?.runtime_probes && Array.isArray(viewingReport.evidence.runtime_probes) && (viewingReport.evidence.runtime_probes as any[]).length > 0 && (
                 <div className="border border-cyan-300 dark:border-cyan-700 rounded-lg p-3 bg-cyan-50/40 dark:bg-cyan-900/10">

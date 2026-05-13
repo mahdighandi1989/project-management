@@ -969,6 +969,8 @@ async def verify_task(
     runtime_evidence_blob = ""
     runtime_override_hints: Dict[str, str] = {}  # ac_text → "passed" | "failed"
     runtime_run_id: Optional[str] = None
+    # 🔬 (debug visibility) — توضیح اینکه چرا/چطور runtime block اجرا شد
+    runtime_status_note: str = "did_not_run"
     try:
         import os as _os
         import uuid as _uuid
@@ -977,6 +979,12 @@ async def verify_task(
             include_runtime and
             _os.environ.get("RUNTIME_VERIFY_ENABLED", "true").lower() != "false"
         )
+        if not include_runtime:
+            runtime_status_note = "skipped (include_runtime=false)"
+        elif not runtime_enabled:
+            runtime_status_note = "disabled by RUNTIME_VERIFY_ENABLED env"
+        elif not acceptance_criteria:
+            runtime_status_note = "no acceptance_criteria to probe"
         if runtime_enabled and acceptance_criteria:
             from .verify_runtime import (
                 run_probes_for_task,
@@ -1078,6 +1086,13 @@ async def verify_task(
                     elif r.status == "failed":
                         runtime_override_hints[r.ac_text[:200]] = "failed"
                 runtime_evidence_blob = "\n".join(rt_lines)
+                runtime_status_note = (
+                    f"ran ({len(runtime_probe_results)} probes: "
+                    f"{sum(1 for r in runtime_probe_results if r.status == 'passed')}p/"
+                    f"{sum(1 for r in runtime_probe_results if r.status == 'failed')}f/"
+                    f"{sum(1 for r in runtime_probe_results if r.status == 'skipped')}s/"
+                    f"{sum(1 for r in runtime_probe_results if r.status == 'error')}e)"
+                )
                 logger.info(
                     f"verify {task.id}: runtime probes ran — "
                     f"{sum(1 for r in runtime_probe_results if r.status == 'passed')} passed, "
@@ -1439,6 +1454,9 @@ async def verify_task(
         report.evidence["summary"] = parsed["summary"]
 
     # 🔬 (Runtime Verify Stage 5+6) — probe results را در evidence ذخیره کن
+    # همیشه runtime_status را ذخیره می‌کنیم (حتی وقتی probe نخورد) تا
+    # کاربر بفهمد چرا (مثلاً RUNTIME_VERIFY_ENABLED=false یا empty AC).
+    report.evidence["runtime_status"] = runtime_status_note
     if runtime_probe_results:
         report.evidence["runtime_probes"] = [
             r.to_dict() for r in runtime_probe_results
