@@ -1065,6 +1065,8 @@ export default function OversightPage() {
   const [backfillNeeded, setBackfillNeeded] = useState<{
     ac_count: number;
     task_count: number;
+    phase3_ac_count: number;
+    phase3_task_count: number;
   } | null>(null);
 
   const fetchBackfillNeeded = async () => {
@@ -1074,7 +1076,14 @@ export default function OversightPage() {
       const data = await res.json();
       const ac = data?.tasks?.ac_unclassified_count ?? 0;
       const tk = data?.tasks?.tasks_needing_backfill ?? 0;
-      setBackfillNeeded({ ac_count: ac, task_count: tk });
+      const p3ac = data?.tasks?.ac_needing_phase3_upgrade ?? 0;
+      const p3tk = data?.tasks?.tasks_needing_phase3_upgrade ?? 0;
+      setBackfillNeeded({
+        ac_count: ac,
+        task_count: tk,
+        phase3_ac_count: p3ac,
+        phase3_task_count: p3tk,
+      });
     } catch {
       // silent — diagnostics بدون مزاحمت
     }
@@ -2375,14 +2384,15 @@ export default function OversightPage() {
                   : `⚠️ backfill AC ها (${backfillNeeded?.task_count ?? 0} تسک نیاز دارد)`}
               </button>
             )}
-            {/* 🆕 (Phase 3) — Force backfill برای upgrade AC plans به recipe ۳-۸ مرحله‌ای */}
-            {!backfillState?.running && (
+            {/* 🆕 (Phase 3) — Force backfill برای upgrade AC plans به recipe ۳-۸ مرحله‌ای
+                فقط وقتی واقعاً AC هایی هستن که نیاز به upgrade دارن نمایش داده می‌شه. */}
+            {!backfillState?.running && backfillNeeded && backfillNeeded.phase3_ac_count > 0 && (
               <button
                 onClick={() => runBackfillACClassification(true)}
-                title="Force re-enrich: حتی AC هایی که از قبل classified هستند دوباره enrich می‌شوند. برای upgrade plan ها از Phase 2 (navigate only) به Phase 3 (recipe ۳-۸ مرحله‌ای)."
+                title={`${backfillNeeded.phase3_task_count} تسک شامل ${backfillNeeded.phase3_ac_count} AC با plan ناقص هستن (Phase 2 style — فقط navigate). Force re-enrich این‌ها رو به Phase 3 (recipe ۳-۸ مرحله‌ای) upgrade می‌کنه تا probe ها واقعاً interaction انجام بدن.`}
                 className="px-3 py-2 bg-purple-50 dark:bg-purple-900/40 text-purple-700 dark:text-purple-200 border border-purple-300 dark:border-purple-700 rounded-lg text-sm hover:bg-purple-100 dark:hover:bg-purple-900/60"
               >
-                🔬 Force re-enrich (Phase 3)
+                🔬 Force re-enrich (Phase 3) — {backfillNeeded.phase3_task_count} تسک
               </button>
             )}
             <Link
