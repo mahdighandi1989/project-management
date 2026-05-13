@@ -78,7 +78,12 @@ async def _try_vision(
         from ..oversight_inspector_bridge import describe_screenshot_with_vision
         user_ctx = str(context.get("ac_text") or context.get("user_context") or "")[:500]
         page_url = str(context.get("url") or "")[:500]
-        result = await describe_screenshot_with_vision(b64, user_ctx, page_url)
+        # 🆕 (Phase 4 fix) — html_excerpt را برای keyword-overlap از DOM
+        # واقعی (نه از OCR vision که قابل fake است) به bridge بدهیم
+        html_excerpt = str(context.get("html_excerpt") or "")[:8000]
+        result = await describe_screenshot_with_vision(
+            b64, user_ctx, page_url, dom_text=html_excerpt,
+        )
     except Exception as e:
         logger.debug(f"vision_helper: describe_screenshot_with_vision call failed: {e}")
         return None
