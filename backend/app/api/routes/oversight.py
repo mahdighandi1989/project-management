@@ -400,18 +400,32 @@ async def runtime_diagnostics():
     }
     tasks_without_acs = 0
     total_tasks = 0
+    # 🔬 شمارش AC هایی که هنوز unclassified هستند (نیاز به backfill)
+    # «unclassified» یعنی verify_method=static و verify_plan خالی (نه pattern نه files_hint)
+    # تابع _ac_already_classified همین منطق را دارد
+    from app.services.verify_runtime.ac_enricher import _ac_already_classified
+    ac_unclassified_count = 0
+    tasks_needing_backfill = 0
     for t in service.tasks:
         total_tasks += 1
         acs = t.acceptance_criteria or []
         if not acs:
             tasks_without_acs += 1
             continue
+        task_has_unclassified = False
         for ac in acs:
             if isinstance(ac, dict):
                 m = str(ac.get("verify_method") or "static").lower()
             else:
                 m = "static"
             method_counts[m] = method_counts.get(m, 0) + 1
+            # تشخیص unclassified
+            ac_dict = ac if isinstance(ac, dict) else {"text": str(ac), "verify_method": "static", "verify_plan": {}}
+            if not _ac_already_classified(ac_dict):
+                ac_unclassified_count += 1
+                task_has_unclassified = True
+        if task_has_unclassified:
+            tasks_needing_backfill += 1
 
     # ---- recent reports runtime_status ----
     recent = service.reports[:50]
@@ -484,6 +498,8 @@ async def runtime_diagnostics():
             "total": total_tasks,
             "without_acs": tasks_without_acs,
             "ac_by_method": method_counts,
+            "ac_unclassified_count": ac_unclassified_count,
+            "tasks_needing_backfill": tasks_needing_backfill,
         },
         "recent_reports": {
             "count_inspected": len(recent),

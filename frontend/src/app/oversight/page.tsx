@@ -1046,6 +1046,24 @@ export default function OversightPage() {
     summary: Record<string, any> | null;
     error: string | null;
   } | null>(null);
+  // 🔬 آمار «چندتا AC هنوز نیاز به backfill دارند» — برای نمایش مشروط دکمه
+  const [backfillNeeded, setBackfillNeeded] = useState<{
+    ac_count: number;
+    task_count: number;
+  } | null>(null);
+
+  const fetchBackfillNeeded = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/runtime/diagnostics`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const ac = data?.tasks?.ac_unclassified_count ?? 0;
+      const tk = data?.tasks?.tasks_needing_backfill ?? 0;
+      setBackfillNeeded({ ac_count: ac, task_count: tk });
+    } catch {
+      // silent — diagnostics بدون مزاحمت
+    }
+  };
 
   const runBackfillACClassification = async () => {
     const confirmed = window.confirm(
@@ -1083,6 +1101,8 @@ export default function OversightPage() {
                   ` (${s.tasks_already_classified} از قبل کلاسیفای بودند، ${s.tasks_errored} خطا)`
               );
             }
+            // refetch diagnostics — دکمه باید خودش غیب شود اگر دیگر AC unclassified نیست
+            fetchBackfillNeeded();
           }
         } catch (e) {
           clearInterval(interval);
@@ -1189,6 +1209,8 @@ export default function OversightPage() {
     } finally {
       setLoading(false);
     }
+    // best-effort — دکمه backfill بر اساس وضعیت AC ها مشروط نشان داده می‌شود
+    fetchBackfillNeeded();
   };
 
   const reloadStatus = async () => {
@@ -2316,17 +2338,28 @@ export default function OversightPage() {
             >
               🔄 بروزرسانی
             </button>
-            {/* 🔬 (Runtime Verify) — backfill AI classification AC ها */}
-            <button
-              onClick={runBackfillACClassification}
-              disabled={!!backfillState?.running}
-              title="با AI همه AC های تسک‌های قدیمی را به متد درست (UI/API/test/manual) کلاسیفای می‌کند تا runtime probes واقعاً اجرا شوند."
-              className="px-3 py-2 bg-cyan-50 dark:bg-cyan-900/40 text-cyan-700 dark:text-cyan-200 border border-cyan-300 dark:border-cyan-700 rounded-lg text-sm hover:bg-cyan-100 dark:hover:bg-cyan-900/60 disabled:opacity-60 disabled:cursor-not-allowed"
-            >
-              {backfillState?.running
-                ? `🔬 backfill ${backfillState.current_index}/${backfillState.total}…`
-                : '🔬 backfill AC ها'}
-            </button>
+            {/* 🔬 (Runtime Verify) — backfill AI classification AC ها
+                فقط وقتی AC unclassified وجود دارد یا backfill در حال اجراست نشان داده می‌شود */}
+            {(backfillState?.running || (backfillNeeded && backfillNeeded.ac_count > 0)) && (
+              <button
+                onClick={runBackfillACClassification}
+                disabled={!!backfillState?.running}
+                title={
+                  backfillState?.running
+                    ? 'backfill در حال اجرا — صبر کنید…'
+                    : `${backfillNeeded?.task_count ?? 0} تسک هنوز AC هایشان به متد درست (UI/API/test/manual) کلاسیفای نشده. این عملیات با AI آن‌ها را کلاسیفای می‌کند تا runtime probes واقعاً اجرا شوند.`
+                }
+                className={
+                  backfillState?.running
+                    ? 'px-3 py-2 bg-cyan-50 dark:bg-cyan-900/40 text-cyan-700 dark:text-cyan-200 border border-cyan-300 dark:border-cyan-700 rounded-lg text-sm disabled:opacity-60 disabled:cursor-not-allowed'
+                    : 'px-3 py-2 bg-amber-50 dark:bg-amber-900/40 text-amber-700 dark:text-amber-200 border border-amber-300 dark:border-amber-700 rounded-lg text-sm hover:bg-amber-100 dark:hover:bg-amber-900/60 animate-pulse'
+                }
+              >
+                {backfillState?.running
+                  ? `🔬 backfill ${backfillState.current_index}/${backfillState.total}…`
+                  : `⚠️ backfill AC ها (${backfillNeeded?.task_count ?? 0} تسک نیاز دارد)`}
+              </button>
+            )}
             <Link
               href="/"
               className="px-4 py-2 bg-gray-200 dark:bg-gray-700 dark:text-white rounded-lg hover:bg-gray-300"
