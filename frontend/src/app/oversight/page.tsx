@@ -5951,6 +5951,39 @@ function TasksPanel({
                         </ul>
                       </div>
                     )}
+                    {/* 🔬 (Runtime Verify) — وضعیت probes و خلاصه نتایج (همیشه نمایش، حتی اگر skip شده) */}
+                    {r.evidence?.runtime_status && (
+                      <div className="border border-cyan-300 dark:border-cyan-700 rounded p-2 bg-cyan-50/40 dark:bg-cyan-900/10">
+                        <div className="font-semibold text-cyan-700 dark:text-cyan-200 mb-1">🔬 Runtime probes:</div>
+                        <div className="text-gray-700 dark:text-gray-300">
+                          <span className="font-mono text-[10px]">{String(r.evidence.runtime_status)}</span>
+                        </div>
+                        {r.evidence.runtime_probes_summary && (
+                          <div className="text-[11px] text-gray-600 dark:text-gray-400 mt-1">
+                            ✅ {(r.evidence.runtime_probes_summary as any).passed || 0} pass
+                            {' · '}❌ {(r.evidence.runtime_probes_summary as any).failed || 0} fail
+                            {' · '}⏭ {(r.evidence.runtime_probes_summary as any).skipped || 0} skip
+                            {' · '}⚠️ {(r.evidence.runtime_probes_summary as any).error || 0} error
+                          </div>
+                        )}
+                        {Array.isArray(r.evidence.runtime_probes) && (r.evidence.runtime_probes as any[]).length > 0 && (
+                          <ul className="mt-1 text-[10px] text-gray-600 dark:text-gray-400 space-y-0.5">
+                            {(r.evidence.runtime_probes as any[]).slice(0, 6).map((p: any, i: number) => {
+                              const emoji = p.status === 'passed' ? '✅' : p.status === 'failed' ? '❌' : p.status === 'error' ? '⚠️' : '⏭';
+                              return (
+                                <li key={i} className="truncate">
+                                  {emoji} <span className="font-mono">{p.method}</span> — «{String(p.ac_text || '').slice(0, 60)}»
+                                  {p.evidence?.reason ? <span className="text-gray-500"> ({String(p.evidence.reason).slice(0, 60)})</span> : null}
+                                </li>
+                              );
+                            })}
+                            {(r.evidence.runtime_probes as any[]).length > 6 && (
+                              <li className="text-gray-500">… و {(r.evidence.runtime_probes as any[]).length - 6} probe دیگر</li>
+                            )}
+                          </ul>
+                        )}
+                      </div>
+                    )}
                     {r.evidence && (Object.keys(r.evidence).length > 0) && (() => {
                       // نمایش زیباتر شواهد: commits، files، issues به صورت جدا
                       const commits = Array.isArray(r.evidence.commits) ? r.evidence.commits : [];
