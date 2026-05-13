@@ -40,9 +40,9 @@ from .base import (
 
 logger = logging.getLogger(__name__)
 
-# محدودیت Phase 1
-_TIMEOUT_S = 60
-_MAX_SCREENSHOTS = 2
+# محدودیت Phase 3
+_TIMEOUT_S = 90  # افزایش از ۶۰ به ۹۰ برای recipe طولانی
+_MAX_SCREENSHOTS = 5  # افزایش از ۲ — interaction های پیچیده
 _MAX_SCREENSHOT_BYTES = 500_000  # ~500KB
 _MAX_CONSOLE_LOGS = 50
 # 🆕 (Phase 2) محدودیت ضبط network requests
@@ -52,6 +52,17 @@ _STATIC_EXTENSIONS = (
     ".woff", ".woff2", ".ttf", ".otf",
     ".css", ".js", ".mjs", ".map", ".ico",
 )
+# 🆕 (Phase 3) — action loop
+_MAX_UI_STEPS = 12  # حداکثر step در هر probe
+_DEFAULT_STEP_TIMEOUT_MS = 5000
+
+# action های مجاز در ui_steps
+_SUPPORTED_ACTIONS = frozenset({
+    "navigate", "click", "fill", "submit", "select",
+    "check", "uncheck", "hover", "wait_for", "wait_for_url",
+    "wait_for_load", "screenshot", "scroll_to", "press_key",
+    "assert_visible", "assert_text", "assert_url",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +357,12 @@ async def _run_inspector_inner(
 
     try:
         try:
-            context = await browser.new_context(viewport={"width": 1280, "height": 800})
+            # 🆕 (Phase 3) — اگر ctx.storage_state داریم، در new_context اعمال
+            # کن تا probe به صفحات با لاگین دسترسی داشته باشد.
+            _ctx_kwargs: Dict[str, Any] = {"viewport": {"width": 1280, "height": 800}}
+            if isinstance(ctx.storage_state, dict) and ctx.storage_state:
+                _ctx_kwargs["storage_state"] = ctx.storage_state
+            context = await browser.new_context(**_ctx_kwargs)
             page = await context.new_page()
             page.set_default_timeout(ctx.ui_timeout_ms)
 
@@ -453,6 +469,22 @@ async def _run_inspector_inner(
 
             final_url = page.url or full_url
 
+            # 🔐 (Phase 3) — Login redirect detection
+            # اگر صفحه به /login redirect خورد (و هدف تسک خود login نبود)،
+            # علامت‌گذاری کن. اگر storage_state داشتیم ولی auth منقضی شده، این
+            # هم گرفته می‌شود.
+            auth_required = False
+            try:
+                _final_lower = (final_url or "").lower()
+                _orig_lower = (full_url or "").lower()
+                _login_paths = ("/login", "/signin", "/sign-in", "/auth/login", "/auth/signin")
+                if any(p in _final_lower for p in _login_paths) and not any(
+                    p in _orig_lower for p in _login_paths
+                ):
+                    auth_required = True
+            except Exception:
+                pass
+
             # screenshot 1 (after_navigate)
             shot1 = await _take_and_record_screenshot(
                 page, shot_dir, "after_navigate", screenshots, actions_taken, ctx,
@@ -464,9 +496,67 @@ async def _run_inspector_inner(
             except Exception:
                 html_excerpt = ""
 
-            # ---- click (در صورت وجود selector_hint) ----
+            # 🆕 (Phase 3) — action loop: اگر verify_plan.ui_steps شامل بیش از
+            # یک step غیر-navigate است، sequence را اجرا کن (interaction واقعی).
+            # navigate قبلاً انجام شده، پس step های navigate در sequence skip
+            # می‌شوند مگر URL متفاوت داشته باشند.
+            extra_steps_executed = False
+            backend_root_for_probe = (ctx.backend_base_url or "").rstrip("/")
+            plan_steps_raw = plan.get("ui_steps") or []
+            # تنها step های non-navigate یا step های navigate با URL متفاوت
+            executable_steps: List[Dict[str, Any]] = []
+            if isinstance(plan_steps_raw, list):
+                for _s in plan_steps_raw[:_MAX_UI_STEPS]:
+                    if not isinstance(_s, dict):
+                        continue
+                    _act = str(_s.get("action") or "").lower()
+                    if _act == "navigate":
+                        # اولین navigate قبلاً انجام شده — skip تا navigate دوگانه نداشته باشیم
+                        continue
+                    if _act:
+                        executable_steps.append(_s)
+
+            if executable_steps:
+                extra_steps_executed = True
+                if ctx.inspector_session_id:
+                    try:
+                        await _msg(
+                            ctx.inspector_session_id, "system",
+                            f"🎬 اجرای sequence ({len(executable_steps)} مرحله)",
+                        )
+                    except Exception:
+                        pass
+                for _step_idx, _step in enumerate(executable_steps, start=1):
+                    _step_result = await _execute_ui_step(
+                        page, _step, _step_idx, shot_dir,
+                        screenshots, ctx, backend_root_for_probe,
+                    )
+                    actions_taken.append(_step_result)
+                    # log به session
+                    if ctx.inspector_session_id:
+                        _emoji = "✅" if _step_result.get("success") else "❌"
+                        try:
+                            await _msg(
+                                ctx.inspector_session_id, "action",
+                                f"{_emoji} step {_step_idx}: {_step_result.get('message', '')}",
+                                action_type=_step_result.get("action"),
+                            )
+                        except Exception:
+                            pass
+                    # اگر step ای fail شد، sequence را متوقف کن (مگر assert_*)
+                    if (not _step_result.get("success")
+                            and not _step_result["action"].startswith("assert_")):
+                        break
+                # update final_url پس از sequence
+                try:
+                    final_url = page.url or final_url
+                except Exception:
+                    pass
+
+            # ---- click (در صورت وجود selector_hint و در صورت نبود extra_steps) ----
             selector_found = True  # default if no hint
-            if selector_hint:
+            # اگر sequence اجرا شد، single-click قدیمی را skip کن
+            if selector_hint and not extra_steps_executed:
                 click_start = time.monotonic()
                 try:
                     el = await page.wait_for_selector(selector_hint, timeout=5000, state="visible")
@@ -595,19 +685,14 @@ async def _run_inspector_inner(
                 vision_missing_reason = _shot.get("vision_feature_reason") or "vision AI: feature not visible"
                 break
 
-        passed = (
+        # 🔢 (Phase 3) — passed نهایی بعد از vision_pair و expected_api_calls
+        # محاسبه می‌شود (پایین‌تر در کد). فعلاً initial passed برای assertion ها.
+        passed_initial = (
             nav_ok
             and (not has_console_error)
             and selector_ok
             and (not vision_says_feature_missing)
-        )
-        status = PROBE_STATUS_PASSED if passed else PROBE_STATUS_FAILED
-        emoji = "✅" if passed else "❌"
-        await _msg(
-            ctx.inspector_session_id, "system",
-            f"{emoji} probe {status}"
-            + (f" — feature missing: {vision_missing_reason[:200]}"
-               if vision_says_feature_missing else ""),
+            and (not auth_required)
         )
 
         assertion_results: List[Dict[str, Any]] = [
@@ -616,12 +701,130 @@ async def _run_inspector_inner(
             {"expectation": "no console errors", "met": (not has_console_error),
              "reason": f"{sum(1 for c in console_errors if c.get('level') == 'error')} errors"},
         ]
+        # 🆕 (Phase 3) — vision pair analysis اگر ≥۲ screenshot داریم
+        # و sequence اجرا شده (یعنی interaction واقعی بود)
+        vision_pair_result: Optional[Dict[str, Any]] = None
+        try:
+            if extra_steps_executed and len(screenshots) >= 2:
+                # اولین و آخرین screenshot معتبر را به‌عنوان before/after بگیر
+                _valid_shots = [s for s in screenshots if s.get("path")]
+                if len(_valid_shots) >= 2:
+                    _before = _valid_shots[0]
+                    _after = _valid_shots[-1]
+                    from .vision_helper import analyze_screenshot_pair
+                    vision_pair_result = await analyze_screenshot_pair(
+                        _before["path"], _after["path"],
+                        {
+                            "ac_text": ac_text,
+                            "actions_taken": actions_taken,
+                        },
+                    )
+                    if vision_pair_result and ctx.inspector_session_id:
+                        try:
+                            _diff = vision_pair_result.get("diff_description") or ""
+                            _suc = vision_pair_result.get("interaction_succeeded") or "unclear"
+                            _fp = vision_pair_result.get("feature_present") or "unclear"
+                            await _msg(
+                                ctx.inspector_session_id, "system",
+                                f"🔬 vision pair: interaction={_suc}, "
+                                f"feature_present={_fp} — {_diff[:200]}",
+                            )
+                        except Exception:
+                            pass
+        except Exception as _vpe:
+            logger.debug(f"inspector_probe vision pair failed: {_vpe}")
+
+        # 🆕 (Phase 3) — expected_api_calls assertion
+        expected_api_calls_results: List[Dict[str, Any]] = []
+        try:
+            expected = plan.get("expected_api_calls") or []
+            if isinstance(expected, list) and expected:
+                for exp in expected:
+                    if not isinstance(exp, dict):
+                        continue
+                    exp_method = str(exp.get("method") or "GET").upper()
+                    exp_path = str(exp.get("path_contains") or "").strip()
+                    if not exp_path:
+                        continue
+                    matched = any(
+                        str(c.get("method") or "").upper() == exp_method
+                        and exp_path in str(c.get("url") or "")
+                        for c in network_calls
+                    )
+                    expected_api_calls_results.append({
+                        "expectation": f"API call {exp_method} {exp_path}",
+                        "met": matched,
+                        "reason": "ثبت شد" if matched else "ثبت نشد",
+                    })
+        except Exception as _eae:
+            logger.debug(f"inspector_probe expected_api_calls failed: {_eae}")
+
+        # اگر expected_api_calls فیلد داشت و حداقل یکی نشد → احتمالاً feature
+        # واقعی کار نکرده — این علاوه بر vision یک signal دیگر است
+        api_calls_failed = bool(expected_api_calls_results) and any(
+            not r.get("met") for r in expected_api_calls_results
+        )
+
+        # vision_pair interaction signal
+        vision_pair_interaction_failed = bool(
+            vision_pair_result
+            and vision_pair_result.get("interaction_succeeded") == "no"
+        )
+
+        # assertion ها از vision_pair و expected_api_calls
+        if vision_pair_result and vision_pair_result.get("interaction_succeeded") != "unclear":
+            _ok = vision_pair_result.get("interaction_succeeded") == "yes"
+            assertion_results.append({
+                "expectation": "interaction قابل مشاهده‌ای انجام شد",
+                "met": _ok,
+                "reason": vision_pair_result.get("diff_description", "")[:300],
+            })
+        assertion_results.extend(expected_api_calls_results)
+
+        # 🆕 passed نهایی Phase 3
+        passed = (
+            passed_initial
+            and not vision_pair_interaction_failed
+            and not api_calls_failed
+        )
+        status = PROBE_STATUS_PASSED if passed else PROBE_STATUS_FAILED
+        emoji = "✅" if passed else "❌"
+        # علت اولویت‌دار برای پیام session
+        _why_failed = ""
+        if vision_says_feature_missing:
+            _why_failed = f" — feature missing: {vision_missing_reason[:200]}"
+        elif auth_required:
+            _why_failed = " — redirect به login (auth recipe لازم است)"
+        elif vision_pair_interaction_failed:
+            _why_failed = f" — interaction انجام نشد: {(vision_pair_result or {}).get('diff_description', '')[:200]}"
+        elif api_calls_failed:
+            _missed = [r for r in expected_api_calls_results if not r.get('met')]
+            _why_failed = f" — {len(_missed)} API call مورد انتظار ثبت نشد"
+        await _msg(
+            ctx.inspector_session_id, "system",
+            f"{emoji} probe {status}{_why_failed}",
+        )
+
         # 🆕 (Phase 2 fix 3) — assertion vision feature_present
         if vision_says_feature_missing:
             assertion_results.append({
                 "expectation": f"feature «{ac_text[:80]}» در صفحه دیده شود",
                 "met": False,
                 "reason": vision_missing_reason[:300],
+            })
+        # 🔐 (Phase 3) — login redirect assertion
+        if auth_required:
+            _auth_state_label = (
+                "valid" if ctx.storage_state else
+                ("none" if not getattr(ctx, "storage_state", None) else "expired")
+            )
+            assertion_results.append({
+                "expectation": "صفحه‌ی هدف بدون redirect به login باز شود",
+                "met": False,
+                "reason": (
+                    f"redirect به {final_url[:120]} — auth_state={_auth_state_label}"
+                    f"؛ احتمالاً runtime_auth_recipe لازم است"
+                ),
             })
         if selector_hint:
             assertion_results.append({
@@ -665,7 +868,17 @@ async def _run_inspector_inner(
                 "backend_log_summary": backend_summary,
                 "final_url": final_url,
                 "assertion_results": assertion_results,
-                "probe_type": "inspector_phase1",
+                # 🆕 (Phase 3) — vision pair + expected_api_calls
+                "vision_pair": vision_pair_result,
+                "expected_api_calls_results": expected_api_calls_results,
+                # 🔐 (Phase 3) — auth state
+                "auth_required": auth_required,
+                "auth_state": (
+                    "valid" if (ctx.storage_state and not auth_required) else
+                    ("expired" if (ctx.storage_state and auth_required) else
+                     ("failed" if auth_required else "none"))
+                ),
+                "probe_type": "inspector_phase3",
             },
             duration_ms=int((time.monotonic() - start_mono) * 1000),
         )
@@ -757,11 +970,188 @@ async def _take_and_record_screenshot(
         return None
 
 
+# ---------------------------------------------------------------------------
+# 🆕 (Phase 3) — action loop helper
+# ---------------------------------------------------------------------------
+
+async def _execute_ui_step(
+    page: Any,
+    step: Dict[str, Any],
+    step_idx: int,
+    shot_dir: Optional[Path],
+    screenshots: List[Dict[str, Any]],
+    ctx: ProbeContext,
+    backend_root: str,
+) -> Dict[str, Any]:
+    """اجرای یک ui_step و برگرداندن نتیجه ساختاریافته.
+
+    Returns:
+      {
+        step_idx, action, selector, value,
+        success, duration_ms, message, error, screenshot_label
+      }
+    """
+    start = time.monotonic()
+    action = str(step.get("action") or "").strip().lower()
+    selector = step.get("selector")
+    value = step.get("value")
+    timeout_ms = int(step.get("timeout_ms") or _DEFAULT_STEP_TIMEOUT_MS)
+
+    result: Dict[str, Any] = {
+        "step_idx": step_idx,
+        "action": action,
+        "selector": selector,
+        "value": value if action != "fill" else "***",  # mask values
+        "success": False,
+        "duration_ms": 0,
+        "message": "",
+        "error": None,
+        "screenshot_label": None,
+    }
+
+    if action not in _SUPPORTED_ACTIONS:
+        result["error"] = f"unknown action: {action}"
+        result["message"] = "action skipped"
+        return result
+
+    try:
+        if action == "navigate":
+            url = step.get("url") or "/"
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            result["success"] = True
+            result["message"] = f"navigated to {url}"
+        elif action == "click":
+            if not selector:
+                result["error"] = "selector required"
+                return result
+            await page.locator(selector).first.click(timeout=timeout_ms)
+            result["success"] = True
+            result["message"] = f"clicked {selector}"
+        elif action == "fill":
+            if not selector:
+                result["error"] = "selector required"
+                return result
+            await page.locator(selector).first.fill(str(value or ""), timeout=timeout_ms)
+            result["success"] = True
+            result["message"] = f"filled {selector}"
+        elif action == "submit":
+            # selector می‌تواند یک form یا یک button[type=submit] باشد
+            if selector:
+                try:
+                    await page.locator(selector).first.click(timeout=timeout_ms)
+                except Exception:
+                    await page.locator(selector).first.press("Enter", timeout=timeout_ms)
+                result["success"] = True
+                result["message"] = f"submitted via {selector}"
+            else:
+                result["error"] = "selector required"
+                return result
+        elif action == "select":
+            if not selector:
+                result["error"] = "selector required"
+                return result
+            await page.select_option(selector, str(value or ""), timeout=timeout_ms)
+            result["success"] = True
+            result["message"] = f"selected {value} in {selector}"
+        elif action == "check":
+            await page.check(selector, timeout=timeout_ms)
+            result["success"] = True
+            result["message"] = f"checked {selector}"
+        elif action == "uncheck":
+            await page.uncheck(selector, timeout=timeout_ms)
+            result["success"] = True
+            result["message"] = f"unchecked {selector}"
+        elif action == "hover":
+            await page.hover(selector, timeout=timeout_ms)
+            result["success"] = True
+            result["message"] = f"hovered {selector}"
+        elif action == "wait_for":
+            state = step.get("state", "visible")
+            await page.wait_for_selector(selector, timeout=timeout_ms, state=state)
+            result["success"] = True
+            result["message"] = f"wait_for {selector} ({state})"
+        elif action == "wait_for_url":
+            contains = step.get("contains") or step.get("pattern") or ""
+            # Playwright wait_for_url می‌خواهد یا callable یا regex یا exact url
+            try:
+                await page.wait_for_url(f"**{contains}**", timeout=timeout_ms)
+            except Exception:
+                # fallback: poll page.url
+                deadline = time.monotonic() + (timeout_ms / 1000.0)
+                while time.monotonic() < deadline:
+                    if contains in (page.url or ""):
+                        break
+                    await asyncio.sleep(0.2)
+                if contains not in (page.url or ""):
+                    raise
+            result["success"] = True
+            result["message"] = f"url now contains '{contains}'"
+        elif action == "wait_for_load":
+            state = step.get("state", "networkidle")
+            await page.wait_for_load_state(state, timeout=timeout_ms)
+            result["success"] = True
+            result["message"] = f"wait_for_load_state({state})"
+        elif action == "screenshot":
+            label = str(step.get("label") or f"step_{step_idx}")
+            path = await _take_and_record_screenshot(
+                page, shot_dir, label, screenshots, [], ctx,
+            )
+            result["success"] = path is not None
+            result["screenshot_label"] = label
+            result["message"] = f"screenshot {label}"
+        elif action == "scroll_to":
+            await page.locator(selector).first.scroll_into_view_if_needed(timeout=timeout_ms)
+            result["success"] = True
+            result["message"] = f"scrolled to {selector}"
+        elif action == "press_key":
+            key = str(step.get("key") or "Enter")
+            await page.keyboard.press(key)
+            result["success"] = True
+            result["message"] = f"pressed {key}"
+        elif action == "assert_visible":
+            visible = await page.locator(selector).first.is_visible(timeout=timeout_ms)
+            result["success"] = bool(visible)
+            result["message"] = f"assert_visible {selector} = {visible}"
+            if not visible:
+                result["error"] = "not visible"
+        elif action == "assert_text":
+            text = await page.locator(selector).first.text_content(timeout=timeout_ms)
+            contains = str(step.get("contains") or "")
+            ok = bool(text and contains and contains in text)
+            result["success"] = ok
+            result["message"] = f"assert_text {selector} contains '{contains}' = {ok}"
+            if not ok:
+                result["error"] = f"text mismatch (got: {(text or '')[:80]})"
+        elif action == "assert_url":
+            contains = str(step.get("contains") or "")
+            current = page.url or ""
+            ok = contains in current
+            result["success"] = ok
+            result["message"] = f"assert_url contains '{contains}' = {ok}"
+            if not ok:
+                result["error"] = f"url mismatch ({current})"
+    except Exception as e:
+        result["error"] = str(e)[:300]
+        result["message"] = f"{action} failed: {result['error']}"
+        # screenshot on failure (best-effort)
+        try:
+            fail_label = f"step_{step_idx}_fail_{action}"
+            await _take_and_record_screenshot(
+                page, shot_dir, fail_label, screenshots, [], ctx,
+            )
+            result["screenshot_label"] = fail_label
+        except Exception:
+            pass
+
+    result["duration_ms"] = int((time.monotonic() - start) * 1000)
+    return result
+
+
 def _skipped(ac_id: str, ac_text: str, reason: str, start_mono: float) -> RuntimeProbeResult:
     return RuntimeProbeResult(
         ac_id=ac_id, ac_text=ac_text, method="ui_interaction",
         status=PROBE_STATUS_SKIPPED,
-        evidence={"reason": reason, "probe_type": "inspector_phase1"},
+        evidence={"reason": reason, "probe_type": "inspector_phase3"},
         duration_ms=int((time.monotonic() - start_mono) * 1000),
     )
 
@@ -780,7 +1170,7 @@ def _build_result_after_failure(
         "console_errors": console_errors,
         "final_url": final_url,
         "reason": reason,
-        "probe_type": "inspector_phase1",
+        "probe_type": "inspector_phase3",
     }
     if network_calls is not None:
         evid["network_calls"] = network_calls

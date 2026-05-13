@@ -180,6 +180,169 @@ async def _try_text_fallback(
         return None
 
 
+# ---------------------------------------------------------------------------
+# 🆕 (Phase 3) — Before/After screenshot pair analysis
+# ---------------------------------------------------------------------------
+
+async def analyze_screenshot_pair(
+    before_path: str,
+    after_path: str,
+    context: Dict[str, Any],
+) -> Dict[str, Any]:
+    """آنالیز یک جفت screenshot قبل/بعد از interaction.
+
+    دو تصویر را همزمان به multimodal model می‌فرستد و می‌پرسد:
+    «قبل از تعامل، صفحه X بود. بعد از تعامل، Y شد. آیا تعامل کار کرد
+    و feature واقعاً عمل کرد؟»
+
+    اگر vision در دسترس نباشد → source="none" + توصیف‌های خالی.
+
+    Returns:
+      {
+        "before_description": str,
+        "after_description": str,
+        "diff_description": str,
+        "interaction_succeeded": "yes" | "no" | "unclear",
+        "feature_present": "yes" | "no" | "unclear",
+        "source": str,
+        "raw": dict | None,
+      }
+    """
+    none_pair = {
+        "before_description": "",
+        "after_description": "",
+        "diff_description": "",
+        "interaction_succeeded": "unclear",
+        "feature_present": "unclear",
+        "source": "none",
+        "raw": None,
+    }
+    try:
+        from pathlib import Path as _Path
+        bp = _Path(before_path)
+        ap = _Path(after_path)
+        if not bp.is_file() or not ap.is_file():
+            return none_pair
+        with bp.open("rb") as f:
+            b64_before = base64.b64encode(f.read()).decode("ascii")
+        with ap.open("rb") as f:
+            b64_after = base64.b64encode(f.read()).decode("ascii")
+    except Exception as e:
+        logger.debug(f"vision_helper pair: file read failed: {e}")
+        return none_pair
+
+    # تلاش vision multimodal (با ۲ تصویر)
+    try:
+        from ..ai_manager import get_ai_manager
+        from ..ai_base import Message
+        from ...core.models_registry import get_vision_models
+        import os as _os
+    except Exception as e:
+        logger.debug(f"vision_helper pair: imports failed: {e}")
+        return none_pair
+
+    try:
+        vision_models = get_vision_models() or []
+        env_keys = {
+            "openai": ["OPENAI_API_KEY"],
+            "claude": ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
+            "anthropic": ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
+            "gemini": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            "google": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        }
+        with_key = set()
+        for p, ks in env_keys.items():
+            if any((_os.environ.get(k) or "").strip() for k in ks):
+                with_key.add(p.lower())
+        picked = None
+        for m in vision_models:
+            prov = m.provider
+            prov_str = (prov.value if hasattr(prov, "value") else str(prov)).lower()
+            if prov_str in with_key:
+                picked = m
+                break
+        if not picked:
+            return none_pair
+    except Exception as e:
+        logger.debug(f"vision_helper pair: model pick failed: {e}")
+        return none_pair
+
+    ac_text = str(context.get("ac_text") or "")[:500]
+    actions = context.get("actions_taken") or []
+    actions_summary = "\n".join(
+        f"  - {a.get('action', '')}: {a.get('message', '')[:80]}"
+        for a in (actions or [])[:10]
+        if isinstance(a, dict)
+    ) or "(none)"
+
+    prompt = (
+        "دو screenshot به ترتیب می‌بینی: «قبل» و «بعد» از یک سری تعامل\n"
+        "روی صفحه. وظیفه‌ات:\n\n"
+        "1) توصیف قبل: scene فعلی\n"
+        "2) توصیف بعد: scene تغییر یافته\n"
+        "3) diff_description: چه تغییری ظاهر شد؟ (یک جمله)\n"
+        "4) interaction_succeeded: آیا interaction واقعاً کار کرد؟\n"
+        "   - yes: تغییر مرئی رخ داد (modal باز شد، فرم submit شد، …)\n"
+        "   - no: هیچ تغییری نبود یا error ظاهر شد\n"
+        "   - unclear: نمی‌توان از مقایسه قطعی گفت\n"
+        "5) feature_present: آیا ویژگی AC در نهایت روی صفحه دیده می‌شود؟\n\n"
+        f"📋 ویژگی AC مورد بررسی:\n{ac_text}\n\n"
+        f"🎬 اقدامات انجام‌شده بین «قبل» و «بعد»:\n{actions_summary}\n\n"
+        "خروجی JSON خالص:\n"
+        "{\n"
+        '  "before_description": "...",\n'
+        '  "after_description": "...",\n'
+        '  "diff_description": "...",\n'
+        '  "interaction_succeeded": "yes|no|unclear",\n'
+        '  "feature_present": "yes|no|unclear"\n'
+        "}"
+    )
+
+    try:
+        ai_mgr = get_ai_manager()
+        msg = Message(
+            role="user",
+            content=prompt,
+            images=[b64_before, b64_after],
+        )
+        resp = await ai_mgr.generate(
+            model_id=picked.id,
+            messages=[msg],
+            max_tokens=2000,
+            temperature=0.2,
+        )
+        txt = (resp.content or "").strip()
+        if txt.startswith("```"):
+            txt = txt.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        start = txt.find("{")
+        end = txt.rfind("}")
+        if start == -1 or end <= start:
+            return none_pair
+        try:
+            import json as _json
+            parsed = _json.loads(txt[start:end + 1])
+        except Exception as je:
+            logger.debug(f"vision_helper pair: JSON parse failed: {je}")
+            return none_pair
+
+        def _norm_verdict(v: Any) -> str:
+            s = str(v or "unclear").strip().lower()
+            return s if s in ("yes", "no", "unclear") else "unclear"
+
+        return {
+            "before_description": str(parsed.get("before_description") or "")[:2000],
+            "after_description": str(parsed.get("after_description") or "")[:2000],
+            "diff_description": str(parsed.get("diff_description") or "")[:1500],
+            "interaction_succeeded": _norm_verdict(parsed.get("interaction_succeeded")),
+            "feature_present": _norm_verdict(parsed.get("feature_present")),
+            "source": f"vision_pair_{picked.id}",
+            "raw": parsed,
+        }
+    except Exception as e:
+        logger.debug(f"vision_helper pair: call failed: {e}")
+        return none_pair
+
+
 def _none_result(reason: str) -> Dict[str, Any]:
     return {
         "description": "",

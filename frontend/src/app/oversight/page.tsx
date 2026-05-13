@@ -110,6 +110,21 @@ interface Watched {
     frontend?: { ok?: boolean; status?: number; error?: string; url?: string };
     backend?: { ok?: boolean; status?: number; error?: string; url?: string };
   } | null;
+  // 🔐 (Phase 3) — auth recipe + cached storage state
+  runtime_auth_recipe?: {
+    type?: string;
+    login_url?: string;
+    steps?: Array<Record<string, any>>;
+    success_indicator?: { selector?: string; must_exist?: boolean };
+    session_ttl_minutes?: number;
+  } | null;
+  runtime_storage_state?: {
+    encrypted_blob?: string | null;
+    expires_at?: string | null;
+    obtained_at?: string | null;
+    login_failed_count?: number;
+    last_error?: string | null;
+  } | null;
 }
 
 // 🔬 (Runtime Verify Stage 1) — ساختار AC جدید
@@ -5200,6 +5215,164 @@ function WatchedCard({
               </label>
             </div>
 
+            {/* 🔐 (Phase 3) — Auth Recipe Panel */}
+            <details className="mb-2 border border-cyan-200 dark:border-cyan-800 rounded">
+              <summary className="cursor-pointer text-xs p-1.5 bg-cyan-50/50 dark:bg-cyan-900/20 dark:text-cyan-200">
+                🔐 Auth Recipe (اختیاری) — برای صفحات با لاگین
+                {w.runtime_storage_state?.encrypted_blob && (
+                  <span className="mr-2 text-[10px] text-green-700 dark:text-green-300">
+                    ✓ session cached
+                  </span>
+                )}
+                {(w.runtime_storage_state?.login_failed_count ?? 0) >= 3 && (
+                  <span className="mr-2 text-[10px] text-red-700 dark:text-red-300">
+                    ⚠️ recipe disabled ({w.runtime_storage_state?.login_failed_count} failures)
+                  </span>
+                )}
+              </summary>
+              <div className="p-2 space-y-1.5">
+                <div className="text-[10px] text-gray-500 dark:text-gray-400">
+                  recipe یک‌بار قبل از هر verify run اجرا می‌شود و cookies را
+                  برای probe ها cache می‌کند. credentials از env vars با
+                  prefix <code>WATCHED_AUTH_*</code> خوانده می‌شوند.
+                </div>
+                <label className="block text-xs dark:text-gray-200">
+                  <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Login URL</span>
+                  <input
+                    type="text"
+                    defaultValue={w.runtime_auth_recipe?.login_url || ''}
+                    placeholder="/login"
+                    onBlur={(e) => {
+                      const v = e.target.value.trim();
+                      const prev = w.runtime_auth_recipe || {};
+                      onChange({ runtime_auth_recipe: { ...prev, login_url: v, type: prev.type || 'form_login' } });
+                    }}
+                    className="w-full p-1.5 border rounded text-xs dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                    dir="ltr"
+                  />
+                </label>
+                <div className="grid grid-cols-2 gap-1">
+                  <label className="text-xs dark:text-gray-200">
+                    <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Email selector</span>
+                    <input
+                      type="text"
+                      defaultValue={(w.runtime_auth_recipe?.steps?.find((s: any) => s.value_env === 'WATCHED_AUTH_EMAIL')?.selector) || 'input[name=email]'}
+                      placeholder="input[name=email]"
+                      onBlur={(e) => {
+                        const v = e.target.value.trim();
+                        const prev = w.runtime_auth_recipe || { type: 'form_login', steps: [] };
+                        const steps = (prev.steps || []).filter((s: any) => s.value_env !== 'WATCHED_AUTH_EMAIL');
+                        steps.unshift({ action: 'fill', selector: v, value_env: 'WATCHED_AUTH_EMAIL' });
+                        onChange({ runtime_auth_recipe: { ...prev, steps } });
+                      }}
+                      className="w-full p-1.5 border rounded text-[10px] dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                      dir="ltr"
+                    />
+                  </label>
+                  <label className="text-xs dark:text-gray-200">
+                    <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Password selector</span>
+                    <input
+                      type="text"
+                      defaultValue={(w.runtime_auth_recipe?.steps?.find((s: any) => s.value_env === 'WATCHED_AUTH_PASSWORD')?.selector) || 'input[name=password]'}
+                      placeholder="input[name=password]"
+                      onBlur={(e) => {
+                        const v = e.target.value.trim();
+                        const prev = w.runtime_auth_recipe || { type: 'form_login', steps: [] };
+                        const steps = (prev.steps || []).filter((s: any) => s.value_env !== 'WATCHED_AUTH_PASSWORD');
+                        // اضافه کن بعد از email step
+                        const emailIdx = steps.findIndex((s: any) => s.value_env === 'WATCHED_AUTH_EMAIL');
+                        const insertAt = emailIdx >= 0 ? emailIdx + 1 : 0;
+                        steps.splice(insertAt, 0, { action: 'fill', selector: v, value_env: 'WATCHED_AUTH_PASSWORD' });
+                        onChange({ runtime_auth_recipe: { ...prev, steps } });
+                      }}
+                      className="w-full p-1.5 border rounded text-[10px] dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                      dir="ltr"
+                    />
+                  </label>
+                </div>
+                <div className="grid grid-cols-2 gap-1">
+                  <label className="text-xs dark:text-gray-200">
+                    <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Submit selector</span>
+                    <input
+                      type="text"
+                      defaultValue={(w.runtime_auth_recipe?.steps?.find((s: any) => s.action === 'click')?.selector) || 'button[type=submit]'}
+                      placeholder="button[type=submit]"
+                      onBlur={(e) => {
+                        const v = e.target.value.trim();
+                        const prev = w.runtime_auth_recipe || { type: 'form_login', steps: [] };
+                        const steps = (prev.steps || []).filter((s: any) => s.action !== 'click');
+                        steps.push({ action: 'click', selector: v });
+                        onChange({ runtime_auth_recipe: { ...prev, steps } });
+                      }}
+                      className="w-full p-1.5 border rounded text-[10px] dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                      dir="ltr"
+                    />
+                  </label>
+                  <label className="text-xs dark:text-gray-200">
+                    <span className="block text-gray-500 dark:text-gray-400 mb-0.5">Success selector</span>
+                    <input
+                      type="text"
+                      defaultValue={w.runtime_auth_recipe?.success_indicator?.selector || ''}
+                      placeholder="[data-testid='user-menu']"
+                      onBlur={(e) => {
+                        const v = e.target.value.trim();
+                        const prev = w.runtime_auth_recipe || { type: 'form_login', steps: [] };
+                        onChange({ runtime_auth_recipe: { ...prev, success_indicator: { selector: v, must_exist: true } } });
+                      }}
+                      className="w-full p-1.5 border rounded text-[10px] dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                      dir="ltr"
+                    />
+                  </label>
+                </div>
+                <div className="flex gap-1 flex-wrap">
+                  <button
+                    onClick={async () => {
+                      try {
+                        const res = await fetch(`${API_BASE}/api/oversight/watched/${w.id}/auth-recipe/test`, { method: 'POST' });
+                        const data = await res.json();
+                        if (data.success) {
+                          alert(`✅ login موفق (${data.duration_ms}ms)\nsuccess_indicator_found: ${data.success_indicator_found}`);
+                        } else {
+                          alert(`❌ login fail: ${data.error || 'unknown'}`);
+                        }
+                      } catch (e: any) {
+                        alert(`خطا: ${e?.message || e}`);
+                      }
+                    }}
+                    className="px-2 py-1 bg-cyan-600 text-white rounded text-xs hover:bg-cyan-700"
+                  >
+                    🧪 Test login
+                  </button>
+                  <button
+                    onClick={async () => {
+                      try {
+                        const res = await fetch(`${API_BASE}/api/oversight/watched/${w.id}/auth-recipe/invalidate`, { method: 'POST' });
+                        const data = await res.json();
+                        if (data.ok) {
+                          alert('🔄 session invalidated — verify بعدی recipe را دوباره اجرا می‌کند');
+                        } else {
+                          alert(`خطا: ${data.error || 'unknown'}`);
+                        }
+                      } catch (e: any) {
+                        alert(`خطا: ${e?.message || e}`);
+                      }
+                    }}
+                    className="px-2 py-1 bg-gray-200 dark:bg-gray-700 dark:text-white text-gray-700 rounded text-xs hover:bg-gray-300"
+                  >
+                    🔄 Refresh session
+                  </button>
+                </div>
+                {w.runtime_storage_state?.last_error && (
+                  <div className="text-[10px] text-red-600 dark:text-red-400">
+                    ⚠️ آخرین خطا: {w.runtime_storage_state.last_error}
+                  </div>
+                )}
+                <div className="text-[9px] text-gray-500 dark:text-gray-400 mt-1">
+                  env vars لازم: <code>WATCHED_AUTH_EMAIL</code> و <code>WATCHED_AUTH_PASSWORD</code> — در Settings → Env Vars پروژه Render ست شود.
+                </div>
+              </div>
+            </details>
+
             {/* persisted last test result */}
             {w.runtime_connection_test && (
               <div className="mb-2 p-2 bg-white/60 dark:bg-gray-900/40 rounded border border-gray-200 dark:border-gray-700">
@@ -6026,6 +6199,15 @@ function TasksPanel({
                                 const featureReason = featureMissing
                                   ? (shots.find((s: any) => (s.vision_feature_present || '').toLowerCase() === 'no')?.vision_feature_reason || '')
                                   : '';
+                                // 🔐 (Phase 3) — auth_required + vision_pair
+                                const authRequired = !!p.evidence?.auth_required;
+                                const visionPair = p.evidence?.vision_pair || null;
+                                const interactionFailed = visionPair && visionPair.interaction_succeeded === 'no';
+                                const apiCallsFailed = Array.isArray(p.evidence?.expected_api_calls_results) &&
+                                  p.evidence.expected_api_calls_results.some((r: any) => !r.met);
+                                const apiCallsMissingCount = Array.isArray(p.evidence?.expected_api_calls_results)
+                                  ? p.evidence.expected_api_calls_results.filter((r: any) => !r.met).length
+                                  : 0;
                                 // 🆕 (Phase 2) — تشخیص step / system / regular probe برای آیکن
                                 const isStepProbe = !!p.evidence?.step_id;
                                 const isSystemProbe = p.ac_id === 'system_home';
@@ -6056,6 +6238,21 @@ function TasksPanel({
                                             {' — '}{String(featureReason).slice(0, 100)}
                                           </span>
                                         )}
+                                      </div>
+                                    )}
+                                    {authRequired && (
+                                      <div className="pr-3 text-amber-700 dark:text-amber-300 font-semibold">
+                                        🔐 نیاز به login (redirect دیده شد) — runtime_auth_recipe را تنظیم کنید
+                                      </div>
+                                    )}
+                                    {interactionFailed && visionPair && (
+                                      <div className="pr-3 text-red-700 dark:text-red-300">
+                                        ⚡ interaction انجام نشد: <span className="font-normal italic">{String(visionPair.diff_description || '').slice(0, 100)}</span>
+                                      </div>
+                                    )}
+                                    {apiCallsFailed && (
+                                      <div className="pr-3 text-orange-700 dark:text-orange-300 text-[10px]">
+                                        🌐 {apiCallsMissingCount} API call مورد انتظار ثبت نشد
                                       </div>
                                     )}
                                     {firstVision && (

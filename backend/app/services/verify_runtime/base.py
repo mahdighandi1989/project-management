@@ -104,3 +104,8 @@ class ProbeContext:
     verify_model_id: Optional[str] = None
     # 🔬 watched_id برای جستجوی RenderLog مرتبط با سرویس
     watched_id: Optional[str] = None
+    # 🔐 (Phase 3) — storage_state از Playwright (cookies + localStorage) که
+    # اگر تنظیم شد، inspector_probe در new_context آن را اعمال می‌کند تا
+    # probe به صفحات با لاگین دسترسی داشته باشد. dict مستقیماً قابل پاس
+    # به browser.new_context(storage_state=...).
+    storage_state: Optional[Dict[str, Any]] = None

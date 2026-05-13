@@ -224,6 +224,26 @@ class WatchedProject:
     runtime_autodetected: bool = False
     # نتیجهٔ آخرین تست اتصال — {frontend: {ok, status, error?}, backend: {...}, at: ISO}
     runtime_connection_test: Optional[Dict[str, Any]] = None
+    # 🔐 (Phase 3) — auth recipe برای probe ها
+    # اگر تنظیم شد، قبل از هر verify run یک login flow اجرا می‌شود و
+    # storage_state (cookies + localStorage) برای استفاده‌ی probe ها
+    # ذخیره می‌شود. ساختار:
+    # {
+    #   "type": "form_login",
+    #   "login_url": "/login",
+    #   "steps": [
+    #     {"action": "fill", "selector": "input[name=email]", "value_env": "TEST_EMAIL"},
+    #     {"action": "fill", "selector": "input[name=password]", "value_env": "TEST_PASSWORD"},
+    #     {"action": "click", "selector": "button[type=submit]"},
+    #     {"action": "wait_for_url", "contains": "/dashboard", "timeout_ms": 5000}
+    #   ],
+    #   "success_indicator": {"selector": "[data-testid='user-menu']", "must_exist": true},
+    #   "session_ttl_minutes": 30
+    # }
+    runtime_auth_recipe: Optional[Dict[str, Any]] = None
+    # cached storage state (encrypted) — توسط auth_runner مدیریت می‌شود
+    # {encrypted_blob, expires_at, obtained_at, login_failed_count}
+    runtime_storage_state: Optional[Dict[str, Any]] = None
 
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
