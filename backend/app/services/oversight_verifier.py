@@ -679,6 +679,74 @@ async def _fetch_recent_commits(
 
 
 # ============================================================================
+# 🔬 (inspector_probe Phase 1) — TTL cleanup برای screenshot های orphan
+# ============================================================================
+
+def cleanup_orphan_runtime_screenshots(max_age_days: int = 3) -> Dict[str, int]:
+    """screenshot هایی که بیش از max_age_days روی دیسک مانده‌اند را حذف کن.
+
+    این تابع synchronous است (فایل‌سیستم). از داخل scheduler صدا زده می‌شود.
+
+    خروجی: {deleted_count, deleted_bytes, scanned_count}
+    """
+    import os as _os
+    from pathlib import Path as _Path
+
+    try:
+        from .oversight_service import STORAGE_DIR as _SD
+    except Exception:
+        return {"deleted_count": 0, "deleted_bytes": 0, "scanned_count": 0, "error": "STORAGE_DIR unavailable"}
+
+    root = _Path(_SD) / "runtime_evidence"
+    if not root.exists():
+        return {"deleted_count": 0, "deleted_bytes": 0, "scanned_count": 0}
+
+    threshold = time.time() - (max_age_days * 86400)
+    deleted = 0
+    deleted_bytes = 0
+    scanned = 0
+    try:
+        for png in root.rglob("*.png"):
+            scanned += 1
+            try:
+                st = png.stat()
+                if st.st_mtime < threshold:
+                    sz = st.st_size
+                    png.unlink(missing_ok=True)
+                    deleted += 1
+                    deleted_bytes += sz
+            except Exception:
+                continue
+        for jpg in root.rglob("*.jpg"):
+            scanned += 1
+            try:
+                st = jpg.stat()
+                if st.st_mtime < threshold:
+                    sz = st.st_size
+                    jpg.unlink(missing_ok=True)
+                    deleted += 1
+                    deleted_bytes += sz
+            except Exception:
+                continue
+        # پوشه‌های خالی را هم پاک کن (best-effort)
+        for d in sorted(root.rglob("*"), key=lambda p: -len(str(p))):
+            try:
+                if d.is_dir() and not any(d.iterdir()):
+                    d.rmdir()
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug(f"cleanup_orphan_runtime_screenshots error: {e}")
+
+    if deleted:
+        logger.info(
+            f"runtime_evidence TTL cleanup: deleted={deleted} files, "
+            f"bytes={deleted_bytes}, scanned={scanned}"
+        )
+    return {"deleted_count": deleted, "deleted_bytes": deleted_bytes, "scanned_count": scanned}
+
+
+# ============================================================================
 # 🔬 (inspector_probe Phase 1) — ضمیمه‌ی screenshot ها به تلگرام + پاک‌سازی
 # ============================================================================
 

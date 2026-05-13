@@ -5673,6 +5673,14 @@ class OversightService:
             await get_compose_service().cleanup_expired()
         except Exception:
             pass
+        # 🔬 (inspector_probe Phase 1) — TTL پاک‌سازی screenshot های orphan auto-verify
+        # هر بار scheduler_tick اجرا می‌شود این هم چک می‌شود؛ هزینه‌اش ناچیز است.
+        try:
+            import asyncio as _asyncio_lc
+            from .oversight_verifier import cleanup_orphan_runtime_screenshots
+            await _asyncio_lc.to_thread(cleanup_orphan_runtime_screenshots, 3)
+        except Exception:
+            pass
 
         for w in list(self.watched):
             # ----- 1) Scan دوره‌ای -----
