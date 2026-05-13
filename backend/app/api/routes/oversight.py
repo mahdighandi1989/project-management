@@ -582,6 +582,31 @@ async def _run_backfill_ac_classification(model_id: Optional[str]) -> None:
                     model_id=model_id,
                 )
                 if enriched:
+                    # 🛡 post-process — تضمین می‌کنیم هر AC در نهایت "classified"
+                    # شناخته شود. اگر AI با static و plan خالی برگشت (که گاهی
+                    # برای AC های مبهم پیش می‌آید)، خودمان grep_patterns از متن
+                    # استخراج می‌کنیم. اگر متن قابل استخراج نبود، manual_only
+                    # می‌گذاریم. بدون این مرحله، چنین AC هایی هرگز از لیست
+                    # «نیاز به backfill» خارج نمی‌شوند و دکمه ابدی می‌ماند.
+                    from app.services.verify_runtime.static_probe import _build_patterns
+                    for _ac in enriched:
+                        if not isinstance(_ac, dict):
+                            continue
+                        _method = str(_ac.get("verify_method") or "static").lower()
+                        _plan = _ac.get("verify_plan") or {}
+                        if not isinstance(_plan, dict):
+                            _plan = {}
+                            _ac["verify_plan"] = _plan
+                        if _method == "static" and not _plan.get("grep_patterns") and not _plan.get("files_hint"):
+                            _derived = _build_patterns(_ac)
+                            if _derived:
+                                _plan["grep_patterns"] = _derived
+                                _ac["verify_plan"] = _plan
+                            else:
+                                _ac["verify_method"] = "manual_only"
+                                _ac["verify_plan"] = {
+                                    "reason": "AI و auto-derive نتوانستند pattern قابل تست استخراج کنند — نیاز به بازبینی دستی"
+                                }
                     async with service._lock:
                         # تسک ممکن است در حین صبر برای AI تغییر کرده باشد — دوباره fetch
                         live = next((t for t in service.tasks if t.id == tid), None)
