@@ -2333,6 +2333,44 @@ async def run_deep_scan(
             done_priority = "high" if critical_count > 0 else ("medium" if len(created_tasks) > 0 else "low")
             # 🆕 (R6) silent default = NOT bool(watched.scan_notify_sound)
             _silent_default = not bool(getattr(watched, "scan_notify_sound", False))
+
+            # 🆕 (Phase 5 — bug 2 fix) — scan-bundle PDF attachment
+            _scan_bundle_attachment: Optional[Dict[str, Any]] = None
+            try:
+                from .scan_v5.scan_bundle import build_scan_bundle_pdf
+                _bundle_bytes, _bundle_ext = await build_scan_bundle_pdf(
+                    watched=watched,
+                    scan_v5_inventory=scan_v5_inventory,
+                    created_tasks=created_tasks,
+                )
+                # ذخیره روی disk تا notification_service بتواند ضمیمه کند
+                from pathlib import Path as _PA
+                _bundle_dir = _PA("storage/scan_v5_bundles")
+                _bundle_dir.mkdir(parents=True, exist_ok=True)
+                _bundle_name = (
+                    f"scan_bundle_{watched_id}_{uuid.uuid4().hex[:8]}{_bundle_ext}"
+                )
+                _bundle_path = _bundle_dir / _bundle_name
+                _bundle_path.write_bytes(_bundle_bytes)
+                _scan_bundle_attachment = {
+                    "bytes": _bundle_bytes,
+                    "filename": _bundle_name,
+                    "path": str(_bundle_path),
+                }
+                logger.info(
+                    f"scan_v5 bundle generated: {_bundle_path} "
+                    f"({len(_bundle_bytes)} bytes, ext={_bundle_ext})"
+                )
+                if scan_v5_session_id:
+                    from .scan_v5.scan_inspector_session import log_scan_message
+                    log_scan_message(
+                        scan_v5_session_id, "system",
+                        f"📦 scan bundle ساخته شد ({_bundle_ext}, "
+                        f"{len(_bundle_bytes) // 1024}KB)",
+                    )
+            except Exception as _e_bun:
+                logger.warning(f"scan_v5 bundle generation failed: {_e_bun}")
+
             await notification_service.notify_event(
                 "scan_done", "\n".join(msg_lines),
                 subject="Deep Scan completed",
@@ -2340,6 +2378,7 @@ async def run_deep_scan(
                 project_name=repo_name,
                 watched_id=watched_id,
                 silent=_silent_default,
+                attachment=_scan_bundle_attachment,
             )
 
             # 2) اگر یافتهٔ critical داشت، یک پیام جداگانه با priority بالا
