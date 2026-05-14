@@ -1743,6 +1743,46 @@ async def run_deep_scan(
         except Exception as _e_r4:
             logger.warning(f"scan_v5 phase 4 failed: {_e_r4}")
 
+        # 🆕 (Phase 5 — فاز ۵) — Logical Audit (Coherence + Anti-pattern)
+        scan_v5_coherence: Dict[str, Any] = {}
+        scan_v5_anti_patterns: List[Dict[str, Any]] = []
+        try:
+            if getattr(watched, "logic_audit_enabled", True):
+                write_progress(
+                    watched_id, phase="phase5_logic_audit",
+                    message="تحلیل منطقی coherence و anti-patterns",
+                )
+                from .scan_v5.coherence_analyzer import analyze_coherence
+                from .scan_v5.anti_pattern_detector import detect_anti_patterns
+
+                scan_v5_coherence = await analyze_coherence(
+                    purpose_map=scan_v5_purpose_map,
+                    inventory=scan_v5_inventory,
+                    file_contents=deep_contents,
+                    verify_model_id=(model_ids[0] if model_ids else model_id),
+                )
+                scan_v5_anti_patterns = await detect_anti_patterns(
+                    file_contents=deep_contents,
+                    inventory=scan_v5_inventory,
+                    purpose_map=scan_v5_purpose_map,
+                    verify_model_id=(model_ids[0] if model_ids else model_id),
+                )
+                logger.info(
+                    f"scan_v5 logic_audit: "
+                    f"coherence_issues={len(scan_v5_coherence.get('issues', []))}, "
+                    f"anti_patterns={len(scan_v5_anti_patterns)}"
+                )
+                if scan_v5_session_id:
+                    from .scan_v5.scan_inspector_session import log_scan_message
+                    log_scan_message(
+                        scan_v5_session_id, "system",
+                        f"🧠 logic audit: "
+                        f"{len(scan_v5_coherence.get('issues', []))} coherence + "
+                        f"{len(scan_v5_anti_patterns)} anti-pattern",
+                    )
+        except Exception as _e_logic:
+            logger.warning(f"scan_v5 logic_audit failed: {_e_logic}")
+
         # 🆕 (Phase 5 — فاز ۳) — Delta Detection + Bidirectional Dependency
         scan_v5_delta: Dict[str, Any] = {"summary": {}}
         scan_v5_change_impact: List[Dict[str, Any]] = []
@@ -1801,6 +1841,8 @@ async def run_deep_scan(
             scan_v5_inventory["_outcome_data"] = scan_v5_outcome_data
             scan_v5_inventory["_effectiveness_issues"] = scan_v5_effectiveness_issues
             scan_v5_inventory["_scan_session_id"] = scan_v5_session_id
+            scan_v5_inventory["_coherence"] = scan_v5_coherence
+            scan_v5_inventory["_anti_patterns"] = scan_v5_anti_patterns
         except Exception:
             pass
 
