@@ -3206,6 +3206,47 @@ async def verify_task(
                 f"verify {task.id}: {len(_step_overrides)} step status "
                 f"overrides applied from code-aware: {_step_overrides[:5]}"
             )
+            # 🆕 (Phase 5 cosmetic fix) — وقتی override fires، report.remaining_parts
+            # و report.done_parts را هم sync کن. در غیر اینصورت کاربر چک‌لیست
+            # 10/10 done می‌بیند ولی "باقی‌مانده (5)" در PDF نمایش داده می‌شود
+            # که گمراه‌کننده است.
+            try:
+                _upgraded_step_titles = []
+                for _us in updated_steps:
+                    if _us.get("status") == "done":
+                        _t = (_us.get("title") or "").strip()
+                        if _t:
+                            _upgraded_step_titles.append(_t)
+                _existing_done = list(getattr(report, "done_parts", []) or [])
+                _existing_remaining = list(getattr(report, "remaining_parts", []) or [])
+
+                # حذف عناوین upgrade شده از remaining_parts
+                _new_remaining = []
+                for _rp in _existing_remaining:
+                    _rp_text = str(_rp).strip()
+                    # match approximate: عنوان step در remaining_parts باشد
+                    _matched = any(
+                        _t in _rp_text or _rp_text in _t
+                        for _t in _upgraded_step_titles
+                        if len(_t) >= 8
+                    )
+                    if not _matched:
+                        _new_remaining.append(_rp)
+                # افزودن عناوین upgrade شده به done_parts (با prefix شناسایی)
+                _new_done = list(_existing_done)
+                for _t in _upgraded_step_titles:
+                    _entry = f"✓ {_t} (code-aware: implemented)"
+                    if _entry not in _new_done:
+                        _new_done.append(_entry)
+
+                report.remaining_parts = _new_remaining
+                report.done_parts = _new_done
+                logger.info(
+                    f"verify {task.id}: sync done/remaining after override — "
+                    f"removed {len(_existing_remaining) - len(_new_remaining)} from remaining"
+                )
+            except Exception as _sync_e:
+                logger.debug(f"done/remaining sync failed: {_sync_e}")
 
         # overall %
         total_steps = len(updated_steps)
