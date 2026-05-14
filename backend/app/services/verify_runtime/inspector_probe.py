@@ -784,12 +784,44 @@ async def _run_inspector_inner(
         is_system_probe_local = (ac_id == "system_home")
         vision_says_feature_missing = False
         vision_missing_reason = ""
+        # 🆕 (Phase 4 fix) — fail-safe: اگر vision نتوانست feature_present
+        # تشخیص دهد (parse failure → ست به "" یا "unclear")، probe باید
+        # احتیاط کند و pass نگیرد. از این flag در passed_initial استفاده
+        # می‌کنیم تا نسبت به سکوت Vision امن باشیم.
+        vision_inconclusive = False
         if not is_system_probe_local:
+            _has_any_vision_yes = False
+            _all_inconclusive = True if screenshots else False
             for _shot in screenshots:
-                if (_shot.get("vision_feature_present") or "").lower() == "no":
+                if not _shot.get("path"):
+                    continue
+                _fp = (_shot.get("vision_feature_present") or "").lower()
+                if _fp == "no":
                     vision_says_feature_missing = True
-                    vision_missing_reason = _shot.get("vision_feature_reason") or "vision AI: feature not visible"
+                    vision_missing_reason = (
+                        _shot.get("vision_feature_reason")
+                        or "vision AI: feature not visible"
+                    )
                     break
+                if _fp == "yes":
+                    _has_any_vision_yes = True
+                    _all_inconclusive = False
+                elif _fp in ("", "unclear"):
+                    # هیچ اطلاع قطعی نیست — ادامه می‌دهیم ولی flag فعال
+                    pass
+                else:
+                    _all_inconclusive = False
+            # اگر هیچ shot ای yes نگفت و همگی فقط empty/unclear هستند،
+            # vision را "بی‌نتیجه" در نظر بگیر — probe باید fail-safe بدهد
+            if (not vision_says_feature_missing
+                    and not _has_any_vision_yes
+                    and _all_inconclusive
+                    and screenshots):
+                vision_inconclusive = True
+                vision_missing_reason = (
+                    "vision AI: feature_present تشخیص داده نشد "
+                    "(parse failure یا response ناقص) — fail-safe به FAIL"
+                )
 
         # 🔢 (Phase 3) — passed نهایی بعد از vision_pair و expected_api_calls
         # محاسبه می‌شود (پایین‌تر در کد). فعلاً initial passed برای assertion ها.
@@ -798,6 +830,7 @@ async def _run_inspector_inner(
             and (not has_console_error)
             and selector_ok
             and (not vision_says_feature_missing)
+            and (not vision_inconclusive)
             and (not auth_required)
         )
 
