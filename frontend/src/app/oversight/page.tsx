@@ -4836,6 +4836,10 @@ function WatchedCard({
           </label>
           <div className="text-xs text-gray-500 dark:text-gray-400 self-end">
             وزن‌های معیار را تنظیم کنید تا scoring per-file به اولویت‌های شما حساس باشد:
+            <div className="text-[10px] text-blue-500 dark:text-blue-400 mt-0.5">
+              ⓘ این sliderها روی <strong>per-file health score</strong> اعمال می‌شوند (محاسبه شده در run_deep_scan).
+              این مستقل از <strong>Phase 5 Intelligence</strong> پایین است.
+            </div>
           </div>
           {(['security', 'quality', 'tests', 'completeness', 'logical_alignment', 'functional_correctness'] as const).map(key => {
             const weights = w.scan_criteria_weights || {};
@@ -5305,8 +5309,15 @@ function WatchedCard({
 
       {/* 🆕 (Smart Task Lifecycle) چرخهٔ تسک — dedup + auto-regenerate */}
       <div className="mb-3 p-3 bg-teal-50 dark:bg-teal-900/20 border border-teal-200 dark:border-teal-800 rounded-lg">
-        <div className="text-sm font-semibold dark:text-teal-200 mb-2">
+        <div className="text-sm font-semibold dark:text-teal-200 mb-2 flex items-center gap-2 flex-wrap">
           🔁 چرخهٔ تسک (Smart Task Lifecycle)
+          <span className="text-[10px] px-1.5 py-0.5 bg-teal-200 dark:bg-teal-800 dark:text-teal-100 rounded">قدیمی + سازگار با Phase 5</span>
+          <span
+            className="text-blue-400 cursor-help"
+            title="این بخش از قبل از Phase 5 وجود داشت و کار می‌کند. dedup روی task های دستی + auto-regenerate برای پرامپت‌های ضعیف. Phase 5 موازی این کار می‌کند (auto-tasks از scan هم checklist می‌گیرند)."
+          >
+            ⓘ
+          </span>
         </div>
         <label className="flex items-start gap-2 cursor-pointer mb-2">
           <input
