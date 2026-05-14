@@ -170,14 +170,44 @@ async def describe_screenshot_with_vision(
                     # چون AI می‌تواند کلمات AC را در OCR fake کند.
                     if fp_raw == "yes" and user_context:
                         import re as _re
+                        # pattern گسترش یافته: CamelCase، snake_case، **و**
+                        # کلمات lowercase ≥6 char (مثل runner, semaphore,
+                        # timeouts که قبلاً نمی‌گرفت)
                         _ac_specific = set(_re.findall(
-                            r"\b([A-Z][a-zA-Z0-9]{3,}|[a-z][a-z0-9_]{4,}_[a-z0-9_]+)\b",
+                            r"\b([A-Z][a-zA-Z0-9]{3,}|[a-z][a-z0-9_]{4,}_[a-z0-9_]+|[a-z]{6,})\b",
                             user_context,
                         ))
+                        # generic list گسترش یافته با کلمات UI/web/فریم‌ورک
                         _generic = {
-                            "AI", "API", "URL", "JSON", "HTML", "CSS", "true",
-                            "false", "None", "self", "data", "page", "step",
-                            "probe", "Stage", "stage",
+                            # tech generic (uppercase)
+                            "AI", "API", "URL", "JSON", "HTML", "CSS", "JSX", "TSX",
+                            "true", "false", "None", "Null", "self", "Self",
+                            # context noise
+                            "data", "page", "step", "probe", "Stage", "stage",
+                            "this", "that", "with", "from", "have", "into",
+                            # English UI words (carry low signal)
+                            "dashboard", "Dashboard", "button", "Button",
+                            "header", "Header", "footer", "Footer",
+                            "content", "Content", "section", "Section",
+                            "navigation", "Navigation", "sidebar", "Sidebar",
+                            "navbar", "Navbar", "layout", "Layout",
+                            "default", "Default", "status", "Status",
+                            "title", "Title", "action", "Action",
+                            "settings", "Settings", "profile", "Profile",
+                            "login", "Login", "logout", "Logout",
+                            "submit", "Submit", "cancel", "Cancel",
+                            "modal", "Modal", "panel", "Panel",
+                            "loading", "Loading", "result", "Result",
+                            "select", "Select", "search", "Search",
+                            "create", "Create", "update", "Update",
+                            "delete", "Delete", "remove", "Remove",
+                            "active", "Active", "inactive", "Inactive",
+                            "enable", "Enable", "disable", "Disable",
+                            "filter", "Filter", "sorting", "Sorting",
+                            "should", "would", "could", "field", "Field",
+                            "value", "Value", "string", "String",
+                            "number", "Number", "object", "Object",
+                            "feature", "Feature",
                         }
                         _ac_specific = {
                             k for k in _ac_specific if k not in _generic

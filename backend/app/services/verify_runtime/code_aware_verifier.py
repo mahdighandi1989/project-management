@@ -103,16 +103,13 @@ async def analyze_acs_with_commit_diffs(
         key_changes = list(ai_item.get("key_changes") or [])[:5]
         reason = str(ai_item.get("reason") or "")[:400]
 
-        # 🆕 (Phase 4 fix) — programmatic upgrade: اگر AI گفت not_found
-        # ولی AC به فایلی اشاره می‌کند که در target_files است (یا فایل
-        # backend مشخصی که در commit ها فقط دیر دیده شده)، آن را به
-        # 'implemented' upgrade کن. AI گاهی روی commit window محدود
-        # بدبینانه قضاوت می‌کند.
-        # matching معیار: token-overlap بین basename و AC text:
-        #  - basename را روی _, -, . tokenize کن
-        #  - AC text را روی whitespace/punctuation tokenize کن
-        #  - اگر **همه** token های ≥3 char در basename در AC هستند → match
-        if verdict == "not_found" and target_files_list and ac_text:
+        # 🆕 (Phase 4 fix) — programmatic upgrade: اگر AI گفت not_found یا
+        # unclear ولی AC به فایلی اشاره می‌کند که در target_files است،
+        # آن را به 'implemented' upgrade کن. AI گاهی بدبینانه (not_found)
+        # یا مردد (unclear) قضاوت می‌کند روی commit window محدود — ولی
+        # وجود فایل در target_files یعنی feature ساخته شده.
+        # matching معیار: token-overlap بین basename و AC text.
+        if verdict in ("not_found", "unclear") and target_files_list and ac_text:
             import re as _re_match
             ac_tokens = set(
                 t.lower() for t in _re_match.findall(r"[A-Za-z][A-Za-z0-9]+", ac_text)
