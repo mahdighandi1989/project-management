@@ -3139,6 +3139,7 @@ async def verify_task(
                 step_code_verdicts.get(_step_id_int)
                 if _step_id_int is not None else None
             )
+            _override_applied = False
             if _cav:
                 _ca_verdict = _cav.get("verdict", "unclear")
                 _ca_reason = _cav.get("reason", "")[:200]
@@ -3146,6 +3147,7 @@ async def verify_task(
                 # implemented → done (مگر AI شواهد قوی ضد داشته باشد)
                 if _ca_verdict == "implemented" and new_status in ("not_done", "pending"):
                     new_status = "done"
+                    _override_applied = True
                     _step_overrides.append(
                         f"step {sid}: AI={_orig_status} → done "
                         f"(code-aware: implemented; {_ca_reason})"
@@ -3153,6 +3155,7 @@ async def verify_task(
                 # partial → partial (اگر AI گفت not_done)
                 elif _ca_verdict == "partial" and new_status == "not_done":
                     new_status = "partial"
+                    _override_applied = True
                     _step_overrides.append(
                         f"step {sid}: AI=not_done → partial "
                         f"(code-aware: partial; {_ca_reason})"
@@ -3174,7 +3177,19 @@ async def verify_task(
             new_entry["status"] = new_status
             new_entry["completion_pct"] = pct
             new_entry["remaining"] = (upd.get("remaining") or "").strip() if new_status != "done" else ""
-            if upd.get("evidence"):
+            # 🆕 (Phase 4 fix #17 cosmetic) — وقتی override fire می‌کند،
+            # evidence text را هم به code-aware reason به‌روز کن — تا
+            # کاربر تناقض بین status=✅ و evidence="اعمال نشده" نبیند.
+            if _override_applied and _cav:
+                _ca_commits = _cav.get("matching_commits") or []
+                _ev_parts = [
+                    f"🤖 code-aware: {_cav.get('verdict')}",
+                    _cav.get("reason", "")[:200],
+                ]
+                if _ca_commits:
+                    _ev_parts.append(f"commits: {', '.join(_ca_commits[:3])}")
+                new_entry["evidence"] = " — ".join(p for p in _ev_parts if p)[:300]
+            elif upd.get("evidence"):
                 new_entry["evidence"] = str(upd.get("evidence"))[:300]
             new_entry["last_verified_at"] = now_iso()
             if new_status == "done":
