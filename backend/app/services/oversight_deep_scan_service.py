@@ -1650,14 +1650,60 @@ async def run_deep_scan(
         except Exception as _e_stale:
             logger.warning(f"scan_v5 stale/document failed: {_e_stale}")
 
+        # 🆕 (Phase 5 — فاز ۳) — Delta Detection + Bidirectional Dependency
+        scan_v5_delta: Dict[str, Any] = {"summary": {}}
+        scan_v5_change_impact: List[Dict[str, Any]] = []
+        try:
+            if getattr(watched, "delta_analysis_enabled", True):
+                write_progress(
+                    watched_id, phase="phase5_delta",
+                    message="تشخیص تغییرات از scan قبلی",
+                )
+                from .scan_v5.delta_analyzer import build_current_state, compute_delta
+                from .scan_v5.dependency_analyzer import (
+                    build_bidirectional_deps, analyze_change_impact,
+                )
+                current_state = build_current_state(deep_contents)
+                prev_state = getattr(watched, "prev_scan_state", None)
+                scan_v5_delta = compute_delta(
+                    prev_state=prev_state,
+                    current_state=current_state,
+                    file_contents=deep_contents,
+                    prev_contents=None,  # هنوز محتوای prev ذخیره نمی‌کنیم
+                )
+                logger.info(f"scan_v5 delta summary: {scan_v5_delta.get('summary')}")
+
+                # Bidirectional deps
+                bi_deps = build_bidirectional_deps(imports, imported_by)
+
+                # Logical impact analysis (R7 + R10)
+                if not scan_v5_delta.get("summary", {}).get("first_scan"):
+                    scan_v5_change_impact = await analyze_change_impact(
+                        delta=scan_v5_delta,
+                        deps=bi_deps,
+                        purpose_map=scan_v5_purpose_map,
+                        file_contents=deep_contents,
+                        verify_model_id=(model_ids[0] if model_ids else model_id),
+                    )
+                    logger.info(
+                        f"scan_v5 change_impact: {len(scan_v5_change_impact)} dependent-impacts"
+                    )
+
+                # ذخیره state فعلی برای scan بعدی
+                watched.prev_scan_state = current_state
+        except Exception as _e_delta:
+            logger.warning(f"scan_v5 delta failed: {_e_delta}")
+
         # ذخیره روی watched برای دسترسی فازهای بعدی + UI
         try:
             watched.last_scan_inventory = scan_v5_inventory
             watched.last_scan_purpose_map = scan_v5_purpose_map
             watched.last_scan_at_v5 = now_iso()
-            # ذخیره stale + docs درون inventory برای سادگی
+            # ذخیره stale + docs + delta درون inventory برای سادگی
             scan_v5_inventory["_stale"] = scan_v5_stale
             scan_v5_inventory["_feature_docs"] = scan_v5_feature_docs
+            scan_v5_inventory["_delta"] = scan_v5_delta
+            scan_v5_inventory["_change_impact"] = scan_v5_change_impact
         except Exception:
             pass
 
