@@ -183,9 +183,10 @@ class TaskUpdate(BaseModel):
 class RunTaskRequest(BaseModel):
     model_id: Optional[str] = None
     model_ids: Optional[List[str]] = None
-    # 🔬 (Runtime Verify Stage 8) — controls runtime probes in verify-now
-    # default True (همان رفتار قبلی + probe ها)؛ False = verify سریع بدون probe
-    include_runtime: bool = True
+    # 🔬 (Runtime Verify Stage 8) — controls runtime probes in verify-now.
+    # 🆕 (Phase 4) — Optional[bool]: اگر None، از watched.verify_mode ارث می‌برد
+    # (deep → True, fast → False). True/False صریحاً override می‌کند.
+    include_runtime: Optional[bool] = None
 
 
 class ScanRequest(BaseModel):
@@ -1333,13 +1334,31 @@ async def run_task(task_id: str, payload: Optional[RunTaskRequest] = None):
 async def verify_task_now(task_id: str, payload: Optional[RunTaskRequest] = None):
     """اجرای فوری verifier روی یک تسک — مستقل از execution."""
     from ...services.oversight_verifier import verify_task as _verify_task
+    from ...services.oversight_service import get_oversight_service
+
+    # 🆕 (Phase 4) — include_runtime را از watched.verify_mode ارث ببر
+    # اگر کاربر صریحاً ست نکرده باشد. deep → True (پیش‌فرض)، fast → False.
+    _include_runtime: bool = True
+    try:
+        if payload is not None and payload.include_runtime is not None:
+            _include_runtime = bool(payload.include_runtime)
+        else:
+            svc = get_oversight_service()
+            task = next((t for t in svc.tasks if t.id == task_id), None)
+            if task and task.watched_id:
+                watched = svc._find_watched(task.watched_id)
+                if watched:
+                    _vm = (getattr(watched, "verify_mode", "deep") or "deep").lower()
+                    _include_runtime = (_vm != "fast")
+    except Exception:
+        _include_runtime = True
 
     try:
         return await _verify_task(
             task_id,
             model_id=payload.model_id if payload else None,
             triggered_by="manual",
-            include_runtime=payload.include_runtime if payload else True,
+            include_runtime=_include_runtime,
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

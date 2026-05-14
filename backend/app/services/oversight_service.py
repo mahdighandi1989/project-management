@@ -159,6 +159,10 @@ class WatchedProject:
     last_verify_at: Optional[str] = None
     next_verify_at: Optional[str] = None
     verify_interval_hours: float = 12.0
+    # 🆕 (Phase 4) — حالت verify: deep (پیش‌فرض، با probe/vision/code-aware/
+    # backend-log/smart-nav) یا fast (فقط grep+AI، سریع‌تر ولی شواهد کمتر)
+    # این flag هم در scheduler خودکار و هم در دکمه‌ی verify-now استفاده می‌شود.
+    verify_mode: str = "deep"  # "deep" | "fast"
     # 🆕 وزن‌های قابل تنظیم برای محاسبهٔ per-file health score
     # (مهاجرت از Health analysis criteria_weights)
     # default values متعادل — کاربر می‌تواند override کند تا محاسبه
@@ -1399,6 +1403,8 @@ class OversightService:
                         "auto_create_pr_instead_of_commit",
                         "notify_user_before_apply",
                         "verify_interval_hours",
+                        # 🆕 (Phase 4) — حالت verify
+                        "verify_mode",
                         # 🆕 (commit 2.3) — مهاجرت از Health analysis settings
                         "scan_depth",
                         "scan_criteria_weights",
@@ -1424,6 +1430,11 @@ class OversightService:
                     }
                     for k, v in updates.items():
                         if k in allowed:
+                            # 🆕 (Phase 4) — normalize verify_mode به deep/fast
+                            if k == "verify_mode":
+                                v = str(v or "deep").strip().lower()
+                                if v not in ("deep", "fast"):
+                                    v = "deep"
                             setattr(w, k, v)
                     w.updated_at = now_iso()
                     if w.schedule_enabled:
@@ -5972,10 +5983,19 @@ class OversightService:
                                 {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(t.priority, 9),
                             )
                         )
+                        # 🆕 (Phase 4) — حالت verify از watched.verify_mode
+                        # خوانده می‌شود؛ deep = include_runtime=True (پیش‌فرض)،
+                        # fast = include_runtime=False (سریع، بدون probe).
+                        _w_verify_mode = (getattr(w, "verify_mode", "deep") or "deep").lower()
+                        _include_runtime = (_w_verify_mode != "fast")
                         for t in candidates[:max_runs]:
                             try:
                                 from .oversight_verifier import verify_task as _verify_task
-                                await _verify_task(t.id, model_id=None, triggered_by="scheduler")
+                                await _verify_task(
+                                    t.id, model_id=None,
+                                    triggered_by="scheduler",
+                                    include_runtime=_include_runtime,
+                                )
                                 verified.append(t.id)
                             except Exception as e:
                                 logger.warning(f"scheduled verify {t.id} failed: {e}")
