@@ -1334,6 +1334,8 @@ class NotificationService:
         extra_hashtags: Optional[List[str]] = None,
         extra_buttons: Optional[List[Dict[str, str]]] = None,
         attachment: Optional[Dict[str, Any]] = None,
+        # 🆕 (Phase 5 — فاز ۸) — silent override (R6, R12)
+        silent: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
         """ارسال نوتیفیکیشن.
 
@@ -1359,9 +1361,14 @@ class NotificationService:
             )
             full_message = f"{message}\n\n{tags}"
         # silent based on per-event sound (sound=True ⇒ silent=False)
-        sound_prefs = prefs.get("sound", {})
-        with_sound = bool(sound_prefs.get(event, EVENT_REGISTRY.get(event, {}).get("default_sound", False)))
-        silent = not with_sound
+        # 🆕 (Phase 5 — فاز ۸) — silent param override: اگر صریحاً پاس داده،
+        # event preferences را ignore کن
+        if silent is None:
+            sound_prefs = prefs.get("sound", {})
+            with_sound = bool(sound_prefs.get(event, EVENT_REGISTRY.get(event, {}).get("default_sound", False)))
+            silent = not with_sound
+        else:
+            silent = bool(silent)
         # inline keyboard
         reply_markup = None
         if prefs.get("include_inline_buttons", True):

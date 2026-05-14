@@ -2045,6 +2045,37 @@ async def run_deep_scan(
                     "scanned_at": now_iso(),
                     "_pass": f.get("_pass", ""),
                 }
+                # 🆕 (Phase 5 — فاز ۸) — task_steps هوشمند برای auto-tasks
+                # (R5: «حالت هوشمند که برای تولید چک‌لیست یا عدم تولیدش حسب نیاز»)
+                # mode: auto = AI تصمیم می‌گیرد، always = همیشه، never = هرگز
+                auto_task_steps: List[Dict[str, Any]] = []
+                try:
+                    checklist_mode = getattr(watched, "auto_task_checklist_mode", "auto") or "auto"
+                    # heuristic پیچیدگی: scope طولانی + multiple AC + multiple target_files
+                    complexity_score = (
+                        (1 if len(ac) >= 4 else 0)
+                        + (1 if len(target_files) >= 3 else 0)
+                        + (1 if len(f.get("description", "")) > 500 else 0)
+                    )
+                    should_split = (
+                        checklist_mode == "always"
+                        or (checklist_mode == "auto" and complexity_score >= 2)
+                    )
+                    if should_split:
+                        # full_prompt + raw_idea را به planner بده تا task_steps بسازد
+                        auto_task_steps = await service._ai_plan_steps_from_idea(
+                            idea=f.get("description", "") + "\n\n" + (full_prompt or "")[:3000],
+                            user_goal=getattr(watched, "user_notes", "") or "",
+                            model_id=(model_ids[0] if model_ids else model_id),
+                            model_ids=None,
+                        )
+                        # normalize برای schema OversightTask.task_steps
+                        for st in auto_task_steps:
+                            st.setdefault("status", "pending")
+                            st.setdefault("completion_pct", 0)
+                except Exception as _ts_e:
+                    logger.debug(f"auto task_steps generation skipped: {_ts_e}")
+
                 t = OversightTask(
                     id=str(uuid.uuid4()),
                     watched_id=watched.id,
@@ -2059,6 +2090,8 @@ async def run_deep_scan(
                     target_files=target_files,
                     acceptance_criteria=ac,
                     execution_mode=execution_mode_default,
+                    # 🆕 (Phase 5 — فاز ۸) — checklist هوشمند برای auto-tasks
+                    task_steps=auto_task_steps,
                     # 🆕 finding های ادغام‌شده در این task (از smart merger)
                     merged_findings=(f.get("merged_findings") or []),
                     # 🆕 (P1) metadata scan
@@ -2216,13 +2249,65 @@ async def run_deep_scan(
                     msg_lines.append(f"📊 per-pass: {breakdown}")
             except Exception:
                 pass
+            # 🆕 (Phase 5 — فاز ۸) — Telegram template جامع برای scan_completed
+            # شامل: tasks count + delta + logic + notification audit + inspector link
+            try:
+                _v5_summary = (scan_v5_inventory.get("_meta") or {}).get("counts", {})
+                _v5_stale_summary = (scan_v5_stale.get("summary") or {})
+                _v5_delta_summary = (scan_v5_delta.get("summary") or {})
+                _v5_coh_count = len((scan_v5_coherence.get("issues") or []))
+                _v5_ap_count = len(scan_v5_anti_patterns)
+                _v5_notif_issues = (scan_v5_notif_audit.get("summary") or {}).get("total_issues", 0)
+                _v5_eff_count = len(scan_v5_effectiveness_issues)
+                _v5_change_impact_count = len(scan_v5_change_impact)
+                msg_lines.append("")
+                msg_lines.append("🔬 *Phase 5 (scan v5)*:")
+                if _v5_summary:
+                    msg_lines.append(
+                        f"  📋 inventory: "
+                        f"endpoints={_v5_summary.get('backend_endpoints', 0)}, "
+                        f"ui={_v5_summary.get('ui_elements', 0)}, "
+                        f"notifications={_v5_summary.get('notification_calls', 0)}"
+                    )
+                if _v5_stale_summary.get("structural_total", 0) or _v5_stale_summary.get("semantic_total", 0):
+                    msg_lines.append(
+                        f"  🗑 stale: "
+                        f"{_v5_stale_summary.get('structural_total', 0)} structural + "
+                        f"{_v5_stale_summary.get('semantic_total', 0)} semantic"
+                    )
+                if _v5_delta_summary and not _v5_delta_summary.get("first_scan", True):
+                    msg_lines.append(
+                        f"  🔄 delta: "
+                        f"add={_v5_delta_summary.get('add', 0)}, "
+                        f"remove={_v5_delta_summary.get('remove', 0)}, "
+                        f"modify={_v5_delta_summary.get('modify', 0)}, "
+                        f"signature_change={_v5_delta_summary.get('signature_change', 0)}"
+                    )
+                if _v5_change_impact_count:
+                    msg_lines.append(f"  ⚠️ {_v5_change_impact_count} dependent در خطر تغییر")
+                if _v5_coh_count or _v5_ap_count:
+                    msg_lines.append(
+                        f"  🧠 logic: {_v5_coh_count} coherence + {_v5_ap_count} anti-pattern"
+                    )
+                if _v5_eff_count:
+                    msg_lines.append(f"  📊 effectiveness: {_v5_eff_count} issue (outcome-based)")
+                if _v5_notif_issues:
+                    msg_lines.append(f"  🔔 notification audit: {_v5_notif_issues} issue")
+                if scan_v5_session_id:
+                    msg_lines.append(f"  🔍 inspector session: #{scan_v5_session_id}")
+            except Exception as _v5_msg_e:
+                logger.debug(f"scan_v5 message enrichment failed: {_v5_msg_e}")
+
             done_priority = "high" if critical_count > 0 else ("medium" if len(created_tasks) > 0 else "low")
+            # 🆕 (R6) silent default = NOT bool(watched.scan_notify_sound)
+            _silent_default = not bool(getattr(watched, "scan_notify_sound", False))
             await notification_service.notify_event(
                 "scan_done", "\n".join(msg_lines),
                 subject="Deep Scan completed",
                 priority=done_priority,
                 project_name=repo_name,
                 watched_id=watched_id,
+                silent=_silent_default,
             )
 
             # 2) اگر یافتهٔ critical داشت، یک پیام جداگانه با priority بالا
