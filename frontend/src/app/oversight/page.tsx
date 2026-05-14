@@ -55,7 +55,20 @@ interface Watched {
   auto_create_pr_instead_of_commit?: boolean;
   notify_user_before_apply?: boolean;
   // 🆕 (commit 2.3) عمق scan + criteria weights — مهاجرت از Health
-  scan_depth?: 'quick' | 'standard' | 'deep' | 'thorough';
+  scan_depth?: 'quick' | 'standard' | 'deep' | 'thorough' | 'balanced' | 'ultra';
+  // 🆕 (Phase 5 — فاز ۹) — Scan v5 flags
+  stale_detection_enabled?: boolean;
+  delta_analysis_enabled?: boolean;
+  runtime_discovery_enabled?: boolean;
+  outcome_data_enabled?: boolean;
+  logic_audit_enabled?: boolean;
+  notification_audit_enabled?: boolean;
+  inspector_session_enabled?: boolean;
+  auto_task_checklist_mode?: 'auto' | 'always' | 'never';
+  cleanup_tasks_enabled?: boolean;
+  auto_task_notify_sound?: boolean;
+  scan_notify_sound?: boolean;
+  last_scan_at_v5?: string | null;
   scan_criteria_weights?: {
     security?: number;
     quality?: number;
@@ -4815,8 +4828,10 @@ function WatchedCard({
             >
               <option value="quick">⚡ quick (3 pass — سریع: frontend + backend + security)</option>
               <option value="standard">⚖ standard (6 pass — متعادل + logical_alignment)</option>
-              <option value="deep">🔍 deep (12 pass — کامل، پیش‌فرض)</option>
-              <option value="thorough">🔬 thorough (12 pass + per-file health scoring + roadmap)</option>
+              <option value="balanced">🎯 balanced (Phase 5 — recommended) — pass های اصلی + delta + stale + runtime</option>
+              <option value="deep">🔍 deep (12 pass — کامل)</option>
+              <option value="thorough">🔬 thorough (12 pass + per-file health + roadmap)</option>
+              <option value="ultra">🧠 ultra (Phase 5 — همه + logic audit + outcome + notification audit + inspector session)</option>
             </select>
           </label>
           <div className="text-xs text-gray-500 dark:text-gray-400 self-end">
@@ -5129,6 +5144,163 @@ function WatchedCard({
             </div>
           </div>
         </label>
+      </div>
+
+      {/* 🆕 (Phase 5 — فاز ۹) — Scan V5 Intelligence Settings */}
+      <div className="mb-3 p-3 bg-fuchsia-50 dark:bg-fuchsia-900/20 border border-fuchsia-200 dark:border-fuchsia-800 rounded-lg">
+        <div className="text-sm font-semibold dark:text-fuchsia-200 mb-2 flex items-center gap-2">
+          🧠 Scan v5 Intelligence — هوشمندی scan
+          <span className="text-[10px] px-1.5 py-0.5 bg-fuchsia-200 dark:bg-fuchsia-800 dark:text-fuchsia-100 rounded">Phase 5</span>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={w.stale_detection_enabled !== false}
+              onChange={(e) => onChange({ stale_detection_enabled: e.target.checked })}
+              className="w-4 h-4"
+            />
+            <span title="فاز ۲: شناسایی dead UI buttons، dead routes، unused fields، forgotten options و فاز جدیدی برای features قدیمی که کاربر فراموش کرده چی هست (R8)">
+              🗑 stale + forgotten options
+            </span>
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={w.delta_analysis_enabled !== false}
+              onChange={(e) => onChange({ delta_analysis_enabled: e.target.checked })}
+              className="w-4 h-4"
+            />
+            <span title="فاز ۳: تغییرات بین scan ها (add/remove/modify/rename/move/signature) + bidirectional dependency + AI change-impact (R7)">
+              🔄 delta + bidirectional dep
+            </span>
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={w.runtime_discovery_enabled !== false}
+              onChange={(e) => onChange({ runtime_discovery_enabled: e.target.checked })}
+              className="w-4 h-4"
+            />
+            <span title="فاز ۴: Playwright روی همه routes، 404 detection، Render logs برای endpoints called (R14)">
+              🌐 runtime discovery
+            </span>
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={w.outcome_data_enabled !== false}
+              onChange={(e) => onChange({ outcome_data_enabled: e.target.checked })}
+              className="w-4 h-4"
+            />
+            <span title="فاز ۴: outcome data (P&L، error rate، delivery rate) برای effectiveness audit (R11)">
+              📊 outcome data
+            </span>
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={w.logic_audit_enabled !== false}
+              onChange={(e) => onChange({ logic_audit_enabled: e.target.checked })}
+              className="w-4 h-4"
+            />
+            <span title="فاز ۵: pipeline coherence + anti-patterns منطقی (magic threshold، silent failure، broken feedback loop، threshold-outcome mismatch). مثال trade (R10, R11)">
+              🧠 logic audit
+            </span>
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={w.notification_audit_enabled !== false}
+              onChange={(e) => onChange({ notification_audit_enabled: e.target.checked })}
+              className="w-4 h-4"
+            />
+            <span title="فاز ۶: audit همه notification ها (caption کامل، silent مناسب، missing critical events) (R12)">
+              🔔 notification audit
+            </span>
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={w.inspector_session_enabled !== false}
+              onChange={(e) => onChange({ inspector_session_enabled: e.target.checked })}
+              className="w-4 h-4"
+            />
+            <span title="فاز ۴: یک Inspector Session برای هر scan باز کن. همه AI calls + screenshots + actions ثبت شود. به‌علاوه bundle PDF + Telegram (R14)">
+              🔍 inspector session
+            </span>
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={w.cleanup_tasks_enabled !== false}
+              onChange={(e) => onChange({ cleanup_tasks_enabled: e.target.checked })}
+              className="w-4 h-4"
+            />
+            <span title="فاز ۲: ایجاد task های cleanup برای stale items (R8)">
+              🗑 cleanup tasks
+            </span>
+          </label>
+        </div>
+
+        <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+          <label className="block">
+            <span className="block text-gray-600 dark:text-gray-300 mb-1">
+              حالت چک‌لیست (R5)
+              <span
+                className="text-blue-400 cursor-help mx-1"
+                title="auto: AI بر اساس پیچیدگی task تصمیم می‌گیرد چک‌لیست بسازد یا نه. always: همیشه. never: هرگز. این هم برای task های manual و هم auto کار می‌کند."
+              >
+                ⓘ
+              </span>
+            </span>
+            <select
+              value={w.auto_task_checklist_mode || 'auto'}
+              onChange={(e) => onChange({ auto_task_checklist_mode: e.target.value as any })}
+              className="w-full p-1.5 border rounded text-sm dark:bg-gray-700 dark:text-white dark:border-gray-600"
+            >
+              <option value="auto">🧠 auto (هوشمند، پیش‌فرض)</option>
+              <option value="always">✅ always (همیشه چک‌لیست)</option>
+              <option value="never">❌ never (هرگز چک‌لیست)</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer self-end mb-1">
+            <input
+              type="checkbox"
+              checked={!!w.auto_task_notify_sound}
+              onChange={(e) => onChange({ auto_task_notify_sound: e.target.checked })}
+              className="w-4 h-4"
+            />
+            <span title="R6: پیش‌فرض false (silent) برای auto-task ها. اگر فعال کنی، notification با صدا می‌رسد.">
+              🔔 صدا برای auto-tasks
+            </span>
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer self-end mb-1">
+            <input
+              type="checkbox"
+              checked={!!w.scan_notify_sound}
+              onChange={(e) => onChange({ scan_notify_sound: e.target.checked })}
+              className="w-4 h-4"
+            />
+            <span title="R6: پیش‌فرض false (silent) برای scan_completed. اگر فعال کنی، با صدا.">
+              🔔 صدا برای scan completed
+            </span>
+          </label>
+        </div>
+
+        {w.last_scan_at_v5 && (
+          <div className="mt-2 text-[10px] text-fuchsia-700 dark:text-fuchsia-300">
+            ✅ آخرین scan v5: {new Date(w.last_scan_at_v5).toLocaleString('fa-IR')}
+            {' '}|{' '}
+            <a
+              href={`${API_BASE}/api/oversight/watched/${w.id}/feature-inventory`}
+              target="_blank" rel="noreferrer"
+              className="underline hover:text-fuchsia-900 dark:hover:text-fuchsia-100"
+            >
+              🗺 مشاهده Feature Inventory (R8)
+            </a>
+          </div>
+        )}
       </div>
 
       {/* 🆕 (Smart Task Lifecycle) چرخهٔ تسک — dedup + auto-regenerate */}
