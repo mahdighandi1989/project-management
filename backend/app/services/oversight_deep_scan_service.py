@@ -1563,6 +1563,319 @@ async def run_deep_scan(
             "functional_correctness": "functional_correctness",
         }
 
+        # 🆕 (Phase 5 — فاز ۱) — Comprehensive Inventory + Purpose Extraction
+        # این بلوک fail-soft است: اگر scan_v5 import شکست خورد یا AI خاموش
+        # بود، scan قدیمی ادامه می‌دهد بدون اختلال.
+        scan_v5_inventory: Dict[str, Any] = {}
+        scan_v5_purpose_map: Dict[str, Any] = {}
+        try:
+            write_progress(
+                watched_id, phase="phase5_inventory",
+                message="ساخت inventory جامع (۱۲ لایه)",
+            )
+            from .scan_v5.comprehensive_inventory import build_inventory
+            scan_v5_inventory = build_inventory(deep_contents, all_files)
+            logger.info(
+                f"scan_v5 inventory: {scan_v5_inventory.get('_meta', {}).get('counts', {})}"
+            )
+        except Exception as _e_inv:
+            logger.warning(f"scan_v5 inventory failed: {_e_inv}")
+
+        try:
+            write_progress(
+                watched_id, phase="phase5_purpose",
+                message="استخراج هدف و منطق فایل‌های کلیدی",
+            )
+            from .scan_v5.purpose_extractor import extract_purposes
+            # task history برای originating_task_id
+            _task_history_for_purpose = [
+                {
+                    "id": t.id,
+                    "target_files": list(t.target_files or []),
+                    "raw_idea": (t.raw_idea or "")[:500],
+                }
+                for t in service.tasks
+                if getattr(t, "watched_id", None) == watched_id
+            ][:50]
+            scan_v5_purpose_map = await extract_purposes(
+                inventory=scan_v5_inventory,
+                file_contents=deep_contents,
+                reverse_imports=imported_by,
+                task_history=_task_history_for_purpose,
+                commit_history=[],  # commits در scan قدیمی fetched نمی‌شود
+                verify_model_id=(model_ids[0] if model_ids else model_id),
+            )
+            logger.info(
+                f"scan_v5 purpose_map: {len(scan_v5_purpose_map)} files purposed"
+            )
+        except Exception as _e_pp:
+            logger.warning(f"scan_v5 purpose extraction failed: {_e_pp}")
+
+        # 🆕 (Phase 5 — فاز ۲) — Stale Detection + Feature Inventory
+        scan_v5_stale: Dict[str, Any] = {"structural": [], "semantic": [], "summary": {}}
+        scan_v5_feature_docs: List[Dict[str, Any]] = []
+        try:
+            if getattr(watched, "stale_detection_enabled", True):
+                write_progress(
+                    watched_id, phase="phase5_stale",
+                    message="تشخیص گزینه‌های قدیمی و dead code",
+                )
+                from .scan_v5.stale_detector import detect_stale
+                scan_v5_stale = detect_stale(
+                    inventory=scan_v5_inventory,
+                    purpose_map=scan_v5_purpose_map,
+                    file_contents=deep_contents,
+                    imported_by=imported_by,
+                    runtime_state=None,  # Phase 4 می‌آورد
+                )
+                logger.info(
+                    f"scan_v5 stale: {scan_v5_stale.get('summary')}"
+                )
+
+                # AI documentation برای options
+                write_progress(
+                    watched_id, phase="phase5_documenting",
+                    message="مستندسازی گزینه‌ها با AI",
+                )
+                from .scan_v5.feature_documenter import document_features
+                scan_v5_feature_docs = await document_features(
+                    inventory=scan_v5_inventory,
+                    purpose_map=scan_v5_purpose_map,
+                    stale_findings=scan_v5_stale,
+                    verify_model_id=(model_ids[0] if model_ids else model_id),
+                )
+                logger.info(
+                    f"scan_v5 feature_docs: {len(scan_v5_feature_docs)} items documented"
+                )
+        except Exception as _e_stale:
+            logger.warning(f"scan_v5 stale/document failed: {_e_stale}")
+
+        # 🆕 (Phase 5 — فاز ۴) — Scan Inspector Session + Runtime + Outcome
+        scan_v5_session_id: Optional[int] = None
+        scan_v5_runtime_state: Dict[str, Any] = {}
+        scan_v5_outcome_data: Dict[str, Any] = {}
+        scan_v5_effectiveness_issues: List[Dict[str, Any]] = []
+        try:
+            if getattr(watched, "inspector_session_enabled", True):
+                from .scan_v5.scan_inspector_session import (
+                    create_scan_session, log_scan_message,
+                )
+                scan_v5_session_id = create_scan_session(
+                    watched_id=watched_id,
+                    project_name=getattr(watched, "name", "") or getattr(watched, "repo_full_name", ""),
+                )
+                if scan_v5_session_id:
+                    log_scan_message(
+                        scan_v5_session_id, "system",
+                        f"🔍 شروع scan v5 — inventory: "
+                        f"{len(scan_v5_inventory.get('files', []))} files, "
+                        f"stale: {scan_v5_stale.get('summary', {})}",
+                    )
+
+            # Runtime discovery (R14)
+            if getattr(watched, "runtime_discovery_enabled", True):
+                write_progress(
+                    watched_id, phase="phase5_runtime",
+                    message="کشف state واقعی frontend + backend logs",
+                )
+                from .scan_v5.runtime_discovery import discover_runtime_state
+                _ss = None
+                try:
+                    _ss = getattr(watched, "runtime_storage_state", None)
+                except Exception:
+                    pass
+                # screenshot dir
+                from pathlib import Path as _P
+                _sd = _P("storage/scan_v5_screenshots") / str(watched_id)
+                _sd.mkdir(parents=True, exist_ok=True)
+                scan_v5_runtime_state = await discover_runtime_state(
+                    frontend_base_url=getattr(watched, "frontend_base_url", None),
+                    backend_base_url=getattr(watched, "backend_base_url", None),
+                    inventory=scan_v5_inventory,
+                    storage_state=_ss,
+                    scan_session_id=scan_v5_session_id,
+                    screenshot_dir=str(_sd),
+                    verify_model_id=(model_ids[0] if model_ids else model_id),
+                )
+                logger.info(
+                    f"scan_v5 runtime: "
+                    f"alive={len(scan_v5_runtime_state.get('routes_alive', []))}, "
+                    f"404={len(scan_v5_runtime_state.get('routes_404', []))}"
+                )
+
+            # Outcome data + effectiveness (R11)
+            if getattr(watched, "outcome_data_enabled", True):
+                write_progress(
+                    watched_id, phase="phase5_outcome",
+                    message="جمع‌آوری outcome data و audit effectiveness",
+                )
+                from .scan_v5.outcome_analyzer import (
+                    collect_outcome_data, audit_effectiveness,
+                )
+                # render logs از 30 روز
+                _render_logs: List[Dict[str, Any]] = []
+                try:
+                    from .verify_runtime.backend_log_probe import _fetch_relevant_logs
+                    _render_logs = await _fetch_relevant_logs(
+                        target_files=[], endpoints=[], symbols=[],
+                        window_hours=720,
+                    )
+                except Exception as _le:
+                    logger.debug(f"render logs fetch failed: {_le}")
+                scan_v5_outcome_data = collect_outcome_data(
+                    inventory=scan_v5_inventory,
+                    purpose_map=scan_v5_purpose_map,
+                    render_logs=_render_logs,
+                )
+                if getattr(watched, "logic_audit_enabled", True):
+                    scan_v5_effectiveness_issues = await audit_effectiveness(
+                        outcome_data=scan_v5_outcome_data,
+                        purpose_map=scan_v5_purpose_map,
+                        verify_model_id=(model_ids[0] if model_ids else model_id),
+                    )
+                    if scan_v5_session_id:
+                        from .scan_v5.scan_inspector_session import log_scan_message
+                        log_scan_message(
+                            scan_v5_session_id, "system",
+                            f"📊 effectiveness: {scan_v5_outcome_data.get('project_type')} — "
+                            f"{len(scan_v5_effectiveness_issues)} issue identified",
+                        )
+        except Exception as _e_r4:
+            logger.warning(f"scan_v5 phase 4 failed: {_e_r4}")
+
+        # 🆕 (Phase 5 — فاز ۵) — Logical Audit (Coherence + Anti-pattern)
+        scan_v5_coherence: Dict[str, Any] = {}
+        scan_v5_anti_patterns: List[Dict[str, Any]] = []
+        try:
+            if getattr(watched, "logic_audit_enabled", True):
+                write_progress(
+                    watched_id, phase="phase5_logic_audit",
+                    message="تحلیل منطقی coherence و anti-patterns",
+                )
+                from .scan_v5.coherence_analyzer import analyze_coherence
+                from .scan_v5.anti_pattern_detector import detect_anti_patterns
+
+                scan_v5_coherence = await analyze_coherence(
+                    purpose_map=scan_v5_purpose_map,
+                    inventory=scan_v5_inventory,
+                    file_contents=deep_contents,
+                    verify_model_id=(model_ids[0] if model_ids else model_id),
+                )
+                scan_v5_anti_patterns = await detect_anti_patterns(
+                    file_contents=deep_contents,
+                    inventory=scan_v5_inventory,
+                    purpose_map=scan_v5_purpose_map,
+                    verify_model_id=(model_ids[0] if model_ids else model_id),
+                )
+                logger.info(
+                    f"scan_v5 logic_audit: "
+                    f"coherence_issues={len(scan_v5_coherence.get('issues', []))}, "
+                    f"anti_patterns={len(scan_v5_anti_patterns)}"
+                )
+                if scan_v5_session_id:
+                    from .scan_v5.scan_inspector_session import log_scan_message
+                    log_scan_message(
+                        scan_v5_session_id, "system",
+                        f"🧠 logic audit: "
+                        f"{len(scan_v5_coherence.get('issues', []))} coherence + "
+                        f"{len(scan_v5_anti_patterns)} anti-pattern",
+                    )
+        except Exception as _e_logic:
+            logger.warning(f"scan_v5 logic_audit failed: {_e_logic}")
+
+        # 🆕 (Phase 5 — فاز ۶) — Notification System Audit (R12)
+        scan_v5_notif_audit: Dict[str, Any] = {"summary": {}}
+        try:
+            if getattr(watched, "notification_audit_enabled", True):
+                write_progress(
+                    watched_id, phase="phase5_notif_audit",
+                    message="audit سیستم notification (R12)",
+                )
+                from .scan_v5.notification_auditor import audit_notifications
+                scan_v5_notif_audit = await audit_notifications(
+                    inventory=scan_v5_inventory,
+                    purpose_map=scan_v5_purpose_map,
+                    file_contents=deep_contents,
+                    verify_model_id=(model_ids[0] if model_ids else model_id),
+                )
+                logger.info(
+                    f"scan_v5 notif_audit: {scan_v5_notif_audit.get('summary')}"
+                )
+                if scan_v5_session_id:
+                    from .scan_v5.scan_inspector_session import log_scan_message
+                    log_scan_message(
+                        scan_v5_session_id, "system",
+                        f"🔔 notification audit: "
+                        f"{scan_v5_notif_audit.get('summary', {}).get('total_issues', 0)} issue "
+                        f"({scan_v5_notif_audit.get('summary', {}).get('total_calls', 0)} call total)",
+                    )
+        except Exception as _e_na:
+            logger.warning(f"scan_v5 notification audit failed: {_e_na}")
+
+        # 🆕 (Phase 5 — فاز ۳) — Delta Detection + Bidirectional Dependency
+        scan_v5_delta: Dict[str, Any] = {"summary": {}}
+        scan_v5_change_impact: List[Dict[str, Any]] = []
+        try:
+            if getattr(watched, "delta_analysis_enabled", True):
+                write_progress(
+                    watched_id, phase="phase5_delta",
+                    message="تشخیص تغییرات از scan قبلی",
+                )
+                from .scan_v5.delta_analyzer import build_current_state, compute_delta
+                from .scan_v5.dependency_analyzer import (
+                    build_bidirectional_deps, analyze_change_impact,
+                )
+                current_state = build_current_state(deep_contents)
+                prev_state = getattr(watched, "prev_scan_state", None)
+                scan_v5_delta = compute_delta(
+                    prev_state=prev_state,
+                    current_state=current_state,
+                    file_contents=deep_contents,
+                    prev_contents=None,  # هنوز محتوای prev ذخیره نمی‌کنیم
+                )
+                logger.info(f"scan_v5 delta summary: {scan_v5_delta.get('summary')}")
+
+                # Bidirectional deps
+                bi_deps = build_bidirectional_deps(imports, imported_by)
+
+                # Logical impact analysis (R7 + R10)
+                if not scan_v5_delta.get("summary", {}).get("first_scan"):
+                    scan_v5_change_impact = await analyze_change_impact(
+                        delta=scan_v5_delta,
+                        deps=bi_deps,
+                        purpose_map=scan_v5_purpose_map,
+                        file_contents=deep_contents,
+                        verify_model_id=(model_ids[0] if model_ids else model_id),
+                    )
+                    logger.info(
+                        f"scan_v5 change_impact: {len(scan_v5_change_impact)} dependent-impacts"
+                    )
+
+                # ذخیره state فعلی برای scan بعدی
+                watched.prev_scan_state = current_state
+        except Exception as _e_delta:
+            logger.warning(f"scan_v5 delta failed: {_e_delta}")
+
+        # ذخیره روی watched برای دسترسی فازهای بعدی + UI
+        try:
+            watched.last_scan_inventory = scan_v5_inventory
+            watched.last_scan_purpose_map = scan_v5_purpose_map
+            watched.last_scan_at_v5 = now_iso()
+            # ذخیره stale + docs + delta درون inventory برای سادگی
+            scan_v5_inventory["_stale"] = scan_v5_stale
+            scan_v5_inventory["_feature_docs"] = scan_v5_feature_docs
+            scan_v5_inventory["_delta"] = scan_v5_delta
+            scan_v5_inventory["_change_impact"] = scan_v5_change_impact
+            scan_v5_inventory["_runtime_state"] = scan_v5_runtime_state
+            scan_v5_inventory["_outcome_data"] = scan_v5_outcome_data
+            scan_v5_inventory["_effectiveness_issues"] = scan_v5_effectiveness_issues
+            scan_v5_inventory["_scan_session_id"] = scan_v5_session_id
+            scan_v5_inventory["_coherence"] = scan_v5_coherence
+            scan_v5_inventory["_anti_patterns"] = scan_v5_anti_patterns
+            scan_v5_inventory["_notif_audit"] = scan_v5_notif_audit
+        except Exception:
+            pass
+
         file_health_map: Dict[str, Dict[str, Any]] = {}
         # ابتدا برای هر فایل deep-read شده، یک ورودی اولیه با score=100
         for path in deep_contents.keys():
@@ -1732,6 +2045,37 @@ async def run_deep_scan(
                     "scanned_at": now_iso(),
                     "_pass": f.get("_pass", ""),
                 }
+                # 🆕 (Phase 5 — فاز ۸) — task_steps هوشمند برای auto-tasks
+                # (R5: «حالت هوشمند که برای تولید چک‌لیست یا عدم تولیدش حسب نیاز»)
+                # mode: auto = AI تصمیم می‌گیرد، always = همیشه، never = هرگز
+                auto_task_steps: List[Dict[str, Any]] = []
+                try:
+                    checklist_mode = getattr(watched, "auto_task_checklist_mode", "auto") or "auto"
+                    # heuristic پیچیدگی: scope طولانی + multiple AC + multiple target_files
+                    complexity_score = (
+                        (1 if len(ac) >= 4 else 0)
+                        + (1 if len(target_files) >= 3 else 0)
+                        + (1 if len(f.get("description", "")) > 500 else 0)
+                    )
+                    should_split = (
+                        checklist_mode == "always"
+                        or (checklist_mode == "auto" and complexity_score >= 2)
+                    )
+                    if should_split:
+                        # full_prompt + raw_idea را به planner بده تا task_steps بسازد
+                        auto_task_steps = await service._ai_plan_steps_from_idea(
+                            idea=f.get("description", "") + "\n\n" + (full_prompt or "")[:3000],
+                            user_goal=getattr(watched, "user_notes", "") or "",
+                            model_id=(model_ids[0] if model_ids else model_id),
+                            model_ids=None,
+                        )
+                        # normalize برای schema OversightTask.task_steps
+                        for st in auto_task_steps:
+                            st.setdefault("status", "pending")
+                            st.setdefault("completion_pct", 0)
+                except Exception as _ts_e:
+                    logger.debug(f"auto task_steps generation skipped: {_ts_e}")
+
                 t = OversightTask(
                     id=str(uuid.uuid4()),
                     watched_id=watched.id,
@@ -1746,6 +2090,8 @@ async def run_deep_scan(
                     target_files=target_files,
                     acceptance_criteria=ac,
                     execution_mode=execution_mode_default,
+                    # 🆕 (Phase 5 — فاز ۸) — checklist هوشمند برای auto-tasks
+                    task_steps=auto_task_steps,
                     # 🆕 finding های ادغام‌شده در این task (از smart merger)
                     merged_findings=(f.get("merged_findings") or []),
                     # 🆕 (P1) metadata scan
@@ -1903,13 +2249,65 @@ async def run_deep_scan(
                     msg_lines.append(f"📊 per-pass: {breakdown}")
             except Exception:
                 pass
+            # 🆕 (Phase 5 — فاز ۸) — Telegram template جامع برای scan_completed
+            # شامل: tasks count + delta + logic + notification audit + inspector link
+            try:
+                _v5_summary = (scan_v5_inventory.get("_meta") or {}).get("counts", {})
+                _v5_stale_summary = (scan_v5_stale.get("summary") or {})
+                _v5_delta_summary = (scan_v5_delta.get("summary") or {})
+                _v5_coh_count = len((scan_v5_coherence.get("issues") or []))
+                _v5_ap_count = len(scan_v5_anti_patterns)
+                _v5_notif_issues = (scan_v5_notif_audit.get("summary") or {}).get("total_issues", 0)
+                _v5_eff_count = len(scan_v5_effectiveness_issues)
+                _v5_change_impact_count = len(scan_v5_change_impact)
+                msg_lines.append("")
+                msg_lines.append("🔬 *Phase 5 (scan v5)*:")
+                if _v5_summary:
+                    msg_lines.append(
+                        f"  📋 inventory: "
+                        f"endpoints={_v5_summary.get('backend_endpoints', 0)}, "
+                        f"ui={_v5_summary.get('ui_elements', 0)}, "
+                        f"notifications={_v5_summary.get('notification_calls', 0)}"
+                    )
+                if _v5_stale_summary.get("structural_total", 0) or _v5_stale_summary.get("semantic_total", 0):
+                    msg_lines.append(
+                        f"  🗑 stale: "
+                        f"{_v5_stale_summary.get('structural_total', 0)} structural + "
+                        f"{_v5_stale_summary.get('semantic_total', 0)} semantic"
+                    )
+                if _v5_delta_summary and not _v5_delta_summary.get("first_scan", True):
+                    msg_lines.append(
+                        f"  🔄 delta: "
+                        f"add={_v5_delta_summary.get('add', 0)}, "
+                        f"remove={_v5_delta_summary.get('remove', 0)}, "
+                        f"modify={_v5_delta_summary.get('modify', 0)}, "
+                        f"signature_change={_v5_delta_summary.get('signature_change', 0)}"
+                    )
+                if _v5_change_impact_count:
+                    msg_lines.append(f"  ⚠️ {_v5_change_impact_count} dependent در خطر تغییر")
+                if _v5_coh_count or _v5_ap_count:
+                    msg_lines.append(
+                        f"  🧠 logic: {_v5_coh_count} coherence + {_v5_ap_count} anti-pattern"
+                    )
+                if _v5_eff_count:
+                    msg_lines.append(f"  📊 effectiveness: {_v5_eff_count} issue (outcome-based)")
+                if _v5_notif_issues:
+                    msg_lines.append(f"  🔔 notification audit: {_v5_notif_issues} issue")
+                if scan_v5_session_id:
+                    msg_lines.append(f"  🔍 inspector session: #{scan_v5_session_id}")
+            except Exception as _v5_msg_e:
+                logger.debug(f"scan_v5 message enrichment failed: {_v5_msg_e}")
+
             done_priority = "high" if critical_count > 0 else ("medium" if len(created_tasks) > 0 else "low")
+            # 🆕 (R6) silent default = NOT bool(watched.scan_notify_sound)
+            _silent_default = not bool(getattr(watched, "scan_notify_sound", False))
             await notification_service.notify_event(
                 "scan_done", "\n".join(msg_lines),
                 subject="Deep Scan completed",
                 priority=done_priority,
                 project_name=repo_name,
                 watched_id=watched_id,
+                silent=_silent_default,
             )
 
             # 2) اگر یافتهٔ critical داشت، یک پیام جداگانه با priority بالا
