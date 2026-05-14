@@ -1611,11 +1611,53 @@ async def run_deep_scan(
         except Exception as _e_pp:
             logger.warning(f"scan_v5 purpose extraction failed: {_e_pp}")
 
+        # 🆕 (Phase 5 — فاز ۲) — Stale Detection + Feature Inventory
+        scan_v5_stale: Dict[str, Any] = {"structural": [], "semantic": [], "summary": {}}
+        scan_v5_feature_docs: List[Dict[str, Any]] = []
+        try:
+            if getattr(watched, "stale_detection_enabled", True):
+                write_progress(
+                    watched_id, phase="phase5_stale",
+                    message="تشخیص گزینه‌های قدیمی و dead code",
+                )
+                from .scan_v5.stale_detector import detect_stale
+                scan_v5_stale = detect_stale(
+                    inventory=scan_v5_inventory,
+                    purpose_map=scan_v5_purpose_map,
+                    file_contents=deep_contents,
+                    imported_by=imported_by,
+                    runtime_state=None,  # Phase 4 می‌آورد
+                )
+                logger.info(
+                    f"scan_v5 stale: {scan_v5_stale.get('summary')}"
+                )
+
+                # AI documentation برای options
+                write_progress(
+                    watched_id, phase="phase5_documenting",
+                    message="مستندسازی گزینه‌ها با AI",
+                )
+                from .scan_v5.feature_documenter import document_features
+                scan_v5_feature_docs = await document_features(
+                    inventory=scan_v5_inventory,
+                    purpose_map=scan_v5_purpose_map,
+                    stale_findings=scan_v5_stale,
+                    verify_model_id=(model_ids[0] if model_ids else model_id),
+                )
+                logger.info(
+                    f"scan_v5 feature_docs: {len(scan_v5_feature_docs)} items documented"
+                )
+        except Exception as _e_stale:
+            logger.warning(f"scan_v5 stale/document failed: {_e_stale}")
+
         # ذخیره روی watched برای دسترسی فازهای بعدی + UI
         try:
             watched.last_scan_inventory = scan_v5_inventory
             watched.last_scan_purpose_map = scan_v5_purpose_map
             watched.last_scan_at_v5 = now_iso()
+            # ذخیره stale + docs درون inventory برای سادگی
+            scan_v5_inventory["_stale"] = scan_v5_stale
+            scan_v5_inventory["_feature_docs"] = scan_v5_feature_docs
         except Exception:
             pass
 

@@ -309,6 +309,31 @@ async def get_evidence_file(task_id: str, run_id: str, file_path: str):
     return FileResponse(str(p), media_type=media)
 
 
+# 🆕 (Phase 5 — فاز ۲) — Feature Inventory برای UI
+@router.get("/watched/{watched_id}/feature-inventory")
+async def get_feature_inventory(watched_id: str):
+    """خروجی فاز ۲ scan v5: inventory + stale findings + AI documentation.
+
+    اگر هنوز scan v5 اجرا نشده، یک پاسخ خالی + پیام راهنما برمی‌گرداند.
+    """
+    from ...services.oversight_service import get_oversight_service
+    service = get_oversight_service()
+    watched = service._find_watched(watched_id)
+    if not watched:
+        raise HTTPException(status_code=404, detail="watched not found")
+    inventory = getattr(watched, "last_scan_inventory", None) or {}
+    purpose_map = getattr(watched, "last_scan_purpose_map", None) or {}
+    return {
+        "watched_id": watched_id,
+        "scanned_at": getattr(watched, "last_scan_at_v5", None),
+        "inventory_summary": (inventory.get("_meta") or {}).get("counts", {}),
+        "stale": inventory.get("_stale", {"structural": [], "semantic": [], "summary": {}}),
+        "feature_docs": inventory.get("_feature_docs", []),
+        "purpose_count": len(purpose_map),
+        "_hint": "اگر خالی است، یک scan روی این پروژه بزن.",
+    }
+
+
 # 🔬 (Runtime Verify Stage 4) — تست اتصال probe
 @router.post("/watched/{watched_id}/runtime/test-connection")
 async def runtime_test_connection(watched_id: str):
