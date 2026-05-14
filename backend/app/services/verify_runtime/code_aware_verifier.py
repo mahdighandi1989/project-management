@@ -93,17 +93,64 @@ async def analyze_acs_with_commit_diffs(
         ]
 
     # نتایج را با input AC ها sync کن
+    target_files_list = list(task.target_files or [])
     final: List[Dict[str, Any]] = []
     for i, ac in enumerate(acs[:_MAX_ACS_PER_BATCH]):
         ac_text = ac_texts[i] if i < len(ac_texts) else ""
         ai_item = results.get(i, {}) if isinstance(results, dict) else {}
+        verdict = _norm_verdict(ai_item.get("verdict"))
+        matching = list(ai_item.get("matching_commits") or [])[:5]
+        key_changes = list(ai_item.get("key_changes") or [])[:5]
+        reason = str(ai_item.get("reason") or "")[:400]
+
+        # 🆕 (Phase 4 fix) — programmatic upgrade: اگر AI گفت not_found
+        # ولی AC به فایلی اشاره می‌کند که در target_files است (یا فایل
+        # backend مشخصی که در commit ها فقط دیر دیده شده)، آن را به
+        # 'implemented' upgrade کن. AI گاهی روی commit window محدود
+        # بدبینانه قضاوت می‌کند.
+        # matching معیار: token-overlap بین basename و AC text:
+        #  - basename را روی _, -, . tokenize کن
+        #  - AC text را روی whitespace/punctuation tokenize کن
+        #  - اگر **همه** token های ≥3 char در basename در AC هستند → match
+        if verdict == "not_found" and target_files_list and ac_text:
+            import re as _re_match
+            ac_tokens = set(
+                t.lower() for t in _re_match.findall(r"[A-Za-z][A-Za-z0-9]+", ac_text)
+                if len(t) >= 3
+            )
+            matched_files: List[str] = []
+            for tf in target_files_list:
+                tf_str = str(tf)
+                base = tf_str.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+                if len(base) < 4:
+                    continue
+                # tokenize basename روی _, -, .
+                base_tokens = set(
+                    t.lower() for t in _re_match.split(r"[_\-.]", base)
+                    if len(t) >= 3
+                )
+                if not base_tokens:
+                    continue
+                # match اگر همه token های basename در AC تمیز پیدا شوند
+                if base_tokens.issubset(ac_tokens):
+                    matched_files.append(tf_str)
+            if matched_files:
+                verdict = "implemented"
+                _orig_reason = reason
+                reason = (
+                    f"⚙️ programmatic-upgrade: AI گفت not_found ولی AC به "
+                    f"{matched_files[:3]} اشاره می‌کند که در target_files "
+                    f"موجود است → پیش‌ساخته. "
+                    f"اصلی: {_orig_reason[:160]}"
+                )
+
         final.append({
             "ac_index": i,
             "ac_text": ac_text,
-            "code_verdict": _norm_verdict(ai_item.get("verdict")),
-            "matching_commits": list(ai_item.get("matching_commits") or [])[:5],
-            "key_changes": list(ai_item.get("key_changes") or [])[:5],
-            "reason": str(ai_item.get("reason") or "")[:400],
+            "code_verdict": verdict,
+            "matching_commits": matching,
+            "key_changes": key_changes,
+            "reason": reason,
         })
     return final
 
