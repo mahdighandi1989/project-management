@@ -988,6 +988,135 @@ def _classify_task_type(task: "OversightTask") -> str:
 
 
 # ============================================================================
+# 🆕 (Phase 5 — bug 4) — Wiring Check
+# verify فقط existence نگاه نکند — wiring/integration هم چک کند تا
+# false-positive «file exists ⇒ implemented» جلوگیری شود.
+# ============================================================================
+
+def _check_file_wiring(
+    step_text: str,
+    target_files: List[str],
+    file_contents: Dict[str, str],
+    repo_tree: Optional[List[str]],
+) -> Dict[str, Any]:
+    """چک می‌کند آیا فایل‌های مرتبط با step، توسط جای دیگری import می‌شوند.
+
+    این فقط برای فایل‌های python (.py) منطقی است.
+
+    Returns:
+        {
+            "status": "wired" | "orphan" | "unknown",
+            "detail": str,
+            "matched_files": [...],
+            "importers_found": int,
+        }
+    """
+    import re as _re
+    if not target_files or not file_contents:
+        return {"status": "unknown", "detail": "no target_files or file_contents", "matched_files": [], "importers_found": 0}
+
+    # match target_files با step_text (token-overlap)
+    step_lower = (step_text or "").lower()
+    step_tokens = set(
+        t.lower() for t in _re.findall(r"[A-Za-z][A-Za-z0-9]+", step_text or "")
+        if len(t) >= 3
+    )
+    matched: List[str] = []
+    for tf in target_files:
+        if not tf or not str(tf).endswith(".py"):
+            continue
+        basename = str(tf).rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        if len(basename) < 4:
+            continue
+        # match اگر basename یا نسخه‌ی space-shaped در step هست
+        bt = set(t.lower() for t in _re.split(r"[_\-.]", basename) if len(t) >= 3)
+        if basename.lower() in step_lower or (bt and bt.issubset(step_tokens)):
+            matched.append(str(tf))
+    if not matched:
+        return {
+            "status": "unknown",
+            "detail": "هیچ target_file مرتبط با step text پیدا نشد",
+            "matched_files": [],
+            "importers_found": 0,
+        }
+
+    # برای هر matched file، آیا توسط فایل دیگری import می‌شود؟
+    importers_total = 0
+    orphan_files: List[str] = []
+    for tf in matched:
+        # ساخت import patterns — هم relative هم absolute
+        # e.g. backend/app/services/scan_v5/foo.py
+        # patterns: "scan_v5.foo", "scan_v5 import foo", "from .scan_v5 import foo"
+        parts = str(tf).replace("\\", "/").split("/")
+        basename = parts[-1].rsplit(".", 1)[0]
+        if basename == "__init__":
+            continue  # __init__.py auto-wired
+        # generate possible import strings
+        patterns: List[str] = []
+        for i in range(len(parts) - 1, -1, -1):
+            suffix = ".".join(parts[i:-1] + [basename])
+            if suffix:
+                patterns.append(suffix)
+        patterns.append(basename)
+        # search in همه file_contents (به جز خود فایل)
+        importer_count = 0
+        for fp, content in file_contents.items():
+            if fp == tf:
+                continue
+            if not str(fp).endswith(".py"):
+                continue
+            # check patterns:
+            #  - "import X.Y.basename"
+            #  - "from X.Y import basename"
+            #  - "from .Y.basename" (relative)
+            #  - "from ..Y.basename" (parent-relative)
+            #  - "import basename"
+            _hit = False
+            for pat in patterns:
+                if (
+                    f"import {pat}" in content
+                    or f"from {pat}" in content
+                    or f"from .{pat}" in content
+                    or f"from ..{pat}" in content
+                ):
+                    _hit = True
+                    break
+            # نهایی: basename به‌عنوان identifier
+            if not _hit:
+                if (
+                    f"from .{basename} " in content
+                    or f"from ..{basename} " in content
+                    or f"import {basename} " in content
+                    or f"import {basename}\n" in content
+                ):
+                    _hit = True
+            if _hit:
+                importer_count += 1
+        importers_total += importer_count
+        if importer_count == 0:
+            orphan_files.append(tf)
+
+    if not orphan_files:
+        return {
+            "status": "wired",
+            "detail": f"همه‌ی {len(matched)} فایل matched توسط ≥۱ فایل دیگر import می‌شوند",
+            "matched_files": matched,
+            "importers_found": importers_total,
+        }
+
+    return {
+        "status": "orphan",
+        "detail": (
+            f"{len(orphan_files)} از {len(matched)} فایل matched توسط هیچ فایل "
+            f"دیگری import نمی‌شوند: {[f.rsplit('/', 1)[-1] for f in orphan_files[:3]]}"
+        ),
+        "matched_files": matched,
+        "importers_found": importers_total,
+        "orphan_files": orphan_files,
+    }
+
+
+# ============================================================================
 # 🔬 (inspector_probe Phase 1 — relevance fix) — تشخیص route مرتبط با تسک
 # ============================================================================
 
@@ -2160,9 +2289,37 @@ async def verify_task(
                                     )
                                     if _step_id is None:
                                         continue
+                                    # 🆕 (Phase 5 — bug 4 fix) — Wiring Check:
+                                    # کد existence ≠ کد wired into pipeline. اگر
+                                    # target_file وجود دارد ولی هیچ فایل دیگری
+                                    # آن را import نمی‌کند (یا فقط __init__.py)،
+                                    # implementation orphan است. downgrade به
+                                    # "partial" با reason صریح تا verify
+                                    # false-positive ندهد.
+                                    _ca_verdict_raw = _sa.get("code_verdict", "unclear")
+                                    _ca_reason_raw = _sa.get("reason", "")
+                                    if _ca_verdict_raw == "implemented":
+                                        try:
+                                            _step_text = _step_acs[_i].get("text", "")
+                                            _wiring_status = _check_file_wiring(
+                                                step_text=_step_text,
+                                                target_files=list(task.target_files or []),
+                                                file_contents=file_contents,
+                                                repo_tree=repo_tree,
+                                            )
+                                            if _wiring_status["status"] == "orphan":
+                                                _ca_verdict_raw = "partial"
+                                                _ca_reason_raw = (
+                                                    f"⚠️ wiring-check: "
+                                                    f"{_wiring_status['detail']} — "
+                                                    f"کد ساخته شده ولی integration ناقص. "
+                                                    f"اصلی: {_ca_reason_raw[:150]}"
+                                                )
+                                        except Exception as _wce:
+                                            logger.debug(f"wiring_check failed: {_wce}")
                                     step_code_verdicts[int(_step_id)] = {
-                                        "verdict": _sa.get("code_verdict", "unclear"),
-                                        "reason": _sa.get("reason", ""),
+                                        "verdict": _ca_verdict_raw,
+                                        "reason": _ca_reason_raw,
                                         "matching_commits": _sa.get("matching_commits", [])[:3],
                                         "key_changes": _sa.get("key_changes", [])[:3],
                                     }
