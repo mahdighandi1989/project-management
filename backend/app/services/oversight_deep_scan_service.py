@@ -1650,6 +1650,99 @@ async def run_deep_scan(
         except Exception as _e_stale:
             logger.warning(f"scan_v5 stale/document failed: {_e_stale}")
 
+        # 🆕 (Phase 5 — فاز ۴) — Scan Inspector Session + Runtime + Outcome
+        scan_v5_session_id: Optional[int] = None
+        scan_v5_runtime_state: Dict[str, Any] = {}
+        scan_v5_outcome_data: Dict[str, Any] = {}
+        scan_v5_effectiveness_issues: List[Dict[str, Any]] = []
+        try:
+            if getattr(watched, "inspector_session_enabled", True):
+                from .scan_v5.scan_inspector_session import (
+                    create_scan_session, log_scan_message,
+                )
+                scan_v5_session_id = create_scan_session(
+                    watched_id=watched_id,
+                    project_name=getattr(watched, "name", "") or getattr(watched, "repo_full_name", ""),
+                )
+                if scan_v5_session_id:
+                    log_scan_message(
+                        scan_v5_session_id, "system",
+                        f"🔍 شروع scan v5 — inventory: "
+                        f"{len(scan_v5_inventory.get('files', []))} files, "
+                        f"stale: {scan_v5_stale.get('summary', {})}",
+                    )
+
+            # Runtime discovery (R14)
+            if getattr(watched, "runtime_discovery_enabled", True):
+                write_progress(
+                    watched_id, phase="phase5_runtime",
+                    message="کشف state واقعی frontend + backend logs",
+                )
+                from .scan_v5.runtime_discovery import discover_runtime_state
+                _ss = None
+                try:
+                    _ss = getattr(watched, "runtime_storage_state", None)
+                except Exception:
+                    pass
+                # screenshot dir
+                from pathlib import Path as _P
+                _sd = _P("storage/scan_v5_screenshots") / str(watched_id)
+                _sd.mkdir(parents=True, exist_ok=True)
+                scan_v5_runtime_state = await discover_runtime_state(
+                    frontend_base_url=getattr(watched, "frontend_base_url", None),
+                    backend_base_url=getattr(watched, "backend_base_url", None),
+                    inventory=scan_v5_inventory,
+                    storage_state=_ss,
+                    scan_session_id=scan_v5_session_id,
+                    screenshot_dir=str(_sd),
+                    verify_model_id=(model_ids[0] if model_ids else model_id),
+                )
+                logger.info(
+                    f"scan_v5 runtime: "
+                    f"alive={len(scan_v5_runtime_state.get('routes_alive', []))}, "
+                    f"404={len(scan_v5_runtime_state.get('routes_404', []))}"
+                )
+
+            # Outcome data + effectiveness (R11)
+            if getattr(watched, "outcome_data_enabled", True):
+                write_progress(
+                    watched_id, phase="phase5_outcome",
+                    message="جمع‌آوری outcome data و audit effectiveness",
+                )
+                from .scan_v5.outcome_analyzer import (
+                    collect_outcome_data, audit_effectiveness,
+                )
+                # render logs از 30 روز
+                _render_logs: List[Dict[str, Any]] = []
+                try:
+                    from .verify_runtime.backend_log_probe import _fetch_relevant_logs
+                    _render_logs = await _fetch_relevant_logs(
+                        target_files=[], endpoints=[], symbols=[],
+                        window_hours=720,
+                    )
+                except Exception as _le:
+                    logger.debug(f"render logs fetch failed: {_le}")
+                scan_v5_outcome_data = collect_outcome_data(
+                    inventory=scan_v5_inventory,
+                    purpose_map=scan_v5_purpose_map,
+                    render_logs=_render_logs,
+                )
+                if getattr(watched, "logic_audit_enabled", True):
+                    scan_v5_effectiveness_issues = await audit_effectiveness(
+                        outcome_data=scan_v5_outcome_data,
+                        purpose_map=scan_v5_purpose_map,
+                        verify_model_id=(model_ids[0] if model_ids else model_id),
+                    )
+                    if scan_v5_session_id:
+                        from .scan_v5.scan_inspector_session import log_scan_message
+                        log_scan_message(
+                            scan_v5_session_id, "system",
+                            f"📊 effectiveness: {scan_v5_outcome_data.get('project_type')} — "
+                            f"{len(scan_v5_effectiveness_issues)} issue identified",
+                        )
+        except Exception as _e_r4:
+            logger.warning(f"scan_v5 phase 4 failed: {_e_r4}")
+
         # 🆕 (Phase 5 — فاز ۳) — Delta Detection + Bidirectional Dependency
         scan_v5_delta: Dict[str, Any] = {"summary": {}}
         scan_v5_change_impact: List[Dict[str, Any]] = []
@@ -1704,6 +1797,10 @@ async def run_deep_scan(
             scan_v5_inventory["_feature_docs"] = scan_v5_feature_docs
             scan_v5_inventory["_delta"] = scan_v5_delta
             scan_v5_inventory["_change_impact"] = scan_v5_change_impact
+            scan_v5_inventory["_runtime_state"] = scan_v5_runtime_state
+            scan_v5_inventory["_outcome_data"] = scan_v5_outcome_data
+            scan_v5_inventory["_effectiveness_issues"] = scan_v5_effectiveness_issues
+            scan_v5_inventory["_scan_session_id"] = scan_v5_session_id
         except Exception:
             pass
 
