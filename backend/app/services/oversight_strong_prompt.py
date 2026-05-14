@@ -320,12 +320,38 @@ def build_strong_prompt(
 
     # === Acceptance criteria ===
     # 🔬 (Runtime Verify Stage 1) — AC می‌تواند str یا dict باشد
+    # 🆕 (Phase 5 — فاز ۷) — AC ساختار غنی: behavior + acceptance_signal +
+    # business_intent + alternative_implementations + non_goals +
+    # false_positive_guard. هر AC اگر این فیلدها را داشته باشد، در پرامپت
+    # به‌صورت block جداگانه render می‌شود تا verify بتواند رفتار-محور
+    # judge کند نه نام-محور.
     ac_lines: List[str] = []
     for c in acceptance_criteria:
-        c_text = (c.get("text") if isinstance(c, dict) else c) or ""
-        c_text = str(c_text).strip()
-        if c_text:
+        if isinstance(c, dict):
+            c_text = str(c.get("text") or "").strip()
+            if not c_text:
+                continue
+            extras_parts: List[str] = []
+            if c.get("behavior"):
+                extras_parts.append(f"  📐 رفتار: {str(c['behavior'])[:300]}")
+            if c.get("acceptance_signal"):
+                extras_parts.append(f"  🎯 معیار قابل-verify: {str(c['acceptance_signal'])[:300]}")
+            if c.get("business_intent"):
+                extras_parts.append(f"  💼 چرا (intent): {str(c['business_intent'])[:200]}")
+            if c.get("alternative_implementations"):
+                alts = ", ".join(str(a)[:80] for a in c["alternative_implementations"][:5])
+                extras_parts.append(f"  🔀 پیاده‌سازی‌های جایگزین قابل قبول: {alts}")
+            if c.get("non_goals"):
+                extras_parts.append(f"  ⛔ این AC شامل نیست: {str(c['non_goals'])[:200]}")
+            if c.get("false_positive_guard"):
+                extras_parts.append(f"  ⚠️ شواهد ضعیف (NOT done): {str(c['false_positive_guard'])[:200]}")
             ac_lines.append(f"- [ ] {c_text}")
+            if extras_parts:
+                ac_lines.extend(extras_parts)
+        else:
+            c_text = str(c).strip()
+            if c_text:
+                ac_lines.append(f"- [ ] {c_text}")
     standard_ac = [
         "- [ ] هیچ تستی fail نمی‌شود (`npm run test` / `pytest`)",
         "- [ ] linter بدون warning عبور می‌کند",
@@ -334,7 +360,12 @@ def build_strong_prompt(
     for s in standard_ac:
         if s not in ac_lines:
             ac_lines.append(s)
-    parts.append("## ✅ معیار پذیرش (Acceptance Criteria)\n" + "\n".join(ac_lines))
+    parts.append(
+        "## ✅ معیار پذیرش (Acceptance Criteria) — رفتار-محور\n"
+        "**مهم:** هر AC رفتار قابل مشاهده را تعریف می‌کند، نه نام فایل/کلاس.\n"
+        "verify می‌تواند پیاده‌سازی متفاوت ولی هم‌ارز را قبول کند.\n\n"
+        + "\n".join(ac_lines)
+    )
 
     # === Steps ===
     if not steps and proposed_action:

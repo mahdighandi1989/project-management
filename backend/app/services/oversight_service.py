@@ -2743,11 +2743,24 @@ class OversightService:
       "title": "عنوان کوتاه مرحله (یک جمله)",
       "scope": "scope کامل این مرحله — چه چیزی باید انجام شود، چه چیزی خارج از این مرحله است، نکات حیاتی (حداقل ۲-۳ جمله، می‌تواند تا ۱۰۰۰ کاراکتر باشد)",
       "raw_excerpt": "بخش‌هایی از متن کاربر که به این مرحله مربوط است — کلمه به کلمه با URL ها و نام‌ها، حداقل ۱۰۰ char اگر متن طولانی است",
-      "key_terms": ["نام فایل ۱", "endpoint ۲", "library ۳", "https://..."]
+      "key_terms": ["نام فایل ۱", "endpoint ۲", "library ۳", "https://..."],
+      "behavior_observable": "رفتار قابل مشاهده پس از این مرحله — چه چیزی کاربر می‌بیند یا چه خروجی observable تولید می‌شود (نه نام فایل، بلکه رفتار).",
+      "verification_hint": "کجا verify باید این رفتار را ببیند — مثل /route مشخص، endpoint، یا outcome data",
+      "business_intent": "چرا این مرحله لازم است — هدف کسب‌وکاری یا کاربر",
+      "non_goals": "چه چیزی این مرحله نیست — جلوگیری از scope creep"
     }}
   ],
   "rationale": "چرا این تقسیم منطقی است (۲-۳ جمله)"
 }}
+
+## 🎯 معیار رفتاری (R9 + R13 — مهم برای جلوگیری از false-positive):
+- هر AC که نام فایل/کلاس می‌برد، در `behavior_observable` رفتار همان feature را به‌صورت **observable** بنویس.
+  - ❌ بد: «فایل XyzPanel.tsx بساز»
+  - ✅ خوب: «پنلی که watched projects را list می‌کند — می‌تواند در app/X/page.tsx یا کامپوننت جدا»
+- `verification_hint` کمک می‌کند verify بداند کجا feature را بجوید — URL یا event مشخص.
+- `business_intent` کاربر را کمک می‌کند بفهمد چرا این مرحله مهم است.
+- اگر مرحله **vague** است (مثل "system works")، آن را به sub-behaviors **concrete** split کن.
+- `non_goals` باید **صریح** باشد تا verify فریب نخورد.
 """
         try:
             response = await self._ai_generate(
@@ -2772,12 +2785,19 @@ class OversightService:
                 scope = (s.get("scope") or "").strip()
                 if not title or not scope:
                     continue
+                # 🆕 (Phase 5 — فاز ۷) — ساختار غنی task_step (R9, R13):
+                # علاوه بر title/scope، فیلدهای رفتار-محور هم استخراج می‌کنیم
                 valid_steps.append({
                     "id": int(s.get("id") or (i + 1)),
                     "title": title[:200],
-                    "scope": scope[:2500],   # 🛡 از 1000 به 2500 — جلوی شکست detail
-                    "raw_excerpt": (s.get("raw_excerpt") or "").strip()[:4000],  # از 2000 به 4000
-                    "key_terms": [str(k) for k in (s.get("key_terms") or [])[:25]],  # از 15 به 25
+                    "scope": scope[:2500],
+                    "raw_excerpt": (s.get("raw_excerpt") or "").strip()[:4000],
+                    "key_terms": [str(k) for k in (s.get("key_terms") or [])[:25]],
+                    # Phase 5 — فاز ۷
+                    "behavior_observable": str(s.get("behavior_observable") or "").strip()[:500],
+                    "verification_hint": str(s.get("verification_hint") or "").strip()[:300],
+                    "business_intent": str(s.get("business_intent") or "").strip()[:300],
+                    "non_goals": str(s.get("non_goals") or "").strip()[:300],
                 })
             return valid_steps[:30]  # 🛡 6 → 12 → 30 (پشتیبانی تسک‌های پیچیده)
         except Exception as e:
