@@ -28,6 +28,45 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _resolve_project_id_for_watched(watched_id: str) -> str:
+    """resolve watched_id به Project.id محلی تا session در tab UI ظاهر شود.
+
+    مشابه oversight_verifier._resolve_inspector_project_id.
+    Falls back به watched_id خام اگر resolve fail کرد.
+    """
+    try:
+        from ...core.database import SessionLocal
+        from ..oversight_service import get_oversight_service
+        from ...models.project import Project as _Project
+        service = get_oversight_service()
+        watched = service._find_watched(watched_id) if watched_id else None
+        repo_full_name = (watched.repo_full_name if watched else "") or ""
+        if not repo_full_name or "/" not in repo_full_name:
+            return str(watched_id)
+        db = SessionLocal()
+        try:
+            # تلاش 1: github_path
+            p = db.query(_Project).filter(_Project.github_path == repo_full_name).first()
+            if p:
+                return str(p.id)
+            # تلاش 2: github_url contains
+            p = (
+                db.query(_Project)
+                .filter(_Project.github_url.like(f"%{repo_full_name}%"))
+                .first()
+            )
+            if p:
+                return str(p.id)
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug(f"scan_inspector: project resolve failed: {e}")
+    return str(watched_id)
+
+
 def create_scan_session(
     watched_id: str,
     project_name: str = "",
@@ -43,16 +82,24 @@ def create_scan_session(
         logger.debug(f"scan_inspector: model import failed: {e}")
         return None
 
+    # 🆕 (bug 3 fix) — resolve project_id تا session در UI tab «بازرس ویژه»
+    # ظاهر شود (مشابه verify session ها)
+    project_id = _resolve_project_id_for_watched(watched_id)
+
     db = SessionLocal()
     try:
         session = InspectorSession(
-            project_id=str(watched_id),
+            project_id=project_id,
             status="active",
             title=f"🔍 Scan: {project_name or watched_id}",
         )
         db.add(session)
         db.commit()
         db.refresh(session)
+        logger.info(
+            f"scan_inspector: session #{session.id} created "
+            f"(project_id={project_id}, watched_id={watched_id})"
+        )
         return session.id
     except Exception as e:
         logger.warning(f"scan_inspector: create_session failed: {e}")
