@@ -1783,6 +1783,35 @@ async def run_deep_scan(
         except Exception as _e_logic:
             logger.warning(f"scan_v5 logic_audit failed: {_e_logic}")
 
+        # 🆕 (Phase 5 — فاز ۶) — Notification System Audit (R12)
+        scan_v5_notif_audit: Dict[str, Any] = {"summary": {}}
+        try:
+            if getattr(watched, "notification_audit_enabled", True):
+                write_progress(
+                    watched_id, phase="phase5_notif_audit",
+                    message="audit سیستم notification (R12)",
+                )
+                from .scan_v5.notification_auditor import audit_notifications
+                scan_v5_notif_audit = await audit_notifications(
+                    inventory=scan_v5_inventory,
+                    purpose_map=scan_v5_purpose_map,
+                    file_contents=deep_contents,
+                    verify_model_id=(model_ids[0] if model_ids else model_id),
+                )
+                logger.info(
+                    f"scan_v5 notif_audit: {scan_v5_notif_audit.get('summary')}"
+                )
+                if scan_v5_session_id:
+                    from .scan_v5.scan_inspector_session import log_scan_message
+                    log_scan_message(
+                        scan_v5_session_id, "system",
+                        f"🔔 notification audit: "
+                        f"{scan_v5_notif_audit.get('summary', {}).get('total_issues', 0)} issue "
+                        f"({scan_v5_notif_audit.get('summary', {}).get('total_calls', 0)} call total)",
+                    )
+        except Exception as _e_na:
+            logger.warning(f"scan_v5 notification audit failed: {_e_na}")
+
         # 🆕 (Phase 5 — فاز ۳) — Delta Detection + Bidirectional Dependency
         scan_v5_delta: Dict[str, Any] = {"summary": {}}
         scan_v5_change_impact: List[Dict[str, Any]] = []
@@ -1843,6 +1872,7 @@ async def run_deep_scan(
             scan_v5_inventory["_scan_session_id"] = scan_v5_session_id
             scan_v5_inventory["_coherence"] = scan_v5_coherence
             scan_v5_inventory["_anti_patterns"] = scan_v5_anti_patterns
+            scan_v5_inventory["_notif_audit"] = scan_v5_notif_audit
         except Exception:
             pass
 
