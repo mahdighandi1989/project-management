@@ -1910,6 +1910,10 @@ async def verify_task(
     runtime_probe_results: List[Any] = []
     runtime_evidence_blob = ""
     runtime_override_hints: Dict[str, str] = {}  # ac_text → "passed" | "failed"
+    # 🆕 (Phase 4 fix #17) — code-aware verdicts for task_steps —
+    # populated در runtime block، استفاده‌شده در (a) prompt verifier
+    # و (b) post-AI programmatic override روی steps_status
+    step_code_verdicts: Dict[int, Dict[str, Any]] = {}
     runtime_run_id: Optional[str] = None
     # 🔬 (debug visibility) — توضیح اینکه چرا/چطور runtime block اجرا شد
     runtime_status_note: str = "did_not_run"
@@ -2077,8 +2081,10 @@ async def verify_task(
             # 🆕 (Phase 4) — Code-aware Verifier per AC (همیشه برای task
             # هایی که حداقل یک AC و repo دارند اجرا می‌شود — مستقل از type)
             code_probe_results: List[Any] = []
+            # (step_code_verdicts بالا، در scope تابع، تعریف شده تا
+            # هم در prompt verifier و هم در post-AI override در دسترس باشد)
             try:
-                if acceptance_criteria and watched and getattr(watched, "repo_full_name", None):
+                if (acceptance_criteria or task.task_steps) and watched and getattr(watched, "repo_full_name", None):
                     from .verify_runtime.code_aware_verifier import (
                         analyze_acs_with_commit_diffs,
                     )
@@ -2090,37 +2096,76 @@ async def verify_task(
                     )
                     _token = get_github_token()
                     if _token:
-                        _code_analysis = await analyze_acs_with_commit_diffs(
-                            task=task,
-                            acs=list(acceptance_criteria)[:10],
-                            repo_full_name=watched.repo_full_name,
-                            token=_token,
-                            verify_model_id=model_id,
-                        )
-                        _verdict_to_status = {
-                            "implemented": _PASSED,
-                            "partial": _FAILED,
-                            "not_found": _FAILED,
-                            "unclear": _SKIPPED,
-                        }
-                        for _ca in _code_analysis:
-                            _ca_idx = _ca.get("ac_index", 0)
-                            _ca_verdict = _ca.get("code_verdict", "unclear")
-                            _ca_status = _verdict_to_status.get(_ca_verdict, _SKIPPED)
-                            code_probe_results.append(_RPR(
-                                ac_id=f"code_ac{_ca_idx}",
-                                ac_text=_ca.get("ac_text", ""),
-                                method="code_analysis",
-                                status=_ca_status,
-                                evidence={
-                                    "code_verdict": _ca_verdict,
-                                    "matching_commits": _ca.get("matching_commits", []),
-                                    "key_changes": _ca.get("key_changes", []),
-                                    "reason": _ca.get("reason", ""),
-                                    "probe_type": "code_aware_phase4",
-                                },
-                                duration_ms=0,
-                            ))
+                        # 1) acceptance_criteria کلی
+                        if acceptance_criteria:
+                            _code_analysis = await analyze_acs_with_commit_diffs(
+                                task=task,
+                                acs=list(acceptance_criteria)[:10],
+                                repo_full_name=watched.repo_full_name,
+                                token=_token,
+                                verify_model_id=model_id,
+                            )
+                            _verdict_to_status = {
+                                "implemented": _PASSED,
+                                "partial": _FAILED,
+                                "not_found": _FAILED,
+                                "unclear": _SKIPPED,
+                            }
+                            for _ca in _code_analysis:
+                                _ca_idx = _ca.get("ac_index", 0)
+                                _ca_verdict = _ca.get("code_verdict", "unclear")
+                                _ca_status = _verdict_to_status.get(_ca_verdict, _SKIPPED)
+                                code_probe_results.append(_RPR(
+                                    ac_id=f"code_ac{_ca_idx}",
+                                    ac_text=_ca.get("ac_text", ""),
+                                    method="code_analysis",
+                                    status=_ca_status,
+                                    evidence={
+                                        "code_verdict": _ca_verdict,
+                                        "matching_commits": _ca.get("matching_commits", []),
+                                        "key_changes": _ca.get("key_changes", []),
+                                        "reason": _ca.get("reason", ""),
+                                        "probe_type": "code_aware_phase4",
+                                    },
+                                    duration_ms=0,
+                                ))
+
+                        # 2) task_steps — حیاتی برای checklist
+                        # هر task_step را به‌عنوان یک AC در نظر می‌گیریم
+                        _steps_list = list(task.task_steps or [])
+                        if _steps_list:
+                            _step_acs = [
+                                {
+                                    "text": (
+                                        f"{s.get('title', '')} — "
+                                        f"{s.get('scope', '')[:300]}"
+                                    ).strip(),
+                                    "_step_id": s.get("id", i + 1),
+                                }
+                                for i, s in enumerate(_steps_list[:10])
+                                if isinstance(s, dict)
+                            ]
+                            if _step_acs:
+                                _steps_analysis = await analyze_acs_with_commit_diffs(
+                                    task=task,
+                                    acs=_step_acs,
+                                    repo_full_name=watched.repo_full_name,
+                                    token=_token,
+                                    verify_model_id=model_id,
+                                )
+                                for _i, _sa in enumerate(_steps_analysis):
+                                    _step_id = (
+                                        _step_acs[_i].get("_step_id")
+                                        if _i < len(_step_acs) else None
+                                    )
+                                    if _step_id is None:
+                                        continue
+                                    step_code_verdicts[int(_step_id)] = {
+                                        "verdict": _sa.get("code_verdict", "unclear"),
+                                        "reason": _sa.get("reason", ""),
+                                        "matching_commits": _sa.get("matching_commits", [])[:3],
+                                        "key_changes": _sa.get("key_changes", [])[:3],
+                                    }
                         if auto_verify_session_id:
                             try:
                                 from .verify_runtime.inspector_probe import _msg as _ip_msg
@@ -2130,6 +2175,14 @@ async def verify_task(
                                     f"{sum(1 for r in code_probe_results if r.status == _FAILED)}f / "
                                     f"{sum(1 for r in code_probe_results if r.status == _SKIPPED)}s)"
                                 )
+                                if step_code_verdicts:
+                                    _step_imp = sum(
+                                        1 for v in step_code_verdicts.values()
+                                        if v.get("verdict") == "implemented"
+                                    )
+                                    _summary += (
+                                        f" + steps: {_step_imp}/{len(step_code_verdicts)} implemented"
+                                    )
                                 await _ip_msg(auto_verify_session_id, "system", _summary)
                             except Exception:
                                 pass
@@ -2636,11 +2689,44 @@ async def verify_task(
         ]
         for s in task_steps_list:
             cur = (s.get("status") or "pending")
+            sid_int = int(s.get("id", 0))
+            # 🆕 (Phase 4 fix #17) — اگر code_aware verdict برای این step
+            # داریم، آن را به‌عنوان "🤖 شواهد ماشینی" کنار توضیح step
+            # بگذار تا AI verifier نهایی هنگام تصمیم در checklist از آن
+            # استفاده کند.
+            _cav = step_code_verdicts.get(sid_int)
+            _cav_line = ""
+            if _cav:
+                _v = _cav.get("verdict", "unclear")
+                _emoji = {"implemented": "✅", "partial": "🟡",
+                          "not_found": "❌", "unclear": "❓"}.get(_v, "·")
+                _commits = _cav.get("matching_commits") or []
+                _commits_s = ", ".join(f"`{c}`" for c in _commits[:3])
+                _cav_line = (
+                    f"\n  🤖 code-aware: {_emoji} `{_v}` "
+                    f"— {_cav.get('reason', '')[:200]}"
+                    + (f" (commits: {_commits_s})" if _commits else "")
+                )
             steps_lines.append(
                 f"- **مرحله {s.get('id')}** ({cur}): "
                 f"{(s.get('title') or '')[:120]} — "
                 f"{(s.get('scope') or '')[:280]}"
+                f"{_cav_line}"
             )
+        # 🆕 (Phase 4 fix #17) — راهنمای استفاده از code-aware verdicts
+        if step_code_verdicts:
+            steps_lines.insert(5, (
+                "🤖 **شواهد code-aware برای هر step** (در زیر هر مرحله):\n"
+                "- اگر verdict = `implemented` → status باید `done` باشد "
+                "(مگر شواهد runtime ضد قوی دیدی).\n"
+                "- اگر verdict = `partial` → status باید `partial`.\n"
+                "- اگر verdict = `not_found` → status `not_done` مگر "
+                "خودت در chunks فایل را پیدا کنی.\n"
+                "- اگر verdict = `unclear` → بر اساس شواهد دیگر تصمیم بگیر.\n"
+                "**هرگز** فقط بر اساس عدم دیدن feature در UI screenshot "
+                "نگو not_done — اگر code-aware گفته implemented، صفحه/کد آن "
+                "موجود است، شاید در UI دیده نشود (backend internal).\n"
+            ))
         steps_blob = "\n".join(steps_lines)
         # ساخت template نمونه (id‌ها واقعی) برای کاهش خطای AI
         sample_ids = [str(s.get("id", i + 1)) for i, s in enumerate(task_steps_list[:3])]
@@ -3025,6 +3111,8 @@ async def verify_task(
         updated_steps: List[Dict[str, Any]] = []
         completion_sum = 0
         done_count = 0
+        # 🆕 (Phase 4 fix #17) — programmatic override stats
+        _step_overrides: List[str] = []
         for s in task_steps_list:
             sid = s.get("id")
             try:
@@ -3036,6 +3124,42 @@ async def verify_task(
             new_status = (upd.get("status") or s.get("status") or "pending").strip().lower()
             if new_status not in ("done", "partial", "not_done", "pending", "error"):
                 new_status = "pending"
+
+            # 🆕 (Phase 4 fix #17) — programmatic override:
+            # اگر code_aware برای این step verdict داده، AI verdict را
+            # با آن چک کن. اگر AI گفت not_done ولی code_aware گفت
+            # implemented (یا برعکس)، code_aware را اولویت بده — چون
+            # AI verifier نهایی گاهی فقط روی UI screenshot قضاوت می‌کند
+            # و backend internal features را نمی‌بیند.
+            try:
+                _step_id_int = int(sid) if sid is not None else None
+            except Exception:
+                _step_id_int = None
+            _cav = (
+                step_code_verdicts.get(_step_id_int)
+                if _step_id_int is not None else None
+            )
+            if _cav:
+                _ca_verdict = _cav.get("verdict", "unclear")
+                _ca_reason = _cav.get("reason", "")[:200]
+                _orig_status = new_status
+                # implemented → done (مگر AI شواهد قوی ضد داشته باشد)
+                if _ca_verdict == "implemented" and new_status in ("not_done", "pending"):
+                    new_status = "done"
+                    _step_overrides.append(
+                        f"step {sid}: AI={_orig_status} → done "
+                        f"(code-aware: implemented; {_ca_reason})"
+                    )
+                # partial → partial (اگر AI گفت not_done)
+                elif _ca_verdict == "partial" and new_status == "not_done":
+                    new_status = "partial"
+                    _step_overrides.append(
+                        f"step {sid}: AI=not_done → partial "
+                        f"(code-aware: partial; {_ca_reason})"
+                    )
+                # اگر AI گفت done ولی code-aware گفت not_found، AI بمونه
+                # (شاید AI کد را در chunks خوانده، code_aware فقط commit window می‌بیند)
+
             # completion_pct
             try:
                 pct = int(upd.get("completion_pct", s.get("completion_pct", 0)) or 0)
@@ -3061,6 +3185,12 @@ async def verify_task(
                 new_entry["completed_at"] = None
             completion_sum += pct
             updated_steps.append(new_entry)
+        # log overrides
+        if _step_overrides:
+            logger.info(
+                f"verify {task.id}: {len(_step_overrides)} step status "
+                f"overrides applied from code-aware: {_step_overrides[:5]}"
+            )
 
         # overall %
         total_steps = len(updated_steps)
