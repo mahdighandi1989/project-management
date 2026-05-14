@@ -94,6 +94,18 @@ async def analyze_acs_with_commit_diffs(
 
     # نتایج را با input AC ها sync کن
     target_files_list = list(task.target_files or [])
+    # 🆕 (Phase 4 fix) — task context کامل برای token-matching: AC کلی
+    # ممکن است نام فایل ندهد ولی task_steps می‌دهد. ما tokens همه‌ی
+    # task_steps را به ac_context هر AC اضافه می‌کنیم تا programmatic
+    # upgrade برای AC های کلی هم fire شود.
+    _task_steps_text = " ".join(
+        f"{s.get('title', '')} {s.get('scope', '')}"
+        for s in (getattr(task, "task_steps", None) or [])
+        if isinstance(s, dict)
+    )
+    _task_title = str(getattr(task, "title", "") or "")
+    _task_extra_context = (_task_title + " " + _task_steps_text).strip()
+
     final: List[Dict[str, Any]] = []
     for i, ac in enumerate(acs[:_MAX_ACS_PER_BATCH]):
         ac_text = ac_texts[i] if i < len(ac_texts) else ""
@@ -104,15 +116,17 @@ async def analyze_acs_with_commit_diffs(
         reason = str(ai_item.get("reason") or "")[:400]
 
         # 🆕 (Phase 4 fix) — programmatic upgrade: اگر AI گفت not_found یا
-        # unclear ولی AC به فایلی اشاره می‌کند که در target_files است،
-        # آن را به 'implemented' upgrade کن. AI گاهی بدبینانه (not_found)
-        # یا مردد (unclear) قضاوت می‌کند روی commit window محدود — ولی
-        # وجود فایل در target_files یعنی feature ساخته شده.
-        # matching معیار: token-overlap بین basename و AC text.
+        # unclear ولی AC (یا task context) به فایلی اشاره می‌کند که در
+        # target_files است، آن را به 'implemented' upgrade کن.
+        # ac_context = ac_text + کل task_steps + title — تا AC های کلی هم
+        # از طریق task_steps کشف شوند.
         if verdict in ("not_found", "unclear") and target_files_list and ac_text:
             import re as _re_match
+            # ترکیب ac.text با task context (titleها + scopeها) تا
+            # AC های کلی بتوانند از طریق task_steps هم match شوند
+            _full_ctx = (ac_text + " " + _task_extra_context).strip()
             ac_tokens = set(
-                t.lower() for t in _re_match.findall(r"[A-Za-z][A-Za-z0-9]+", ac_text)
+                t.lower() for t in _re_match.findall(r"[A-Za-z][A-Za-z0-9]+", _full_ctx)
                 if len(t) >= 3
             )
             matched_files: List[str] = []
