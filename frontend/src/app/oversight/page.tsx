@@ -47,6 +47,7 @@ interface Watched {
   allow_create_issue?: boolean;
   scan_interval_hours?: number;
   verify_interval_hours?: number;
+  verify_mode?: 'deep' | 'fast';
   default_execution_mode?: 'manual' | 'auto_via_projects_page' | 'auto_via_pr';
   verify_only_mode?: boolean;
   confirmation_streak_required?: number;
@@ -5070,6 +5071,64 @@ function WatchedCard({
             {w.autonomy_level === 'manual' && ' در حالت manual، تسک‌ها فقط با کلیک شما اجرا می‌شوند.'}
           </div>
         )}
+      </div>
+
+      {/* 🆕 (Phase 4) — حالت verify (deep / fast) */}
+      <div className="mb-3 p-3 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 rounded">
+        <label className="flex items-start gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={(w.verify_mode ?? 'deep') === 'deep'}
+            onChange={(e) =>
+              onChange({ verify_mode: e.target.checked ? 'deep' : 'fast' })
+            }
+            className="w-4 h-4 mt-0.5 accent-purple-600"
+          />
+          <div className="flex-1">
+            <div className="text-sm font-semibold text-purple-900 dark:text-purple-200 flex items-center gap-2 flex-wrap">
+              🔬 verify عمیق (پیش‌فرض)
+              {(w.verify_mode ?? 'deep') === 'deep' && (
+                <span className="text-[10px] px-1.5 py-0.5 bg-purple-200 dark:bg-purple-800 dark:text-purple-100 rounded">
+                  فعال
+                </span>
+              )}
+              {w.verify_mode === 'fast' && (
+                <span className="text-[10px] px-1.5 py-0.5 bg-amber-200 dark:bg-amber-800 dark:text-amber-100 rounded">
+                  ⚡ fast mode
+                </span>
+              )}
+              <span
+                title="در حالت deep، verify علاوه بر grep+AI، Playwright probe ها، تحلیل screenshot با Vision، analysis commit diffs (code-aware)، تحلیل لاگ‌های Render (backend-log)، و smart navigation روی nav menu را هم اجرا می‌کند. در حالت fast، فقط grep+AI سریع اجرا می‌شود."
+                className="cursor-help text-purple-500"
+              >
+                ⓘ
+              </span>
+            </div>
+            <div className="text-[11px] text-purple-700 dark:text-purple-300 mt-0.5 leading-relaxed">
+              {(w.verify_mode ?? 'deep') === 'deep' ? (
+                <>
+                  شامل: 🖱 Playwright probe • 👁 Vision analysis •
+                  🔍 code-aware (commit diffs) • 📊 backend-log •
+                  🧭 smart navigation • 📸 screenshot evidence.
+                  <span className="block opacity-80 mt-0.5">
+                    ~30 ثانیه طول می‌کشد، ولی شواهد دقیق‌تری برای checklist
+                    تولید می‌کند (به‌خصوص برای feature های backend-internal).
+                  </span>
+                </>
+              ) : (
+                <>
+                  فقط grep + AI verifier (~5 ثانیه). probe، Vision،
+                  code-aware، backend-log، smart-nav <strong>اجرا نمی‌شوند</strong>.
+                  مناسب وقتی شواهد runtime نیاز ندارید یا verify باید سریع باشد.
+                  <span className="block text-amber-700 dark:text-amber-400 mt-0.5">
+                    ⚠️ برای task های backend-internal، ممکن است AI verifier
+                    به‌تنهایی نتواند درست تشخیص دهد — توصیه deep می‌شود.
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
+        </label>
       </div>
 
       {/* 🆕 (Smart Task Lifecycle) چرخهٔ تسک — dedup + auto-regenerate */}
