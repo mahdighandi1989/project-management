@@ -163,6 +163,23 @@ class WatchedProject:
     # backend-log/smart-nav) یا fast (فقط grep+AI، سریع‌تر ولی شواهد کمتر)
     # این flag هم در scheduler خودکار و هم در دکمه‌ی verify-now استفاده می‌شود.
     verify_mode: str = "deep"  # "deep" | "fast"
+    # 🆕 (Phase 5) — Scan V5: comprehensive inventory + purpose + delta + logic
+    last_scan_inventory: Optional[Dict[str, Any]] = None
+    last_scan_purpose_map: Optional[Dict[str, Any]] = None
+    last_scan_at_v5: Optional[str] = None
+    prev_scan_state: Optional[Dict[str, Any]] = None  # {path: sha,size,...}
+    # حالت‌های scan v5 (همه default sensible)
+    stale_detection_enabled: bool = True
+    delta_analysis_enabled: bool = True
+    runtime_discovery_enabled: bool = True
+    outcome_data_enabled: bool = True
+    logic_audit_enabled: bool = True
+    notification_audit_enabled: bool = True
+    inspector_session_enabled: bool = True  # R14
+    auto_task_checklist_mode: str = "auto"  # "auto" | "always" | "never"  R5
+    cleanup_tasks_enabled: bool = True
+    auto_task_notify_sound: bool = False  # R6 — silent default
+    scan_notify_sound: bool = False  # R6
     # 🆕 وزن‌های قابل تنظیم برای محاسبهٔ per-file health score
     # (مهاجرت از Health analysis criteria_weights)
     # default values متعادل — کاربر می‌تواند override کند تا محاسبه
@@ -1405,6 +1422,18 @@ class OversightService:
                         "verify_interval_hours",
                         # 🆕 (Phase 4) — حالت verify
                         "verify_mode",
+                        # 🆕 (Phase 5) — Scan V5 flags
+                        "stale_detection_enabled",
+                        "delta_analysis_enabled",
+                        "runtime_discovery_enabled",
+                        "outcome_data_enabled",
+                        "logic_audit_enabled",
+                        "notification_audit_enabled",
+                        "inspector_session_enabled",
+                        "auto_task_checklist_mode",
+                        "cleanup_tasks_enabled",
+                        "auto_task_notify_sound",
+                        "scan_notify_sound",
                         # 🆕 (commit 2.3) — مهاجرت از Health analysis settings
                         "scan_depth",
                         "scan_criteria_weights",

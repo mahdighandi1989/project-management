@@ -1563,6 +1563,62 @@ async def run_deep_scan(
             "functional_correctness": "functional_correctness",
         }
 
+        # 🆕 (Phase 5 — فاز ۱) — Comprehensive Inventory + Purpose Extraction
+        # این بلوک fail-soft است: اگر scan_v5 import شکست خورد یا AI خاموش
+        # بود، scan قدیمی ادامه می‌دهد بدون اختلال.
+        scan_v5_inventory: Dict[str, Any] = {}
+        scan_v5_purpose_map: Dict[str, Any] = {}
+        try:
+            write_progress(
+                watched_id, phase="phase5_inventory",
+                message="ساخت inventory جامع (۱۲ لایه)",
+            )
+            from .scan_v5.comprehensive_inventory import build_inventory
+            scan_v5_inventory = build_inventory(deep_contents, all_files)
+            logger.info(
+                f"scan_v5 inventory: {scan_v5_inventory.get('_meta', {}).get('counts', {})}"
+            )
+        except Exception as _e_inv:
+            logger.warning(f"scan_v5 inventory failed: {_e_inv}")
+
+        try:
+            write_progress(
+                watched_id, phase="phase5_purpose",
+                message="استخراج هدف و منطق فایل‌های کلیدی",
+            )
+            from .scan_v5.purpose_extractor import extract_purposes
+            # task history برای originating_task_id
+            _task_history_for_purpose = [
+                {
+                    "id": t.id,
+                    "target_files": list(t.target_files or []),
+                    "raw_idea": (t.raw_idea or "")[:500],
+                }
+                for t in service.tasks
+                if getattr(t, "watched_id", None) == watched_id
+            ][:50]
+            scan_v5_purpose_map = await extract_purposes(
+                inventory=scan_v5_inventory,
+                file_contents=deep_contents,
+                reverse_imports=imported_by,
+                task_history=_task_history_for_purpose,
+                commit_history=[],  # commits در scan قدیمی fetched نمی‌شود
+                verify_model_id=(model_ids[0] if model_ids else model_id),
+            )
+            logger.info(
+                f"scan_v5 purpose_map: {len(scan_v5_purpose_map)} files purposed"
+            )
+        except Exception as _e_pp:
+            logger.warning(f"scan_v5 purpose extraction failed: {_e_pp}")
+
+        # ذخیره روی watched برای دسترسی فازهای بعدی + UI
+        try:
+            watched.last_scan_inventory = scan_v5_inventory
+            watched.last_scan_purpose_map = scan_v5_purpose_map
+            watched.last_scan_at_v5 = now_iso()
+        except Exception:
+            pass
+
         file_health_map: Dict[str, Dict[str, Any]] = {}
         # ابتدا برای هر فایل deep-read شده، یک ورودی اولیه با score=100
         for path in deep_contents.keys():
