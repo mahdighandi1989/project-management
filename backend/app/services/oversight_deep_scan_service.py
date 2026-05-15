@@ -226,7 +226,7 @@ async def _fetch_file_content(
 # =====================================================================
 
 _PY_IMPORT_RE = re.compile(
-    r"^\s*(?:from\s+([\w\.]+)\s+import|import\s+([\w\.]+))",
+    r"^\s*(?:from\s+(\.+[\w\.]*|[\w\.]+)\s+import|import\s+([\w\.]+))",
     re.MULTILINE,
 )
 _JS_IMPORT_RE = re.compile(
@@ -250,6 +250,67 @@ def _resolve_py_import(module: str, all_paths: List[str]) -> Optional[str]:
             if p.endswith("/" + c) or p == c:
                 return p
     return None
+
+
+# 🆕 (Phase 5 — bug 14) — relative imports باید resolve شوند
+# (`from .api.routes import xxx` در `backend/app/main.py` ⇒
+# `backend/app/api/routes/xxx.py`). در غیر این صورت همه فایل‌ها
+# false-positive «unused_file» می‌گیرند.
+def _resolve_py_relative_import(
+    module_or_dots: str,
+    imported_names: List[str],
+    importer_path: str,
+    all_paths: List[str],
+) -> List[str]:
+    """resolve `from .a.b import x, y` به مسیرهای فایل.
+
+    `module_or_dots` می‌تواند `.`, `..`, `.a`, `..a.b` باشد.
+    `imported_names` نام‌های `import (x, y, z)` — هر کدام ممکن است
+    خودش یک sub-module باشد.
+    Returns: لیست paths که resolve شدند.
+    """
+    if not module_or_dots.startswith("."):
+        return []
+    # شمارش dots
+    dots = 0
+    rest = module_or_dots
+    while rest.startswith("."):
+        dots += 1
+        rest = rest[1:]
+    # importer_path → directory parts
+    dir_parts = importer_path.split("/")[:-1]  # حذف نام فایل
+    # هر dot اضافه = یک level بالاتر (اولین dot = same package)
+    if dots > 1:
+        dir_parts = dir_parts[: len(dir_parts) - (dots - 1)]
+    if rest:
+        dir_parts = dir_parts + rest.split(".")
+    base = "/".join(dir_parts)
+    resolved: List[str] = []
+    # حالت ۱: خود base یک ماژول است (یا یک سری نام در آن import شده)
+    candidates = [base + ".py", base + "/__init__.py"]
+    for c in candidates:
+        if c in all_paths:
+            resolved.append(c)
+    # حالت ۲: نام‌های import شده ممکن است sub-modules باشند
+    for nm in imported_names:
+        nm_clean = nm.strip().split(" as ")[0].strip()
+        if not nm_clean or nm_clean == "*":
+            continue
+        sub_candidates = [
+            base + "/" + nm_clean + ".py",
+            base + "/" + nm_clean + "/__init__.py",
+        ]
+        for c in sub_candidates:
+            if c in all_paths:
+                resolved.append(c)
+    return resolved
+
+
+# regex برای استخراج نام‌های `import (a, b, c)` در کنار `from X import ...`
+_PY_FROM_IMPORT_NAMES_RE = re.compile(
+    r"^\s*from\s+(\.+[\w\.]*|[\w\.]+)\s+import\s+([^\n]+?)(?:\n|$)",
+    re.MULTILINE,
+)
 
 
 def _resolve_js_import(spec: str, importer_path: str, all_paths: List[str]) -> Optional[str]:
@@ -297,10 +358,39 @@ def _build_import_graph(
             continue
         deps: List[str] = []
         if fpath.endswith(".py"):
-            for m in _PY_IMPORT_RE.finditer(content):
-                mod = m.group(1) or m.group(2) or ""
+            # 🆕 (Phase 5 — bug 14) — relative imports اکنون resolve می‌شوند
+            # (قبلاً silently skip می‌شد → همه فایل‌های دارای imported_by صرفاً
+            # از relative، false-positive «unused_file» می‌گرفتند).
+            for m in _PY_FROM_IMPORT_NAMES_RE.finditer(content):
+                mod = (m.group(1) or "").strip()
+                names_raw = (m.group(2) or "").strip()
+                # پاک‌سازی parentheses و trailing comments
+                names_raw = names_raw.split("#")[0].strip()
+                if names_raw.startswith("("):
+                    # ممکن است multi-line باشد — بهترین تلاش
+                    names_raw = names_raw.lstrip("(").rstrip(")").strip()
+                names = [n.strip() for n in names_raw.split(",") if n.strip()]
                 if mod.startswith("."):
-                    # relative import — best-effort skip (rare in this codebase)
+                    for r in _resolve_py_relative_import(mod, names, fpath, list(path_set)):
+                        if r and r != fpath:
+                            deps.append(r)
+                else:
+                    resolved = _resolve_py_import(mod, list(path_set))
+                    if resolved and resolved != fpath:
+                        deps.append(resolved)
+                    # هر name هم ممکن است sub-module باشد (مثل
+                    # `from app.api.routes import a, b, c` → a.py, b.py, c.py)
+                    for nm in names:
+                        nm = nm.split(" as ")[0].strip()
+                        if not nm or nm == "*":
+                            continue
+                        sub_resolved = _resolve_py_import(mod + "." + nm, list(path_set))
+                        if sub_resolved and sub_resolved != fpath:
+                            deps.append(sub_resolved)
+            # `import x.y.z` ها هم همچنان handle شوند
+            for m in _PY_IMPORT_RE.finditer(content):
+                mod = m.group(2) or ""
+                if not mod or mod.startswith("."):
                     continue
                 resolved = _resolve_py_import(mod, list(path_set))
                 if resolved and resolved != fpath:
