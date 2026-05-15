@@ -1947,6 +1947,8 @@ async def run_deep_scan(
         # 🆕 (Phase 5 — فاز ۳) — Delta Detection + Bidirectional Dependency
         scan_v5_delta: Dict[str, Any] = {"summary": {}}
         scan_v5_change_impact: List[Dict[str, Any]] = []
+        scan_v5_upstream_impact: List[Dict[str, Any]] = []
+        scan_v5_added_ripple: List[Dict[str, Any]] = []
         try:
             if getattr(watched, "delta_analysis_enabled", True):
                 write_progress(
@@ -1956,6 +1958,7 @@ async def run_deep_scan(
                 from .scan_v5.delta_analyzer import build_current_state, compute_delta
                 from .scan_v5.dependency_analyzer import (
                     build_bidirectional_deps, analyze_change_impact,
+                    analyze_upstream_impact, analyze_added_files_ripple,
                 )
                 current_state = build_current_state(deep_contents)
                 prev_state = getattr(watched, "prev_scan_state", None)
@@ -1970,17 +1973,54 @@ async def run_deep_scan(
                 # Bidirectional deps
                 bi_deps = build_bidirectional_deps(imports, imported_by)
 
-                # Logical impact analysis (R7 + R10)
+                # 🆕 (Phase 5 — bug 23) — Ripple limits depth-aware
+                _depth_now = getattr(watched, "scan_depth", "deep") or "deep"
+                _ripple_limit_map = {
+                    "quick": 10, "standard": 20, "balanced": 20,
+                    "deep": 30, "thorough": 45, "ultra": 60,
+                }
+                _ripple_max = _ripple_limit_map.get(_depth_now, 30)
+
+                # Logical impact analysis (R7 + R10) — هر سه جهت
                 if not scan_v5_delta.get("summary", {}).get("first_scan"):
+                    _vm = (model_ids[0] if model_ids else model_id)
+                    # ۱) Downstream — dependents در خطر
                     scan_v5_change_impact = await analyze_change_impact(
                         delta=scan_v5_delta,
                         deps=bi_deps,
                         purpose_map=scan_v5_purpose_map,
                         file_contents=deep_contents,
-                        verify_model_id=(model_ids[0] if model_ids else model_id),
+                        verify_model_id=_vm,
+                        max_changed=_ripple_max,
                     )
                     logger.info(
-                        f"scan_v5 change_impact: {len(scan_v5_change_impact)} dependent-impacts"
+                        f"scan_v5 change_impact (downstream): {len(scan_v5_change_impact)} impacts"
+                    )
+
+                    # 🆕 ۲) Upstream — deps در خطر
+                    scan_v5_upstream_impact = await analyze_upstream_impact(
+                        delta=scan_v5_delta,
+                        deps=bi_deps,
+                        purpose_map=scan_v5_purpose_map,
+                        file_contents=deep_contents,
+                        verify_model_id=_vm,
+                        max_changed=_ripple_max,
+                    )
+                    logger.info(
+                        f"scan_v5 upstream_impact: {len(scan_v5_upstream_impact)} impacts"
+                    )
+
+                    # 🆕 ۳) Added files — orphan + companion
+                    scan_v5_added_ripple = await analyze_added_files_ripple(
+                        delta=scan_v5_delta,
+                        deps=bi_deps,
+                        inventory=scan_v5_inventory,
+                        file_contents=deep_contents,
+                        verify_model_id=_vm,
+                        max_added=_ripple_max,
+                    )
+                    logger.info(
+                        f"scan_v5 added_ripple: {len(scan_v5_added_ripple)} findings"
                     )
 
                 # ذخیره state فعلی برای scan بعدی
@@ -1998,6 +2038,8 @@ async def run_deep_scan(
             scan_v5_inventory["_feature_docs"] = scan_v5_feature_docs
             scan_v5_inventory["_delta"] = scan_v5_delta
             scan_v5_inventory["_change_impact"] = scan_v5_change_impact
+            scan_v5_inventory["_upstream_impact"] = scan_v5_upstream_impact
+            scan_v5_inventory["_added_ripple"] = scan_v5_added_ripple
             scan_v5_inventory["_runtime_state"] = scan_v5_runtime_state
             scan_v5_inventory["_outcome_data"] = scan_v5_outcome_data
             scan_v5_inventory["_effectiveness_issues"] = scan_v5_effectiveness_issues
@@ -2021,6 +2063,8 @@ async def run_deep_scan(
                 effectiveness_issues=scan_v5_effectiveness_issues,
                 notification_audit=scan_v5_notif_audit,
                 change_impact=scan_v5_change_impact,
+                upstream_impact=scan_v5_upstream_impact,
+                added_ripple=scan_v5_added_ripple,
                 delta=scan_v5_delta,
                 inventory=scan_v5_inventory,
             )
@@ -2452,7 +2496,14 @@ async def run_deep_scan(
                         f"signature_change={_v5_delta_summary.get('signature_change', 0)}"
                     )
                 if _v5_change_impact_count:
-                    msg_lines.append(f"  ⚠️ {_v5_change_impact_count} dependent در خطر تغییر")
+                    msg_lines.append(f"  ⚠️ {_v5_change_impact_count} dependent در خطر تغییر (downstream)")
+                # 🆕 (bug 23) — upstream + ripple counts
+                _v5_upstream_count = len(scan_v5_upstream_impact or [])
+                _v5_ripple_count = len(scan_v5_added_ripple or [])
+                if _v5_upstream_count:
+                    msg_lines.append(f"  ⬆️ {_v5_upstream_count} upstream در خطر (نیاز update)")
+                if _v5_ripple_count:
+                    msg_lines.append(f"  🧩 {_v5_ripple_count} added-file ripple (orphan/companion)")
                 if _v5_coh_count or _v5_ap_count:
                     msg_lines.append(
                         f"  🧠 logic: {_v5_coh_count} coherence + {_v5_ap_count} anti-pattern"
