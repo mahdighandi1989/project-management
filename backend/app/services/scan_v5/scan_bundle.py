@@ -99,14 +99,18 @@ def build_scan_bundle_md(
             rows_lines.append("\n**به تفکیک نوع:**")
             for k, c in sorted(by_kind.items(), key=lambda x: -x[1]):
                 rows_lines.append(f"- {k}: {c}")
-        # نمونه‌های top 8
+        # 🆕 همه‌ی items (نه top 8) — کاربر می‌خواهد همه را ببیند
         structural = stale.get("structural") or []
         semantic = stale.get("semantic") or []
-        all_items = (structural + semantic)[:8]
-        if all_items:
-            rows_lines.append("\n**نمونه (top 8):**")
-            for it in all_items:
-                kind = it.get("kind", "?")
+        # ابتدا group by kind برای خوانایی
+        from collections import defaultdict as _dd
+        by_kind_items: Dict[str, List[Dict[str, Any]]] = _dd(list)
+        for it in structural + semantic:
+            by_kind_items[it.get("kind", "?")].append(it)
+        for kind in sorted(by_kind_items.keys()):
+            items_of_kind = by_kind_items[kind]
+            rows_lines.append(f"\n**{kind} ({len(items_of_kind)}):**")
+            for it in items_of_kind[:50]:  # تا 50 per kind
                 target = (
                     it.get("file")
                     or it.get("route")
@@ -114,7 +118,9 @@ def build_scan_bundle_md(
                     or it.get("label")
                     or "?"
                 )
-                rows_lines.append(f"- `{kind}` → {_safe(target, 80)}")
+                rows_lines.append(f"- {_safe(target, 100)}: {_safe(it.get('reason', ''), 80)}")
+            if len(items_of_kind) > 50:
+                rows_lines.append(f"  _… و {len(items_of_kind) - 50} مورد دیگر_")
         parts.append(_section("۳. Stale & Forgotten Options (R8)", "\n".join(rows_lines)))
 
     # ── 4. anti-patterns ──
@@ -122,10 +128,22 @@ def build_scan_bundle_md(
     if aps:
         from collections import Counter
         kinds = Counter(a.get("kind", "?") for a in aps)
-        body = "**خلاصه:** " + ", ".join(f"{k}: {c}" for k, c in kinds.most_common(8))
-        body += "\n\n**نمونه‌ها:**\n"
-        for ap in aps[:8]:
-            body += f"- `{ap.get('kind', '?')}` در `{_safe(ap.get('file', '?'), 60)}`: {_safe(ap.get('reason') or ap.get('description', ''), 200)}\n"
+        body = "**خلاصه:** " + ", ".join(f"{k}: {c}" for k, c in kinds.most_common(15))
+        # 🆕 group by kind، تا 30 نمونه از هر نوع
+        body += "\n\n**به تفکیک نوع:**"
+        ap_by_kind: Dict[str, List[Dict[str, Any]]] = {}
+        for ap in aps:
+            ap_by_kind.setdefault(ap.get("kind", "?"), []).append(ap)
+        for kind, items in ap_by_kind.items():
+            body += f"\n\n**{kind} ({len(items)}):**\n"
+            for ap in items[:30]:
+                _line = ap.get("line")
+                _line_str = f" line {_line}" if _line else ""
+                _file_str = _safe(ap.get("file", "?"), 60)
+                _reason_str = _safe(ap.get("reason") or ap.get("description", ""), 150)
+                body += f"- `{_file_str}`{_line_str}: {_reason_str}\n"
+            if len(items) > 30:
+                body += f"  _… و {len(items) - 30} مورد دیگر_\n"
         parts.append(_section("۴. Anti-patterns منطقی (R10)", body))
 
     # ── 5. coherence ──
