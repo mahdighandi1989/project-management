@@ -671,6 +671,24 @@ async def _run_backfill_ac_classification(
                                 _ac["verify_plan"] = {
                                     "reason": "AI و auto-derive نتوانستند pattern قابل تست استخراج کنند — نیاز به بازبینی دستی"
                                 }
+                        # 🆕 (Phase 5 — bug 22) — اگر force=True بوده و
+                        # AC ui_interaction هنوز هیچ real step ندارد، AI
+                        # واقعاً نمی‌تواند برای این AC plan تولید کند →
+                        # تنزل به manual_only تا از لیست phase3 خارج شود
+                        # و دکمه بنفش ابدی نماند.
+                        if force and _method == "ui_interaction":
+                            _steps = _plan.get("ui_steps") or []
+                            _NON_REAL = {"", "navigate", "screenshot", "wait_for_load"}
+                            _real = sum(
+                                1 for s in _steps if isinstance(s, dict)
+                                and str(s.get("action") or "").lower() not in _NON_REAL
+                            ) if isinstance(_steps, list) else 0
+                            if _real < 1:
+                                _ac["verify_method"] = "manual_only"
+                                _ac["verify_plan"] = {
+                                    "reason": "AI پس از force re-enrich نتوانست ui_steps واقعی (click/fill/assert) تولید کند — این AC نیاز به بازبینی دستی دارد",
+                                    "previous_plan": _plan,
+                                }
                     async with service._lock:
                         # تسک ممکن است در حین صبر برای AI تغییر کرده باشد — دوباره fetch
                         live = next((t for t in service.tasks if t.id == tid), None)
