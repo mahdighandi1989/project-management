@@ -8444,10 +8444,17 @@ async def get_bridge_connections(project_id: str):
 
 @router.post("/inspector/session/create")
 async def create_inspector_session(
-    project_id: str,
+    project_id: str = Query(..., description="ID پروژه که سشن بازرس برای آن ساخته می‌شود"),
     db: Session = Depends(get_db)
 ):
-    """ایجاد سشن جدید بازرس هوشمند"""
+    """ایجاد سشن جدید بازرس هوشمند.
+
+    🆕 (Phase 5 — bug 21) — `project_id` صریحاً `Query(...)` علامت‌گذاری شد.
+    قبلاً به‌خاطر اینکه فقط `project_id: str` بود، FastAPI آن را به‌عنوان
+    body field تفسیر می‌کرد و چون فرانت‌اند بدنه نمی‌فرستد (پارامتر در
+    query string است)، درخواست با 422 رد می‌شد و در تب بازرس ویژه «سشن
+    ایجاد نمی‌شد». خطا در try/except فرانت silent بود.
+    """
     from ...models.inspector_session import InspectorSession
 
     # بررسی سشن فعال موجود
