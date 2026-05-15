@@ -210,7 +210,44 @@ async def _fetch_file_content(
     except Exception:
         return None
     if len(decoded) > max_bytes:
-        decoded = decoded[:max_bytes] + "\n... [TRUNCATED]"
+        # 🆕 (Phase 5 — bug 24) — قبل از truncate، همهٔ import ها را از full
+        # content استخراج می‌کنیم و در انتها append می‌کنیم. علت: فایل‌های
+        # بزرگ مثل oversight_deep_scan_service.py (۸۸KB) local imports عمیق
+        # درون توابع دارند که بدون این کار از import graph می‌افتند و
+        # ماژول‌های هدف false-positive «unused_file» می‌گیرند.
+        try:
+            _is_py = path.endswith(".py")
+            _is_js = path.endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"))
+            _imports_block: List[str] = []
+            if _is_py:
+                for _m in re.finditer(
+                    r"^\s*(?:from\s+[\.\w]+\s+import\s+[^\n]+|import\s+[\w\.,\s]+)",
+                    decoded, re.MULTILINE,
+                ):
+                    _line = _m.group(0).strip()
+                    if _line and len(_line) < 500:
+                        _imports_block.append(_line)
+            elif _is_js:
+                for _m in re.finditer(
+                    r"""^\s*(?:import\s+[^\n]+?\bfrom\s+['"][^'"]+['"]|import\s+['"][^'"]+['"]|(?:const|let|var)\s+[^=]+=\s*require\(\s*['"][^'"]+['"]\s*\))""",
+                    decoded, re.MULTILINE,
+                ):
+                    _line = _m.group(0).strip()
+                    if _line and len(_line) < 500:
+                        _imports_block.append(_line)
+            decoded = decoded[:max_bytes] + "\n... [TRUNCATED]"
+            if _imports_block:
+                # حذف duplicate ها با حفظ ترتیب
+                _seen: set = set()
+                _uniq: List[str] = []
+                for _il in _imports_block:
+                    if _il not in _seen:
+                        _seen.add(_il)
+                        _uniq.append(_il)
+                decoded += "\n\n# [IMPORTS_RECOVERED_FROM_FULL_FILE]\n" + "\n".join(_uniq)
+        except Exception:
+            # هرگز fetch نباید fail-soft نکند
+            decoded = decoded[:max_bytes] + "\n... [TRUNCATED]"
     return decoded
 
 
