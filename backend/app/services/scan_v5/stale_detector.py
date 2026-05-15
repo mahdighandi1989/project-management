@@ -35,9 +35,14 @@ def _detect_dead_ui_buttons(inventory: Dict[str, Any]) -> List[Dict[str, Any]]:
     for el in inventory.get("ui_elements", []):
         if el.get("type") != "button":
             continue
+        # 🆕 (Phase 5 — bug 15) — اعتماد به has_handler از inventory
+        # (به‌جای دست‌اول از handler). type="submit" یا handler غیر-خالی
+        # یا handler با reference (مثل `setX` یا فراخوانی تابع) = فعال.
+        if el.get("has_handler"):
+            continue
         handler = (el.get("handler") or "").strip()
         # button بدون handler یا فقط با value-only
-        if not handler or handler in ("()", "{}", "() => {}", "() => null"):
+        if not handler or handler in ("()", "{}", "() => {}", "() => null", "() => void 0"):
             out.append({
                 "kind": "dead_ui_button",
                 "label": el.get("label", "?"),
@@ -60,28 +65,53 @@ def _detect_dead_frontend_routes(
     for el in inventory.get("ui_elements", []):
         if el.get("type") == "link" and el.get("href"):
             referenced_routes.add(el["href"].split("?")[0].rstrip("/"))
-    # router.push patterns
+    # 🆕 (Phase 5 — bug 16) — pattern های بیشتر:
+    #   - router.push("/x")  | navigate("/x")  | Router.push
+    #   - <Link href="/x">  | <a href="/x">
+    #   - nav config objects: { path: "/x" }  | { href: "/x" }  | { route: "/x" }
     router_push_re = re.compile(
-        r"router\.(?:push|replace)\s*\(\s*[\"']([^\"']+)[\"']"
-        r"|navigate\s*\(\s*[\"']([^\"']+)[\"']"
+        r"router\.(?:push|replace|prefetch)\s*\(\s*[`\"']([^`\"']+)[`\"']"
+        r"|navigate\s*\(\s*[`\"']([^`\"']+)[`\"']"
+        r"|Router\.(?:push|replace)\s*\(\s*[`\"']([^`\"']+)[`\"']"
+        r"|<a\s+[^>]*href=[`\"']([^`\"']+)[`\"']"
+        r"|<Link\s+[^>]*href=[`\"']([^`\"']+)[`\"']"
+        # nav config / menu items
+        r"|(?:path|href|route|url)\s*:\s*[`\"']([^`\"']+)[`\"']"
+        # redirect/rewrite در next.config
+        r"|(?:source|destination)\s*:\s*[`\"']([^`\"']+)[`\"']"
     )
     for path, content in file_contents.items():
-        if not (path.endswith(".tsx") or path.endswith(".jsx")):
+        if not (path.endswith((".tsx", ".jsx", ".ts", ".js"))):
             continue
-        for m in router_push_re.finditer(content[:50000]):
-            r = (m.group(1) or m.group(2) or "").split("?")[0].rstrip("/")
-            if r:
-                referenced_routes.add(r)
+        body = content[:80000]
+        for m in router_push_re.finditer(body):
+            for grp in m.groups():
+                if not grp:
+                    continue
+                r = grp.split("?")[0].rstrip("/")
+                # skip external و relative-only
+                if r.startswith(("http://", "https://", "mailto:", "tel:", "#")):
+                    continue
+                if r and r.startswith("/"):
+                    referenced_routes.add(r)
     for route in frontend_routes:
         normalized = route.rstrip("/")
         # / همیشه main است — skip
         if normalized in ("", "/"):
             continue
-        if normalized not in referenced_routes:
+        # 🆕 (bug 16) — اگر route با :param است (مثل /project/:id)، آن را به
+        # base عام تطبیق بده (مثلاً /project یا /project/[id])
+        base = normalized.split(":")[0].rstrip("/")
+        is_referenced = (
+            normalized in referenced_routes
+            or any(r == normalized or r.startswith(normalized + "/") for r in referenced_routes)
+            or (base and any(r == base or r.startswith(base + "/") for r in referenced_routes))
+        )
+        if not is_referenced:
             out.append({
                 "kind": "dead_frontend_route",
                 "route": route,
-                "reason": "route exists in app router but no Link/router.push references it",
+                "reason": "route exists in app router but no Link/router.push/nav-config references it",
             })
             if len(out) >= _MAX_STALE_PER_TYPE:
                 break
@@ -97,19 +127,39 @@ def _detect_dead_backend_endpoints(
     backend_endpoints = inventory.get("backend_endpoints", [])
     # frontend fetch patterns
     fetch_paths: Set[str] = set()
+    # 🆕 (Phase 5 — bug 18) — pattern های بیشتر برای fetch
     fetch_re = re.compile(
         r"fetch\s*\(\s*[`\"']([^`\"']+)[`\"']"
-        r"|axios\.\w+\s*\(\s*[`\"']([^`\"']+)[`\"']"
-        r"|api\.\w+\s*\(\s*[`\"']([^`\"']+)[`\"']"
+        r"|axios(?:\.\w+)?\s*\(\s*[`\"']([^`\"']+)[`\"']"
+        r"|axios\s*\(\s*\{[^}]*url\s*:\s*[`\"']([^`\"']+)[`\"']"
+        r"|api(?:Client)?(?:\.\w+)?\s*\(\s*[`\"']([^`\"']+)[`\"']"
+        r"|(?:get|post|put|delete|patch)\s*\(\s*[`\"']([^`\"']+)[`\"']"
+        r"|useSWR\s*\(\s*[`\"']([^`\"']+)[`\"']"
     )
     for path, content in file_contents.items():
         if not (path.endswith((".tsx", ".jsx", ".ts", ".js"))):
             continue
-        for m in fetch_re.finditer(content[:80000]):
-            url = m.group(1) or m.group(2) or m.group(3) or ""
-            # normalize path (remove ${} interpolations)
-            url = re.sub(r"\$\{[^}]+\}", ":var", url)
+        body = content[:80000]
+        for m in fetch_re.finditer(body):
+            url = ""
+            for g in m.groups():
+                if g:
+                    url = g
+                    break
+            if not url:
+                continue
+            # 🆕 (bug 18) — strip API_BASE/baseURL prefix (template literal)
+            # `${API_BASE}/api/x/y` → `/api/x/y`
+            url = re.sub(r"\$\{[^}]+\}", "", url)
+            # normalize empty + leading garbage
+            url = url.strip()
             url = url.split("?")[0]
+            url = re.sub(r"\$\{[^}]+\}", ":var", url)  # remaining interpolations
+            if not url.startswith("/"):
+                # ممکن است relative یا فقط ${API_BASE} باشد — اگر برای match
+                # شدن endpoint کفایت می‌کند، نگه دار
+                if not url:
+                    continue
             fetch_paths.add(url)
 
     # endpoints که در logs اخیر صدا شدند (اگر runtime_state داریم)
@@ -117,29 +167,49 @@ def _detect_dead_backend_endpoints(
         (runtime_state or {}).get("endpoints_called_recently") or []
     )
 
+    # 🆕 (bug 18) — helper برای match هوشمند path ها
+    def _path_matches(endpoint_path: str, fetched: str) -> bool:
+        # نرمالیزه: {param} → :var | [param] → :var
+        ep = re.sub(r"\{[^}]+\}", ":var", endpoint_path)
+        fp = re.sub(r"\{[^}]+\}", ":var", fetched)
+        fp = re.sub(r"\[[^\]]+\]", ":var", fp)
+        ep_low = ep.lower().rstrip("/")
+        fp_low = fp.lower().rstrip("/")
+        if not ep_low or not fp_low:
+            return False
+        # exact or substring (که segments مشترک کافی دارند)
+        if ep_low == fp_low:
+            return True
+        # endpoint در fetched هست (با prefix /api/X)
+        if ep_low and fp_low.endswith(ep_low):
+            return True
+        # split و segment match
+        ep_segs = [s for s in ep_low.split("/") if s]
+        fp_segs = [s for s in fp_low.split("/") if s]
+        if len(ep_segs) >= 2 and ep_segs[-2:] == fp_segs[-2:]:
+            return True
+        return False
+
     for ep in backend_endpoints:
-        path = ep.get("path", "")
-        if not path:
+        ep_path = ep.get("path", "")
+        if not ep_path:
             continue
-        # نرمالیزه کن
-        path_normalized = re.sub(r"\{[^}]+\}", ":var", path)
-        # match approximate (در fetch_paths هست یا substring مشترک)
+        # match approximate
         ref_in_frontend = any(
-            path_normalized.lower() in fp.lower() or fp.lower() in path_normalized.lower()
-            for fp in fetch_paths if fp and len(fp) > 5
+            _path_matches(ep_path, fp) for fp in fetch_paths if fp and len(fp) > 3
         )
         ref_in_logs = (
-            path in called_endpoints
-            or any(path in c for c in called_endpoints)
+            ep_path in called_endpoints
+            or any(ep_path in c for c in called_endpoints)
         )
         if not ref_in_frontend and not ref_in_logs:
             # health/api/root را skip کن
-            if path in ("/", "/health", "/api"):
+            if ep_path in ("/", "/health", "/api"):
                 continue
             out.append({
                 "kind": "dead_backend_endpoint",
                 "method": ep.get("method"),
-                "path": path,
+                "path": ep_path,
                 "file": ep.get("file"),
                 "function": ep.get("function"),
                 "reason": "no frontend fetch + no recent call in logs",
@@ -336,8 +406,14 @@ def _detect_forgotten_options(
     """UI option/setting که کاربر هر بار باید بپرسد چی هست (R8)."""
     out: List[Dict[str, Any]] = []
     # UI options که field_hint مبهم دارند
+    # 🆕 (Phase 5 — bug 17) — اگر field_hint خالی است (یعنی smart extractor
+    # نتوانست hint معنادار پیدا کند) آن را skip کن. در غیر این صورت بسیاری
+    # callback param ها به‌اشتباه forgotten_option flag می‌شدند.
     for opt in inventory.get("ui_options", []):
         field = opt.get("field_hint")
+        # اگر None باشد یعنی smart extractor چیزی نیافت — skip
+        if field is None:
+            continue
         if not field or len(field) < 4 or field in ("value", "state", "data", "item"):
             out.append({
                 "kind": "forgotten_option",

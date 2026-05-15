@@ -93,10 +93,16 @@ def _extract_backend_endpoints(
 # Layer 3: UI elements
 # ─────────────────────────────────────────────────────────────────────────
 
+# 🆕 (Phase 5 — bug 15) — قبلاً regex با alternation بود که هرگز
+# handler را capture نمی‌کرد (`[^>]*` با greedy تا `>` پیش می‌رفت و
+# سپس شاخه `onClick={...}` همیشه fail می‌کرد چون موقعیت پس از `>` بود).
+# اکنون attrs و body جداگانه capture می‌شوند و onClick در attrs جستجو می‌شود.
 _UI_BUTTON_RE = re.compile(
-    r"<button[^>]*(?:onClick=\{([^}]*)\}|>([^<]{1,80})</button>)",
-    re.DOTALL,
+    r"<button(?P<attrs>[^>]*)>(?P<body>.*?)</button>",
+    re.DOTALL | re.IGNORECASE,
 )
+_BUTTON_ONCLICK_RE = re.compile(r"onClick\s*=\s*\{([^}]+)\}", re.IGNORECASE)
+_BUTTON_DISABLED_RE = re.compile(r"\bdisabled\b", re.IGNORECASE)
 _UI_FORM_RE = re.compile(r"<form[^>]*>", re.IGNORECASE)
 _UI_INPUT_RE = re.compile(
     r"<input[^>]*(?:type=\{?[\"']?([^\"'}\s]+)[\"']?\}?|name=\{?[\"']?([^\"'}\s]+))",
@@ -119,14 +125,25 @@ def _extract_ui_elements(
 
         # buttons
         for m in _UI_BUTTON_RE.finditer(content):
-            handler = (m.group(1) or "").strip()[:200]
-            label = (m.group(2) or "").strip()[:80]
+            attrs = (m.group("attrs") or "").strip()
+            body_raw = (m.group("body") or "").strip()
+            # حذف tags داخلی برای استخراج متن (مثل <span>...</span>)
+            label = re.sub(r"<[^>]+>", "", body_raw)[:120].strip()
+            # 🆕 (Phase 5 — bug 15) — onClick را در attrs جستجو می‌کنیم
+            onclick_m = _BUTTON_ONCLICK_RE.search(attrs)
+            handler = (onclick_m.group(1).strip()[:200] if onclick_m else "")
+            # 🆕 hand-off form submit ها: button با type="submit" در <form> هم
+            # «دارای handler» است (به onSubmit fielding می‌شود).
+            is_submit = bool(re.search(r'type\s*=\s*["\']?submit', attrs, re.IGNORECASE))
+            # 🆕 disabled ولی با onClick هنوز button فعال است
+            has_handler = bool(handler) or is_submit
             out.append({
                 "type": "button",
                 "label": label,
                 "handler": handler,
                 "file": path,
-                "has_handler": bool(handler and "()" in handler or "=>" in handler),
+                "has_handler": has_handler,
+                "is_submit": is_submit,
             })
             if len(out) >= _MAX_ITEMS_PER_LAYER:
                 return out
@@ -451,6 +468,54 @@ _UI_DROPDOWN_RE = re.compile(
 )
 
 
+# 🆕 (Phase 5 — bug 17) — کلمات رزرو که نباید به‌عنوان field_hint
+# گرفته شوند (پارامترهای callback، نام‌های frameworks، utility ها).
+_FIELD_HINT_DENY = {
+    "e", "event", "evt", "ev", "ev_", "_e",
+    "el", "elem", "element",
+    "v", "val", "value", "val_",
+    "i", "idx", "index", "n",
+    "x", "y", "z",
+    "t", "data", "item", "items", "row", "col",
+    "key", "id", "type", "name", "props",
+    "ref", "state", "set", "get", "fn", "cb",
+    "true", "false", "null", "undefined",
+    "react", "default", "const", "let", "var",
+}
+
+
+def _smart_field_hint(ctx: str) -> Optional[str]:
+    """field name واقعی را از context استخراج کن.
+
+    استراتژی:
+      ۱) `name="xyz"` یا `id="xyz"` در attrs
+      ۲) `checked={state.xyz}` یا `value={xyz}` — متغیر state
+      ۳) `onChange={(e) => setXyz(e.target...)` — setter name → xyz
+      ۴) اولین identifier معنادار که در _FIELD_HINT_DENY نباشد.
+    """
+    # ۱) name="..." یا id="..."
+    m = re.search(r'(?:name|id)\s*=\s*["\']([a-zA-Z][a-zA-Z0-9_]{2,})["\']', ctx)
+    if m:
+        return m.group(1)
+    # ۲) setXyz(...) → state name
+    m = re.search(r'\bset([A-Z][a-zA-Z0-9_]{1,})\s*\(', ctx)
+    if m:
+        nm = m.group(1)
+        return nm[0].lower() + nm[1:]  # camelCase
+    # ۳) checked={state.xyz} | value={xyz}
+    m = re.search(r'(?:checked|value)\s*=\s*\{[^.}]*?\.([a-z_][a-zA-Z0-9_]{2,})', ctx)
+    if m and m.group(1).lower() not in _FIELD_HINT_DENY:
+        return m.group(1)
+    m = re.search(r'(?:checked|value)\s*=\s*\{([a-z_][a-zA-Z0-9_]{2,})', ctx)
+    if m and m.group(1).lower() not in _FIELD_HINT_DENY:
+        return m.group(1)
+    # ۴) fallback: اولین identifier معنادار
+    for cand in re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]{2,})\b', ctx):
+        if cand.lower() not in _FIELD_HINT_DENY:
+            return cand
+    return None
+
+
 def _extract_ui_options(file_contents: Dict[str, str]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for path, content in file_contents.items():
@@ -460,9 +525,7 @@ def _extract_ui_options(file_contents: Dict[str, str]) -> List[Dict[str, Any]]:
         # checkboxes
         for m in _UI_CHECKBOX_RE.finditer(content):
             ctx = (m.group(1) or m.group(2) or "")[:200]
-            # نام field — معمولاً در onChange یا checked
-            field_m = re.search(r"\b([a-z_][a-zA-Z0-9_]*?)(?:\s*\?|\s*=>)", ctx)
-            field = field_m.group(1) if field_m else None
+            field = _smart_field_hint(ctx)
             out.append({
                 "type": "checkbox", "file": path,
                 "field_hint": field, "context": ctx,
@@ -470,8 +533,7 @@ def _extract_ui_options(file_contents: Dict[str, str]) -> List[Dict[str, Any]]:
         # sliders
         for m in _UI_SLIDER_RE.finditer(content):
             ctx = (m.group(1) or m.group(2) or "")[:200]
-            field_m = re.search(r"\b([a-z_][a-zA-Z0-9_]*?)\b", ctx)
-            field = field_m.group(1) if field_m else None
+            field = _smart_field_hint(ctx)
             out.append({
                 "type": "slider", "file": path,
                 "field_hint": field, "context": ctx,
@@ -479,8 +541,7 @@ def _extract_ui_options(file_contents: Dict[str, str]) -> List[Dict[str, Any]]:
         # dropdowns (selects with onChange)
         for m in _UI_DROPDOWN_RE.finditer(content):
             ctx = (m.group(1) or m.group(2) or "")[:200]
-            field_m = re.search(r"\b([a-z_][a-zA-Z0-9_]*?)\b", ctx)
-            field = field_m.group(1) if field_m else None
+            field = _smart_field_hint(ctx)
             out.append({
                 "type": "dropdown", "file": path,
                 "field_hint": field, "context": ctx,
