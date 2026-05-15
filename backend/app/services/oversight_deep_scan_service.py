@@ -1556,38 +1556,12 @@ async def run_deep_scan(
         # ادغام target_files مشترک)
         write_progress(watched_id, phase="phase4_aggregate", message="dedup هوشمند و ادغام")
 
-        # 🆕 (Phase 5 — bug 1 fix) — تبدیل Phase 5 findings به standard findings
-        # این مهم‌ترین integration بود که گم شده بود. بدون این، Phase 5
-        # یافته‌ها تولید می‌کرد ولی هرگز به task تبدیل نمی‌شدند.
-        try:
-            from .scan_v5._findings_to_tasks import phase5_findings_to_standard
-
-            _phase5_findings = phase5_findings_to_standard(
-                stale=scan_v5_stale,
-                anti_patterns=scan_v5_anti_patterns,
-                coherence_issues=(scan_v5_coherence.get("issues") or []),
-                effectiveness_issues=scan_v5_effectiveness_issues,
-                notification_audit=scan_v5_notif_audit,
-                change_impact=scan_v5_change_impact,
-                delta=scan_v5_delta,
-                inventory=scan_v5_inventory,
-            )
-            if _phase5_findings:
-                logger.info(
-                    f"scan_v5: converted {len(_phase5_findings)} Phase 5 findings → standard"
-                )
-                all_findings.extend(_phase5_findings)
-                if scan_v5_session_id:
-                    from .scan_v5.scan_inspector_session import log_scan_message
-                    log_scan_message(
-                        scan_v5_session_id, "system",
-                        f"📝 Phase 5 findings → tasks pipeline: "
-                        f"{len(_phase5_findings)} finding added"
-                    )
-        except Exception as _e_p5conv:
-            logger.warning(f"scan_v5 findings → standard conversion failed: {_e_p5conv}")
-
-        unique = _merge_similar_findings(all_findings)
+        # 🆕 (Phase 5 — bug 9 fix) — `phase5_findings_to_standard` و
+        # محاسبه `unique` به انتهای پایپ‌لاین (پس از اجرای ماژول‌های Phase 5)
+        # منتقل شدند. در غیر این صورت در زمان فراخوانی، متغیرهای
+        # `scan_v5_stale`/`scan_v5_anti_patterns`/... هنوز تعریف نشده‌اند
+        # و NameError سکوت‌شده باعث می‌شد هیچ Phase 5 finding وارد
+        # `all_findings` نشود (دلیل اصلی ۱۴ تسک از ۳۴۰ یافته).
 
         # ----- فاز ۴.۵: محاسبهٔ per-file health map -----
         # (مهاجرت از Health analysis file_health_map)
@@ -1926,6 +1900,39 @@ async def run_deep_scan(
             scan_v5_inventory["_notif_audit"] = scan_v5_notif_audit
         except Exception:
             pass
+
+        # 🆕 (Phase 5 — bug 9 fix) — اکنون که همه ماژول‌های Phase 5 اجرا
+        # شده و متغیرها populated هستند، Phase 5 findings → standard
+        # تبدیل می‌شوند و سپس dedup هوشمند روی کل all_findings اجرا می‌شود.
+        try:
+            from .scan_v5._findings_to_tasks import phase5_findings_to_standard
+
+            _phase5_findings = phase5_findings_to_standard(
+                stale=scan_v5_stale,
+                anti_patterns=scan_v5_anti_patterns,
+                coherence_issues=(scan_v5_coherence.get("issues") or []),
+                effectiveness_issues=scan_v5_effectiveness_issues,
+                notification_audit=scan_v5_notif_audit,
+                change_impact=scan_v5_change_impact,
+                delta=scan_v5_delta,
+                inventory=scan_v5_inventory,
+            )
+            if _phase5_findings:
+                logger.info(
+                    f"scan_v5: converted {len(_phase5_findings)} Phase 5 findings → standard"
+                )
+                all_findings.extend(_phase5_findings)
+                if scan_v5_session_id:
+                    from .scan_v5.scan_inspector_session import log_scan_message
+                    log_scan_message(
+                        scan_v5_session_id, "system",
+                        f"📝 Phase 5 findings → tasks pipeline: "
+                        f"{len(_phase5_findings)} finding added"
+                    )
+        except Exception as _e_p5conv:
+            logger.warning(f"scan_v5 findings → standard conversion failed: {_e_p5conv}")
+
+        unique = _merge_similar_findings(all_findings)
 
         file_health_map: Dict[str, Dict[str, Any]] = {}
         # ابتدا برای هر فایل deep-read شده، یک ورودی اولیه با score=100

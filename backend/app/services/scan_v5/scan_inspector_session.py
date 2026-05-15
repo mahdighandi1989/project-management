@@ -31,9 +31,15 @@ logger = logging.getLogger(__name__)
 def _resolve_project_id_for_watched(watched_id: str) -> str:
     """resolve watched_id به Project.id محلی تا session در tab UI ظاهر شود.
 
-    مشابه oversight_verifier._resolve_inspector_project_id.
-    Falls back به watched_id خام اگر resolve fail کرد.
+    استراتژی سه‌مرحله‌ای — دقیقاً همان منطق
+    `oversight_service.resolve_project_for_task` تا scan session ها
+    در همان UI tab به‌عنوان verify session ها ظاهر شوند:
+      1) github_path == repo_full_name
+      2) github_url LIKE %repo_full_name%
+      3) extra_data.owner + extra_data.repo match (full scan روی Projects)
+    در صورت شکست همه: fallback به watched_id خام.
     """
+    import json as _json
     try:
         from ...core.database import SessionLocal
         from ..oversight_service import get_oversight_service
@@ -42,12 +48,20 @@ def _resolve_project_id_for_watched(watched_id: str) -> str:
         watched = service._find_watched(watched_id) if watched_id else None
         repo_full_name = (watched.repo_full_name if watched else "") or ""
         if not repo_full_name or "/" not in repo_full_name:
+            logger.info(
+                f"scan_inspector: no repo_full_name for watched_id={watched_id}; "
+                f"falling back to raw id (UI tab won't list this session)"
+            )
             return str(watched_id)
         db = SessionLocal()
         try:
             # تلاش 1: github_path
             p = db.query(_Project).filter(_Project.github_path == repo_full_name).first()
             if p:
+                logger.info(
+                    f"scan_inspector: resolved {repo_full_name} → "
+                    f"project_id={p.id} via github_path"
+                )
                 return str(p.id)
             # تلاش 2: github_url contains
             p = (
@@ -56,7 +70,43 @@ def _resolve_project_id_for_watched(watched_id: str) -> str:
                 .first()
             )
             if p:
+                logger.info(
+                    f"scan_inspector: resolved {repo_full_name} → "
+                    f"project_id={p.id} via github_url substring"
+                )
                 return str(p.id)
+            # تلاش 3: extra_data.owner+repo (مشابه verify)
+            try:
+                owner, repo = repo_full_name.split("/", 1)
+                for proj in db.query(_Project).all():
+                    if not proj.extra_data:
+                        continue
+                    try:
+                        ed = (
+                            _json.loads(proj.extra_data)
+                            if isinstance(proj.extra_data, str)
+                            else proj.extra_data
+                        )
+                    except Exception:
+                        continue
+                    if (
+                        isinstance(ed, dict)
+                        and ed.get("owner") == owner
+                        and ed.get("repo") == repo
+                    ):
+                        logger.info(
+                            f"scan_inspector: resolved {repo_full_name} → "
+                            f"project_id={proj.id} via extra_data"
+                        )
+                        return str(proj.id)
+            except Exception as _e_ed:
+                logger.debug(f"scan_inspector: extra_data scan failed: {_e_ed}")
+            logger.warning(
+                f"scan_inspector: no local Project matched repo='{repo_full_name}'. "
+                f"Session will be saved with project_id={watched_id} but won't "
+                f"appear in any /projects/[id] tab. "
+                f"کاربر باید این repo را از /projects (GitHub Import) اضافه کند."
+            )
         finally:
             try:
                 db.close()
