@@ -1155,6 +1155,58 @@ def _title_similarity(a: str, b: str) -> float:
     return inter / union if union > 0 else 0.0
 
 
+# 🆕 (Phase 5 — bug 28) — Content fingerprint برای findings بدون target_files
+# استخراج کلمات کلیدی محتوایی (شناسه‌ها، نام تابع/کلاس، نام فایل) از title +
+# description. AI variance در wording را خنثی می‌کند.
+def _content_fingerprint(text: str, max_tokens: int = 8) -> frozenset:
+    """فنجر معنایی: کلمات «دلپذیر» را برمی‌دارد و sort شده برمی‌گرداند.
+
+    «دلپذیر» = طول ≥ ۴ + حداقل یک حرف انگلیسی یا underscore (یعنی شناسهٔ
+    احتمالی کد، نه واژگان عادی فارسی). این روی پروژه‌های real-world که
+    finding ها به نام تابع/کلاس/فایل ارجاع می‌دهند بسیار خوب کار می‌کند.
+    """
+    import re as _re
+    if not text:
+        return frozenset()
+    # توکن‌های احتمالی شناسه: حروف، اعداد، underscore، slash، نقطه
+    tokens = _re.findall(r"[A-Za-z_][A-Za-z0-9_./\-]{3,}", text)
+    # یکتا، lowercase
+    uniq = []
+    seen = set()
+    for t in tokens:
+        tl = t.lower().strip("./-_")
+        if not tl or tl in seen:
+            continue
+        # فیلتر کلمات عمومی که info خاصی ندارند
+        if tl in {"this", "that", "with", "from", "have", "been", "will",
+                  "true", "false", "none", "type", "data", "code", "file",
+                  "name", "list", "dict", "json", "test", "tests", "main",
+                  "https", "http", "function", "class", "method", "value"}:
+            continue
+        seen.add(tl)
+        uniq.append(tl)
+        if len(uniq) >= max_tokens:
+            break
+    return frozenset(uniq)
+
+
+def _content_fingerprint_match(
+    a_title: str, a_desc: str,
+    b_title: str, b_desc: str,
+    min_overlap: float = 0.6,
+    min_tokens: int = 3,
+) -> bool:
+    """آیا دو finding/task فنجر محتوایی مشابه دارند؟"""
+    fa = _content_fingerprint(f"{a_title} {a_desc[:300]}")
+    fb = _content_fingerprint(f"{b_title} {b_desc[:300]}")
+    if len(fa) < min_tokens or len(fb) < min_tokens:
+        return False
+    inter = fa & fb
+    smaller = min(len(fa), len(fb))
+    overlap = len(inter) / smaller if smaller else 0.0
+    return overlap >= min_overlap
+
+
 def _merge_similar_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """ادغام هوشمند findings مشابه — مهاجرت از Health analysis.
 
@@ -1334,7 +1386,21 @@ def _find_existing_active_task(
                 if _overlap >= _thresh:
                     return task
 
-            # مرحلهٔ ۲: تطابق با title
+            # 🆕 (bug 28) — مرحلهٔ ۲: content fingerprint برای findings
+            # بدون target_files (مثل coherence/anti_pattern). شناسه‌های کد
+            # (نام تابع/کلاس/فایل) را از title+description استخراج می‌کند —
+            # AI wording variance را بی‌اثر می‌سازد. type باید یکی باشد.
+            if (
+                finding_type and task_type and finding_type == task_type
+                and (not finding_targets or not task_targets)
+            ):
+                if _content_fingerprint_match(
+                    finding_title, finding_desc,
+                    task.title or "", task.raw_idea or "",
+                ):
+                    return task
+
+            # مرحلهٔ ۳: تطابق با title
             sim_title = _title_similarity(finding_title, task.title)
             if sim_title >= similarity_threshold:
                 return task
@@ -2477,6 +2543,39 @@ async def run_deep_scan(
             duplicates_skipped=len(duplicates_skipped),
             **scan_metadata,
         )
+
+        # 🆕 (Phase 5 — bug 27) — بستن (archive) scan inspector session.
+        # قبلاً sessions با status="active" باقی می‌ماندند و در archive list
+        # تب «بازرس ویژه» دیده نمی‌شدند (UI فقط status=archived را می‌آورد).
+        # نتیجه: کاربر فکر می‌کرد scan هیچ session ای نمی‌سازد، در حالی
+        # که می‌ساخت اما هرگز finalize نمی‌شد و در archive ظاهر نمی‌شد.
+        if scan_v5_session_id:
+            try:
+                from .scan_v5.scan_inspector_session import (
+                    log_scan_message, archive_scan_session,
+                )
+                # یک پیام نهایی با خلاصه نتایج
+                log_scan_message(
+                    session_id=scan_v5_session_id,
+                    role="system",
+                    content=(
+                        f"✅ Scan کامل شد\n\n"
+                        f"📊 آمار:\n"
+                        f"• {len(unique)} یافتهٔ منحصربه‌فرد\n"
+                        f"• {len(created_tasks)} تسک جدید ساخته شد\n"
+                        f"• {len(duplicates_skipped)} تسک تکراری (skip)\n"
+                        f"• {critical_count} مورد critical\n"
+                        f"• {passes_done}/{len(PASSES)} pass اجرا شد"
+                    ),
+                    action_type="scan_completed",
+                )
+                archive_scan_session(scan_v5_session_id)
+                logger.info(
+                    f"scan_inspector: session #{scan_v5_session_id} archived "
+                    f"(found {len(unique)}, created {len(created_tasks)})"
+                )
+            except Exception as _e_arch:
+                logger.warning(f"scan_inspector: archive failed: {_e_arch}")
 
         # 🆕 (P4) ذخیره خلاصهٔ آخرین scan روی خود WatchedProject — برای نمایش
         # دائمی در UI WatchedCard (مستقل از progress JSON که override می‌شود)
