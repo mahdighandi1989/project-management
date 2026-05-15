@@ -1060,6 +1060,12 @@ def _merge_similar_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, An
             continue
 
         ftype = (f.get("type") or "").lower()
+        # 🆕 (Phase 5 — bug 6) — findings از scan_v5 (با _pass شروع‌شده با
+        # "phase5_") نباید با dedup قدیمی merge شوند. هر stale/anti-pattern/
+        # notification audit یک finding مستقل است (مثلاً 50 dead_endpoint
+        # 50 task جداگانه است، نه 1 task).
+        f_pass = (f.get("_pass") or "").lower()
+        is_phase5 = f_pass.startswith("phase5_")
         f_files: set = set()
         for loc in (f.get("target_locations") or []):
             if isinstance(loc, dict) and loc.get("path"):
@@ -1074,6 +1080,7 @@ def _merge_similar_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, An
         for u in unique:
             u_title = (u.get("title") or "").strip()
             u_type = (u.get("type") or "").lower()
+            u_pass = (u.get("_pass") or "").lower()
             sim = _title_similarity(title, u_title)
 
             # شرط ۱: exact match (sim=1.0)
@@ -1081,7 +1088,19 @@ def _merge_similar_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, An
                 merged_into = u
                 break
 
-            # شرط ۲: similarity بالا و type یکسان
+            # 🆕 (Phase 5) — Phase 5 finding ها فقط با خودشان merge می‌شوند
+            # و فقط اگر title و file یکسان باشد (تا 50 dead_endpoint جدا
+            # بمانند، نه یکی شوند)
+            if is_phase5 or u_pass.startswith("phase5_"):
+                # اگر هر دو phase5 و title و file هر دو exact match → merge
+                # در غیر این صورت → جداگانه نگه دار
+                if is_phase5 and u_pass.startswith("phase5_") and sim >= 0.95:
+                    if f_files == set(p for loc in (u.get("target_locations") or []) for p in [loc.get("path", "")] if loc.get("path")):
+                        merged_into = u
+                        break
+                continue
+
+            # شرط ۲: similarity بالا و type یکسان (فقط non-phase5)
             if sim >= SIMILARITY_THRESHOLD and ftype == u_type and ftype:
                 merged_into = u
                 break
@@ -1988,7 +2007,10 @@ async def run_deep_scan(
         tech_context_default = (
             f"Stack: {', '.join(stacks)}." if stacks else ""
         )
-        for f in unique[:30]:
+        # 🆕 (Phase 5 — bug 6) — افزایش cap از 30 به 200 تا Phase 5 findings
+        # (164 stale + 121 anti-pattern + 27 notification + ...) همه به task
+        # تبدیل شوند. dedup قدیمی همچنان عمل می‌کند برای جلوگیری از تکرار.
+        for f in unique[:200]:
             try:
                 title = (f.get("title") or "").strip()[:200]
                 if not title:

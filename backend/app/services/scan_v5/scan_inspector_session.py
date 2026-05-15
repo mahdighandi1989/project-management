@@ -88,6 +88,8 @@ def create_scan_session(
 
     db = SessionLocal()
     try:
+        # 🆕 (debug) — log resolve outcome
+        _was_resolved = project_id != str(watched_id)
         session = InspectorSession(
             project_id=project_id,
             status="active",
@@ -97,8 +99,10 @@ def create_scan_session(
         db.commit()
         db.refresh(session)
         logger.info(
-            f"scan_inspector: session #{session.id} created "
-            f"(project_id={project_id}, watched_id={watched_id})"
+            f"scan_inspector: session #{session.id} created — "
+            f"project_id={project_id} (resolved={_was_resolved} from watched_id={watched_id}), "
+            f"title='{session.title}'. "
+            f"UI query path: /api/render/inspector/sessions/{project_id}?status=archived"
         )
         return session.id
     except Exception as e:
