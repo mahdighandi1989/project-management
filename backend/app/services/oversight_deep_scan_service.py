@@ -2359,6 +2359,48 @@ async def run_deep_scan(
             except Exception as _v5_msg_e:
                 logger.debug(f"scan_v5 message enrichment failed: {_v5_msg_e}")
 
+            # 🆕 (Phase 5 — bug 13) — Top N task list برای Telegram
+            # هر تسک ۱-۲ خط: priority + type + title (پیامد۱۲۰ کاراکتر) + AC count.
+            # پرامپت کامل در PDF bundle attached می‌ماند.
+            try:
+                if created_tasks:
+                    PRIO = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+                    _sorted = sorted(
+                        created_tasks,
+                        key=lambda x: PRIO.get(
+                            (x.get("priority") or "medium").lower(), 2
+                        ),
+                    )
+                    TOP_N = 15
+                    msg_lines.append("")
+                    msg_lines.append(
+                        f"📝 *Top {min(TOP_N, len(_sorted))} تسک* "
+                        f"(از {len(_sorted)} کل — پرامپت کامل در PDF):"
+                    )
+                    PRIO_EMOJI = {
+                        "critical": "🚨",
+                        "high": "🔴",
+                        "medium": "🟡",
+                        "low": "🟢",
+                    }
+                    for t in _sorted[:TOP_N]:
+                        pr = (t.get("priority") or "medium").lower()
+                        emoji = PRIO_EMOJI.get(pr, "•")
+                        type_short = (t.get("type") or "?")[:18]
+                        tl = (t.get("title") or "?")
+                        if len(tl) > 100:
+                            tl = tl[:97] + "..."
+                        ac_count = len(t.get("acceptance_criteria") or [])
+                        msg_lines.append(
+                            f"  {emoji} `{type_short}` · {tl} _(AC: {ac_count})_"
+                        )
+                    if len(_sorted) > TOP_N:
+                        msg_lines.append(
+                            f"  _... و {len(_sorted) - TOP_N} تسک دیگر در PDF._"
+                        )
+            except Exception as _tlist_e:
+                logger.debug(f"telegram task list failed: {_tlist_e}")
+
             done_priority = "high" if critical_count > 0 else ("medium" if len(created_tasks) > 0 else "low")
             # 🆕 (R6) silent default = NOT bool(watched.scan_notify_sound)
             _silent_default = not bool(getattr(watched, "scan_notify_sound", False))

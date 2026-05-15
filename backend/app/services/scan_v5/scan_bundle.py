@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-_MAX_SIZE_BYTES = 1_500_000  # 1.5MB cap
+_MAX_SIZE_BYTES = 5_000_000  # 5MB cap (Telegram allows ~50MB; we leave headroom)
 _PDF_RENDER_SEM = asyncio.Semaphore(2)
 
 
@@ -231,20 +231,96 @@ def build_scan_bundle_md(
             )
             for t in created_tasks
         )
+        # 🆕 group by priority too
+        priorities = Counter((t.get("priority") or "?") for t in created_tasks)
+        # 🆕 group by type
+        types = Counter((t.get("type") or "?") for t in created_tasks)
+
         body = f"**کل تسک‌های ایجادشده:** {len(created_tasks)}\n\n"
-        body += "**به تفکیک pass:**\n"
+        body += "**به تفکیک priority:**\n"
+        for p, c in priorities.most_common():
+            body += f"- {p}: {c}\n"
+        body += "\n**به تفکیک type:**\n"
+        for t_, c in types.most_common():
+            body += f"- {t_}: {c}\n"
+        body += "\n**به تفکیک pass:**\n"
         for p, c in passes.most_common():
             body += f"- {p}: {c}\n"
-        body += "\n**لیست تسک‌ها (top 20):**\n"
-        for t in created_tasks[:20]:
-            title = _safe(t.get("title", "?"), 100)
+        parts.append(_section("۹. خلاصه تسک‌های ایجاد شده", body))
+
+        # 🆕 (Phase 5 — bug 12) — فهرست کامل تسک‌ها با پرامپت و چک‌لیست
+        # هر تسک یک sub-section با: title + priority + type + target_files
+        # + prompt کامل (یا cap به ۴۰۰۰ کاراکتر) + acceptance_criteria به‌صورت
+        # checklist قابل تیک. تسک‌ها به‌ترتیب priority (critical→low) مرتب می‌شوند.
+        PRIO = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        sorted_tasks = sorted(
+            created_tasks,
+            key=lambda x: (
+                PRIO.get((x.get("priority") or "medium").lower(), 2),
+                (x.get("type") or ""),
+            ),
+        )
+        # حداکثر ۳۰۰ تسک با پرامپت کامل، بعد از آن فقط title.
+        FULL_LIMIT = 300
+        for idx, t in enumerate(sorted_tasks[:FULL_LIMIT], start=1):
+            title = _safe(t.get("title", "?"), 200)
             priority = t.get("priority", "?")
             type_ = t.get("type", "?")
-            tid = t.get("id", "?")[:8]
-            body += f"- [{priority:8}] `{type_}` — {title} (id: `{tid}`)\n"
-        if len(created_tasks) > 20:
-            body += f"\n_... و {len(created_tasks) - 20} تسک دیگر_\n"
-        parts.append(_section("۹. تسک‌های ایجاد شده", body))
+            tid = (t.get("id") or "?")[:8]
+            target_files = t.get("target_files") or []
+            prompt_full = t.get("prompt") or ""
+            # cap prompt at 4000 chars per task to keep bundle ≤1.5MB
+            if len(prompt_full) > 4000:
+                prompt_short = prompt_full[:4000] + "\n\n[... trimmed به 4000 char؛ پرامپت کامل در UI تسک ...]"
+            else:
+                prompt_short = prompt_full
+            ac_items = t.get("acceptance_criteria") or []
+
+            task_body_parts: List[str] = []
+            task_body_parts.append(f"**🆔 ID:** `{tid}…`")
+            task_body_parts.append(f"**🎯 priority:** `{priority}`")
+            task_body_parts.append(f"**📂 type:** `{type_}`")
+            if target_files:
+                task_body_parts.append(
+                    "**📁 target_files:** "
+                    + ", ".join(f"`{p}`" for p in target_files[:5])
+                    + (f" (+{len(target_files)-5} more)" if len(target_files) > 5 else "")
+                )
+            task_body_parts.append("")
+            task_body_parts.append("### 📜 پرامپت کامل (Executable prompt)")
+            task_body_parts.append("")
+            task_body_parts.append("```")
+            task_body_parts.append(prompt_short or "(پرامپت خالی)")
+            task_body_parts.append("```")
+            task_body_parts.append("")
+            if ac_items:
+                task_body_parts.append("### ✅ Acceptance Criteria (Checklist)")
+                task_body_parts.append("")
+                for ac in ac_items:
+                    if isinstance(ac, dict):
+                        txt = (ac.get("text") or "").strip()
+                        signal = (ac.get("acceptance_signal") or "").strip()
+                        if txt:
+                            task_body_parts.append(f"- [ ] {txt}")
+                            if signal:
+                                task_body_parts.append(f"  - 🔍 signal: _{signal}_")
+                    else:
+                        task_body_parts.append(f"- [ ] {str(ac).strip()}")
+                task_body_parts.append("")
+            parts.append(_section(
+                f"۹.{idx} {title}", "\n".join(task_body_parts)
+            ))
+
+        if len(created_tasks) > FULL_LIMIT:
+            remaining = created_tasks[FULL_LIMIT:]
+            body = f"**{len(remaining)} تسک باقی‌مانده (فقط title):**\n\n"
+            for t in remaining:
+                title = _safe(t.get("title", "?"), 120)
+                priority = t.get("priority", "?")
+                type_ = t.get("type", "?")
+                tid = (t.get("id") or "?")[:8]
+                body += f"- [{priority:8}] `{type_}` — {title} (id: `{tid}…`)\n"
+            parts.append(_section("۹.* تسک‌های دیگر (خلاصه)", body))
 
     # ── 10. Inspector session reference ──
     sid = scan_v5_inventory.get("_scan_session_id")
