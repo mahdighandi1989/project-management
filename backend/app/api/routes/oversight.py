@@ -456,16 +456,23 @@ async def runtime_diagnostics():
             if not _ac_already_classified(ac_dict):
                 ac_unclassified_count += 1
                 task_has_unclassified = True
-            # 🆕 Phase 3 detection: ui_interaction با plan ضعیف (≤۱ step
-            # غیر-navigate) → نیاز به upgrade
+            # 🆕 Phase 3 detection: ui_interaction با plan ضعیف
+            # 🆕 (Phase 5 — bug 20) — threshold از `< 2` به `< 1` نرم شد.
+            # دلیل: AI گاهی فقط navigate + wait_for_load + screenshot +
+            # assert_visible می‌دهد که از نظر طراحی کافی است (یک assert واقعی).
+            # در آستانه قبلی این AC ها همیشه «نیاز به upgrade» علامت می‌خوردند
+            # و دکمه بنفش پس از force-enrich هم مخفی نمی‌شد.
+            # ضمناً `assert_*` و `wait_for_selector` و `click`/`fill` هم
+            # real محسوب می‌شوند؛ فقط navigate/screenshot/wait_for_load غیر-real.
             if m == "ui_interaction":
                 _plan = (ac.get("verify_plan") if isinstance(ac, dict) else {}) or {}
                 _steps = _plan.get("ui_steps") or []
+                _NON_REAL = {"", "navigate", "screenshot", "wait_for_load"}
                 _real_count = sum(
                     1 for s in _steps if isinstance(s, dict)
-                    and str(s.get("action") or "").lower() not in ("", "navigate", "screenshot")
+                    and str(s.get("action") or "").lower() not in _NON_REAL
                 ) if isinstance(_steps, list) else 0
-                if _real_count < 2:
+                if _real_count < 1:
                     ac_needing_phase3_upgrade += 1
                     task_has_phase3_gap = True
         if task_has_unclassified:

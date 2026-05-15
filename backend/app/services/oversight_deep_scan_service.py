@@ -1321,6 +1321,23 @@ async def run_deep_scan(
             # عمیق: همهٔ ۱۲ pass
             enabled_passes = [p[0] for p in PASSES]
 
+    # 🆕 (Phase 5 — bug 19) — deep_read_count حالا depth-aware است.
+    # default ۳۵ (× ۲ داخلی = ۷۰) برای پروژه‌های متوسط کفایت می‌کرد، ولی
+    # برای ultra/thorough/deep باید پوشش بیشتری داشته باشیم.
+    # کاربر می‌تواند با explicit deep_read_count override کند.
+    if deep_read_count == 35:  # یعنی default، نه override
+        _depth_now = getattr(watched, "scan_depth", "deep") or "deep"
+        # ۲× داخلی هم اعمال می‌شود → effective: balanced=70, deep=100, thorough=150, ultra=200
+        depth_map = {
+            "quick": 25,
+            "standard": 35,
+            "balanced": 35,
+            "deep": 50,
+            "thorough": 75,
+            "ultra": 100,
+        }
+        deep_read_count = depth_map.get(_depth_now, 50)
+
     enabled = set(enabled_passes)
 
     write_progress(
