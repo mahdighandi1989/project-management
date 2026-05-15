@@ -861,6 +861,137 @@ def _change_impact_to_finding(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 # Main aggregator
 # ============================================================
 
+def _upstream_impact_to_finding(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """🆕 (bug 23) — finding برای upstream-impact (deps در خطر تغییر)."""
+    if not isinstance(item, dict):
+        return None
+    changed = item.get("changed_file", "?")
+    upstream = item.get("upstream_file", "?")
+    risk = item.get("risk", "?")
+    reason = item.get("reason", "")
+    rec_action = item.get("recommended_action", "?")
+    title = (
+        f"⬆️ {(upstream or '?').rsplit('/', 1)[-1]} ممکن است نیاز به update "
+        f"داشته باشد به‌خاطر تغییرات در {(changed or '?').rsplit('/', 1)[-1]}"
+    )
+    description = (
+        f"## 📋 شرح\n"
+        f"یک فایل تغییر کرده و حالا از API/behavior جدیدی استفاده می‌کند که "
+        f"upstream فعلی ممکن است پشتیبانی نکند.\n\n"
+        f"## 🔍 جزئیات\n"
+        f"- 📂 فایل تغییریافته (consumer): `{changed}`\n"
+        f"- 📂 فایل upstream (producer — نیازمند update): `{upstream}`\n"
+        f"- 🔥 risk: **{risk}**\n"
+        f"- 📝 reason: {reason}\n"
+        f"- 🛠 recommended: `{rec_action}`\n\n"
+        f"## 🤔 چرا مهم است\n"
+        f"اگر upstream متد/تابع/فیلد لازم را اضافه نکند، consumer در runtime "
+        f"شکست می‌خورد یا silent failure می‌دهد."
+    )
+    acceptance_criteria = [
+        {"text": f"بررسی شد `{changed}` چه API ای از `{upstream}` می‌خواهد"},
+        {"text": f"اگر API در `{upstream}` نیست، اضافه شد"},
+        {"text": "تست integration که هر دو سمت را پوشش می‌دهد عبور می‌کند"},
+    ]
+    priority_map = {"high": "high", "medium": "medium", "low": "low"}
+    priority = priority_map.get(str(risk).lower(), "medium")
+    return {
+        "type": "upstream_update",
+        "priority": priority,
+        "title": title,
+        "description": description,
+        "proposed_action": (
+            f"گام ۱: `{changed}` را بخوان و usages جدید از `{upstream}` را پیدا کن.\n"
+            f"گام ۲: API contract در `{upstream}` چک کن.\n"
+            f"گام ۳: اگر contract ناسازگار است، `{upstream}` را extend کن."
+        ),
+        "acceptance_criteria": acceptance_criteria,
+        "validation_commands": _vcmds_for_file(upstream),
+        "risks": f"تغییر `{upstream}` ممکن است بقیه consumers را تحت تأثیر قرار دهد — قبل از تغییر، همهٔ مصرف‌کنندگانش را check کن.",
+        "dependency_summary": f"`{changed}` به `{upstream}` وابسته است.",
+        "related_files": [{"path": changed, "reason": "consumer که تغییر کرده", "at_line": ""}],
+        "target_files": [upstream] if upstream and upstream != "?" else [],
+        "target_locations": [{"path": upstream, "lines": ""}] if upstream and upstream != "?" else [],
+        "_pass": "phase5_upstream_impact",
+        "_source": "scan_v5/dependency_analyzer",
+    }
+
+
+def _added_ripple_to_finding(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """🆕 (bug 23) — finding برای added-file ripple (orphan / missing companion)."""
+    if not isinstance(item, dict):
+        return None
+    added = item.get("added_file", "?")
+    issue_type = str(item.get("issue_type", "")).lower()
+    risk = str(item.get("risk", "medium")).lower()
+    reason = item.get("reason", "")
+
+    if issue_type == "orphan_added":
+        title = f"🆕 فایل جدید `{added.rsplit('/', 1)[-1]}` به هیچ‌جا متصل نیست (orphan)"
+        description = (
+            f"## 📋 شرح\n"
+            f"این فایل تازه اضافه شده ولی هیچ فایلی آن را import نمی‌کند.\n\n"
+            f"## 🔍 جزئیات\n"
+            f"- 📂 added: `{added}`\n"
+            f"- 🔥 risk: **{risk}**\n"
+            f"- 📝 reason: {reason}\n\n"
+            f"## 🤔 چرا مهم است\n"
+            f"فایل orphan معمولاً یعنی wiring فراموش شده. یا باید به جای مناسبی "
+            f"متصل شود، یا اگر واقعاً لازم نیست، حذف شود."
+        )
+        acceptance_criteria = [
+            {"text": "بررسی شد چه فایلی باید این فایل را import کند"},
+            {"text": "wiring اضافه شد یا فایل حذف شد"},
+            {"text": "scan بعدی این فایل را orphan گزارش نمی‌کند"},
+        ]
+        related = []
+        target_files = [added]
+    else:  # missing_companion
+        comp_kind = str(item.get("companion_kind", ""))
+        comp_path = str(item.get("companion_path", ""))
+        title = (
+            f"🧩 `{added.rsplit('/', 1)[-1]}` نیازمند {comp_kind} است "
+            f"(در `{comp_path[:60]}` پیدا نشد)"
+        )
+        description = (
+            f"## 📋 شرح\n"
+            f"این فایل جدید اضافه شده ولی companion ضروری ({comp_kind}) ندارد.\n\n"
+            f"## 🔍 جزئیات\n"
+            f"- 📂 added: `{added}`\n"
+            f"- 📂 expected companion: `{comp_path}`\n"
+            f"- 🔥 risk: **{risk}**\n"
+            f"- 📝 reason: {reason}\n\n"
+            f"## 🤔 چرا مهم است\n"
+            f"بدون companion، فایل به‌مرور isolated می‌ماند — نه تست دارد، نه consumer."
+        )
+        acceptance_criteria = [
+            {"text": f"{comp_kind} مناسب برای `{added}` ایجاد شد"},
+            {"text": "کیفیت companion: حداقل ۱ assertion/binding واقعی دارد"},
+            {"text": "scan بعدی این finding را نمی‌سازد"},
+        ]
+        related = [{"path": added, "reason": f"فایل جدید که {comp_kind} می‌خواهد", "at_line": ""}]
+        target_files = []
+    priority_map = {"high": "high", "medium": "medium", "low": "low"}
+    return {
+        "type": "ripple_companion",
+        "priority": priority_map.get(risk, "medium"),
+        "title": title,
+        "description": description,
+        "proposed_action": (
+            f"بررسی کن فایل `{added}` به چه companion ای نیاز دارد و آن را ایجاد یا متصل کن."
+        ),
+        "acceptance_criteria": acceptance_criteria,
+        "validation_commands": _vcmds_for_file(added),
+        "risks": "اگر companion ایجاد نشود، در scan های بعدی همچنان flag می‌شود.",
+        "dependency_summary": f"فایل جدید `{added}` بدون companion.",
+        "related_files": related,
+        "target_files": target_files,
+        "target_locations": [{"path": added, "lines": ""}],
+        "_pass": "phase5_added_ripple",
+        "_source": "scan_v5/dependency_analyzer",
+    }
+
+
 def phase5_findings_to_standard(
     stale: Optional[Dict[str, Any]] = None,
     anti_patterns: Optional[List[Dict[str, Any]]] = None,
@@ -868,6 +999,8 @@ def phase5_findings_to_standard(
     effectiveness_issues: Optional[List[Dict[str, Any]]] = None,
     notification_audit: Optional[Dict[str, Any]] = None,
     change_impact: Optional[List[Dict[str, Any]]] = None,
+    upstream_impact: Optional[List[Dict[str, Any]]] = None,
+    added_ripple: Optional[List[Dict[str, Any]]] = None,
     delta: Optional[Dict[str, Any]] = None,
     inventory: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
@@ -927,6 +1060,21 @@ def phase5_findings_to_standard(
     for ci in (change_impact or []):
         try:
             f = _change_impact_to_finding(ci)
+            if f:
+                out.append(f)
+        except Exception:
+            pass
+    # 🆕 (bug 23) — upstream + added ripple
+    for ui in (upstream_impact or []):
+        try:
+            f = _upstream_impact_to_finding(ui)
+            if f:
+                out.append(f)
+        except Exception:
+            pass
+    for ar in (added_ripple or []):
+        try:
+            f = _added_ripple_to_finding(ar)
             if f:
                 out.append(f)
         except Exception:
