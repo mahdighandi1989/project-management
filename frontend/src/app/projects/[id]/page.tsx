@@ -2118,6 +2118,23 @@ export default function ProjectDetailPage() {
     }
   }, [projectId, activeTab]);
 
+  // 🆕 (Phase 5 — bug 25) — Auto-init سشن وقتی تب Inspector باز می‌شود.
+  // قبلاً session فقط با toggle Power ساخته می‌شد؛ کاربری که فقط می‌خواست
+  // چت کند بدون اینکه iframe / WS را راه بیندازد، با سشن خالی روبرو می‌شد و
+  // پیام‌هایش هیچ‌جا ذخیره نمی‌شد. بک‌اند خودش active session موجود را
+  // برمی‌گرداند (existing=true)، پس فراخوانی تکراری بی‌خطر است.
+  useEffect(() => {
+    if (
+      projectId
+      && activeTab === 'inspector'
+      && !inspectorSessionId
+      && !inspectorSessionIdRef.current
+    ) {
+      initInspectorSession();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, activeTab]);
+
   // 🌐 ارسال دستور به Bridge از طریق WebSocket
   const sendBridgeCommand = (command: string, data: Record<string, any> = {}) => {
     if (bridgeWsRef.current?.readyState === WebSocket.OPEN) {
@@ -2474,6 +2491,16 @@ export default function ProjectDetailPage() {
       const res = await fetch(`${API_BASE}/api/render/inspector/session/create?project_id=${projectId}`, {
         method: 'POST',
       });
+      // 🆕 (Phase 5 — bug 25) — اگر HTTP non-2xx، خطا را surface کن.
+      // قبلاً silent بود → کاربر متوجه نمی‌شد چرا session ساخته نمی‌شود.
+      if (!res.ok) {
+        const _txt = await res.text().catch(() => '');
+        console.error(`Inspector session create failed: HTTP ${res.status}`, _txt.slice(0, 300));
+        try {
+          addTransientMessage(`❌ ایجاد سشن بازرس شکست خورد (HTTP ${res.status})`, 'error');
+        } catch {}
+        return;
+      }
       const data = await res.json();
 
       if (data.success && data.session) {

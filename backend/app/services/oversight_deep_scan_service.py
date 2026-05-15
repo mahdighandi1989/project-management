@@ -1276,16 +1276,29 @@ def _find_existing_active_task(
     similarity_threshold: float = 0.8,
 ) -> Optional[Any]:
     """در tasks active موجود (همان watched، نه archived/done/cancelled)
-    دنبال match با finding بگرد. Jaccard >0.8 روی title.
+    دنبال match با finding بگرد.
 
-    اگر کاربر title را دستی edit کرده باشد، روی raw_idea finding
-    هم match می‌کنیم (به‌عنوان fallback).
+    🆕 (Phase 5 — bug 26) — حالا match سه‌مرحله‌ای:
+      ۱) structural fingerprint: (type + target_files overlap >= 50%)
+         این برای findings AI-generated (coherence/anti_pattern) که هر اسکن
+         تیتر کمی متفاوت تولید می‌کنند، حیاتی است.
+      ۲) title Jaccard >= 0.8 (مثل قبل)
+      ۳) fallback: تطابق با raw_idea تسک
     """
     try:
         finding_title = (finding.get("title") or "").strip()
         if not finding_title:
             return None
         finding_desc = (finding.get("description") or "")[:500]
+        finding_type = str(finding.get("type") or "").lower()
+        # 🆕 normalize target_files برای structural fingerprint
+        finding_targets = {
+            str(p).strip().lower() for p in (finding.get("target_files") or [])
+            if p and isinstance(p, str)
+        }
+        # finding._pass و _source هم بخشی از fingerprint اند
+        finding_pass = str(finding.get("_pass") or "").lower()
+
         candidates = [
             t for t in service.tasks
             if t.watched_id == watched_id
@@ -1295,16 +1308,42 @@ def _find_existing_active_task(
             and t.verification_status not in ("done",)
         ]
         for task in candidates:
-            # تطابق با title
+            # 🆕 (bug 26) — مرحلهٔ ۱: structural fingerprint
+            # اگر type یکی، _pass یکی، و target_files با ≥۵۰٪ overlap → دوپلیکیت
+            task_type = str(getattr(task, "type", "") or "").lower()
+            task_targets = {
+                str(p).strip().lower() for p in (getattr(task, "target_files", None) or [])
+                if p and isinstance(p, str)
+            }
+            task_meta = getattr(task, "created_by_scan_metadata", None) or {}
+            # metadata key قبلاً '_pass' (با underscore) ذخیره شده — حواست باشد
+            task_pass = str(
+                (task_meta.get("_pass") or task_meta.get("pass"))
+                if isinstance(task_meta, dict) else ""
+            or "").lower()
+            if (
+                finding_type and task_type and finding_type == task_type
+                and finding_targets and task_targets
+            ):
+                _inter = finding_targets & task_targets
+                _union = finding_targets | task_targets
+                _overlap = len(_inter) / len(_union) if _union else 0.0
+                # اگر pass هم match کند، آستانه پایین‌تر کافی است
+                _pass_match = bool(finding_pass and task_pass and finding_pass == task_pass)
+                _thresh = 0.4 if _pass_match else 0.5
+                if _overlap >= _thresh:
+                    return task
+
+            # مرحلهٔ ۲: تطابق با title
             sim_title = _title_similarity(finding_title, task.title)
             if sim_title >= similarity_threshold:
                 return task
-            # fallback: تطابق با raw_idea (اگر کاربر title را edit کرده)
+            # مرحلهٔ ۳ (fallback): تطابق با raw_idea (اگر کاربر title را edit کرده)
             if task.raw_idea:
                 sim_raw = _title_similarity(finding_title, task.raw_idea)
                 if sim_raw >= similarity_threshold:
                     return task
-            # fallback ۲: تطابق finding.description با task.raw_idea
+            # مرحلهٔ ۴ (fallback): finding.description با task.raw_idea
             if finding_desc and task.raw_idea:
                 sim_desc = _title_similarity(finding_desc[:200], task.raw_idea[:200])
                 if sim_desc >= similarity_threshold:
