@@ -2356,7 +2356,20 @@ async def verify_task(
                                     # false-positive ندهد.
                                     _ca_verdict_raw = _sa.get("code_verdict", "unclear")
                                     _ca_reason_raw = _sa.get("reason", "")
-                                    if _ca_verdict_raw == "implemented":
+                                    # 🆕 (bug 36) — wiring_check downgrade
+                                    # غیرفعال شد. علت: file_contents در
+                                    # verify فقط شامل target_files است (نه
+                                    # importer ها). برای meta-task هایی که
+                                    # target_files همگی در یک package هستند،
+                                    # هیچ importer در view نیست → wiring_check
+                                    # همه را orphan اعلام می‌کرد و downgrade
+                                    # می‌داد. bug 35 یک guard نرم اضافه کرد
+                                    # ولی شرایطش در عمل تقریباً همیشه
+                                    # برآورده می‌شود (هر .py دارای "import ").
+                                    # برای verify، اعتماد به code-aware
+                                    # کافی است؛ wiring فقط برای deep_scan
+                                    # که corpus کامل دارد، معنا دارد.
+                                    if False and _ca_verdict_raw == "implemented":
                                         try:
                                             _step_text = _step_acs[_i].get("text", "")
                                             _wiring_status = _check_file_wiring(
