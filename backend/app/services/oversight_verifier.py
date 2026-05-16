@@ -1104,6 +1104,43 @@ def _check_file_wiring(
             "importers_found": importers_total,
         }
 
+    # 🆕 (bug 35) — اگر file_contents فقط شامل خود target_files است
+    # (یعنی فایل‌هایی که داریم چک می‌کنیم) و هیچ importer بالقوه‌ای داخل
+    # نیست، اعلام orphan false-positive است. شواهد: اگر هیچ فایلی در
+    # file_contents از matched files نیست (یعنی importers اصلاً در
+    # view نیستند) → status=unknown به جای orphan.
+    _non_matched_py_files = sum(
+        1 for fp in file_contents.keys()
+        if str(fp).endswith(".py") and fp not in matched
+    )
+    if _non_matched_py_files == 0:
+        return {
+            "status": "unknown",
+            "detail": (
+                f"file_contents فقط شامل target_files matched است "
+                f"({len(matched)} file)؛ importer بالقوه در دسترس نیست — "
+                f"نمی‌توان orphan را قطعی تشخیص داد."
+            ),
+            "matched_files": matched,
+            "importers_found": 0,
+        }
+    # یا: اگر فایل‌های غیر-matched هم هستند ولی هیچ‌کدام import statement
+    # ندارند (corpus ناقص است)، باز هم unknown
+    _has_any_import = any(
+        ("import " in (content or "")) for fp, content in file_contents.items()
+        if fp not in matched and content
+    )
+    if not _has_any_import:
+        return {
+            "status": "unknown",
+            "detail": (
+                f"در {_non_matched_py_files} فایل غیر-matched هیچ "
+                f"import statement پیدا نشد — corpus محدود است."
+            ),
+            "matched_files": matched,
+            "importers_found": 0,
+        }
+
     return {
         "status": "orphan",
         "detail": (
