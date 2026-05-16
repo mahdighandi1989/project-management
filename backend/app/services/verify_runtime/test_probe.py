@@ -57,6 +57,34 @@ async def run_test_probe(
             duration_ms=int((time.monotonic() - start) * 1000),
         )
 
+    # 🆕 (Phase 5 V4 — bug B2) — guard علیه test_node های بیش‌از‌حد گسترده
+    # که کل suite را اجرا می‌کنند. اگر test_node یک directory یا module
+    # کامل است (نه یک test مشخص مثل `tests/test_x.py::test_y`)، probe را
+    # SKIP می‌کنیم تا کل verify timeout نخورد. برای پشتیبانی از این مورد
+    # در آینده، AC باید با pytest marker (@pytest.mark.verify) و test_node
+    # دقیق پر شود.
+    _is_specific = "::" in test_node
+    _looks_dir = test_node.endswith("/") or (
+        "::" not in test_node and "." not in test_node.rsplit("/", 1)[-1]
+    )
+    if not _is_specific and _looks_dir:
+        return RuntimeProbeResult(
+            ac_id=ac_id,
+            ac_text=ac_text,
+            method="backend_test",
+            status=PROBE_STATUS_SKIPPED,
+            evidence={
+                "reason": (
+                    f"test_node='{test_node}' یک directory/module کامل است — "
+                    f"اجرای کل suite ریسک timeout دارد. برای اجرای مؤثر، AC "
+                    f"باید test_node مشخص (file::function) داشته باشد."
+                ),
+                "test_node": test_node,
+                "hint": "از @pytest.mark.verify در تست‌ها استفاده کن و test_node را به یک node خاص محدود کن",
+            },
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+
     timeout = int(plan.get("timeout_seconds") or ctx.test_timeout_s)
     cwd = ctx.repo_path or None
     if cwd and not Path(cwd).is_dir():
@@ -86,6 +114,9 @@ async def run_test_probe(
     cmd = [
         "python", "-m", "pytest", test_node,
         "-v", "--tb=short", "--no-header", "--color=no",
+        # 🆕 (Phase 5 V4 — bug B2) — fail-fast: حداکثر ۲ failure → exit
+        # تا یک test معیوب کل probe timeout را نخورد.
+        "--maxfail=2",
     ]
     if _has_jsonreport and json_report_path:
         cmd += ["--json-report", f"--json-report-file={json_report_path}"]
