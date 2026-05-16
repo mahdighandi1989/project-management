@@ -2734,14 +2734,21 @@ class OversightService:
             # مثل "# 🎯 پرامپت Phase 1 — ..."
             r'(?im)^\s*#{1,4}\s.*?\b(?:phase|stage)\s+[\d]+\b',
         ]
-        _detected_sections: List[str] = []
-        _seen_sigs: set = set()
+        # 🆕 (bug 30 v2) — استخراج موقعیت + متن header برای chunking
+        _section_starts: List[Tuple[int, str]] = []  # (offset, header_line)
+        _seen_offsets: set = set()
         for _pat in _section_patterns:
             for _m in _re_seg.finditer(_pat, idea):
-                _sig = _re_seg.sub(r'\s+', ' ', _m.group(0).strip().lower())
-                if _sig not in _seen_sigs:
-                    _seen_sigs.add(_sig)
-                    _detected_sections.append(_sig)
+                _off = _m.start()
+                # حذف overlap نزدیک (همان خط با چند regex)
+                _too_close = any(abs(_off - o) < 5 for o in _seen_offsets)
+                if _too_close:
+                    continue
+                _seen_offsets.add(_off)
+                _header = _re_seg.sub(r'\s+', ' ', _m.group(0).strip())[:120]
+                _section_starts.append((_off, _header))
+        _section_starts.sort(key=lambda x: x[0])
+        _detected_sections = [h for _, h in _section_starts]
         _section_count = len(_detected_sections)
         _is_multi_section = _section_count >= 3
 
@@ -2853,6 +2860,81 @@ class OversightService:
                 })
             return out[:30]
 
+        # 🆕 (bug 30 v2) — Programmatic chunking fallback
+        # تابع کمکی: idea را با موقعیت header های detected به chunks تقسیم می‌کند
+        # هر chunk = یک بخش از header شروع تا header بعدی (یا انتها)
+        def _split_idea_by_sections() -> List[Tuple[str, str]]:
+            """خروجی: [(header, chunk_text), ...]"""
+            if not _section_starts:
+                return []
+            chunks: List[Tuple[str, str]] = []
+            for idx, (offset, header) in enumerate(_section_starts):
+                next_off = (
+                    _section_starts[idx + 1][0]
+                    if idx + 1 < len(_section_starts)
+                    else len(idea)
+                )
+                chunk_text = idea[offset:next_off].strip()
+                # حذف chunk های خیلی کوچک (احتمالاً false-positive section)
+                if len(chunk_text) >= 200:
+                    chunks.append((header, chunk_text))
+            return chunks
+
+        async def _plan_single_section(
+            header: str, section_text: str, section_idx: int,
+        ) -> Optional[Dict[str, Any]]:
+            """یک AI call برای یک بخش — یک step تولید می‌کند."""
+            mini_prompt = f"""تو یک پلانر دقیق هستی. این **یک بخش** از یک درخواست بزرگ‌تر است. وظیفه‌ات: این بخش را به **یک مرحله** اجرایی تبدیل کن.
+
+## هدف پروژه:
+{user_goal or '(کاربر یادداشتی ثبت نکرده است)'}
+
+## این بخش از درخواست کاربر (header: {header}):
+\"\"\"
+{section_text}
+\"\"\"
+
+## خروجی فقط JSON خالص (یک object، نه array):
+{{
+  "title": "عنوان کوتاه این بخش (یک جمله — بر اساس header اگر مرتبط است)",
+  "scope": "scope کامل این بخش — چه چیزی شامل است، چه چیزی خارج، نکات حیاتی (۲-۵ جمله)",
+  "raw_excerpt": "بخش‌هایی از متن کاربر مربوط به این بخش — verbatim، با URLها و نام‌ها (تا ۱۲۰۰ کاراکتر)",
+  "key_terms": ["نام‌های فایل/endpoint/library/متغیر/کلاس که در این بخش آمده"],
+  "behavior_observable": "رفتار قابل مشاهده پس از این مرحله",
+  "verification_hint": "کجا verify باید این رفتار را ببیند (URL/endpoint/outcome)",
+  "business_intent": "چرا این مرحله لازم است",
+  "non_goals": "چه چیزی این مرحله نیست"
+}}
+"""
+            try:
+                _resp = await self._ai_generate(
+                    mini_prompt,
+                    model_id=(model_ids[0] if model_ids else model_id),
+                    max_tokens=2500,
+                    temperature=0.2,
+                )
+                _parsed = self._extract_json(_resp)
+                if not isinstance(_parsed, dict):
+                    return None
+                title = (_parsed.get("title") or "").strip()
+                scope = (_parsed.get("scope") or "").strip()
+                if not title or not scope:
+                    return None
+                return {
+                    "id": section_idx + 1,
+                    "title": title[:200],
+                    "scope": scope[:2500],
+                    "raw_excerpt": (_parsed.get("raw_excerpt") or "").strip()[:4000],
+                    "key_terms": [str(k) for k in (_parsed.get("key_terms") or [])[:25]],
+                    "behavior_observable": str(_parsed.get("behavior_observable") or "").strip()[:500],
+                    "verification_hint": str(_parsed.get("verification_hint") or "").strip()[:300],
+                    "business_intent": str(_parsed.get("business_intent") or "").strip()[:300],
+                    "non_goals": str(_parsed.get("non_goals") or "").strip()[:300],
+                }
+            except Exception as _e:
+                logger.warning(f"_plan_single_section[{section_idx}] failed: {_e}")
+                return None
+
         try:
             valid_steps = await _run_planner(plan_prompt, _max_out_tokens)
 
@@ -2882,6 +2964,39 @@ class OversightService:
                         f"{len(valid_steps)} → {len(retry_steps)} steps"
                     )
                     valid_steps = retry_steps
+
+            # 🆕 (bug 30 v2) — اگر هنوز بعد از retry تعداد مراحل خیلی کمتر از
+            # سکشن‌های detected است، به chunking برنامه‌ای سوئیچ کن.
+            # هر section به یک AI call تبدیل می‌شود (parallel) — این روش
+            # AI را مجبور می‌کند نتواند خلاصه کند چون هر call فقط ۱ بخش می‌بیند.
+            if (
+                _is_multi_section
+                and _section_count >= 5
+                and len(valid_steps) < max(5, int(_section_count * 0.6))
+            ):
+                logger.warning(
+                    f"_ai_plan_steps: retry still insufficient ({len(valid_steps)}/"
+                    f"{_section_count}) — switching to programmatic chunking"
+                )
+                _chunks = _split_idea_by_sections()
+                _chunks = _chunks[:30]  # cap سخت
+                logger.info(
+                    f"_ai_plan_steps: chunking → {len(_chunks)} chunks "
+                    f"(parallel AI calls)"
+                )
+                import asyncio as _aio
+                _tasks = [
+                    _plan_single_section(_h, _txt, _i)
+                    for _i, (_h, _txt) in enumerate(_chunks)
+                ]
+                _results = await _aio.gather(*_tasks, return_exceptions=False)
+                _chunk_steps = [r for r in _results if r is not None]
+                if len(_chunk_steps) > len(valid_steps):
+                    logger.info(
+                        f"_ai_plan_steps: chunking produced {len(_chunk_steps)} "
+                        f"steps (vs {len(valid_steps)} from monolithic planner)"
+                    )
+                    valid_steps = _chunk_steps
 
             return valid_steps
         except Exception as e:
