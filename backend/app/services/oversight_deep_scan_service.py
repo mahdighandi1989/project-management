@@ -2746,6 +2746,7 @@ async def run_deep_scan(
                     watched=watched,
                     scan_v5_inventory=scan_v5_inventory,
                     created_tasks=created_tasks,
+                    all_findings=all_findings,
                 )
                 # ذخیره روی disk تا notification_service بتواند ضمیمه کند
                 from pathlib import Path as _PA
