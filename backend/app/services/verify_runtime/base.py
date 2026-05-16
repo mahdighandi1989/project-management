@@ -96,7 +96,11 @@ class ProbeContext:
     # محدودیت‌های زمانی
     ui_timeout_ms: int = 30000
     api_timeout_s: int = 10
-    test_timeout_s: int = 120
+    # 🆕 (Phase 5 V4 — bug B2) — افزایش از ۱۲۰s به ۲۴۰s. تست‌های backend
+    # اغلب شامل import های سنگین (fastapi، sqlalchemy، playwright) هستند
+    # که خود ۲۰-۴۰s startup می‌خواهند. plan می‌تواند با timeout_seconds
+    # override کند.
+    test_timeout_s: int = 240
     # 🔬 (inspector_probe Phase 1) — اگر set باشد، inspector_probe پیام‌ها/شواهد
     # خود را در این session ذخیره می‌کند تا کاربر بتواند از تب بازرس ویژه ببیند.
     inspector_session_id: Optional[int] = None

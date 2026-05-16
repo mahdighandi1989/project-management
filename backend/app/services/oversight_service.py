@@ -4127,8 +4127,12 @@ class OversightService:
   ],
 
   "acceptance_criteria": [
-    "معیار قابل تست ۱ — با مرجع به فایل/تابع واقعی",
-    "معیار قابل تست ۲"
+    {{
+      "text": "معیار قابل تست ۱ — با مرجع به فایل/تابع واقعی",
+      "verify_method": "static | ui_interaction | api_response | backend_test | manual_only",
+      "verify_plan": {{ /* وابسته به verify_method — به راهنمای پایین مراجعه کن */ }}
+    }},
+    "معیار ۲ به‌صورت رشته‌ای ساده — اگر method خاصی نمی‌دانی، فقط رشته بنویس و پیش‌فرض static گرفته می‌شود"
   ],
 
   "validation_commands": ["pytest backend/...", "npm run test -- ..."],
@@ -4136,6 +4140,73 @@ class OversightService:
   "risks": "ریسک‌های specific این کدبیس (نه جملات عمومی) — مثلاً 'این تابع توسط ۳ روتر استفاده می‌شود، تغییرش روی همه اثر دارد'"
 }}
 {deep_rules_block}
+
+# 🔬 راهنمای انتخاب verify_method (Stage 2 — Runtime Verify Layer)
+**هر AC ماهیتی دارد. AC را به یکی از ۵ متد ببر:**
+
+| نشانه‌ها در متن AC | verify_method | verify_plan باید شامل باشد |
+|---|---|---|
+| «فایل X وجود دارد»، «import شده»، «class Y تعریف شده» | `static` | `{{"grep_patterns": ["pattern1", "pattern2"], "files_hint": ["path/to/file.py"]}}` |
+| «کلیک»، «نمایش»، «مودال باز شود»، «صفحه X لود شود» | `ui_interaction` | `{{"ui_steps": [{{"action": "navigate", "url": "/path"}}, {{"action": "click", "selector": "[data-testid='x']"}}, {{"action": "wait_for", "selector": "[role='dialog']"}}, {{"action": "assert_visible", "selector": "..."}}]}}` |
+| «endpoint Y returns 200»، «API X با شِما Z پاسخ می‌دهد» | `api_response` | `{{"method": "GET", "path": "/api/...", "expected_status": 200, "required_fields": ["id", "name"]}}` |
+| «تست T pass شود»، «pytest tests/X.py» | `backend_test` | `{{"test_path": "backend/tests/test_x.py::test_func", "marker": "verify"}}` |
+| AC مبهم/ذهنی («ظاهر زیبا»، «UX خوب»، «قابل فهم باشد») | `manual_only` | `{{"reason": "subjective — needs human review"}}` |
+
+**نمونه‌های few-shot:**
+
+AC = «دکمهٔ Login باید modal باز کند»:
+```json
+{{
+  "text": "دکمهٔ Login باید modal باز کند",
+  "verify_method": "ui_interaction",
+  "verify_plan": {{
+    "ui_steps": [
+      {{"action": "navigate", "url": "/"}},
+      {{"action": "click", "selector": "[data-testid='btn-login']"}},
+      {{"action": "wait_for", "selector": "[role='dialog']", "timeout_ms": 3000}},
+      {{"action": "assert_visible", "selector": "[role='dialog']"}}
+    ]
+  }}
+}}
+```
+
+AC = «GET /api/users → 200 با field email»:
+```json
+{{
+  "text": "GET /api/users → 200 با field email",
+  "verify_method": "api_response",
+  "verify_plan": {{
+    "method": "GET",
+    "path": "/api/users",
+    "expected_status": 200,
+    "required_fields": ["email"]
+  }}
+}}
+```
+
+AC = «class OversightTask باید فیلد verify_method داشته باشد»:
+```json
+{{
+  "text": "class OversightTask باید فیلد verify_method داشته باشد",
+  "verify_method": "static",
+  "verify_plan": {{
+    "grep_patterns": ["verify_method:", "verify_method =", "class OversightTask"],
+    "files_hint": ["backend/app/services/oversight_service.py"]
+  }}
+}}
+```
+
+AC = «طراحی شیک‌تر باشد»:
+```json
+{{
+  "text": "طراحی شیک‌تر باشد",
+  "verify_method": "manual_only",
+  "verify_plan": {{"reason": "subjective — needs human review"}}
+}}
+```
+
+**اگر مطمئن نیستی، `static` با `grep_patterns` بساز** (fallback ایمن — همیشه قابل اجراست).
+نکته: حداقل ۵۰٪ از AC ها باید verify_method **غیر** از manual_only داشته باشند (تا verify خودکار بتواند کار کند).
 
 # قوانین کلی نهایی
 1. path همیشه از ریشهٔ ریپو (مثل `backend/app/...` یا `frontend/src/...`).
