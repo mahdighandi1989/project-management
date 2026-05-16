@@ -925,6 +925,14 @@ export default function OversightPage() {
   const [reportSinceFilter, setReportSinceFilter] = useState<string>('');
   const [reportFlaggedOnly, setReportFlaggedOnly] = useState(false);
   const [viewingReport, setViewingReport] = useState<Report | null>(null);
+  // 🆕 (Phase 5 V4 — bug A2) — Evidence drill-down modal for inspector probes
+  // یک probe + reference به report برای ساختن لینک‌ها
+  const [drillDownProbe, setDrillDownProbe] = useState<{
+    probe: any;
+    taskId: string;
+    runId: string;
+    projectId?: string;
+  } | null>(null);
 
   // Idea inbox
   const [idea, setIdea] = useState('');
@@ -3948,6 +3956,22 @@ export default function OversightPage() {
                                 {p.duration_ms}ms
                               </span>
                             ) : null}
+                            {/* 🆕 (bug A2) — drill-down evidence modal trigger */}
+                            <button
+                              type="button"
+                              onClick={() => setDrillDownProbe({
+                                probe: p,
+                                taskId: viewingReport.task_id,
+                                runId: viewingReport.evidence?.runtime_run_id || '',
+                                projectId: viewingReport.evidence?.auto_verify_project_id
+                                  ? String(viewingReport.evidence.auto_verify_project_id)
+                                  : undefined,
+                              })}
+                              className="ml-auto px-1.5 py-0.5 text-[10px] rounded bg-white/70 dark:bg-black/30 hover:bg-white dark:hover:bg-gray-700 border border-gray-300 dark:border-gray-600 dark:text-white"
+                              title="مشاهدهٔ کامل شواهد"
+                            >
+                              🔍 جزئیات
+                            </button>
                           </div>
                           <div className="text-[11px] dark:text-gray-200 italic mb-1">
                             «{(p.ac_text || '').slice(0, 200)}»
@@ -4408,6 +4432,17 @@ export default function OversightPage() {
             <VerifyHistoryView data={verifyHistoryData} />
           </Modal>
         )}
+
+        {/* 🆕 (Phase 5 V4 — bug A2) — Evidence drill-down modal for inspector probe */}
+        {drillDownProbe && (
+          <EvidenceDrillDownModal
+            probe={drillDownProbe.probe}
+            taskId={drillDownProbe.taskId}
+            runId={drillDownProbe.runId}
+            projectId={drillDownProbe.projectId}
+            onClose={() => setDrillDownProbe(null)}
+          />
+        )}
       </div>
     </div>
   );
@@ -4488,6 +4523,363 @@ function Modal({
   );
 }
 
+// 🆕 (Phase 5 V4 — bug A2) — full drill-down modal for a single probe's evidence
+function EvidenceDrillDownModal({
+  probe,
+  taskId,
+  runId,
+  projectId,
+  onClose,
+}: {
+  probe: any;
+  taskId: string;
+  runId: string;
+  projectId?: string;
+  onClose: () => void;
+}) {
+  const [lightbox, setLightbox] = useState<string | null>(null);
+  const evidence = probe?.evidence || {};
+  const screenshots: any[] = Array.isArray(evidence.screenshots) ? evidence.screenshots : [];
+  const assertions: any[] = Array.isArray(evidence.assertion_results) ? evidence.assertion_results : [];
+  const actions: any[] = Array.isArray(evidence.actions_taken) ? evidence.actions_taken : [];
+  const networkCalls: any[] = Array.isArray(evidence.network_calls) ? evidence.network_calls : [];
+  const backendUrls: any[] = Array.isArray(evidence.backend_urls_called) ? evidence.backend_urls_called : [];
+  const consoleErrors: any[] = Array.isArray(evidence.console_errors) ? evidence.console_errors : [];
+
+  const screenshotUrl = (sn: any): string | null => {
+    if (typeof sn === 'string') {
+      if (!runId) return null;
+      return `${API_BASE}/api/oversight/tasks/${taskId}/evidence/${runId}/${probe.ac_id}/${sn}`;
+    }
+    if (sn?.url) return String(sn.url);
+    if (sn?.path && runId) {
+      const filename = String(sn.path).split('/').pop() || '';
+      return `${API_BASE}/api/oversight/tasks/${taskId}/evidence/${runId}/${probe.ac_id}/${filename}`;
+    }
+    return null;
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white dark:bg-gray-800 rounded-xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between p-4 border-b dark:border-gray-700">
+          <div className="flex-1 min-w-0">
+            <h2 className="text-lg font-bold dark:text-white truncate">
+              🔬 شواهد کامل probe
+            </h2>
+            <div className="text-xs text-gray-500 dark:text-gray-400 flex items-center gap-2 mt-1">
+              <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700">
+                {probe.method}
+              </span>
+              <span className={
+                probe.status === 'passed' ? 'text-green-700 dark:text-green-300'
+                : probe.status === 'failed' ? 'text-red-700 dark:text-red-300'
+                : probe.status === 'error' ? 'text-amber-700 dark:text-amber-300'
+                : 'text-gray-500'
+              }>
+                {probe.status}
+              </span>
+              {probe.duration_ms != null && (
+                <span>· {probe.duration_ms}ms</span>
+              )}
+            </div>
+          </div>
+          {projectId && evidence.inspector_session_id && (
+            <a
+              href={`/projects/${encodeURIComponent(projectId)}?tab=inspector&session=${encodeURIComponent(String(evidence.inspector_session_id))}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="ml-3 text-xs text-cyan-700 dark:text-cyan-300 hover:underline whitespace-nowrap"
+            >
+              📺 بازرس ویژه
+            </a>
+          )}
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-600 text-2xl leading-none px-2 ml-2"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="overflow-auto p-4 flex-1 space-y-4 text-sm dark:text-gray-200">
+          {/* AC text — کامل، بدون truncate */}
+          <div className="bg-gray-50 dark:bg-gray-900 rounded p-3">
+            <div className="text-[10px] uppercase text-gray-500 mb-1">Acceptance Criterion</div>
+            <div className="italic">«{probe.ac_text || '(empty)'}»</div>
+          </div>
+
+          {/* Error message — کامل */}
+          {probe.error_message && (
+            <div className="bg-red-50 dark:bg-red-900/30 border border-red-300 dark:border-red-700 rounded p-3">
+              <div className="text-[10px] uppercase text-red-700 dark:text-red-300 mb-1">Error</div>
+              <pre className="whitespace-pre-wrap text-xs text-red-800 dark:text-red-200">
+                {probe.error_message}
+              </pre>
+            </div>
+          )}
+
+          {/* Screenshots gallery — بدون cap، با lightbox */}
+          {screenshots.length > 0 && (
+            <div>
+              <h3 className="font-bold mb-2 text-cyan-700 dark:text-cyan-300">
+                📸 Screenshots ({screenshots.length})
+              </h3>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                {screenshots.map((sn, si) => {
+                  const url = screenshotUrl(sn);
+                  const obj = typeof sn === 'object' ? sn : {};
+                  const label = String(obj.label || (typeof sn === 'string' ? sn : `shot ${si + 1}`));
+                  const visionDesc = String(obj.vision_description || '');
+                  const visionSource = String(obj.vision_source || '');
+                  const featurePresent = String(obj.vision_feature_present || '');
+                  const archived = !!obj.archived_to_telegram;
+                  return (
+                    <div
+                      key={si}
+                      className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded overflow-hidden"
+                    >
+                      {url && (
+                        <button
+                          type="button"
+                          onClick={() => setLightbox(url)}
+                          className="block w-full"
+                        >
+                          <img
+                            src={url}
+                            alt={label}
+                            className="w-full h-32 object-cover hover:opacity-90 cursor-zoom-in"
+                            onError={(e) => {
+                              (e.target as HTMLImageElement).style.display = 'none';
+                            }}
+                          />
+                        </button>
+                      )}
+                      <div className="p-2 text-xs space-y-1">
+                        <div className="font-semibold flex items-center justify-between">
+                          <span className="truncate">{label}</span>
+                          {archived && (
+                            <span className="text-[9px] text-cyan-700 dark:text-cyan-300 ml-1">
+                              📦 آرشیو
+                            </span>
+                          )}
+                        </div>
+                        {featurePresent && (
+                          <div className={
+                            featurePresent === 'yes' ? 'text-[10px] text-green-700 dark:text-green-300'
+                            : featurePresent === 'no' ? 'text-[10px] text-red-700 dark:text-red-300'
+                            : 'text-[10px] text-gray-500'
+                          }>
+                            feature_present: {featurePresent}
+                          </div>
+                        )}
+                        {visionDesc && (
+                          <div className="text-[10px] italic text-gray-700 dark:text-gray-300">
+                            👁 {visionDesc}
+                          </div>
+                        )}
+                        {visionSource && visionSource !== 'none' && (
+                          <div className="text-[9px] text-gray-500">
+                            source: <code>{visionSource}</code>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* assertion results */}
+          {assertions.length > 0 && (
+            <div>
+              <h3 className="font-bold mb-2 text-purple-700 dark:text-purple-300">
+                ✅ Assertions ({assertions.length})
+              </h3>
+              <div className="space-y-1">
+                {assertions.map((a, ai) => (
+                  <div
+                    key={ai}
+                    className={`text-xs p-2 rounded border ${
+                      a.met
+                        ? 'bg-green-50 dark:bg-green-900/20 border-green-300 dark:border-green-700'
+                        : 'bg-red-50 dark:bg-red-900/20 border-red-300 dark:border-red-700'
+                    }`}
+                  >
+                    <span className="font-semibold">{a.met ? '✓' : '✗'}</span>
+                    {' '}
+                    <span>{a.expectation}</span>
+                    {a.reason && (
+                      <div className="mt-1 text-[10px] text-gray-600 dark:text-gray-400">
+                        → {a.reason}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* actions taken — Playwright steps log */}
+          {actions.length > 0 && (
+            <div>
+              <h3 className="font-bold mb-2 text-blue-700 dark:text-blue-300">
+                🪜 Actions taken ({actions.length})
+              </h3>
+              <div className="max-h-64 overflow-y-auto bg-gray-50 dark:bg-gray-900 rounded p-2 space-y-1">
+                {actions.map((a, ai) => (
+                  <div key={ai} className="text-[10px] font-mono">
+                    <span className="text-gray-500">#{a.step_idx ?? ai}</span>
+                    {' '}
+                    <span className={a.success === false ? 'text-red-600' : 'text-gray-700 dark:text-gray-300'}>
+                      {a.action || '?'}
+                    </span>
+                    {a.selector && <span className="text-purple-600 dark:text-purple-400"> "{a.selector}"</span>}
+                    {a.value && <span className="text-green-700 dark:text-green-400"> ← {String(a.value).slice(0, 60)}</span>}
+                    {a.url && <span className="text-cyan-700 dark:text-cyan-400"> → {a.url}</span>}
+                    {a.duration_ms != null && <span className="text-gray-500"> ({a.duration_ms}ms)</span>}
+                    {a.error && (
+                      <div className="text-red-700 dark:text-red-400 ml-4">
+                        ⚠ {String(a.error).slice(0, 200)}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Network calls */}
+          {(networkCalls.length > 0 || backendUrls.length > 0) && (
+            <div>
+              <h3 className="font-bold mb-2 text-emerald-700 dark:text-emerald-300">
+                🌐 Network ({networkCalls.length + backendUrls.length})
+              </h3>
+              <div className="max-h-48 overflow-y-auto bg-gray-50 dark:bg-gray-900 rounded p-2 space-y-1">
+                {[...backendUrls, ...networkCalls].slice(0, 100).map((c: any, ci: number) => (
+                  <div key={ci} className="text-[10px] font-mono flex gap-2">
+                    <span className="text-gray-600 dark:text-gray-400 w-12">{c.method || 'GET'}</span>
+                    <span className="text-gray-800 dark:text-gray-200 flex-1 truncate">{c.url || c.path || '?'}</span>
+                    <span className={
+                      (c.status >= 200 && c.status < 400) ? 'text-green-600'
+                      : (c.status >= 400) ? 'text-red-600'
+                      : 'text-gray-500'
+                    }>
+                      {c.status || '?'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Console errors */}
+          {consoleErrors.length > 0 && (
+            <div>
+              <h3 className="font-bold mb-2 text-orange-700 dark:text-orange-300">
+                ⚠ Console errors ({consoleErrors.length})
+              </h3>
+              <div className="max-h-48 overflow-y-auto bg-gray-50 dark:bg-gray-900 rounded p-2 space-y-1">
+                {consoleErrors.map((e: any, ei: number) => (
+                  <div key={ei} className="text-[10px] font-mono">
+                    <span className={
+                      e.level === 'error' ? 'text-red-600'
+                      : e.level === 'warning' ? 'text-amber-600'
+                      : 'text-gray-500'
+                    }>
+                      [{e.level || '?'}]
+                    </span>
+                    {' '}
+                    <span className="text-gray-700 dark:text-gray-300">{e.message || JSON.stringify(e)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* API response — full, terminal-style */}
+          {probe.method === 'api_response' && evidence.response_excerpt && (
+            <div>
+              <h3 className="font-bold mb-2 text-indigo-700 dark:text-indigo-300">
+                🌐 API Response
+              </h3>
+              <pre className="text-[11px] bg-gray-900 text-green-300 p-3 rounded overflow-x-auto max-h-96 font-mono whitespace-pre-wrap">
+                {evidence.response_excerpt}
+              </pre>
+            </div>
+          )}
+
+          {/* pytest stdout — full, terminal-style */}
+          {probe.method === 'backend_test' && evidence.stdout_excerpt && (
+            <div>
+              <h3 className="font-bold mb-2 text-yellow-700 dark:text-yellow-300">
+                🧪 Test stdout
+              </h3>
+              <pre className="text-[11px] bg-gray-900 text-yellow-100 p-3 rounded overflow-x-auto max-h-96 font-mono whitespace-pre-wrap">
+                {evidence.stdout_excerpt}
+              </pre>
+            </div>
+          )}
+
+          {/* Backend log summary — full */}
+          {evidence.backend_log_summary && (
+            <div>
+              <h3 className="font-bold mb-2 text-gray-700 dark:text-gray-300">
+                📋 Backend log summary
+              </h3>
+              <pre className="text-[11px] bg-gray-50 dark:bg-gray-900 text-gray-800 dark:text-gray-200 p-3 rounded overflow-x-auto whitespace-pre-wrap max-h-64">
+                {String(evidence.backend_log_summary)}
+              </pre>
+            </div>
+          )}
+
+          {/* Final URL */}
+          {evidence.final_url && (
+            <div className="text-xs text-gray-600 dark:text-gray-400">
+              📍 final_url: <code className="bg-gray-100 dark:bg-gray-900 px-1 rounded">{evidence.final_url}</code>
+            </div>
+          )}
+
+          {/* Raw evidence dump — collapsible */}
+          <details className="text-xs">
+            <summary className="cursor-pointer text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
+              📦 Raw evidence (JSON)
+            </summary>
+            <pre className="mt-2 text-[10px] bg-gray-900 text-gray-100 p-3 rounded overflow-x-auto max-h-96 font-mono">
+              {JSON.stringify(evidence, null, 2)}
+            </pre>
+          </details>
+        </div>
+      </div>
+
+      {/* Lightbox */}
+      {lightbox && (
+        <div
+          className="fixed inset-0 bg-black/90 flex items-center justify-center z-[60]"
+          onClick={() => setLightbox(null)}
+        >
+          <button
+            type="button"
+            className="absolute top-4 right-4 text-white text-3xl"
+            onClick={() => setLightbox(null)}
+          >
+            ×
+          </button>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={lightbox} alt="" className="max-w-[95vw] max-h-[95vh] object-contain" />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Section({ title, items }: { title: string; items: string[] }) {
   return (
     <div>
@@ -4550,6 +4942,29 @@ function WatchedCard({
   // 🔬 (Runtime Verify) — collapsible section state, closed by default
   const [runtimeOpen, setRuntimeOpen] = useState(false);
   const [runtimeBusy, setRuntimeBusy] = useState(false);
+
+  // 🆕 (Phase 5 V4 — bug A1) — Feature Inventory inline modal state
+  const [fiOpen, setFiOpen] = useState(false);
+  const [fiData, setFiData] = useState<any | null>(null);
+  const [fiLoading, setFiLoading] = useState(false);
+  const [fiError, setFiError] = useState<string | null>(null);
+
+  const openFeatureInventory = useCallback(async () => {
+    setFiOpen(true);
+    if (fiData) return;  // قبلاً fetch شده
+    setFiLoading(true);
+    setFiError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/watched/${w.id}/feature-inventory`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setFiData(data);
+    } catch (e: any) {
+      setFiError(String(e?.message || e));
+    } finally {
+      setFiLoading(false);
+    }
+  }, [w.id, fiData]);
 
   useEffect(() => {
     setNotes(w.user_notes);
@@ -4811,8 +5226,49 @@ function WatchedCard({
         </label>
       </div>
 
+      {/* 🆕 (Phase 5 V4 — bug A3) — 4-tab navigation for settings sections.
+          Replaces the user's expectation of a 4-tab redesign without
+          breaking the existing structure. Clicking a tab scrolls to the
+          relevant section AND opens its <details> if collapsed. */}
+      <div className="mt-3 flex flex-wrap gap-1 sticky top-0 bg-white/95 dark:bg-gray-900/95 backdrop-blur z-10 py-1.5 border-b border-gray-200 dark:border-gray-700">
+        {[
+          { id: 'coverage', label: '🔍 Coverage', color: 'cyan', anchor: `settings-coverage-${w.id}` },
+          { id: 'intelligence', label: '🧠 Intelligence', color: 'fuchsia', anchor: `settings-intelligence-${w.id}` },
+          { id: 'lifecycle', label: '🔁 Lifecycle', color: 'teal', anchor: `settings-lifecycle-${w.id}` },
+          { id: 'notifications', label: '🔔 Notifications', color: 'amber', anchor: `settings-notifications-${w.id}` },
+        ].map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => {
+              const el = document.getElementById(t.anchor);
+              if (el) {
+                // اگر داخل <details>، بازش کن
+                let p: HTMLElement | null = el;
+                while (p) {
+                  if (p.tagName === 'DETAILS') {
+                    (p as HTMLDetailsElement).open = true;
+                    break;
+                  }
+                  p = p.parentElement;
+                }
+                el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                // flash highlight
+                el.classList.add('ring-2', 'ring-offset-2', `ring-${t.color}-400`);
+                setTimeout(() => {
+                  el.classList.remove('ring-2', 'ring-offset-2', `ring-${t.color}-400`);
+                }, 1500);
+              }
+            }}
+            className={`px-2.5 py-1 text-xs rounded-full border transition bg-${t.color}-50 dark:bg-${t.color}-900/20 text-${t.color}-700 dark:text-${t.color}-300 border-${t.color}-300 dark:border-${t.color}-700 hover:bg-${t.color}-100 dark:hover:bg-${t.color}-900/40`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
       {/* 🆕 (commit 2.3) Scan settings — مهاجرت از Health analysis */}
-      <details className="mt-3 bg-cyan-50 dark:bg-cyan-900/20 border border-cyan-200 dark:border-cyan-800/40 rounded-lg p-3 text-xs">
+      <details id={`settings-coverage-${w.id}`} className="mt-3 bg-cyan-50 dark:bg-cyan-900/20 border border-cyan-200 dark:border-cyan-800/40 rounded-lg p-3 text-xs">
         <summary className="cursor-pointer font-medium text-cyan-800 dark:text-cyan-200">
           ⚙️ تنظیمات پیشرفتهٔ scan (عمق + وزن‌های معیار)
         </summary>
@@ -5151,7 +5607,7 @@ function WatchedCard({
       </div>
 
       {/* 🆕 (Phase 5 — فاز ۹) — Scan V5 Intelligence Settings */}
-      <div className="mb-3 p-3 bg-fuchsia-50 dark:bg-fuchsia-900/20 border border-fuchsia-200 dark:border-fuchsia-800 rounded-lg">
+      <div id={`settings-intelligence-${w.id}`} className="mb-3 p-3 bg-fuchsia-50 dark:bg-fuchsia-900/20 border border-fuchsia-200 dark:border-fuchsia-800 rounded-lg">
         <div className="text-sm font-semibold dark:text-fuchsia-200 mb-2 flex items-center gap-2">
           🧠 Scan v5 Intelligence — هوشمندی scan
           <span className="text-[10px] px-1.5 py-0.5 bg-fuchsia-200 dark:bg-fuchsia-800 dark:text-fuchsia-100 rounded">Phase 5</span>
@@ -5268,7 +5724,7 @@ function WatchedCard({
               <option value="never">❌ never (هرگز چک‌لیست)</option>
             </select>
           </label>
-          <label className="flex items-center gap-2 cursor-pointer self-end mb-1">
+          <label id={`settings-notifications-${w.id}`} className="flex items-center gap-2 cursor-pointer self-end mb-1">
             <input
               type="checkbox"
               checked={!!w.auto_task_notify_sound}
@@ -5296,19 +5752,194 @@ function WatchedCard({
           <div className="mt-2 text-[10px] text-fuchsia-700 dark:text-fuchsia-300">
             ✅ آخرین scan v5: {new Date(w.last_scan_at_v5).toLocaleString('fa-IR')}
             {' '}|{' '}
+            <button
+              type="button"
+              onClick={openFeatureInventory}
+              className="underline hover:text-fuchsia-900 dark:hover:text-fuchsia-100 cursor-pointer"
+            >
+              🗺 مشاهده Feature Inventory (R8)
+            </button>
+            {' '}·{' '}
             <a
               href={`${API_BASE}/api/oversight/watched/${w.id}/feature-inventory`}
               target="_blank" rel="noreferrer"
-              className="underline hover:text-fuchsia-900 dark:hover:text-fuchsia-100"
+              className="text-fuchsia-500 hover:text-fuchsia-700"
+              title="باز کردن JSON خام در تب جدید"
             >
-              🗺 مشاهده Feature Inventory (R8)
+              📄 JSON
             </a>
           </div>
+        )}
+
+        {/* 🆕 (Phase 5 V4 — bug A1) — Feature Inventory drill-down modal */}
+        {fiOpen && (
+          <Modal title="🗺 Feature Inventory" onClose={() => setFiOpen(false)}>
+            {fiLoading && (
+              <div className="p-6 text-center text-gray-500 dark:text-gray-400">
+                <div className="text-3xl mb-2">⏳</div>
+                <div>در حال بارگذاری...</div>
+              </div>
+            )}
+            {fiError && !fiLoading && (
+              <div className="p-6 text-center text-red-600 dark:text-red-400">
+                <div className="text-3xl mb-2">❌</div>
+                <div>خطا: {fiError}</div>
+              </div>
+            )}
+            {fiData && !fiLoading && !fiError && (
+              <div className="space-y-4 text-sm dark:text-gray-200">
+                {/* timestamp + watched id */}
+                <div className="bg-gray-50 dark:bg-gray-900 p-3 rounded text-xs">
+                  <div>📁 <span className="font-mono">{fiData.watched_id}</span></div>
+                  {fiData.scanned_at && (
+                    <div className="mt-1">
+                      🕐 scanned at: {new Date(fiData.scanned_at).toLocaleString('fa-IR')}
+                    </div>
+                  )}
+                  <div className="mt-1">
+                    🧠 purpose_map: {fiData.purpose_count || 0} فایل
+                  </div>
+                </div>
+
+                {/* inventory summary */}
+                {fiData.inventory_summary && Object.keys(fiData.inventory_summary).length > 0 && (
+                  <div>
+                    <h3 className="font-bold mb-2 text-fuchsia-700 dark:text-fuchsia-300">
+                      📊 خلاصهٔ inventory (۱۲ لایه)
+                    </h3>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      {Object.entries(fiData.inventory_summary).map(([k, v]) => (
+                        <div
+                          key={k}
+                          className="bg-fuchsia-50 dark:bg-fuchsia-900/20 border border-fuchsia-200 dark:border-fuchsia-800 rounded p-2"
+                        >
+                          <div className="text-[10px] text-fuchsia-700 dark:text-fuchsia-400">
+                            {k}
+                          </div>
+                          <div className="text-lg font-bold text-fuchsia-900 dark:text-fuchsia-100">
+                            {String(v)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* stale findings */}
+                {fiData.stale && (fiData.stale.summary?.structural_total || fiData.stale.summary?.semantic_total) && (
+                  <div>
+                    <h3 className="font-bold mb-2 text-amber-700 dark:text-amber-300">
+                      🗑 Stale & Forgotten Options
+                    </h3>
+                    <div className="text-xs text-amber-700 dark:text-amber-400 mb-2">
+                      {fiData.stale.summary?.structural_total || 0} structural
+                      {' + '}
+                      {fiData.stale.summary?.semantic_total || 0} semantic
+                    </div>
+                    {fiData.stale.summary?.by_kind && (
+                      <div className="space-y-1 text-xs">
+                        {Object.entries(fiData.stale.summary.by_kind).map(([kind, n]) => (
+                          <div key={kind} className="flex justify-between">
+                            <span className="text-gray-700 dark:text-gray-300">{kind}:</span>
+                            <span className="font-bold">{String(n)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {/* اولین ۱۵ structural items */}
+                    {Array.isArray(fiData.stale.structural) && fiData.stale.structural.length > 0 && (
+                      <details className="mt-2">
+                        <summary className="cursor-pointer text-xs text-amber-600 hover:text-amber-800">
+                          مشاهدهٔ {fiData.stale.structural.length} مورد structural
+                        </summary>
+                        <div className="mt-1 max-h-64 overflow-y-auto space-y-1">
+                          {fiData.stale.structural.slice(0, 30).map((s: any, i: number) => (
+                            <div key={i} className="text-[10px] font-mono bg-amber-50 dark:bg-amber-900/20 p-1 rounded">
+                              <span className="text-amber-700 dark:text-amber-400">[{s.kind || '?'}]</span>
+                              {' '}
+                              <span className="text-gray-800 dark:text-gray-200">
+                                {s.file || s.path || s.route || s.label || '?'}
+                              </span>
+                              {s.reason && (
+                                <div className="text-gray-500 dark:text-gray-400">
+                                  → {String(s.reason).slice(0, 100)}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                          {fiData.stale.structural.length > 30 && (
+                            <div className="text-[10px] text-gray-500 italic">
+                              … و {fiData.stale.structural.length - 30} مورد دیگر (برای دیدن کامل، JSON ببین)
+                            </div>
+                          )}
+                        </div>
+                      </details>
+                    )}
+                  </div>
+                )}
+
+                {/* feature docs */}
+                {Array.isArray(fiData.feature_docs) && fiData.feature_docs.length > 0 && (
+                  <div>
+                    <h3 className="font-bold mb-2 text-cyan-700 dark:text-cyan-300">
+                      📚 Feature Documentation ({fiData.feature_docs.length})
+                    </h3>
+                    <div className="space-y-2 max-h-96 overflow-y-auto">
+                      {fiData.feature_docs.slice(0, 50).map((fd: any, i: number) => (
+                        <div
+                          key={i}
+                          className="bg-cyan-50 dark:bg-cyan-900/20 border border-cyan-200 dark:border-cyan-800 rounded p-2 text-xs"
+                        >
+                          <div className="font-bold text-cyan-800 dark:text-cyan-200">
+                            {fd.name || fd.key || `Feature ${i + 1}`}
+                          </div>
+                          {fd.type && (
+                            <div className="text-[10px] text-cyan-600 dark:text-cyan-400">
+                              type: {fd.type}
+                              {fd.file && <> · file: <span className="font-mono">{fd.file}</span></>}
+                            </div>
+                          )}
+                          {fd.what_it_does && (
+                            <div className="mt-1 text-gray-700 dark:text-gray-300">
+                              {fd.what_it_does}
+                            </div>
+                          )}
+                          {fd.current_status && (
+                            <div className="mt-1 text-[10px]">
+                              وضعیت:
+                              <span
+                                className={
+                                  fd.current_status === 'active'
+                                    ? 'text-green-600 mr-1'
+                                    : fd.current_status === 'possibly_stale'
+                                      ? 'text-amber-600 mr-1'
+                                      : 'text-gray-500 mr-1'
+                                }
+                              >
+                                {fd.current_status}
+                              </span>
+                              {fd.recommended_action && <>· توصیه: <span className="font-semibold">{fd.recommended_action}</span></>}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {fiData._hint && (
+                  <div className="text-[10px] text-gray-500 italic border-t pt-2 dark:border-gray-700">
+                    💡 {fiData._hint}
+                  </div>
+                )}
+              </div>
+            )}
+          </Modal>
         )}
       </div>
 
       {/* 🆕 (Smart Task Lifecycle) چرخهٔ تسک — dedup + auto-regenerate */}
-      <div className="mb-3 p-3 bg-teal-50 dark:bg-teal-900/20 border border-teal-200 dark:border-teal-800 rounded-lg">
+      <div id={`settings-lifecycle-${w.id}`} className="mb-3 p-3 bg-teal-50 dark:bg-teal-900/20 border border-teal-200 dark:border-teal-800 rounded-lg">
         <div className="text-sm font-semibold dark:text-teal-200 mb-2 flex items-center gap-2 flex-wrap">
           🔁 چرخهٔ تسک (Smart Task Lifecycle)
           <span className="text-[10px] px-1.5 py-0.5 bg-teal-200 dark:bg-teal-800 dark:text-teal-100 rounded">قدیمی + سازگار با Phase 5</span>
