@@ -1145,9 +1145,27 @@ def _infer_route_for_step(
 
     # 1) explicit URL path — /foo or /foo/bar (نه فقط /)
     # حداقل ۳ حرف بعد از / تا با همان "/" تنها confuse نشود
-    m_url = _re.search(r"(?<!\w)/([a-z][a-z0-9_-]{2,}(?:/[a-z0-9_-]+)*)", combined_low)
-    if m_url:
-        return ("/" + m_url.group(1), True)
+    # 🆕 (bug 32) — exclude file-extension matches (e.g., `/page.tsx`,
+    # `/utils.py`). قبلاً «frontend/.../page.tsx» را به /page تبدیل می‌کرد
+    # که در runtime → 404. حالا اگر بعد از match یک `.` همراه با حرف بیاید
+    # (یعنی پسوند فایل)، آن match رد می‌شود.
+    # همچنین کلمات generic مثل page/pages/index/utils/main رد می‌شوند.
+    _GENERIC_PATH_WORDS = {
+        "page", "pages", "index", "main", "app", "src", "lib",
+        "utils", "helpers", "types", "components", "common",
+        "dist", "build", "node_modules", "test", "tests",
+    }
+    # 🆕 (bug 32) — انکر سمت راست به non-path-char (و سپس exclude file ext)
+    # تا regex نتواند با backtrack از "/page.tsx" ، "/pag" استخراج کند.
+    for _m_url in _re.finditer(
+        r"(?<!\w)/([a-z][a-z0-9_-]{2,}(?:/[a-z0-9_-]+)*)(?![a-z0-9_-])(?!\.[a-z])",
+        combined_low,
+    ):
+        _candidate = _m_url.group(1)
+        # اگر فقط یک segment است و در لیست generic، رد کن
+        if "/" not in _candidate and _candidate in _GENERIC_PATH_WORDS:
+            continue
+        return ("/" + _candidate, True)
 
     # 2) Next.js App Router file path
     m1 = _re.search(r"app/([a-z0-9_\-]+(?:/[a-z0-9_\-]+)*)/page\.[jt]sx?", combined_low)
@@ -2261,6 +2279,9 @@ async def verify_task(
 
                         # 2) task_steps — حیاتی برای checklist
                         # هر task_step را به‌عنوان یک AC در نظر می‌گیریم
+                        # 🆕 (bug 31) cap از 10 به 40 → step های 11+ هم
+                        # code-aware می‌گیرند. code_aware_verifier حالا
+                        # داخل خودش batching می‌کند.
                         _steps_list = list(task.task_steps or [])
                         if _steps_list:
                             _step_acs = [
@@ -2271,7 +2292,7 @@ async def verify_task(
                                     ).strip(),
                                     "_step_id": s.get("id", i + 1),
                                 }
-                                for i, s in enumerate(_steps_list[:10])
+                                for i, s in enumerate(_steps_list[:40])
                                 if isinstance(s, dict)
                             ]
                             if _step_acs:
@@ -2507,6 +2528,34 @@ async def verify_task(
                             return _best
                         return None
 
+                    # 🆕 (bug 33) — per-step classifier: اگر step فقط backend
+                    # است (مثل «Schema migration در OversightTask»)، UI probe
+                    # اصلاً اجرا نشود چون feature روی UI نیست و vision قطعاً
+                    # «feature missing» خواهد گفت. در عوض همان step را برای
+                    # backend_log_probe می‌فرستیم.
+                    def _classify_step_for_probe(step: Dict[str, Any]) -> str:
+                        """Returns: 'ui_eligible' | 'backend_only'"""
+                        _scope_low = str(step.get("scope") or "").lower()
+                        _title_low = str(step.get("title") or "").lower()
+                        _combined = _scope_low + " " + _title_low
+                        _ui_hits = sum(1 for kw in _UI_KEYWORDS if kw in _combined)
+                        _be_hits = sum(1 for kw in _BACKEND_KEYWORDS if kw in _combined)
+                        # کلمات backend-specific (Schema migration, dataclass, AST,
+                        # subprocess, ...) که قطعاً UI ندارند
+                        _strong_backend_terms = (
+                            "schema migration", "dataclass", "ast parse",
+                            "subprocess", "asyncio", "pytest", "import graph",
+                            "background task", "scheduler", "thread",
+                            "system prompt", "ai prompt", "@router",
+                            "fastapi", "pydantic", "sqlalchemy",
+                        )
+                        _strong_be = any(t in _combined for t in _strong_backend_terms)
+                        if _strong_be and _ui_hits == 0:
+                            return "backend_only"
+                        if _be_hits >= 2 and _ui_hits == 0:
+                            return "backend_only"
+                        return "ui_eligible"
+
                     # حداکثر ۱۲ مرحله — متناسب با cap چک‌لیست ۳۰ که هرکدام
                     # ~1 دقیقه طول می‌کشد، 12 → ~12 دقیقه عمر مفید برای probe
                     for _step in _ts_list[:12]:
@@ -2516,6 +2565,41 @@ async def verify_task(
                             _sid = _step.get("id", 0)
                             _stitle = str(_step.get("title") or "")[:80]
                             _sscope = str(_step.get("scope") or "")[:200]
+                            # 🆕 (bug 33) — backend-only step → skip UI probe
+                            _step_class = _classify_step_for_probe(_step)
+                            if _step_class == "backend_only":
+                                if auto_verify_session_id:
+                                    try:
+                                        from .verify_runtime.inspector_probe import _msg as _ip_msg
+                                        await _ip_msg(
+                                            auto_verify_session_id, "system",
+                                            f"⏭ step #{_sid} ({_stitle[:50]}) → backend-only "
+                                            f"(UI probe skipped — code-aware + backend-log کافی است)",
+                                        )
+                                    except Exception:
+                                        pass
+                                # یک probe result با status=skipped می‌سازیم تا
+                                # در bundle مشخص باشد (و verify درست محاسبه کند)
+                                from .verify_runtime.base import (
+                                    RuntimeProbeResult, PROBE_STATUS_SKIPPED,
+                                )
+                                runtime_probe_results.append(
+                                    RuntimeProbeResult(
+                                        ac_id=f"step_{_sid}",
+                                        ac_text=f"(step probe #{_sid}) {_stitle}",
+                                        method="ui_interaction",
+                                        status=PROBE_STATUS_SKIPPED,
+                                        evidence={
+                                            "skip_reason": "backend_only — UI probe دور زده شد",
+                                            "step_id": _sid,
+                                            "step_title": _stitle,
+                                            "probe_type": "skipped_backend_only",
+                                        },
+                                        duration_ms=0,
+                                        error_message=None,
+                                    )
+                                )
+                                continue
 
                             # 🆕 (Phase 4 fix) — Smart Navigation همیشه قبل
                             # از matched-AC check اجرا شود، تا حتی AC هایی که
