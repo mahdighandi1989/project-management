@@ -5226,8 +5226,49 @@ function WatchedCard({
         </label>
       </div>
 
+      {/* 🆕 (Phase 5 V4 — bug A3) — 4-tab navigation for settings sections.
+          Replaces the user's expectation of a 4-tab redesign without
+          breaking the existing structure. Clicking a tab scrolls to the
+          relevant section AND opens its <details> if collapsed. */}
+      <div className="mt-3 flex flex-wrap gap-1 sticky top-0 bg-white/95 dark:bg-gray-900/95 backdrop-blur z-10 py-1.5 border-b border-gray-200 dark:border-gray-700">
+        {[
+          { id: 'coverage', label: '🔍 Coverage', color: 'cyan', anchor: `settings-coverage-${w.id}` },
+          { id: 'intelligence', label: '🧠 Intelligence', color: 'fuchsia', anchor: `settings-intelligence-${w.id}` },
+          { id: 'lifecycle', label: '🔁 Lifecycle', color: 'teal', anchor: `settings-lifecycle-${w.id}` },
+          { id: 'notifications', label: '🔔 Notifications', color: 'amber', anchor: `settings-notifications-${w.id}` },
+        ].map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => {
+              const el = document.getElementById(t.anchor);
+              if (el) {
+                // اگر داخل <details>، بازش کن
+                let p: HTMLElement | null = el;
+                while (p) {
+                  if (p.tagName === 'DETAILS') {
+                    (p as HTMLDetailsElement).open = true;
+                    break;
+                  }
+                  p = p.parentElement;
+                }
+                el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                // flash highlight
+                el.classList.add('ring-2', 'ring-offset-2', `ring-${t.color}-400`);
+                setTimeout(() => {
+                  el.classList.remove('ring-2', 'ring-offset-2', `ring-${t.color}-400`);
+                }, 1500);
+              }
+            }}
+            className={`px-2.5 py-1 text-xs rounded-full border transition bg-${t.color}-50 dark:bg-${t.color}-900/20 text-${t.color}-700 dark:text-${t.color}-300 border-${t.color}-300 dark:border-${t.color}-700 hover:bg-${t.color}-100 dark:hover:bg-${t.color}-900/40`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
       {/* 🆕 (commit 2.3) Scan settings — مهاجرت از Health analysis */}
-      <details className="mt-3 bg-cyan-50 dark:bg-cyan-900/20 border border-cyan-200 dark:border-cyan-800/40 rounded-lg p-3 text-xs">
+      <details id={`settings-coverage-${w.id}`} className="mt-3 bg-cyan-50 dark:bg-cyan-900/20 border border-cyan-200 dark:border-cyan-800/40 rounded-lg p-3 text-xs">
         <summary className="cursor-pointer font-medium text-cyan-800 dark:text-cyan-200">
           ⚙️ تنظیمات پیشرفتهٔ scan (عمق + وزن‌های معیار)
         </summary>
@@ -5566,7 +5607,7 @@ function WatchedCard({
       </div>
 
       {/* 🆕 (Phase 5 — فاز ۹) — Scan V5 Intelligence Settings */}
-      <div className="mb-3 p-3 bg-fuchsia-50 dark:bg-fuchsia-900/20 border border-fuchsia-200 dark:border-fuchsia-800 rounded-lg">
+      <div id={`settings-intelligence-${w.id}`} className="mb-3 p-3 bg-fuchsia-50 dark:bg-fuchsia-900/20 border border-fuchsia-200 dark:border-fuchsia-800 rounded-lg">
         <div className="text-sm font-semibold dark:text-fuchsia-200 mb-2 flex items-center gap-2">
           🧠 Scan v5 Intelligence — هوشمندی scan
           <span className="text-[10px] px-1.5 py-0.5 bg-fuchsia-200 dark:bg-fuchsia-800 dark:text-fuchsia-100 rounded">Phase 5</span>
@@ -5683,7 +5724,7 @@ function WatchedCard({
               <option value="never">❌ never (هرگز چک‌لیست)</option>
             </select>
           </label>
-          <label className="flex items-center gap-2 cursor-pointer self-end mb-1">
+          <label id={`settings-notifications-${w.id}`} className="flex items-center gap-2 cursor-pointer self-end mb-1">
             <input
               type="checkbox"
               checked={!!w.auto_task_notify_sound}
@@ -5898,7 +5939,7 @@ function WatchedCard({
       </div>
 
       {/* 🆕 (Smart Task Lifecycle) چرخهٔ تسک — dedup + auto-regenerate */}
-      <div className="mb-3 p-3 bg-teal-50 dark:bg-teal-900/20 border border-teal-200 dark:border-teal-800 rounded-lg">
+      <div id={`settings-lifecycle-${w.id}`} className="mb-3 p-3 bg-teal-50 dark:bg-teal-900/20 border border-teal-200 dark:border-teal-800 rounded-lg">
         <div className="text-sm font-semibold dark:text-teal-200 mb-2 flex items-center gap-2 flex-wrap">
           🔁 چرخهٔ تسک (Smart Task Lifecycle)
           <span className="text-[10px] px-1.5 py-0.5 bg-teal-200 dark:bg-teal-800 dark:text-teal-100 rounded">قدیمی + سازگار با Phase 5</span>
