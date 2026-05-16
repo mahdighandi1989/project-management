@@ -31,7 +31,10 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # محدودیت‌ها
-_MAX_ACS_PER_BATCH = 10
+_MAX_ACS_PER_BATCH = 10      # سقف هر batch به AI (تا context AI نشکند)
+_MAX_TOTAL_ACS = 40          # 🆕 (bug 31) — قبلاً همان 10 بود و step های 11+
+                              # هرگز code-aware نمی‌گرفتند. حالا تا 40 پشتیبانی
+                              # می‌شود با اجرای چند batch موازی.
 _MAX_COMMITS_TO_FETCH = 60  # 🆕 از 20 به 60 — feature های قدیمی‌تر هم در بازه می‌آیند
 _MAX_FILES_PER_COMMIT = 8
 _MAX_PATCH_CHARS = 1200  # هر patch trim شود تا context AI نشکند
@@ -48,6 +51,10 @@ async def analyze_acs_with_commit_diffs(
 ) -> List[Dict[str, Any]]:
     """تحلیل per-AC با commit diffs (batch AI call).
 
+    🆕 (bug 31) — حالا چندین batch اجرا می‌کند تا همه‌ی AC ها تحلیل
+    شوند (تا سقف _MAX_TOTAL_ACS=40)، نه فقط ۱۰ تای اول. batch ها به
+    صورت موازی اجرا می‌شوند.
+
     شکست‌خوردگی مجاز:
     - GitHub API fail → همه‌ی نتایج با code_verdict="unclear"
     - AI fail → همه با code_verdict="unclear"
@@ -56,19 +63,68 @@ async def analyze_acs_with_commit_diffs(
     if not acs:
         return []
 
-    # commits اخیر را با diff fetch کن
+    # commits اخیر را یک‌بار fetch کن (shared بین همه batch ها)
     commits_with_diff = await _fetch_recent_commits_with_diff(
         repo_full_name, token, limit=_MAX_COMMITS_TO_FETCH,
     )
     if not commits_with_diff:
         return [
             _build_unclear_result(i, ac, reason="no recent commits found")
-            for i, ac in enumerate(acs[:_MAX_ACS_PER_BATCH])
+            for i, ac in enumerate(acs[:_MAX_TOTAL_ACS])
         ]
 
+    # 🆕 (bug 31) — تقسیم AC ها به batches و موازی‌سازی
+    _capped_acs = acs[:_MAX_TOTAL_ACS]
+    _batches: List[List[Any]] = []
+    for _b_start in range(0, len(_capped_acs), _MAX_ACS_PER_BATCH):
+        _batches.append(_capped_acs[_b_start : _b_start + _MAX_ACS_PER_BATCH])
+
+    logger.info(
+        f"code_aware_verifier: {len(_capped_acs)} ACs → "
+        f"{len(_batches)} batch(es) of ≤{_MAX_ACS_PER_BATCH}"
+    )
+
+    async def _process_batch(
+        batch_acs: List[Any], batch_offset: int,
+    ) -> List[Dict[str, Any]]:
+        return await _process_single_batch(
+            task=task,
+            batch_acs=batch_acs,
+            batch_offset=batch_offset,
+            commits_with_diff=commits_with_diff,
+            verify_model_id=verify_model_id,
+        )
+
+    # موازی‌سازی batch ها
+    _gathered = await asyncio.gather(
+        *[
+            _process_batch(batch, idx * _MAX_ACS_PER_BATCH)
+            for idx, batch in enumerate(_batches)
+        ],
+        return_exceptions=False,
+    )
+
+    # ادغام نتایج
+    _all_results: List[Dict[str, Any]] = []
+    for _batch_results in _gathered:
+        _all_results.extend(_batch_results)
+    return _all_results
+
+
+async def _process_single_batch(
+    task: Any,
+    batch_acs: List[Any],
+    batch_offset: int,
+    commits_with_diff: List[Dict[str, Any]],
+    verify_model_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """پردازش یک batch از ACs (حداکثر _MAX_ACS_PER_BATCH).
+
+    batch_offset برای حفظ ac_id درست (step_N) استفاده می‌شود.
+    """
     # AC ها را به متن خام تبدیل کن
     ac_texts: List[str] = []
-    for ac in acs[:_MAX_ACS_PER_BATCH]:
+    for ac in batch_acs:
         if isinstance(ac, dict):
             ac_texts.append(str(ac.get("text") or "").strip())
         else:
@@ -88,16 +144,15 @@ async def analyze_acs_with_commit_diffs(
     except Exception as e:
         logger.warning(f"code_aware_verifier AI batch failed: {e}")
         return [
-            _build_unclear_result(i, ac, reason=f"AI batch failed: {str(e)[:100]}")
-            for i, ac in enumerate(acs[:_MAX_ACS_PER_BATCH])
+            _build_unclear_result(
+                batch_offset + i, ac,
+                reason=f"AI batch failed: {str(e)[:100]}",
+            )
+            for i, ac in enumerate(batch_acs)
         ]
 
     # نتایج را با input AC ها sync کن
     target_files_list = list(task.target_files or [])
-    # 🆕 (Phase 4 fix) — task context کامل برای token-matching: AC کلی
-    # ممکن است نام فایل ندهد ولی task_steps می‌دهد. ما tokens همه‌ی
-    # task_steps را به ac_context هر AC اضافه می‌کنیم تا programmatic
-    # upgrade برای AC های کلی هم fire شود.
     _task_steps_text = " ".join(
         f"{s.get('title', '')} {s.get('scope', '')}"
         for s in (getattr(task, "task_steps", None) or [])
@@ -107,7 +162,7 @@ async def analyze_acs_with_commit_diffs(
     _task_extra_context = (_task_title + " " + _task_steps_text).strip()
 
     final: List[Dict[str, Any]] = []
-    for i, ac in enumerate(acs[:_MAX_ACS_PER_BATCH]):
+    for i, ac in enumerate(batch_acs):
         ac_text = ac_texts[i] if i < len(ac_texts) else ""
         ai_item = results.get(i, {}) if isinstance(results, dict) else {}
         verdict = _norm_verdict(ai_item.get("verdict"))
@@ -115,15 +170,9 @@ async def analyze_acs_with_commit_diffs(
         key_changes = list(ai_item.get("key_changes") or [])[:5]
         reason = str(ai_item.get("reason") or "")[:400]
 
-        # 🆕 (Phase 4 fix) — programmatic upgrade: اگر AI گفت not_found یا
-        # unclear ولی AC (یا task context) به فایلی اشاره می‌کند که در
-        # target_files است، آن را به 'implemented' upgrade کن.
-        # ac_context = ac_text + کل task_steps + title — تا AC های کلی هم
-        # از طریق task_steps کشف شوند.
+        # programmatic upgrade (همان منطق قبلی)
         if verdict in ("not_found", "unclear") and target_files_list and ac_text:
             import re as _re_match
-            # ترکیب ac.text با task context (titleها + scopeها) تا
-            # AC های کلی بتوانند از طریق task_steps هم match شوند
             _full_ctx = (ac_text + " " + _task_extra_context).strip()
             ac_tokens = set(
                 t.lower() for t in _re_match.findall(r"[A-Za-z][A-Za-z0-9]+", _full_ctx)
@@ -156,7 +205,7 @@ async def analyze_acs_with_commit_diffs(
                 )
 
         final.append({
-            "ac_index": i,
+            "ac_index": batch_offset + i,  # 🆕 offset باعث می‌شود ac_index در سراسر batch ها یکتا بماند
             "ac_text": ac_text,
             "code_verdict": verdict,
             "matching_commits": matching,
