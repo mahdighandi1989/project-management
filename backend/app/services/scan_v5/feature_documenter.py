@@ -166,7 +166,21 @@ async def document_features(
                 "field_hint": btn.get("label", ""),
                 "context": btn.get("handler", ""),
             })
-    items_to_document = items_to_document[:_MAX_OPTIONS_TO_DOCUMENT]
+    # 🆕 (bug A5) — dedup قبل از AI و قبل از output. علت: یک کاربر callback
+    # (مثلاً updatePrefs در NotificationSettingsPanel.tsx) می‌تواند چندین
+    # checkbox/slider را trigger کند — هر کدام یک ui_option جداگانه در
+    # inventory می‌شوند ولی منطقاً همگی همان feature هستند. بدون این dedup،
+    # کاربر در UI می‌بیند که `updatePrefs` ۵ بار، `config` ۴ بار، ...
+    # تکرار می‌شود.
+    _seen_keys: set = set()
+    _deduped: List[Dict[str, Any]] = []
+    for _item in items_to_document:
+        _k = _item_key(_item)
+        if _k in _seen_keys:
+            continue
+        _seen_keys.add(_k)
+        _deduped.append(_item)
+    items_to_document = _deduped[:_MAX_OPTIONS_TO_DOCUMENT]
 
     # AI batched
     docs: Dict[str, Dict[str, Any]] = {}

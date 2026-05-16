@@ -5607,12 +5607,13 @@ function WatchedCard({
       </div>
 
       {/* 🆕 (Phase 5 — فاز ۹) — Scan V5 Intelligence Settings */}
-      <div id={`settings-intelligence-${w.id}`} className="mb-3 p-3 bg-fuchsia-50 dark:bg-fuchsia-900/20 border border-fuchsia-200 dark:border-fuchsia-800 rounded-lg">
-        <div className="text-sm font-semibold dark:text-fuchsia-200 mb-2 flex items-center gap-2">
+      {/* 🆕 (bug A4) — کشویی شد. روی refresh بسته است؛ tab handler خودکار باز می‌کند. */}
+      <details id={`settings-intelligence-${w.id}`} className="mb-3 p-3 bg-fuchsia-50 dark:bg-fuchsia-900/20 border border-fuchsia-200 dark:border-fuchsia-800 rounded-lg">
+        <summary className="text-sm font-semibold dark:text-fuchsia-200 cursor-pointer flex items-center gap-2 select-none">
           🧠 Scan v5 Intelligence — هوشمندی scan
           <span className="text-[10px] px-1.5 py-0.5 bg-fuchsia-200 dark:bg-fuchsia-800 dark:text-fuchsia-100 rounded">Phase 5</span>
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+        </summary>
+        <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
           <label className="flex items-center gap-2 cursor-pointer">
             <input
               type="checkbox"
@@ -5936,11 +5937,12 @@ function WatchedCard({
             )}
           </Modal>
         )}
-      </div>
+      </details>
 
       {/* 🆕 (Smart Task Lifecycle) چرخهٔ تسک — dedup + auto-regenerate */}
-      <div id={`settings-lifecycle-${w.id}`} className="mb-3 p-3 bg-teal-50 dark:bg-teal-900/20 border border-teal-200 dark:border-teal-800 rounded-lg">
-        <div className="text-sm font-semibold dark:text-teal-200 mb-2 flex items-center gap-2 flex-wrap">
+      {/* 🆕 (bug A4) — کشویی شد */}
+      <details id={`settings-lifecycle-${w.id}`} className="mb-3 p-3 bg-teal-50 dark:bg-teal-900/20 border border-teal-200 dark:border-teal-800 rounded-lg">
+        <summary className="text-sm font-semibold dark:text-teal-200 cursor-pointer flex items-center gap-2 flex-wrap select-none">
           🔁 چرخهٔ تسک (Smart Task Lifecycle)
           <span className="text-[10px] px-1.5 py-0.5 bg-teal-200 dark:bg-teal-800 dark:text-teal-100 rounded">قدیمی + سازگار با Phase 5</span>
           <span
@@ -5949,7 +5951,8 @@ function WatchedCard({
           >
             ⓘ
           </span>
-        </div>
+        </summary>
+        <div className="mt-2" />
         <label className="flex items-start gap-2 cursor-pointer mb-2">
           <input
             type="checkbox"
@@ -6072,7 +6075,7 @@ function WatchedCard({
             🔄 بازتولید پرامپت‌های ناقص
           </button>
         </div>
-      </div>
+      </details>
 
       {/* 🔬 (Runtime Verify Stage 4) — Collapsible Runtime Verify section */}
       <div className="mt-3 border border-cyan-300 dark:border-cyan-700 rounded bg-cyan-50/40 dark:bg-cyan-900/10">
