@@ -4551,6 +4551,29 @@ function WatchedCard({
   const [runtimeOpen, setRuntimeOpen] = useState(false);
   const [runtimeBusy, setRuntimeBusy] = useState(false);
 
+  // 🆕 (Phase 5 V4 — bug A1) — Feature Inventory inline modal state
+  const [fiOpen, setFiOpen] = useState(false);
+  const [fiData, setFiData] = useState<any | null>(null);
+  const [fiLoading, setFiLoading] = useState(false);
+  const [fiError, setFiError] = useState<string | null>(null);
+
+  const openFeatureInventory = useCallback(async () => {
+    setFiOpen(true);
+    if (fiData) return;  // قبلاً fetch شده
+    setFiLoading(true);
+    setFiError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/watched/${w.id}/feature-inventory`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setFiData(data);
+    } catch (e: any) {
+      setFiError(String(e?.message || e));
+    } finally {
+      setFiLoading(false);
+    }
+  }, [w.id, fiData]);
+
   useEffect(() => {
     setNotes(w.user_notes);
     setIntervalH(w.interval_hours);
@@ -5296,14 +5319,189 @@ function WatchedCard({
           <div className="mt-2 text-[10px] text-fuchsia-700 dark:text-fuchsia-300">
             ✅ آخرین scan v5: {new Date(w.last_scan_at_v5).toLocaleString('fa-IR')}
             {' '}|{' '}
+            <button
+              type="button"
+              onClick={openFeatureInventory}
+              className="underline hover:text-fuchsia-900 dark:hover:text-fuchsia-100 cursor-pointer"
+            >
+              🗺 مشاهده Feature Inventory (R8)
+            </button>
+            {' '}·{' '}
             <a
               href={`${API_BASE}/api/oversight/watched/${w.id}/feature-inventory`}
               target="_blank" rel="noreferrer"
-              className="underline hover:text-fuchsia-900 dark:hover:text-fuchsia-100"
+              className="text-fuchsia-500 hover:text-fuchsia-700"
+              title="باز کردن JSON خام در تب جدید"
             >
-              🗺 مشاهده Feature Inventory (R8)
+              📄 JSON
             </a>
           </div>
+        )}
+
+        {/* 🆕 (Phase 5 V4 — bug A1) — Feature Inventory drill-down modal */}
+        {fiOpen && (
+          <Modal title="🗺 Feature Inventory" onClose={() => setFiOpen(false)}>
+            {fiLoading && (
+              <div className="p-6 text-center text-gray-500 dark:text-gray-400">
+                <div className="text-3xl mb-2">⏳</div>
+                <div>در حال بارگذاری...</div>
+              </div>
+            )}
+            {fiError && !fiLoading && (
+              <div className="p-6 text-center text-red-600 dark:text-red-400">
+                <div className="text-3xl mb-2">❌</div>
+                <div>خطا: {fiError}</div>
+              </div>
+            )}
+            {fiData && !fiLoading && !fiError && (
+              <div className="space-y-4 text-sm dark:text-gray-200">
+                {/* timestamp + watched id */}
+                <div className="bg-gray-50 dark:bg-gray-900 p-3 rounded text-xs">
+                  <div>📁 <span className="font-mono">{fiData.watched_id}</span></div>
+                  {fiData.scanned_at && (
+                    <div className="mt-1">
+                      🕐 scanned at: {new Date(fiData.scanned_at).toLocaleString('fa-IR')}
+                    </div>
+                  )}
+                  <div className="mt-1">
+                    🧠 purpose_map: {fiData.purpose_count || 0} فایل
+                  </div>
+                </div>
+
+                {/* inventory summary */}
+                {fiData.inventory_summary && Object.keys(fiData.inventory_summary).length > 0 && (
+                  <div>
+                    <h3 className="font-bold mb-2 text-fuchsia-700 dark:text-fuchsia-300">
+                      📊 خلاصهٔ inventory (۱۲ لایه)
+                    </h3>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      {Object.entries(fiData.inventory_summary).map(([k, v]) => (
+                        <div
+                          key={k}
+                          className="bg-fuchsia-50 dark:bg-fuchsia-900/20 border border-fuchsia-200 dark:border-fuchsia-800 rounded p-2"
+                        >
+                          <div className="text-[10px] text-fuchsia-700 dark:text-fuchsia-400">
+                            {k}
+                          </div>
+                          <div className="text-lg font-bold text-fuchsia-900 dark:text-fuchsia-100">
+                            {String(v)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* stale findings */}
+                {fiData.stale && (fiData.stale.summary?.structural_total || fiData.stale.summary?.semantic_total) && (
+                  <div>
+                    <h3 className="font-bold mb-2 text-amber-700 dark:text-amber-300">
+                      🗑 Stale & Forgotten Options
+                    </h3>
+                    <div className="text-xs text-amber-700 dark:text-amber-400 mb-2">
+                      {fiData.stale.summary?.structural_total || 0} structural
+                      {' + '}
+                      {fiData.stale.summary?.semantic_total || 0} semantic
+                    </div>
+                    {fiData.stale.summary?.by_kind && (
+                      <div className="space-y-1 text-xs">
+                        {Object.entries(fiData.stale.summary.by_kind).map(([kind, n]) => (
+                          <div key={kind} className="flex justify-between">
+                            <span className="text-gray-700 dark:text-gray-300">{kind}:</span>
+                            <span className="font-bold">{String(n)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {/* اولین ۱۵ structural items */}
+                    {Array.isArray(fiData.stale.structural) && fiData.stale.structural.length > 0 && (
+                      <details className="mt-2">
+                        <summary className="cursor-pointer text-xs text-amber-600 hover:text-amber-800">
+                          مشاهدهٔ {fiData.stale.structural.length} مورد structural
+                        </summary>
+                        <div className="mt-1 max-h-64 overflow-y-auto space-y-1">
+                          {fiData.stale.structural.slice(0, 30).map((s: any, i: number) => (
+                            <div key={i} className="text-[10px] font-mono bg-amber-50 dark:bg-amber-900/20 p-1 rounded">
+                              <span className="text-amber-700 dark:text-amber-400">[{s.kind || '?'}]</span>
+                              {' '}
+                              <span className="text-gray-800 dark:text-gray-200">
+                                {s.file || s.path || s.route || s.label || '?'}
+                              </span>
+                              {s.reason && (
+                                <div className="text-gray-500 dark:text-gray-400">
+                                  → {String(s.reason).slice(0, 100)}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                          {fiData.stale.structural.length > 30 && (
+                            <div className="text-[10px] text-gray-500 italic">
+                              … و {fiData.stale.structural.length - 30} مورد دیگر (برای دیدن کامل، JSON ببین)
+                            </div>
+                          )}
+                        </div>
+                      </details>
+                    )}
+                  </div>
+                )}
+
+                {/* feature docs */}
+                {Array.isArray(fiData.feature_docs) && fiData.feature_docs.length > 0 && (
+                  <div>
+                    <h3 className="font-bold mb-2 text-cyan-700 dark:text-cyan-300">
+                      📚 Feature Documentation ({fiData.feature_docs.length})
+                    </h3>
+                    <div className="space-y-2 max-h-96 overflow-y-auto">
+                      {fiData.feature_docs.slice(0, 50).map((fd: any, i: number) => (
+                        <div
+                          key={i}
+                          className="bg-cyan-50 dark:bg-cyan-900/20 border border-cyan-200 dark:border-cyan-800 rounded p-2 text-xs"
+                        >
+                          <div className="font-bold text-cyan-800 dark:text-cyan-200">
+                            {fd.name || fd.key || `Feature ${i + 1}`}
+                          </div>
+                          {fd.type && (
+                            <div className="text-[10px] text-cyan-600 dark:text-cyan-400">
+                              type: {fd.type}
+                              {fd.file && <> · file: <span className="font-mono">{fd.file}</span></>}
+                            </div>
+                          )}
+                          {fd.what_it_does && (
+                            <div className="mt-1 text-gray-700 dark:text-gray-300">
+                              {fd.what_it_does}
+                            </div>
+                          )}
+                          {fd.current_status && (
+                            <div className="mt-1 text-[10px]">
+                              وضعیت:
+                              <span
+                                className={
+                                  fd.current_status === 'active'
+                                    ? 'text-green-600 mr-1'
+                                    : fd.current_status === 'possibly_stale'
+                                      ? 'text-amber-600 mr-1'
+                                      : 'text-gray-500 mr-1'
+                                }
+                              >
+                                {fd.current_status}
+                              </span>
+                              {fd.recommended_action && <>· توصیه: <span className="font-semibold">{fd.recommended_action}</span></>}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {fiData._hint && (
+                  <div className="text-[10px] text-gray-500 italic border-t pt-2 dark:border-gray-700">
+                    💡 {fiData._hint}
+                  </div>
+                )}
+              </div>
+            )}
+          </Modal>
         )}
       </div>
 
