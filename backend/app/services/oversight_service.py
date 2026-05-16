@@ -2712,6 +2712,58 @@ class OversightService:
           {id, title, scope, raw_excerpt, key_terms: [...]}
         اگر AI نتوانست تقسیم منطقی بدهد، list خالی.
         """
+        # 🆕 (Phase 5 — bug 30) — Pre-detect explicit section markers in idea.
+        # برای ایده‌های خیلی بزرگ مثل meta-task ها که چندین Phase/فاز دارند،
+        # AI تمایل دارد همه را یک task کلی ببیند و فقط ۱-۲ step بسازد.
+        # با شناسایی صریح بخش‌بندی‌ها، AI را مجبور می‌کنیم پیروی کند.
+        import re as _re_seg
+        _section_patterns = [
+            # heading-level English: "## Phase 1", "### Stage 2", etc.
+            r'(?im)^\s*#{1,4}\s*[^\w\n]*(?:phase|stage|step)\s+[\d]+',
+            # inline English with separator: "Phase 1 — ...", "Stage 2:"
+            r'(?im)^\s*(?:phase|stage|step)\s+[\d]+\s*[:\-—]',
+            # Persian with letter-emoji prefix: "## 🅰️ فاز ۱"
+            r'(?im)^\s*#{1,4}\s*[🅰🅱🅲🅳🅴🅵🅶🅷🅸🅹]️?\s*فاز\s*[\d۰-۹]+',
+            # Persian heading: "## فاز ۱", "# فاز ۲"
+            r'(?im)^\s*#{1,4}\s*[^\w\n]*فاز\s*[\d۰-۹]+',
+            # Persian word form: "فاز دوم:", "فاز سوم:"
+            r'(?im)^\s*فاز\s+(?:اول|دوم|سوم|چهارم|پنجم|ششم|هفتم|هشتم|نهم|دهم|یازدهم|دوازدهم)\s*[:\-—]',
+            # Generic Persian: "مرحله ۱:", "گام ۲:"
+            r'(?im)^\s*(?:مرحله|گام)\s*[\d۰-۹]+\s*[:\-—]',
+            # 🆕 (bug 30 — refinement) heading شامل Phase X با هر متن قبلش
+            # مثل "# 🎯 پرامپت Phase 1 — ..."
+            r'(?im)^\s*#{1,4}\s.*?\b(?:phase|stage)\s+[\d]+\b',
+        ]
+        _detected_sections: List[str] = []
+        _seen_sigs: set = set()
+        for _pat in _section_patterns:
+            for _m in _re_seg.finditer(_pat, idea):
+                _sig = _re_seg.sub(r'\s+', ' ', _m.group(0).strip().lower())
+                if _sig not in _seen_sigs:
+                    _seen_sigs.add(_sig)
+                    _detected_sections.append(_sig)
+        _section_count = len(_detected_sections)
+        _is_multi_section = _section_count >= 3
+
+        # 🆕 (bug 30) — اگر بخش‌بندی صریح زیاد دیدیم، prompt را hint بزن
+        # و فرمت compact بخواه تا output در ۱۲۰۰۰ توکن جای کافی داشته باشد.
+        _section_hint = ""
+        if _is_multi_section:
+            _detected_preview = "\n".join(
+                f"  - {s[:80]}" for s in _detected_sections[:25]
+            )
+            _section_hint = (
+                f"\n\n🚨 **تشخیص خودکار: متن کاربر شامل {_section_count} "
+                f"بخش صریح است.** بخش‌های detected:\n{_detected_preview}\n\n"
+                f"⚠️ **الزامی**: تو **باید دقیقاً {min(_section_count, 30)} "
+                f"مرحله** بسازی، هر کدام مربوط به یکی از این بخش‌های صریح. "
+                f"اگر تعداد کمتر برگردانی، یعنی کار را خلاصه کرده‌ای — این "
+                f"اشتباه است.\n\n"
+                f"💡 **برای جا کردن همه در پاسخ**: scope هر مرحله را **حداکثر "
+                f"۴۰۰ کاراکتر** و raw_excerpt را **حداکثر ۸۰۰ کاراکتر** "
+                f"نگه‌دار. غنی‌سازی در pass بعدی انجام می‌شود."
+            )
+
         plan_prompt = f"""تو یک پلانر دقیق هستی. درخواست طولانی کاربر را به مراحل کوچک‌تر و **مستقل** تقسیم می‌کنی.
 
 ## قانون‌های حیاتی (دقیقاً رعایت کن):
@@ -2724,7 +2776,7 @@ class OversightService:
 7. **`key_terms`**: همهٔ نام‌ها (فایل، endpoint، function، URL، library، dataclass، table، …) که کاربر در این بخش گفته. حداقل ۳ آیتم اگر در متن وجود دارد.
 8. اگر درخواست کاربر فقط یک کار است (نه چندتایی)، فقط ۱ مرحله بده — ولی همان ۱ مرحله را خیلی غنی توضیح بده.
 
-## مهم: اگر کاربر صراحتاً موارد ۱، ۲، ۳، … را شماره‌گذاری کرده، **برای هر کدام یک مرحله** بساز. اگر بنویسد «و این، و آن، و فلان»، هر کدام جداگانه.
+## مهم: اگر کاربر صراحتاً موارد ۱، ۲، ۳، … را شماره‌گذاری کرده، **برای هر کدام یک مرحله** بساز. اگر بنویسد «و این، و آن، و فلان»، هر کدام جداگانه.{_section_hint}
 
 ## هدف اصلی پروژه:
 {user_goal or '(کاربر یادداشتی ثبت نکرده است)'}
@@ -2762,44 +2814,76 @@ class OversightService:
 - اگر مرحله **vague** است (مثل "system works")، آن را به sub-behaviors **concrete** split کن.
 - `non_goals` باید **صریح** باشد تا verify فریب نخورد.
 """
-        try:
+        # 🆕 (bug 30) — برای ایده‌های با چند بخش صریح، max_tokens را بالا ببر
+        # تا output truncate نشود. DeepSeek-Chat تا ۱۶۳۸۴ توکن خروجی می‌دهد.
+        _max_out_tokens = 16000 if _is_multi_section else 12000
+
+        async def _run_planner(_prompt: str, _budget: int) -> List[Dict[str, Any]]:
+            """یک تلاش پلانر — اجرای AI، parse JSON، normalize steps."""
             response = await self._ai_generate(
-                plan_prompt,
+                _prompt,
                 model_id=(model_ids[0] if model_ids else model_id),
-                max_tokens=12000,  # 🛡 (audit fix #2) از 4000 افزایش یافت — تا
-                                   # planner برای requestهای بزرگ کوتاهی نکند
+                max_tokens=_budget,
                 temperature=0.2,
             )
             parsed = self._extract_json(response)
             if not isinstance(parsed, dict):
                 return []
-            steps = parsed.get("steps") or []
-            if not isinstance(steps, list):
+            raw_steps = parsed.get("steps") or []
+            if not isinstance(raw_steps, list):
                 return []
-            # validation
-            valid_steps: List[Dict[str, Any]] = []
-            for i, s in enumerate(steps):
+            out: List[Dict[str, Any]] = []
+            for i, s in enumerate(raw_steps):
                 if not isinstance(s, dict):
                     continue
                 title = (s.get("title") or "").strip()
                 scope = (s.get("scope") or "").strip()
                 if not title or not scope:
                     continue
-                # 🆕 (Phase 5 — فاز ۷) — ساختار غنی task_step (R9, R13):
-                # علاوه بر title/scope، فیلدهای رفتار-محور هم استخراج می‌کنیم
-                valid_steps.append({
+                out.append({
                     "id": int(s.get("id") or (i + 1)),
                     "title": title[:200],
                     "scope": scope[:2500],
                     "raw_excerpt": (s.get("raw_excerpt") or "").strip()[:4000],
                     "key_terms": [str(k) for k in (s.get("key_terms") or [])[:25]],
-                    # Phase 5 — فاز ۷
                     "behavior_observable": str(s.get("behavior_observable") or "").strip()[:500],
                     "verification_hint": str(s.get("verification_hint") or "").strip()[:300],
                     "business_intent": str(s.get("business_intent") or "").strip()[:300],
                     "non_goals": str(s.get("non_goals") or "").strip()[:300],
                 })
-            return valid_steps[:30]  # 🛡 6 → 12 → 30 (پشتیبانی تسک‌های پیچیده)
+            return out[:30]
+
+        try:
+            valid_steps = await _run_planner(plan_prompt, _max_out_tokens)
+
+            # 🆕 (bug 30) — اگر بخش‌بندی صریح زیاد بود ولی خروجی خیلی کمتر،
+            # AI خلاصه کرده — یک‌بار دیگر با تأکید صریح‌تر تلاش کن.
+            if (
+                _is_multi_section
+                and _section_count >= 3
+                and len(valid_steps) < max(3, int(_section_count * 0.5))
+            ):
+                logger.warning(
+                    f"_ai_plan_steps: AI returned {len(valid_steps)} steps but "
+                    f"idea has {_section_count} explicit sections — retrying with stricter prompt"
+                )
+                retry_hint = (
+                    f"\n\n🚨🚨🚨 **بازنگری اجباری**: تلاش قبلی فقط "
+                    f"{len(valid_steps)} مرحله ساخت در حالی که متن دارای "
+                    f"{_section_count} بخش صریح شماره‌دار است. **این بار "
+                    f"دقیقاً {min(_section_count, 30)} مرحله بساز** — برای "
+                    f"هر بخش یک مرحله. هر چیزی کمتر = خلاصه‌سازی = اشتباه."
+                )
+                retry_prompt = plan_prompt + retry_hint
+                retry_steps = await _run_planner(retry_prompt, _max_out_tokens)
+                if len(retry_steps) > len(valid_steps):
+                    logger.info(
+                        f"_ai_plan_steps: retry succeeded — "
+                        f"{len(valid_steps)} → {len(retry_steps)} steps"
+                    )
+                    valid_steps = retry_steps
+
+            return valid_steps
         except Exception as e:
             logger.warning(f"_ai_plan_steps_from_idea failed: {e}")
             return []
