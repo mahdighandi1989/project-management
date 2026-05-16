@@ -170,8 +170,13 @@ async def _process_single_batch(
         key_changes = list(ai_item.get("key_changes") or [])[:5]
         reason = str(ai_item.get("reason") or "")[:400]
 
-        # programmatic upgrade (همان منطق قبلی)
-        if verdict in ("not_found", "unclear") and target_files_list and ac_text:
+        # programmatic upgrade — 🆕 (bug 34) — حالا "partial" را هم پشتیبانی
+        # می‌کند. علت: AC هایی که چند feature را با هم نام می‌برند («Smart
+        # Navigation + Backend Log Probe + Code-aware») وقتی AI فقط یکی را
+        # در commits اخیر می‌بیند، verdict را "partial" می‌گذارد و
+        # implemented اعلام نمی‌شود. اگر همه فایل‌های مرتبط در target_files
+        # یا repo tree موجود باشند، باید به implemented upgrade شوند.
+        if verdict in ("not_found", "unclear", "partial") and target_files_list and ac_text:
             import re as _re_match
             _full_ctx = (ac_text + " " + _task_extra_context).strip()
             ac_tokens = set(
@@ -191,14 +196,48 @@ async def _process_single_batch(
                 )
                 if not base_tokens:
                     continue
-                # match اگر همه token های basename در AC تمیز پیدا شوند
-                if base_tokens.issubset(ac_tokens):
+                # 🆕 (bug 34) — match در چهار سطح:
+                # 1) strict: همه‌ی token های basename در AC tokens
+                # 2) majority: ≥۵۰٪ token های basename match + ≥۲ مورد
+                # 3) single-token: basename یک‌token است و در AC هست
+                # 4) specific-token: یک token "specific" (≥۶ char، یعنی
+                #    کلمهٔ تخصصی مثل "navigation"، "inspector"، "auth_runner")
+                #    در AC هست — این برای ACهایی که فقط feature name را
+                #    می‌گویند (نه پسوند helper/runner/service) لازم است.
+                # tokenهای generic که به‌تنهایی شواهد محکم نیستند
+                _COMMON_SUFFIX_TOKENS = {
+                    "helper", "runner", "service", "utils", "util", "manager",
+                    "handler", "factory", "client", "common", "test", "tests",
+                    "main", "app", "src", "lib", "code", "file", "data",
+                    "base", "core", "types", "schema", "config",
+                }
+                _inter = base_tokens & ac_tokens
+                _strict_match = base_tokens.issubset(ac_tokens)
+                _majority_match = (
+                    len(base_tokens) >= 2
+                    and len(_inter) >= 2
+                    and len(_inter) / len(base_tokens) >= 0.5
+                )
+                _single_token_match = (
+                    len(base_tokens) == 1 and len(_inter) == 1
+                )
+                # specific-token: حداقل یک token محکم (≥۴ char و در لیست
+                # stopwords عمومی نیست) match کرده. ۴ char برای پوشش
+                # کلمات تخصصی کوتاه مثل "auth" یا "probe" یا "scan".
+                _specific_match = any(
+                    t in ac_tokens
+                    and len(t) >= 4
+                    and t not in _COMMON_SUFFIX_TOKENS
+                    for t in base_tokens
+                )
+                if _strict_match or _majority_match or _single_token_match or _specific_match:
                     matched_files.append(tf_str)
             if matched_files:
+                _prev_verdict = verdict
                 verdict = "implemented"
                 _orig_reason = reason
                 reason = (
-                    f"⚙️ programmatic-upgrade: AI گفت not_found ولی AC به "
+                    f"⚙️ programmatic-upgrade: AI گفت {_prev_verdict} ولی AC به "
                     f"{matched_files[:3]} اشاره می‌کند که در target_files "
                     f"موجود است → پیش‌ساخته. "
                     f"اصلی: {_orig_reason[:160]}"
