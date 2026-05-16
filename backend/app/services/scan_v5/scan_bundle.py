@@ -46,6 +46,7 @@ def build_scan_bundle_md(
     watched: Any,
     scan_v5_inventory: Dict[str, Any],
     created_tasks: List[Dict[str, Any]],
+    all_findings: Optional[List[Dict[str, Any]]] = None,
 ) -> bytes:
     """ساخت HTML bundle از scan v5 خروجی.
 
@@ -332,6 +333,134 @@ def build_scan_bundle_md(
             f"خروجی AI calls این scan را ببینید.",
         ))
 
+    # ══════════════════════════════════════════════════════════════════════
+    # 🆕 (Phase 5 — bug 29) — بخش‌های گسترش‌یافتهٔ گزارش جامع
+    # درخواست کاربر: هر pass و هر phase 5 layer باید با جزئیات کامل بیاید.
+    # ══════════════════════════════════════════════════════════════════════
+
+    # ── 11. Bidirectional Dependency Impact (downstream + upstream + added) ──
+    _ci = scan_v5_inventory.get("_change_impact") or []
+    _ui = scan_v5_inventory.get("_upstream_impact") or []
+    _ar = scan_v5_inventory.get("_added_ripple") or []
+    if _ci or _ui or _ar:
+        body = (
+            f"**خلاصه:** "
+            f"⚠️ {len(_ci)} downstream · "
+            f"⬆️ {len(_ui)} upstream · "
+            f"🧩 {len(_ar)} added-file ripple\n"
+        )
+        if _ci:
+            body += "\n**⚠️ Downstream impact (dependents در خطر):**\n"
+            for item in _ci[:30]:
+                _ch = _safe(item.get("changed_file", "?"), 70)
+                _dep = _safe(item.get("dependent_file", "?"), 70)
+                _risk = item.get("risk", "?")
+                _reason = _safe(item.get("reason", ""), 140)
+                body += f"- `{_ch}` → `{_dep}` [risk: {_risk}]: {_reason}\n"
+            if len(_ci) > 30:
+                body += f"  _… و {len(_ci) - 30} مورد دیگر_\n"
+        if _ui:
+            body += "\n**⬆️ Upstream impact (وابستگی‌ها نیازمند update):**\n"
+            for item in _ui[:30]:
+                _ch = _safe(item.get("changed_file", "?"), 70)
+                _up = _safe(item.get("upstream_file", "?"), 70)
+                _risk = item.get("risk", "?")
+                _reason = _safe(item.get("reason", ""), 140)
+                body += f"- `{_ch}` ← `{_up}` [risk: {_risk}]: {_reason}\n"
+            if len(_ui) > 30:
+                body += f"  _… و {len(_ui) - 30} مورد دیگر_\n"
+        if _ar:
+            body += "\n**🧩 Added-file ripple (orphan / missing companion):**\n"
+            for item in _ar[:30]:
+                _added = _safe(item.get("added_file", "?"), 70)
+                _ity = item.get("issue_type", "?")
+                _reason = _safe(item.get("reason", ""), 140)
+                body += f"- `{_added}` [{_ity}]: {_reason}\n"
+            if len(_ar) > 30:
+                body += f"  _… و {len(_ar) - 30} مورد دیگر_\n"
+        parts.append(_section("۱۱. Bidirectional Dependency Impact (R7+R10)", body))
+
+    # ── 12. Cleanup tasks (subset) ──
+    if created_tasks:
+        cleanup = [t for t in created_tasks if (t.get("type") or "").lower() == "cleanup"]
+        if cleanup:
+            body = f"**{len(cleanup)} cleanup task:**\n\n"
+            for t in cleanup[:30]:
+                body += (
+                    f"- [{t.get('priority', '?')}] "
+                    f"{_safe(t.get('title', '?'), 140)}\n"
+                )
+            parts.append(_section("۱۲. Cleanup Tasks", body))
+
+    # ── 13. گزارش تفصیلی per-category (۶ گروه اصلی pass ها) ──
+    # mapping از pass name به گروه کاربر:
+    _CAT_MAP = {
+        "🔒 امنیت": ["security", "security_deep"],
+        "🛠 کیفیت": ["quality"],
+        "🧪 تست": ["coverage"],
+        "✅ کامل بودن": ["completeness"],
+        "🧩 منطق/هم‌راستایی": [
+            "logical_alignment", "cross_stack", "dependency", "integrity",
+        ],
+        "⚙️ صحت رفتاری": ["functional_correctness", "frontend", "backend"],
+    }
+    _findings_all = all_findings or []
+    if _findings_all:
+        cat_intro = (
+            f"**کل findings این scan:** {len(_findings_all)}\n\n"
+            "هر یافته زیر شامل: مسیر فایل، severity، توضیح، توصیه.\n"
+        )
+        parts.append(_section("۱۳. گزارش تفصیلی per-category", cat_intro))
+        for cat_label, pass_names in _CAT_MAP.items():
+            # جمع‌آوری findings آن گروه
+            cat_findings = [
+                f for f in _findings_all
+                if (f.get("_pass") or "").lower() in [p.lower() for p in pass_names]
+            ]
+            if not cat_findings:
+                parts.append(_section(f"  {cat_label}", "_(یافته‌ای در این گروه ثبت نشد)_"))
+                continue
+            # group by severity
+            from collections import Counter
+            sev_count = Counter(
+                (f.get("severity") or f.get("priority") or "medium").lower()
+                for f in cat_findings
+            )
+            sev_summary = " · ".join(f"{s}: {c}" for s, c in sev_count.most_common())
+            body = f"**{len(cat_findings)} یافته** ({sev_summary})\n\n"
+            # sort by severity desc
+            _SEV = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+            cat_findings = sorted(
+                cat_findings,
+                key=lambda x: _SEV.get(
+                    (x.get("severity") or x.get("priority") or "medium").lower(), 2
+                ),
+            )
+            for f in cat_findings[:60]:  # تا ۶۰ مورد per category
+                _sev = (f.get("severity") or f.get("priority") or "medium").lower()
+                _title = _safe(f.get("title") or f.get("description", ""), 180)
+                _files = f.get("target_files") or []
+                _file_str = _safe(_files[0], 80) if _files else "(no file)"
+                _line = f.get("line") or ""
+                _line_str = f":{_line}" if _line else ""
+                _reason = _safe(
+                    f.get("description") or f.get("reason", ""), 250,
+                )
+                _rec = _safe(f.get("proposed_action") or f.get("recommendation", ""), 200)
+                body += (
+                    f"### [{_sev}] {_title}\n"
+                    f"- 📂 **file:** `{_file_str}{_line_str}`\n"
+                    f"- 📝 **توضیح:** {_reason}\n"
+                )
+                if _rec:
+                    body += f"- 🛠 **توصیه:** {_rec}\n"
+                body += "\n"
+            if len(cat_findings) > 60:
+                body += f"_… و {len(cat_findings) - 60} مورد دیگر در این گروه_\n"
+            parts.append(_section(f"  {cat_label}", body))
+
+    # ══════════════════════════════════════════════════════════════════════
+
     # ── compose HTML ──
     full_md = "".join(parts)
     title_html = _safe(repo_name, 200)
@@ -380,9 +509,12 @@ async def build_scan_bundle_pdf(
     watched: Any,
     scan_v5_inventory: Dict[str, Any],
     created_tasks: List[Dict[str, Any]],
+    all_findings: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[bytes, str]:
     """ساخت PDF با Playwright fallback به HTML."""
-    html_bytes = build_scan_bundle_md(watched, scan_v5_inventory, created_tasks)
+    html_bytes = build_scan_bundle_md(
+        watched, scan_v5_inventory, created_tasks, all_findings=all_findings,
+    )
     if html_bytes.startswith(b"\xef\xbb\xbf"):
         html_bytes = html_bytes[3:]
     try:
