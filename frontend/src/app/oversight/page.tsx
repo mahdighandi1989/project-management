@@ -925,6 +925,14 @@ export default function OversightPage() {
   const [reportSinceFilter, setReportSinceFilter] = useState<string>('');
   const [reportFlaggedOnly, setReportFlaggedOnly] = useState(false);
   const [viewingReport, setViewingReport] = useState<Report | null>(null);
+  // 🆕 (Phase 5 V4 — bug A2) — Evidence drill-down modal for inspector probes
+  // یک probe + reference به report برای ساختن لینک‌ها
+  const [drillDownProbe, setDrillDownProbe] = useState<{
+    probe: any;
+    taskId: string;
+    runId: string;
+    projectId?: string;
+  } | null>(null);
 
   // Idea inbox
   const [idea, setIdea] = useState('');
@@ -3948,6 +3956,22 @@ export default function OversightPage() {
                                 {p.duration_ms}ms
                               </span>
                             ) : null}
+                            {/* 🆕 (bug A2) — drill-down evidence modal trigger */}
+                            <button
+                              type="button"
+                              onClick={() => setDrillDownProbe({
+                                probe: p,
+                                taskId: viewingReport.task_id,
+                                runId: viewingReport.evidence?.runtime_run_id || '',
+                                projectId: viewingReport.evidence?.auto_verify_project_id
+                                  ? String(viewingReport.evidence.auto_verify_project_id)
+                                  : undefined,
+                              })}
+                              className="ml-auto px-1.5 py-0.5 text-[10px] rounded bg-white/70 dark:bg-black/30 hover:bg-white dark:hover:bg-gray-700 border border-gray-300 dark:border-gray-600 dark:text-white"
+                              title="مشاهدهٔ کامل شواهد"
+                            >
+                              🔍 جزئیات
+                            </button>
                           </div>
                           <div className="text-[11px] dark:text-gray-200 italic mb-1">
                             «{(p.ac_text || '').slice(0, 200)}»
@@ -4408,6 +4432,17 @@ export default function OversightPage() {
             <VerifyHistoryView data={verifyHistoryData} />
           </Modal>
         )}
+
+        {/* 🆕 (Phase 5 V4 — bug A2) — Evidence drill-down modal for inspector probe */}
+        {drillDownProbe && (
+          <EvidenceDrillDownModal
+            probe={drillDownProbe.probe}
+            taskId={drillDownProbe.taskId}
+            runId={drillDownProbe.runId}
+            projectId={drillDownProbe.projectId}
+            onClose={() => setDrillDownProbe(null)}
+          />
+        )}
       </div>
     </div>
   );
@@ -4484,6 +4519,363 @@ function Modal({
         </div>
         <div className="overflow-auto p-4 flex-1">{children}</div>
       </div>
+    </div>
+  );
+}
+
+// 🆕 (Phase 5 V4 — bug A2) — full drill-down modal for a single probe's evidence
+function EvidenceDrillDownModal({
+  probe,
+  taskId,
+  runId,
+  projectId,
+  onClose,
+}: {
+  probe: any;
+  taskId: string;
+  runId: string;
+  projectId?: string;
+  onClose: () => void;
+}) {
+  const [lightbox, setLightbox] = useState<string | null>(null);
+  const evidence = probe?.evidence || {};
+  const screenshots: any[] = Array.isArray(evidence.screenshots) ? evidence.screenshots : [];
+  const assertions: any[] = Array.isArray(evidence.assertion_results) ? evidence.assertion_results : [];
+  const actions: any[] = Array.isArray(evidence.actions_taken) ? evidence.actions_taken : [];
+  const networkCalls: any[] = Array.isArray(evidence.network_calls) ? evidence.network_calls : [];
+  const backendUrls: any[] = Array.isArray(evidence.backend_urls_called) ? evidence.backend_urls_called : [];
+  const consoleErrors: any[] = Array.isArray(evidence.console_errors) ? evidence.console_errors : [];
+
+  const screenshotUrl = (sn: any): string | null => {
+    if (typeof sn === 'string') {
+      if (!runId) return null;
+      return `${API_BASE}/api/oversight/tasks/${taskId}/evidence/${runId}/${probe.ac_id}/${sn}`;
+    }
+    if (sn?.url) return String(sn.url);
+    if (sn?.path && runId) {
+      const filename = String(sn.path).split('/').pop() || '';
+      return `${API_BASE}/api/oversight/tasks/${taskId}/evidence/${runId}/${probe.ac_id}/${filename}`;
+    }
+    return null;
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white dark:bg-gray-800 rounded-xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between p-4 border-b dark:border-gray-700">
+          <div className="flex-1 min-w-0">
+            <h2 className="text-lg font-bold dark:text-white truncate">
+              🔬 شواهد کامل probe
+            </h2>
+            <div className="text-xs text-gray-500 dark:text-gray-400 flex items-center gap-2 mt-1">
+              <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700">
+                {probe.method}
+              </span>
+              <span className={
+                probe.status === 'passed' ? 'text-green-700 dark:text-green-300'
+                : probe.status === 'failed' ? 'text-red-700 dark:text-red-300'
+                : probe.status === 'error' ? 'text-amber-700 dark:text-amber-300'
+                : 'text-gray-500'
+              }>
+                {probe.status}
+              </span>
+              {probe.duration_ms != null && (
+                <span>· {probe.duration_ms}ms</span>
+              )}
+            </div>
+          </div>
+          {projectId && evidence.inspector_session_id && (
+            <a
+              href={`/projects/${encodeURIComponent(projectId)}?tab=inspector&session=${encodeURIComponent(String(evidence.inspector_session_id))}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="ml-3 text-xs text-cyan-700 dark:text-cyan-300 hover:underline whitespace-nowrap"
+            >
+              📺 بازرس ویژه
+            </a>
+          )}
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-600 text-2xl leading-none px-2 ml-2"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="overflow-auto p-4 flex-1 space-y-4 text-sm dark:text-gray-200">
+          {/* AC text — کامل، بدون truncate */}
+          <div className="bg-gray-50 dark:bg-gray-900 rounded p-3">
+            <div className="text-[10px] uppercase text-gray-500 mb-1">Acceptance Criterion</div>
+            <div className="italic">«{probe.ac_text || '(empty)'}»</div>
+          </div>
+
+          {/* Error message — کامل */}
+          {probe.error_message && (
+            <div className="bg-red-50 dark:bg-red-900/30 border border-red-300 dark:border-red-700 rounded p-3">
+              <div className="text-[10px] uppercase text-red-700 dark:text-red-300 mb-1">Error</div>
+              <pre className="whitespace-pre-wrap text-xs text-red-800 dark:text-red-200">
+                {probe.error_message}
+              </pre>
+            </div>
+          )}
+
+          {/* Screenshots gallery — بدون cap، با lightbox */}
+          {screenshots.length > 0 && (
+            <div>
+              <h3 className="font-bold mb-2 text-cyan-700 dark:text-cyan-300">
+                📸 Screenshots ({screenshots.length})
+              </h3>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                {screenshots.map((sn, si) => {
+                  const url = screenshotUrl(sn);
+                  const obj = typeof sn === 'object' ? sn : {};
+                  const label = String(obj.label || (typeof sn === 'string' ? sn : `shot ${si + 1}`));
+                  const visionDesc = String(obj.vision_description || '');
+                  const visionSource = String(obj.vision_source || '');
+                  const featurePresent = String(obj.vision_feature_present || '');
+                  const archived = !!obj.archived_to_telegram;
+                  return (
+                    <div
+                      key={si}
+                      className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded overflow-hidden"
+                    >
+                      {url && (
+                        <button
+                          type="button"
+                          onClick={() => setLightbox(url)}
+                          className="block w-full"
+                        >
+                          <img
+                            src={url}
+                            alt={label}
+                            className="w-full h-32 object-cover hover:opacity-90 cursor-zoom-in"
+                            onError={(e) => {
+                              (e.target as HTMLImageElement).style.display = 'none';
+                            }}
+                          />
+                        </button>
+                      )}
+                      <div className="p-2 text-xs space-y-1">
+                        <div className="font-semibold flex items-center justify-between">
+                          <span className="truncate">{label}</span>
+                          {archived && (
+                            <span className="text-[9px] text-cyan-700 dark:text-cyan-300 ml-1">
+                              📦 آرشیو
+                            </span>
+                          )}
+                        </div>
+                        {featurePresent && (
+                          <div className={
+                            featurePresent === 'yes' ? 'text-[10px] text-green-700 dark:text-green-300'
+                            : featurePresent === 'no' ? 'text-[10px] text-red-700 dark:text-red-300'
+                            : 'text-[10px] text-gray-500'
+                          }>
+                            feature_present: {featurePresent}
+                          </div>
+                        )}
+                        {visionDesc && (
+                          <div className="text-[10px] italic text-gray-700 dark:text-gray-300">
+                            👁 {visionDesc}
+                          </div>
+                        )}
+                        {visionSource && visionSource !== 'none' && (
+                          <div className="text-[9px] text-gray-500">
+                            source: <code>{visionSource}</code>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* assertion results */}
+          {assertions.length > 0 && (
+            <div>
+              <h3 className="font-bold mb-2 text-purple-700 dark:text-purple-300">
+                ✅ Assertions ({assertions.length})
+              </h3>
+              <div className="space-y-1">
+                {assertions.map((a, ai) => (
+                  <div
+                    key={ai}
+                    className={`text-xs p-2 rounded border ${
+                      a.met
+                        ? 'bg-green-50 dark:bg-green-900/20 border-green-300 dark:border-green-700'
+                        : 'bg-red-50 dark:bg-red-900/20 border-red-300 dark:border-red-700'
+                    }`}
+                  >
+                    <span className="font-semibold">{a.met ? '✓' : '✗'}</span>
+                    {' '}
+                    <span>{a.expectation}</span>
+                    {a.reason && (
+                      <div className="mt-1 text-[10px] text-gray-600 dark:text-gray-400">
+                        → {a.reason}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* actions taken — Playwright steps log */}
+          {actions.length > 0 && (
+            <div>
+              <h3 className="font-bold mb-2 text-blue-700 dark:text-blue-300">
+                🪜 Actions taken ({actions.length})
+              </h3>
+              <div className="max-h-64 overflow-y-auto bg-gray-50 dark:bg-gray-900 rounded p-2 space-y-1">
+                {actions.map((a, ai) => (
+                  <div key={ai} className="text-[10px] font-mono">
+                    <span className="text-gray-500">#{a.step_idx ?? ai}</span>
+                    {' '}
+                    <span className={a.success === false ? 'text-red-600' : 'text-gray-700 dark:text-gray-300'}>
+                      {a.action || '?'}
+                    </span>
+                    {a.selector && <span className="text-purple-600 dark:text-purple-400"> "{a.selector}"</span>}
+                    {a.value && <span className="text-green-700 dark:text-green-400"> ← {String(a.value).slice(0, 60)}</span>}
+                    {a.url && <span className="text-cyan-700 dark:text-cyan-400"> → {a.url}</span>}
+                    {a.duration_ms != null && <span className="text-gray-500"> ({a.duration_ms}ms)</span>}
+                    {a.error && (
+                      <div className="text-red-700 dark:text-red-400 ml-4">
+                        ⚠ {String(a.error).slice(0, 200)}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Network calls */}
+          {(networkCalls.length > 0 || backendUrls.length > 0) && (
+            <div>
+              <h3 className="font-bold mb-2 text-emerald-700 dark:text-emerald-300">
+                🌐 Network ({networkCalls.length + backendUrls.length})
+              </h3>
+              <div className="max-h-48 overflow-y-auto bg-gray-50 dark:bg-gray-900 rounded p-2 space-y-1">
+                {[...backendUrls, ...networkCalls].slice(0, 100).map((c: any, ci: number) => (
+                  <div key={ci} className="text-[10px] font-mono flex gap-2">
+                    <span className="text-gray-600 dark:text-gray-400 w-12">{c.method || 'GET'}</span>
+                    <span className="text-gray-800 dark:text-gray-200 flex-1 truncate">{c.url || c.path || '?'}</span>
+                    <span className={
+                      (c.status >= 200 && c.status < 400) ? 'text-green-600'
+                      : (c.status >= 400) ? 'text-red-600'
+                      : 'text-gray-500'
+                    }>
+                      {c.status || '?'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Console errors */}
+          {consoleErrors.length > 0 && (
+            <div>
+              <h3 className="font-bold mb-2 text-orange-700 dark:text-orange-300">
+                ⚠ Console errors ({consoleErrors.length})
+              </h3>
+              <div className="max-h-48 overflow-y-auto bg-gray-50 dark:bg-gray-900 rounded p-2 space-y-1">
+                {consoleErrors.map((e: any, ei: number) => (
+                  <div key={ei} className="text-[10px] font-mono">
+                    <span className={
+                      e.level === 'error' ? 'text-red-600'
+                      : e.level === 'warning' ? 'text-amber-600'
+                      : 'text-gray-500'
+                    }>
+                      [{e.level || '?'}]
+                    </span>
+                    {' '}
+                    <span className="text-gray-700 dark:text-gray-300">{e.message || JSON.stringify(e)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* API response — full, terminal-style */}
+          {probe.method === 'api_response' && evidence.response_excerpt && (
+            <div>
+              <h3 className="font-bold mb-2 text-indigo-700 dark:text-indigo-300">
+                🌐 API Response
+              </h3>
+              <pre className="text-[11px] bg-gray-900 text-green-300 p-3 rounded overflow-x-auto max-h-96 font-mono whitespace-pre-wrap">
+                {evidence.response_excerpt}
+              </pre>
+            </div>
+          )}
+
+          {/* pytest stdout — full, terminal-style */}
+          {probe.method === 'backend_test' && evidence.stdout_excerpt && (
+            <div>
+              <h3 className="font-bold mb-2 text-yellow-700 dark:text-yellow-300">
+                🧪 Test stdout
+              </h3>
+              <pre className="text-[11px] bg-gray-900 text-yellow-100 p-3 rounded overflow-x-auto max-h-96 font-mono whitespace-pre-wrap">
+                {evidence.stdout_excerpt}
+              </pre>
+            </div>
+          )}
+
+          {/* Backend log summary — full */}
+          {evidence.backend_log_summary && (
+            <div>
+              <h3 className="font-bold mb-2 text-gray-700 dark:text-gray-300">
+                📋 Backend log summary
+              </h3>
+              <pre className="text-[11px] bg-gray-50 dark:bg-gray-900 text-gray-800 dark:text-gray-200 p-3 rounded overflow-x-auto whitespace-pre-wrap max-h-64">
+                {String(evidence.backend_log_summary)}
+              </pre>
+            </div>
+          )}
+
+          {/* Final URL */}
+          {evidence.final_url && (
+            <div className="text-xs text-gray-600 dark:text-gray-400">
+              📍 final_url: <code className="bg-gray-100 dark:bg-gray-900 px-1 rounded">{evidence.final_url}</code>
+            </div>
+          )}
+
+          {/* Raw evidence dump — collapsible */}
+          <details className="text-xs">
+            <summary className="cursor-pointer text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
+              📦 Raw evidence (JSON)
+            </summary>
+            <pre className="mt-2 text-[10px] bg-gray-900 text-gray-100 p-3 rounded overflow-x-auto max-h-96 font-mono">
+              {JSON.stringify(evidence, null, 2)}
+            </pre>
+          </details>
+        </div>
+      </div>
+
+      {/* Lightbox */}
+      {lightbox && (
+        <div
+          className="fixed inset-0 bg-black/90 flex items-center justify-center z-[60]"
+          onClick={() => setLightbox(null)}
+        >
+          <button
+            type="button"
+            className="absolute top-4 right-4 text-white text-3xl"
+            onClick={() => setLightbox(null)}
+          >
+            ×
+          </button>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={lightbox} alt="" className="max-w-[95vw] max-h-[95vh] object-contain" />
+        </div>
+      )}
     </div>
   );
 }
