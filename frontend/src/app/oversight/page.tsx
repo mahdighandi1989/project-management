@@ -4949,6 +4949,50 @@ function WatchedCard({
   const [fiLoading, setFiLoading] = useState(false);
   const [fiError, setFiError] = useState<string | null>(null);
 
+  // 🆕 (Phase 6 — bug C1) — Bulk Verify state
+  const [bvState, setBvState] = useState<any | null>(null);
+  const [bvPolling, setBvPolling] = useState(false);
+
+  const startBulkVerify = useCallback(async () => {
+    const _confirm = window.confirm(
+      `🔬 Bulk Verify — همهٔ تسک‌های active این پروژه به‌صورت موازی verify می‌شوند.\n\n` +
+        `• تسک‌هایی که done شدند خودکار آرشیو می‌شوند.\n` +
+        `• ~۳۰-۶۰ ثانیه per task، حداکثر ۳ موازی.\n` +
+        `• ۱۰۰ تسک ≈ ۲۰-۳۰ دقیقه. ۳۰۰ تسک ≈ ۹۰ دقیقه.\n\n` +
+        `ادامه می‌دهید؟`
+    );
+    if (!_confirm) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/oversight/watched/${w.id}/bulk-verify?auto_archive_done=true&concurrency=3`,
+        { method: 'POST' }
+      );
+      const data = await res.json();
+      if (!data.started) {
+        alert(`نتوانست شروع شود: ${data.reason || 'unknown'}`);
+        return;
+      }
+      setBvPolling(true);
+      const _interval = setInterval(async () => {
+        try {
+          const sres = await fetch(
+            `${API_BASE}/api/oversight/watched/${w.id}/bulk-verify/status`
+          );
+          const sdata = await sres.json();
+          setBvState(sdata);
+          if (!sdata.running) {
+            clearInterval(_interval);
+            setBvPolling(false);
+          }
+        } catch {
+          // ignore — keep polling
+        }
+      }, 5000);
+    } catch (e: any) {
+      alert(`خطا: ${String(e?.message || e)}`);
+    }
+  }, [w.id]);
+
   const openFeatureInventory = useCallback(async () => {
     setFiOpen(true);
     if (fiData) return;  // قبلاً fetch شده
@@ -6521,6 +6565,45 @@ function WatchedCard({
         )}
       </div>
 
+      {/* 🆕 (Phase 6 — bug C1) — Bulk Verify progress (وقتی فعال است) */}
+      {(bvPolling || bvState?.running) && bvState && (
+        <div className="mb-2 p-2 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-300 dark:border-emerald-700 rounded text-xs">
+          <div className="font-bold text-emerald-800 dark:text-emerald-200 mb-1">
+            🔬 Bulk Verify در حال اجرا — {bvState.current_index}/{bvState.total}
+          </div>
+          {bvState.summary && (
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-1 text-[10px]">
+              <span>✅ done: <b>{bvState.summary.verified_done}</b></span>
+              <span>🟡 partial: <b>{bvState.summary.verified_partial}</b></span>
+              <span>❌ not done: <b>{bvState.summary.verified_not_done}</b></span>
+              <span>⚠️ error: <b>{bvState.summary.verified_error}</b></span>
+              <span>📦 archived: <b>{bvState.summary.auto_archived}</b></span>
+            </div>
+          )}
+        </div>
+      )}
+      {bvState && !bvState.running && bvState.finished_at && bvState.summary && (
+        <div className="mb-2 p-2 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-300 dark:border-emerald-700 rounded text-xs">
+          <div className="font-bold text-emerald-800 dark:text-emerald-200 mb-1">
+            ✅ Bulk Verify تمام شد ({bvState.total} تسک)
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-1 text-[10px]">
+            <span>✅ done: <b>{bvState.summary.verified_done}</b></span>
+            <span>🟡 partial: <b>{bvState.summary.verified_partial}</b></span>
+            <span>❌ not done: <b>{bvState.summary.verified_not_done}</b></span>
+            <span>⚠️ error: <b>{bvState.summary.verified_error}</b></span>
+            <span>📦 archived: <b>{bvState.summary.auto_archived}</b></span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setBvState(null)}
+            className="mt-1 text-[10px] text-gray-500 hover:text-gray-700 underline"
+          >
+            بستن
+          </button>
+        </div>
+      )}
+
       <div className="flex gap-2 flex-wrap">
         <button
           onClick={onDeepScan}
@@ -6529,6 +6612,22 @@ function WatchedCard({
         >
           🔬 Deep Scan
         </button>
+        {taskCount >= 10 && (
+          <button
+            onClick={startBulkVerify}
+            disabled={bvPolling || !!bvState?.running}
+            title={
+              bvPolling || bvState?.running
+                ? 'یک Bulk Verify در حال اجراست'
+                : `verify همزمان روی همهٔ ${taskCount} تسک active. تسک‌های done شده خودکار آرشیو می‌شوند.`
+            }
+            className="px-3 py-1.5 bg-emerald-500 text-white rounded text-sm hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {bvPolling || bvState?.running
+              ? `🔬 verify... (${bvState?.current_index ?? 0}/${bvState?.total ?? 0})`
+              : `🔬 Bulk Verify (${taskCount})`}
+          </button>
+        )}
         <button
           onClick={onScan}
           title="اسکن تک‌پاس و سریع (~30 ثانیه) — برای کشف کلی نیازها بدون per-file scoring"

@@ -1416,6 +1416,205 @@ async def verify_task_now(task_id: str, payload: Optional[RunTaskRequest] = None
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# 🆕 (Phase 6 — bug C1) — Bulk Verify Engine
+# کاربر صدها تسک accumulated دارد و دستی verify کردن غیرعملی است.
+# این endpoint یک background job می‌سازد که همهٔ تسک‌های active
+# (یا فیلتر شده با priority/type) را با concurrency محدود verify می‌کند.
+# هر تسک که done شد → خودکار به archive منتقل می‌شود.
+_BULK_VERIFY_STATE: Dict[str, Any] = {
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "current_index": 0,
+    "total": 0,
+    "watched_id": None,
+    "summary": {
+        "verified_done": 0,
+        "verified_partial": 0,
+        "verified_not_done": 0,
+        "verified_error": 0,
+        "auto_archived": 0,
+    },
+    "error": None,
+    "task_results": [],  # تا 100 نتیجه آخر برای نمایش
+}
+
+
+async def _run_bulk_verify(
+    watched_id: Optional[str],
+    priority_filter: Optional[str],
+    auto_archive_done: bool,
+    concurrency: int,
+) -> None:
+    """در پس‌زمینه روی همه‌ی تسک‌های active (پس از فیلتر) verify اجرا می‌کند."""
+    import asyncio as _aio
+    from datetime import datetime as _dt
+    from ...services.oversight_service import get_oversight_service, now_iso
+    from ...services.oversight_verifier import verify_task as _verify_task
+
+    _BULK_VERIFY_STATE["running"] = True
+    _BULK_VERIFY_STATE["started_at"] = _dt.utcnow().isoformat()
+    _BULK_VERIFY_STATE["finished_at"] = None
+    _BULK_VERIFY_STATE["watched_id"] = watched_id
+    _BULK_VERIFY_STATE["error"] = None
+    _BULK_VERIFY_STATE["current_index"] = 0
+    _BULK_VERIFY_STATE["summary"] = {
+        "verified_done": 0,
+        "verified_partial": 0,
+        "verified_not_done": 0,
+        "verified_error": 0,
+        "auto_archived": 0,
+    }
+    _BULK_VERIFY_STATE["task_results"] = []
+
+    service = get_oversight_service()
+
+    try:
+        # snapshot لیست تسک‌ها — فقط active، فیلتر شده
+        candidate_ids: List[str] = []
+        for t in service.tasks:
+            if watched_id and t.watched_id != watched_id:
+                continue
+            if t.status in ("done", "cancelled"):
+                continue
+            if getattr(t, "archived", False):
+                continue
+            if t.verification_status == "done":
+                continue
+            if priority_filter and t.priority != priority_filter:
+                continue
+            candidate_ids.append(t.id)
+
+        _BULK_VERIFY_STATE["total"] = len(candidate_ids)
+        if not candidate_ids:
+            return
+
+        _sem = _aio.Semaphore(max(1, min(int(concurrency), 5)))
+
+        async def _verify_one(_tid: str, _idx: int) -> None:
+            async with _sem:
+                _result: Dict[str, Any] = {
+                    "task_id": _tid, "index": _idx, "status": "?",
+                    "title": "", "verified_at": now_iso(),
+                }
+                try:
+                    task = next((t for t in service.tasks if t.id == _tid), None)
+                    if task is None:
+                        _result["status"] = "missing"
+                        return
+                    _result["title"] = (task.title or "")[:120]
+                    _report = await _verify_task(_tid, include_runtime=True)
+                    _status = str(getattr(_report, "status", "") or "").lower()
+                    _result["status"] = _status
+
+                    _summary = _BULK_VERIFY_STATE["summary"]
+                    if _status == "done":
+                        _summary["verified_done"] += 1
+                        # auto-archive اگر فعال
+                        if auto_archive_done:
+                            async with service._lock:
+                                live = next((t for t in service.tasks if t.id == _tid), None)
+                                if live is not None and not getattr(live, "archived", False):
+                                    live.archived = True
+                                    live.updated_at = now_iso()
+                                    _summary["auto_archived"] += 1
+                            service._save_tasks()
+                    elif _status == "partial":
+                        _summary["verified_partial"] += 1
+                    elif _status in ("not_done", "regressed"):
+                        _summary["verified_not_done"] += 1
+                    else:
+                        _summary["verified_error"] += 1
+                except Exception as _ve:
+                    _result["status"] = "error"
+                    _result["error"] = str(_ve)[:200]
+                    _BULK_VERIFY_STATE["summary"]["verified_error"] += 1
+                finally:
+                    _BULK_VERIFY_STATE["current_index"] = _idx + 1
+                    # نگهداری تا 100 نتیجه اخیر
+                    _BULK_VERIFY_STATE["task_results"].append(_result)
+                    if len(_BULK_VERIFY_STATE["task_results"]) > 100:
+                        _BULK_VERIFY_STATE["task_results"] = (
+                            _BULK_VERIFY_STATE["task_results"][-100:]
+                        )
+
+        await _aio.gather(
+            *[_verify_one(_tid, _idx) for _idx, _tid in enumerate(candidate_ids)],
+            return_exceptions=False,
+        )
+    except Exception as e:
+        _BULK_VERIFY_STATE["error"] = str(e)[:500]
+    finally:
+        _BULK_VERIFY_STATE["finished_at"] = __import__("datetime").datetime.utcnow().isoformat()
+        _BULK_VERIFY_STATE["running"] = False
+
+        # نوتیفیکیشن تلگرام
+        try:
+            from app.services.notification_service import notification_service
+            _s = _BULK_VERIFY_STATE["summary"]
+            _msg = (
+                f"✅ *Bulk Verify کامل شد*\n\n"
+                f"📊 خلاصه:\n"
+                f"• ✅ done: {_s['verified_done']}\n"
+                f"• 🟡 partial: {_s['verified_partial']}\n"
+                f"• ❌ not_done: {_s['verified_not_done']}\n"
+                f"• ⚠️ error: {_s['verified_error']}\n"
+                f"• 📦 خودکار archive شدند: {_s['auto_archived']}\n"
+                f"• 📋 کل: {_BULK_VERIFY_STATE['total']}"
+            )
+            await notification_service.notify_event(
+                "bulk_verify_completed", _msg,
+                subject="Bulk Verify completed",
+                priority="medium",
+            )
+        except Exception:
+            pass
+
+
+@router.post("/watched/{watched_id}/bulk-verify")
+async def start_bulk_verify(
+    watched_id: str,
+    priority: Optional[str] = None,
+    auto_archive_done: bool = True,
+    concurrency: int = 3,
+):
+    """شروع bulk verify در پس‌زمینه روی همهٔ تسک‌های active یک watched.
+
+    - priority: اختیاری، فیلتر بر اساس critical/high/medium/low
+    - auto_archive_done: اگر True (پیش‌فرض)، تسک‌هایی که done شدند به آرشیو می‌روند
+    - concurrency: حداکثر تعداد verify موازی (پیش‌فرض ۳، حداکثر ۵)
+    """
+    import asyncio as _aio
+    if _BULK_VERIFY_STATE.get("running"):
+        return {
+            "started": False,
+            "reason": "bulk verify در حال اجراست",
+            "state": _BULK_VERIFY_STATE,
+        }
+    # validate watched
+    service = get_oversight_service()
+    watched = service._find_watched(watched_id)
+    if not watched:
+        raise HTTPException(status_code=404, detail="watched not found")
+    _aio.create_task(
+        _run_bulk_verify(
+            watched_id=watched_id,
+            priority_filter=priority,
+            auto_archive_done=auto_archive_done,
+            concurrency=concurrency,
+        )
+    )
+    return {"started": True, "watched_id": watched_id}
+
+
+@router.get("/watched/{watched_id}/bulk-verify/status")
+async def get_bulk_verify_status(watched_id: str):
+    """وضعیت فعلی bulk verify."""
+    if _BULK_VERIFY_STATE.get("watched_id") != watched_id and not _BULK_VERIFY_STATE.get("running"):
+        return {"running": False, "for_watched": watched_id, "state": None}
+    return {**_BULK_VERIFY_STATE}
+
+
 @router.post("/tasks/{task_id}/mark-applied-externally")
 async def mark_applied_externally(task_id: str):
     """کاربر صریحاً می‌گوید این تسک را بیرون از سیستم اعمال کردم."""
