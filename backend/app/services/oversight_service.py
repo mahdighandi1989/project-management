@@ -403,6 +403,10 @@ class OversightTask:
     #   merged_from_snapshot = {source_id: کل dict تسک قبل از آرشیو} — برای undo
     #   consolidation_meta = {cluster_theme, rationale, mode, ai_calls_used, ts}
     # source برای super-taskها = "auto_consolidation" (مقدار جدید)
+    # 🆕 (C4 fix) — tags برای task هم لازم شد (consolidated, merged, ...).
+    # backward-compat: تسک‌های قدیمی بدون tags ذخیره شده‌اند، _filter_known_fields
+    # هنگام load عبور می‌دهد و این default [] استفاده می‌شود.
+    tags: List[str] = field(default_factory=list)
     merged_into: Optional[str] = None
     merged_from: List[str] = field(default_factory=list)
     merged_from_snapshot: Dict[str, Any] = field(default_factory=dict)
