@@ -1466,17 +1466,20 @@ async def run_deep_scan(
     # 🆕 (Phase 5 — bug 19) — deep_read_count حالا depth-aware است.
     # default ۳۵ (× ۲ داخلی = ۷۰) برای پروژه‌های متوسط کفایت می‌کرد، ولی
     # برای ultra/thorough/deep باید پوشش بیشتری داشته باشیم.
+    # 🆕 (bug A6) — ultra حالا UNCAPPED است؛ همهٔ فایل‌های پروژه deep-read
+    # می‌شوند (تا سقف امن ۲۰۰۰ که از حد منطقی ریپوها بزرگ‌تر است).
     # کاربر می‌تواند با explicit deep_read_count override کند.
     if deep_read_count == 35:  # یعنی default، نه override
         _depth_now = getattr(watched, "scan_depth", "deep") or "deep"
-        # ۲× داخلی هم اعمال می‌شود → effective: balanced=70, deep=100, thorough=150, ultra=200
+        # ۲× داخلی هم اعمال می‌شود → effective:
+        # balanced=70, deep=100, thorough=150, ultra=ALL (تا 2000)
         depth_map = {
             "quick": 25,
             "standard": 35,
             "balanced": 35,
             "deep": 50,
             "thorough": 75,
-            "ultra": 100,
+            "ultra": 2000,  # عملاً unlimited برای ریپوهای معمولی
         }
         deep_read_count = depth_map.get(_depth_now, 50)
 
