@@ -1601,7 +1601,16 @@ async def run_deep_scan(
         # ----- فاز ۲ -----
         # ابتدا یک sweep سبک: top-N اولیه را با نوع/حجم/critical path رتبه‌بندی کن
         ranked0 = _score_files(all_files, sizes, recent_changed, {})
-        initial_deep_paths = [p for p, s in ranked0[: max(deep_read_count, 5) * 2] if s > 0]
+        # 🆕 (bug A6b) — در ultra، فیلتر s>0 برداشته می‌شود تا همهٔ فایل‌ها
+        # (حتی موارد "other" مثل .md، .json، config) deep-read شوند.
+        # دلیل: عدد "231/201" در UI به این علت می‌آمد که ۳۰ فایل score=0
+        # داشتند (مارک‌داون، JSON config، ...). ultra واقعاً "همه چیز" است.
+        _depth_now = (getattr(watched, "scan_depth", "deep") or "deep").lower()
+        _filter_score = _depth_now != "ultra"
+        if _filter_score:
+            initial_deep_paths = [p for p, s in ranked0[: max(deep_read_count, 5) * 2] if s > 0]
+        else:
+            initial_deep_paths = [p for p, _s in ranked0[: max(deep_read_count, 5) * 2]]
 
         # خواندن این فایل‌ها (محتوای کامل ولی truncate شده)
         deep_contents: Dict[str, str] = {}
