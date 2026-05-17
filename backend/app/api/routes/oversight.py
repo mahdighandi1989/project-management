@@ -1534,13 +1534,21 @@ async def _run_bulk_verify(
                             _BULK_VERIFY_STATE["summary"]["skipped_manual"] += 1
                             return
                     _report = await _verify_task(_tid, include_runtime=_include_runtime)
-                    _status = str(getattr(_report, "status", "") or "").lower()
-                    _result["status"] = _status
+                    # 🐛 (C2 fix) — verify_task یک Dict برمی‌گرداند نه object.
+                    # قبلاً getattr(_report, "status", "") همیشه "" می‌داد و
+                    # همهٔ تسک‌ها به verified_error می‌رفتند. الان status را
+                    # از task.verification_status که در dict هست استخراج می‌کنیم.
+                    _task_dict = _report.get("task") if isinstance(_report, dict) else None
+                    _status = ""
+                    if isinstance(_task_dict, dict):
+                        _status = str(_task_dict.get("verification_status") or "").lower().strip()
+                    _result["status"] = _status or "unknown"
 
                     _summary = _BULK_VERIFY_STATE["summary"]
                     if _status == "done":
                         _summary["verified_done"] += 1
-                        # auto-archive اگر فعال
+                        # auto-archive اگر فعال — verify_task خودش هم وقتی streak
+                        # رسید archive می‌کند، این چک‌مانند safety net است
                         if auto_archive_done:
                             async with service._lock:
                                 live = next((t for t in service.tasks if t.id == _tid), None)
@@ -1551,9 +1559,10 @@ async def _run_bulk_verify(
                             service._save_tasks()
                     elif _status == "partial":
                         _summary["verified_partial"] += 1
-                    elif _status in ("not_done", "regressed"):
+                    elif _status in ("not_done", "regressed", "pending", "needs_clarification"):
                         _summary["verified_not_done"] += 1
                     else:
+                        # وضعیت ناشناخته یا خالی → error واقعی است
                         _summary["verified_error"] += 1
                 except Exception as _ve:
                     _result["status"] = "error"
