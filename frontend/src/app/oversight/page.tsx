@@ -5033,6 +5033,17 @@ function WatchedCard({
       alert(`mode نامعتبر: "${_modeChoice}". باید "fast" یا "deep" باشد.`);
       return;
     }
+    // 🆕 (C3) — پرسش از کاربر برای auto_consolidate
+    const _consolidateChoice = window.confirm(
+      `🧬 پس از پایان verify، تسک‌های باقی‌مانده (partial + not_done) را ` +
+        `به‌صورت هوشمند بر اساس شباهت در چند super-task تجمیع کنم؟\n\n` +
+        `• تسک‌های منبع آرشیو با تگ \`merged\` می‌شوند\n` +
+        `• هیچ متن idea_prompt خلاصه نمی‌شود — همه کامل حفظ می‌شوند\n` +
+        `• تسک‌های partial کنار not_done های هم‌موضوع قرار می‌گیرند\n` +
+        `• قابل undo با یک کلیک\n\n` +
+        `[OK] = بله، فعال کن\n[Cancel] = نه، فقط verify`
+    );
+    const _autoConsolidate = !!_consolidateChoice;
     const _confirm = window.confirm(
       `🔬 Bulk Verify — تأیید نهایی:\n\n` +
         `• روی ${_scanCount} تسک scan-generated اجرا می‌شود\n` +
@@ -5041,6 +5052,7 @@ function WatchedCard({
           ? `• ${_manualCount} تسک دستی شما skip می‌شوند (دست‌نخورده)\n`
           : '') +
         `• تسک‌هایی که done شدند خودکار آرشیو می‌شوند\n` +
+        `• 🧬 تجمیع هوشمند: ${_autoConsolidate ? 'فعال' : 'غیرفعال'}\n` +
         `• ۳ موازی، تخمین: ~${Math.ceil(
           (_scanCount * (_mode === 'fast' ? 30 : 90)) / 60 / 3
         )} دقیقه\n\n` +
@@ -5053,6 +5065,7 @@ function WatchedCard({
         concurrency: '3',
         mode: _mode,
         source_filter: 'auto_scan',
+        auto_consolidate: _autoConsolidate ? 'true' : 'false',
       });
       const res = await fetch(
         `${API_BASE}/api/oversight/watched/${w.id}/bulk-verify?${_qs.toString()}`,
@@ -6663,7 +6676,7 @@ function WatchedCard({
         )}
       </div>
 
-      {/* 🆕 (Phase 6 — bug C1+C2) — Bulk Verify progress (وقتی فعال است) */}
+      {/* 🆕 (Phase 6 — bug C1+C2+C3) — Bulk Verify progress (وقتی فعال است) */}
       {(bvPolling || bvState?.running) && bvState && (
         <div className="mb-2 p-2 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-300 dark:border-emerald-700 rounded text-xs">
           <div className="font-bold text-emerald-800 dark:text-emerald-200 mb-1">
@@ -6686,6 +6699,21 @@ function WatchedCard({
               </span>
             </div>
           )}
+          {/* 🆕 (C3) live precluster preview در حین verify */}
+          {bvState.consolidation?.enabled && bvState.live_preclusters && bvState.live_preclusters.length > 0 && (
+            <div className="mt-1 pt-1 border-t border-emerald-200 dark:border-emerald-800 text-[10px] text-emerald-700 dark:text-emerald-300">
+              🧬 live precluster: حدود {bvState.live_preclusters.length} گروه در حال شکل‌گیری
+              ({bvState.consolidation_candidates?.length ?? 0} کاندیدا تا الان)
+            </div>
+          )}
+          {/* 🆕 (C3) consolidation phase وقتی verify تمام شد ولی consolidation در حال اجراست */}
+          {bvState.consolidation?.phase && bvState.consolidation.phase !== 'idle' && bvState.consolidation.phase !== 'done' && (
+            <div className="mt-1 pt-1 border-t border-emerald-200 dark:border-emerald-800 text-[10px] font-semibold text-emerald-800 dark:text-emerald-200">
+              🧬 در حال تجمیع هوشمند (phase: {bvState.consolidation.phase})...
+              {bvState.consolidation.candidates_count > 0 &&
+                ` ${bvState.consolidation.candidates_count} کاندیدا → ${bvState.consolidation.clusters_created || '?'} cluster`}
+            </div>
+          )}
         </div>
       )}
       {bvState && !bvState.running && bvState.finished_at && bvState.summary && (
@@ -6704,6 +6732,56 @@ function WatchedCard({
               🛡 skip: <b>{bvState.summary.skipped_manual ?? 0}</b>
             </span>
           </div>
+          {/* 🆕 (C3) consolidation result */}
+          {bvState.consolidation?.ran && (
+            <div className="mt-2 pt-2 border-t border-emerald-200 dark:border-emerald-800">
+              <div className="font-semibold text-emerald-800 dark:text-emerald-200 mb-1 text-[11px]">
+                🧬 تجمیع هوشمند:
+                {' '}
+                {bvState.consolidation.candidates_count} کاندیدا →
+                {' '}
+                <b>{bvState.consolidation.super_tasks_created?.length ?? 0}</b> super-task
+                {' '}({bvState.consolidation.tasks_archived ?? 0} آرشیو merged)
+              </div>
+              {bvState.consolidation.error && (
+                <div className="text-[10px] text-amber-700 dark:text-amber-300 mt-1">
+                  ⚠️ note: {bvState.consolidation.error}
+                </div>
+              )}
+              {bvState.consolidation.super_tasks_created && bvState.consolidation.super_tasks_created.length > 0 && (
+                <div className="text-[10px] text-emerald-700 dark:text-emerald-300 mt-1 flex gap-2 flex-wrap">
+                  {bvState.consolidation.super_tasks_created.slice(0, 5).map((sid: string) => (
+                    <button
+                      key={sid}
+                      type="button"
+                      onClick={async () => {
+                        if (!window.confirm(`آیا super-task ${sid} را undo کنم؟ source ها به فعال برمی‌گردند.`)) return;
+                        try {
+                          const ur = await fetch(`${API_BASE}/api/oversight/super-task/${sid}/unmerge`, { method: 'POST' });
+                          const ud = await ur.json();
+                          if (ud.ok) {
+                            alert(`✅ ${ud.restored?.length ?? 0} تسک به فعال بازگشتند`);
+                            refreshBvEligible();
+                          } else {
+                            alert(`خطا: ${ud.error || 'unknown'}`);
+                          }
+                        } catch (e: any) {
+                          alert(`خطا: ${String(e?.message || e)}`);
+                        }
+                      }}
+                      title="undo این super-task — source ها به فعال بازمی‌گردند"
+                      className="px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/30 border border-amber-300 dark:border-amber-700 rounded hover:bg-amber-200 dark:hover:bg-amber-900/50"
+                    >
+                      ↩ {sid.slice(0, 12)}
+                    </button>
+                  ))}
+                  {bvState.consolidation.super_tasks_created.length > 5 && (
+                    <span className="text-gray-500">و {bvState.consolidation.super_tasks_created.length - 5} مورد دیگر...</span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
           <button
             type="button"
             onClick={() => setBvState(null)}

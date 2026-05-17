@@ -4,6 +4,7 @@ Oversight API
 API routes برای مرکز نظارت و مدیریت پروژه‌های گیت‌هاب.
 """
 
+import logging
 from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
@@ -11,6 +12,8 @@ from sqlalchemy.orm import Session
 
 from ...services.oversight_service import get_oversight_service
 from ...core.database import get_db
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/oversight", tags=["Oversight"])
 
@@ -1437,6 +1440,23 @@ _BULK_VERIFY_STATE: Dict[str, Any] = {
     },
     "error": None,
     "task_results": [],  # تا 100 نتیجه آخر برای نمایش
+    # 🆕 (C3) Post-Verify Consolidation — جمع‌آوری در حین، اجرا در پایان
+    "consolidation_candidates": [],  # fingerprints جمع‌آوری‌شده در _verify_one
+    "live_preclusters": [],  # rolling mechanical preclusters
+    "consolidation": {
+        "enabled": False,
+        "ran": False,
+        "phase": "idle",  # idle|clustering|building|done
+        "candidates_count": 0,
+        "live_pre_cluster_count": 0,
+        "clusters_created": 0,
+        "super_tasks_created": [],
+        "tasks_archived": 0,
+        "ai_calls": 0,
+        "error": None,
+        "started_at": None,
+        "finished_at": None,
+    },
 }
 
 
@@ -1448,6 +1468,7 @@ async def _run_bulk_verify(
     *,
     source_filter: Optional[str] = "auto_scan",  # 🆕 (C2) فقط scan-generated
     mode: str = "deep",  # 🆕 (C2) "fast" یا "deep"
+    auto_consolidate: bool = True,  # 🆕 (C3) Post-verify consolidation
 ) -> None:
     """در پس‌زمینه روی همه‌ی تسک‌های active (پس از فیلتر) verify اجرا می‌کند.
 
@@ -1478,6 +1499,23 @@ async def _run_bulk_verify(
         "skipped_manual": 0,  # 🆕 شمارش تسک‌های دستی که skip شدند
     }
     _BULK_VERIFY_STATE["task_results"] = []
+    # 🆕 (C3) reset consolidation buffers
+    _BULK_VERIFY_STATE["consolidation_candidates"] = []
+    _BULK_VERIFY_STATE["live_preclusters"] = []
+    _BULK_VERIFY_STATE["consolidation"] = {
+        "enabled": bool(auto_consolidate),
+        "ran": False,
+        "phase": "idle",
+        "candidates_count": 0,
+        "live_pre_cluster_count": 0,
+        "clusters_created": 0,
+        "super_tasks_created": [],
+        "tasks_archived": 0,
+        "ai_calls": 0,
+        "error": None,
+        "started_at": None,
+        "finished_at": None,
+    }
 
     service = get_oversight_service()
     _include_runtime = (mode == "deep")  # 🆕 fast = no runtime probes
@@ -1564,6 +1602,31 @@ async def _run_bulk_verify(
                     else:
                         # وضعیت ناشناخته یا خالی → error واقعی است
                         _summary["verified_error"] += 1
+
+                    # 🆕 (C3) Sidecar — اگر این تسک done نشد، fingerprint
+                    # برای consolidation جمع شود. (شامل partial، not_done،
+                    # regressed، needs_clarification، pending)
+                    if auto_consolidate and _status != "done":
+                        try:
+                            from app.services.task_consolidation_service import (
+                                build_candidate_fingerprint,
+                                mechanical_precluster,
+                            )
+                            # snapshot زنده از task (با verify_status جدید)
+                            _live = next((t for t in service.tasks if t.id == _tid), None)
+                            if _live is not None and not getattr(_live, "archived", False):
+                                # 🛡 فقط auto_scan ها → consolidation
+                                _src_live = (getattr(_live, "source", "user") or "user").lower()
+                                if _src_live == "auto_scan":
+                                    _fp = build_candidate_fingerprint(_live)
+                                    _BULK_VERIFY_STATE["consolidation_candidates"].append(_fp)
+                                    # rolling pre-cluster هر ۱۰ تسک یکبار
+                                    _cands_now = _BULK_VERIFY_STATE["consolidation_candidates"]
+                                    if len(_cands_now) > 0 and len(_cands_now) % 10 == 0:
+                                        _pc = mechanical_precluster(_cands_now)
+                                        _BULK_VERIFY_STATE["live_preclusters"] = _pc
+                        except Exception as _ce:
+                            logger.debug(f"consolidation sidecar failed: {_ce}")
                 except Exception as _ve:
                     _result["status"] = "error"
                     _result["error"] = str(_ve)[:200]
@@ -1581,6 +1644,40 @@ async def _run_bulk_verify(
             *[_verify_one(_tid, _idx) for _idx, _tid in enumerate(candidate_ids)],
             return_exceptions=False,
         )
+
+        # 🆕 (C3) Post-Verify Consolidation
+        if auto_consolidate and watched_id:
+            try:
+                from app.services.task_consolidation_service import (
+                    consolidate_remaining_tasks,
+                )
+                _cands = list(_BULK_VERIFY_STATE.get("consolidation_candidates") or [])
+                _pre = list(_BULK_VERIFY_STATE.get("live_preclusters") or [])
+                if _cands:
+                    # یک رفرش mechanical نهایی روی همهٔ کاندیدها
+                    try:
+                        from app.services.task_consolidation_service import (
+                            mechanical_precluster as _mp_final,
+                        )
+                        _pre = _mp_final(_cands)
+                        _BULK_VERIFY_STATE["live_preclusters"] = _pre
+                    except Exception:
+                        pass
+                    await consolidate_remaining_tasks(
+                        watched_id=watched_id,
+                        candidates=_cands,
+                        mode=mode,
+                        verify_model_id=None,  # → DEFAULT_EXTRACTION_MODEL_ID
+                        live_preclusters=_pre,
+                        service=service,
+                        state=_BULK_VERIFY_STATE["consolidation"],
+                    )
+            except Exception as _ce:
+                logger.warning(f"consolidation pipeline failed: {_ce}")
+                try:
+                    _BULK_VERIFY_STATE["consolidation"]["error"] = str(_ce)[:300]
+                except Exception:
+                    pass
     except Exception as e:
         _BULK_VERIFY_STATE["error"] = str(e)[:500]
     finally:
@@ -1602,6 +1699,25 @@ async def _run_bulk_verify(
                 f"• 🛡 manual skip شد: {_s['skipped_manual']}\n"
                 f"• 📋 کل scan-generated processed: {_BULK_VERIFY_STATE['total']}"
             )
+            # 🆕 (C3) بخش consolidation
+            _c = _BULK_VERIFY_STATE.get("consolidation") or {}
+            if _c.get("ran"):
+                _cands_n = _c.get("candidates_count", 0)
+                _cls_n = _c.get("clusters_created", 0)
+                _super_ids = _c.get("super_tasks_created") or []
+                _archived_n = _c.get("tasks_archived", 0)
+                _err = _c.get("error")
+                _partial_n = _s.get("verified_partial", 0)
+                _msg += (
+                    f"\n\n🧬 *Consolidation*:\n"
+                    f"• کاندیدها: {_cands_n} (شامل ~{_partial_n} partial)\n"
+                    f"• cluster: {_cls_n}\n"
+                    f"• super-task جدید: {len(_super_ids)}\n"
+                    f"• آرشیو (merged): {_archived_n}\n"
+                    f"• AI calls: {_c.get('ai_calls', 0)}"
+                )
+                if _err:
+                    _msg += f"\n• ⚠️ note: {_err[:120]}"
             await notification_service.notify_event(
                 "bulk_verify_completed", _msg,
                 subject="Bulk Verify completed",
@@ -1619,6 +1735,7 @@ async def start_bulk_verify(
     concurrency: int = 3,
     mode: str = "deep",  # 🆕 (C2) "fast" یا "deep"
     source_filter: str = "auto_scan",  # 🆕 (C2) فقط scan-generated
+    auto_consolidate: bool = True,  # 🆕 (C3) Post-verify consolidation
 ):
     """شروع bulk verify در پس‌زمینه روی همهٔ تسک‌های active یک watched.
 
@@ -1659,9 +1776,92 @@ async def start_bulk_verify(
             concurrency=concurrency,
             source_filter=_src,
             mode=_mode,
+            auto_consolidate=bool(auto_consolidate),
         )
     )
-    return {"started": True, "watched_id": watched_id, "mode": _mode, "source_filter": _src}
+    return {
+        "started": True,
+        "watched_id": watched_id,
+        "mode": _mode,
+        "source_filter": _src,
+        "auto_consolidate": bool(auto_consolidate),
+    }
+
+
+# ════════════════════════════════════════════════════════════════════
+# 🆕 (Phase 6 — bug C3) — Manual consolidation + unmerge endpoints
+# ════════════════════════════════════════════════════════════════════
+
+@router.post("/watched/{watched_id}/consolidate-remaining")
+async def consolidate_remaining_endpoint(
+    watched_id: str,
+):
+    """اجرای دستی consolidation روی تسک‌های scan-generated باقی‌مانده.
+
+    🆕 (C3) — بدون نیاز به bulk verify. fingerprint های همهٔ تسک‌های
+    غیر done و غیر archived از auto_scan ساخته شده و به engine consolidation
+    داده می‌شود. خروجی state نهایی consolidation است.
+    """
+    from app.services.task_consolidation_service import (
+        build_candidate_fingerprint,
+        mechanical_precluster,
+        consolidate_remaining_tasks,
+    )
+    service = get_oversight_service()
+    watched = service._find_watched(watched_id)
+    if not watched:
+        raise HTTPException(status_code=404, detail="watched not found")
+
+    # جمع‌آوری کاندیدها
+    candidates: List[Dict[str, Any]] = []
+    for t in service.tasks:
+        if t.watched_id != watched_id:
+            continue
+        if t.status in ("done", "cancelled"):
+            continue
+        if getattr(t, "archived", False):
+            continue
+        if (getattr(t, "verification_status", "pending") or "pending").lower() == "done":
+            continue
+        if (getattr(t, "source", "user") or "user").lower() != "auto_scan":
+            continue
+        try:
+            candidates.append(build_candidate_fingerprint(t))
+        except Exception as e:
+            logger.warning(f"fingerprint failed for {t.id}: {e}")
+
+    if not candidates:
+        return {"ran": False, "reason": "هیچ کاندید scan-generated فعالی نیست"}
+
+    state: Dict[str, Any] = {}
+    try:
+        pre = mechanical_precluster(candidates)
+    except Exception:
+        pre = []
+    await consolidate_remaining_tasks(
+        watched_id=watched_id,
+        candidates=candidates,
+        mode="manual",
+        verify_model_id=None,
+        live_preclusters=pre,
+        service=service,
+        state=state,
+    )
+    return {"ran": True, "state": state}
+
+
+@router.post("/super-task/{super_task_id}/unmerge")
+async def unmerge_super_task_endpoint(super_task_id: str):
+    """آرشیو معکوس یک super-task — source ها به فعال بازمی‌گردند.
+
+    🆕 (C3) — برای undo اشتباهات AI clustering.
+    """
+    from app.services.task_consolidation_service import unmerge_super_task
+    service = get_oversight_service()
+    result = await unmerge_super_task(super_task_id, service)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "unmerge failed"))
+    return result
 
 
 @router.get("/watched/{watched_id}/bulk-verify/eligible-count")

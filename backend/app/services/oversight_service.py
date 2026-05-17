@@ -393,6 +393,26 @@ class OversightTask:
     # rule تکرار (آینده): "daily" | "weekly" | None
     reminder_repeat_rule: Optional[str] = None
 
+    # 🆕 (Phase 6 — bug C3) Post-Verify Intelligent Task Consolidation
+    # وقتی این تسک به‌عنوان source در یک super-task ادغام شد:
+    #   merged_into = id همان super-task
+    #   archive_reason = "merged_into_consolidated_task"
+    #   tags شامل "merged"
+    # وقتی این تسک خود یک super-task است:
+    #   merged_from = [source_task_id, ...]
+    #   merged_from_snapshot = {source_id: کل dict تسک قبل از آرشیو} — برای undo
+    #   consolidation_meta = {cluster_theme, rationale, mode, ai_calls_used, ts}
+    # source برای super-taskها = "auto_consolidation" (مقدار جدید)
+    merged_into: Optional[str] = None
+    merged_from: List[str] = field(default_factory=list)
+    merged_from_snapshot: Dict[str, Any] = field(default_factory=dict)
+    archive_reason: Optional[str] = None
+    consolidation_meta: Optional[Dict[str, Any]] = None
+    # 🆕 (C3) checklist هوشمند — اگر watched.auto_task_checklist_mode != "never"
+    # و difficulty cluster medium/large بود، در super-task ست می‌شود.
+    # هر آیتم: {id, text, priority: low|medium|high, done: bool}
+    intelligent_checklist: Optional[List[Dict[str, Any]]] = None
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
