@@ -4952,19 +4952,110 @@ function WatchedCard({
   // 🆕 (Phase 6 — bug C1) — Bulk Verify state
   const [bvState, setBvState] = useState<any | null>(null);
   const [bvPolling, setBvPolling] = useState(false);
+  // 🆕 (C2) — eligible-count برای نمایش تعداد دقیق scan-generated روی دکمه
+  const [bvEligible, setBvEligible] = useState<{
+    scan_generated_count: number;
+    manual_count: number;
+    total_active: number;
+  } | null>(null);
+
+  const refreshBvEligible = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/oversight/watched/${w.id}/bulk-verify/eligible-count`
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      setBvEligible({
+        scan_generated_count: data.scan_generated_count ?? 0,
+        manual_count: data.manual_count ?? 0,
+        total_active: data.total_active ?? 0,
+      });
+    } catch {
+      // silent — UI fallback به taskCount
+    }
+  }, [w.id]);
 
   const startBulkVerify = useCallback(async () => {
+    // 🛡 (C2) — اول eligible-count تازه بگیر تا کاربر عدد صحیح را ببیند
+    let _eligible = bvEligible;
+    if (!_eligible) {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/oversight/watched/${w.id}/bulk-verify/eligible-count`
+        );
+        if (res.ok) {
+          const data = await res.json();
+          _eligible = {
+            scan_generated_count: data.scan_generated_count ?? 0,
+            manual_count: data.manual_count ?? 0,
+            total_active: data.total_active ?? 0,
+          };
+          setBvEligible(_eligible);
+        }
+      } catch {
+        // ignore
+      }
+    }
+    const _scanCount = _eligible?.scan_generated_count ?? 0;
+    const _manualCount = _eligible?.manual_count ?? 0;
+    if (_scanCount === 0) {
+      alert(
+        `⚠️ هیچ تسک scan-generated فعالی برای verify وجود ندارد.\n\n` +
+          `Bulk Verify فقط روی تسک‌هایی اجرا می‌شود که سیستم در مراحل اسکن خودکار ساخته است — ` +
+          `نه تسک‌هایی که شما به‌صورت دستی از طریق ایدهٔ خام ثبت کرده‌اید.\n\n` +
+          (_manualCount > 0
+            ? `(تسک‌های دستی شما: ${_manualCount} — دست‌نخورده می‌مانند)`
+            : '')
+      );
+      return;
+    }
+    // 🆕 (C2) — انتخاب mode: fast (~30s/task) یا deep (~90s/task)
+    const _modeChoice = window.prompt(
+      `🔬 Bulk Verify — حالت اجرا را انتخاب کنید:\n\n` +
+        `• تعداد تسک‌های scan-generated فعال: ${_scanCount}\n` +
+        (_manualCount > 0
+          ? `• تسک‌های دستی شما (${_manualCount}) — skip می‌شوند ✅\n`
+          : '') +
+        `\n` +
+        `حالت‌ها:\n` +
+        `  fast → فقط code-aware، ~۳۰s/task (سریع، dependency-light)\n` +
+        `  deep → همهٔ probe ها + runtime، ~۹۰s/task (دقیق، روی Render)\n\n` +
+        `تخمین زمان:\n` +
+        `  fast: ${_scanCount} تسک ≈ ${Math.ceil((_scanCount * 30) / 60 / 3)} دقیقه (۳ موازی)\n` +
+        `  deep: ${_scanCount} تسک ≈ ${Math.ceil((_scanCount * 90) / 60 / 3)} دقیقه (۳ موازی)\n\n` +
+        `بنویسید: fast یا deep (پیش‌فرض: deep)`,
+      'deep'
+    );
+    if (_modeChoice === null) return;  // cancel
+    const _mode = (_modeChoice || 'deep').trim().toLowerCase();
+    if (_mode !== 'fast' && _mode !== 'deep') {
+      alert(`mode نامعتبر: "${_modeChoice}". باید "fast" یا "deep" باشد.`);
+      return;
+    }
     const _confirm = window.confirm(
-      `🔬 Bulk Verify — همهٔ تسک‌های active این پروژه به‌صورت موازی verify می‌شوند.\n\n` +
-        `• تسک‌هایی که done شدند خودکار آرشیو می‌شوند.\n` +
-        `• ~۳۰-۶۰ ثانیه per task، حداکثر ۳ موازی.\n` +
-        `• ۱۰۰ تسک ≈ ۲۰-۳۰ دقیقه. ۳۰۰ تسک ≈ ۹۰ دقیقه.\n\n` +
+      `🔬 Bulk Verify — تأیید نهایی:\n\n` +
+        `• روی ${_scanCount} تسک scan-generated اجرا می‌شود\n` +
+        `• حالت: ${_mode}\n` +
+        (_manualCount > 0
+          ? `• ${_manualCount} تسک دستی شما skip می‌شوند (دست‌نخورده)\n`
+          : '') +
+        `• تسک‌هایی که done شدند خودکار آرشیو می‌شوند\n` +
+        `• ۳ موازی، تخمین: ~${Math.ceil(
+          (_scanCount * (_mode === 'fast' ? 30 : 90)) / 60 / 3
+        )} دقیقه\n\n` +
         `ادامه می‌دهید؟`
     );
     if (!_confirm) return;
     try {
+      const _qs = new URLSearchParams({
+        auto_archive_done: 'true',
+        concurrency: '3',
+        mode: _mode,
+        source_filter: 'auto_scan',
+      });
       const res = await fetch(
-        `${API_BASE}/api/oversight/watched/${w.id}/bulk-verify?auto_archive_done=true&concurrency=3`,
+        `${API_BASE}/api/oversight/watched/${w.id}/bulk-verify?${_qs.toString()}`,
         { method: 'POST' }
       );
       const data = await res.json();
@@ -4983,6 +5074,8 @@ function WatchedCard({
           if (!sdata.running) {
             clearInterval(_interval);
             setBvPolling(false);
+            // 🆕 (C2) — refresh eligible-count بعد از پایان (چون چندتا done شدند)
+            refreshBvEligible();
           }
         } catch {
           // ignore — keep polling
@@ -4991,7 +5084,7 @@ function WatchedCard({
     } catch (e: any) {
       alert(`خطا: ${String(e?.message || e)}`);
     }
-  }, [w.id]);
+  }, [w.id, bvEligible, refreshBvEligible]);
 
   const openFeatureInventory = useCallback(async () => {
     setFiOpen(true);
@@ -5015,6 +5108,11 @@ function WatchedCard({
     setIntervalH(w.interval_hours);
     setScanH(w.scan_interval_hours ?? 168);
   }, [w.id]);
+
+  // 🆕 (C2) — eligible-count را در mount و وقتی watched عوض می‌شود تازه کن
+  useEffect(() => {
+    refreshBvEligible();
+  }, [w.id, refreshBvEligible]);
 
   const addTag = () => {
     const v = tagInput.trim();
@@ -6565,19 +6663,27 @@ function WatchedCard({
         )}
       </div>
 
-      {/* 🆕 (Phase 6 — bug C1) — Bulk Verify progress (وقتی فعال است) */}
+      {/* 🆕 (Phase 6 — bug C1+C2) — Bulk Verify progress (وقتی فعال است) */}
       {(bvPolling || bvState?.running) && bvState && (
         <div className="mb-2 p-2 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-300 dark:border-emerald-700 rounded text-xs">
           <div className="font-bold text-emerald-800 dark:text-emerald-200 mb-1">
             🔬 Bulk Verify در حال اجرا — {bvState.current_index}/{bvState.total}
+            {bvState.mode && (
+              <span className="ml-2 text-[10px] opacity-75">
+                [mode: {bvState.mode}]
+              </span>
+            )}
           </div>
           {bvState.summary && (
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-1 text-[10px]">
+            <div className="grid grid-cols-2 sm:grid-cols-6 gap-1 text-[10px]">
               <span>✅ done: <b>{bvState.summary.verified_done}</b></span>
               <span>🟡 partial: <b>{bvState.summary.verified_partial}</b></span>
               <span>❌ not done: <b>{bvState.summary.verified_not_done}</b></span>
               <span>⚠️ error: <b>{bvState.summary.verified_error}</b></span>
               <span>📦 archived: <b>{bvState.summary.auto_archived}</b></span>
+              <span title="تسک‌های دستی که برای ایمنی skip شدند">
+                🛡 skip: <b>{bvState.summary.skipped_manual ?? 0}</b>
+              </span>
             </div>
           )}
         </div>
@@ -6585,14 +6691,18 @@ function WatchedCard({
       {bvState && !bvState.running && bvState.finished_at && bvState.summary && (
         <div className="mb-2 p-2 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-300 dark:border-emerald-700 rounded text-xs">
           <div className="font-bold text-emerald-800 dark:text-emerald-200 mb-1">
-            ✅ Bulk Verify تمام شد ({bvState.total} تسک)
+            ✅ Bulk Verify تمام شد ({bvState.total} تسک
+            {bvState.mode ? `، mode: ${bvState.mode}` : ''})
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-1 text-[10px]">
+          <div className="grid grid-cols-2 sm:grid-cols-6 gap-1 text-[10px]">
             <span>✅ done: <b>{bvState.summary.verified_done}</b></span>
             <span>🟡 partial: <b>{bvState.summary.verified_partial}</b></span>
             <span>❌ not done: <b>{bvState.summary.verified_not_done}</b></span>
             <span>⚠️ error: <b>{bvState.summary.verified_error}</b></span>
             <span>📦 archived: <b>{bvState.summary.auto_archived}</b></span>
+            <span title="تسک‌های دستی که برای ایمنی skip شدند">
+              🛡 skip: <b>{bvState.summary.skipped_manual ?? 0}</b>
+            </span>
           </div>
           <button
             type="button"
@@ -6612,20 +6722,25 @@ function WatchedCard({
         >
           🔬 Deep Scan
         </button>
-        {taskCount >= 10 && (
+        {/* 🆕 (C2) — دکمه فقط با scan-generated count نمایش می‌شود (نه total) */}
+        {(bvEligible?.scan_generated_count ?? 0) >= 1 && (
           <button
             onClick={startBulkVerify}
             disabled={bvPolling || !!bvState?.running}
             title={
               bvPolling || bvState?.running
                 ? 'یک Bulk Verify در حال اجراست'
-                : `verify همزمان روی همهٔ ${taskCount} تسک active. تسک‌های done شده خودکار آرشیو می‌شوند.`
+                : `Bulk Verify فقط روی ${bvEligible?.scan_generated_count ?? 0} تسک scan-generated اجرا می‌شود. ` +
+                  (bvEligible?.manual_count
+                    ? `(${bvEligible.manual_count} تسک دستی شما skip می‌شوند)`
+                    : '') +
+                  ' تسک‌های done شده خودکار آرشیو می‌شوند.'
             }
             className="px-3 py-1.5 bg-emerald-500 text-white rounded text-sm hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {bvPolling || bvState?.running
               ? `🔬 verify... (${bvState?.current_index ?? 0}/${bvState?.total ?? 0})`
-              : `🔬 Bulk Verify (${taskCount})`}
+              : `🔬 Bulk Verify (${bvEligible?.scan_generated_count ?? 0} auto-scan)`}
           </button>
         )}
         <button

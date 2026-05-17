@@ -1445,8 +1445,17 @@ async def _run_bulk_verify(
     priority_filter: Optional[str],
     auto_archive_done: bool,
     concurrency: int,
+    *,
+    source_filter: Optional[str] = "auto_scan",  # 🆕 (C2) فقط scan-generated
+    mode: str = "deep",  # 🆕 (C2) "fast" یا "deep"
 ) -> None:
-    """در پس‌زمینه روی همه‌ی تسک‌های active (پس از فیلتر) verify اجرا می‌کند."""
+    """در پس‌زمینه روی همه‌ی تسک‌های active (پس از فیلتر) verify اجرا می‌کند.
+
+    🆕 (C2) — دو محافظت کلیدی:
+      1. source_filter پیش‌فرض "auto_scan" → تسک‌های دستی کاربر دست‌نخورده می‌مانند
+      2. mode="fast" → فقط code-aware + AI verifier (~25-30s/task)
+         mode="deep" → همهٔ probe ها (~75-120s/task) — دقیق ولی کند
+    """
     import asyncio as _aio
     from datetime import datetime as _dt
     from ...services.oversight_service import get_oversight_service, now_iso
@@ -1458,20 +1467,25 @@ async def _run_bulk_verify(
     _BULK_VERIFY_STATE["watched_id"] = watched_id
     _BULK_VERIFY_STATE["error"] = None
     _BULK_VERIFY_STATE["current_index"] = 0
+    _BULK_VERIFY_STATE["mode"] = mode
+    _BULK_VERIFY_STATE["source_filter"] = source_filter
     _BULK_VERIFY_STATE["summary"] = {
         "verified_done": 0,
         "verified_partial": 0,
         "verified_not_done": 0,
         "verified_error": 0,
         "auto_archived": 0,
+        "skipped_manual": 0,  # 🆕 شمارش تسک‌های دستی که skip شدند
     }
     _BULK_VERIFY_STATE["task_results"] = []
 
     service = get_oversight_service()
+    _include_runtime = (mode == "deep")  # 🆕 fast = no runtime probes
 
     try:
         # snapshot لیست تسک‌ها — فقط active، فیلتر شده
         candidate_ids: List[str] = []
+        skipped_manual = 0
         for t in service.tasks:
             if watched_id and t.watched_id != watched_id:
                 continue
@@ -1483,8 +1497,15 @@ async def _run_bulk_verify(
                 continue
             if priority_filter and t.priority != priority_filter:
                 continue
+            # 🆕 (C2) — source filter (پیش‌فرض: فقط auto_scan)
+            if source_filter:
+                _task_source = (getattr(t, "source", "user") or "user").lower()
+                if _task_source != source_filter.lower():
+                    skipped_manual += 1
+                    continue
             candidate_ids.append(t.id)
 
+        _BULK_VERIFY_STATE["summary"]["skipped_manual"] = skipped_manual
         _BULK_VERIFY_STATE["total"] = len(candidate_ids)
         if not candidate_ids:
             return
@@ -1503,7 +1524,16 @@ async def _run_bulk_verify(
                         _result["status"] = "missing"
                         return
                     _result["title"] = (task.title or "")[:120]
-                    _report = await _verify_task(_tid, include_runtime=True)
+                    # 🛡 (C2) — defense in depth: یک بار دیگر source را چک کن
+                    # که حتی اگر منطق بالا سهواً تسک manual را قبول کرد،
+                    # اینجا rejected شود.
+                    if source_filter:
+                        _src = (getattr(task, "source", "user") or "user").lower()
+                        if _src != source_filter.lower():
+                            _result["status"] = "skipped_manual"
+                            _BULK_VERIFY_STATE["summary"]["skipped_manual"] += 1
+                            return
+                    _report = await _verify_task(_tid, include_runtime=_include_runtime)
                     _status = str(getattr(_report, "status", "") or "").lower()
                     _result["status"] = _status
 
@@ -1553,14 +1583,15 @@ async def _run_bulk_verify(
             from app.services.notification_service import notification_service
             _s = _BULK_VERIFY_STATE["summary"]
             _msg = (
-                f"✅ *Bulk Verify کامل شد*\n\n"
+                f"✅ *Bulk Verify کامل شد* (mode: {mode})\n\n"
                 f"📊 خلاصه:\n"
                 f"• ✅ done: {_s['verified_done']}\n"
                 f"• 🟡 partial: {_s['verified_partial']}\n"
                 f"• ❌ not_done: {_s['verified_not_done']}\n"
                 f"• ⚠️ error: {_s['verified_error']}\n"
                 f"• 📦 خودکار archive شدند: {_s['auto_archived']}\n"
-                f"• 📋 کل: {_BULK_VERIFY_STATE['total']}"
+                f"• 🛡 manual skip شد: {_s['skipped_manual']}\n"
+                f"• 📋 کل scan-generated processed: {_BULK_VERIFY_STATE['total']}"
             )
             await notification_service.notify_event(
                 "bulk_verify_completed", _msg,
@@ -1577,10 +1608,17 @@ async def start_bulk_verify(
     priority: Optional[str] = None,
     auto_archive_done: bool = True,
     concurrency: int = 3,
+    mode: str = "deep",  # 🆕 (C2) "fast" یا "deep"
+    source_filter: str = "auto_scan",  # 🆕 (C2) فقط scan-generated
 ):
     """شروع bulk verify در پس‌زمینه روی همهٔ تسک‌های active یک watched.
 
+    🆕 (C2) — فقط روی تسک‌های scan-generated اجرا می‌شود (source_filter="auto_scan").
+    تسک‌های دستی کاربر (source="user") دست‌نخورده می‌مانند.
+
+    - mode: "fast" (فقط code-aware، ~۳۰s/task) یا "deep" (همهٔ probe ها، ~۹۰s/task)
     - priority: اختیاری، فیلتر بر اساس critical/high/medium/low
+    - source_filter: پیش‌فرض "auto_scan". برای پوشش هر دو، خالی بگذار (نشدنی از UI).
     - auto_archive_done: اگر True (پیش‌فرض)، تسک‌هایی که done شدند به آرشیو می‌روند
     - concurrency: حداکثر تعداد verify موازی (پیش‌فرض ۳، حداکثر ۵)
     """
@@ -1591,20 +1629,65 @@ async def start_bulk_verify(
             "reason": "bulk verify در حال اجراست",
             "state": _BULK_VERIFY_STATE,
         }
+    # validate mode
+    _mode = (mode or "deep").lower().strip()
+    if _mode not in ("fast", "deep"):
+        raise HTTPException(status_code=400, detail="mode باید 'fast' یا 'deep' باشد")
     # validate watched
     service = get_oversight_service()
     watched = service._find_watched(watched_id)
     if not watched:
         raise HTTPException(status_code=404, detail="watched not found")
+    # 🛡 (C2) — source_filter باید "auto_scan" یا "user" (یا خالی) باشد
+    _src = (source_filter or "").strip().lower() or None
+    if _src and _src not in ("auto_scan", "user"):
+        raise HTTPException(status_code=400, detail="source_filter باید 'auto_scan' یا 'user' باشد")
     _aio.create_task(
         _run_bulk_verify(
             watched_id=watched_id,
             priority_filter=priority,
             auto_archive_done=auto_archive_done,
             concurrency=concurrency,
+            source_filter=_src,
+            mode=_mode,
         )
     )
-    return {"started": True, "watched_id": watched_id}
+    return {"started": True, "watched_id": watched_id, "mode": _mode, "source_filter": _src}
+
+
+@router.get("/watched/{watched_id}/bulk-verify/eligible-count")
+async def get_bulk_verify_eligible_count(watched_id: str):
+    """تعداد تسک‌های واجد شرایط برای bulk verify (فقط auto_scan های active).
+
+    🆕 (C2) — UI از این برای نمایش "🔬 Bulk Verify (N)" روی دکمه استفاده می‌کند
+    — N فقط scan-generated است، نه total.
+    """
+    service = get_oversight_service()
+    watched = service._find_watched(watched_id)
+    if not watched:
+        raise HTTPException(status_code=404, detail="watched not found")
+    _scan_count = 0
+    _manual_count = 0
+    for t in service.tasks:
+        if t.watched_id != watched_id:
+            continue
+        if t.status in ("done", "cancelled"):
+            continue
+        if getattr(t, "archived", False):
+            continue
+        if t.verification_status == "done":
+            continue
+        _src = (getattr(t, "source", "user") or "user").lower()
+        if _src == "auto_scan":
+            _scan_count += 1
+        else:
+            _manual_count += 1
+    return {
+        "watched_id": watched_id,
+        "scan_generated_count": _scan_count,
+        "manual_count": _manual_count,
+        "total_active": _scan_count + _manual_count,
+    }
 
 
 @router.get("/watched/{watched_id}/bulk-verify/status")
