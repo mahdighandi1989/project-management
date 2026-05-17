@@ -122,8 +122,22 @@ async def _ai_document_batch(
 
 
 def _item_key(item: Dict[str, Any]) -> str:
-    """unique key for an inventory item."""
-    return f"{item.get('type','?')}:{item.get('file','?')}:{item.get('field_hint') or item.get('label') or item.get('name') or '?'}"
+    """unique key for an inventory item.
+
+    🆕 (bug A5b) — normalize aggressive: strip + lower + سرکوب tokenهای
+    rendering. این جلوگیری می‌کند که "updatePrefs " و "updatePrefs" به
+    دو entry جدا تبدیل شوند.
+    """
+    _t = str(item.get("type") or "?").strip().lower()
+    _f = str(item.get("file") or "?").strip().lower()
+    _h = (
+        item.get("field_hint")
+        or item.get("label")
+        or item.get("name")
+        or "?"
+    )
+    _h = str(_h).strip().lower()
+    return f"{_t}:{_f}:{_h}"
 
 
 async def document_features(
@@ -180,6 +194,13 @@ async def document_features(
             continue
         _seen_keys.add(_k)
         _deduped.append(_item)
+    _before = len(items_to_document)
+    _after = len(_deduped)
+    if _before != _after:
+        logger.info(
+            f"feature_documenter: deduped {_before} → {_after} items "
+            f"({_before - _after} duplicates removed)"
+        )
     items_to_document = _deduped[:_MAX_OPTIONS_TO_DOCUMENT]
 
     # AI batched
