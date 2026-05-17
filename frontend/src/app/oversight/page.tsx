@@ -1459,31 +1459,6 @@ export default function OversightPage() {
     }
   };
 
-  const runAllPendingForWatched = async (id: string) => {
-    showSuccess('در حال اجرای همهٔ تسک‌های pending...');
-    try {
-      const res = await fetch(`${API_BASE}/api/oversight/watched/${id}/run-now`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model_id: selectedModelIds[0],
-          model_ids: selectedModelIds.length > 1 ? selectedModelIds : undefined,
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        showSuccess(data.message || `${data.ran_count} تسک اجرا شد`);
-        await reloadTasks();
-        await reloadReports();
-        await reloadStatus();
-      } else {
-        showError('خطا در اجرا');
-      }
-    } catch (e: any) {
-      showError(e.message);
-    }
-  };
-
   // ============================ Idea / Tasks ============================
 
   const generatePrompt = async () => {
@@ -2575,7 +2550,6 @@ export default function OversightPage() {
                   onRemove={() => removeWatched(w.id, w.repo_full_name)}
                   onScan={() => scanProject(w.id)}
                   onDeepScan={() => startDeepScan(w.id)}
-                  onRunNow={() => runAllPendingForWatched(w.id)}
                   onWriteIdea={() => {
                     setIdeaWatchedIds([w.id]);
                     setTab('ideas');
@@ -4910,7 +4884,6 @@ function WatchedCard({
   onRemove,
   onScan,
   onDeepScan,
-  onRunNow,
   onWriteIdea,
   onViewTasks,
   onViewArchive,
@@ -4928,7 +4901,6 @@ function WatchedCard({
   onRemove: () => void;
   onScan: () => void;
   onDeepScan: () => void;
-  onRunNow: () => void;
   onWriteIdea: () => void;
   onViewTasks: () => void;
   onViewArchive: () => void;
@@ -4976,7 +4948,7 @@ function WatchedCard({
     }
   }, [w.id]);
 
-  const startBulkVerify = useCallback(async () => {
+  const startBulkVerify = useCallback(async (forcedMode: 'fast' | 'deep') => {
     // 🛡 (C2) — اول eligible-count تازه بگیر تا کاربر عدد صحیح را ببیند
     let _eligible = bvEligible;
     if (!_eligible) {
@@ -5010,29 +4982,9 @@ function WatchedCard({
       );
       return;
     }
-    // 🆕 (C2) — انتخاب mode: fast (~30s/task) یا deep (~90s/task)
-    const _modeChoice = window.prompt(
-      `🔬 Bulk Verify — حالت اجرا را انتخاب کنید:\n\n` +
-        `• تعداد تسک‌های scan-generated فعال: ${_scanCount}\n` +
-        (_manualCount > 0
-          ? `• تسک‌های دستی شما (${_manualCount}) — skip می‌شوند ✅\n`
-          : '') +
-        `\n` +
-        `حالت‌ها:\n` +
-        `  fast → فقط code-aware، ~۳۰s/task (سریع، dependency-light)\n` +
-        `  deep → همهٔ probe ها + runtime، ~۹۰s/task (دقیق، روی Render)\n\n` +
-        `تخمین زمان:\n` +
-        `  fast: ${_scanCount} تسک ≈ ${Math.ceil((_scanCount * 30) / 60 / 3)} دقیقه (۳ موازی)\n` +
-        `  deep: ${_scanCount} تسک ≈ ${Math.ceil((_scanCount * 90) / 60 / 3)} دقیقه (۳ موازی)\n\n` +
-        `بنویسید: fast یا deep (پیش‌فرض: deep)`,
-      'deep'
-    );
-    if (_modeChoice === null) return;  // cancel
-    const _mode = (_modeChoice || 'deep').trim().toLowerCase();
-    if (_mode !== 'fast' && _mode !== 'deep') {
-      alert(`mode نامعتبر: "${_modeChoice}". باید "fast" یا "deep" باشد.`);
-      return;
-    }
+    // 🆕 (C4) — mode از روی دکمه ثابت است (نه prompt). هیچ runtime انتخاب
+    // mode وجود ندارد — دکمهٔ سبز همیشه deep، دکمهٔ آبی همیشه fast.
+    const _mode: 'fast' | 'deep' = forcedMode;
     // 🆕 (C3) — پرسش از کاربر برای auto_consolidate
     const _consolidateChoice = window.confirm(
       `🧬 پس از پایان verify، تسک‌های باقی‌مانده (partial + not_done) را ` +
@@ -6800,25 +6752,49 @@ function WatchedCard({
         >
           🔬 Deep Scan
         </button>
-        {/* 🆕 (C2) — دکمه فقط با scan-generated count نمایش می‌شود (نه total) */}
+        {/* 🆕 (C2+C4) — دو دکمه side-by-side: سبز=deep، آبی=fast. هر دو
+            از scan_generated_count می‌خوانند، هر دو با شرط یکسان مخفی/disable
+            می‌شوند، هر دو همان تابع startBulkVerify را با mode متفاوت صدا می‌زنند. */}
         {(bvEligible?.scan_generated_count ?? 0) >= 1 && (
           <button
-            onClick={startBulkVerify}
+            onClick={() => startBulkVerify('deep')}
             disabled={bvPolling || !!bvState?.running}
             title={
               bvPolling || bvState?.running
                 ? 'یک Bulk Verify در حال اجراست'
-                : `Bulk Verify فقط روی ${bvEligible?.scan_generated_count ?? 0} تسک scan-generated اجرا می‌شود. ` +
+                : `Bulk Verify عمیق — همهٔ probe ها (Playwright + vision + smart_nav + backend_log)، ~۹۰s/task. ` +
+                  `فقط روی ${bvEligible?.scan_generated_count ?? 0} تسک scan-generated. ` +
                   (bvEligible?.manual_count
-                    ? `(${bvEligible.manual_count} تسک دستی شما skip می‌شوند)`
+                    ? `(${bvEligible.manual_count} تسک دستی skip می‌شوند) `
                     : '') +
-                  ' تسک‌های done شده خودکار آرشیو می‌شوند.'
+                  'تسک‌های done شده خودکار آرشیو می‌شوند.'
             }
             className="px-3 py-1.5 bg-emerald-500 text-white rounded text-sm hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {bvPolling || bvState?.running
-              ? `🔬 verify... (${bvState?.current_index ?? 0}/${bvState?.total ?? 0})`
-              : `🔬 Bulk Verify (${bvEligible?.scan_generated_count ?? 0} auto-scan)`}
+            {(bvPolling || bvState?.running) && bvState?.mode === 'deep'
+              ? `🔬 deep... (${bvState?.current_index ?? 0}/${bvState?.total ?? 0})`
+              : `🔬 Bulk Verify Deep (${bvEligible?.scan_generated_count ?? 0})`}
+          </button>
+        )}
+        {(bvEligible?.scan_generated_count ?? 0) >= 1 && (
+          <button
+            onClick={() => startBulkVerify('fast')}
+            disabled={bvPolling || !!bvState?.running}
+            title={
+              bvPolling || bvState?.running
+                ? 'یک Bulk Verify در حال اجراست'
+                : `Bulk Verify سریع — فقط code-aware + AI، بدون runtime probe، ~۳۰s/task. ` +
+                  `فقط روی ${bvEligible?.scan_generated_count ?? 0} تسک scan-generated. ` +
+                  (bvEligible?.manual_count
+                    ? `(${bvEligible.manual_count} تسک دستی skip می‌شوند) `
+                    : '') +
+                  'بعد از پایان، تجمیع هوشمند تسک‌های باقی‌مانده پیشنهاد می‌شود.'
+            }
+            className="px-3 py-1.5 bg-blue-500 text-white rounded text-sm hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {(bvPolling || bvState?.running) && bvState?.mode === 'fast'
+              ? `▶ fast... (${bvState?.current_index ?? 0}/${bvState?.total ?? 0})`
+              : `▶ بررسی فوری Fast (${bvEligible?.scan_generated_count ?? 0})`}
           </button>
         )}
         <button
@@ -6827,18 +6803,6 @@ function WatchedCard({
           className="px-3 py-1.5 bg-cyan-500 text-white rounded text-sm hover:bg-cyan-600"
         >
           🔎 اسکن سریع
-        </button>
-        <button
-          onClick={onRunNow}
-          disabled={taskCount === 0}
-          title={
-            taskCount === 0
-              ? 'هیچ تسکی برای این پروژه وجود ندارد — ابتدا Deep Scan یا اسکن سریع بزنید یا یک ایده ثبت کنید'
-              : `اجرای فوری ${taskCount} تسک pending موجود (تسک جدید نمی‌سازد) — برای وقتی که قبلاً تسک ساخته‌اید`
-          }
-          className="px-3 py-1.5 bg-blue-500 text-white rounded text-sm hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          ▶ بررسی فوری{taskCount > 0 ? ` (${taskCount})` : ''}
         </button>
         <button
           onClick={onWriteIdea}
