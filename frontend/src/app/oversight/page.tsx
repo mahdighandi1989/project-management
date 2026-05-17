@@ -6700,6 +6700,19 @@ function WatchedCard({
                   ⚠️ note: {bvState.consolidation.error}
                 </div>
               )}
+              {/* 🆕 (C4 fix) — نمایش cluster های شکست‌خوردهٔ منفرد */}
+              {bvState.consolidation.cluster_failures && bvState.consolidation.cluster_failures.length > 0 && (
+                <details className="text-[10px] text-amber-700 dark:text-amber-300 mt-1">
+                  <summary className="cursor-pointer hover:underline">
+                    ⚠️ {bvState.consolidation.cluster_failures.length} cluster در ساخت super-task شکست خورد — مشاهدهٔ جزئیات
+                  </summary>
+                  <ul className="mt-1 ml-4 list-disc">
+                    {bvState.consolidation.cluster_failures.map((f: string, i: number) => (
+                      <li key={i} className="break-words">{f}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
               {bvState.consolidation.super_tasks_created && bvState.consolidation.super_tasks_created.length > 0 && (
                 <div className="text-[10px] text-emerald-700 dark:text-emerald-300 mt-1 flex gap-2 flex-wrap">
                   {bvState.consolidation.super_tasks_created.slice(0, 5).map((sid: string) => (
