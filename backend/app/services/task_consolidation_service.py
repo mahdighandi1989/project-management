@@ -431,28 +431,58 @@ def _validate_clusters(
 # Super-task construction
 # ────────────────────────────────────────────────────────────────────
 
+def _safe_str(v: Any, max_len: int = 1000) -> str:
+    """تبدیل ایمن هر مقدار به string قابل strip.
+
+    🐛 (C4 fix) — بسیاری از فیلدها (مثل verify_plan در ACهای ساختاریافته)
+    می‌توانند dict باشند. ()`dict or ""` به dict ارزیابی می‌شود (truthy)،
+    سپس `.strip()` روی dict خطا می‌اندازد:
+        'dict' object has no attribute 'strip'
+    این تابع dict/list/None را به str ایمن تبدیل می‌کند.
+    """
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v.strip()
+    if isinstance(v, (dict, list)):
+        try:
+            return json.dumps(v, ensure_ascii=False)[:max_len]
+        except Exception:
+            return str(v)[:max_len]
+    try:
+        return str(v).strip()[:max_len]
+    except Exception:
+        return ""
+
+
 def _format_step_summary(step: Dict[str, Any]) -> str:
-    _title = step.get("title") or step.get("id") or ""
-    _scope = (step.get("scope") or "").strip()
+    _title = _safe_str(step.get("title") or step.get("id") or "", max_len=200)
+    _scope = _safe_str(step.get("scope") or "", max_len=200)
     if _scope:
         return f"{_title} — {_scope[:200]}"
     return _title
 
 
 def _format_ac(ac: Any) -> str:
+    """فرمت AC به متن — مقاوم در برابر dict های nested.
+
+    🐛 (C4 fix) — قبلاً (ac.get("verify_plan") or "").strip() اگر verify_plan
+    یک dict بود (مثل {"steps":[...], "detection_signal":"..."})، چون dict
+    truthy است، strip روی dict خطا می‌داد. حالا با _safe_str ایمن است.
+    """
     if isinstance(ac, str):
         return ac.strip()
     if isinstance(ac, dict):
-        _text = (ac.get("text") or "").strip()
-        _vm = (ac.get("verify_method") or "").strip()
-        _vp = (ac.get("verify_plan") or "").strip()
+        _text = _safe_str(ac.get("text"), max_len=500)
+        _vm = _safe_str(ac.get("verify_method"), max_len=200)
+        _vp = _safe_str(ac.get("verify_plan"), max_len=500)
         out = _text
         if _vm:
             out += f" [verify_method={_vm}]"
         if _vp:
             out += f" [verify_plan={_vp[:200]}]"
         return out
-    return str(ac)
+    return _safe_str(ac)
 
 
 def _build_merged_idea_prompt(
@@ -980,46 +1010,60 @@ async def consolidate_remaining_tasks(
             # تسک‌های زنده برای آرشیو
             tasks_by_id = {t.id: t for t in service.tasks}
 
-            for cl in all_clusters:
-                src_cands = [
-                    candidate_by_id[tid] for tid in cl["task_ids"]
-                    if tid in candidate_by_id
-                ]
-                src_objs = [
-                    tasks_by_id[tid] for tid in cl["task_ids"]
-                    if tid in tasks_by_id and not getattr(tasks_by_id[tid], "archived", False)
-                ]
-                if len(src_objs) < _MIN_CLUSTER_SIZE:
+            # 🐛 (C4 fix) — هر cluster در try/except جداگانه ساخته می‌شود تا
+            # یک خطا در یکی، بقیه را نشکند. قبلاً یک bug در _format_ac کل
+            # ۲۳ cluster را با هم خراب می‌کرد.
+            cluster_failures: List[str] = []
+            for cl_idx, cl in enumerate(all_clusters):
+                try:
+                    src_cands = [
+                        candidate_by_id[tid] for tid in cl["task_ids"]
+                        if tid in candidate_by_id
+                    ]
+                    src_objs = [
+                        tasks_by_id[tid] for tid in cl["task_ids"]
+                        if tid in tasks_by_id and not getattr(tasks_by_id[tid], "archived", False)
+                    ]
+                    if len(src_objs) < _MIN_CLUSTER_SIZE:
+                        continue
+                    # 🛡 ایمنی: فقط تسک‌های done-نشده آرشیو شوند
+                    src_objs = [
+                        t for t in src_objs
+                        if (getattr(t, "verification_status", "pending") or "pending").lower() != "done"
+                    ]
+                    if len(src_objs) < _MIN_CLUSTER_SIZE:
+                        continue
+                    # 🛡 ایمنی: فقط source = auto_scan
+                    src_objs = [
+                        t for t in src_objs
+                        if (getattr(t, "source", "user") or "user").lower() == "auto_scan"
+                    ]
+                    if len(src_objs) < _MIN_CLUSTER_SIZE:
+                        continue
+                    # کاندیدهای مرتبط را هم به همان لیست تسک‌های آرشیو می‌رسانیم
+                    src_ids_final = {t.id for t in src_objs}
+                    src_cands_filtered = [c for c in src_cands if c["task_id"] in src_ids_final]
+                    super_task = await _build_super_task(
+                        cluster=cl,
+                        source_candidates=src_cands_filtered,
+                        source_task_objs=src_objs,
+                        watched_obj=watched_obj,
+                        verify_model_id=verify_model_id,
+                        mode=mode,
+                        service=service,
+                    )
+                    if super_task is not None:
+                        state["super_tasks_created"].append(super_task.id)
+                        state["tasks_archived"] += len(src_objs)
+                except Exception as _cl_e:
+                    _cid = cl.get("cluster_id", f"#{cl_idx}")
+                    _msg = f"cluster {_cid}: {type(_cl_e).__name__}: {str(_cl_e)[:200]}"
+                    cluster_failures.append(_msg)
+                    logger.exception(f"consolidation: cluster build failed — {_msg}")
                     continue
-                # 🛡 ایمنی: فقط تسک‌های done-نشده آرشیو شوند
-                src_objs = [
-                    t for t in src_objs
-                    if (getattr(t, "verification_status", "pending") or "pending").lower() != "done"
-                ]
-                if len(src_objs) < _MIN_CLUSTER_SIZE:
-                    continue
-                # 🛡 ایمنی: فقط source = auto_scan
-                src_objs = [
-                    t for t in src_objs
-                    if (getattr(t, "source", "user") or "user").lower() == "auto_scan"
-                ]
-                if len(src_objs) < _MIN_CLUSTER_SIZE:
-                    continue
-                # کاندیدهای مرتبط را هم به همان لیست تسک‌های آرشیو می‌رسانیم
-                src_ids_final = {t.id for t in src_objs}
-                src_cands_filtered = [c for c in src_cands if c["task_id"] in src_ids_final]
-                super_task = await _build_super_task(
-                    cluster=cl,
-                    source_candidates=src_cands_filtered,
-                    source_task_objs=src_objs,
-                    watched_obj=watched_obj,
-                    verify_model_id=verify_model_id,
-                    mode=mode,
-                    service=service,
-                )
-                if super_task is not None:
-                    state["super_tasks_created"].append(super_task.id)
-                    state["tasks_archived"] += len(src_objs)
+
+            if cluster_failures:
+                state["cluster_failures"] = cluster_failures[:20]  # حداکثر 20 نگه دار
 
             state["phase"] = "done"
         except Exception as e:
