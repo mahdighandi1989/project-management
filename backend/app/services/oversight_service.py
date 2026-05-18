@@ -3093,6 +3093,22 @@ class OversightService:
         # AI تمایل دارد همه را یک task کلی ببیند و فقط ۱-۲ step بسازد.
         # با شناسایی صریح بخش‌بندی‌ها، AI را مجبور می‌کنیم پیروی کند.
         import re as _re_seg
+
+        # 🆕 (bug 30 v4) — Reference/historical marker detection.
+        # وقتی متن کاربر می‌گوید «فاز X قبلاً اجرا شده» یا «مرور سریع» یا
+        # «(done)» یا «برای مرجع»، آن section باید از step generation حذف شود
+        # — وگرنه bloat با کارهای انجام‌شده ایجاد می‌شود.
+        _REFERENCE_MARKERS = [
+            r'قبلاً\s+(?:اجرا|انجام|پیاده)\s*شد',
+            r'پیش[\s\-]?تر\s+(?:اجرا|انجام|پیاده)\s*شد',
+            r'(?:فقط|صرفاً)\s+(?:برای|جهت)\s+(?:مرجع|حافظه|reference|reminder)',
+            r'مرور\s+(?:سریع|کوتاه|قبلی)',
+            r'\(\s*(?:done|completed|تمام|تمام\s*شد|انجام\s*شد|اجرا\s*شد)\s*\)',
+            r'(?:این\s+بخش|بخش\s+(?:الف|قبل|قدیم)|previous\s+phase).*قبلاً',
+            r'^\s*✅\s+(?:Phase|فاز|Stage)\s+[\d]+',  # «✅ Phase 1 اضافه کرد»
+            r'(?:چه\s+چیزی|چیزی\s+که)\s+(?:الان|حالا)\s+داریم',
+            r'(?:خلاصه|recap|summary)\s+(?:از|of)\s+(?:Phase|فاز|stages?)',
+        ]
         _section_patterns = [
             # heading-level English: "## Phase 1", "### Stage 2", etc.
             r'(?im)^\s*#{1,4}\s*[^\w\n]*(?:phase|stage|step)\s+[\d]+',
@@ -3122,8 +3138,8 @@ class OversightService:
             # 🆕 (bug 30 v3) — markdown heading عمومی به‌عنوان fallback نهایی
             # هر # یا ## یا ### که با emoji یا متن شروع شود (الویت پایین‌تر)
             # این موقع‌ای فعال می‌شود که هیچ کدام از patterns بالا کافی نباشد
-            r'(?im)^\s*##\s+[🎯🔬🅰🅱🅲🅳🅴🅵🅶🅷🅸🅹🚀🔧📌💡⭐]+',
-            r'(?im)^\s*#\s+[🎯🔬🅰🅱🅲🅳🅴🅵🅶🅷🅸🅹🚀🔧📌💡⭐]+',
+            r'(?im)^\s*##\s+[🎯🔬🅰🅱🅲🅳🅴🅵🅶🅷🅸🅹🚀🔧📌💡⭐🧪✅🚫⚠📁🏗🔄🛡📊🧠]+',
+            r'(?im)^\s*#\s+[🎯🔬🅰🅱🅲🅳🅴🅵🅶🅷🅸🅹🚀🔧📌💡⭐🧪✅🚫⚠📁🏗🔄🛡📊🧠]+',
         ]
         # 🆕 (bug 30 v2) — استخراج موقعیت + متن header برای chunking
         _section_starts: List[Tuple[int, str]] = []  # (offset, header_line)
@@ -3139,6 +3155,184 @@ class OversightService:
                 _header = _re_seg.sub(r'\s+', ' ', _m.group(0).strip())[:120]
                 _section_starts.append((_off, _header))
         _section_starts.sort(key=lambda x: x[0])
+
+        # 🆕 (bug 30 v4) — Filter out reference/historical sections (+ inheritance).
+        # هر section که در ۵۰۰ کاراکتر اول خود یکی از markers بالا را داشته
+        # باشد، به‌عنوان reference تگ می‌شود و از step generation خارج می‌شود.
+        # علاوه بر این، اگر یک parent section reference بود، همه sub-sectionهای
+        # داخل آن (تا section بعدی هم‌سطح یا بالاتر) نیز skip می‌شوند.
+        def _section_is_reference(start_off: int, end_off: int) -> bool:
+            preview = idea[start_off:min(end_off, start_off + 500)]
+            for _rm in _REFERENCE_MARKERS:
+                if _re_seg.search(_rm, preview, _re_seg.IGNORECASE):
+                    return True
+            return False
+
+        def _heading_level(header: str) -> int:
+            """تعداد # در شروع header — اگر header اصلاً heading نباشد، 99."""
+            _hm = _re_seg.match(r'^\s*(#+)', header)
+            return len(_hm.group(1)) if _hm else 99
+
+        # اول هر section را به‌طور مستقیم چک کن
+        _direct_ref: List[bool] = []
+        for _idx, (_off, _header) in enumerate(_section_starts):
+            _end = (
+                _section_starts[_idx + 1][0]
+                if _idx + 1 < len(_section_starts)
+                else len(idea)
+            )
+            _direct_ref.append(_section_is_reference(_off, _end))
+
+        # حالا inheritance: اگر section[i] direct ref است و heading level دارد،
+        # هر section بعدی با level > آن تا section دیگر با level ≤ آن نیز ref است.
+        _is_ref_final: List[bool] = list(_direct_ref)
+        for _i, _drf in enumerate(_direct_ref):
+            if not _drf:
+                continue
+            _parent_level = _heading_level(_section_starts[_i][1])
+            if _parent_level >= 99:
+                continue  # heading-less section نمی‌تواند parent باشد
+            # walk forward and mark descendants
+            for _j in range(_i + 1, len(_section_starts)):
+                _child_level = _heading_level(_section_starts[_j][1])
+                if _child_level <= _parent_level:
+                    break  # رسیدیم به sibling یا سطح بالاتر
+                _is_ref_final[_j] = True
+
+        _filtered_starts: List[Tuple[int, str]] = []
+        _skipped_ref_count = 0
+        for _idx, (_off, _header) in enumerate(_section_starts):
+            if _is_ref_final[_idx]:
+                _skipped_ref_count += 1
+                continue
+            _filtered_starts.append((_off, _header))
+        if _skipped_ref_count > 0:
+            logger.info(
+                f"_ai_plan_steps: skipped {_skipped_ref_count} reference/"
+                f"historical sections (already-done markers + inheritance)"
+            )
+        _section_starts = _filtered_starts
+
+        # 🆕 (bug 30 v4) — Programmatic enumerated sub-list expansion.
+        # وقتی یک section شامل لیست شماره‌دار/بولت با ≥۳ آیتم explicit است
+        # (مثل «Chunk 1..8»، «گپ ۱..۶»، «بهبود ۷..۹»)، آن lista را به sub-step
+        # جداگانه expand می‌کنیم تا هر آیتم خودش یک step شود.
+        # 🆕 (bug 30 v4) — Patterns هم فرمت bold (`**Chunk N**`) و هم numbered
+        # prefix (`1. `) را می‌پذیرند. بخش lead = "1. **" یا "- **" یا "" قبل از
+        # کلید واژه قرار می‌گیرد. asterisks تا ۲ تا قبل و بعد عبارت مجاز است.
+        _LEAD = r'(?:[\d۰-۹]+[\.\)]\s+|[-*•]\s+)?\*{0,2}\s*'
+        _TAIL = r'\*{0,2}\s*[:\-—\.\*]'
+        _ENUM_PATTERNS = [
+            # "Chunk N: ..." یا "1. **Chunk N**: ..." یا "**Chunk N** — ..."
+            rf'(?im)^\s*{_LEAD}\bChunk\s+([\d]+)\s*{_TAIL}',
+            # "گپ ۱ — ...", "گپ N:"، "1. **گپ ۱**: "
+            rf'(?im)^\s*{_LEAD}گپ\s+([\d۰-۹]+)\s*{_TAIL}',
+            # "بهبود ۷ — ..."
+            rf'(?im)^\s*{_LEAD}بهبود\s+([\d۰-۹]+)\s*{_TAIL}',
+            # "فیکس ۱ — ..."
+            rf'(?im)^\s*{_LEAD}فیکس\s+([\d۰-۹]+)\s*{_TAIL}',
+            # "Bug C6 — ..." (با heading hashes اختیاری)
+            r'(?im)^\s*#{0,4}\s*[^\w\n]*\b[Bb]ug\s+[Cc]?([\d]+)\b\s*[:\-—\.]',
+            # "مرحله X:" (وقتی sub-list هست)
+            rf'(?im)^\s*{_LEAD}مرحله\s+([\d۰-۹]+)\s*[:\-—]',
+            # 🆕 AC جدول/لیست: "AC 1:", "AC#1", "| 1 | ... |" در جدول AC
+            rf'(?im)^\s*{_LEAD}AC\s*#?\s*([\d]+)\s*[:\-—]',
+            # 🆕 "edge case N", "Stage N" در sub-list
+            rf'(?im)^\s*{_LEAD}(?:edge\s*case|stage)\s+([\d]+)\s*{_TAIL}',
+        ]
+
+        def _expand_section_enums(start_off: int, end_off: int, header: str) -> List[Tuple[int, str]]:
+            """اگر داخل یک section لیست شماره‌دار با ≥۳ آیتم بود، آن آیتم‌ها
+            را به‌عنوان sub-section برمی‌گرداند. اگر نه، [] برمی‌گرداند."""
+            section_text = idea[start_off:end_off]
+            for _ep in _ENUM_PATTERNS:
+                _matches = list(_re_seg.finditer(_ep, section_text))
+                if len(_matches) >= 3:
+                    _subs: List[Tuple[int, str]] = []
+                    for _m in _matches:
+                        _abs_off = start_off + _m.start()
+                        _line = _re_seg.sub(r'\s+', ' ', _m.group(0).strip())[:120]
+                        # عنوان sub-section را با header parent ترکیب کن
+                        _sub_header = f"{header[:60]} :: {_line}"[:180]
+                        _subs.append((_abs_off, _sub_header))
+                    return _subs
+            return []
+
+        _expanded_starts: List[Tuple[int, str]] = []
+        _expanded_from_sections = 0
+        for _idx, (_off, _header) in enumerate(_section_starts):
+            _end = (
+                _section_starts[_idx + 1][0]
+                if _idx + 1 < len(_section_starts)
+                else len(idea)
+            )
+            _subs = _expand_section_enums(_off, _end, _header)
+            if _subs:
+                _expanded_starts.extend(_subs)
+                _expanded_from_sections += 1
+            else:
+                _expanded_starts.append((_off, _header))
+        if _expanded_from_sections > 0:
+            _delta = len(_expanded_starts) - len(_section_starts)
+            logger.info(
+                f"_ai_plan_steps: expanded {_expanded_from_sections} section(s) "
+                f"with enumerated sub-lists → +{_delta} sub-steps"
+            )
+        _section_starts = sorted(_expanded_starts, key=lambda x: x[0])
+
+        # 🆕 (bug 30 v4) — Identifier extraction from raw idea.
+        # نام فایل‌ها/کلاس‌ها/توابع و paths را استخراج می‌کنیم تا AI به جای
+        # اختراع نام، از همین‌ها در key_terms و target_files استفاده کند.
+        def _extract_identifiers(text: str) -> Dict[str, List[str]]:
+            ids = {"paths": [], "classes": [], "functions": [], "endpoints": []}
+            # file paths (backend/.../*.py، frontend/.../*.tsx، docs/*.md و …)
+            for _m in _re_seg.finditer(
+                r'\b((?:backend|frontend|docs|tests|src|app|scripts)/[\w/\.\-]+\.(?:py|tsx?|jsx?|md|json|yaml|yml|sh|toml|env))\b',
+                text,
+            ):
+                _p = _m.group(1)
+                if _p not in ids["paths"]:
+                    ids["paths"].append(_p)
+            # PascalCase class names + suffixes معمول
+            for _m in _re_seg.finditer(
+                r'\b([A-Z][a-zA-Z0-9]{3,}(?:Service|Helper|Probe|Verifier|Manager|Bundle|Context|Config|Session|Detector|Analyzer|Extractor|Result|Schema|Runner|Cache|Orchestrator|Builder|Searcher|Inventory))\b',
+                text,
+            ):
+                _c = _m.group(1)
+                if _c not in ids["classes"]:
+                    ids["classes"].append(_c)
+            # snake_case function/method names (با حداقل یک underscore)
+            for _m in _re_seg.finditer(
+                r'\b(_?[a-z][a-z0-9]*(?:_[a-z0-9]+){1,})\b',
+                text,
+            ):
+                _f = _m.group(1)
+                # حذف کلمات common که snake_case نیستن
+                if (
+                    len(_f) >= 6
+                    and _f not in ids["functions"]
+                    and _f not in ("user_goal", "user_id", "task_id", "watched_id")
+                ):
+                    ids["functions"].append(_f)
+            # HTTP endpoints مثل GET /api/X یا /verify-trace
+            for _m in _re_seg.finditer(
+                r'\b(?:GET|POST|PUT|PATCH|DELETE)\s+(/[\w\-/\{\}\:]+)|^\s*(/api/[\w\-/\{\}\:]+)',
+                text,
+                _re_seg.MULTILINE,
+            ):
+                _ep = _m.group(1) or _m.group(2)
+                if _ep and _ep not in ids["endpoints"]:
+                    ids["endpoints"].append(_ep)
+            # caps
+            return {
+                "paths": ids["paths"][:60],
+                "classes": ids["classes"][:60],
+                "functions": ids["functions"][:80],
+                "endpoints": ids["endpoints"][:40],
+            }
+
+        _extracted_ids = _extract_identifiers(idea)
+
         _detected_sections = [h for _, h in _section_starts]
         _section_count = len(_detected_sections)
         _is_multi_section = _section_count >= 3
@@ -3162,6 +3356,49 @@ class OversightService:
                 f"۴۰۰ کاراکتر** و raw_excerpt را **حداکثر ۸۰۰ کاراکتر** "
                 f"نگه‌دار. غنی‌سازی در pass بعدی انجام می‌شود."
             )
+            if _skipped_ref_count > 0:
+                _section_hint += (
+                    f"\n\n🚫 **{_skipped_ref_count} بخش 'مرور/قبلاً اجرا شده' "
+                    f"حذف شدند** — برای آنها step نساز (کارشان تمام است). "
+                    f"فقط روی بخش‌های detected بالا تمرکز کن."
+                )
+
+        # 🆕 (bug 30 v4) — Identifier hint: list خروجی regex را به AI نشان بده
+        # تا از همان نام‌ها استفاده کند، نه اختراع کند.
+        _id_hint = ""
+        if any(_extracted_ids[k] for k in ("paths", "classes", "functions", "endpoints")):
+            _id_lines: List[str] = []
+            if _extracted_ids["paths"]:
+                _id_lines.append(
+                    "📂 مسیرهای فایل ذکرشده در متن (عیناً استفاده کن — اختراع نکن):"
+                )
+                for _p in _extracted_ids["paths"][:30]:
+                    _id_lines.append(f"   • {_p}")
+            if _extracted_ids["classes"]:
+                _id_lines.append(
+                    "🏷 نام کلاس‌های ذکرشده (در key_terms و scope استفاده کن):"
+                )
+                for _c in _extracted_ids["classes"][:30]:
+                    _id_lines.append(f"   • {_c}")
+            if _extracted_ids["functions"]:
+                _id_lines.append(
+                    "⚙ نام توابع/متغیرهای snake_case ذکرشده:"
+                )
+                for _f in _extracted_ids["functions"][:40]:
+                    _id_lines.append(f"   • {_f}")
+            if _extracted_ids["endpoints"]:
+                _id_lines.append("🌐 endpoint های ذکرشده:")
+                for _ep in _extracted_ids["endpoints"][:20]:
+                    _id_lines.append(f"   • {_ep}")
+            _id_hint = (
+                "\n\n📌 **identifier های استخراج‌شده از متن کاربر**:\n"
+                + "\n".join(_id_lines)
+                + "\n\n⚠️ **قاعدهٔ سخت**: در `key_terms`, `target_files`, و "
+                "`scope` فقط از همین نام‌ها استفاده کن. **هیچ مسیر یا نام جدیدی "
+                "که در متن کاربر نیست اختراع نکن**. اگر کاربر گفت "
+                "`backend/app/services/X/Y.py`، تو همان مسیر را بنویس — نه "
+                "`backend/Y.py` و نه `app/services/Z/Y.py`. consistency حیاتی است."
+            )
 
         plan_prompt = f"""تو یک پلانر دقیق هستی. درخواست طولانی کاربر را به مراحل کوچک‌تر و **مستقل** تقسیم می‌کنی.
 
@@ -3175,7 +3412,13 @@ class OversightService:
 7. **`key_terms`**: همهٔ نام‌ها (فایل، endpoint، function، URL، library، dataclass، table، …) که کاربر در این بخش گفته. حداقل ۳ آیتم اگر در متن وجود دارد.
 8. اگر درخواست کاربر فقط یک کار است (نه چندتایی)، فقط ۱ مرحله بده — ولی همان ۱ مرحله را خیلی غنی توضیح بده.
 
-## مهم: اگر کاربر صراحتاً موارد ۱، ۲، ۳، … را شماره‌گذاری کرده، **برای هر کدام یک مرحله** بساز. اگر بنویسد «و این، و آن، و فلان»، هر کدام جداگانه.{_section_hint}
+## مهم: اگر کاربر صراحتاً موارد ۱، ۲، ۳، … را شماره‌گذاری کرده، **برای هر کدام یک مرحله** بساز. اگر بنویسد «و این، و آن، و فلان»، هر کدام جداگانه.
+
+## 🆕 (bug 30 v4) قواعد سخت برای جلوگیری از خطاهای پرتکرار:
+- **هرگز** بخش‌هایی که کاربر گفته «قبلاً اجرا شده» یا «مرور» یا «(done)» یا «برای مرجع» را به‌عنوان step اجرایی نساز. این‌ها فقط زمینه هستن.
+- اگر یک بخش شامل لیست explicit با شمارهٔ ≥۳ آیتم است (مثل «Chunk ۱..۸»، «گپ ۱..۶»، «۱۲ AC شماره‌دار»، «۱۱ edge case»)، **هر آیتم را یک step مستقل کن** — نه ادغام در یک step خلاصه.
+- اگر کاربر جدول AC با ستون‌های (#, AC, identifier) داد، آن جدول را به یک step «meta-test/checklist» تبدیل کن و **همهٔ سطرها را verbatim در `raw_excerpt` کپی کن** — هیچ‌کدام را حذف نکن.
+- consistency مسیر فایل: اگر کاربر یک فایل را با مسیر `X/Y/Z.py` گفت، تو دقیقاً همان مسیر را بنویس — نه مسیر متفاوت در stepهای مختلف.{_section_hint}{_id_hint}
 
 ## هدف اصلی پروژه:
 {user_goal or '(کاربر یادداشتی ثبت نکرده است)'}
@@ -3282,6 +3525,20 @@ class OversightService:
             header: str, section_text: str, section_idx: int,
         ) -> Optional[Dict[str, Any]]:
             """یک AI call برای یک بخش — یک step تولید می‌کند."""
+            # 🆕 (bug 30 v4) — identifier hint مختصر برای chunking نیز
+            _mini_id_lines: List[str] = []
+            if _extracted_ids["paths"]:
+                _mini_id_lines.append(
+                    "📂 مسیرهای فایل (از این لیست استفاده کن، اختراع نکن): "
+                    + ", ".join(_extracted_ids["paths"][:12])
+                )
+            if _extracted_ids["classes"]:
+                _mini_id_lines.append(
+                    "🏷 کلاس‌های ذکرشده: "
+                    + ", ".join(_extracted_ids["classes"][:12])
+                )
+            _mini_id_hint = "\n\n" + "\n".join(_mini_id_lines) if _mini_id_lines else ""
+
             mini_prompt = f"""تو یک پلانر دقیق هستی. این **یک بخش** از یک درخواست بزرگ‌تر است. وظیفه‌ات: این بخش را به **یک مرحله** اجرایی تبدیل کن.
 
 ## هدف پروژه:
@@ -3291,6 +3548,11 @@ class OversightService:
 \"\"\"
 {section_text}
 \"\"\"
+
+## قواعد سخت:
+- اگر این بخش صراحتاً می‌گوید «قبلاً اجرا شده» یا «مرور» یا «(done)» یا «برای مرجع»، خروجی را `{{"skip": true, "reason": "..."}}` بده — هیچ step نساز.
+- اگر بخش شامل لیست شماره‌دار با ≥۳ آیتم explicit است، در `scope` این موضوع را ذکر کن و در `raw_excerpt` همه آیتم‌ها را verbatim بگذار.
+- نام فایل/کلاس را عیناً از متن استفاده کن — اختراع نکن.{_mini_id_hint}
 
 ## خروجی فقط JSON خالص (یک object، نه array):
 {{
@@ -3314,6 +3576,13 @@ class OversightService:
                 _parsed = self._extract_json(_resp)
                 if not isinstance(_parsed, dict):
                     return None
+                # 🆕 (bug 30 v4) — اگر AI تشخیص داد این section reference است
+                if _parsed.get("skip") is True:
+                    logger.info(
+                        f"_plan_single_section[{section_idx}]: AI marked as "
+                        f"reference/skip (reason: {_parsed.get('reason', 'n/a')})"
+                    )
+                    return None
                 title = (_parsed.get("title") or "").strip()
                 scope = (_parsed.get("scope") or "").strip()
                 if not title or not scope:
@@ -3333,8 +3602,123 @@ class OversightService:
                 logger.warning(f"_plan_single_section[{section_idx}] failed: {_e}")
                 return None
 
+        # 🆕 (bug 30 v4) — Post-processing: path consistency + dedup.
+        # هر step ممکن است در `scope` یا `key_terms` مسیر فایل ذکر کند.
+        # اگر دو step به فایل مشابه (basename یکسان) اشاره می‌کنند ولی مسیر
+        # متفاوت، آن‌ها را به مسیر اول هماهنگ می‌کنیم. همچنین stepهای با
+        # عنوان تقریباً یکسان (Jaccard >= 0.7) را merge می‌کنیم.
+        def _normalize_paths_across_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            # نقشه basename -> اولین مسیر کاملی که دیده شده
+            canonical: Dict[str, str] = {}
+            _path_re = _re_seg.compile(
+                r'\b((?:backend|frontend|docs|tests|src|app|scripts)/[\w/\.\-]+\.(?:py|tsx?|jsx?|md|json|yaml|yml|sh|toml))\b'
+            )
+            # pass 1: collect canonical
+            for st in steps:
+                for fld in ("scope", "raw_excerpt", "title"):
+                    txt = st.get(fld) or ""
+                    for _m in _path_re.finditer(txt):
+                        _p = _m.group(1)
+                        _base = _p.rsplit("/", 1)[-1]
+                        canonical.setdefault(_base, _p)
+                for kt in st.get("key_terms") or []:
+                    if isinstance(kt, str) and "/" in kt and "." in kt:
+                        _base = kt.rsplit("/", 1)[-1]
+                        if _base.split(".")[-1] in ("py", "tsx", "ts", "jsx", "js", "md", "json", "yaml", "yml", "sh", "toml"):
+                            canonical.setdefault(_base, kt)
+            # pass 2: replace alternative paths with canonical
+            _replacements = 0
+            for st in steps:
+                for fld in ("scope", "raw_excerpt", "title"):
+                    txt = st.get(fld) or ""
+                    new_txt = txt
+                    for _m in _path_re.finditer(txt):
+                        _p = _m.group(1)
+                        _base = _p.rsplit("/", 1)[-1]
+                        canon = canonical.get(_base)
+                        if canon and canon != _p:
+                            new_txt = new_txt.replace(_p, canon)
+                            _replacements += 1
+                    if new_txt != txt:
+                        st[fld] = new_txt
+                # نرمالیزه کردن key_terms
+                _new_kt: List[str] = []
+                for kt in st.get("key_terms") or []:
+                    if isinstance(kt, str) and "/" in kt and "." in kt:
+                        _base = kt.rsplit("/", 1)[-1]
+                        canon = canonical.get(_base)
+                        if canon and canon != kt:
+                            _new_kt.append(canon)
+                            _replacements += 1
+                            continue
+                    _new_kt.append(kt)
+                st["key_terms"] = _new_kt
+            if _replacements > 0:
+                logger.info(
+                    f"_ai_plan_steps: normalized {_replacements} inconsistent "
+                    f"file paths across steps (canonicalized to first-seen form)"
+                )
+            return steps
+
+        def _dedup_similar_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            """دو step با similarity ≥0.75 در عنوان merge می‌شوند (دومی drop)."""
+            if len(steps) < 2:
+                return steps
+
+            def _tokenize(s: str) -> set:
+                s = _re_seg.sub(r'[^\w؀-ۿ\s]', ' ', (s or "").lower())
+                return {t for t in s.split() if len(t) > 2}
+
+            def _jaccard(a: set, b: set) -> float:
+                if not a or not b:
+                    return 0.0
+                return len(a & b) / len(a | b)
+
+            kept: List[Dict[str, Any]] = []
+            kept_tokens: List[set] = []
+            _merged = 0
+            for st in steps:
+                _t = _tokenize(st.get("title", ""))
+                _is_dup = False
+                for _i, _kt in enumerate(kept_tokens):
+                    if _jaccard(_t, _kt) >= 0.75:
+                        # merge: scope/key_terms از step دوم به اول اضافه می‌شود
+                        kept[_i]["scope"] = (
+                            kept[_i].get("scope", "")
+                            + "\n— [merged] "
+                            + (st.get("scope") or "")
+                        )[:2500]
+                        _kt_combined = list({
+                            *(kept[_i].get("key_terms") or []),
+                            *(st.get("key_terms") or []),
+                        })
+                        kept[_i]["key_terms"] = _kt_combined[:25]
+                        _is_dup = True
+                        _merged += 1
+                        break
+                if not _is_dup:
+                    kept.append(st)
+                    kept_tokens.append(_t)
+            if _merged > 0:
+                logger.info(
+                    f"_ai_plan_steps: merged {_merged} near-duplicate steps "
+                    f"(title Jaccard >= 0.75)"
+                )
+            # renumber ids
+            for _i, st in enumerate(kept, start=1):
+                st["id"] = _i
+            return kept
+
+        def _post_process(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            if not steps:
+                return steps
+            steps = _normalize_paths_across_steps(steps)
+            steps = _dedup_similar_steps(steps)
+            return steps
+
         try:
             valid_steps = await _run_planner(plan_prompt, _max_out_tokens)
+            valid_steps = _post_process(valid_steps)
 
             # 🆕 (bug 30) — اگر بخش‌بندی صریح زیاد بود ولی خروجی خیلی کمتر،
             # AI خلاصه کرده — یک‌بار دیگر با تأکید صریح‌تر تلاش کن.
@@ -3356,6 +3740,7 @@ class OversightService:
                 )
                 retry_prompt = plan_prompt + retry_hint
                 retry_steps = await _run_planner(retry_prompt, _max_out_tokens)
+                retry_steps = _post_process(retry_steps)
                 if len(retry_steps) > len(valid_steps):
                     logger.info(
                         f"_ai_plan_steps: retry succeeded — "
@@ -3390,6 +3775,7 @@ class OversightService:
                 ]
                 _results = await _aio.gather(*_tasks, return_exceptions=False)
                 _chunk_steps = [r for r in _results if r is not None]
+                _chunk_steps = _post_process(_chunk_steps)
                 if len(_chunk_steps) > len(valid_steps):
                     logger.info(
                         f"_ai_plan_steps: chunking produced {len(_chunk_steps)} "
