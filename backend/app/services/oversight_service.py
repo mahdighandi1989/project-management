@@ -5737,6 +5737,229 @@ AC = «طراحی شیک‌تر باشد»:
             raise
 
     # ====================================================================
+    # 🔗 Bug C7 — Bridge: Inspector ↔ Oversight helpers
+    # ====================================================================
+
+    async def build_followup_for_task(
+        self,
+        task: "OversightTask",
+        last_report: Optional["OversightReport"] = None,
+    ) -> str:
+        """ساخت پرامپت followup مختصر برای ادامهٔ کار روی یک تسک.
+
+        خروجی: متن چند خطی که در smart-chat در round بعدی ping-pong یا
+        execute فرستاده می‌شود. شامل:
+          - تأیید آنچه done شد (done_parts)
+          - تمرکز روی آنچه remaining است (remaining_parts)
+          - فایل‌هایی که قبلاً تغییر کرد (تا overwrite نشود)
+        """
+        # اگر last_report داده نشده، آخرین report تسک را پیدا کن
+        if last_report is None:
+            last_report = next(
+                (r for r in self.reports if r.task_id == task.id), None
+            )
+
+        lines: List[str] = []
+        lines.append("# ادامهٔ کار روی تسک")
+        lines.append(f"عنوان: {task.title}")
+        lines.append("")
+
+        # آنچه done شد
+        done_parts: List[str] = []
+        if last_report and getattr(last_report, "done_parts", None):
+            done_parts = list(last_report.done_parts)
+        if done_parts:
+            lines.append("## ✓ بخش‌هایی که در round های قبل انجام شدند")
+            lines.append("این موارد را **دوباره** پیاده‌سازی نکنید — فقط بدانید کامل‌اند:")
+            for dp in done_parts[:20]:
+                dp_text = str(dp).strip()
+                if dp_text:
+                    lines.append(f"  - {dp_text[:200]}")
+            lines.append("")
+
+        # آنچه باقی مانده — مهم‌ترین بخش
+        remaining_parts: List[str] = []
+        if last_report and getattr(last_report, "remaining_parts", None):
+            remaining_parts = list(last_report.remaining_parts)
+        if remaining_parts:
+            lines.append("## ⚠️ بخش‌هایی که باید الان انجام شوند (تمرکز کامل اینجا)")
+            for i, rp in enumerate(remaining_parts, 1):
+                rp_text = str(rp).strip()
+                if rp_text:
+                    lines.append(f"  {i}. {rp_text}")
+            lines.append("")
+        else:
+            # remaining خالی است ولی verify done نشده — یعنی AC ها هست ولی
+            # هیچ AC در remaining ست نشده. کل AC را به‌عنوان hint بده.
+            ac_list = list(task.acceptance_criteria or [])
+            if ac_list:
+                lines.append("## 📋 acceptance_criteria کامل (هنوز done کامل نشده)")
+                for i, ac in enumerate(ac_list, 1):
+                    if isinstance(ac, dict):
+                        ac_text = ac.get("text", "") or str(ac)
+                    else:
+                        ac_text = str(ac)
+                    if ac_text.strip():
+                        lines.append(f"  {i}. {ac_text.strip()[:300]}")
+                lines.append("")
+
+        # فایل‌های قبلاً تغییر داده‌شده — تا overwrite نشود
+        evidence = task.applied_evidence or {}
+        prev_files: List[str] = list(evidence.get("files_committed") or [])
+        if prev_files:
+            lines.append("## 🛡 فایل‌هایی که در apply قبلی تغییر کردند")
+            lines.append("این فایل‌ها قبلاً modify شدند. اگر باز هم لازم است "
+                         "تغییر دهید، **افزایشی** کار کنید — کد موجود را پاک نکنید:")
+            for fp in prev_files[:30]:
+                lines.append(f"  - {fp}")
+            lines.append("")
+
+        # یک reminder صریح در پایان
+        lines.append("---")
+        lines.append(
+            "**لطفاً دقیقاً همان فرمت action تولید کنید "
+            "(action_plan با files = [{path, content, operation}])** "
+            "تا apply-action بتواند آن را به‌کار ببرد."
+        )
+
+        return "\n".join(lines)
+
+    async def execute_task_via_inspector(
+        self,
+        task_id: str,
+        *,
+        model_ids: Optional[List[str]] = None,
+        followup_only: bool = False,
+    ) -> Dict[str, Any]:
+        """اجرای یک تسک از طریق پایپ‌لاین smart-chat inspector.
+
+        این تابع برای ping-pong loop scheduler است (فاز ۴ Bridge). به‌جای
+        فراخوانی run_task مستقیم (که فقط verdict تولید می‌کند)، تسک را به
+        smart-chat می‌فرستد تا کد تولید + apply شود.
+
+        Args:
+          task_id: شناسهٔ تسک
+          model_ids: اگر None، از watched.default_model_ids استفاده می‌شود
+          followup_only: اگر True، فقط followup ارسال می‌شود (round بعدی)
+
+        Returns:
+          dict با status و جزئیات اجرا
+        """
+        task = next((t for t in self.tasks if t.id == task_id), None)
+        if task is None:
+            return {"success": False, "error": "task not found"}
+
+        watched = self._find_watched(task.watched_id) if task.watched_id else None
+        if not watched:
+            return {"success": False, "error": "watched project not found for task"}
+
+        # ساخت پیام به smart-chat
+        if followup_only:
+            last_report = next(
+                (r for r in self.reports if r.task_id == task_id), None
+            )
+            message = await self.build_followup_for_task(task, last_report)
+        else:
+            message = (
+                f"# اجرای تسک از مرکز نظارت\n\n"
+                f"این تسک از مرکز نظارت برای اجرا فرستاده شده. "
+                f"لطفاً action تولید کنید تا apply-action کد را اعمال کند.\n\n"
+                f"## تسک:\n{task.title}\n\n"
+                f"## prompt:\n{task.prompt[:5000]}"
+            )
+
+        # یافتن project_id از watched.repo_full_name
+        # نکته: oversight tasks در DB با watched_id لینک اند، نه با project_id.
+        # inspector با project_id کار می‌کند. اگر watched.repo_full_name با
+        # project.github_path یا extra_data.owner/repo match شود، آن project
+        # را پیدا می‌کنیم. در نسخه‌های بعد می‌توان wired-link کرد.
+        # برای الان، resolver ساده:
+        try:
+            from ..db.session import SessionLocal
+            from ..models.project import Project as _Proj_lookup
+            _db = SessionLocal()
+            try:
+                _projects = _db.query(_Proj_lookup).all()
+                project_id: Optional[str] = None
+                target_path = (watched.repo_full_name or "").lower()
+                for p in _projects:
+                    if (p.github_path or "").lower() == target_path:
+                        project_id = p.id
+                        break
+                    # هم extra_data را چک کن
+                    try:
+                        ed = p.extra_data
+                        if isinstance(ed, str):
+                            ed = json.loads(ed)
+                        if isinstance(ed, dict):
+                            _o = (ed.get("owner") or "").lower()
+                            _r = (ed.get("repo") or "").lower()
+                            if _o and _r and f"{_o}/{_r}" == target_path:
+                                project_id = p.id
+                                break
+                    except Exception:
+                        continue
+            finally:
+                _db.close()
+        except Exception as _pe:
+            logger.warning(f"execute_task_via_inspector: project lookup failed: {_pe}")
+            project_id = None
+
+        if not project_id:
+            return {
+                "success": False,
+                "error": f"no inspector project found for watched.repo_full_name={watched.repo_full_name}",
+            }
+
+        # NOTE: smart-chat یک SSE streaming endpoint است. در ping-pong scheduler
+        # ما نمی‌توانیم مستقیماً SSE consumer باشیم بدون HTTP client overhead.
+        # راه‌حل: smart-chat را با کاهش-فرم به یک تابع داخلی refactor کنیم،
+        # یا یک HTTP client از خود سرور به خودش بزنیم. برای minimum viable
+        # implementation، یک HTTP self-call می‌زنیم.
+        import os as _os
+        backend_base = _os.environ.get("BACKEND_INTERNAL_URL", "http://127.0.0.1:8000")
+        try:
+            import aiohttp as _ah
+            _payload = {
+                "project_id": project_id,
+                "model_ids": list(model_ids or []),
+                "message": message,
+                "task_id": task_id,
+            }
+            _timeout = _ah.ClientTimeout(total=600)
+            async with _ah.ClientSession(timeout=_timeout) as session:
+                async with session.post(
+                    f"{backend_base}/api/render/inspector/smart-chat",
+                    json=_payload,
+                ) as r:
+                    if r.status != 200:
+                        return {
+                            "success": False,
+                            "error": f"smart-chat HTTP {r.status}",
+                        }
+                    # SSE consumer — تا done event بخوان
+                    accumulated: List[str] = []
+                    async for chunk in r.content.iter_chunked(8192):
+                        try:
+                            accumulated.append(chunk.decode("utf-8", errors="ignore"))
+                        except Exception:
+                            pass
+                        if "event: done" in "".join(accumulated[-3:]):
+                            break
+            return {
+                "success": True,
+                "task_id": task_id,
+                "project_id": project_id,
+                "message_chars": len(message),
+                "raw_response_length": sum(len(c) for c in accumulated),
+            }
+        except Exception as _he:
+            return {
+                "success": False,
+                "error": f"smart-chat call failed: {_he}",
+            }
+
+    # ====================================================================
     # Reports
     # ====================================================================
 
