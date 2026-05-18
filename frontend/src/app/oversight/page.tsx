@@ -268,6 +268,26 @@ interface Task {
     done?: boolean;  // 🔔 reminder tick flag
   }>;
   overall_completion_pct?: number | null;
+  // 🆕 (C5) — pin، title management، consolidation
+  tags?: string[];
+  pinned?: boolean;
+  pinned_at?: string | null;
+  manual_title_override?: boolean;
+  title_history?: Array<{
+    ts: string;
+    source: string;
+    old_title?: string;
+    new_title?: string;
+    reason?: string;
+  }>;
+  merged_into?: string | null;
+  merged_from?: string[];
+  consolidation_meta?: {
+    cluster_theme?: string;
+    rationale?: string;
+    [key: string]: any;
+  } | null;
+  intelligent_checklist?: Array<{ id: string; text: string; priority: string; done: boolean }> | null;
   // 🔔 Reminder feature
   reminder_at?: string | null;
   reminder_state?: 'none' | 'scheduled' | 'fired' | 'snoozed' | 'done';
@@ -342,6 +362,451 @@ const TYPE_ICONS: Record<string, string> = {
 };
 
 type RepoSort = 'pushed_desc' | 'pushed_asc' | 'name' | 'stars';
+
+// ════════════════════════════════════════════════════════════════════
+// 🆕 (C5) — View preferences foundation: hook + applyFiltersSortSearch
+//                                        + Pagination component
+// ════════════════════════════════════════════════════════════════════
+
+type ViewPrefsTab = {
+  page_size: number;
+  current_page: number;
+  sort_field: string;
+  sort_order: 'asc' | 'desc';
+  filters: {
+    status: string[];
+    source: string[];
+    priority: string[];
+    type: string[];
+    verification_status: string[];
+    tags: string[];
+    date_range: { from: string | null; to: string | null };
+    context_toggles: Record<string, boolean>;
+  };
+  search_query: string;
+};
+type ViewPrefs = {
+  tasks_tab: ViewPrefsTab;
+  archive_tab: ViewPrefsTab;
+  reports_tab: ViewPrefsTab;
+};
+
+const DEFAULT_VIEW_PREFS_TAB: ViewPrefsTab = {
+  page_size: 100,
+  current_page: 1,
+  sort_field: 'created_at',
+  sort_order: 'desc',
+  filters: {
+    status: [],
+    source: [],
+    priority: [],
+    type: [],
+    verification_status: [],
+    tags: [],
+    date_range: { from: null, to: null },
+    context_toggles: {
+      pinned_only: false,
+      has_followup: false,
+      has_prompt_history: false,
+      manually_edited_title: false,
+      merged_super_tasks: false,
+      was_merged: false,
+      partial_only: false,
+      regressed_only: false,
+      recently_verified: false,
+      stale: false,
+      has_acceptance_criteria: false,
+      has_checklist: false,
+      near_completion: false,
+      started_but_not_done: false,
+      auto_loop_eligible: false,
+    },
+  },
+  search_query: '',
+};
+
+const DEFAULT_VIEW_PREFS: ViewPrefs = {
+  tasks_tab: DEFAULT_VIEW_PREFS_TAB,
+  archive_tab: DEFAULT_VIEW_PREFS_TAB,
+  reports_tab: DEFAULT_VIEW_PREFS_TAB,
+};
+
+function deepMergePrefs<T>(base: T, patch: any): T {
+  if (typeof base !== 'object' || base === null) return patch ?? base;
+  if (typeof patch !== 'object' || patch === null) return base;
+  const out: any = Array.isArray(base) ? [...(base as any)] : { ...base };
+  for (const k of Object.keys(patch)) {
+    const bv = (base as any)[k];
+    const pv = patch[k];
+    if (
+      bv && typeof bv === 'object' && !Array.isArray(bv)
+      && pv && typeof pv === 'object' && !Array.isArray(pv)
+    ) {
+      out[k] = deepMergePrefs(bv, pv);
+    } else {
+      out[k] = pv;
+    }
+  }
+  return out;
+}
+
+// 🆕 (C5) — hook اصلی برای view preferences از backend
+// fetch اولیه + debounced PATCH روی هر change
+function useViewPrefs(watchedId: string | null | undefined) {
+  const [prefs, setPrefsState] = useState<ViewPrefs>(DEFAULT_VIEW_PREFS);
+  const [loaded, setLoaded] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // initial fetch
+  useEffect(() => {
+    if (!watchedId) {
+      setPrefsState(DEFAULT_VIEW_PREFS);
+      setLoaded(true);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/oversight/watched/${watchedId}/view-prefs`
+        );
+        if (res.ok) {
+          const data = await res.json();
+          if (!cancelled) {
+            setPrefsState(deepMergePrefs(DEFAULT_VIEW_PREFS, data));
+          }
+        }
+      } catch {
+        // silent — defaults are fine
+      } finally {
+        if (!cancelled) setLoaded(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [watchedId]);
+
+  // patch با debounce ۵۰۰ms
+  const patchPrefs = useCallback((patch: Partial<ViewPrefs> | any) => {
+    setPrefsState((prev) => {
+      const next = deepMergePrefs(prev, patch);
+      // schedule backend save (debounced)
+      if (watchedId) {
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        debounceRef.current = setTimeout(() => {
+          fetch(`${API_BASE}/api/oversight/watched/${watchedId}/view-prefs`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(patch),
+          }).catch(() => {});
+        }, 500);
+      }
+      return next;
+    });
+  }, [watchedId]);
+
+  return { prefs, patchPrefs, loaded };
+}
+
+// 🆕 (C5) — Persian/Arabic normalization for search
+function normalizeForSearch(s: string): string {
+  if (!s) return '';
+  return s
+    .toString()
+    .toLowerCase()
+    .replace(/[يى]/g, 'ی')
+    .replace(/[ك]/g, 'ک')
+    .replace(/[۰]/g, '0').replace(/[۱]/g, '1').replace(/[۲]/g, '2')
+    .replace(/[۳]/g, '3').replace(/[۴]/g, '4').replace(/[۵]/g, '5')
+    .replace(/[۶]/g, '6').replace(/[۷]/g, '7').replace(/[۸]/g, '8').replace(/[۹]/g, '9')
+    .replace(/[٠]/g, '0').replace(/[١]/g, '1').replace(/[٢]/g, '2')
+    .replace(/[٣]/g, '3').replace(/[٤]/g, '4').replace(/[٥]/g, '5')
+    .replace(/[٦]/g, '6').replace(/[٧]/g, '7').replace(/[٨]/g, '8').replace(/[٩]/g, '9')
+    .replace(/‌/g, ' ')  // نیم‌فاصله → space
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// 🆕 (C5) — جمع‌آوری متن قابل جستجو از یک تسک (همهٔ فیلدها)
+function buildSearchHaystack(t: any): string {
+  const parts: string[] = [];
+  parts.push(t.title || '');
+  parts.push(t.prompt || '');
+  parts.push(t.raw_idea || '');
+  parts.push(t.followup_prompt || '');
+  parts.push(t.last_summary || '');
+  parts.push(t.id || '');
+  parts.push((t.tags || []).join(' '));
+  for (const s of (t.task_steps || [])) {
+    if (!s || typeof s !== 'object') continue;
+    parts.push(s.title || '');
+    parts.push(s.scope || '');
+    parts.push(s.remaining || '');
+    parts.push(s.evidence || '');
+  }
+  for (const ac of (t.acceptance_criteria || [])) {
+    if (typeof ac === 'string') parts.push(ac);
+    else if (ac && typeof ac === 'object') {
+      parts.push(ac.text || '');
+      parts.push(ac.verify_method || '');
+      if (typeof ac.verify_plan === 'string') parts.push(ac.verify_plan);
+    }
+  }
+  for (const ck of (t.intelligent_checklist || [])) {
+    if (ck && typeof ck === 'object') parts.push(ck.text || '');
+  }
+  for (const m of (t.merged_from || [])) parts.push(String(m));
+  for (const ph of (t.prompt_history || [])) {
+    if (ph && typeof ph === 'object') parts.push(ph.prompt || '');
+  }
+  for (const th of (t.title_history || [])) {
+    if (th && typeof th === 'object') {
+      parts.push(th.old_title || '');
+      parts.push(th.new_title || '');
+    }
+  }
+  if (t.consolidation_meta && typeof t.consolidation_meta === 'object') {
+    parts.push(t.consolidation_meta.cluster_theme || '');
+    parts.push(t.consolidation_meta.rationale || '');
+  }
+  return normalizeForSearch(parts.join(' '));
+}
+
+// 🆕 (C5) — اعمال filter + search + sort روی لیست تسک‌ها
+// خروجی: { items: لیست نهایی، total: تعداد قبل از pagination، haystackMap برای highlight }
+function applyFiltersSortSearch(
+  items: any[],
+  prefs: ViewPrefsTab,
+  options?: { isArchive?: boolean }
+): { items: any[]; total: number } {
+  let filtered = [...items];
+  const f = prefs.filters;
+  const ct = f.context_toggles || {};
+
+  // filters: multi-select (OR در هر دسته، AND بین دسته‌ها)
+  if (f.status && f.status.length > 0) {
+    filtered = filtered.filter((t) => f.status.includes(t.status));
+  }
+  if (f.source && f.source.length > 0) {
+    filtered = filtered.filter((t) => f.source.includes(t.source || 'user'));
+  }
+  if (f.priority && f.priority.length > 0) {
+    filtered = filtered.filter((t) => f.priority.includes(t.priority));
+  }
+  if (f.type && f.type.length > 0) {
+    filtered = filtered.filter((t) => f.type.includes(t.type));
+  }
+  if (f.verification_status && f.verification_status.length > 0) {
+    filtered = filtered.filter((t) =>
+      f.verification_status.includes(t.verification_status || 'pending')
+    );
+  }
+  if (f.tags && f.tags.length > 0) {
+    filtered = filtered.filter((t) => {
+      const tags = (t.tags || []) as string[];
+      return f.tags.some((needed) => tags.includes(needed));
+    });
+  }
+  // date range روی created_at
+  if (f.date_range?.from) {
+    const fromT = new Date(f.date_range.from).getTime();
+    filtered = filtered.filter(
+      (t) => t.created_at && new Date(t.created_at).getTime() >= fromT
+    );
+  }
+  if (f.date_range?.to) {
+    const toT = new Date(f.date_range.to).getTime();
+    filtered = filtered.filter(
+      (t) => t.created_at && new Date(t.created_at).getTime() <= toT
+    );
+  }
+  // context toggles
+  const now = Date.now();
+  if (ct.pinned_only) filtered = filtered.filter((t) => !!t.pinned);
+  if (ct.has_followup) filtered = filtered.filter((t) => !!t.followup_prompt);
+  if (ct.has_prompt_history) filtered = filtered.filter((t) => (t.prompt_history?.length || 0) > 0);
+  if (ct.manually_edited_title) filtered = filtered.filter((t) => !!t.manual_title_override);
+  if (ct.merged_super_tasks) filtered = filtered.filter((t) => t.source === 'auto_consolidation');
+  if (ct.was_merged) filtered = filtered.filter((t) => !!t.merged_into);
+  if (ct.partial_only) filtered = filtered.filter((t) => t.verification_status === 'partial');
+  if (ct.regressed_only) filtered = filtered.filter((t) => t.verification_status === 'regressed');
+  if (ct.recently_verified) {
+    filtered = filtered.filter((t) => {
+      if (!t.last_verified_at) return false;
+      const diff = now - new Date(t.last_verified_at).getTime();
+      return diff <= 24 * 60 * 60 * 1000;
+    });
+  }
+  if (ct.stale) {
+    filtered = filtered.filter((t) => {
+      if (!t.updated_at) return false;
+      const diff = now - new Date(t.updated_at).getTime();
+      return diff > 30 * 24 * 60 * 60 * 1000;
+    });
+  }
+  if (ct.has_acceptance_criteria) filtered = filtered.filter((t) => (t.acceptance_criteria?.length || 0) > 0);
+  if (ct.has_checklist) filtered = filtered.filter((t) => !!t.intelligent_checklist);
+  if (ct.near_completion) filtered = filtered.filter((t) => (t.overall_completion_pct || 0) >= 70);
+  if (ct.started_but_not_done) {
+    filtered = filtered.filter(
+      (t) => (t.runs_count || 0) > 0 && t.verification_status !== 'done'
+    );
+  }
+
+  // search
+  const q = normalizeForSearch(prefs.search_query || '');
+  if (q) {
+    filtered = filtered.filter((t) => {
+      const hay = buildSearchHaystack(t);
+      return hay.includes(q);
+    });
+  }
+
+  // sort
+  const sf = prefs.sort_field || 'created_at';
+  const dir = prefs.sort_order === 'asc' ? 1 : -1;
+  const PRIO: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+  filtered.sort((a, b) => {
+    // pinned همیشه بالا
+    const pa = a.pinned ? 1 : 0;
+    const pb = b.pinned ? 1 : 0;
+    if (pa !== pb) return pb - pa;
+    if (pa && pb) {
+      // هر دو pinned — sort by pinned_at desc
+      const ta = a.pinned_at ? new Date(a.pinned_at).getTime() : 0;
+      const tb = b.pinned_at ? new Date(b.pinned_at).getTime() : 0;
+      if (ta !== tb) return tb - ta;
+    }
+    // sort field
+    let va: any = a[sf];
+    let vb: any = b[sf];
+    if (sf === 'priority') {
+      va = PRIO[va] ?? 9;
+      vb = PRIO[vb] ?? 9;
+      return (va - vb) * dir;
+    }
+    // تاریخ یا عدد یا رشته
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1;
+    if (vb == null) return -1;
+    if (typeof va === 'number' && typeof vb === 'number') {
+      return (va - vb) * dir;
+    }
+    // date string
+    if (typeof va === 'string' && /\d{4}-\d{2}-\d{2}/.test(va)) {
+      const ta = new Date(va).getTime();
+      const tb = new Date(vb).getTime();
+      return (ta - tb) * dir;
+    }
+    return String(va).localeCompare(String(vb), 'fa') * dir;
+  });
+
+  return { items: filtered, total: filtered.length };
+}
+
+// 🆕 (C5) — Pagination component مشترک
+function Pagination({
+  currentPage,
+  total,
+  pageSize,
+  onPageChange,
+  onPageSizeChange,
+}: {
+  currentPage: number;
+  total: number;
+  pageSize: number;
+  onPageChange: (p: number) => void;
+  onPageSizeChange: (s: number) => void;
+}) {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(Math.max(1, currentPage), totalPages);
+  const start = total === 0 ? 0 : (page - 1) * pageSize + 1;
+  const end = Math.min(page * pageSize, total);
+  return (
+    <div className="flex items-center gap-2 flex-wrap text-xs my-2 p-2 bg-gray-50 dark:bg-gray-800 rounded">
+      <button
+        type="button"
+        onClick={() => onPageChange(1)}
+        disabled={page <= 1}
+        className="px-2 py-1 border rounded disabled:opacity-40 dark:border-gray-600"
+        title="اولین صفحه"
+      >« اول</button>
+      <button
+        type="button"
+        onClick={() => onPageChange(page - 1)}
+        disabled={page <= 1}
+        className="px-2 py-1 border rounded disabled:opacity-40 dark:border-gray-600"
+      >‹ قبلی</button>
+      <span className="px-2 py-1">
+        صفحهٔ <b>{page}</b> از <b>{totalPages}</b>
+      </span>
+      <button
+        type="button"
+        onClick={() => onPageChange(page + 1)}
+        disabled={page >= totalPages}
+        className="px-2 py-1 border rounded disabled:opacity-40 dark:border-gray-600"
+      >بعدی ›</button>
+      <button
+        type="button"
+        onClick={() => onPageChange(totalPages)}
+        disabled={page >= totalPages}
+        className="px-2 py-1 border rounded disabled:opacity-40 dark:border-gray-600"
+        title="آخرین صفحه"
+      >آخر »</button>
+      <input
+        type="number"
+        min={1}
+        max={totalPages}
+        defaultValue={page}
+        key={`page-input-${page}`}
+        onBlur={(e) => {
+          const v = parseInt(e.target.value, 10);
+          if (v && v >= 1 && v <= totalPages && v !== page) onPageChange(v);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+        }}
+        className="w-16 px-1 py-1 border rounded text-center dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+        title="برو به صفحه"
+      />
+      <span className="text-gray-600 dark:text-gray-400 ml-auto">
+        نمایش <b>{start}-{end}</b> از <b>{total}</b>
+      </span>
+      <select
+        value={pageSize}
+        onChange={(e) => onPageSizeChange(parseInt(e.target.value, 10))}
+        className="px-1 py-1 border rounded dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+        title="آیتم در هر صفحه"
+      >
+        <option value={25}>۲۵</option>
+        <option value={50}>۵۰</option>
+        <option value={100}>۱۰۰</option>
+        <option value={200}>۲۰۰</option>
+        <option value={500}>۵۰۰</option>
+      </select>
+    </div>
+  );
+}
+
+// 🆕 (C5) — Highlight جستجو با <mark>
+function HighlightMatch({ text, query }: { text: string; query: string }) {
+  if (!query || !text) return <>{text}</>;
+  const qNorm = normalizeForSearch(query);
+  if (!qNorm) return <>{text}</>;
+  const tNorm = normalizeForSearch(text);
+  const idx = tNorm.indexOf(qNorm);
+  if (idx === -1) return <>{text}</>;
+  // برای ساده‌نگه‌داشتن، روی متن normalize شده highlight می‌کنیم
+  // (نمایش با original ولی index از normalize)
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark className="bg-yellow-200 dark:bg-yellow-700 dark:text-white px-0.5 rounded">
+        {text.slice(idx, idx + qNorm.length)}
+      </mark>
+      {text.slice(idx + qNorm.length)}
+    </>
+  );
+}
 
 export default function OversightPage() {
   const [tab, setTab] = useState<'watched' | 'repos' | 'ideas' | 'tasks' | 'reports'>('watched');
@@ -2159,6 +2624,35 @@ export default function OversightPage() {
         setRegenError(data?.detail || `HTTP ${res.status}`);
         return;
       }
+      // 🆕 (C5 — بند ۹.۲) — اگر title عوض شده و manual_title_override=false،
+      // از کاربر بپرس کدام را نگه دارد
+      const oldTitle = regenTask.title;
+      const newTitle: string = data?.task?.title || oldTitle;
+      const wasManual = !!regenTask.manual_title_override;
+      if (!wasManual && newTitle && newTitle !== oldTitle) {
+        const keep = window.confirm(
+          `🔄 عنوان پیشنهادی جدید بر اساس پرامپت به‌روز:\n\n` +
+            `• قبلی: "${oldTitle}"\n` +
+            `• پیشنهاد جدید: "${newTitle}"\n\n` +
+            `[OK] قبول عنوان جدید\n[Cancel] نگه‌داشتن عنوان قبلی (با قفل manual)`
+        );
+        if (!keep) {
+          // نگه‌داشتن عنوان قبلی + قفل manual
+          try {
+            const patchRes = await fetch(`${API_BASE}/api/oversight/tasks/${regenTask.id}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ title: oldTitle, manual_title_override: true }),
+            });
+            if (patchRes.ok) {
+              const patched = await patchRes.json();
+              setTasks(prev => prev.map(x => (x.id === regenTask.id ? patched : x)));
+              closeRegenModal();
+              return;
+            }
+          } catch {/* fall through to default */}
+        }
+      }
       setTasks(prev => prev.map(x => (x.id === regenTask.id ? data.task : x)));
       closeRegenModal();
     } catch (e: any) {
@@ -2226,6 +2720,41 @@ export default function OversightPage() {
     });
   }, [tasks, taskFilterStatus, taskFilterWatched, taskFilterArchived]);
 
+  // 🆕 (C5) — View preferences از backend برای watched فعلی
+  // اگر "همهٔ پروژه‌ها" انتخاب است، یک id موهومی استفاده می‌شود تا defaults
+  // در حافظه باشد ولی PATCH نشود (hook خودش این را handle می‌کند).
+  const _activeWatchedForPrefs = taskFilterWatched !== 'all' ? taskFilterWatched : null;
+  const { prefs: viewPrefs, patchPrefs: patchViewPrefs } = useViewPrefs(_activeWatchedForPrefs);
+  const _activeTabKey: 'tasks_tab' | 'archive_tab' =
+    taskFilterArchived === 'archived' ? 'archive_tab' : 'tasks_tab';
+  const _activeTabPrefs = viewPrefs[_activeTabKey];
+  // اعمال filter+sort+search طبق view-prefs روی filteredTasks
+  const processedTasks = useMemo(() => {
+    return applyFiltersSortSearch(filteredTasks, _activeTabPrefs).items;
+  }, [filteredTasks, _activeTabPrefs]);
+  // اعمال pagination روی processedTasks
+  const _pageSize = _activeTabPrefs.page_size || 100;
+  const _currentPage = Math.max(
+    1,
+    Math.min(
+      _activeTabPrefs.current_page || 1,
+      Math.max(1, Math.ceil(processedTasks.length / _pageSize))
+    )
+  );
+  const pageTasks = useMemo(() => {
+    const start = (_currentPage - 1) * _pageSize;
+    return processedTasks.slice(start, start + _pageSize);
+  }, [processedTasks, _currentPage, _pageSize]);
+  // اگر صفحه فعلی به‌خاطر فیلتر خالی شد، reset به 1
+  useEffect(() => {
+    if (
+      processedTasks.length > 0
+      && _currentPage > Math.ceil(processedTasks.length / _pageSize)
+    ) {
+      patchViewPrefs({ [_activeTabKey]: { current_page: 1 } });
+    }
+  }, [processedTasks.length, _currentPage, _pageSize, _activeTabKey, patchViewPrefs]);
+
   // ============================ Reports ============================
 
   const filteredReports = useMemo(() => {
@@ -2237,6 +2766,54 @@ export default function OversightPage() {
       return true;
     });
   }, [reports, reportStatusFilter, reportWatchedFilter, reportFlaggedOnly, reportSinceFilter]);
+
+  // 🆕 (C5) — reports search + sort + pagination
+  const _reportsTabPrefs = viewPrefs.reports_tab;
+  const processedReports = useMemo(() => {
+    let arr = [...filteredReports];
+    // search
+    const q = normalizeForSearch(_reportsTabPrefs.search_query || '');
+    if (q) {
+      arr = arr.filter((r: any) => {
+        const hay = normalizeForSearch(
+          (r.content || '') + ' ' +
+          (r.error || '') + ' ' +
+          (r.followup_prompt || '') + ' ' +
+          (r.task_id || '') + ' ' +
+          (r.id || '')
+        );
+        return hay.includes(q);
+      });
+    }
+    // sort
+    const sf = _reportsTabPrefs.sort_field || 'run_at';
+    const dir = _reportsTabPrefs.sort_order === 'asc' ? 1 : -1;
+    arr.sort((a: any, b: any) => {
+      const va = a[sf];
+      const vb = b[sf];
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * dir;
+      if (typeof va === 'string' && /\d{4}-\d{2}-\d{2}/.test(va)) {
+        return (new Date(va).getTime() - new Date(vb).getTime()) * dir;
+      }
+      return String(va).localeCompare(String(vb), 'fa') * dir;
+    });
+    return arr;
+  }, [filteredReports, _reportsTabPrefs.search_query, _reportsTabPrefs.sort_field, _reportsTabPrefs.sort_order]);
+  const _reportsPageSize = _reportsTabPrefs.page_size || 100;
+  const _reportsCurrentPage = Math.max(
+    1,
+    Math.min(
+      _reportsTabPrefs.current_page || 1,
+      Math.max(1, Math.ceil(processedReports.length / _reportsPageSize))
+    )
+  );
+  const pageReports = useMemo(() => {
+    const start = (_reportsCurrentPage - 1) * _reportsPageSize;
+    return processedReports.slice(start, start + _reportsPageSize);
+  }, [processedReports, _reportsCurrentPage, _reportsPageSize]);
 
   const markReport = async (
     reportId: string,
@@ -3255,6 +3832,11 @@ export default function OversightPage() {
           <TasksPanel
             tasks={tasks}
             filteredTasks={filteredTasks}
+            processedTasks={processedTasks}
+            pageTasks={pageTasks}
+            viewPrefs={viewPrefs}
+            patchViewPrefs={patchViewPrefs}
+            activeTabKey={_activeTabKey}
             watched={watched}
             taskFilterStatus={taskFilterStatus}
             setTaskFilterStatus={setTaskFilterStatus}
@@ -3291,7 +3873,8 @@ export default function OversightPage() {
           />
         ) : (
           <ReportsPanel
-            reports={filteredReports}
+            reports={pageReports}
+            processedReports={processedReports}
             allCount={reports.length}
             watched={watched}
             reportStatusFilter={reportStatusFilter}
@@ -3302,6 +3885,8 @@ export default function OversightPage() {
             setReportSinceFilter={setReportSinceFilter}
             reportFlaggedOnly={reportFlaggedOnly}
             setReportFlaggedOnly={setReportFlaggedOnly}
+            reportsPrefs={_reportsTabPrefs}
+            patchViewPrefs={patchViewPrefs}
             onView={(r) => setViewingReport(r)}
             onMark={markReport}
             fmtDate={fmtDate}
@@ -6865,9 +7450,331 @@ function WatchedCard({
   );
 }
 
+// ════════════════════════════════════════════════════════════════════
+// 🆕 (C5) — TasksToolbar: search + sort + filter accordion + clear
+// ════════════════════════════════════════════════════════════════════
+
+const _SORT_FIELDS: { value: string; label: string }[] = [
+  { value: 'created_at', label: 'تاریخ ساخت' },
+  { value: 'updated_at', label: 'آخرین به‌روزرسانی' },
+  { value: 'last_verified_at', label: 'آخرین verify' },
+  { value: 'last_run_at', label: 'آخرین اجرا' },
+  { value: 'archived_at', label: 'تاریخ آرشیو' },
+  { value: 'priority', label: 'اولویت' },
+  { value: 'status', label: 'وضعیت' },
+  { value: 'verification_status', label: 'وضعیت verify' },
+  { value: 'runs_count', label: 'تعداد اجرا' },
+  { value: 'confirmation_streak', label: 'streak تأیید' },
+  { value: 'merge_count', label: 'تعداد merge' },
+  { value: 'scan_seen_count', label: 'تعداد دیده در scan' },
+  { value: 'followup_round', label: 'دور followup' },
+  { value: 'prompt_quality_score', label: 'کیفیت پرامپت' },
+  { value: 'overall_completion_pct', label: 'درصد پیشرفت' },
+  { value: 'title', label: 'عنوان (الفبایی)' },
+  { value: 'type', label: 'نوع' },
+  { value: 'source', label: 'منبع' },
+];
+
+const _CONTEXT_TOGGLES: { key: string; label: string; archive_only?: boolean }[] = [
+  { key: 'pinned_only', label: '📌 فقط پین‌شده‌ها' },
+  { key: 'has_followup', label: '🔁 دارای followup' },
+  { key: 'has_prompt_history', label: '📜 دارای history پرامپت' },
+  { key: 'manually_edited_title', label: '✏️ عنوان دستی ویرایش‌شده' },
+  { key: 'merged_super_tasks', label: '🧬 فقط super-task ها' },
+  { key: 'was_merged', label: '🗄 merged شده در آرشیو', archive_only: true },
+  { key: 'partial_only', label: '🟡 فقط partial' },
+  { key: 'regressed_only', label: '⚠️ فقط regressed' },
+  { key: 'recently_verified', label: '🔬 verify در ۲۴ ساعت اخیر' },
+  { key: 'stale', label: '💤 بدون به‌روزرسانی > ۳۰ روز' },
+  { key: 'has_acceptance_criteria', label: '🎯 دارای AC' },
+  { key: 'has_checklist', label: '📋 دارای checklist' },
+  { key: 'near_completion', label: '🏁 پیشرفت ≥ ۷۰٪' },
+  { key: 'started_but_not_done', label: '🚧 شروع‌شده ولی not_done' },
+  { key: 'auto_loop_eligible', label: '🤖 auto-loop eligible' },
+];
+
+function TasksToolbar({
+  prefs,
+  patchPrefs,
+  tabKey,
+  totalCount,
+  allTags,
+}: {
+  prefs: ViewPrefsTab;
+  patchPrefs: (p: any) => void;
+  tabKey: 'tasks_tab' | 'archive_tab' | 'reports_tab';
+  totalCount: number;
+  allTags: string[];
+}) {
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [searchLocal, setSearchLocal] = useState(prefs.search_query || '');
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // sync local از prefs (مثلاً وقتی from backend reload شد)
+  useEffect(() => {
+    setSearchLocal(prefs.search_query || '');
+  }, [prefs.search_query]);
+
+  const updateFilter = useCallback((patch: any) => {
+    patchPrefs({ [tabKey]: { filters: patch, current_page: 1 } });
+  }, [patchPrefs, tabKey]);
+
+  const updateToggle = useCallback((key: string, v: boolean) => {
+    patchPrefs({
+      [tabKey]: {
+        filters: { context_toggles: { [key]: v } },
+        current_page: 1,
+      },
+    });
+  }, [patchPrefs, tabKey]);
+
+  const onSearchChange = (v: string) => {
+    setSearchLocal(v);
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(() => {
+      patchPrefs({ [tabKey]: { search_query: v, current_page: 1 } });
+    }, 150);
+  };
+
+  const clearAll = () => {
+    patchPrefs({
+      [tabKey]: {
+        ...DEFAULT_VIEW_PREFS_TAB,
+        page_size: prefs.page_size,  // نگه داشتن page_size
+      },
+    });
+    setSearchLocal('');
+  };
+
+  // شمارش فیلترهای فعال
+  const activeFiltersCount =
+    (prefs.filters.status?.length || 0) +
+    (prefs.filters.source?.length || 0) +
+    (prefs.filters.priority?.length || 0) +
+    (prefs.filters.type?.length || 0) +
+    (prefs.filters.verification_status?.length || 0) +
+    (prefs.filters.tags?.length || 0) +
+    (prefs.filters.date_range?.from ? 1 : 0) +
+    (prefs.filters.date_range?.to ? 1 : 0) +
+    Object.values(prefs.filters.context_toggles || {}).filter(Boolean).length;
+
+  const isArchive = tabKey === 'archive_tab';
+  const toggleList = _CONTEXT_TOGGLES.filter(
+    (t) => !t.archive_only || isArchive
+  );
+
+  return (
+    <div className="mb-3 p-2 bg-white dark:bg-gray-900 border dark:border-gray-700 rounded-lg space-y-2">
+      {/* ردیف ۱: جستجو + sort + page_size + clear */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <input
+          type="text"
+          value={searchLocal}
+          onChange={(e) => onSearchChange(e.target.value)}
+          placeholder="🔍 جستجو در عنوان، پرامپت، ایده، چک‌لیست، AC ها…"
+          className="flex-1 min-w-[200px] px-3 py-1.5 border rounded text-sm dark:bg-gray-800 dark:border-gray-600 dark:text-white"
+        />
+        <select
+          value={prefs.sort_field}
+          onChange={(e) => patchPrefs({ [tabKey]: { sort_field: e.target.value, current_page: 1 } })}
+          className="px-2 py-1.5 border rounded text-sm dark:bg-gray-800 dark:border-gray-600 dark:text-white"
+          title="فیلد سورت"
+        >
+          {_SORT_FIELDS.map((s) => (
+            <option key={s.value} value={s.value}>🔀 {s.label}</option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={() => patchPrefs({ [tabKey]: { sort_order: prefs.sort_order === 'asc' ? 'desc' : 'asc' } })}
+          className="px-2 py-1.5 border rounded text-sm dark:bg-gray-800 dark:border-gray-600 dark:text-white"
+          title={prefs.sort_order === 'asc' ? 'صعودی' : 'نزولی'}
+        >
+          {prefs.sort_order === 'asc' ? '⬆' : '⬇'}
+        </button>
+        <button
+          type="button"
+          onClick={() => setFilterOpen((v) => !v)}
+          className={`px-3 py-1.5 border rounded text-sm flex items-center gap-1 ${
+            activeFiltersCount > 0
+              ? 'bg-blue-100 dark:bg-blue-900/40 border-blue-400 dark:border-blue-700'
+              : 'dark:bg-gray-800 dark:border-gray-600'
+          }`}
+        >
+          🔧 فیلتر
+          {activeFiltersCount > 0 && (
+            <span className="bg-blue-500 text-white text-[10px] rounded-full px-1.5 py-0.5">
+              {activeFiltersCount}
+            </span>
+          )}
+          <span className="opacity-50">{filterOpen ? '▾' : '▸'}</span>
+        </button>
+        {activeFiltersCount > 0 && (
+          <button
+            type="button"
+            onClick={clearAll}
+            className="px-2 py-1.5 border rounded text-xs text-red-700 dark:text-red-300 border-red-300 dark:border-red-700 hover:bg-red-50 dark:hover:bg-red-900/20"
+            title="پاک کردن همهٔ فیلترها"
+          >
+            🧹 پاک
+          </button>
+        )}
+        <span className="text-xs text-gray-500 dark:text-gray-400">
+          نتیجه: <b>{totalCount}</b>
+        </span>
+      </div>
+
+      {/* ردیف ۲: filter accordion */}
+      {filterOpen && (
+        <div className="border-t pt-2 dark:border-gray-700 space-y-2 text-xs">
+          {/* multi-select filters */}
+          <FilterChipGroup
+            label="منبع"
+            options={[
+              { value: 'user', label: 'دستی' },
+              { value: 'auto_scan', label: 'سیستم (auto_scan)' },
+              { value: 'auto_consolidation', label: 'super-task' },
+            ]}
+            selected={prefs.filters.source || []}
+            onChange={(v) => updateFilter({ source: v })}
+          />
+          <FilterChipGroup
+            label="اولویت"
+            options={[
+              { value: 'critical', label: 'critical' },
+              { value: 'high', label: 'high' },
+              { value: 'medium', label: 'medium' },
+              { value: 'low', label: 'low' },
+            ]}
+            selected={prefs.filters.priority || []}
+            onChange={(v) => updateFilter({ priority: v })}
+          />
+          <FilterChipGroup
+            label="نوع"
+            options={[
+              { value: 'bug', label: 'bug' },
+              { value: 'feature_request', label: 'feature' },
+              { value: 'refactor', label: 'refactor' },
+              { value: 'docs', label: 'docs' },
+              { value: 'reminder', label: 'reminder' },
+              { value: 'idea', label: 'idea' },
+              { value: 'other', label: 'other' },
+            ]}
+            selected={prefs.filters.type || []}
+            onChange={(v) => updateFilter({ type: v })}
+          />
+          <FilterChipGroup
+            label="verify"
+            options={[
+              { value: 'pending', label: 'pending' },
+              { value: 'partial', label: 'partial' },
+              { value: 'done', label: 'done' },
+              { value: 'regressed', label: 'regressed' },
+              { value: 'needs_clarification', label: 'needs_clarification' },
+            ]}
+            selected={prefs.filters.verification_status || []}
+            onChange={(v) => updateFilter({ verification_status: v })}
+          />
+          {allTags.length > 0 && (
+            <FilterChipGroup
+              label="tag"
+              options={allTags.map((t) => ({ value: t, label: t }))}
+              selected={prefs.filters.tags || []}
+              onChange={(v) => updateFilter({ tags: v })}
+            />
+          )}
+          {/* date range */}
+          <div className="flex items-center gap-1 flex-wrap">
+            <span className="font-semibold min-w-[60px]">بازهٔ زمانی:</span>
+            <input
+              type="date"
+              value={prefs.filters.date_range?.from || ''}
+              onChange={(e) => updateFilter({ date_range: { from: e.target.value || null, to: prefs.filters.date_range?.to || null } })}
+              className="px-1 py-0.5 border rounded dark:bg-gray-800 dark:border-gray-600 dark:text-white"
+            />
+            <span>تا</span>
+            <input
+              type="date"
+              value={prefs.filters.date_range?.to || ''}
+              onChange={(e) => updateFilter({ date_range: { from: prefs.filters.date_range?.from || null, to: e.target.value || null } })}
+              className="px-1 py-0.5 border rounded dark:bg-gray-800 dark:border-gray-600 dark:text-white"
+            />
+          </div>
+          {/* context toggles */}
+          <div className="flex items-center gap-1 flex-wrap pt-1 border-t dark:border-gray-700">
+            <span className="font-semibold min-w-[60px]">شرایط خاص:</span>
+            {toggleList.map((t) => {
+              const checked = !!(prefs.filters.context_toggles || {})[t.key];
+              return (
+                <button
+                  key={t.key}
+                  type="button"
+                  onClick={() => updateToggle(t.key, !checked)}
+                  className={`px-2 py-0.5 rounded border text-[10px] ${
+                    checked
+                      ? 'bg-blue-500 text-white border-blue-600'
+                      : 'bg-gray-100 dark:bg-gray-800 dark:border-gray-600 dark:text-gray-200 hover:bg-gray-200'
+                  }`}
+                >
+                  {t.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FilterChipGroup({
+  label,
+  options,
+  selected,
+  onChange,
+}: {
+  label: string;
+  options: { value: string; label: string }[];
+  selected: string[];
+  onChange: (v: string[]) => void;
+}) {
+  const toggle = (val: string) => {
+    if (selected.includes(val)) onChange(selected.filter((x) => x !== val));
+    else onChange([...selected, val]);
+  };
+  return (
+    <div className="flex items-center gap-1 flex-wrap">
+      <span className="font-semibold min-w-[60px]">{label}:</span>
+      {options.map((o) => {
+        const isOn = selected.includes(o.value);
+        return (
+          <button
+            key={o.value}
+            type="button"
+            onClick={() => toggle(o.value)}
+            className={`px-2 py-0.5 rounded border text-[10px] ${
+              isOn
+                ? 'bg-blue-500 text-white border-blue-600'
+                : 'bg-gray-100 dark:bg-gray-800 dark:border-gray-600 dark:text-gray-200 hover:bg-gray-200'
+            }`}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+
 function TasksPanel({
   tasks,
   filteredTasks,
+  processedTasks,
+  pageTasks,
+  viewPrefs,
+  patchViewPrefs,
+  activeTabKey,
   watched,
   taskFilterStatus,
   setTaskFilterStatus,
@@ -6904,6 +7811,11 @@ function TasksPanel({
 }: {
   tasks: Task[];
   filteredTasks: Task[];
+  processedTasks: Task[];
+  pageTasks: Task[];
+  viewPrefs: ViewPrefs;
+  patchViewPrefs: (p: any) => void;
+  activeTabKey: 'tasks_tab' | 'archive_tab';
   watched: Watched[];
   taskFilterStatus: string;
   setTaskFilterStatus: (s: string) => void;
@@ -6938,10 +7850,22 @@ function TasksPanel({
   executeDisabledReason: string;
   fmtDate: (d?: string | null) => string;
 }) {
+  // 🆕 (C5) — title editing state (inline)
+  const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
+  const [editingTitleValue, setEditingTitleValue] = useState<string>('');
+  // 🆕 (C5) — title history viewer
+  const [historyOpenId, setHistoryOpenId] = useState<string | null>(null);
+  // 🆕 (C5) — همهٔ tagهای منحصربه‌فرد برای dropdown فیلتر
+  const allTags = useMemo(() => {
+    const s = new Set<string>();
+    for (const t of tasks) for (const tag of ((t as any).tags || [])) s.add(tag);
+    return Array.from(s).sort();
+  }, [tasks]);
+  // 🆕 (C5) — Kanban روی processedTasks (sorted/filtered)، نه pageTasks
   const tasksByCol = useMemo(() => {
     const map: Record<string, Task[]> = {};
     KANBAN_COLUMNS.forEach((c) => (map[c.id] = []));
-    filteredTasks.forEach((t) => {
+    processedTasks.forEach((t) => {
       if (map[t.status]) map[t.status].push(t);
     });
     return map;
@@ -6953,9 +7877,12 @@ function TasksPanel({
     return (
       <div
         key={t.id}
-        className="p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg border border-transparent hover:border-blue-300 dark:hover:border-blue-700"
+        className={`p-3 sm:p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg border ${
+          t.pinned ? 'border-yellow-400 dark:border-yellow-600' : 'border-transparent hover:border-blue-300 dark:hover:border-blue-700'
+        } overflow-hidden`}
+        style={{ minWidth: '280px', wordWrap: 'break-word', overflowWrap: 'break-word' }}
       >
-        <div className="flex items-start justify-between gap-2 mb-2 flex-wrap">
+        <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-2 mb-2">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap mb-1">
               {t.status === 'suggested' && (
@@ -6971,13 +7898,87 @@ function TasksPanel({
                   className="w-4 h-4"
                 />
               )}
-              <span className="text-lg">{TYPE_ICONS[t.type] || '📌'}</span>
+              {/* 🆕 (C5) — pin button */}
               <button
-                onClick={() => onView(t)}
-                className="font-medium dark:text-white text-right hover:underline"
+                type="button"
+                onClick={() => onUpdate(t.id, { pinned: !t.pinned } as any)}
+                title={t.pinned ? 'برداشتن پین' : 'پین کردن (بالای لیست)'}
+                className={`text-base ${t.pinned ? 'text-yellow-500' : 'text-gray-300 hover:text-yellow-400'}`}
               >
-                {t.title}
+                {t.pinned ? '📌' : '📍'}
               </button>
+              <span className="text-lg">{TYPE_ICONS[t.type] || '📌'}</span>
+              {/* 🆕 (C5) — title: inline edit if editingTitleId === t.id */}
+              {editingTitleId === t.id ? (
+                <div className="flex items-center gap-1 flex-1 min-w-[200px]">
+                  <input
+                    autoFocus
+                    type="text"
+                    value={editingTitleValue}
+                    onChange={(e) => setEditingTitleValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const newT = editingTitleValue.trim();
+                        if (newT && newT !== t.title) onUpdate(t.id, { title: newT });
+                        setEditingTitleId(null);
+                      } else if (e.key === 'Escape') {
+                        setEditingTitleId(null);
+                      }
+                    }}
+                    className="flex-1 px-2 py-0.5 border rounded text-sm dark:bg-gray-800 dark:border-gray-600 dark:text-white"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const newT = editingTitleValue.trim();
+                      if (newT && newT !== t.title) onUpdate(t.id, { title: newT });
+                      setEditingTitleId(null);
+                    }}
+                    className="px-2 py-0.5 bg-green-500 text-white rounded text-xs"
+                  >✓</button>
+                  <button
+                    type="button"
+                    onClick={() => setEditingTitleId(null)}
+                    className="px-2 py-0.5 bg-gray-300 dark:bg-gray-600 text-gray-700 dark:text-white rounded text-xs"
+                  >✕</button>
+                </div>
+              ) : (
+                <>
+                  <button
+                    onClick={() => onView(t)}
+                    className="font-medium dark:text-white text-right hover:underline break-words"
+                    style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}
+                    title={t.title}
+                  >
+                    <HighlightMatch text={t.title} query={viewPrefs[activeTabKey].search_query} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingTitleId(t.id);
+                      setEditingTitleValue(t.title);
+                    }}
+                    title="ویرایش دستی عنوان (پس از این، AI خودکار عنوان را عوض نمی‌کند)"
+                    className="text-xs opacity-50 hover:opacity-100"
+                  >✏️</button>
+                  {t.manual_title_override && (
+                    <button
+                      type="button"
+                      onClick={() => onUpdate(t.id, { manual_title_override: false } as any)}
+                      title="بازکردن قفل عنوان — اجازه بده AI خودکار بازنگری کند"
+                      className="text-xs opacity-60 hover:opacity-100"
+                    >🔓</button>
+                  )}
+                  {(t.title_history?.length || 0) > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setHistoryOpenId(historyOpenId === t.id ? null : t.id)}
+                      title={`تاریخچهٔ عنوان (${t.title_history!.length})`}
+                      className="text-xs opacity-60 hover:opacity-100"
+                    >📜</button>
+                  )}
+                </>
+              )}
               <span className={`text-xs px-2 py-0.5 rounded ${statusInfo?.color || ''}`}>
                 {statusInfo?.label || t.status}
               </span>
@@ -6989,7 +7990,33 @@ function TasksPanel({
                   🤖 AI
                 </span>
               )}
+              {t.source === 'auto_consolidation' && (
+                <span
+                  className="text-xs px-2 py-0.5 bg-fuchsia-100 dark:bg-fuchsia-900/40 text-fuchsia-700 dark:text-fuchsia-300 rounded"
+                  title={`super-task — تجمیع ${t.merged_from?.length || 0} تسک`}
+                >
+                  🧬 consolidated
+                </span>
+              )}
             </div>
+            {/* 🆕 (C5) — title history viewer (collapsible) */}
+            {historyOpenId === t.id && (t.title_history?.length || 0) > 0 && (
+              <div className="ml-6 mt-1 mb-2 p-2 bg-gray-100 dark:bg-gray-800 rounded text-[11px] space-y-1 max-h-48 overflow-y-auto">
+                <div className="font-semibold text-gray-700 dark:text-gray-300">
+                  📜 تاریخچهٔ عنوان ({t.title_history!.length}):
+                </div>
+                {t.title_history!.slice().reverse().map((h, i) => (
+                  <div key={i} className="border-r-2 border-gray-300 dark:border-gray-600 pr-2">
+                    <div className="text-gray-500 dark:text-gray-400">
+                      {h.ts?.slice(0, 19)} <span className="bg-gray-200 dark:bg-gray-700 px-1 rounded">{h.source}</span>
+                    </div>
+                    <div className="line-through opacity-60">{h.old_title}</div>
+                    <div className="text-green-700 dark:text-green-400">→ {h.new_title}</div>
+                    {h.reason && <div className="text-gray-500 italic">{h.reason}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
             {t.project_full_name && (
               <div className="text-xs text-gray-500 dark:text-gray-400" dir="ltr">
                 {t.project_full_name}
@@ -7121,7 +8148,7 @@ function TasksPanel({
                       style={{ width: `${Math.max(2, Math.min(100, pct))}%` }}
                     />
                   </div>
-                  <ul className="mt-2 space-y-1">
+                  <ul className="mt-2 space-y-1" style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
                     {steps.map((s) => {
                       const st = s.status || 'pending';
                       const icon = st === 'done' ? '✅' : st === 'partial' ? '🟡' : st === 'error' ? '⚠️' : '⬜';
@@ -7129,23 +8156,23 @@ function TasksPanel({
                         ? 'line-through text-gray-500 dark:text-gray-400'
                         : 'text-indigo-900 dark:text-indigo-100';
                       return (
-                        <li key={s.id} className="flex gap-1.5 items-start">
-                          <span className="mt-0.5">{icon}</span>
-                          <div className="flex-1 min-w-0">
-                            <div className={`text-[11px] ${titleCls}`}>
+                        <li key={s.id} className="flex gap-1.5 items-start max-w-full">
+                          <span className="mt-0.5 shrink-0">{icon}</span>
+                          <div className="flex-1 min-w-0 max-w-full" style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
+                            <div className={`text-[11px] ${titleCls} break-words`}>
                               <b>مرحله {s.id}: {s.title}</b>
                               {typeof s.completion_pct === 'number' && st !== 'done' && st !== 'pending' && (
                                 <span className="ml-1.5 text-[10px] text-gray-500 dark:text-gray-400">({s.completion_pct}%)</span>
                               )}
                             </div>
                             {st !== 'done' && s.remaining && (
-                              <div className="text-[10px] text-amber-700 dark:text-amber-300 mt-0.5">
+                              <div className="text-[10px] text-amber-700 dark:text-amber-300 mt-0.5 break-words">
                                 ⏳ باقی‌مانده: {s.remaining}
                               </div>
                             )}
                             {s.evidence && st === 'done' && (
-                              <div className="text-[10px] text-green-700 dark:text-green-300 mt-0.5 truncate">
-                                📎 {s.evidence}
+                              <div className="text-[10px] text-green-700 dark:text-green-300 mt-0.5 break-words" title={s.evidence}>
+                                📎 {s.evidence.length > 100 ? s.evidence.slice(0, 100) + '…' : s.evidence}
                               </div>
                             )}
                           </div>
@@ -7169,35 +8196,12 @@ function TasksPanel({
               {t.deadline && <span>📅 deadline: {t.deadline}</span>}
             </div>
           </div>
-          <div className="flex gap-1 flex-wrap">
-            <button
-              onClick={() => onCopyPrompt(t.id)}
-              title="کپی پرامپت کامل برای استفاده در ابزار خارجی (Cursor، ChatGPT، ...)"
-              className="px-3 py-1 bg-purple-500 text-white rounded text-xs hover:bg-purple-600"
-            >
-              📋 کپی پرامپت
-            </button>
-            <button
-              onClick={() => onOpenRegen(t)}
-              title="بازتولید پرامپت با کیفیت ارتقایافته (raw_idea را ویرایش کنید — تسک جدید ساخته نمی‌شود)"
-              className="px-3 py-1 bg-fuchsia-500 text-white rounded text-xs hover:bg-fuchsia-600"
-            >
-              🔄 بازتولید
-            </button>
-            {(t.prompt_history && t.prompt_history.length > 0) && (
-              <button
-                onClick={() => onOpenHistory(t)}
-                title={`${t.prompt_history!.length} نسخهٔ قبلی — شامل پرامپت‌های ادامه (followup) و بازتولید‌ها — قابل rollback`}
-                className={`px-3 py-1 rounded text-xs ${
-                  (t.followup_round || 0) > 0
-                    ? 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300 hover:bg-cyan-200'
-                    : 'bg-gray-200 dark:bg-gray-700 dark:text-white text-gray-700 hover:bg-gray-300'
-                }`}
-              >
-                📜 تاریخچه ({t.prompt_history!.length})
-                {(t.followup_round || 0) > 0 && <span className="mr-1">• 🔁{t.followup_round}</span>}
-              </button>
-            )}
+          {/* 🆕 (C5 — بند ۱۳) — دکمه‌ها در ۲ ردیف زیر هم (در صفحات تنگ) با
+              flex-wrap. در صفحات پهن (lg+)، در یک ردیف کنار title.
+              این ساختار جلوی bleed و تنگی عنوان/چک‌لیست را می‌گیرد. */}
+          <div className="flex flex-col gap-1 lg:items-end shrink-0">
+            {/* ردیف ۱: action های اصلی (اجرا/verify/apply) */}
+            <div className="flex gap-1 flex-wrap">
             {t.execution_mode !== 'manual' ? (
               <button
                 onClick={() => onRun(t.id)}
@@ -7255,6 +8259,37 @@ function TasksPanel({
                 ✓ تأیید
               </button>
             )}
+            </div>
+            {/* 🆕 (C5 — بند ۱۳) — ردیف ۲: action های ثانویه */}
+            <div className="flex gap-1 flex-wrap">
+            <button
+              onClick={() => onCopyPrompt(t.id)}
+              title="کپی پرامپت کامل برای استفاده در ابزار خارجی (Cursor، ChatGPT، ...)"
+              className="px-3 py-1 bg-purple-500 text-white rounded text-xs hover:bg-purple-600"
+            >
+              📋 کپی پرامپت
+            </button>
+            <button
+              onClick={() => onOpenRegen(t)}
+              title="بازتولید پرامپت با کیفیت ارتقایافته (raw_idea را ویرایش کنید — تسک جدید ساخته نمی‌شود)"
+              className="px-3 py-1 bg-fuchsia-500 text-white rounded text-xs hover:bg-fuchsia-600"
+            >
+              🔄 بازتولید
+            </button>
+            {(t.prompt_history && t.prompt_history.length > 0) && (
+              <button
+                onClick={() => onOpenHistory(t)}
+                title={`${t.prompt_history!.length} نسخهٔ قبلی`}
+                className={`px-3 py-1 rounded text-xs ${
+                  (t.followup_round || 0) > 0
+                    ? 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300 hover:bg-cyan-200'
+                    : 'bg-gray-200 dark:bg-gray-700 dark:text-white text-gray-700 hover:bg-gray-300'
+                }`}
+              >
+                📜 تاریخچه ({t.prompt_history!.length})
+                {(t.followup_round || 0) > 0 && <span className="mr-1">• 🔁{t.followup_round}</span>}
+              </button>
+            )}
             <button
               onClick={() => onShowHistory(t.id)}
               title="تاریخچهٔ verification"
@@ -7285,6 +8320,7 @@ function TasksPanel({
             >
               🗑
             </button>
+            </div>
           </div>
         </div>
         {/* نشانگر execution mode + verification status + streak */}
@@ -7733,13 +8769,61 @@ function TasksPanel({
         </div>
       )}
 
-      {filteredTasks.length === 0 ? (
+      {/* 🆕 (C5) — TasksToolbar */}
+      <TasksToolbar
+        prefs={viewPrefs[activeTabKey]}
+        patchPrefs={patchViewPrefs}
+        tabKey={activeTabKey}
+        totalCount={processedTasks.length}
+        allTags={allTags}
+      />
+      {/* 🆕 (C5) — Pagination بالا (فقط در list view) */}
+      {taskView === 'list' && processedTasks.length > viewPrefs[activeTabKey].page_size && (
+        <Pagination
+          currentPage={viewPrefs[activeTabKey].current_page}
+          total={processedTasks.length}
+          pageSize={viewPrefs[activeTabKey].page_size}
+          onPageChange={(p) => patchViewPrefs({ [activeTabKey]: { current_page: p } })}
+          onPageSizeChange={(s) => patchViewPrefs({ [activeTabKey]: { page_size: s, current_page: 1 } })}
+        />
+      )}
+
+      {processedTasks.length === 0 ? (
         <div className="text-center py-12 text-gray-400">
           <div className="text-5xl mb-3">📋</div>
-          <p>تسکی نیست</p>
+          <p>
+            {viewPrefs[activeTabKey].search_query
+              ? '🔍 هیچ تسکی با این جستجو/فیلتر یافت نشد'
+              : 'تسکی نیست'}
+          </p>
+          {(viewPrefs[activeTabKey].search_query
+            || Object.values(viewPrefs[activeTabKey].filters.context_toggles || {}).some(Boolean)
+            || (viewPrefs[activeTabKey].filters.status?.length || 0) > 0
+            || (viewPrefs[activeTabKey].filters.source?.length || 0) > 0
+          ) && (
+            <button
+              type="button"
+              onClick={() => patchViewPrefs({ [activeTabKey]: { ...DEFAULT_VIEW_PREFS_TAB, page_size: viewPrefs[activeTabKey].page_size } })}
+              className="mt-3 px-3 py-1 bg-red-500 text-white text-xs rounded hover:bg-red-600"
+            >
+              🧹 پاک کردن همهٔ فیلترها
+            </button>
+          )}
         </div>
       ) : taskView === 'list' ? (
-        <div className="space-y-3">{filteredTasks.map(renderTaskRow)}</div>
+        <>
+          <div className="space-y-3">{pageTasks.map(renderTaskRow)}</div>
+          {/* 🆕 (C5) — Pagination پایین */}
+          {processedTasks.length > viewPrefs[activeTabKey].page_size && (
+            <Pagination
+              currentPage={viewPrefs[activeTabKey].current_page}
+              total={processedTasks.length}
+              pageSize={viewPrefs[activeTabKey].page_size}
+              onPageChange={(p) => patchViewPrefs({ [activeTabKey]: { current_page: p } })}
+              onPageSizeChange={(s) => patchViewPrefs({ [activeTabKey]: { page_size: s, current_page: 1 } })}
+            />
+          )}
+        </>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-3 overflow-x-auto">
           {KANBAN_COLUMNS.map((col) => (
@@ -7791,6 +8875,7 @@ function TasksPanel({
 
 function ReportsPanel({
   reports,
+  processedReports,
   allCount,
   watched,
   reportStatusFilter,
@@ -7801,11 +8886,14 @@ function ReportsPanel({
   setReportSinceFilter,
   reportFlaggedOnly,
   setReportFlaggedOnly,
+  reportsPrefs,
+  patchViewPrefs,
   onView,
   onMark,
   fmtDate,
 }: {
   reports: Report[];
+  processedReports: Report[];
   allCount: number;
   watched: Watched[];
   reportStatusFilter: string;
@@ -7816,10 +8904,23 @@ function ReportsPanel({
   setReportSinceFilter: (s: string) => void;
   reportFlaggedOnly: boolean;
   setReportFlaggedOnly: (v: boolean) => void;
+  reportsPrefs: ViewPrefsTab;
+  patchViewPrefs: (p: any) => void;
   onView: (r: Report) => void;
   onMark: (id: string, updates: { read?: boolean; flagged?: boolean }) => void;
   fmtDate: (d?: string | null) => string;
 }) {
+  // 🆕 (C5) — reports search input local state با debounce 150ms
+  const [searchLocal, setSearchLocal] = useState(reportsPrefs.search_query || '');
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => { setSearchLocal(reportsPrefs.search_query || ''); }, [reportsPrefs.search_query]);
+  const onSearchChange = (v: string) => {
+    setSearchLocal(v);
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(() => {
+      patchViewPrefs({ reports_tab: { search_query: v, current_page: 1 } });
+    }, 150);
+  };
   return (
     <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
@@ -7871,6 +8972,48 @@ function ReportsPanel({
           </label>
         </div>
       </div>
+
+      {/* 🆕 (C5) — search + sort + pagination toolbar */}
+      <div className="mb-3 flex items-center gap-2 flex-wrap p-2 bg-gray-50 dark:bg-gray-800 rounded">
+        <input
+          type="text"
+          value={searchLocal}
+          onChange={(e) => onSearchChange(e.target.value)}
+          placeholder="🔍 جستجو در محتوای گزارش، error، followup…"
+          className="flex-1 min-w-[200px] px-3 py-1.5 border rounded text-sm dark:bg-gray-800 dark:border-gray-600 dark:text-white"
+        />
+        <select
+          value={reportsPrefs.sort_field}
+          onChange={(e) => patchViewPrefs({ reports_tab: { sort_field: e.target.value, current_page: 1 } })}
+          className="px-2 py-1.5 border rounded text-sm dark:bg-gray-800 dark:border-gray-600 dark:text-white"
+        >
+          <option value="run_at">🔀 تاریخ اجرا</option>
+          <option value="created_at">🔀 تاریخ ساخت</option>
+          <option value="status">🔀 وضعیت</option>
+          <option value="task_id">🔀 task_id</option>
+        </select>
+        <button
+          type="button"
+          onClick={() => patchViewPrefs({ reports_tab: { sort_order: reportsPrefs.sort_order === 'asc' ? 'desc' : 'asc' } })}
+          className="px-2 py-1.5 border rounded text-sm dark:bg-gray-800 dark:border-gray-600 dark:text-white"
+        >
+          {reportsPrefs.sort_order === 'asc' ? '⬆' : '⬇'}
+        </button>
+        <span className="text-xs text-gray-500 dark:text-gray-400">
+          نتیجه: <b>{processedReports.length}</b>
+        </span>
+      </div>
+
+      {/* 🆕 (C5) — pagination بالا */}
+      {processedReports.length > reportsPrefs.page_size && (
+        <Pagination
+          currentPage={reportsPrefs.current_page}
+          total={processedReports.length}
+          pageSize={reportsPrefs.page_size}
+          onPageChange={(p) => patchViewPrefs({ reports_tab: { current_page: p } })}
+          onPageSizeChange={(s) => patchViewPrefs({ reports_tab: { page_size: s, current_page: 1 } })}
+        />
+      )}
 
       {reports.length === 0 ? (
         <div className="text-center py-12 text-gray-400">
@@ -7933,6 +9076,16 @@ function ReportsPanel({
             </div>
           ))}
         </div>
+      )}
+      {/* 🆕 (C5) — pagination پایین */}
+      {processedReports.length > reportsPrefs.page_size && reports.length > 0 && (
+        <Pagination
+          currentPage={reportsPrefs.current_page}
+          total={processedReports.length}
+          pageSize={reportsPrefs.page_size}
+          onPageChange={(p) => patchViewPrefs({ reports_tab: { current_page: p } })}
+          onPageSizeChange={(s) => patchViewPrefs({ reports_tab: { page_size: s, current_page: 1 } })}
+        />
       )}
     </div>
   );

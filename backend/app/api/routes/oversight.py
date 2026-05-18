@@ -181,6 +181,9 @@ class TaskUpdate(BaseModel):
     last_summary: Optional[str] = None
     next_run_at: Optional[str] = None
     archived: Optional[bool] = None  # 🆕 (P3)
+    # 🆕 (C5) — pin + title management
+    pinned: Optional[bool] = None
+    manual_title_override: Optional[bool] = None
 
 
 class RunTaskRequest(BaseModel):
@@ -999,6 +1002,110 @@ async def unarchive_task(task_id: str):
     if not res:
         raise HTTPException(status_code=404, detail="تسک یافت نشد")
     return {"success": True, "task": res}
+
+
+# ════════════════════════════════════════════════════════════════════
+# 🆕 (C5) — View preferences (pagination, sort, filter, search) per watched
+# ════════════════════════════════════════════════════════════════════
+
+def _default_view_prefs_tab() -> Dict[str, Any]:
+    return {
+        "page_size": 100,
+        "current_page": 1,
+        "sort_field": "created_at",
+        "sort_order": "desc",
+        "filters": {
+            "status": [],
+            "source": [],
+            "priority": [],
+            "type": [],
+            "verification_status": [],
+            "tags": [],
+            "date_range": {"from": None, "to": None},
+            "context_toggles": {
+                "pinned_only": False,
+                "has_followup": False,
+                "has_prompt_history": False,
+                "manually_edited_title": False,
+                "merged_super_tasks": False,
+                "was_merged": False,
+                "partial_only": False,
+                "regressed_only": False,
+                "recently_verified": False,
+                "stale": False,
+                "has_acceptance_criteria": False,
+                "has_checklist": False,
+                "near_completion": False,
+                "started_but_not_done": False,
+                "auto_loop_eligible": False,
+            },
+        },
+        "search_query": "",
+    }
+
+
+def _default_view_prefs() -> Dict[str, Any]:
+    return {
+        "tasks_tab": _default_view_prefs_tab(),
+        "archive_tab": _default_view_prefs_tab(),
+        "reports_tab": _default_view_prefs_tab(),
+    }
+
+
+def _deep_merge(base: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+    """deep merge: dict ها merge، non-dict ها replace."""
+    if not isinstance(base, dict):
+        return patch
+    if not isinstance(patch, dict):
+        return patch
+    out = dict(base)
+    for k, v in patch.items():
+        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+@router.get("/watched/{watched_id}/view-prefs")
+async def get_view_prefs(watched_id: str):
+    """تنظیمات نمایش (pagination, sort, filter, search) برای watched.
+
+    🆕 (C5) — اگر watched تنظیم ذخیره نکرده، defaultها برمی‌گردد.
+    """
+    service = get_oversight_service()
+    watched = service._find_watched(watched_id)
+    if not watched:
+        raise HTTPException(status_code=404, detail="watched not found")
+    stored = getattr(watched, "view_preferences", None) or {}
+    return _deep_merge(_default_view_prefs(), stored)
+
+
+class ViewPrefsPatch(BaseModel):
+    tasks_tab: Optional[Dict[str, Any]] = None
+    archive_tab: Optional[Dict[str, Any]] = None
+    reports_tab: Optional[Dict[str, Any]] = None
+
+
+@router.patch("/watched/{watched_id}/view-prefs")
+async def patch_view_prefs(watched_id: str, payload: ViewPrefsPatch):
+    """به‌روزرسانی deep-merged تنظیمات نمایش.
+
+    🆕 (C5) — body می‌تواند subset باشد. مثلاً برای تغییر فقط page_size:
+        { "tasks_tab": { "page_size": 200 } }
+    """
+    service = get_oversight_service()
+    watched = service._find_watched(watched_id)
+    if not watched:
+        raise HTTPException(status_code=404, detail="watched not found")
+    patch = payload.model_dump(exclude_none=True)
+    async with service._lock:
+        stored = getattr(watched, "view_preferences", None) or {}
+        merged = _deep_merge(stored, patch)
+        watched.view_preferences = merged
+        watched.updated_at = __import__("datetime").datetime.utcnow().isoformat() + "+00:00"
+        service._save_watched()
+    return _deep_merge(_default_view_prefs(), merged)
 
 
 # 🔔 Reminder endpoints

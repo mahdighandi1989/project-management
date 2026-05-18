@@ -266,6 +266,17 @@ class WatchedProject:
     # {encrypted_blob, expires_at, obtained_at, login_failed_count}
     runtime_storage_state: Optional[Dict[str, Any]] = None
 
+    # 🆕 (C5) — تنظیمات نمایش (pagination, sort, filter, search) برای ۳ تب
+    # ساختار:
+    # {
+    #   "tasks_tab": {page_size, current_page, sort_field, sort_order,
+    #                 filters: {...}, search_query},
+    #   "archive_tab": {...},
+    #   "reports_tab": {...}
+    # }
+    # هر تب مستقل ذخیره می‌شود. cross-device sync.
+    view_preferences: Dict[str, Any] = field(default_factory=dict)
+
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
 
@@ -407,6 +418,17 @@ class OversightTask:
     # backward-compat: تسک‌های قدیمی بدون tags ذخیره شده‌اند، _filter_known_fields
     # هنگام load عبور می‌دهد و این default [] استفاده می‌شود.
     tags: List[str] = field(default_factory=list)
+    # 🆕 (C5) — pin: تسک‌های پین‌شده همیشه بالای لیست. pin در active و archive
+    # مستقل است (تسک معمولاً یا یکی یا دیگری) ولی state ذخیره می‌شود.
+    pinned: bool = False
+    pinned_at: Optional[str] = None
+    # 🆕 (C5) — title management:
+    # title_history: ts, source (manual|ai_generate|verify_reassess|regenerate|consolidation),
+    #               old_title, new_title
+    # manual_title_override: اگر True، AI خودکار عنوان را عوض نمی‌کند
+    #                       (احترام به ویرایش دستی کاربر)
+    title_history: List[Dict[str, Any]] = field(default_factory=list)
+    manual_title_override: bool = False
     merged_into: Optional[str] = None
     merged_from: List[str] = field(default_factory=list)
     merged_from_snapshot: Dict[str, Any] = field(default_factory=dict)
@@ -1717,6 +1739,23 @@ class OversightService:
 
         title = payload.get("title", "").strip() or "تسک بدون عنوان"
         prompt = payload.get("prompt", "").strip()
+        # 🆕 (C5 — بند ۹) — title validator + retry. اگر AI عنوان generic داد،
+        # یک پاس دیگر با hint قوی‌تر می‌زنیم تا عنوان معنادار شود.
+        if title != "تسک بدون عنوان" and not self._validate_title_quality(title):
+            try:
+                _better = await self._generate_better_title(
+                    idea=(payload.get("raw_idea") or "")[:2000],
+                    prompt=prompt[:3000],
+                    fallback=title,
+                    model_id=payload.get("model_id"),
+                )
+                if _better and _better != title:
+                    logger.info(
+                        f"create_task: title improved from '{title}' → '{_better}'"
+                    )
+                    title = _better
+            except Exception as _te:
+                logger.debug(f"create_task: title regenerate skipped: {_te}")
         if not prompt:
             raise ValueError("prompt خالی است")
 
@@ -1985,7 +2024,14 @@ class OversightService:
                         "acceptance_criteria",
                         "verification_status",
                         "archived",  # 🆕 (P3)
+                        # 🆕 (C5) — pin + title management
+                        "pinned",
+                        "manual_title_override",
+                        "tags",
                     }
+                    # 🆕 (C5) — اگر title از updates آمد، title_history را به‌روز کن
+                    _old_title = t.title
+                    _title_changed = False
                     for k, v in updates.items():
                         if k in allowed:
                             setattr(t, k, v)
@@ -1994,6 +2040,33 @@ class OversightService:
                                 t.archived_at = now_iso()
                             elif k == "archived" and not v:
                                 t.archived_at = None
+                            # وقتی pinned true شد، pinned_at ست شود
+                            if k == "pinned" and v:
+                                t.pinned_at = now_iso()
+                            elif k == "pinned" and not v:
+                                t.pinned_at = None
+                            # تشخیص تغییر title برای history
+                            if k == "title" and v and v != _old_title:
+                                _title_changed = True
+                    # 🆕 (C5) — اگر title از طریق این endpoint تغییر کرد:
+                    # 1) entry در title_history (source=manual پیش‌فرض)
+                    # 2) اگر کاربر صریحاً manual_title_override نفرستاد، آن را True کن
+                    #    (یعنی این یک manual edit است، AI نباید بعداً override کند)
+                    if _title_changed:
+                        _src = str(updates.get("_title_change_source") or "manual")
+                        try:
+                            _hist = list(getattr(t, "title_history", None) or [])
+                            _hist.append({
+                                "ts": now_iso(),
+                                "source": _src,
+                                "old_title": _old_title,
+                                "new_title": t.title,
+                            })
+                            t.title_history = _hist[-20:]  # حداکثر 20 آیتم
+                        except Exception:
+                            pass
+                        if "manual_title_override" not in updates and _src == "manual":
+                            t.manual_title_override = True
                     # اگر prompt تغییر کرده، target_files و AC را هم به‌روز کن
                     if "prompt" in updates and updates["prompt"]:
                         if not updates.get("target_files"):
@@ -2688,6 +2761,264 @@ class OversightService:
 
     # ====================================================================
     # Idea -> Strong Prompt
+    # ====================================================================
+    # 🆕 (C5) — Title management: validator + reassess
+    # ====================================================================
+
+    # کلمات generic که اگر تنها token معنادار عنوان باشند، عنوان "نا‌مفهوم" تلقی
+    # می‌شود و retry تولید عنوان اتفاق می‌افتد.
+    _TITLE_GENERIC_TOKENS = {
+        # فارسی
+        "بهبود", "تغییر", "تغییرات", "سیستم", "پروژه", "اصلاح", "اصلاحات",
+        "رفع", "ایجاد", "ساخت", "اضافه", "حذف", "اپدیت", "آپدیت", "بروزرسانی",
+        # انگلیسی
+        "fix", "update", "improve", "improvement", "change", "changes",
+        "add", "remove", "system", "project", "task", "feature", "bug",
+        "refactor", "tweak", "patch",
+    }
+
+    @classmethod
+    def _validate_title_quality(cls, title: str) -> bool:
+        """آیا این عنوان به‌اندازهٔ کافی توصیفی هست؟
+
+        قواعد رد:
+          - خالی یا < 3 کاراکتر
+          - فقط شامل کلمات generic (مثل "fix" یا "بهبود سیستم")
+          - بیش از 80 درصد tokenهایش generic باشند
+
+        True: عنوان قابل قبول است.
+        False: نیاز به retry/regenerate.
+        """
+        import re as _re
+        if not title or not title.strip():
+            return False
+        clean = title.strip()
+        if len(clean) < 3:
+            return False
+        # tokenize ساده — split روی whitespace + punctuation
+        tokens = [
+            t.lower().strip(".,؛:!?()[]{}«»\"'")
+            for t in _re.split(r'[\s\-،,]+', clean)
+            if t.strip()
+        ]
+        if not tokens:
+            return False
+        # اگر تعداد token < 2 و token تنها generic است → رد
+        meaningful = [t for t in tokens if t and t not in cls._TITLE_GENERIC_TOKENS]
+        if not meaningful:
+            return False
+        # اگر بیش از 80٪ tokenها generic → رد
+        if len(tokens) >= 3:
+            generic_ratio = (len(tokens) - len(meaningful)) / len(tokens)
+            if generic_ratio > 0.8:
+                return False
+        return True
+
+    async def _ai_reassess_title(
+        self,
+        task: "OversightTask",
+        *,
+        triggered_by: str = "verify_reassess",
+        model_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """بازنگری عنوان تسک با AI سبک.
+
+        🆕 (C5 — بند ۱۱) — بعد از هر verify (single/bulk، fast/deep) و بعد از
+        build super-task فراخوانی می‌شود. اگر AI تصمیم بگیرد عنوان فعلی
+        مناسب نیست، پیشنهاد جدید برمی‌گرداند.
+
+        قاعدهٔ skip:
+          - اگر manual_title_override == True → skip کامل (احترام به کاربر)
+
+        خروجی: new_title اگر تغییر کرد، None اگر keep یا fail.
+        side effect: title و title_history روی task به‌روز می‌شوند و
+        _save_tasks() صدا زده می‌شود.
+        """
+        if getattr(task, "manual_title_override", False):
+            return None
+        try:
+            from .ai_manager import get_ai_manager
+            from .ai_base import Message
+        except Exception:
+            return None
+        if not model_id:
+            try:
+                from ..core.models_registry import DEFAULT_EXTRACTION_MODEL_ID
+                model_id = DEFAULT_EXTRACTION_MODEL_ID
+            except Exception:
+                return None
+
+        # جمع‌آوری context
+        _ac_list = []
+        for ac in (getattr(task, "acceptance_criteria", None) or [])[:8]:
+            if isinstance(ac, str):
+                _ac_list.append(ac[:200])
+            elif isinstance(ac, dict):
+                _ac_list.append(str(ac.get("text") or "")[:200])
+        _completed = []
+        _remaining = []
+        for s in (getattr(task, "task_steps", None) or [])[:15]:
+            if not isinstance(s, dict):
+                continue
+            _t = str(s.get("title") or "")[:120]
+            _st = str(s.get("status") or "").lower()
+            if _st == "done":
+                _completed.append(_t)
+            else:
+                _remaining.append(_t)
+
+        prompt_text = (
+            "وظیفه‌ات: ارزیابی عنوان فعلی تسک و تصمیم اینکه آیا باید عوض شود.\n\n"
+            f"عنوان فعلی: \"{task.title}\"\n"
+            f"اولویت: {task.priority}\n"
+            f"وضعیت: {task.status}\n"
+            f"verification_status: {task.verification_status}\n"
+            f"acceptance_criteria ({len(_ac_list)}):\n"
+            + "\n".join(f"  - {a}" for a in _ac_list[:6]) + "\n"
+            f"\nمراحل done شده ({len(_completed)}):\n"
+            + "\n".join(f"  ✓ {s}" for s in _completed[:6]) + "\n"
+            f"\nمراحل remaining ({len(_remaining)}):\n"
+            + "\n".join(f"  ○ {s}" for s in _remaining[:6]) + "\n"
+            f"\nlast_summary: {(task.last_summary or '')[:300]}\n\n"
+            "قواعد:\n"
+            "1. اگر عنوان فعلی **دقیق، توصیفی (حداکثر ۸ کلمه)، با فعل عملیاتی + "
+            "موضوع مشخص** است → `keep`.\n"
+            "2. اگر عنوان generic است (مثل 'بهبود سیستم'، 'fix'، 'تغییرات') یا "
+            "از وضعیت/AC ها انحراف دارد → عنوان مناسب پیشنهاد بده.\n"
+            "3. در پیشنهاد جدید، حداکثر ۸ کلمه، با فعل عملیاتی + موضوع.\n\n"
+            "خروجی JSON خالص:\n"
+            "{\"action\": \"keep\" | \"update\", \"new_title\": \"...\", \"reason\": \"...\"}"
+        )
+
+        try:
+            import asyncio as _asyncio
+            mgr = get_ai_manager()
+            resp = await _asyncio.wait_for(
+                mgr.generate(
+                    model_id=model_id,
+                    messages=[Message(role="user", content=prompt_text)],
+                    max_tokens=200,
+                    temperature=0.2,
+                    allow_fallback=True,
+                ),
+                timeout=15,
+            )
+            raw = (resp.content or "").strip()
+        except _asyncio.TimeoutError:
+            return None
+        except Exception as e:
+            logger.debug(f"_ai_reassess_title failed: {e}")
+            return None
+
+        import json as _json
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end <= start:
+            return None
+        try:
+            data = _json.loads(raw[start:end + 1])
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        action = str(data.get("action") or "keep").lower().strip()
+        if action != "update":
+            return None
+        new_title = str(data.get("new_title") or "").strip()
+        if not new_title or new_title == task.title:
+            return None
+        # validator: اگر AI عنوان بد پیشنهاد داد، نگه نمی‌داریم
+        if not self._validate_title_quality(new_title):
+            return None
+        # اعمال و ثبت در history
+        async with self._lock:
+            _old = task.title
+            task.title = new_title[:200]
+            _hist = list(getattr(task, "title_history", None) or [])
+            _hist.append({
+                "ts": now_iso(),
+                "source": triggered_by,
+                "old_title": _old,
+                "new_title": task.title,
+                "reason": str(data.get("reason") or "")[:300],
+            })
+            task.title_history = _hist[-20:]
+            task.updated_at = now_iso()
+            self._save_tasks()
+        return new_title
+
+
+    async def _generate_better_title(
+        self,
+        idea: str,
+        prompt: str,
+        fallback: str,
+        model_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """تولید عنوان بهتر وقتی validator اولیه رد می‌کند.
+
+        🆕 (C5 — بند ۹) — AI call سبک با hint قوی برای کلمات غیر-generic.
+        خروجی: عنوان جدید یا None در صورت خطا.
+        """
+        try:
+            from .ai_manager import get_ai_manager
+            from .ai_base import Message
+        except Exception:
+            return None
+        if not model_id:
+            try:
+                from ..core.models_registry import DEFAULT_EXTRACTION_MODEL_ID
+                model_id = DEFAULT_EXTRACTION_MODEL_ID
+            except Exception:
+                return None
+
+        prompt_text = (
+            "وظیفه‌ات: بر اساس ایده و پرامپت زیر، یک **عنوان توصیفی** برای تسک "
+            "بساز. عنوان قبلی generic بود و قابل قبول نیست.\n\n"
+            "قواعد سخت:\n"
+            "1. حداکثر ۸ کلمه\n"
+            "2. ساختار: 'فعل عملیاتی + موضوع مشخص + scope روشن'\n"
+            "3. **ممنوع**: کلمات کلی مثل 'بهبود'، 'تغییر'، 'سیستم'، 'fix'، "
+            "'update'، 'improve' بدون context.\n"
+            "4. باید **چه چیزی** عوض می‌شود و **روی کدام بخش** اشاره شود.\n\n"
+            f"ایده: {idea[:1500]}\n\n"
+            f"پرامپت: {prompt[:2500]}\n\n"
+            f"عنوان قبلی (نا‌مفهوم — جایگزین کن): \"{fallback}\"\n\n"
+            "خروجی فقط یک خط متن — عنوان جدید (بدون quote، بدون JSON)."
+        )
+
+        try:
+            import asyncio as _asyncio
+            mgr = get_ai_manager()
+            resp = await _asyncio.wait_for(
+                mgr.generate(
+                    model_id=model_id,
+                    messages=[Message(role="user", content=prompt_text)],
+                    max_tokens=80,
+                    temperature=0.3,
+                    allow_fallback=True,
+                ),
+                timeout=12,
+            )
+            raw = (resp.content or "").strip()
+        except _asyncio.TimeoutError:
+            return None
+        except Exception as e:
+            logger.debug(f"_generate_better_title failed: {e}")
+            return None
+
+        # cleanup: حذف quote، خطوط اضافی
+        new_title = raw.split("\n")[0].strip(' "\'`')[:120]
+        if not new_title:
+            return None
+        # validate نهایی — اگر باز هم generic بود، fallback را بازگردان (None)
+        if not self._validate_title_quality(new_title):
+            return None
+        return new_title
+
+
     # ====================================================================
 
     @staticmethod
@@ -4121,7 +4452,7 @@ class OversightService:
 # 📤 خروجی فقط JSON خالص (بدون متن اضافی، بدون ```)
 
 {{
-  "title": "عنوان کوتاه و گویا تسک — یک جمله قابل سنجش (فارسی)",
+  "title": "عنوان کوتاه و گویا تسک — حداکثر ۸ کلمه با ساختار 'فعل عملیاتی + موضوع مشخص + scope روشن'. مثال خوب: 'افزودن دکمهٔ undo به super-task'. مثال بد: 'بهبود سیستم'، 'تغییرات'، 'fix'، 'update'، 'improve'. کلمات generic بدون context ممنوع — باید نوع‌بندی واضح موضوع باشد.",
   "description": "پاراگراف کامل + همهٔ URL ها/آدرس‌ها/نام‌ها از متن کاربر + شواهد در کد واقعی پروژه (نام فایل و خط ذکر کن). حداقل ۸۰٪ متن کاربر در اینجا باید بازتاب پیدا کند.",
   "proposed_action": "پیشنهاد عملی برای پیاده‌سازی — با ذکر فایل‌ها/توابع واقعی + همهٔ URL/آدرس از متن کاربر",
   "type": "bug | feature_request | refactor | docs | security | other",
