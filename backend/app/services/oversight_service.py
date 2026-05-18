@@ -4428,17 +4428,29 @@ class OversightService:
             effective_model = get_default_model_id()
 
         # System prompt یادآوری‌محور
+        # 🆕 (Reminder via Telegram) — علاوه بر title/summary/checklist،
+        # AI باید زمان یادآوری (reminder_at به ISO UTC) و قاعدهٔ تکرار
+        # (reminder_repeat_rule از {daily, weekly, null}) را از متن کاربر
+        # استخراج کند. این برای ساخت تسک Telegram-driven ضروری است چون
+        # کاربر در /reminder فقط متن می‌فرستد، نه datetime-picker جدا.
+        from datetime import datetime as _dt_now, timezone as _tz_now
+        _now_iso_for_prompt = _dt_now.now(_tz_now.utc).isoformat(timespec="seconds")
         system_content = (
             "تو یک دستیار شخصی هستی. کاربر یک یادآوری توصیف می‌کند "
             "(احتمالاً شامل پیام صوتی یا فایل پیوست). وظیفهٔ تو این است "
             "که آن را به یک ساختار ساده و قابل تیک تبدیل کنی — مثل "
             "to-do list شخصی. این یادآوری برای انجام کارهای روزمره "
             "است، نه برای engineer کدنویس.\n\n"
+            f"اکنون (UTC): {_now_iso_for_prompt} — برای محاسبهٔ زمان‌های "
+            "نسبی مثل «فردا»، «آخر هفته»، «۲ ساعت دیگر» استفاده کن.\n\n"
             "خروجی JSON معتبر با ساختار زیر بده (هیچ متن دیگری بیرون JSON ننویس):\n"
             "{\n"
             '  "title": "<عنوان کوتاه ≤80 کاراکتر؛ خلاصهٔ مفهوم یادآوری>",\n'
             '  "summary": "<شرح کوتاه 1-3 جمله که چرا/برای چه این یادآوری است>",\n'
-            '  "checklist": ["<آیتم اول>", "<آیتم دوم>", ...]\n'
+            '  "checklist": ["<آیتم اول>", "<آیتم دوم>", ...],\n'
+            '  "reminder_at": "<ISO 8601 UTC مثل 2026-05-20T14:30:00+00:00 — '
+            'زمان firing بعدی؛ null اگر کاربر زمان نگفت>",\n'
+            '  "reminder_repeat_rule": "<\\"daily\\" | \\"weekly\\" | null>"\n'
             "}\n\n"
             "قواعد سخت‌گیرانه:\n"
             "1. هر آیتم چک‌لیست باید یک action واحد، کوتاه (≤120 کاراکتر)، "
@@ -4447,7 +4459,12 @@ class OversightService:
             "3. ترتیب آیتم‌ها = ترتیبی که کاربر گفت (مگر یک ترتیب طبیعی‌تر باشد).\n"
             "4. نام‌ها، URLها، آدرس‌ها، اعداد را verbatim حفظ کن.\n"
             "5. این یک تسک کدنویسی نیست — هیچ ارجاع به فایل/تابع/repo نده.\n"
-            "6. اگر متن کاربر فقط یک کار است، فقط یک آیتم در checklist بگذار."
+            "6. اگر متن کاربر فقط یک کار است، فقط یک آیتم در checklist بگذار.\n"
+            "7. **زمان‌بندی**: اگر کاربر گفت «هر روز ساعت ۹»، repeat=daily و "
+            "reminder_at را روی نزدیک‌ترین ۹ صبح آینده ست کن. اگر گفت «هر "
+            "هفته جمعه»، repeat=weekly و reminder_at را روی نزدیک‌ترین جمعه. "
+            "اگر گفت «فردا» بدون ساعت، ساعت ۹ صبح فردا. اگر هیچ زمانی "
+            "نگفت، reminder_at=null بگذار (سیستم پیش‌فرض می‌گذارد)."
         )
 
         # 🔔 اگر فایل پیوست داشت، augment idea با محتوای استخراج‌شده
@@ -4480,6 +4497,8 @@ class OversightService:
         title = default_title
         summary = idea[:300]
         checklist: List[str] = []
+        reminder_at_extracted: Optional[str] = None
+        reminder_repeat_extracted: Optional[str] = None
         try:
             import re as _re_rem
             m = _re_rem.search(r"\{.*\}", raw, _re_rem.DOTALL)
@@ -4491,6 +4510,19 @@ class OversightService:
                 if isinstance(cl, list):
                     # 🆕 (bug 30 v3) — cap reminder checklist هم به ۱۰۰ بالا برد
                     checklist = [str(x)[:200] for x in cl if str(x).strip()][:100]
+                # 🆕 (Reminder via Telegram) — datetime extraction
+                _r_at = data.get("reminder_at")
+                if isinstance(_r_at, str) and _r_at.strip() and _r_at.lower() != "null":
+                    # تأیید parseable بودن — اگر خراب بود، None می‌گذاریم
+                    try:
+                        from datetime import datetime as _dt_v
+                        _dt_v.fromisoformat(_r_at.replace("Z", "+00:00"))
+                        reminder_at_extracted = _r_at
+                    except Exception as _de:
+                        logger.debug(f"reminder_at extraction unparseable: {_r_at} ({_de})")
+                _r_rule = data.get("reminder_repeat_rule")
+                if isinstance(_r_rule, str) and _r_rule.lower() in ("daily", "weekly"):
+                    reminder_repeat_extracted = _r_rule.lower()
         except Exception as e:
             logger.warning(f"reminder JSON parse failed: {e}")
 
@@ -4537,6 +4569,11 @@ class OversightService:
             "overall_completion_pct": 0,
             "models_used": [effective_model] if effective_model else [],
             "attachments_meta": attachments_meta,
+            # 🆕 (Reminder via Telegram) — زمان و تکرار استخراج‌شده از متن
+            # کاربر (ممکن است None باشد اگر کاربر زمان نگفت — caller
+            # تصمیم می‌گیرد پیش‌فرض بگذارد یا از کاربر بپرسد).
+            "reminder_at": reminder_at_extracted,
+            "reminder_repeat_rule": reminder_repeat_extracted,
         }
 
     async def idea_to_prompt(
@@ -5353,6 +5390,11 @@ AC = «طراحی شیک‌تر باشد»:
                 "estimate": "medium",
                 "raw_response": response,
                 "_quality_flag": "json_parse_failed",
+                # 🆕 idea نهایی پس از resolve_attachments — شامل متن کاربر +
+                # متن استخراج‌شدهٔ همهٔ فایل‌های پیوست (صوت/PDF/...). callerها
+                # باید این را به‌جای ورودی خام به raw_idea تسک بدهند تا
+                # transcript فایل صوتی یا extract فایل از دست نرود.
+                "raw_idea": idea,
             }
             if attachments_meta:
                 result_minimal["attachments"] = attachments_meta
@@ -5417,6 +5459,12 @@ AC = «طراحی شیک‌تر باشد»:
             # 🆕 تعداد واقعی فایل‌های deep-read شده تا UI به‌جای متن hardcoded
             # «۱۸ فایل»، تعداد واقعی را نشان دهد
             "deep_files_count": len(deep_ctx.get("deep_paths", [])) if isinstance(deep_ctx, dict) else 0,
+            # 🆕 idea نهایی پس از resolve_attachments — شامل متن کاربر +
+            # متن استخراج‌شدهٔ همهٔ فایل‌های پیوست. callerها (Telegram bot
+            # و frontend) باید این را به‌جای ورودی خام به raw_idea تسک بدهند
+            # تا transcript صوت/extract PDF/OCR تصویر در ایدهٔ ثبت‌شده باقی
+            # بماند و برای بازتولید قابل دسترسی باشد.
+            "raw_idea": idea,
         }
         if attachments_meta:
             result_final["attachments"] = attachments_meta

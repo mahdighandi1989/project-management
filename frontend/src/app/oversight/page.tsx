@@ -179,6 +179,7 @@ interface Task {
   deadline?: string | null;
   source: string;
   created_at?: string;
+  updated_at?: string;
   execution_mode?: 'manual' | 'auto_via_projects_page' | 'auto_via_pr';
   verification_status?: string;
   verification_history?: Array<{
@@ -1552,6 +1553,7 @@ export default function OversightPage() {
     task_steps?: any[];
     overall_completion_pct?: number;
     deep_files_count?: number;
+    raw_idea?: string;
   } | null>(null);
 
   // 🆕 (Smart Task Lifecycle) Dedup state — وقتی save تسک با duplicate_detected برمی‌گردد
@@ -2088,6 +2090,10 @@ export default function OversightPage() {
           task_steps: data.task_steps || [],
           overall_completion_pct: data.overall_completion_pct,
           deep_files_count: data.deep_files_count ?? 0,
+          // 🆕 (raw_idea fix) — idea ای که backend بعد از resolve فایل‌ها
+          // برگردانده شامل متن کاربر + transcript صوت + extract PDF/OCR است.
+          // در submit به‌جای idea خام کاربر این را به raw_idea تسک می‌دهیم.
+          raw_idea: data.raw_idea,
         });
         setGenPhase('پرامپت آماده شد');
         setGenPct(100);
@@ -2190,7 +2196,7 @@ export default function OversightPage() {
             project_full_name: w?.repo_full_name || '',
             title: previewPrompt.title,
             prompt: previewPrompt.prompt,
-            raw_idea: idea,
+            raw_idea: previewPrompt.raw_idea || idea,
             type: ideaType,
             priority: ideaPriority,
             status: 'pending',
@@ -2218,7 +2224,7 @@ export default function OversightPage() {
               watched_id: wid || null,
               title: previewPrompt.title,
               prompt: previewPrompt.prompt,
-              raw_idea: idea,
+              raw_idea: previewPrompt.raw_idea || idea,
               type: ideaType,
               priority: ideaPriority,
               matches: result.similar_matches || [],
@@ -3000,6 +3006,27 @@ export default function OversightPage() {
       return new Date(d).toLocaleString('fa-IR');
     } catch {
       return d;
+    }
+  };
+
+  const fmtRelative = (d?: string | null) => {
+    if (!d) return '';
+    try {
+      const date = new Date(d);
+      const diffMs = Date.now() - date.getTime();
+      if (diffMs < 0) return new Date(d).toLocaleDateString('fa-IR');
+      const diffMin = Math.floor(diffMs / 60000);
+      if (diffMin < 1) return 'همین الان';
+      if (diffMin < 60) return `${diffMin} دقیقه پیش`;
+      const diffHr = Math.floor(diffMin / 60);
+      if (diffHr < 24) return `${diffHr} ساعت پیش`;
+      const diffDay = Math.floor(diffHr / 24);
+      if (diffDay < 30) return `${diffDay} روز پیش`;
+      const diffMon = Math.floor(diffDay / 30);
+      if (diffMon < 12) return `${diffMon} ماه پیش`;
+      return new Date(d).toLocaleDateString('fa-IR');
+    } catch {
+      return '';
     }
   };
 
@@ -3971,6 +3998,7 @@ export default function OversightPage() {
             fetchLatestReportForTask={fetchLatestReportForTask}
             executeDisabledReason={selectedModelIds.length === 0 ? 'حداقل یک مدل انتخاب کنید' : ''}
             fmtDate={fmtDate}
+            fmtRelative={fmtRelative}
           />
         ) : (
           <ReportsPanel
@@ -7909,6 +7937,7 @@ function TasksPanel({
   fetchLatestReportForTask,
   executeDisabledReason,
   fmtDate,
+  fmtRelative,
 }: {
   tasks: Task[];
   filteredTasks: Task[];
@@ -7950,6 +7979,7 @@ function TasksPanel({
   fetchLatestReportForTask: (taskId: string) => void;
   executeDisabledReason: string;
   fmtDate: (d?: string | null) => string;
+  fmtRelative: (d?: string | null) => string;
 }) {
   // 🆕 (C5) — title editing state (inline)
   const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
@@ -8295,6 +8325,49 @@ function TasksPanel({
               )}
               {t.last_run_at && <span>⏱ {fmtDate(t.last_run_at)}</span>}
               {t.deadline && <span>📅 deadline: {t.deadline}</span>}
+            </div>
+            {/* 🆕 تاریخ‌های مهم تسک — ایجاد + رویدادهای تأثیرگذار اخیر */}
+            <div className="flex items-center gap-2 mt-1 text-[10px] text-gray-500 dark:text-gray-400 flex-wrap">
+              {t.created_at && (
+                <span
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700/60"
+                  title={`ایجاد: ${fmtDate(t.created_at)}`}
+                >
+                  📅 ایجاد: {fmtRelative(t.created_at)}
+                </span>
+              )}
+              {t.updated_at && t.updated_at !== t.created_at && (
+                <span
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700/60"
+                  title={`آخرین تغییر: ${fmtDate(t.updated_at)}`}
+                >
+                  ✏️ تغییر: {fmtRelative(t.updated_at)}
+                </span>
+              )}
+              {t.last_verified_at && (
+                <span
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-cyan-50 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-300"
+                  title={`آخرین verify: ${fmtDate(t.last_verified_at)}`}
+                >
+                  🔍 verify: {fmtRelative(t.last_verified_at)}
+                </span>
+              )}
+              {t.last_seen_in_scan_at && (
+                <span
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300"
+                  title={`آخرین scan: ${fmtDate(t.last_seen_in_scan_at)}`}
+                >
+                  🛰 scan: {fmtRelative(t.last_seen_in_scan_at)}
+                </span>
+              )}
+              {t.last_quality_audit_at && (
+                <span
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-purple-50 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300"
+                  title={`آخرین audit کیفیت: ${fmtDate(t.last_quality_audit_at)}`}
+                >
+                  🧪 audit: {fmtRelative(t.last_quality_audit_at)}
+                </span>
+              )}
             </div>
           </div>
           {/* 🆕 (C5 — بند ۱۳) — دکمه‌ها در ۲ ردیف زیر هم (در صفحات تنگ) با
