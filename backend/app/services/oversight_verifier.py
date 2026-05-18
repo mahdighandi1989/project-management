@@ -4095,6 +4095,28 @@ async def verify_task(
     except Exception as _e:
         logger.debug(f"schedule notification failed: {_e}")
 
+    # 🆕 (C7v2 Sections 4+5) — auto-sync + review در انتهای verify
+    # غیر-blocking نسبت به نتیجهٔ verify؛ هر شکستی فقط log می‌شود.
+    if task.watched_id:
+        try:
+            _svc = get_oversight_service()
+            _sync_r = await _svc.sync_to_inspector_memory_training(task.watched_id)
+            logger.info(
+                f"verify_task end → sync: mem={_sync_r.get('created_memory_count', 0)}, "
+                f"train={_sync_r.get('created_training_count', 0)}"
+            )
+        except Exception as _se:
+            logger.warning(f"verify_task: sync_to_inspector failed: {_se}")
+        try:
+            _svc2 = get_oversight_service()
+            _rev_r = await _svc2.review_auto_synced_fields(task.watched_id)
+            logger.info(
+                f"verify_task end → review: strengthened={_rev_r.get('strengthened_count', 0)}, "
+                f"archived={_rev_r.get('archived_count', 0)}"
+            )
+        except Exception as _re:
+            logger.warning(f"verify_task: review_auto_synced_fields failed: {_re}")
+
     return {
         "task": task.to_dict(),
         "report": report.to_dict(),

@@ -72,6 +72,43 @@ async def lifespan(app: FastAPI):
         for table, count in db_info['record_counts'].items():
             logger.info(f"  📋 {table}: {count} records")
 
+    # 🆕 (C7v2 Section 1) — Archive کردن خودکار همهٔ فیلدهای instruction
+    # تمام پروژه‌ها. این فیلدها orphan هستند (به chat نمی‌رسند) و دیگر
+    # دستی ساخته نمی‌شوند. idempotent — بار دوم چیزی را تغییر نمی‌دهد.
+    try:
+        from .core.database import SessionLocal
+        from .models.inspector_prompt_field import InspectorPromptField
+        from sqlalchemy import or_
+
+        _ipf_db = SessionLocal()
+        try:
+            _ipf_affected = (
+                _ipf_db.query(InspectorPromptField)
+                .filter(
+                    InspectorPromptField.category == "instruction",
+                    or_(
+                        InspectorPromptField.archived.is_(None),
+                        InspectorPromptField.archived == False,  # noqa: E712
+                    ),
+                )
+                .all()
+            )
+            _ipf_count = len(_ipf_affected)
+            for _ipf_f in _ipf_affected:
+                _ipf_f.archived = True
+            if _ipf_count > 0:
+                _ipf_db.commit()
+                logger.info(
+                    f"📁 (C7v2) Auto-archived {_ipf_count} legacy instruction field(s) "
+                    f"on startup (idempotent)"
+                )
+            else:
+                logger.info("📁 (C7v2) No legacy instruction fields to archive on startup")
+        finally:
+            _ipf_db.close()
+    except Exception as _ipf_e:
+        logger.warning(f"(C7v2) Auto-archive instructions failed (non-fatal): {_ipf_e}")
+
     # بارگذاری API keys از دیتابیس
     await load_api_keys_from_database()
 
