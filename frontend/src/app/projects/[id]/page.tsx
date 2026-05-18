@@ -676,6 +676,10 @@ export default function ProjectDetailPage() {
   const [projectTasksPanel, setProjectTasksPanel] = useState<any[]>([]);
   const [projectTasksPanelOpen, setProjectTasksPanelOpen] = useState(false);
 
+  // 🆕 (C7v2 Section 1) — فیلدهای archived (instruction های قدیمی)
+  const [archivedFields, setArchivedFields] = useState<any[]>([]);
+  const [archivedFieldsOpen, setArchivedFieldsOpen] = useState(false);
+
   const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
   const [selectedLog, setSelectedLog] = useState<ActivityLog | null>(null);
   const [reports, setReports] = useState<ProjectReport[]>([]);
@@ -2327,6 +2331,24 @@ export default function ProjectDetailPage() {
       console.error('Error loading prompt fields:', e);
     } finally {
       setPromptFieldsLoading(false);
+    }
+  };
+
+  // 🆕 (C7v2 Section 1) — بارگذاری فیلدهای archived فقط زمانی که accordion آرشیو باز شود
+  const loadArchivedFields = async () => {
+    if (!projectId) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/render/inspector/prompt-fields/${projectId}?include_archived=true`,
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.success && Array.isArray(data.fields)) {
+        // فقط آن‌هایی که archived=true هستند را نگه دار
+        setArchivedFields(data.fields.filter((f: any) => f.archived === true));
+      }
+    } catch (e) {
+      console.warn('loadArchivedFields failed:', e);
     }
   };
 
@@ -14604,7 +14626,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             <div className="mt-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden" dir="rtl">
               {/* هدر پنل - کلیک برای باز/بسته شدن */}
               <button
-                onClick={() => { setPromptFieldsOpen(!promptFieldsOpen); if (!promptFieldsOpen) { if (promptFields.length === 0) loadPromptFields(); if (generalInstructions.length === 0) loadGeneralInstructions(); if (!visualDebugPromptData) loadVisualDebugPrompt(); } }}
+                onClick={() => { setPromptFieldsOpen(!promptFieldsOpen); if (!promptFieldsOpen) { if (promptFields.length === 0) loadPromptFields(); if (generalInstructions.length === 0) loadGeneralInstructions(); if (!visualDebugPromptData) loadVisualDebugPrompt(); /* 🆕 C7v2 — fetch archived هم */ loadArchivedFields(); } }}
                 className="w-full flex items-center justify-between px-4 py-3 bg-gradient-to-r from-purple-50 to-indigo-50 dark:from-purple-900/20 dark:to-indigo-900/20 hover:from-purple-100 hover:to-indigo-100 dark:hover:from-purple-900/30 dark:hover:to-indigo-900/30 transition-colors"
               >
                 <div className="flex items-center gap-3">
@@ -14739,12 +14761,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         </button>
                       ))}
                     </div>
-                    <button
-                      onClick={() => { setPromptFieldAdding(true); setPromptFieldNewData({title: '', content: '', category: promptFieldActiveCategory === 'all' ? 'instruction' : promptFieldActiveCategory, priority: promptFields.length}); }}
-                      className="px-3 py-1.5 bg-green-500 text-white rounded-lg text-xs font-medium hover:bg-green-600 transition-colors"
-                    >
-                      + افزودن فیلد جدید
-                    </button>
+                    {/* 🆕 (C7v2 Section 1) — دکمه افزودن فیلد دستی حذف شد.
+                        فیلدهای جدید فقط از طریق auto-sync مرکز نظارت ساخته می‌شوند. */}
                   </div>
 
                   {/* فرم اضافه کردن فیلد جدید */}
@@ -15070,6 +15088,46 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 </div>
               )}
             </div>
+
+            {/* 🆕 (C7v2 Section 1) — Accordion فیلدهای آرشیو با count دینامیک.
+                تنها زمانی نمایش داده می‌شود که حداقل یک فیلد archived وجود داشته باشد. */}
+            {archivedFields.length > 0 && (
+              <div className="mt-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden" dir="rtl">
+                <button
+                  onClick={() => {
+                    setArchivedFieldsOpen(!archivedFieldsOpen);
+                  }}
+                  className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-gray-900/40 hover:bg-gray-100 dark:hover:bg-gray-900/60 transition-colors"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="text-2xl">🗄</span>
+                    <div className="text-right">
+                      <h3 className="font-bold text-sm text-gray-700 dark:text-gray-300">فیلدهای آرشیو ({archivedFields.length})</h3>
+                      <p className="text-xs text-gray-500 dark:text-gray-400">
+                        فیلدهای قدیمی که فعلاً به مدل ارسال نمی‌شوند ولی حذف نشده‌اند
+                      </p>
+                    </div>
+                  </div>
+                  <span className={`text-lg transition-transform ${archivedFieldsOpen ? 'rotate-180' : ''}`}>▼</span>
+                </button>
+                {archivedFieldsOpen && (
+                  <div className="p-3 max-h-[400px] overflow-y-auto space-y-1">
+                    {archivedFields.map((f: any) => (
+                      <div key={f.id} className="p-2 rounded border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/30 text-xs">
+                        <div className="font-medium text-gray-700 dark:text-gray-300">{f.title}</div>
+                        <div className="text-[10px] text-gray-500 mt-0.5">دسته: {f.category} | اولویت: {f.priority}</div>
+                        {f.content && (
+                          <details className="mt-1 text-[11px] text-gray-600 dark:text-gray-400">
+                            <summary className="cursor-pointer">محتوا</summary>
+                            <div className="mt-1 p-2 bg-white dark:bg-gray-800 rounded">{f.content}</div>
+                          </details>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 

@@ -458,6 +458,36 @@ def migrate_db():
                 cursor.execute("ALTER TABLE inspector_messages ADD COLUMN extra_data TEXT")
                 logger.info("Added 'extra_data' column to inspector_messages table")
 
+        # 🆕 (C7v2) Migration برای جدول inspector_prompt_fields — افزودن
+        # ستون‌های archive، auto-sync، evidence_count، last_seen_at و
+        # previous_content برای پشتیبانی از چرخهٔ تقویت/آرشیو
+        if "inspector_prompt_fields" in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
+            existing_cols = get_columns("inspector_prompt_fields")
+
+            if "archived" not in existing_cols:
+                cursor.execute("ALTER TABLE inspector_prompt_fields ADD COLUMN archived BOOLEAN DEFAULT 0")
+                logger.info("Added 'archived' column to inspector_prompt_fields table")
+
+            if "source" not in existing_cols:
+                cursor.execute("ALTER TABLE inspector_prompt_fields ADD COLUMN source VARCHAR(50)")
+                logger.info("Added 'source' column to inspector_prompt_fields table")
+
+            if "auto_synced" not in existing_cols:
+                cursor.execute("ALTER TABLE inspector_prompt_fields ADD COLUMN auto_synced BOOLEAN DEFAULT 0")
+                logger.info("Added 'auto_synced' column to inspector_prompt_fields table")
+
+            if "evidence_count" not in existing_cols:
+                cursor.execute("ALTER TABLE inspector_prompt_fields ADD COLUMN evidence_count INTEGER DEFAULT 0")
+                logger.info("Added 'evidence_count' column to inspector_prompt_fields table")
+
+            if "last_seen_at" not in existing_cols:
+                cursor.execute("ALTER TABLE inspector_prompt_fields ADD COLUMN last_seen_at DATETIME")
+                logger.info("Added 'last_seen_at' column to inspector_prompt_fields table")
+
+            if "previous_content" not in existing_cols:
+                cursor.execute("ALTER TABLE inspector_prompt_fields ADD COLUMN previous_content TEXT")
+                logger.info("Added 'previous_content' column to inspector_prompt_fields table")
+
         conn.commit()
         logger.info("Database migration completed")
 

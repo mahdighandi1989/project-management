@@ -40,6 +40,14 @@ class InspectorPromptField(Base):
     last_test_passed = Column(Boolean, nullable=True)
     last_test_result = Column(Text, nullable=True)  # JSON result
 
+    # 🆕 (C7v2) فیلدهای جدید برای archive، auto-sync و چرخهٔ تقویت/آرشیو
+    archived = Column(Boolean, default=False, index=True)
+    source = Column(String(50), nullable=True)  # "manual" | "oversight_auto_sync" | "migrate"
+    auto_synced = Column(Boolean, default=False, index=True)
+    evidence_count = Column(Integer, default=0)
+    last_seen_at = Column(DateTime, nullable=True)
+    previous_content = Column(Text, nullable=True)  # نسخهٔ قبلی content پس از تقویت
+
     # زمان‌ها
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
@@ -60,4 +68,11 @@ class InspectorPromptField(Base):
             "last_test_result": json.loads(self.last_test_result) if self.last_test_result else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            # 🆕 (C7v2)
+            "archived": bool(self.archived) if self.archived is not None else False,
+            "source": self.source or "manual",
+            "auto_synced": bool(self.auto_synced) if self.auto_synced is not None else False,
+            "evidence_count": int(self.evidence_count or 0),
+            "last_seen_at": self.last_seen_at.isoformat() if self.last_seen_at else None,
+            "previous_content": self.previous_content,
         }

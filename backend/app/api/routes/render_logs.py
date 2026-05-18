@@ -9302,8 +9302,17 @@ async def inspector_project_tasks(project_id: str, db: Session = Depends(get_db)
 
 
 @router.get("/inspector/prompt-fields/{project_id}")
-async def get_prompt_fields(project_id: str, category: Optional[str] = None, db: Session = Depends(get_db)):
-    """دریافت همه فیلدهای دستورات/حافظه/آموزش پروژه"""
+async def get_prompt_fields(
+    project_id: str,
+    category: Optional[str] = None,
+    include_archived: bool = False,
+    db: Session = Depends(get_db),
+):
+    """دریافت همه فیلدهای دستورات/حافظه/آموزش پروژه.
+
+    🆕 (C7v2 Section 1) — به‌صورت پیش‌فرض فیلدهای archived=true حذف می‌شوند.
+    برای دیدن آرشیو، include_archived=true را پاس کنید.
+    """
     from ...models.inspector_prompt_field import InspectorPromptField
 
     query = db.query(InspectorPromptField).filter(
@@ -9312,12 +9321,91 @@ async def get_prompt_fields(project_id: str, category: Optional[str] = None, db:
     if category:
         query = query.filter(InspectorPromptField.category == category)
 
+    if not include_archived:
+        # فیلدهای archived=true را حذف کن (پیش‌فرض). نکته: ستون archived
+        # ممکن است در DBهای قدیمی NULL باشد — هر دو NULL و false را قبول
+        # کنیم.
+        from sqlalchemy import or_
+        query = query.filter(
+            or_(
+                InspectorPromptField.archived.is_(None),
+                InspectorPromptField.archived == False,  # noqa: E712
+            )
+        )
+
     fields = query.order_by(InspectorPromptField.priority.desc(), InspectorPromptField.created_at).all()
     return {
         "success": True,
         "fields": [f.to_dict() for f in fields],
         "total": len(fields)
     }
+
+
+@router.post("/inspector/prompt-fields/archive-all-instructions/{project_id}")
+async def archive_all_instructions(project_id: str, db: Session = Depends(get_db)):
+    """🆕 (C7v2 Section 1) Archive کردن همهٔ فیلدهای instruction پروژه.
+
+    این endpoint idempotent است — اگر دوباره صدا زده شود، فیلدهایی که
+    قبلاً archived شده‌اند را دست نمی‌زند. خروجی شامل تعداد فیلدهای
+    تبدیل‌شده در این فراخوانی است.
+    """
+    from ...models.inspector_prompt_field import InspectorPromptField
+    from sqlalchemy import or_
+
+    affected = (
+        db.query(InspectorPromptField)
+        .filter(
+            InspectorPromptField.project_id == project_id,
+            InspectorPromptField.category == "instruction",
+            or_(
+                InspectorPromptField.archived.is_(None),
+                InspectorPromptField.archived == False,  # noqa: E712
+            ),
+        )
+        .all()
+    )
+    count = len(affected)
+    for f in affected:
+        f.archived = True
+    if count > 0:
+        db.commit()
+    logger.info(
+        f"archive_all_instructions(project={project_id}): "
+        f"{count} instruction field(s) archived"
+    )
+    return {"success": True, "archived_count": count, "project_id": project_id}
+
+
+@router.post("/inspector/prompt-fields/archive-all-instructions-everywhere")
+async def archive_all_instructions_everywhere(db: Session = Depends(get_db)):
+    """🆕 (C7v2 Section 1) Bulk archive برای تمام projects.
+
+    یک‌بار پس از deploy این تغییرات اجرا می‌شود (همچنین در on-startup hook
+    خودکار صدا زده می‌شود). idempotent است.
+    """
+    from ...models.inspector_prompt_field import InspectorPromptField
+    from sqlalchemy import or_
+
+    affected = (
+        db.query(InspectorPromptField)
+        .filter(
+            InspectorPromptField.category == "instruction",
+            or_(
+                InspectorPromptField.archived.is_(None),
+                InspectorPromptField.archived == False,  # noqa: E712
+            ),
+        )
+        .all()
+    )
+    count = len(affected)
+    for f in affected:
+        f.archived = True
+    if count > 0:
+        db.commit()
+    logger.info(
+        f"archive_all_instructions_everywhere: {count} instruction field(s) archived across all projects"
+    )
+    return {"success": True, "archived_count": count}
 
 
 @router.post("/inspector/prompt-fields")
