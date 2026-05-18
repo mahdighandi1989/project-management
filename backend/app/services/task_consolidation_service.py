@@ -860,6 +860,18 @@ async def _build_super_task(
 
         service._save_tasks()
 
+    # 🆕 (C5 — بند ۱۱) — title re-assess برای super-task بعد از build
+    # AI cluster ممکن است suggested_super_title generic داده باشد. این پاس
+    # با AI سبک عنوان را بازنگری می‌کند (طبق همان منطق post-verify).
+    try:
+        if hasattr(service, "_ai_reassess_title"):
+            await service._ai_reassess_title(
+                super_task, triggered_by="consolidation",
+                model_id=verify_model_id,
+            )
+    except Exception as e:
+        logger.debug(f"consolidation: super-task title reassess failed: {e}")
+
     return super_task
 
 

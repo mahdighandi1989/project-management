@@ -3654,6 +3654,16 @@ async def verify_task(
     except Exception as _e:
         logger.warning(f"apply_followup_after_verify failed: {_e}")
 
+    # 🆕 (C5 — بند ۱۱) — Title re-evaluation بعد از هر verify
+    # هر بار که verify اجرا شود، عنوان بازنگری می‌شود (مگر manual_title_override).
+    # AI call سبک، ~۴s، با مدل extraction. اگر fail شد، صدمه‌ای به verify نمی‌زند.
+    try:
+        await service._ai_reassess_title(task, triggered_by="verify_reassess")
+        # task ممکن است به‌روز شده باشد — دوباره بخوان
+        task = next((t for t in service.tasks if t.id == task.id), task)
+    except Exception as _e:
+        logger.debug(f"title reassess (post-verify) failed for {task.id}: {_e}")
+
     # event hook
     try:
         await service._emit(
