@@ -2367,10 +2367,14 @@ async def verify_task(
                     _token = get_github_token()
                     if _token:
                         # 1) acceptance_criteria کلی
+                        # 🆕 (Bug C6 v6) cap از 10 به 200 (هماهنگ با
+                        # _MAX_TOTAL_ACS) — task های با AC های زیاد
+                        # نباید AC های بعد از 10ام را از code-aware
+                        # محروم کنند.
                         if acceptance_criteria:
                             _code_analysis = await analyze_acs_with_commit_diffs(
                                 task=task,
-                                acs=list(acceptance_criteria)[:10],
+                                acs=list(acceptance_criteria)[:200],
                                 repo_full_name=watched.repo_full_name,
                                 token=_token,
                                 verify_model_id=model_id,
@@ -2402,9 +2406,11 @@ async def verify_task(
 
                         # 2) task_steps — حیاتی برای checklist
                         # هر task_step را به‌عنوان یک AC در نظر می‌گیریم
-                        # 🆕 (bug 31) cap از 10 به 40 → step های 11+ هم
-                        # code-aware می‌گیرند. code_aware_verifier حالا
-                        # داخل خودش batching می‌کند.
+                        # 🆕 (Bug C6 v6) cap از 40 به 200 → task های meta با
+                        # ۵۲+ step (مثل meta-test verify v6) همه step ها
+                        # code-aware می‌گیرند و programmatic-upgrade می‌توانند
+                        # داشته باشند. code_aware_verifier داخل خودش batching
+                        # می‌کند (هر batch ≤10 AC، تعداد batch ها بدون cap).
                         _steps_list = list(task.task_steps or [])
                         if _steps_list:
                             _step_acs = [
@@ -2415,7 +2421,7 @@ async def verify_task(
                                     ).strip(),
                                     "_step_id": s.get("id", i + 1),
                                 }
-                                for i, s in enumerate(_steps_list[:40])
+                                for i, s in enumerate(_steps_list[:200])
                                 if isinstance(s, dict)
                             ]
                             if _step_acs:

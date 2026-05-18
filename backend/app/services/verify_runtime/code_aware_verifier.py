@@ -32,9 +32,12 @@ logger = logging.getLogger(__name__)
 
 # محدودیت‌ها
 _MAX_ACS_PER_BATCH = 10      # سقف هر batch به AI (تا context AI نشکند)
-_MAX_TOTAL_ACS = 40          # 🆕 (bug 31) — قبلاً همان 10 بود و step های 11+
-                              # هرگز code-aware نمی‌گرفتند. حالا تا 40 پشتیبانی
-                              # می‌شود با اجرای چند batch موازی.
+_MAX_TOTAL_ACS = 200         # 🆕 (Bug C6 v6) — قبلاً 40 بود؛ task های meta با
+                              # ۵۲+ AC (مثل meta-test verify v6) باعث می‌شد
+                              # step های 41+ از code-aware محروم بمانند و
+                              # programmatic-upgrade نگیرند → در checklist
+                              # not_done. cap به ۲۰۰ هماهنگ با cap step
+                              # generator (200) بالا برده شد.
 _MAX_COMMITS_TO_FETCH = 60  # 🆕 از 20 به 60 — feature های قدیمی‌تر هم در بازه می‌آیند
 _MAX_FILES_PER_COMMIT = 8
 _MAX_PATCH_CHARS = 1200  # هر patch trim شود تا context AI نشکند
@@ -52,7 +55,7 @@ async def analyze_acs_with_commit_diffs(
     """تحلیل per-AC با commit diffs (batch AI call).
 
     🆕 (bug 31) — حالا چندین batch اجرا می‌کند تا همه‌ی AC ها تحلیل
-    شوند (تا سقف _MAX_TOTAL_ACS=40)، نه فقط ۱۰ تای اول. batch ها به
+    شوند (تا سقف _MAX_TOTAL_ACS=200)، نه فقط ۱۰ تای اول. batch ها به
     صورت موازی اجرا می‌شوند.
 
     شکست‌خوردگی مجاز:
