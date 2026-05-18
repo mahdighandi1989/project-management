@@ -485,3 +485,347 @@ def _build_unclear_result(
         "key_changes": [],
         "reason": reason or "no analysis",
     }
+
+
+# ===========================================================================
+# 🔬 Bug C6 — Verify v6, گپ ۳ — AC matching: file content (نه basename)
+# ===========================================================================
+# ۴ مرحلهٔ A→B→C→D با نام تابع‌های صریح برای traceability.
+# orchestrator: analyze_acs_with_content_grep(acs, context) — early-exit اگر
+# هر phase done قطعی داد.
+
+
+async def _phase_a_basename_match(ac, target_files, context):
+    """Phase A — basename match.
+
+    ضعیف‌ترین signal: آیا identifier های AC در basename فایل‌های هدف
+    هستند؟ سریع و بدون API call. اگر hit زیاد بود، done قطعی.
+    """
+    from .code_content_searcher import extract_identifiers
+    from .iterative_orchestrator import ProbeResult
+    import time as _t
+    start = _t.monotonic()
+
+    ac_text = str(ac.get("text", "") if isinstance(ac, dict) else ac)
+    identifiers = extract_identifiers(ac_text)
+    if not identifiers or not target_files:
+        return ProbeResult(
+            probe_name="code_aware_basename",
+            verdict="unclear",
+            confidence=0.0,
+            evidence=["no identifiers or no target_files"],
+            elapsed_ms=int((_t.monotonic() - start) * 1000),
+        )
+
+    hits = 0
+    matched_paths = []
+    for path in target_files[:30]:
+        base = path.rsplit("/", 1)[-1].rsplit(".", 1)[0].lower()
+        for ident in identifiers:
+            if ident.lower() in base:
+                hits += 1
+                matched_paths.append(path)
+                break
+
+    if hits >= 2:
+        verdict, confidence = "done", 0.85
+    elif hits == 1:
+        verdict, confidence = "partial", 0.55
+    else:
+        verdict, confidence = "not_done", 0.5
+
+    if context is not None:
+        try:
+            context.append_trace({
+                "phase": "_phase_a_basename_match",
+                "ac_text": ac_text[:120],
+                "hits": hits,
+                "verdict": verdict,
+            })
+        except Exception:
+            pass
+
+    return ProbeResult(
+        probe_name="code_aware_basename",
+        verdict=verdict,
+        confidence=confidence,
+        evidence=[f"basename hits: {hits}", f"matched: {matched_paths[:5]}"],
+        elapsed_ms=int((_t.monotonic() - start) * 1000),
+    )
+
+
+async def _phase_b_content_grep(ac, target_files, context):
+    """Phase B — content grep روی target_files.
+
+    استفاده از smart_grep_for_ac برای جستجوی identifier ها در محتوای
+    فایل (نه فقط basename). dependent به GitHub Contents API.
+    """
+    from .code_content_searcher import smart_grep_for_ac
+    from .iterative_orchestrator import ProbeResult
+    import time as _t
+    start = _t.monotonic()
+
+    ac_text = str(ac.get("text", "") if isinstance(ac, dict) else ac)
+    if not ac_text:
+        return ProbeResult("content_grep_weak", "unclear", 0.0, ["empty ac_text"])
+
+    task = context.task if context else None
+    watched = context.watched if context else None
+    repo_full_name = ""
+    if watched is not None:
+        repo_full_name = getattr(watched, "repo_full_name", "") or ""
+    if not repo_full_name and task is not None:
+        repo_full_name = getattr(task, "project_full_name", "") or ""
+    if not repo_full_name or not target_files:
+        return ProbeResult("content_grep_weak", "unclear", 0.0, ["no repo or target_files"])
+
+    branch = (getattr(watched, "default_branch", None) or "main") if watched else "main"
+
+    try:
+        results = await smart_grep_for_ac(
+            ac_text, target_files, repo_full_name, branch, context=context,
+        )
+    except Exception as e:
+        return ProbeResult(
+            "content_grep_weak", "unclear", 0.0,
+            evidence=[f"grep error: {e}"], error=str(e),
+            elapsed_ms=int((_t.monotonic() - start) * 1000),
+        )
+
+    matched_idents = len(results)
+    files_with_match = set()
+    for matches in results.values():
+        for m in matches:
+            files_with_match.add(m.get("path", ""))
+
+    if matched_idents >= 2 and len(files_with_match) >= 1:
+        probe_name = "content_grep_strong"
+        verdict, confidence = "done", 0.9
+    elif matched_idents >= 1:
+        probe_name = "content_grep_weak"
+        verdict, confidence = "partial", 0.6
+    else:
+        probe_name = "content_grep_weak"
+        verdict, confidence = "not_done", 0.55
+
+    if context is not None:
+        try:
+            context.append_trace({
+                "phase": "_phase_b_content_grep",
+                "ac_text": ac_text[:120],
+                "identifiers_matched": matched_idents,
+                "files_with_match": list(files_with_match)[:5],
+                "verdict": verdict,
+            })
+        except Exception:
+            pass
+
+    return ProbeResult(
+        probe_name=probe_name,
+        verdict=verdict,
+        confidence=confidence,
+        evidence=[
+            f"identifiers matched: {matched_idents}",
+            f"files: {sorted(files_with_match)[:5]}",
+        ],
+        elapsed_ms=int((_t.monotonic() - start) * 1000),
+    )
+
+
+async def _phase_c_extended_repo_grep(ac, context):
+    """Phase C — extended repo grep.
+
+    اگر phase B done قطعی نداد، scope را به repo_tree گسترش می‌دهیم با
+    فیلتر extension مرتبط (py/tsx/ts/jsx/js) و path overlap با AC text.
+    cap 50 فایل اضافی.
+    """
+    from .code_content_searcher import grep_token_in_files, extract_identifiers
+    from .iterative_orchestrator import ProbeResult
+    import time as _t
+    import re as _re
+    start = _t.monotonic()
+
+    ac_text = str(ac.get("text", "") if isinstance(ac, dict) else ac)
+    if not ac_text or not context or not context.repo_tree:
+        return ProbeResult(
+            "content_grep_weak", "unclear", 0.0,
+            evidence=["no repo_tree available"],
+            elapsed_ms=int((_t.monotonic() - start) * 1000),
+        )
+
+    cfg = context.config
+    task = context.task
+    watched = context.watched
+    repo_full_name = ""
+    if watched is not None:
+        repo_full_name = getattr(watched, "repo_full_name", "") or ""
+    if not repo_full_name:
+        repo_full_name = getattr(task, "project_full_name", "") or ""
+    branch = (getattr(watched, "default_branch", None) or "main") if watched else "main"
+    target_set = set(getattr(task, "target_files", None) or [])
+
+    relevant_exts = (".py", ".tsx", ".ts", ".jsx", ".js")
+    ac_lower = ac_text.lower()
+    path_hints = set(m.group(1).lower() for m in _re.finditer(r"\b([a-z_][\w/]*)/", ac_lower))
+
+    cap_files = cfg.iter2_max_extra_files if cfg else 50
+    extended_files = []
+    for path in context.repo_tree:
+        if path in target_set:
+            continue
+        if not path.endswith(relevant_exts):
+            continue
+        plower = path.lower()
+        if any(h and h in plower for h in path_hints):
+            extended_files.append(path)
+        elif len(extended_files) < cap_files // 2:
+            extended_files.append(path)
+        if len(extended_files) >= cap_files:
+            break
+
+    if not extended_files:
+        return ProbeResult(
+            "content_grep_weak", "unclear", 0.0,
+            evidence=["no extended files matched"],
+            elapsed_ms=int((_t.monotonic() - start) * 1000),
+        )
+
+    top_k = cfg.iter2_max_identifiers if cfg else 25
+    identifiers = extract_identifiers(ac_text)[:top_k]
+    if not identifiers:
+        return ProbeResult(
+            "content_grep_weak", "unclear", 0.0,
+            evidence=["no identifiers extracted"],
+            elapsed_ms=int((_t.monotonic() - start) * 1000),
+        )
+
+    try:
+        from ..github_storage import get_github_token
+        gh_token = get_github_token() or ""
+    except Exception:
+        gh_token = ""
+
+    matched_idents = 0
+    matched_files = set()
+    for ident in identifiers:
+        matches = await grep_token_in_files(
+            ident, extended_files, repo_full_name, branch,
+            github_token=gh_token,
+            cache=context.file_grep_cache,
+            file_content_cache=context.file_content_cache,
+        )
+        context.grep_calls_count += 1
+        if matches:
+            matched_idents += 1
+            for m in matches:
+                matched_files.add(m.get("path", ""))
+
+    if matched_idents >= 2:
+        probe_name = "content_grep_strong"
+        verdict, confidence = "done", 0.75
+    elif matched_idents == 1:
+        probe_name = "content_grep_weak"
+        verdict, confidence = "partial", 0.55
+    else:
+        probe_name = "content_grep_weak"
+        verdict, confidence = "not_done", 0.5
+
+    if context is not None:
+        try:
+            context.append_trace({
+                "phase": "_phase_c_extended_repo_grep",
+                "extended_files": len(extended_files),
+                "identifiers_matched": matched_idents,
+                "verdict": verdict,
+            })
+        except Exception:
+            pass
+
+    return ProbeResult(
+        probe_name=probe_name,
+        verdict=verdict,
+        confidence=confidence,
+        evidence=[
+            f"extended scope: {len(extended_files)} files",
+            f"identifiers matched: {matched_idents}/{len(identifiers)}",
+            f"files: {sorted(matched_files)[:5]}",
+        ],
+        elapsed_ms=int((_t.monotonic() - start) * 1000),
+    )
+
+
+async def _phase_d_ai_judgment(ac, context):
+    """Phase D — AI judgment نهایی.
+
+    آخرین مرحله: اگر هیچ‌کدام از phase های A/B/C done قطعی ندادند، یک
+    AI call با کل context (AC + repo_tree + file_content_cache snippets
+    + task.prompt) برای قضاوت نهایی. این مرحله متفاوت از
+    _strong_model_judgment است که در iteration 3 از iterative_orchestrator
+    صدا زده می‌شود — این AI judgment ساده‌تر و سریع‌تر است.
+    """
+    from .iterative_orchestrator import ProbeResult, _strong_model_judgment
+    import time as _t
+    start = _t.monotonic()
+
+    # برای ساده‌سازی، از همان _strong_model_judgment استفاده می‌کنیم — این
+    # AC را به دقیق‌ترین مدل ممکن می‌سپارد. در صورت نبود strong model،
+    # fallback به default extraction model.
+    if context is None:
+        return ProbeResult("ai_verifier", "unclear", 0.0, evidence=["no context"])
+    try:
+        result = await _strong_model_judgment(ac, context, [])
+        # تغییر probe_name برای traceability
+        result.probe_name = "ai_verifier"
+        if context is not None:
+            try:
+                context.append_trace({
+                    "phase": "_phase_d_ai_judgment",
+                    "verdict": result.verdict,
+                    "confidence": result.confidence,
+                })
+            except Exception:
+                pass
+        return result
+    except Exception as e:
+        return ProbeResult(
+            "ai_verifier", "unclear", 0.0,
+            evidence=[f"AI error: {e}"], error=str(e),
+            elapsed_ms=int((_t.monotonic() - start) * 1000),
+        )
+
+
+async def analyze_acs_with_content_grep(acs, context):
+    """Orchestrator گپ ۳ — چهار phase A→B→C→D با early-exit.
+
+    برای هر AC: phase A → اگر done قطعی (confidence >= 0.85) finalize.
+    در غیر این صورت → phase B → C → D. هر phase که done قطعی داد،
+    early-exit.
+
+    خروجی: List[ProbeResult] به طول acs.
+    """
+    from .iterative_orchestrator import ProbeResult
+    results = []
+    task = context.task if context else None
+    target_files = list(getattr(task, "target_files", None) or []) if task else []
+
+    for ac in acs or []:
+        # Phase A
+        r_a = await _phase_a_basename_match(ac, target_files, context)
+        if r_a.verdict == "done" and r_a.confidence >= 0.85:
+            results.append(r_a)
+            continue
+        # Phase B
+        r_b = await _phase_b_content_grep(ac, target_files, context)
+        if r_b.verdict == "done" and r_b.confidence >= 0.85:
+            results.append(r_b)
+            continue
+        # Phase C
+        r_c = await _phase_c_extended_repo_grep(ac, context)
+        if r_c.verdict == "done" and r_c.confidence >= 0.7:
+            results.append(r_c)
+            continue
+        # Phase D
+        r_d = await _phase_d_ai_judgment(ac, context)
+        results.append(r_d)
+
+    return results
