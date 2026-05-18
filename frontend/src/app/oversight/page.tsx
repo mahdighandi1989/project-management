@@ -8425,6 +8425,38 @@ function TasksPanel({
             >
               🚀 اجرا با AI
             </button>
+            {/* 🔗 (C7 Bridge Phase 3) — بارگذاری تسک در بازرس ویژه */}
+            {t.project_full_name && (
+              <button
+                onClick={async () => {
+                  try {
+                    const res = await fetch(
+                      `${API_BASE}/api/oversight/tasks/${t.id}/resolve-project`,
+                    );
+                    if (!res.ok) {
+                      alert('یافتن پروژهٔ inspector برای این تسک ناموفق بود');
+                      return;
+                    }
+                    const data = await res.json();
+                    const pid = data?.project_id;
+                    if (!pid) {
+                      alert('این تسک به یک inspector project متصل نشده — ابتدا پروژه را در صفحهٔ Projects بسازید');
+                      return;
+                    }
+                    window.open(
+                      `/projects/${pid}?tab=inspector&load_task=${t.id}`,
+                      '_blank',
+                    );
+                  } catch (e) {
+                    alert('خطا در باز کردن بازرس ویژه');
+                  }
+                }}
+                title="بارگذاری این تسک در صفحهٔ بازرس ویژه با کانتکست کامل (AC + remaining + history)"
+                className="px-3 py-1 bg-indigo-600 text-white rounded text-xs hover:bg-indigo-700"
+              >
+                ↗️ بازرس ویژه
+              </button>
+            )}
             {t.status === 'suggested' && (
               <button
                 onClick={() => onUpdate(t.id, { status: 'pending' })}
