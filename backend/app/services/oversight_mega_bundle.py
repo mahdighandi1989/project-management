@@ -207,15 +207,17 @@ def build_mega_bundle_md(task: Any, report: Any) -> bytes:
         next_actions = list(getattr(report, "next_actions", None) or [])
         if done:
             report_lines.append(f"\n**✅ انجام‌شده ({len(done)}):**")
-            for d in done[:30]:
+            # 🆕 (bug 30 v3) — cap به ۲۰۰ بالا برد تا برای تسک‌های بزرگ هم
+            # همهٔ موارد در گزارش بیایند
+            for d in done[:200]:
                 report_lines.append(f"- {_safe_str(d, 300)}")
         if remaining:
             report_lines.append(f"\n**⏳ باقی‌مانده ({len(remaining)}):**")
-            for d in remaining[:30]:
+            for d in remaining[:200]:
                 report_lines.append(f"- {_safe_str(d, 300)}")
         if next_actions:
             report_lines.append(f"\n**🪜 اقدامات بعدی ({len(next_actions)}):**")
-            for d in next_actions[:30]:
+            for d in next_actions[:200]:
                 report_lines.append(f"- {_safe_str(d, 300)}")
         # summary اگر در evidence هست
         ev = getattr(report, "evidence", None) or {}
