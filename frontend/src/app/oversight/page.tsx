@@ -7770,6 +7770,11 @@ function TasksPanel({
   executeDisabledReason: string;
   fmtDate: (d?: string | null) => string;
 }) {
+  // 🆕 (C5) — title editing state (inline)
+  const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
+  const [editingTitleValue, setEditingTitleValue] = useState<string>('');
+  // 🆕 (C5) — title history viewer
+  const [historyOpenId, setHistoryOpenId] = useState<string | null>(null);
   // 🆕 (C5) — همهٔ tagهای منحصربه‌فرد برای dropdown فیلتر
   const allTags = useMemo(() => {
     const s = new Set<string>();
@@ -7792,9 +7797,12 @@ function TasksPanel({
     return (
       <div
         key={t.id}
-        className="p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg border border-transparent hover:border-blue-300 dark:hover:border-blue-700"
+        className={`p-3 sm:p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg border ${
+          t.pinned ? 'border-yellow-400 dark:border-yellow-600' : 'border-transparent hover:border-blue-300 dark:hover:border-blue-700'
+        } overflow-hidden`}
+        style={{ minWidth: '280px', wordWrap: 'break-word', overflowWrap: 'break-word' }}
       >
-        <div className="flex items-start justify-between gap-2 mb-2 flex-wrap">
+        <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-2 mb-2">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap mb-1">
               {t.status === 'suggested' && (
@@ -7810,13 +7818,87 @@ function TasksPanel({
                   className="w-4 h-4"
                 />
               )}
-              <span className="text-lg">{TYPE_ICONS[t.type] || '📌'}</span>
+              {/* 🆕 (C5) — pin button */}
               <button
-                onClick={() => onView(t)}
-                className="font-medium dark:text-white text-right hover:underline"
+                type="button"
+                onClick={() => onUpdate(t.id, { pinned: !t.pinned } as any)}
+                title={t.pinned ? 'برداشتن پین' : 'پین کردن (بالای لیست)'}
+                className={`text-base ${t.pinned ? 'text-yellow-500' : 'text-gray-300 hover:text-yellow-400'}`}
               >
-                {t.title}
+                {t.pinned ? '📌' : '📍'}
               </button>
+              <span className="text-lg">{TYPE_ICONS[t.type] || '📌'}</span>
+              {/* 🆕 (C5) — title: inline edit if editingTitleId === t.id */}
+              {editingTitleId === t.id ? (
+                <div className="flex items-center gap-1 flex-1 min-w-[200px]">
+                  <input
+                    autoFocus
+                    type="text"
+                    value={editingTitleValue}
+                    onChange={(e) => setEditingTitleValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const newT = editingTitleValue.trim();
+                        if (newT && newT !== t.title) onUpdate(t.id, { title: newT });
+                        setEditingTitleId(null);
+                      } else if (e.key === 'Escape') {
+                        setEditingTitleId(null);
+                      }
+                    }}
+                    className="flex-1 px-2 py-0.5 border rounded text-sm dark:bg-gray-800 dark:border-gray-600 dark:text-white"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const newT = editingTitleValue.trim();
+                      if (newT && newT !== t.title) onUpdate(t.id, { title: newT });
+                      setEditingTitleId(null);
+                    }}
+                    className="px-2 py-0.5 bg-green-500 text-white rounded text-xs"
+                  >✓</button>
+                  <button
+                    type="button"
+                    onClick={() => setEditingTitleId(null)}
+                    className="px-2 py-0.5 bg-gray-300 dark:bg-gray-600 text-gray-700 dark:text-white rounded text-xs"
+                  >✕</button>
+                </div>
+              ) : (
+                <>
+                  <button
+                    onClick={() => onView(t)}
+                    className="font-medium dark:text-white text-right hover:underline break-words"
+                    style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}
+                    title={t.title}
+                  >
+                    <HighlightMatch text={t.title} query={viewPrefs[activeTabKey].search_query} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingTitleId(t.id);
+                      setEditingTitleValue(t.title);
+                    }}
+                    title="ویرایش دستی عنوان (پس از این، AI خودکار عنوان را عوض نمی‌کند)"
+                    className="text-xs opacity-50 hover:opacity-100"
+                  >✏️</button>
+                  {t.manual_title_override && (
+                    <button
+                      type="button"
+                      onClick={() => onUpdate(t.id, { manual_title_override: false } as any)}
+                      title="بازکردن قفل عنوان — اجازه بده AI خودکار بازنگری کند"
+                      className="text-xs opacity-60 hover:opacity-100"
+                    >🔓</button>
+                  )}
+                  {(t.title_history?.length || 0) > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setHistoryOpenId(historyOpenId === t.id ? null : t.id)}
+                      title={`تاریخچهٔ عنوان (${t.title_history!.length})`}
+                      className="text-xs opacity-60 hover:opacity-100"
+                    >📜</button>
+                  )}
+                </>
+              )}
               <span className={`text-xs px-2 py-0.5 rounded ${statusInfo?.color || ''}`}>
                 {statusInfo?.label || t.status}
               </span>
@@ -7828,7 +7910,33 @@ function TasksPanel({
                   🤖 AI
                 </span>
               )}
+              {t.source === 'auto_consolidation' && (
+                <span
+                  className="text-xs px-2 py-0.5 bg-fuchsia-100 dark:bg-fuchsia-900/40 text-fuchsia-700 dark:text-fuchsia-300 rounded"
+                  title={`super-task — تجمیع ${t.merged_from?.length || 0} تسک`}
+                >
+                  🧬 consolidated
+                </span>
+              )}
             </div>
+            {/* 🆕 (C5) — title history viewer (collapsible) */}
+            {historyOpenId === t.id && (t.title_history?.length || 0) > 0 && (
+              <div className="ml-6 mt-1 mb-2 p-2 bg-gray-100 dark:bg-gray-800 rounded text-[11px] space-y-1 max-h-48 overflow-y-auto">
+                <div className="font-semibold text-gray-700 dark:text-gray-300">
+                  📜 تاریخچهٔ عنوان ({t.title_history!.length}):
+                </div>
+                {t.title_history!.slice().reverse().map((h, i) => (
+                  <div key={i} className="border-r-2 border-gray-300 dark:border-gray-600 pr-2">
+                    <div className="text-gray-500 dark:text-gray-400">
+                      {h.ts?.slice(0, 19)} <span className="bg-gray-200 dark:bg-gray-700 px-1 rounded">{h.source}</span>
+                    </div>
+                    <div className="line-through opacity-60">{h.old_title}</div>
+                    <div className="text-green-700 dark:text-green-400">→ {h.new_title}</div>
+                    {h.reason && <div className="text-gray-500 italic">{h.reason}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
             {t.project_full_name && (
               <div className="text-xs text-gray-500 dark:text-gray-400" dir="ltr">
                 {t.project_full_name}
@@ -7960,7 +8068,7 @@ function TasksPanel({
                       style={{ width: `${Math.max(2, Math.min(100, pct))}%` }}
                     />
                   </div>
-                  <ul className="mt-2 space-y-1">
+                  <ul className="mt-2 space-y-1" style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
                     {steps.map((s) => {
                       const st = s.status || 'pending';
                       const icon = st === 'done' ? '✅' : st === 'partial' ? '🟡' : st === 'error' ? '⚠️' : '⬜';
@@ -7968,23 +8076,23 @@ function TasksPanel({
                         ? 'line-through text-gray-500 dark:text-gray-400'
                         : 'text-indigo-900 dark:text-indigo-100';
                       return (
-                        <li key={s.id} className="flex gap-1.5 items-start">
-                          <span className="mt-0.5">{icon}</span>
-                          <div className="flex-1 min-w-0">
-                            <div className={`text-[11px] ${titleCls}`}>
+                        <li key={s.id} className="flex gap-1.5 items-start max-w-full">
+                          <span className="mt-0.5 shrink-0">{icon}</span>
+                          <div className="flex-1 min-w-0 max-w-full" style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
+                            <div className={`text-[11px] ${titleCls} break-words`}>
                               <b>مرحله {s.id}: {s.title}</b>
                               {typeof s.completion_pct === 'number' && st !== 'done' && st !== 'pending' && (
                                 <span className="ml-1.5 text-[10px] text-gray-500 dark:text-gray-400">({s.completion_pct}%)</span>
                               )}
                             </div>
                             {st !== 'done' && s.remaining && (
-                              <div className="text-[10px] text-amber-700 dark:text-amber-300 mt-0.5">
+                              <div className="text-[10px] text-amber-700 dark:text-amber-300 mt-0.5 break-words">
                                 ⏳ باقی‌مانده: {s.remaining}
                               </div>
                             )}
                             {s.evidence && st === 'done' && (
-                              <div className="text-[10px] text-green-700 dark:text-green-300 mt-0.5 truncate">
-                                📎 {s.evidence}
+                              <div className="text-[10px] text-green-700 dark:text-green-300 mt-0.5 break-words" title={s.evidence}>
+                                📎 {s.evidence.length > 100 ? s.evidence.slice(0, 100) + '…' : s.evidence}
                               </div>
                             )}
                           </div>
@@ -8008,35 +8116,12 @@ function TasksPanel({
               {t.deadline && <span>📅 deadline: {t.deadline}</span>}
             </div>
           </div>
-          <div className="flex gap-1 flex-wrap">
-            <button
-              onClick={() => onCopyPrompt(t.id)}
-              title="کپی پرامپت کامل برای استفاده در ابزار خارجی (Cursor، ChatGPT، ...)"
-              className="px-3 py-1 bg-purple-500 text-white rounded text-xs hover:bg-purple-600"
-            >
-              📋 کپی پرامپت
-            </button>
-            <button
-              onClick={() => onOpenRegen(t)}
-              title="بازتولید پرامپت با کیفیت ارتقایافته (raw_idea را ویرایش کنید — تسک جدید ساخته نمی‌شود)"
-              className="px-3 py-1 bg-fuchsia-500 text-white rounded text-xs hover:bg-fuchsia-600"
-            >
-              🔄 بازتولید
-            </button>
-            {(t.prompt_history && t.prompt_history.length > 0) && (
-              <button
-                onClick={() => onOpenHistory(t)}
-                title={`${t.prompt_history!.length} نسخهٔ قبلی — شامل پرامپت‌های ادامه (followup) و بازتولید‌ها — قابل rollback`}
-                className={`px-3 py-1 rounded text-xs ${
-                  (t.followup_round || 0) > 0
-                    ? 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300 hover:bg-cyan-200'
-                    : 'bg-gray-200 dark:bg-gray-700 dark:text-white text-gray-700 hover:bg-gray-300'
-                }`}
-              >
-                📜 تاریخچه ({t.prompt_history!.length})
-                {(t.followup_round || 0) > 0 && <span className="mr-1">• 🔁{t.followup_round}</span>}
-              </button>
-            )}
+          {/* 🆕 (C5 — بند ۱۳) — دکمه‌ها در ۲ ردیف زیر هم (در صفحات تنگ) با
+              flex-wrap. در صفحات پهن (lg+)، در یک ردیف کنار title.
+              این ساختار جلوی bleed و تنگی عنوان/چک‌لیست را می‌گیرد. */}
+          <div className="flex flex-col gap-1 lg:items-end shrink-0">
+            {/* ردیف ۱: action های اصلی (اجرا/verify/apply) */}
+            <div className="flex gap-1 flex-wrap">
             {t.execution_mode !== 'manual' ? (
               <button
                 onClick={() => onRun(t.id)}
@@ -8094,6 +8179,37 @@ function TasksPanel({
                 ✓ تأیید
               </button>
             )}
+            </div>
+            {/* 🆕 (C5 — بند ۱۳) — ردیف ۲: action های ثانویه */}
+            <div className="flex gap-1 flex-wrap">
+            <button
+              onClick={() => onCopyPrompt(t.id)}
+              title="کپی پرامپت کامل برای استفاده در ابزار خارجی (Cursor، ChatGPT، ...)"
+              className="px-3 py-1 bg-purple-500 text-white rounded text-xs hover:bg-purple-600"
+            >
+              📋 کپی پرامپت
+            </button>
+            <button
+              onClick={() => onOpenRegen(t)}
+              title="بازتولید پرامپت با کیفیت ارتقایافته (raw_idea را ویرایش کنید — تسک جدید ساخته نمی‌شود)"
+              className="px-3 py-1 bg-fuchsia-500 text-white rounded text-xs hover:bg-fuchsia-600"
+            >
+              🔄 بازتولید
+            </button>
+            {(t.prompt_history && t.prompt_history.length > 0) && (
+              <button
+                onClick={() => onOpenHistory(t)}
+                title={`${t.prompt_history!.length} نسخهٔ قبلی`}
+                className={`px-3 py-1 rounded text-xs ${
+                  (t.followup_round || 0) > 0
+                    ? 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300 hover:bg-cyan-200'
+                    : 'bg-gray-200 dark:bg-gray-700 dark:text-white text-gray-700 hover:bg-gray-300'
+                }`}
+              >
+                📜 تاریخچه ({t.prompt_history!.length})
+                {(t.followup_round || 0) > 0 && <span className="mr-1">• 🔁{t.followup_round}</span>}
+              </button>
+            )}
             <button
               onClick={() => onShowHistory(t.id)}
               title="تاریخچهٔ verification"
@@ -8124,6 +8240,7 @@ function TasksPanel({
             >
               🗑
             </button>
+            </div>
           </div>
         </div>
         {/* نشانگر execution mode + verification status + streak */}
