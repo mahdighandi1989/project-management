@@ -89,9 +89,9 @@ def _write_index_state(state: Dict[str, Any]) -> None:
 PERSISTENT_REPLY_KEYBOARD: Dict[str, Any] = {
     "keyboard": [
         [{"text": "📋 ایندکس"}, {"text": "🆕 تسک جدید"}],
-        [{"text": "📚 شناسنامه"}, {"text": "🚀 پروژه جدید"}],
-        [{"text": "💰 مصرف AI"}, {"text": "📊 وضعیت"}],
-        [{"text": "📋 منو"}],
+        [{"text": "🔔 یادآوری جدید"}, {"text": "📚 شناسنامه"}],
+        [{"text": "🚀 پروژه جدید"}, {"text": "💰 مصرف AI"}],
+        [{"text": "📊 وضعیت"}, {"text": "📋 منو"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -103,6 +103,7 @@ PERSISTENT_REPLY_KEYBOARD: Dict[str, Any] = {
 TEXT_ALIASES: Dict[str, str] = {
     "📋 ایندکس": "/index",
     "🆕 تسک جدید": "/new_task",
+    "🔔 یادآوری جدید": "/reminder",
     "📚 شناسنامه": "/codex",
     "🚀 پروژه جدید": "/new_project",
     "📊 وضعیت": "/status",
@@ -2009,6 +2010,14 @@ class NotificationService:
         if text in ("/new_task", "/new_idea"):
             return await self._start_new_task_flow(chat_id_str)
 
+        # 🔔 ——— /reminder — شروع flow یادآوری ———
+        # compose را با force_type="reminder" شروع می‌کند. کاربر می‌تواند
+        # متن/صوت/فایل بفرستد و سپس submit کند — AI زمان را از متن
+        # استخراج می‌کند (یا پیش‌فرض ۱ ساعت بعد). نیاز به انتخاب پروژه
+        # ندارد چون reminder ها مستقل از repo اند.
+        if text in ("/reminder", "/remind"):
+            return await self._start_reminder_flow(chat_id_str)
+
         # 🆕 ——— /new_project و /create_project (Creator flow) ———
         if text in ("/new_project", "/create_project"):
             return await self._start_new_project_flow(chat_id_str)
@@ -2072,6 +2081,7 @@ class NotificationService:
                 "• /index — 📋 *لیست دسته‌بندی‌شدهٔ کارها* (pin‌شده، خودکار به‌روز)\n"
                 "• /new\\_project یا /create\\_project — *🚀 ساخت پروژهٔ جدید* (از صفر، با push به GitHub)\n"
                 "• /new\\_task یا /new\\_idea — ثبت تسک جدید با انتخاب پروژه\n"
+                "• /reminder یا /remind — 🔔 ثبت یادآوری (با متن یا صوت/فایل، زمان از متن استخراج می‌شود)\n"
                 "• /codex — 📚 شناسنامهٔ پروژه (مشاهده یا ساخت با AI)\n"
                 "• /usage یا /balance — 💰 مصرف توکن AI و موجودی provider ها\n"
                 "• /menu — منوی دسترسی سریع\n"
@@ -2130,6 +2140,10 @@ class NotificationService:
                         {"text": "🆕 تسک جدید", "callback_data": "menu:new_task"},
                     ],
                     [
+                        # 🔔 (Reminder) دکمهٔ یادآوری جدید
+                        {"text": "🔔 یادآوری جدید", "callback_data": "menu:reminder"},
+                    ],
+                    [
                         # 🆕 (Codex) دکمهٔ شناسنامه
                         {"text": "📚 شناسنامهٔ پروژه", "callback_data": "menu:codex"},
                     ],
@@ -2179,7 +2193,7 @@ class NotificationService:
 
         # ناشناخته
         await tg.send(
-            f"❓ دستور ناشناخته: `{text[:50]}`\nبا /menu یا /new\\_task شروع کنید.",
+            f"❓ دستور ناشناخته: `{text[:50]}`\nبا /menu، /new\\_task یا /reminder شروع کنید.",
             silent=True,
         )
         return {"ok": True, "handled": "unknown"}
@@ -3130,9 +3144,14 @@ class NotificationService:
             # checklist تولید شود. تسک‌های Telegram اغلب فایل‌محور هستند یا
             # idea کوتاهی دارند که heuristic auto آن را single-pass تشخیص
             # می‌دهد و چک‌لیست از دست می‌رود.
+            # 🔔 (Reminder via Telegram) — اگر compose با /reminder شروع شده،
+            # force_type="reminder" پاس می‌شود تا idea_to_prompt به مسیر
+            # اختصاصی reminder برود (نه code-grounded).
+            _force_type = getattr(buf, "force_type", None) or "other"
             preview = await _ov.idea_to_prompt(
                 idea=idea_for_ai,
                 watched_id=buf.watched_id,
+                type_=_force_type,
                 upload_session_ids=session_ids or None,
                 progress_track_id=buf.task_draft_id,
                 multi_pass_mode="always",
@@ -3232,22 +3251,58 @@ class NotificationService:
             similar = []
 
         # 6) create_task
+        # 🐛 (raw_idea fix) — قبلاً وقتی کاربر در تلگرام فقط فایل صوتی یا PDF
+        # می‌فرستاد و متن همراه نمی‌نوشت، raw_idea تسک به
+        # "(از فایل پیوست)" تنزل می‌یافت و transcript صوت / extract فایل از
+        # دست می‌رفت. الان از preview.raw_idea (که شامل متن کاربر +
+        # محتوای کامل استخراج‌شدهٔ فایل‌هاست) استفاده می‌کنیم تا برای
+        # بازتولید و نمایش در UI ایدهٔ واقعی در دسترس باشد.
+        _resolved_raw_idea = (
+            preview.get("raw_idea")
+            or idea
+            or "(از فایل پیوست)"
+        )
+        # 🔔 (Reminder via Telegram) — اگر force_type="reminder"، فیلدهای
+        # خاص reminder را از preview استخراج کن. _idea_to_prompt_reminder
+        # علاوه بر title/checklist، reminder_at و reminder_repeat_rule را
+        # هم از متن کاربر استخراج می‌کند (با AI). اگر AI زمان پیدا نکرد،
+        # reminder_at=None می‌ماند و create_task خودش ValueError می‌دهد
+        # که در except زیر به کاربر گفته می‌شود زمان مشخص کند.
+        _task_payload: Dict[str, Any] = {
+            "watched_id": buf.watched_id,
+            "title": title,
+            "prompt": preview.get("prompt") or "",
+            "raw_idea": _resolved_raw_idea,
+            "type": preview.get("type") or "other",
+            "priority": preview.get("priority") or "medium",
+            "source": "telegram_bot_compose",
+            "target_files": preview.get("target_files") or [],
+            "acceptance_criteria": preview.get("acceptance_criteria") or [],
+            "task_steps": preview.get("task_steps") or [],
+            "overall_completion_pct": preview.get("overall_completion_pct"),
+            "upload_session_ids": session_ids,
+            "force_create": True,  # dedup را خود پایپ‌لاین خاص anjam داده
+        }
+        if (preview.get("type") or "").lower() == "reminder":
+            _rem_at = preview.get("reminder_at")
+            _task_payload["reminder_at"] = _rem_at
+            _task_payload["reminder_repeat_rule"] = preview.get(
+                "reminder_repeat_rule"
+            )
+            if not _rem_at:
+                # زمان مشخص نیست — به‌جای fail کردن create_task، یک پیش‌فرض
+                # ۱ ساعت بعد بگذار و در پیام به کاربر بگو که می‌تواند با
+                # snooze زمان را تغییر دهد. این UX بهتر از خطای سخت است.
+                from datetime import datetime as _dt_rem, timedelta as _td_rem, timezone as _tz_rem
+                _task_payload["reminder_at"] = (
+                    _dt_rem.now(_tz_rem.utc) + _td_rem(hours=1)
+                ).isoformat()
+                logger.info(
+                    "reminder via telegram: AI زمان مشخصی استخراج نکرد — "
+                    "پیش‌فرض ۱ ساعت بعد ست شد."
+                )
         try:
-            result = await _ov.create_task({
-                "watched_id": buf.watched_id,
-                "title": title,
-                "prompt": preview.get("prompt") or "",
-                "raw_idea": idea or "(از فایل پیوست)",
-                "type": preview.get("type") or "other",
-                "priority": preview.get("priority") or "medium",
-                "source": "telegram_bot_compose",
-                "target_files": preview.get("target_files") or [],
-                "acceptance_criteria": preview.get("acceptance_criteria") or [],
-                "task_steps": preview.get("task_steps") or [],
-                "overall_completion_pct": preview.get("overall_completion_pct"),
-                "upload_session_ids": session_ids,
-                "force_create": True,  # dedup را خود پایپ‌لاین خاص anjam داده
-            })
+            result = await _ov.create_task(_task_payload)
         except Exception as e:
             raise RuntimeError(f"create_task failed: {e}")
 
@@ -3310,6 +3365,42 @@ class NotificationService:
             reply_markup=kb,
         )
         return {"ok": True, "handled": "new_task_picker", "count": len(watched_list)}
+
+    async def _start_reminder_flow(self, chat_id_str: str) -> Dict[str, Any]:
+        """🔔 شروع compose با force_type=reminder.
+
+        بر خلاف /new_task که نیاز به انتخاب پروژه دارد، reminder ها مستقل
+        از repo هستند. compose را با watched_id=None شروع می‌کنیم و کاربر
+        می‌تواند مستقیماً متن/صوت/فایل بفرستد. در submit:
+        - idea_to_prompt با type_=reminder → مسیر _idea_to_prompt_reminder
+        - AI، title + checklist + reminder_at + reminder_repeat_rule
+          را از متن استخراج می‌کند
+        - create_task با type=reminder ساخته می‌شود
+        """
+        tg = self._telegram()
+        compose_svc = get_compose_service()
+        # اگر compose قبلی فعال است، اول cancel کن (replace) تا state تمیز شود
+        await compose_svc.start(
+            chat_id_str,
+            mode="task",
+            watched_id=None,
+            replace=True,
+            force_type="reminder",
+        )
+        msg = (
+            "🔔 *یادآوری جدید*\n\n"
+            "متن یادآوری را بفرستید (یا پیام صوتی/فایل). می‌توانید زمان "
+            "را در متن مشخص کنید — مثلاً:\n"
+            "  • «فردا ساعت ۹ صبح یادم بنداز قرص بخورم»\n"
+            "  • «هر روز ساعت ۸ شب: مرور آلمانی»\n"
+            "  • «هر جمعه: تماس با مامان»\n\n"
+            "اگر زمان نگفتید، پیش‌فرض یک ساعت بعد ست می‌شود (با snooze "
+            "قابل تغییر).\n\n"
+            "وقتی تمام شد، روی *✅ ثبت کن* (دکمهٔ پایین کارت compose) "
+            "بزنید. /cancel برای لغو."
+        )
+        await tg.send(msg, silent=True)
+        return {"ok": True, "handled": "reminder_compose_started"}
 
     def _render_watched_picker(
         self, watched_list: List[Any], max_items: int = 12,
@@ -3492,6 +3583,8 @@ class NotificationService:
             return await self._start_new_project_flow(chat_id_str)
         if data == "menu:new_task":
             return await self._start_new_task_flow(chat_id_str)
+        if data == "menu:reminder":
+            return await self._start_reminder_flow(chat_id_str)
         if data == "menu:codex":
             return await self._start_codex_flow(chat_id_str)
         if data == "menu:usage":

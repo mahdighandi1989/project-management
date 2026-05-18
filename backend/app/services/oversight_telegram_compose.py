@@ -106,6 +106,11 @@ class ComposeBuffer:
     # extraction خودکار revert شود. اگر None باشد، مدل از قبل enabled بوده
     # و revert لازم نیست.
     temp_activated_model_id: Optional[str] = None
+    # 🆕 (Reminder via Telegram) — اگر کاربر با /reminder شروع کرده، این فیلد
+    # "reminder" است و در زمان submit، تسک با type=reminder ساخته می‌شود و
+    # AI به‌جای پایپ‌لاین code-grounded، مسیر اختصاصی reminder را می‌رود
+    # (با استخراج datetime از متن). None یعنی compose عادی (type=other).
+    force_type: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -203,10 +208,14 @@ class ComposeService:
         mode: str = "task",
         watched_id: Optional[str] = None,
         replace: bool = False,
+        force_type: Optional[str] = None,
     ) -> ComposeBuffer:
         """شروع یک compose جدید. اگر buffer قبلی موجود است:
           - replace=True → آن را cancel (با cleanup sessions) و جدید بساز
           - replace=False → همان قبلی برگردان
+
+        force_type: اگر "reminder" داده شود، compose با نوع reminder
+        شروع می‌شود و در زمان submit پایپ‌لاین reminder اجرا می‌گردد.
         """
         async with self._lock:
             existing = self._buffers.get(chat_id)
@@ -219,6 +228,7 @@ class ComposeService:
                 chat_id=chat_id,
                 mode=mode,
                 watched_id=watched_id,
+                force_type=force_type,
             )
             self._buffers[chat_id] = buf
             self._save()
