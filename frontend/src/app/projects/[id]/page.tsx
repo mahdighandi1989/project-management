@@ -14953,6 +14953,23 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                   </div>
                                 </div>
                                 <div className="flex items-center gap-1.5">
+                                  {/* 🆕 (C7v2 Section 4) — Badge فیلدهای auto_synced از مرکز نظارت */}
+                                  {(field as any).auto_synced && (
+                                    <span
+                                      title="این فیلد خودکار از مرکز نظارت سینک شده — دستی ساخته نشده"
+                                      className="text-[10px] bg-cyan-100 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-300 px-2 py-0.5 rounded-full"
+                                    >
+                                      🔄 خودکار
+                                    </span>
+                                  )}
+                                  {(field as any).evidence_count > 0 && (field as any).auto_synced && (
+                                    <span
+                                      title="تعداد دفعاتی که این الگو در reports/scans تأیید شده"
+                                      className="text-[10px] bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 px-2 py-0.5 rounded-full"
+                                    >
+                                      ✓{(field as any).evidence_count}
+                                    </span>
+                                  )}
                                   {/* آمار استفاده */}
                                   {field.usage_count > 0 && (
                                     <span className="text-[10px] bg-purple-100 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 px-2 py-0.5 rounded-full">
