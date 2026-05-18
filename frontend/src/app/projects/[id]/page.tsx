@@ -14763,6 +14763,47 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     </div>
                     {/* 🆕 (C7v2 Section 1) — دکمه افزودن فیلد دستی حذف شد.
                         فیلدهای جدید فقط از طریق auto-sync مرکز نظارت ساخته می‌شوند. */}
+                    {/* 🆕 (C7v2 Section 3) — دکمهٔ سنجش اثر memory/training */}
+                    <button
+                      onClick={async () => {
+                        const testPrompt = window.prompt(
+                          'یک سؤال یا درخواست نمونه بنویس تا اثر memory + training سنجیده شود:',
+                          'لطفاً یک تابع کوتاه پایتون برای ولیدیشن ایمیل بنویس.',
+                        );
+                        if (!testPrompt || !testPrompt.trim()) return;
+                        try {
+                          const res = await fetch(
+                            `${API_BASE}/api/render/inspector/training-impact-test/${encodeURIComponent(projectId)}`,
+                            {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ prompt: testPrompt }),
+                            },
+                          );
+                          if (!res.ok) {
+                            alert(`خطا در سنجش: HTTP ${res.status}`);
+                            return;
+                          }
+                          const data = await res.json();
+                          // نمایش گزارش در یک alert ساده (modal کامل در آینده می‌تواند اضافه شود)
+                          const report =
+                            `📊 گزارش سنجش اثر memory + training\n\n` +
+                            `مدل: ${data.model_id}\n` +
+                            `memory: ${data.memory_fields_count} فیلد\n` +
+                            `training: ${data.training_fields_count} فیلد\n\n` +
+                            `${data.summary}\n\n` +
+                            `--- خروجی A (بدون memory/training) ---\n${(data.output_a || '').slice(0, 500)}...\n\n` +
+                            `--- خروجی B (با memory/training) ---\n${(data.output_b || '').slice(0, 500)}...`;
+                          alert(report);
+                        } catch (e) {
+                          alert(`خطا در سنجش: ${e}`);
+                        }
+                      }}
+                      title="یک سؤال نمونه می‌پرسد و اثر memory/training را با مقایسهٔ خروجی با/بدون اندازه می‌گیرد"
+                      className="px-3 py-1.5 bg-amber-500 text-white rounded-lg text-xs font-medium hover:bg-amber-600 transition-colors"
+                    >
+                      🧪 سنجش اثر فیلدها
+                    </button>
                   </div>
 
                   {/* فرم اضافه کردن فیلد جدید */}

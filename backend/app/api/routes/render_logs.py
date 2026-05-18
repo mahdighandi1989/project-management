@@ -9408,6 +9408,153 @@ async def archive_all_instructions_everywhere(db: Session = Depends(get_db)):
     return {"success": True, "archived_count": count}
 
 
+class TrainingImpactTestRequest(BaseModel):
+    """🆕 (C7v2 Section 3) درخواست سنجش اثر memory + training."""
+    prompt: str
+    model_id: Optional[str] = None
+
+
+@router.post("/inspector/training-impact-test/{project_id}")
+async def training_impact_test(
+    project_id: str,
+    request: TrainingImpactTestRequest,
+    db: Session = Depends(get_db),
+):
+    """🆕 (C7v2 Section 3) سنجش اثر فیلدهای memory + training بر خروجی مدل.
+
+    دو بار prompt یکسان را به مدل می‌فرستد:
+      A) فقط با دستورات عمومی سیستم (بدون memory/training)
+      B) با memory + training کامل
+    سپس خروجی‌ها را مقایسه می‌کند و گزارش متنی می‌دهد.
+
+    خروجی: dict شامل output_a, output_b, comparison.
+    """
+    from ...models.project import Project
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="project not found")
+
+    extra_data = {}
+    if project.extra_data:
+        try:
+            extra_data = json.loads(project.extra_data) if isinstance(project.extra_data, str) else project.extra_data
+        except Exception:
+            extra_data = {}
+    owner = extra_data.get("owner", "") or ""
+    repo = extra_data.get("repo", "") or ""
+
+    # General instructions (پایه)
+    gi_list = _build_general_instructions_list(
+        project.name or "نامشخص",
+        project.technologies or "نامشخص",
+        f"{owner}/{repo}" if owner and repo else "نامشخص",
+    )
+    base_sys = _build_general_instructions_text(gi_list)
+
+    # Memory + Training blocks
+    mem_block, mem_count = _build_memory_block(project_id, db)
+    train_block, train_count = _build_training_block(project_id, db)
+
+    # System prompt A: فقط general
+    sys_a = base_sys
+    # System prompt B: memory + training + general
+    sys_b = base_sys
+    if train_block:
+        sys_b = train_block + "\n\n" + sys_b
+    if mem_block:
+        sys_b = mem_block + "\n\n" + sys_b
+
+    # انتخاب مدل
+    mid = request.model_id or "gpt-4o-mini"
+
+    ai = get_ai_manager()
+
+    try:
+        resp_a = await ai.generate(
+            model_id=mid,
+            messages=[
+                Message(role="system", content=sys_a),
+                Message(role="user", content=request.prompt),
+            ],
+            max_tokens=800,
+            temperature=0.3,
+        )
+        text_a = (resp_a.content or "").strip() if hasattr(resp_a, "content") else str(resp_a or "")
+    except Exception as e:
+        text_a = f"[خطا در فراخوانی A: {e}]"
+
+    try:
+        resp_b = await ai.generate(
+            model_id=mid,
+            messages=[
+                Message(role="system", content=sys_b),
+                Message(role="user", content=request.prompt),
+            ],
+            max_tokens=800,
+            temperature=0.3,
+        )
+        text_b = (resp_b.content or "").strip() if hasattr(resp_b, "content") else str(resp_b or "")
+    except Exception as e:
+        text_b = f"[خطا در فراخوانی B: {e}]"
+
+    # مقایسهٔ ساده — لازم نیست AI دیگری بیاوریم؛ معیارهای کمی کفایت می‌کند
+    diff_chars = sum(1 for a, b in zip(text_a, text_b) if a != b) + abs(len(text_a) - len(text_b))
+    similarity_pct = (
+        round(100.0 * (1.0 - diff_chars / max(len(text_a), len(text_b), 1)), 1)
+        if max(len(text_a), len(text_b)) > 0
+        else 0.0
+    )
+
+    # شناسایی کلمات/جمله‌های جدید در B (کلمه‌هایی که فقط در B هستند)
+    words_a = set(text_a.split())
+    words_b = set(text_b.split())
+    new_in_b = sorted(words_b - words_a)[:30]
+
+    summary_lines = []
+    summary_lines.append(
+        f"تعداد فیلد memory فعال: {mem_count} "
+        f"({len(mem_block.encode('utf-8')) if mem_block else 0} bytes)"
+    )
+    summary_lines.append(
+        f"تعداد فیلد training فعال: {train_count} "
+        f"({len(train_block.encode('utf-8')) if train_block else 0} bytes)"
+    )
+    summary_lines.append(f"شباهت خروجی A و B: {similarity_pct}%")
+    summary_lines.append(f"اختلاف کاراکتر: {diff_chars}")
+    summary_lines.append(f"کلمات تازه در B: {len(new_in_b)}")
+    if new_in_b:
+        summary_lines.append(f"نمونه کلمات تازه: {', '.join(new_in_b[:10])}")
+    if similarity_pct >= 95:
+        summary_lines.append(
+            "نتیجه: memory/training تقریباً اثری روی این prompt خاص نداشتند "
+            "(شاید موضوع پرامپت با محتوای فیلدها ربط زیادی نداشته)."
+        )
+    elif similarity_pct >= 75:
+        summary_lines.append(
+            "نتیجه: memory/training بر بخشی از خروجی اثر داشتند ولی کلیت پاسخ مشابه است."
+        )
+    else:
+        summary_lines.append(
+            "نتیجه: memory/training به‌طور معنادار خروجی را تغییر داده‌اند."
+        )
+
+    return {
+        "success": True,
+        "model_id": mid,
+        "memory_fields_count": mem_count,
+        "training_fields_count": train_count,
+        "output_a": text_a[:5000],
+        "output_b": text_b[:5000],
+        "similarity_pct": similarity_pct,
+        "diff_chars": diff_chars,
+        "new_in_b_sample": new_in_b[:30],
+        "summary": "\n".join(summary_lines),
+    }
+
+
 @router.post("/inspector/prompt-fields")
 async def create_prompt_field(request: PromptFieldCreate, db: Session = Depends(get_db)):
     """ایجاد فیلد جدید دستور/حافظه/آموزش"""
@@ -11139,6 +11286,119 @@ def _build_task_context_block(task_id: str, *, max_size_bytes: int = 30_000) -> 
     except Exception as _e:
         logger.warning(f"_build_task_context_block failed: {_e}")
         return None
+
+
+def _build_memory_block(
+    project_id: str,
+    db: Session,
+    *,
+    max_size_bytes: int = 10_000,
+) -> tuple[Optional[str], int]:
+    """🆕 (C7v2 Section 2) ساخت بلوک «🧠 حافظهٔ ثابت پروژه» برای تزریق به system prompt.
+
+    فیلدهای فعال (is_active=true, archived=false) دستهٔ memory برای project
+    خوانده می‌شوند، sort بر اساس priority desc.
+
+    Returns: (block_text, fields_count). در صورت نبودن فیلد → (None, 0).
+    """
+    try:
+        from ...models.inspector_prompt_field import InspectorPromptField
+        from sqlalchemy import or_
+
+        fields = (
+            db.query(InspectorPromptField)
+            .filter(
+                InspectorPromptField.project_id == project_id,
+                InspectorPromptField.category == "memory",
+                InspectorPromptField.is_active == True,  # noqa: E712
+                or_(
+                    InspectorPromptField.archived.is_(None),
+                    InspectorPromptField.archived == False,  # noqa: E712
+                ),
+            )
+            .order_by(InspectorPromptField.priority.desc())
+            .all()
+        )
+        if not fields:
+            return None, 0
+
+        lines: List[str] = []
+        lines.append("## 🧠 حافظهٔ ثابت پروژه (همیشه فعال — حتماً رعایت کن)")
+        lines.append(
+            "این موارد، واقعیت‌های ثابت پروژه‌اند که در هر تصمیم باید مدنظر باشند:"
+        )
+        lines.append("")
+        for f in fields:
+            lines.append(f"### {f.title}")
+            lines.append((f.content or "").strip())
+            lines.append("")
+
+        block = "\n".join(lines)
+        # cap به max_size_bytes (با truncation از انتها)
+        if len(block.encode("utf-8")) > max_size_bytes:
+            block = block.encode("utf-8")[:max_size_bytes].decode(
+                "utf-8", errors="ignore"
+            ) + "\n... [memory truncated]"
+        return block, len(fields)
+    except Exception as _e:
+        logger.warning(f"_build_memory_block failed: {_e}")
+        return None, 0
+
+
+def _build_training_block(
+    project_id: str,
+    db: Session,
+    *,
+    max_size_bytes: int = 15_000,
+) -> tuple[Optional[str], int]:
+    """🆕 (C7v2 Section 3) ساخت بلوک «📚 آموزش‌های پروژه» برای تزریق به system prompt.
+
+    فیلدهای فعال (is_active=true, archived=false) دستهٔ training برای
+    project خوانده می‌شوند، sort بر اساس priority desc.
+
+    Returns: (block_text, fields_count).
+    """
+    try:
+        from ...models.inspector_prompt_field import InspectorPromptField
+        from sqlalchemy import or_
+
+        fields = (
+            db.query(InspectorPromptField)
+            .filter(
+                InspectorPromptField.project_id == project_id,
+                InspectorPromptField.category == "training",
+                InspectorPromptField.is_active == True,  # noqa: E712
+                or_(
+                    InspectorPromptField.archived.is_(None),
+                    InspectorPromptField.archived == False,  # noqa: E712
+                ),
+            )
+            .order_by(InspectorPromptField.priority.desc())
+            .all()
+        )
+        if not fields:
+            return None, 0
+
+        lines: List[str] = []
+        lines.append("## 📚 آموزش‌های پروژه (الگوها و کانوانشن‌ها — به آن‌ها مراجعه کن)")
+        lines.append(
+            "هرگاه در حل تسک به این الگوها برخوردی، با همین روش پیش برو:"
+        )
+        lines.append("")
+        for f in fields:
+            lines.append(f"### {f.title}")
+            lines.append((f.content or "").strip())
+            lines.append("")
+
+        block = "\n".join(lines)
+        if len(block.encode("utf-8")) > max_size_bytes:
+            block = block.encode("utf-8")[:max_size_bytes].decode(
+                "utf-8", errors="ignore"
+            ) + "\n... [training truncated]"
+        return block, len(fields)
+    except Exception as _e:
+        logger.warning(f"_build_training_block failed: {_e}")
+        return None, 0
 
 
 async def _verify_task_via_v6_stack(task_id: str) -> Optional[Dict[str, Any]]:
@@ -13199,10 +13459,37 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         _gi_list = _build_general_instructions_list(_proj_name, _proj_tech, _proj_github)
         general_instructions_text = _build_general_instructions_text(_gi_list)
 
-        # 🔗 (Bug C7 Bridge Phase 2) — اگر task_id داده شده، بلوک کانتکست تسک
-        # را به‌صورت prefix به general_instructions_text اضافه کن. این باعث
-        # می‌شود AI در همهٔ phase های smart-chat (classify, question, action)
-        # کانتکست تسک را ببیند. اگر task_id نباشد، رفتار قبلی بدون تغییر.
+        # 🔗 (Bug C7 Bridge Phase 2) — task context block (اگر task_id بود)
+        # ترتیب نهایی system prompt (به ترتیب تزریق به prefix):
+        #   1. task context (اگر باشد) — جدیدترین، بالاترین اولویت
+        #   2. memory (همیشه فعال)
+        #   3. training (الگوها و کانوانشن‌ها)
+        #   4. general_instructions_text (دستورات عمومی سیستم)
+        # ما از انتها به ابتدا prefix می‌کنیم تا ترتیب صحیح حفظ شود.
+
+        # 🆕 (C7v2 Section 3) — Training block (الگوها و کانوانشن‌ها)
+        _training_block, _training_count = _build_training_block(request.project_id, db)
+        _training_size = 0
+        if _training_block:
+            general_instructions_text = _training_block + "\n\n" + general_instructions_text
+            _training_size = len(_training_block.encode("utf-8"))
+            logger.info(
+                f"smart-chat: training block injected — "
+                f"fields={_training_count}, size={_training_size}B"
+            )
+
+        # 🆕 (C7v2 Section 2) — Memory block (حافظهٔ ثابت پروژه)
+        _memory_block, _memory_count = _build_memory_block(request.project_id, db)
+        _memory_size = 0
+        if _memory_block:
+            general_instructions_text = _memory_block + "\n\n" + general_instructions_text
+            _memory_size = len(_memory_block.encode("utf-8"))
+            logger.info(
+                f"smart-chat: memory block injected — "
+                f"fields={_memory_count}, size={_memory_size}B"
+            )
+
+        # 🔗 (C7 Phase 2) — Task context block (highest priority)
         task_context_block: Optional[str] = None
         if getattr(request, "task_id", None):
             task_context_block = _build_task_context_block(request.task_id)
@@ -13212,7 +13499,11 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 )
                 logger.info(
                     f"smart-chat: task_id={request.task_id} — "
-                    f"context block injected ({len(task_context_block)} chars)"
+                    f"context block injected ({len(task_context_block)} chars), "
+                    f"memory_fields_count={_memory_count}, "
+                    f"memory_block_size_bytes={_memory_size}, "
+                    f"training_fields_count={_training_count}, "
+                    f"training_block_size_bytes={_training_size}"
                 )
             else:
                 logger.warning(
