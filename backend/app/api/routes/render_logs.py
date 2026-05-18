@@ -9139,6 +9139,161 @@ async def get_visual_debug_prompt(project_id: str, db: Session = Depends(get_db)
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🔗 Bug C7 — Bridge Phase 3: Inspector ↔ Oversight task loading
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@router.get("/inspector/load-task/{task_id}")
+async def inspector_load_task(task_id: str, db: Session = Depends(get_db)):
+    """بارگذاری یک تسک مرکز نظارت در صفحهٔ inspector با کانتکست کامل.
+
+    خروجی JSON شامل:
+      - task: کل OversightTask.to_dict()
+      - project_id: شناسهٔ inspector project مرتبط (برای navigate)
+      - inspector_context: محتوای فایل context (در صورت موجود بودن inspector_context_id)
+      - verify_history: ۵ report آخر این تسک
+      - remaining_parts / done_parts: از آخرین report
+      - target_files, acceptance_criteria, task_steps: از خود تسک
+      - scan_metadata: created_by_scan_metadata
+
+    خطاها:
+      - 404: تسک پیدا نشد
+      - 200 با inspector_context=None: تسک از scan آمده، نه از inspector
+    """
+    from fastapi import HTTPException
+    from ...services.oversight_service import get_oversight_service
+    from ...models.project import Project as _Proj_lt
+
+    svc = get_oversight_service()
+    task = next((t for t in svc.tasks if t.id == task_id), None)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+
+    watched = svc._find_watched(task.watched_id) if task.watched_id else None
+
+    # یافتن project_id inspector مرتبط (با match روی github_path یا extra_data)
+    project_id: Optional[str] = None
+    if watched and watched.repo_full_name:
+        target = (watched.repo_full_name or "").lower()
+        all_projects = db.query(_Proj_lt).all()
+        for p in all_projects:
+            if (p.github_path or "").lower() == target:
+                project_id = p.id
+                break
+            try:
+                ed = p.extra_data
+                if isinstance(ed, str):
+                    ed = json.loads(ed)
+                if isinstance(ed, dict):
+                    _o = (ed.get("owner") or "").lower()
+                    _r = (ed.get("repo") or "").lower()
+                    if _o and _r and f"{_o}/{_r}" == target:
+                        project_id = p.id
+                        break
+            except Exception:
+                continue
+
+    # inspector_context (best-effort از فایل ذخیره‌شده)
+    inspector_context: Optional[Dict[str, Any]] = None
+    ctx_id = getattr(task, "inspector_context_id", None)
+    if ctx_id:
+        try:
+            from ...services.oversight_inspector_bridge import (
+                read_inspector_context as _read_ctx,
+            )
+            inspector_context = _read_ctx(ctx_id)
+        except Exception as _ce:
+            logger.debug(f"inspector_context load failed: {_ce}")
+
+    # verify_history — آخرین ۵ report
+    verify_history: List[Dict[str, Any]] = []
+    for r in svc.reports:
+        if r.task_id == task_id:
+            verify_history.append(r.to_dict())
+            if len(verify_history) >= 5:
+                break
+
+    # آخرین report برای remaining/done
+    last_report = next((r for r in svc.reports if r.task_id == task_id), None)
+    remaining_parts: List[Any] = []
+    done_parts: List[Any] = []
+    if last_report:
+        remaining_parts = list(getattr(last_report, "remaining_parts", []) or [])
+        done_parts = list(getattr(last_report, "done_parts", []) or [])
+
+    return {
+        "task": task.to_dict(),
+        "project_id": project_id,
+        "inspector_context": inspector_context,
+        "verify_history": verify_history,
+        "remaining_parts": remaining_parts,
+        "done_parts": done_parts,
+        "target_files": list(getattr(task, "target_files", []) or []),
+        "acceptance_criteria": list(
+            getattr(task, "acceptance_criteria", []) or []
+        ),
+        "task_steps": list(getattr(task, "task_steps", []) or []),
+        "scan_metadata": getattr(task, "created_by_scan_metadata", None) or {},
+    }
+
+
+@router.get("/inspector/project-tasks/{project_id}")
+async def inspector_project_tasks(project_id: str, db: Session = Depends(get_db)):
+    """لیست تسک‌های مرکز نظارت برای یک inspector project (برای panel).
+
+    این endpoint جایگزین panel «۵۱ فیلد» در صفحهٔ inspector است.
+    تسک‌های watched مرتبط با همین project را برمی‌گرداند.
+    """
+    from ...services.oversight_service import get_oversight_service
+    from ...models.project import Project as _Proj_pt
+
+    svc = get_oversight_service()
+    project = db.query(_Proj_pt).filter(_Proj_pt.id == project_id).first()
+    if not project:
+        return {"tasks": [], "watched_id": None, "project_id": project_id}
+
+    # github_path یا extra_data → watched_id
+    target_path = (project.github_path or "").lower()
+    if not target_path and project.extra_data:
+        try:
+            ed = project.extra_data
+            if isinstance(ed, str):
+                ed = json.loads(ed)
+            if isinstance(ed, dict):
+                _o = (ed.get("owner") or "").lower()
+                _r = (ed.get("repo") or "").lower()
+                if _o and _r:
+                    target_path = f"{_o}/{_r}"
+        except Exception:
+            pass
+
+    matching_watched_id: Optional[str] = None
+    for w in svc.watched:
+        if (w.repo_full_name or "").lower() == target_path:
+            matching_watched_id = w.id
+            break
+
+    if not matching_watched_id:
+        return {"tasks": [], "watched_id": None, "project_id": project_id}
+
+    # تسک‌های فعال این watched (نه archive، نه done مگر کاربر بخواهد)
+    active_tasks: List[Dict[str, Any]] = []
+    for t in svc.tasks:
+        if t.watched_id != matching_watched_id:
+            continue
+        if getattr(t, "archived", False):
+            continue
+        active_tasks.append(t.to_dict())
+
+    return {
+        "tasks": active_tasks,
+        "watched_id": matching_watched_id,
+        "project_id": project_id,
+        "count": len(active_tasks),
+    }
+
+
 @router.get("/inspector/prompt-fields/{project_id}")
 async def get_prompt_fields(project_id: str, category: Optional[str] = None, db: Session = Depends(get_db)):
     """دریافت همه فیلدهای دستورات/حافظه/آموزش پروژه"""
@@ -10698,6 +10853,11 @@ class SmartChatRequest(BaseModel):
     frontend_url: Optional[str] = None
     reply_to: Optional[SmartChatReplyContext] = None  # ریپلای به پیام خاص
     previously_read_files: Optional[List[str]] = None  # فایل‌هایی که قبلاً در مکالمه خوانده شدن
+    # 🔗 (Bug C7 — Bridge Phase 2) — اتصال به تسک مرکز نظارت
+    # اگر داده شود، system prompt شامل بلوک «🎯 کانتکست تسک متصل» می‌شود با
+    # acceptance_criteria + remaining_parts + task_steps + done_parts + scan_metadata.
+    # backward compatible: None یعنی chat آزاد مثل قبل.
+    task_id: Optional[str] = None
 
 
 class ApplyActionRequest(BaseModel):
@@ -10708,6 +10868,13 @@ class ApplyActionRequest(BaseModel):
     action_files: List[dict]  # [{path, content, operation: 'modify'|'create'|'delete'|'modify_sections', sections?: [{find, replace}]}]
     commit_message: str
     original_message: str  # پیام اصلی کاربر
+    # 🔗 (Bug C7 — Bridge Phase 1+3) — اتصال به تسک مرکز نظارت برای write-back.
+    # اگر داده شود، پس از موفقیت apply:
+    #   - verify v6 stack روی تسک اجرا می‌شود
+    #   - task.action_plan و task.applied_evidence به‌روز می‌شوند
+    #   - اگر verify=done، task.verification_status به done می‌رود
+    #   - event "task.applied_via_inspector" emit می‌شود
+    task_id: Optional[str] = None
 
 
 class ScreenshotRequest(BaseModel):
@@ -10732,6 +10899,271 @@ class VisualDebugRequest(BaseModel):
     user_description: Optional[str] = None  # توضیح اختیاری کاربر
     chat_history: Optional[List[InspectorChatMessage]] = None
     previously_read_files: Optional[List[str]] = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🔗 Bug C7 — Inspector ↔ Oversight Bridge helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _build_task_context_block(task_id: str, *, max_size_bytes: int = 30_000) -> Optional[str]:
+    """ساخت بلوک متنی کانتکست تسک برای تزریق به system prompt smart-chat.
+
+    اولویت‌بندی برای cap (در صورت رسیدن به max_size_bytes):
+      1) remaining_parts (مهم‌ترین — آنچه هنوز باید انجام شود)
+      2) acceptance_criteria
+      3) task prompt
+      4) chat history / inspector_context
+
+    خروجی: متن بلوک یا None اگر تسک پیدا نشد.
+    """
+    try:
+        from ...services.oversight_service import get_oversight_service
+        svc = get_oversight_service()
+        task = next((t for t in svc.tasks if t.id == task_id), None)
+        if task is None:
+            return None
+
+        last_report = next(
+            (r for r in svc.reports if r.task_id == task_id), None
+        )
+
+        lines: List[str] = []
+        lines.append("## 🎯 کانتکست تسک متصل")
+        lines.append(
+            "شما در حال کار روی تسک زیر از مرکز نظارت هستید. "
+            "هرگز از حیطهٔ این تسک خارج نشوید — پاسخ شما باید مستقیماً "
+            "به انجام acceptance criteria یا remaining_parts منجر شود."
+        )
+        lines.append("")
+        lines.append(f"### عنوان تسک")
+        lines.append(f"{task.title}")
+        lines.append("")
+        lines.append(f"**وضعیت verify**: {task.verification_status or 'pending'}")
+        lines.append(f"**اولویت**: {task.priority}")
+        lines.append(f"**نوع**: {task.type}")
+        lines.append("")
+
+        # 1) remaining_parts (بالاترین اولویت)
+        remaining_parts = []
+        if last_report and getattr(last_report, "remaining_parts", None):
+            remaining_parts = list(last_report.remaining_parts)
+        if remaining_parts:
+            lines.append("### ⚠️ remaining_parts (تمرکز روی این‌ها)")
+            for i, rp in enumerate(remaining_parts, 1):
+                rp_text = str(rp).strip()
+                if rp_text:
+                    lines.append(f"  {i}. {rp_text}")
+            lines.append("")
+
+        # 2) acceptance_criteria
+        ac_list = list(task.acceptance_criteria or [])
+        if ac_list:
+            lines.append("### acceptance_criteria")
+            for i, ac in enumerate(ac_list, 1):
+                if isinstance(ac, dict):
+                    ac_text = ac.get("text", "") or str(ac)
+                else:
+                    ac_text = str(ac)
+                if ac_text.strip():
+                    lines.append(f"  {i}. {ac_text.strip()}")
+            lines.append("")
+
+        # 3) target_files
+        target_files = list(task.target_files or [])
+        if target_files:
+            lines.append("### فایل‌های هدف (target_files)")
+            for tf in target_files[:50]:
+                lines.append(f"  - {tf}")
+            lines.append("")
+
+        # 4) task_steps با وضعیت
+        task_steps = list(task.task_steps or [])
+        if task_steps:
+            lines.append("### مراحل تسک (task_steps)")
+            for s in task_steps[:50]:
+                if not isinstance(s, dict):
+                    continue
+                _status = s.get("status", "pending")
+                _title = (s.get("title") or s.get("scope") or "").strip()
+                _icon = {
+                    "done": "✅", "partial": "🔶",
+                    "not_done": "❌", "pending": "⬜",
+                }.get(_status, "⬜")
+                lines.append(f"  {_icon} [{_status}] {_title[:120]}")
+            lines.append("")
+
+        # 5) done_parts (تأیید آنچه انجام شده — تا overwrite نشود)
+        done_parts = []
+        if last_report and getattr(last_report, "done_parts", None):
+            done_parts = list(last_report.done_parts)
+        if done_parts:
+            lines.append("### ✓ done_parts (قبلاً انجام شده — دوباره تکرار نکنید)")
+            for dp in done_parts[:30]:
+                dp_text = str(dp).strip()
+                if dp_text:
+                    lines.append(f"  - {dp_text[:200]}")
+            lines.append("")
+
+        # 6) task prompt (پایین‌ترین اولویت)
+        if task.prompt:
+            lines.append("### متن کامل تسک")
+            lines.append(task.prompt[:5000])
+            lines.append("")
+
+        # 7) scan_metadata
+        scan_meta = getattr(task, "created_by_scan_metadata", None) or {}
+        if scan_meta:
+            lines.append("### scan_metadata")
+            for k in ("model", "depth", "passes", "files_count", "scan_id", "scanned_at"):
+                v = scan_meta.get(k)
+                if v:
+                    lines.append(f"  - {k}: {v}")
+            lines.append("")
+
+        full_text = "\n".join(lines)
+
+        # cap با اولویت — اگر بیشتر از max شد، از انتها (prompt + scan_metadata) کم کن
+        if len(full_text.encode("utf-8")) > max_size_bytes:
+            # تلاش با حذف بخش‌های پایین‌اولویت
+            essential_lines: List[str] = []
+            for ln in lines:
+                essential_lines.append(ln)
+                if "### scan_metadata" in ln or "### متن کامل تسک" in ln:
+                    # پس از این بخش‌ها cut کن
+                    if len("\n".join(essential_lines).encode("utf-8")) > max_size_bytes:
+                        break
+            full_text = "\n".join(essential_lines)
+            # اگر هنوز بزرگ است، truncate نهایی
+            if len(full_text.encode("utf-8")) > max_size_bytes:
+                full_text = full_text.encode("utf-8")[:max_size_bytes].decode(
+                    "utf-8", errors="ignore"
+                ) + "\n... [truncated due to size]"
+
+        return full_text
+    except Exception as _e:
+        logger.warning(f"_build_task_context_block failed: {_e}")
+        return None
+
+
+async def _verify_task_via_v6_stack(task_id: str) -> Optional[Dict[str, Any]]:
+    """اجرای verify v6 stack روی یک تسک پس از apply موفق در inspector.
+
+    استفاده از همان مسیر oversight_verifier.verify_task که از قبل v6
+    integration دارد (build_verify_context + iterative_verify_step +
+    reconciliation). در فایل خاص inspector، فقط wrapper روی این صدا
+    می‌زنیم تا apply-action ساده بماند.
+
+    خروجی: dict با verdict + confidence + report_id (یا None اگر شکست خورد)
+    """
+    try:
+        from ...services.oversight_verifier import verify_task as _ovt
+        result = await _ovt(
+            task_id=task_id,
+            triggered_by="inspector_apply",
+            include_runtime=False,  # فقط static (سریع — runtime probes بعداً اگر لازم)
+            verify_v6=True,
+        )
+        if not isinstance(result, dict):
+            return None
+        task_dict = result.get("task") or {}
+        report_dict = result.get("report") or {}
+        return {
+            "verdict": task_dict.get("verification_status"),
+            "report_id": report_dict.get("id"),
+            "done_parts_count": len(report_dict.get("done_parts") or []),
+            "remaining_parts_count": len(report_dict.get("remaining_parts") or []),
+            "verify_version": report_dict.get("verify_version") or "v6",
+            "config_used": report_dict.get("config_used"),
+        }
+    except Exception as _e:
+        logger.warning(f"_verify_task_via_v6_stack failed: {_e}")
+        return None
+
+
+async def _writeback_task_after_apply(
+    task_id: str,
+    *,
+    pr_url: Optional[str],
+    branch: Optional[str],
+    files_committed: List[str],
+    commit_message: str,
+    model_ids: List[str],
+) -> bool:
+    """به‌روزرسانی تسک مرکز نظارت پس از apply موفق در inspector.
+
+    - task.action_plan با خلاصهٔ apply
+    - task.applied_evidence با pr_url + files + models
+    - emit event task.applied_via_inspector
+    """
+    try:
+        from ...services.oversight_service import get_oversight_service
+        from datetime import datetime as _dt_wb
+        svc = get_oversight_service()
+        task = next((t for t in svc.tasks if t.id == task_id), None)
+        if task is None:
+            logger.warning(f"writeback: task {task_id} not found")
+            return False
+
+        # action_plan (یک خلاصهٔ structured که قابل خواندن باشد)
+        try:
+            task.action_plan = {
+                "applied_via": "inspector_smart_chat",
+                "applied_at": _dt_wb.utcnow().isoformat() + "Z",
+                "commit_message": commit_message[:300],
+                "files_committed": list(files_committed)[:50],
+                "pr_url": pr_url or "",
+                "branch": branch or "",
+                "models_used": list(model_ids)[:10],
+            }
+        except Exception:
+            pass
+
+        # applied_evidence
+        try:
+            evidence = dict(task.applied_evidence or {})
+            evidence["pr_url"] = pr_url or evidence.get("pr_url", "")
+            evidence["pr_branch"] = branch or evidence.get("pr_branch", "")
+            evidence["files_committed"] = list(files_committed)[:50]
+            evidence["model_ids"] = list(model_ids)[:10]
+            evidence["executed_via"] = "inspector"
+            evidence["executed_at"] = _dt_wb.utcnow().isoformat() + "Z"
+            evidence["action_plan_summary"] = commit_message[:200]
+            task.applied_evidence = evidence
+        except Exception:
+            pass
+
+        # updated_at
+        try:
+            from ...services.oversight_service import now_iso as _now_iso_wb
+            task.updated_at = _now_iso_wb()
+        except Exception:
+            pass
+
+        try:
+            svc._save_tasks()
+        except Exception as _se:
+            logger.debug(f"writeback save_tasks: {_se}")
+
+        # emit event (best-effort)
+        try:
+            await svc._emit(
+                "task.applied_via_inspector",
+                {
+                    "task_id": task_id,
+                    "pr_url": pr_url,
+                    "branch": branch,
+                    "files_committed": list(files_committed)[:20],
+                    "model_ids": list(model_ids)[:5],
+                },
+            )
+        except Exception as _ee:
+            logger.debug(f"writeback emit failed: {_ee}")
+
+        return True
+    except Exception as _e:
+        logger.warning(f"_writeback_task_after_apply failed: {_e}")
+        return False
 
 
 def _parse_ai_selected_files(ai_response: str, valid_files: list, max_files: int = 10) -> list:
@@ -12671,6 +13103,27 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
         _gi_list = _build_general_instructions_list(_proj_name, _proj_tech, _proj_github)
         general_instructions_text = _build_general_instructions_text(_gi_list)
+
+        # 🔗 (Bug C7 Bridge Phase 2) — اگر task_id داده شده، بلوک کانتکست تسک
+        # را به‌صورت prefix به general_instructions_text اضافه کن. این باعث
+        # می‌شود AI در همهٔ phase های smart-chat (classify, question, action)
+        # کانتکست تسک را ببیند. اگر task_id نباشد، رفتار قبلی بدون تغییر.
+        task_context_block: Optional[str] = None
+        if getattr(request, "task_id", None):
+            task_context_block = _build_task_context_block(request.task_id)
+            if task_context_block:
+                general_instructions_text = (
+                    task_context_block + "\n\n" + general_instructions_text
+                )
+                logger.info(
+                    f"smart-chat: task_id={request.task_id} — "
+                    f"context block injected ({len(task_context_block)} chars)"
+                )
+            else:
+                logger.warning(
+                    f"smart-chat: task_id={request.task_id} provided but "
+                    f"_build_task_context_block returned None"
+                )
 
         # ساخت تاریخچه غنی برای مدل (تا ۲۰۰ پیام آخر)
         history_text = ""
@@ -15053,12 +15506,13 @@ _ساخته شده توسط بازرس ویژه (Inspector)_"""
                 token=token
             )
 
+            pr_url_final: str = ""
             if pr_result.get("success"):
-                pr_url = pr_result.get("html_url", pr_result.get("url", ""))
+                pr_url_final = pr_result.get("html_url", pr_result.get("url", ""))
                 yield sse("apply_complete", {
                     "success": True,
-                    "message": f"✅ Pull Request ساخته شد!\n\n🔗 {pr_url}",
-                    "pr_url": pr_url,
+                    "message": f"✅ Pull Request ساخته شد!\n\n🔗 {pr_url_final}",
+                    "pr_url": pr_url_final,
                     "branch": branch_name,
                     "files_committed": committed_files,
                 })
@@ -15070,12 +15524,103 @@ _ساخته شده توسط بازرس ویژه (Inspector)_"""
                     "files_committed": committed_files,
                 })
         except Exception as e:
+            pr_url_final = ""
             yield sse("apply_complete", {
                 "success": True,
                 "message": f"✅ فایل‌ها commit شدند در branch {branch_name}\n⚠️ خطا در ساخت PR: {str(e)[:80]}",
                 "branch": branch_name,
                 "files_committed": committed_files,
             })
+
+        # 🔗 (Bug C7 Bridge Phase 1 + 3) — اگر task_id داده شده، write-back و
+        # verify v6 اجرا کن. این مسیر فقط با task_id فعال است و backward
+        # compatible: اگر task_id نباشد یا تسک پیدا نشود، خطایی ندارد.
+        if getattr(request, "task_id", None):
+            yield sse("progress", {
+                "step": "writing_back",
+                "message": "📝 در حال به‌روزرسانی تسک مرکز نظارت...",
+            })
+            try:
+                _wb_ok = await _writeback_task_after_apply(
+                    request.task_id,
+                    pr_url=pr_url_final or None,
+                    branch=branch_name,
+                    files_committed=committed_files,
+                    commit_message=request.commit_message,
+                    model_ids=request.model_ids or [],
+                )
+                if _wb_ok:
+                    yield sse("progress", {
+                        "step": "writeback_done",
+                        "message": "✅ تسک به‌روز شد (action_plan + applied_evidence)",
+                    })
+            except Exception as _wbe:
+                logger.warning(f"apply-action writeback failed: {_wbe}")
+
+            # verify v6 stack
+            yield sse("progress", {
+                "step": "verifying",
+                "message": "🔬 در حال اجرای verify v6 روی تسک...",
+            })
+            try:
+                _verify_result = await _verify_task_via_v6_stack(request.task_id)
+                if _verify_result:
+                    _verdict = _verify_result.get("verdict") or "unknown"
+                    _done_n = _verify_result.get("done_parts_count", 0)
+                    _rem_n = _verify_result.get("remaining_parts_count", 0)
+                    yield sse("verify_complete", {
+                        "success": True,
+                        "task_id": request.task_id,
+                        "verdict": _verdict,
+                        "done_parts_count": _done_n,
+                        "remaining_parts_count": _rem_n,
+                        "report_id": _verify_result.get("report_id"),
+                        "verify_version": _verify_result.get("verify_version"),
+                        "message": (
+                            f"🔬 verify: {_verdict} "
+                            f"(done={_done_n}, remaining={_rem_n})"
+                        ),
+                    })
+
+                    # 🔗 (C7 Bridge Phase 4) — allow_push gate.
+                    # اگر تسک به watched متصل است و watched.allow_push=False،
+                    # یا verdict in (not_done, partial), یک هشدار به کاربر
+                    # برسد که PR ساخته شده ولی verify confidence کافی نیست.
+                    # حذف خودکار PR انجام نمی‌شود (ریسک از دست رفتن کار)؛ فقط
+                    # notify می‌فرستیم تا کاربر دستی بررسی کند.
+                    try:
+                        from ...services.oversight_service import (
+                            get_oversight_service as _get_ovs,
+                        )
+                        _svc = _get_ovs()
+                        _t_obj = next(
+                            (tt for tt in _svc.tasks if tt.id == request.task_id),
+                            None,
+                        )
+                        if _t_obj and _t_obj.watched_id:
+                            _w_obj = _svc._find_watched(_t_obj.watched_id)
+                            if (
+                                _w_obj
+                                and not getattr(_w_obj, "allow_push", False)
+                                and pr_url_final
+                                and _verdict not in ("done",)
+                            ):
+                                yield sse("progress", {
+                                    "step": "allow_push_warning",
+                                    "message": (
+                                        "⚠️ allow_push=false و verify=" + _verdict +
+                                        " — PR ساخته شد ولی توصیه می‌شود قبل از merge "
+                                        "دستی بررسی کنید."
+                                    ),
+                                })
+                    except Exception as _age:
+                        logger.debug(f"allow_push gate check failed: {_age}")
+            except Exception as _ve:
+                logger.warning(f"apply-action verify failed: {_ve}")
+                yield sse("verify_complete", {
+                    "success": False,
+                    "error": str(_ve)[:200],
+                })
 
         yield sse("done", {"success": True})
 

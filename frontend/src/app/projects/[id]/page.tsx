@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useSearchParams } from 'next/navigation';
 // ProjectHealthPanel در commit 3.3a حذف شد — همهٔ قابلیت‌ها در /oversight
 import PromptManager from '@/components/PromptManager';
 import ExecutingPromptsPanel from '@/components/ExecutingPromptsPanel';
@@ -232,6 +232,8 @@ interface ReportTriggerSettings {
 export default function ProjectDetailPage() {
   const params = useParams();
   const projectId = params.id as string;
+  // 🔗 (C7 Bridge Phase 3) — برای خواندن ?load_task= از query
+  const searchParams = useSearchParams();
 
   const [project, setProject] = useState<Project | null>(null);
   const [files, setFiles] = useState<ProjectFile[]>([]);
@@ -654,6 +656,26 @@ export default function ProjectDetailPage() {
   const [generalInstructions, setGeneralInstructions] = useState<Array<{id: string; title: string; content: string; icon: string; prompt_detail?: string}>>([]);
   const [generalInstructionsOpen, setGeneralInstructionsOpen] = useState(false);
 
+  // 🔗 (C7 Bridge Phase 3) — اتصال تب inspector به یک تسک از مرکز نظارت.
+  // وقتی صفحه با ?load_task=ID باز می‌شود، این state ها پر می‌شوند تا:
+  //   - smart-chat با task_id فراخوانی شود
+  //   - کارت اطلاعاتی تسک در بالای chat نمایش داده شود
+  //   - previously_read_files از target_files تسک پر شود
+  const [linkedTaskId, setLinkedTaskId] = useState<string | null>(null);
+  const [linkedTaskData, setLinkedTaskData] = useState<{
+    task?: any;
+    inspector_context?: any;
+    verify_history?: any[];
+    remaining_parts?: any[];
+    done_parts?: any[];
+    target_files?: string[];
+    acceptance_criteria?: any[];
+    task_steps?: any[];
+    scan_metadata?: any;
+  } | null>(null);
+  const [projectTasksPanel, setProjectTasksPanel] = useState<any[]>([]);
+  const [projectTasksPanelOpen, setProjectTasksPanelOpen] = useState(false);
+
   const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
   const [selectedLog, setSelectedLog] = useState<ActivityLog | null>(null);
   const [reports, setReports] = useState<ProjectReport[]>([]);
@@ -900,6 +922,53 @@ export default function ProjectDetailPage() {
     done: number;
   } | null>(null);
   const [oversightExternalCount, setOversightExternalCount] = useState<number>(0);
+
+  // 🔗 (C7 Bridge Phase 3) — fetch تسک از /load-task endpoint
+  const loadLinkedTask = useCallback(async (taskId: string) => {
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/render/inspector/load-task/${encodeURIComponent(taskId)}`,
+      );
+      if (!res.ok) {
+        if (res.status === 404) {
+          alert('این تسک پیدا نشد — ممکن است حذف شده باشد');
+        } else {
+          alert(`خطا در بارگذاری تسک: HTTP ${res.status}`);
+        }
+        return;
+      }
+      const data = await res.json();
+      setLinkedTaskId(taskId);
+      setLinkedTaskData(data);
+    } catch (e) {
+      alert(`خطا در بارگذاری تسک: ${e}`);
+    }
+  }, []);
+
+  // 🔗 (C7 Bridge Phase 3) — fetch لیست تسک‌های پروژه برای panel
+  const loadProjectTasksPanel = useCallback(async () => {
+    if (!projectId) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/render/inspector/project-tasks/${encodeURIComponent(projectId)}`,
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setProjectTasksPanel(Array.isArray(data.tasks) ? data.tasks : []);
+      }
+    } catch (e) {
+      console.warn('loadProjectTasksPanel failed:', e);
+    }
+  }, [projectId]);
+
+  // 🔗 (C7 Bridge Phase 3) — وقتی query ?load_task= آمد، fetch خودکار
+  useEffect(() => {
+    if (!searchParams) return;
+    const taskId = searchParams.get('load_task');
+    if (taskId && taskId !== linkedTaskId) {
+      void loadLinkedTask(taskId);
+    }
+  }, [searchParams, linkedTaskId, loadLinkedTask]);
 
   const loadOversightBridge = useCallback(async () => {
     if (!projectId) return;
@@ -3139,6 +3208,8 @@ export default function ProjectDetailPage() {
           action_files: msg.action_plan.files,
           commit_message: msg.action_plan.commit_message || 'Inspector smart fix',
           original_message: msg.original_message || '',
+          // 🔗 (C7 Bridge Phase 1+3) — task_id برای write-back + verify v6
+          task_id: linkedTaskId || undefined,
         }),
         signal: inspectorOpAbortRef.current?.signal,
       });
@@ -4116,6 +4187,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             backend_logs: inspectorBackendLogs,
             frontend_url: inspectorFrontendUrl,
             previously_read_files: previouslyReadFiles,
+            // 🔗 (C7 Bridge Phase 2) — task_id برای کانتکست تسک
+            task_id: linkedTaskId || undefined,
           }),
         });
 
@@ -4667,6 +4740,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             frontend_url: inspectorFrontendUrl,
             reply_to: replyToPayload,
             previously_read_files: previouslyReadFiles,
+            // 🔗 (C7 Bridge Phase 2) — اگر این session به یک تسک مرکز نظارت
+            // متصل است، task_id را پاس بده تا backend بلوک کانتکست تسک را
+            // به system prompt تزریق کند
+            task_id: linkedTaskId || undefined,
           }),
           signal: inspectorOpAbortRef.current?.signal,
         });
@@ -11910,6 +11987,55 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           * ==================================================================== */}
         {activeTab === 'inspector' && (
           <div className="space-y-4">
+            {/* 🔗 (C7 Bridge Phase 3) — کارت اطلاعاتی تسک متصل */}
+            {linkedTaskId && linkedTaskData?.task && (
+              <div className="rounded-lg border-2 border-indigo-400 dark:border-indigo-600 bg-indigo-50 dark:bg-indigo-900/20 p-3">
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="px-2 py-0.5 bg-indigo-600 text-white rounded text-xs">🔗 متصل به تسک</span>
+                    <span className="font-bold text-indigo-900 dark:text-indigo-100">
+                      {linkedTaskData.task.title || 'بدون عنوان'}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setLinkedTaskId(null);
+                      setLinkedTaskData(null);
+                      // پاک کردن query از URL بدون reload
+                      try {
+                        const url = new URL(window.location.href);
+                        url.searchParams.delete('load_task');
+                        window.history.replaceState({}, '', url.toString());
+                      } catch (e) { /* noop */ }
+                    }}
+                    title="قطع اتصال تسک از این session — chat آزاد می‌شود"
+                    className="px-2 py-1 bg-red-500 text-white rounded text-xs hover:bg-red-600"
+                  >
+                    ❌ قطع اتصال
+                  </button>
+                </div>
+                <div className="flex items-center gap-3 text-xs text-indigo-800 dark:text-indigo-200 flex-wrap">
+                  <span>وضعیت verify: <b>{linkedTaskData.task.verification_status || 'pending'}</b></span>
+                  <span>✓ done: {(linkedTaskData.done_parts || []).length}</span>
+                  <span>⚠️ remaining: {(linkedTaskData.remaining_parts || []).length}</span>
+                  <span>📋 AC: {(linkedTaskData.acceptance_criteria || []).length}</span>
+                  <span>📂 target_files: {(linkedTaskData.target_files || []).length}</span>
+                </div>
+                {Array.isArray(linkedTaskData.remaining_parts) && linkedTaskData.remaining_parts.length > 0 && (
+                  <details className="mt-2 text-xs">
+                    <summary className="cursor-pointer text-indigo-700 dark:text-indigo-300">remaining_parts ({linkedTaskData.remaining_parts.length})</summary>
+                    <ul className="mt-1 space-y-0.5 pl-4 list-disc">
+                      {linkedTaskData.remaining_parts.slice(0, 20).map((rp: any, i: number) => (
+                        <li key={i} className="text-indigo-900 dark:text-indigo-100">
+                          {typeof rp === 'string' ? rp : (rp?.text || JSON.stringify(rp))}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </div>
+            )}
+
             {/* هدر */}
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-3">
@@ -14389,6 +14515,89 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   )}
                 </div>
               </div>
+            </div>
+
+            {/* 🔗 (C7 Bridge Phase 3) — پنل تسک‌های مرکز نظارت برای این پروژه */}
+            <div className="mt-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden" dir="rtl">
+              <button
+                onClick={() => {
+                  setProjectTasksPanelOpen(!projectTasksPanelOpen);
+                  if (!projectTasksPanelOpen && projectTasksPanel.length === 0) {
+                    void loadProjectTasksPanel();
+                  }
+                }}
+                className="w-full flex items-center justify-between px-4 py-3 bg-gradient-to-r from-cyan-50 to-blue-50 dark:from-cyan-900/20 dark:to-blue-900/20 hover:from-cyan-100 hover:to-blue-100 dark:hover:from-cyan-900/30 dark:hover:to-blue-900/30 transition-colors"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="text-2xl">📌</span>
+                  <div className="text-right">
+                    <h3 className="font-bold text-sm text-cyan-800 dark:text-cyan-200">تسک‌های این پروژه از مرکز نظارت</h3>
+                    <p className="text-xs text-cyan-600 dark:text-cyan-400">
+                      {projectTasksPanel.length > 0
+                        ? `${projectTasksPanel.length} تسک — کلیک «ارسال به چت» تا با کانتکست کامل کار کنی`
+                        : 'بدون تسک یا هنوز بارگذاری نشده'}
+                    </p>
+                  </div>
+                </div>
+                <span className={`text-lg transition-transform ${projectTasksPanelOpen ? 'rotate-180' : ''}`}>▼</span>
+              </button>
+              {projectTasksPanelOpen && (
+                <div className="px-3 py-3 max-h-[480px] overflow-y-auto space-y-2">
+                  {projectTasksPanel.length === 0 && (
+                    <p className="text-xs text-gray-500 text-center py-4">
+                      هیچ تسکی برای این پروژه در مرکز نظارت یافت نشد.
+                    </p>
+                  )}
+                  {projectTasksPanel.map((t: any) => (
+                    <div
+                      key={t.id}
+                      className={`p-2 rounded border ${
+                        linkedTaskId === t.id
+                          ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/20'
+                          : 'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-medium dark:text-gray-100 line-clamp-1">
+                            {t.title || 'بدون عنوان'}
+                          </div>
+                          <div className="text-[10px] text-gray-500 mt-0.5 flex gap-2 flex-wrap">
+                            <span>وضعیت: {t.verification_status || t.status || 'pending'}</span>
+                            <span>اولویت: {t.priority || 'medium'}</span>
+                            {Array.isArray(t.acceptance_criteria) && (
+                              <span>AC: {t.acceptance_criteria.length}</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex gap-1 shrink-0">
+                          <button
+                            onClick={async () => {
+                              await loadLinkedTask(t.id);
+                              // ارسال یک پیام شروع‌کننده به چت
+                              setTimeout(() => {
+                                const msg = `این تسک از مرکز نظارت را انجام بده:\n\n${t.title}\n\nلطفاً action_plan تولید کن.`;
+                                sendInspectorChat(msg, false);
+                              }, 300);
+                            }}
+                            title="این تسک را به چت بفرست تا AI با کانتکست کامل آن کار کند"
+                            className="px-2 py-0.5 bg-cyan-500 text-white rounded text-[10px] hover:bg-cyan-600"
+                          >
+                            📨 ارسال به چت
+                          </button>
+                          <button
+                            onClick={() => loadLinkedTask(t.id)}
+                            title="فقط تسک را بارگذاری کن (بدون پیام)"
+                            className="px-2 py-0.5 bg-indigo-500 text-white rounded text-[10px] hover:bg-indigo-600"
+                          >
+                            ↗️ load
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* 📋 پنل مدیریت فیلدهای دستورات، حافظه و آموزش */}
