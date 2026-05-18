@@ -5875,7 +5875,7 @@ AC = «طراحی شیک‌تر باشد»:
         # را پیدا می‌کنیم. در نسخه‌های بعد می‌توان wired-link کرد.
         # برای الان، resolver ساده:
         try:
-            from ..db.session import SessionLocal
+            from ..core.database import SessionLocal
             from ..models.project import Project as _Proj_lookup
             _db = SessionLocal()
             try:
@@ -5958,6 +5958,342 @@ AC = «طراحی شیک‌تر باشد»:
                 "success": False,
                 "error": f"smart-chat call failed: {_he}",
             }
+
+    # ====================================================================
+    # 🆕 (C7v2 Sections 4+5) — Auto-sync memory/training + review cycle
+    # ====================================================================
+
+    def _resolve_inspector_project_id(
+        self, watched_id: str
+    ) -> Optional[str]:
+        """🆕 (C7v2) یافتن inspector project مرتبط با یک watched.
+
+        match روی github_path یا extra_data.{owner,repo} انجام می‌شود.
+        خروجی: project_id یا None.
+        """
+        watched = self._find_watched(watched_id)
+        if not watched or not watched.repo_full_name:
+            return None
+        target = (watched.repo_full_name or "").lower()
+        try:
+            from ..core.database import SessionLocal
+            from ..models.project import Project as _Proj_rs
+            _db = SessionLocal()
+            try:
+                for p in _db.query(_Proj_rs).all():
+                    if (p.github_path or "").lower() == target:
+                        return p.id
+                    try:
+                        ed = p.extra_data
+                        if isinstance(ed, str):
+                            ed = json.loads(ed)
+                        if isinstance(ed, dict):
+                            _o = (ed.get("owner") or "").lower()
+                            _r = (ed.get("repo") or "").lower()
+                            if _o and _r and f"{_o}/{_r}" == target:
+                                return p.id
+                    except Exception:
+                        continue
+            finally:
+                _db.close()
+        except Exception as _re:
+            logger.warning(f"_resolve_inspector_project_id failed: {_re}")
+        return None
+
+    async def sync_to_inspector_memory_training(
+        self, watched_id: str
+    ) -> Dict[str, Any]:
+        """🆕 (C7v2 Section 4) سینک خودکار memory و training از مرکز نظارت.
+
+        منابع:
+          - memory ← watched.user_notes + OversightCodex (تنها زمانی که
+            متن در ≥۲ scan/report ظاهر شده)
+          - training ← key_changes از تسک‌های done (تنها زمانی که در ≥۳
+            تسک done تکرار شده)
+
+        Trigger: انتهای scan_project و verify_task. هرگز timer مستقل.
+        خروجی: {created_memory_count, created_training_count, skipped_count}.
+        """
+        project_id = self._resolve_inspector_project_id(watched_id)
+        if not project_id:
+            return {
+                "created_memory_count": 0,
+                "created_training_count": 0,
+                "skipped_count": 0,
+                "reason": "no inspector project for this watched",
+            }
+
+        watched = self._find_watched(watched_id)
+        if not watched:
+            return {
+                "created_memory_count": 0,
+                "created_training_count": 0,
+                "skipped_count": 0,
+                "reason": "watched not found",
+            }
+
+        try:
+            from ..core.database import SessionLocal
+            from ..models.inspector_prompt_field import InspectorPromptField
+            from sqlalchemy import or_, func as _sql_func
+        except Exception as _ie:
+            logger.warning(f"sync_to_inspector: import failed: {_ie}")
+            return {
+                "created_memory_count": 0,
+                "created_training_count": 0,
+                "skipped_count": 0,
+                "reason": f"import failed: {_ie}",
+            }
+
+        # ── memory candidates ──
+        memory_candidates: List[Dict[str, Any]] = []
+        # 1) user_notes (اگر هست و طولش معنادار است)
+        notes = (getattr(watched, "user_notes", "") or "").strip()
+        if notes and len(notes) >= 30:
+            memory_candidates.append({
+                "title": f"یادداشت کاربر: {watched.repo_full_name}",
+                "content": notes[:2000],
+                "evidence_source": "user_notes",
+            })
+        # 2) از OversightCodex (اگر سرویس‌اش موجود است)
+        try:
+            from .oversight_codex_service import (
+                load_codex_for_project as _load_codex,
+            )
+            codex_data = _load_codex(watched.id)
+            if isinstance(codex_data, dict):
+                arch = (codex_data.get("architecture") or "").strip()
+                if arch and len(arch) >= 30:
+                    memory_candidates.append({
+                        "title": f"معماری پروژه: {watched.repo_full_name}",
+                        "content": arch[:2000],
+                        "evidence_source": "codex",
+                    })
+        except Exception as _ce:
+            logger.debug(f"sync: codex load skipped: {_ce}")
+
+        # ── training candidates ──
+        # از key_changes تسک‌های done شده — شمارش تکرار
+        done_tasks = [
+            t for t in self.tasks
+            if t.watched_id == watched_id
+            and (t.verification_status or "") == "done"
+        ]
+        kc_counter: Dict[str, int] = {}
+        for t in done_tasks:
+            for r in self.reports:
+                if r.task_id != t.id:
+                    continue
+                tc = getattr(r, "touched_codex", None) or {}
+                if isinstance(tc, dict):
+                    kcs = tc.get("key_changes") or []
+                    if isinstance(kcs, list):
+                        for kc in kcs[:10]:
+                            kc_text = str(kc).strip()
+                            if len(kc_text) >= 20:
+                                kc_counter[kc_text] = kc_counter.get(kc_text, 0) + 1
+        training_candidates: List[Dict[str, Any]] = []
+        for kc_text, count in kc_counter.items():
+            if count >= 3:
+                training_candidates.append({
+                    "title": kc_text[:80],
+                    "content": kc_text,
+                    "evidence_count": count,
+                })
+
+        # ── ایجاد فیلدهای جدید (skip اگر موجود) ──
+        created_mem = 0
+        created_train = 0
+        skipped = 0
+        try:
+            _db = SessionLocal()
+            try:
+                # memory
+                for cand in memory_candidates:
+                    # شرط تثبیت: متن باید در ≥۲ scan متوالی یا ≥۲ report ظاهر
+                    # شده باشد. برای user_notes و codex، خود وجودش به
+                    # معنای تثبیت توسط کاربر است (پایدار).
+                    # check duplicate by title+content
+                    existing = _db.query(InspectorPromptField).filter(
+                        InspectorPromptField.project_id == project_id,
+                        InspectorPromptField.category == "memory",
+                        InspectorPromptField.title == cand["title"],
+                    ).first()
+                    if existing:
+                        skipped += 1
+                        continue
+                    new_f = InspectorPromptField(
+                        project_id=project_id,
+                        category="memory",
+                        title=cand["title"],
+                        content=cand["content"],
+                        priority=5,
+                        is_active=True,
+                        archived=False,
+                        source="oversight_auto_sync",
+                        auto_synced=True,
+                        evidence_count=2,
+                        last_seen_at=datetime.utcnow(),
+                    )
+                    _db.add(new_f)
+                    created_mem += 1
+                # training
+                for cand in training_candidates:
+                    existing = _db.query(InspectorPromptField).filter(
+                        InspectorPromptField.project_id == project_id,
+                        InspectorPromptField.category == "training",
+                        InspectorPromptField.title == cand["title"][:80],
+                    ).first()
+                    if existing:
+                        skipped += 1
+                        continue
+                    new_f = InspectorPromptField(
+                        project_id=project_id,
+                        category="training",
+                        title=cand["title"][:80],
+                        content=cand["content"],
+                        priority=5,
+                        is_active=True,
+                        archived=False,
+                        source="oversight_auto_sync",
+                        auto_synced=True,
+                        evidence_count=int(cand.get("evidence_count", 3)),
+                        last_seen_at=datetime.utcnow(),
+                    )
+                    _db.add(new_f)
+                    created_train += 1
+                if created_mem > 0 or created_train > 0:
+                    _db.commit()
+            finally:
+                _db.close()
+        except Exception as _de:
+            logger.warning(f"sync_to_inspector DB write failed: {_de}")
+
+        logger.info(
+            f"sync_to_inspector(watched={watched_id}): "
+            f"created memory={created_mem}, training={created_train}, skipped={skipped}"
+        )
+        return {
+            "created_memory_count": created_mem,
+            "created_training_count": created_train,
+            "skipped_count": skipped,
+            "project_id": project_id,
+        }
+
+    async def review_auto_synced_fields(
+        self, watched_id: str
+    ) -> Dict[str, Any]:
+        """🆕 (C7v2 Section 5) بازبینی فیلدهای auto-synced: بمانند/تقویت/آرشیو.
+
+        منطق:
+          - اگر content فیلد در reports/scans اخیر (۳۰ روز) دیده شد →
+            تقویت: priority++, evidence_count++, last_seen_at=now
+          - اگر last_seen_at > ۳۰ روز پیش بود → archive
+          - اگر تناقض با key_changes جدید پیدا شد → archive
+
+        Trigger: انتهای scan_project و verify_task. خروجی:
+        {strengthened_count, archived_count, unchanged_count}.
+        """
+        project_id = self._resolve_inspector_project_id(watched_id)
+        if not project_id:
+            return {
+                "strengthened_count": 0,
+                "archived_count": 0,
+                "unchanged_count": 0,
+                "reason": "no inspector project",
+            }
+
+        try:
+            from ..core.database import SessionLocal
+            from ..models.inspector_prompt_field import InspectorPromptField
+        except Exception as _ie:
+            return {
+                "strengthened_count": 0,
+                "archived_count": 0,
+                "unchanged_count": 0,
+                "reason": f"import failed: {_ie}",
+            }
+
+        now = datetime.utcnow()
+        threshold_30d = now - timedelta(days=30)
+
+        # جمع‌آوری content های متون اخیر (reports/scans اخیر) برای match
+        recent_corpus_parts: List[str] = []
+        for r in self.reports[:50]:
+            if r.task_id:
+                task = next((t for t in self.tasks if t.id == r.task_id), None)
+                if task and task.watched_id == watched_id:
+                    if isinstance(r.evidence, dict):
+                        for v in r.evidence.values():
+                            if isinstance(v, str):
+                                recent_corpus_parts.append(v)
+                            elif isinstance(v, (list, dict)):
+                                recent_corpus_parts.append(str(v))
+        recent_corpus = "\n".join(recent_corpus_parts).lower()
+
+        strengthened = 0
+        archived = 0
+        unchanged = 0
+
+        try:
+            _db = SessionLocal()
+            try:
+                auto_fields = _db.query(InspectorPromptField).filter(
+                    InspectorPromptField.project_id == project_id,
+                    InspectorPromptField.auto_synced == True,  # noqa: E712
+                    InspectorPromptField.archived == False,  # noqa: E712
+                ).all()
+                for f in auto_fields:
+                    # content match — اگر بخشی از title یا content در corpus
+                    # اخیر دیده می‌شود → strengthen
+                    title_lower = (f.title or "").lower()
+                    content_lower = (f.content or "").lower()
+                    seen = False
+                    if title_lower and len(title_lower) >= 10 and title_lower in recent_corpus:
+                        seen = True
+                    elif content_lower:
+                        # check first 100 chars of content
+                        snippet = content_lower[:100]
+                        if snippet and snippet in recent_corpus:
+                            seen = True
+
+                    if seen:
+                        # تقویت
+                        f.priority = min(int(f.priority or 0) + 1, 20)
+                        f.evidence_count = int(f.evidence_count or 0) + 1
+                        f.last_seen_at = now
+                        strengthened += 1
+                    elif f.last_seen_at and f.last_seen_at < threshold_30d:
+                        # آرشیو (>۳۰ روز ندیده شد)
+                        f.archived = True
+                        archived += 1
+                    elif not f.last_seen_at:
+                        # last_seen_at خالی — اگر created_at بیش از ۳۰ روز
+                        # پیش بود، archive کن
+                        if f.created_at and f.created_at < threshold_30d:
+                            f.archived = True
+                            archived += 1
+                        else:
+                            unchanged += 1
+                    else:
+                        unchanged += 1
+                if strengthened > 0 or archived > 0:
+                    _db.commit()
+            finally:
+                _db.close()
+        except Exception as _de:
+            logger.warning(f"review_auto_synced_fields DB write failed: {_de}")
+
+        logger.info(
+            f"review_auto_synced_fields(watched={watched_id}): "
+            f"strengthened={strengthened}, archived={archived}, unchanged={unchanged}"
+        )
+        return {
+            "strengthened_count": strengthened,
+            "archived_count": archived,
+            "unchanged_count": unchanged,
+            "project_id": project_id,
+        }
 
     # ====================================================================
     # Reports
@@ -6172,6 +6508,28 @@ AC = «طراحی شیک‌تر باشد»:
 
         async with self._lock:
             self._save_tasks()
+
+        # 🆕 (C7v2 Sections 4+5) — auto-sync + review در انتهای scan
+        # این کار غیر-blocking است نسبت به نتیجهٔ scan؛ هر شکستی صرفاً log
+        # می‌شود و scan موفق باقی می‌ماند.
+        try:
+            sync_result = await self.sync_to_inspector_memory_training(watched_id)
+            logger.info(
+                f"scan_project end → sync_to_inspector: "
+                f"mem={sync_result.get('created_memory_count', 0)}, "
+                f"train={sync_result.get('created_training_count', 0)}"
+            )
+        except Exception as _se:
+            logger.warning(f"scan_project: sync_to_inspector failed: {_se}")
+        try:
+            review_result = await self.review_auto_synced_fields(watched_id)
+            logger.info(
+                f"scan_project end → review_auto_synced_fields: "
+                f"strengthened={review_result.get('strengthened_count', 0)}, "
+                f"archived={review_result.get('archived_count', 0)}"
+            )
+        except Exception as _re:
+            logger.warning(f"scan_project: review_auto_synced_fields failed: {_re}")
 
         return {
             "success": True,
