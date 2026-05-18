@@ -343,6 +343,451 @@ const TYPE_ICONS: Record<string, string> = {
 
 type RepoSort = 'pushed_desc' | 'pushed_asc' | 'name' | 'stars';
 
+// ════════════════════════════════════════════════════════════════════
+// 🆕 (C5) — View preferences foundation: hook + applyFiltersSortSearch
+//                                        + Pagination component
+// ════════════════════════════════════════════════════════════════════
+
+type ViewPrefsTab = {
+  page_size: number;
+  current_page: number;
+  sort_field: string;
+  sort_order: 'asc' | 'desc';
+  filters: {
+    status: string[];
+    source: string[];
+    priority: string[];
+    type: string[];
+    verification_status: string[];
+    tags: string[];
+    date_range: { from: string | null; to: string | null };
+    context_toggles: Record<string, boolean>;
+  };
+  search_query: string;
+};
+type ViewPrefs = {
+  tasks_tab: ViewPrefsTab;
+  archive_tab: ViewPrefsTab;
+  reports_tab: ViewPrefsTab;
+};
+
+const DEFAULT_VIEW_PREFS_TAB: ViewPrefsTab = {
+  page_size: 100,
+  current_page: 1,
+  sort_field: 'created_at',
+  sort_order: 'desc',
+  filters: {
+    status: [],
+    source: [],
+    priority: [],
+    type: [],
+    verification_status: [],
+    tags: [],
+    date_range: { from: null, to: null },
+    context_toggles: {
+      pinned_only: false,
+      has_followup: false,
+      has_prompt_history: false,
+      manually_edited_title: false,
+      merged_super_tasks: false,
+      was_merged: false,
+      partial_only: false,
+      regressed_only: false,
+      recently_verified: false,
+      stale: false,
+      has_acceptance_criteria: false,
+      has_checklist: false,
+      near_completion: false,
+      started_but_not_done: false,
+      auto_loop_eligible: false,
+    },
+  },
+  search_query: '',
+};
+
+const DEFAULT_VIEW_PREFS: ViewPrefs = {
+  tasks_tab: DEFAULT_VIEW_PREFS_TAB,
+  archive_tab: DEFAULT_VIEW_PREFS_TAB,
+  reports_tab: DEFAULT_VIEW_PREFS_TAB,
+};
+
+function deepMergePrefs<T>(base: T, patch: any): T {
+  if (typeof base !== 'object' || base === null) return patch ?? base;
+  if (typeof patch !== 'object' || patch === null) return base;
+  const out: any = Array.isArray(base) ? [...(base as any)] : { ...base };
+  for (const k of Object.keys(patch)) {
+    const bv = (base as any)[k];
+    const pv = patch[k];
+    if (
+      bv && typeof bv === 'object' && !Array.isArray(bv)
+      && pv && typeof pv === 'object' && !Array.isArray(pv)
+    ) {
+      out[k] = deepMergePrefs(bv, pv);
+    } else {
+      out[k] = pv;
+    }
+  }
+  return out;
+}
+
+// 🆕 (C5) — hook اصلی برای view preferences از backend
+// fetch اولیه + debounced PATCH روی هر change
+function useViewPrefs(watchedId: string | null | undefined) {
+  const [prefs, setPrefsState] = useState<ViewPrefs>(DEFAULT_VIEW_PREFS);
+  const [loaded, setLoaded] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // initial fetch
+  useEffect(() => {
+    if (!watchedId) {
+      setPrefsState(DEFAULT_VIEW_PREFS);
+      setLoaded(true);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/oversight/watched/${watchedId}/view-prefs`
+        );
+        if (res.ok) {
+          const data = await res.json();
+          if (!cancelled) {
+            setPrefsState(deepMergePrefs(DEFAULT_VIEW_PREFS, data));
+          }
+        }
+      } catch {
+        // silent — defaults are fine
+      } finally {
+        if (!cancelled) setLoaded(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [watchedId]);
+
+  // patch با debounce ۵۰۰ms
+  const patchPrefs = useCallback((patch: Partial<ViewPrefs> | any) => {
+    setPrefsState((prev) => {
+      const next = deepMergePrefs(prev, patch);
+      // schedule backend save (debounced)
+      if (watchedId) {
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        debounceRef.current = setTimeout(() => {
+          fetch(`${API_BASE}/api/oversight/watched/${watchedId}/view-prefs`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(patch),
+          }).catch(() => {});
+        }, 500);
+      }
+      return next;
+    });
+  }, [watchedId]);
+
+  return { prefs, patchPrefs, loaded };
+}
+
+// 🆕 (C5) — Persian/Arabic normalization for search
+function normalizeForSearch(s: string): string {
+  if (!s) return '';
+  return s
+    .toString()
+    .toLowerCase()
+    .replace(/[يى]/g, 'ی')
+    .replace(/[ك]/g, 'ک')
+    .replace(/[۰]/g, '0').replace(/[۱]/g, '1').replace(/[۲]/g, '2')
+    .replace(/[۳]/g, '3').replace(/[۴]/g, '4').replace(/[۵]/g, '5')
+    .replace(/[۶]/g, '6').replace(/[۷]/g, '7').replace(/[۸]/g, '8').replace(/[۹]/g, '9')
+    .replace(/[٠]/g, '0').replace(/[١]/g, '1').replace(/[٢]/g, '2')
+    .replace(/[٣]/g, '3').replace(/[٤]/g, '4').replace(/[٥]/g, '5')
+    .replace(/[٦]/g, '6').replace(/[٧]/g, '7').replace(/[٨]/g, '8').replace(/[٩]/g, '9')
+    .replace(/‌/g, ' ')  // نیم‌فاصله → space
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// 🆕 (C5) — جمع‌آوری متن قابل جستجو از یک تسک (همهٔ فیلدها)
+function buildSearchHaystack(t: any): string {
+  const parts: string[] = [];
+  parts.push(t.title || '');
+  parts.push(t.prompt || '');
+  parts.push(t.raw_idea || '');
+  parts.push(t.followup_prompt || '');
+  parts.push(t.last_summary || '');
+  parts.push(t.id || '');
+  parts.push((t.tags || []).join(' '));
+  for (const s of (t.task_steps || [])) {
+    if (!s || typeof s !== 'object') continue;
+    parts.push(s.title || '');
+    parts.push(s.scope || '');
+    parts.push(s.remaining || '');
+    parts.push(s.evidence || '');
+  }
+  for (const ac of (t.acceptance_criteria || [])) {
+    if (typeof ac === 'string') parts.push(ac);
+    else if (ac && typeof ac === 'object') {
+      parts.push(ac.text || '');
+      parts.push(ac.verify_method || '');
+      if (typeof ac.verify_plan === 'string') parts.push(ac.verify_plan);
+    }
+  }
+  for (const ck of (t.intelligent_checklist || [])) {
+    if (ck && typeof ck === 'object') parts.push(ck.text || '');
+  }
+  for (const m of (t.merged_from || [])) parts.push(String(m));
+  for (const ph of (t.prompt_history || [])) {
+    if (ph && typeof ph === 'object') parts.push(ph.prompt || '');
+  }
+  for (const th of (t.title_history || [])) {
+    if (th && typeof th === 'object') {
+      parts.push(th.old_title || '');
+      parts.push(th.new_title || '');
+    }
+  }
+  if (t.consolidation_meta && typeof t.consolidation_meta === 'object') {
+    parts.push(t.consolidation_meta.cluster_theme || '');
+    parts.push(t.consolidation_meta.rationale || '');
+  }
+  return normalizeForSearch(parts.join(' '));
+}
+
+// 🆕 (C5) — اعمال filter + search + sort روی لیست تسک‌ها
+// خروجی: { items: لیست نهایی، total: تعداد قبل از pagination، haystackMap برای highlight }
+function applyFiltersSortSearch(
+  items: any[],
+  prefs: ViewPrefsTab,
+  options?: { isArchive?: boolean }
+): { items: any[]; total: number } {
+  let filtered = [...items];
+  const f = prefs.filters;
+  const ct = f.context_toggles || {};
+
+  // filters: multi-select (OR در هر دسته، AND بین دسته‌ها)
+  if (f.status && f.status.length > 0) {
+    filtered = filtered.filter((t) => f.status.includes(t.status));
+  }
+  if (f.source && f.source.length > 0) {
+    filtered = filtered.filter((t) => f.source.includes(t.source || 'user'));
+  }
+  if (f.priority && f.priority.length > 0) {
+    filtered = filtered.filter((t) => f.priority.includes(t.priority));
+  }
+  if (f.type && f.type.length > 0) {
+    filtered = filtered.filter((t) => f.type.includes(t.type));
+  }
+  if (f.verification_status && f.verification_status.length > 0) {
+    filtered = filtered.filter((t) =>
+      f.verification_status.includes(t.verification_status || 'pending')
+    );
+  }
+  if (f.tags && f.tags.length > 0) {
+    filtered = filtered.filter((t) => {
+      const tags = (t.tags || []) as string[];
+      return f.tags.some((needed) => tags.includes(needed));
+    });
+  }
+  // date range روی created_at
+  if (f.date_range?.from) {
+    const fromT = new Date(f.date_range.from).getTime();
+    filtered = filtered.filter(
+      (t) => t.created_at && new Date(t.created_at).getTime() >= fromT
+    );
+  }
+  if (f.date_range?.to) {
+    const toT = new Date(f.date_range.to).getTime();
+    filtered = filtered.filter(
+      (t) => t.created_at && new Date(t.created_at).getTime() <= toT
+    );
+  }
+  // context toggles
+  const now = Date.now();
+  if (ct.pinned_only) filtered = filtered.filter((t) => !!t.pinned);
+  if (ct.has_followup) filtered = filtered.filter((t) => !!t.followup_prompt);
+  if (ct.has_prompt_history) filtered = filtered.filter((t) => (t.prompt_history?.length || 0) > 0);
+  if (ct.manually_edited_title) filtered = filtered.filter((t) => !!t.manual_title_override);
+  if (ct.merged_super_tasks) filtered = filtered.filter((t) => t.source === 'auto_consolidation');
+  if (ct.was_merged) filtered = filtered.filter((t) => !!t.merged_into);
+  if (ct.partial_only) filtered = filtered.filter((t) => t.verification_status === 'partial');
+  if (ct.regressed_only) filtered = filtered.filter((t) => t.verification_status === 'regressed');
+  if (ct.recently_verified) {
+    filtered = filtered.filter((t) => {
+      if (!t.last_verified_at) return false;
+      const diff = now - new Date(t.last_verified_at).getTime();
+      return diff <= 24 * 60 * 60 * 1000;
+    });
+  }
+  if (ct.stale) {
+    filtered = filtered.filter((t) => {
+      if (!t.updated_at) return false;
+      const diff = now - new Date(t.updated_at).getTime();
+      return diff > 30 * 24 * 60 * 60 * 1000;
+    });
+  }
+  if (ct.has_acceptance_criteria) filtered = filtered.filter((t) => (t.acceptance_criteria?.length || 0) > 0);
+  if (ct.has_checklist) filtered = filtered.filter((t) => !!t.intelligent_checklist);
+  if (ct.near_completion) filtered = filtered.filter((t) => (t.overall_completion_pct || 0) >= 70);
+  if (ct.started_but_not_done) {
+    filtered = filtered.filter(
+      (t) => (t.runs_count || 0) > 0 && t.verification_status !== 'done'
+    );
+  }
+
+  // search
+  const q = normalizeForSearch(prefs.search_query || '');
+  if (q) {
+    filtered = filtered.filter((t) => {
+      const hay = buildSearchHaystack(t);
+      return hay.includes(q);
+    });
+  }
+
+  // sort
+  const sf = prefs.sort_field || 'created_at';
+  const dir = prefs.sort_order === 'asc' ? 1 : -1;
+  const PRIO: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+  filtered.sort((a, b) => {
+    // pinned همیشه بالا
+    const pa = a.pinned ? 1 : 0;
+    const pb = b.pinned ? 1 : 0;
+    if (pa !== pb) return pb - pa;
+    if (pa && pb) {
+      // هر دو pinned — sort by pinned_at desc
+      const ta = a.pinned_at ? new Date(a.pinned_at).getTime() : 0;
+      const tb = b.pinned_at ? new Date(b.pinned_at).getTime() : 0;
+      if (ta !== tb) return tb - ta;
+    }
+    // sort field
+    let va: any = a[sf];
+    let vb: any = b[sf];
+    if (sf === 'priority') {
+      va = PRIO[va] ?? 9;
+      vb = PRIO[vb] ?? 9;
+      return (va - vb) * dir;
+    }
+    // تاریخ یا عدد یا رشته
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1;
+    if (vb == null) return -1;
+    if (typeof va === 'number' && typeof vb === 'number') {
+      return (va - vb) * dir;
+    }
+    // date string
+    if (typeof va === 'string' && /\d{4}-\d{2}-\d{2}/.test(va)) {
+      const ta = new Date(va).getTime();
+      const tb = new Date(vb).getTime();
+      return (ta - tb) * dir;
+    }
+    return String(va).localeCompare(String(vb), 'fa') * dir;
+  });
+
+  return { items: filtered, total: filtered.length };
+}
+
+// 🆕 (C5) — Pagination component مشترک
+function Pagination({
+  currentPage,
+  total,
+  pageSize,
+  onPageChange,
+  onPageSizeChange,
+}: {
+  currentPage: number;
+  total: number;
+  pageSize: number;
+  onPageChange: (p: number) => void;
+  onPageSizeChange: (s: number) => void;
+}) {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(Math.max(1, currentPage), totalPages);
+  const start = total === 0 ? 0 : (page - 1) * pageSize + 1;
+  const end = Math.min(page * pageSize, total);
+  return (
+    <div className="flex items-center gap-2 flex-wrap text-xs my-2 p-2 bg-gray-50 dark:bg-gray-800 rounded">
+      <button
+        type="button"
+        onClick={() => onPageChange(1)}
+        disabled={page <= 1}
+        className="px-2 py-1 border rounded disabled:opacity-40 dark:border-gray-600"
+        title="اولین صفحه"
+      >« اول</button>
+      <button
+        type="button"
+        onClick={() => onPageChange(page - 1)}
+        disabled={page <= 1}
+        className="px-2 py-1 border rounded disabled:opacity-40 dark:border-gray-600"
+      >‹ قبلی</button>
+      <span className="px-2 py-1">
+        صفحهٔ <b>{page}</b> از <b>{totalPages}</b>
+      </span>
+      <button
+        type="button"
+        onClick={() => onPageChange(page + 1)}
+        disabled={page >= totalPages}
+        className="px-2 py-1 border rounded disabled:opacity-40 dark:border-gray-600"
+      >بعدی ›</button>
+      <button
+        type="button"
+        onClick={() => onPageChange(totalPages)}
+        disabled={page >= totalPages}
+        className="px-2 py-1 border rounded disabled:opacity-40 dark:border-gray-600"
+        title="آخرین صفحه"
+      >آخر »</button>
+      <input
+        type="number"
+        min={1}
+        max={totalPages}
+        defaultValue={page}
+        key={`page-input-${page}`}
+        onBlur={(e) => {
+          const v = parseInt(e.target.value, 10);
+          if (v && v >= 1 && v <= totalPages && v !== page) onPageChange(v);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+        }}
+        className="w-16 px-1 py-1 border rounded text-center dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+        title="برو به صفحه"
+      />
+      <span className="text-gray-600 dark:text-gray-400 ml-auto">
+        نمایش <b>{start}-{end}</b> از <b>{total}</b>
+      </span>
+      <select
+        value={pageSize}
+        onChange={(e) => onPageSizeChange(parseInt(e.target.value, 10))}
+        className="px-1 py-1 border rounded dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+        title="آیتم در هر صفحه"
+      >
+        <option value={25}>۲۵</option>
+        <option value={50}>۵۰</option>
+        <option value={100}>۱۰۰</option>
+        <option value={200}>۲۰۰</option>
+        <option value={500}>۵۰۰</option>
+      </select>
+    </div>
+  );
+}
+
+// 🆕 (C5) — Highlight جستجو با <mark>
+function HighlightMatch({ text, query }: { text: string; query: string }) {
+  if (!query || !text) return <>{text}</>;
+  const qNorm = normalizeForSearch(query);
+  if (!qNorm) return <>{text}</>;
+  const tNorm = normalizeForSearch(text);
+  const idx = tNorm.indexOf(qNorm);
+  if (idx === -1) return <>{text}</>;
+  // برای ساده‌نگه‌داشتن، روی متن normalize شده highlight می‌کنیم
+  // (نمایش با original ولی index از normalize)
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark className="bg-yellow-200 dark:bg-yellow-700 dark:text-white px-0.5 rounded">
+        {text.slice(idx, idx + qNorm.length)}
+      </mark>
+      {text.slice(idx + qNorm.length)}
+    </>
+  );
+}
+
 export default function OversightPage() {
   const [tab, setTab] = useState<'watched' | 'repos' | 'ideas' | 'tasks' | 'reports'>('watched');
 
