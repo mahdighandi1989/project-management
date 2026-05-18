@@ -572,11 +572,94 @@ function buildSearchHaystack(t: any): string {
 }
 
 // 🆕 (C5) — اعمال filter + search + sort روی لیست تسک‌ها
+// 🆕 (C5 — مرحلهٔ ۲۴) — True inverted index (Map<token, Set<taskId>>)
+// build یک‌بار از روی tasks، lookup O(1) per token.
+// روی ۵۰۰۰ تسک هم سریع است (target: < 50ms/keystroke).
+type SearchIndex = {
+  byTask: Map<string, string>;  // taskId → normalized haystack (برای substring match)
+  byToken: Map<string, Set<string>>;  // token → Set<taskId> (برای exact-token match)
+  builtAt: number;
+};
+
+function buildSearchIndex(items: any[]): SearchIndex {
+  const byTask = new Map<string, string>();
+  const byToken = new Map<string, Set<string>>();
+  for (const t of items) {
+    if (!t || !t.id) continue;
+    const hay = buildSearchHaystack(t);
+    byTask.set(t.id, hay);
+    // tokenize: split روی whitespace + punctuation
+    const tokens = hay.split(/[\s\-،,.;:!?()[\]{}«»"'/\\]+/).filter((x) => x.length >= 2);
+    for (const tok of tokens) {
+      let set = byToken.get(tok);
+      if (!set) {
+        set = new Set<string>();
+        byToken.set(tok, set);
+      }
+      set.add(t.id);
+    }
+  }
+  return { byTask, byToken, builtAt: Date.now() };
+}
+
+// search با inverted index:
+// - اگر query تک‌token باشد: lookup سریع O(1) از byToken
+// - اگر چند token باشد: intersection روی همهٔ tokenها، سپس substring check
+// - اگر هیچ token کامل match نشد: fallback به substring روی همهٔ haystack ها
+function searchWithIndex(
+  index: SearchIndex,
+  query: string,
+  candidates: any[]
+): any[] {
+  const q = normalizeForSearch(query);
+  if (!q) return candidates;
+  const qTokens = q.split(/[\s\-،,.;:!?]+/).filter((x) => x.length >= 2);
+  if (qTokens.length === 0) {
+    // fallback: substring روی همهٔ candidates
+    return candidates.filter((t) => {
+      const hay = index.byTask.get(t.id);
+      return hay ? hay.includes(q) : false;
+    });
+  }
+  // 1) intersection IDها روی token اول
+  let candidateIds: Set<string> | null = null;
+  for (const tok of qTokens) {
+    // prefix match: همهٔ tokenهای شروع‌شده با این
+    const matched = new Set<string>();
+    index.byToken.forEach((ids, indexedTok) => {
+      if (indexedTok.includes(tok)) {
+        ids.forEach((id) => matched.add(id));
+      }
+    });
+    if (candidateIds === null) {
+      candidateIds = matched;
+    } else {
+      // intersection
+      const prev: Set<string> = candidateIds;
+      const next = new Set<string>();
+      prev.forEach((id: string) => {
+        if (matched.has(id)) next.add(id);
+      });
+      candidateIds = next;
+    }
+    if (candidateIds.size === 0) break;
+  }
+  if (!candidateIds || candidateIds.size === 0) {
+    // fallback: substring روی همهٔ candidates (در صورت phrase match)
+    return candidates.filter((t) => {
+      const hay = index.byTask.get(t.id);
+      return hay ? hay.includes(q) : false;
+    });
+  }
+  // 2) final filter: فقط tasks که در candidates هستند و در candidateIds هستند
+  return candidates.filter((t) => candidateIds!.has(t.id));
+}
+
 // خروجی: { items: لیست نهایی، total: تعداد قبل از pagination، haystackMap برای highlight }
 function applyFiltersSortSearch(
   items: any[],
   prefs: ViewPrefsTab,
-  options?: { isArchive?: boolean }
+  options?: { isArchive?: boolean; searchIndex?: SearchIndex | null }
 ): { items: any[]; total: number } {
   let filtered = [...items];
   const f = prefs.filters;
@@ -652,13 +735,17 @@ function applyFiltersSortSearch(
     );
   }
 
-  // search
+  // search — اگر index داده شده، از آن (سریع)؛ در غیر این صورت fallback به haystack مستقیم
   const q = normalizeForSearch(prefs.search_query || '');
   if (q) {
-    filtered = filtered.filter((t) => {
-      const hay = buildSearchHaystack(t);
-      return hay.includes(q);
-    });
+    if (options?.searchIndex) {
+      filtered = searchWithIndex(options.searchIndex, q, filtered);
+    } else {
+      filtered = filtered.filter((t) => {
+        const hay = buildSearchHaystack(t);
+        return hay.includes(q);
+      });
+    }
   }
 
   // sort
@@ -2728,10 +2815,15 @@ export default function OversightPage() {
   const _activeTabKey: 'tasks_tab' | 'archive_tab' =
     taskFilterArchived === 'archived' ? 'archive_tab' : 'tasks_tab';
   const _activeTabPrefs = viewPrefs[_activeTabKey];
+  // 🆕 (C5 — مرحلهٔ ۲۴) — inverted index یک‌بار از tasks build می‌شود،
+  // و در همهٔ queries استفاده می‌شود. update incremental روی تغییر tasks.
+  const _searchIndex = useMemo(() => buildSearchIndex(tasks), [tasks]);
   // اعمال filter+sort+search طبق view-prefs روی filteredTasks
   const processedTasks = useMemo(() => {
-    return applyFiltersSortSearch(filteredTasks, _activeTabPrefs).items;
-  }, [filteredTasks, _activeTabPrefs]);
+    return applyFiltersSortSearch(filteredTasks, _activeTabPrefs, {
+      searchIndex: _searchIndex,
+    }).items;
+  }, [filteredTasks, _activeTabPrefs, _searchIndex]);
   // اعمال pagination روی processedTasks
   const _pageSize = _activeTabPrefs.page_size || 100;
   const _currentPage = Math.max(
@@ -2745,13 +2837,22 @@ export default function OversightPage() {
     const start = (_currentPage - 1) * _pageSize;
     return processedTasks.slice(start, start + _pageSize);
   }, [processedTasks, _currentPage, _pageSize]);
-  // اگر صفحه فعلی به‌خاطر فیلتر خالی شد، reset به 1
+  // 🆕 (C5 — مرحلهٔ ۲۷) — حفظ هوشمند صفحه بعد از تغییرات:
+  // وقتی pin/unpin/delete/edit رخ می‌دهد، تعداد processedTasks تغییر می‌کند.
+  // به‌جای reset به صفحهٔ ۱ (که annoying است)، تا حد ممکن صفحهٔ نزدیک به
+  // محتوای فعلی را نگه می‌داریم:
+  // - اگر current_page > totalPages → برو به آخرین صفحه (نه ۱)
+  // - اگر processedTasks خالی شد (مثلاً فیلتر شدید) → ۱
+  // این روی pin/edit که items معمولاً درجا می‌مانند صفحه را شیفت نمی‌دهد.
   useEffect(() => {
-    if (
-      processedTasks.length > 0
-      && _currentPage > Math.ceil(processedTasks.length / _pageSize)
-    ) {
+    const totalPages = Math.max(1, Math.ceil(processedTasks.length / _pageSize));
+    if (processedTasks.length === 0 && _currentPage !== 1) {
       patchViewPrefs({ [_activeTabKey]: { current_page: 1 } });
+    } else if (processedTasks.length > 0 && _currentPage > totalPages) {
+      // مثلاً ۵۰ تسک، page 5، size 10 → totalPages=5. اگر یکی پاک شد → 49 تسک
+      // → totalPages=5 (49/10=4.9 → 5)؛ صفحه نمی‌چرخه. اگر ۴۰ تسک → totalPages=4
+      // → ما به 4 می‌رویم، نه ۱.
+      patchViewPrefs({ [_activeTabKey]: { current_page: totalPages } });
     }
   }, [processedTasks.length, _currentPage, _pageSize, _activeTabKey, patchViewPrefs]);
 
