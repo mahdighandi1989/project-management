@@ -277,6 +277,13 @@ class WatchedProject:
     # هر تب مستقل ذخیره می‌شود. cross-device sync.
     view_preferences: Dict[str, Any] = field(default_factory=dict)
 
+    # 🔬 (Bug C6 — Verify v6, بهبود ۹) Centralized VerifyConfig
+    # اگر None، defaults از VerifyConfig.from_dict() استفاده می‌شود.
+    # ساختار: VerifyConfig.to_dict() (max_iterations, thresholds,
+    # weights, strong_model_preference, ac_cache settings, trace).
+    # GET/PATCH /api/oversight/watched/{id}/verify-v6-config
+    verify_v6_config: Optional[Dict[str, Any]] = None
+
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
 
@@ -439,6 +446,20 @@ class OversightTask:
     # هر آیتم: {id, text, priority: low|medium|high, done: bool}
     intelligent_checklist: Optional[List[Dict[str, Any]]] = None
 
+    # 🔬 (Bug C6 — Verify v6, بهبود ۷) Per-AC state cache
+    # ساختار:
+    # {
+    #   "<ac_hash>": {
+    #     "verdict": "done", "confidence": 0.92,
+    #     "last_verified_at": ISO, "files_checksum": "abc123",
+    #     "consecutive_done_count": 3, "evidence": ["..."]
+    #   }
+    # }
+    # اگر consecutive_done >= 3 و checksum unchanged و age < 7 days،
+    # verify v6 از این cache استفاده می‌کند و probes را skip می‌کند.
+    # مدیریت در backend/app/services/verify_runtime/ac_cache_service.py
+    ac_verify_cache: Dict[str, Any] = field(default_factory=dict)
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -495,6 +516,17 @@ class OversightReport:
     # 🆕 معیار راهنما + Codex
     user_goal: str = ""
     touched_codex: Dict[str, Any] = field(default_factory=dict)
+
+    # 🔬 (Bug C6 — Verify v6, بهبود ۸) Observability/Trace mode
+    # verify_trace: کل trace decisions (per AC، per iteration)
+    # ac_probe_details: per-AC summary (probes اجرا شده، نتایج)
+    # verify_version: "v5" | "v6" — برای A/B و backward compat
+    # config_used: snapshot از VerifyConfig که در این run استفاده شد
+    # endpoint: GET /api/oversight/tasks/{task_id}/verify-trace?report_id={id}
+    verify_trace: List[Dict[str, Any]] = field(default_factory=list)
+    ac_probe_details: List[Dict[str, Any]] = field(default_factory=list)
+    verify_version: str = "v5"
+    config_used: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

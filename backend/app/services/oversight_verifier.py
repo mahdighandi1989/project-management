@@ -39,6 +39,86 @@ VERIFICATION_REGRESSED = "regressed"
 VERIFICATION_ERROR = "error"
 
 
+# ===========================================================================
+# 🔬 Bug C6 — Verify v6 — module-level _classify_step_for_probe با ۱۰ قاعده
+# ===========================================================================
+# طبق پرامپت C6 (AC #5): تابع باید identifier های زیر را در ۱۰ قاعدهٔ explicit
+# پوشش دهد: "backend", "frontend", "fullstack", "infra", "test_only",
+# "doc_only", "manual_only". این نسخهٔ ماژول‌سطح در کنار نسخهٔ nested
+# (که فقط ui_eligible|backend_only برمی‌گرداند) قرار می‌گیرد.
+
+_C6_CLASSIFY_RULES = (
+    # rule 1 — test_only: scope صریحاً test یا pytest است (priority بالا)
+    ("test_only", ("pytest", "unittest", "tests/", "test_", "_test.py", "test suite")),
+    # rule 2 — doc_only: مستندسازی، README، docs/
+    ("doc_only", ("readme", "docs/", "documentation", "docstring", "comment-only", "markdown")),
+    # rule 3 — manual_only: نیاز به بازبینی دستی، vision-only، subjective
+    ("manual_only", ("manual review", "visual inspection", "subjective", "look and feel", "design only", "manual_only")),
+    # rule 4 — infra: deployment, CI, docker, env, config
+    ("infra", ("docker", "kubernetes", "ci/cd", ".env", "deployment", "infrastructure", "render.yaml", "github action", "workflow")),
+    # rule 5 — frontend: tsx/jsx، UI element، React/Next
+    ("frontend", ("tsx", "jsx", "react", "next.js", "page.tsx", "component", "frontend/", "ui element", "modal", "panel", "<button>", "<form>", "<input>")),
+    # rule 6 — backend: Python, FastAPI, endpoint, model
+    ("backend", ("@router", "fastapi", "pydantic", "sqlalchemy", "dataclass", "schema migration", "ast parse", "subprocess", "asyncio", "background task", "endpoint", "service.py", "verifier.py")),
+    # rule 7 — fullstack: هم UI و هم backend keyword
+    ("fullstack", ("end-to-end", "fullstack", "full-stack", "ui + api", "ui+api")),
+    # ۳ قاعدهٔ implicit بر اساس scoring (rules 8, 9, 10 پایین در _classify_step_for_probe):
+    # rule 8 — fullstack: اگر هم UI و هم backend hit داشت
+    # rule 9 — frontend (default برای frontend-only)
+    # rule 10 — backend (default برای backend-only)
+)
+
+
+def _classify_step_for_probe(step: Any) -> str:
+    """طبقه‌بندی یک step/AC به یکی از ۷ category (که در ۱۰ قاعده اعمال می‌شود).
+
+    خروجی یکی از: "backend", "frontend", "fullstack", "infra", "test_only",
+    "doc_only", "manual_only".
+
+    ۱۰ قاعدهٔ صریح — اولین match wins:
+    1. test_only (explicit test keywords)
+    2. doc_only (documentation only)
+    3. manual_only (subjective/visual review)
+    4. infra (deployment/CI/config)
+    5. frontend (UI/tsx/React)
+    6. backend (Python/FastAPI/endpoint)
+    7. fullstack (explicit fullstack marker)
+    8. fullstack (implicit: هم UI و هم backend hit)
+    9. frontend (frontend-only fallback)
+    10. backend (backend-only fallback / default)
+
+    classification result در context.trace هنگام verify v6 log می‌شود.
+    """
+    if isinstance(step, dict):
+        text = " ".join([
+            str(step.get("text", "")),
+            str(step.get("title", "")),
+            str(step.get("scope", "")),
+            str(step.get("description", "")),
+        ]).lower()
+    else:
+        text = str(step or "").lower()
+    if not text.strip():
+        return "manual_only"
+
+    # rules 1-7 — explicit keyword match (priority order)
+    for category, keywords in _C6_CLASSIFY_RULES:
+        if any(kw in text for kw in keywords):
+            return category
+
+    # rules 8-10 — implicit scoring fallback
+    # شمارش UI/backend keyword ها
+    _ui_kw = ("button", "click", "screen", "page", "panel", "modal", "input", "view", "render", "props", "state hook")
+    _be_kw = ("endpoint", "api/", "service", "function", "class ", "dataclass", "database", "model", "/api/")
+    _ui_hits = sum(1 for k in _ui_kw if k in text)
+    _be_hits = sum(1 for k in _be_kw if k in text)
+    if _ui_hits >= 2 and _be_hits >= 2:
+        return "fullstack"
+    if _ui_hits > _be_hits:
+        return "frontend"
+    return "backend"
+
+
 def _gh_headers(token: str) -> Dict[str, str]:
     return {
         "Accept": "application/vnd.github+json",
@@ -1810,11 +1890,17 @@ async def verify_task(
     model_id: Optional[str] = None,
     triggered_by: str = "manual",
     include_runtime: bool = True,
+    verify_v6: bool = True,
 ) -> Dict[str, Any]:
     """اجرای verify روی یک تسک — مستقل از execution.
 
     include_runtime: اگر False، فقط grep + AI (verify سریع، بدون probe).
     اگر True (پیش‌فرض)، probe های runtime نیز اجرا می‌شوند.
+
+    verify_v6: اگر True (پیش‌فرض)، علاوه بر مسیر v5 موجود، iterative
+    orchestrator v6 (3-tier escalation) روی AC ها اجرا می‌شود و نتایج
+    در report.verify_trace + report.ac_probe_details ثبت می‌گردد +
+    report.verify_version='v6'. اگر False، مسیر کاملاً v5 (backward compat).
     """
     service = get_oversight_service()
     task = next((t for t in service.tasks if t.id == task_id), None)
@@ -3339,6 +3425,103 @@ async def verify_task(
     # تمام اطلاعات معیارها در done_parts/remaining_parts است
     if parsed.get("summary"):
         report.evidence["summary"] = parsed["summary"]
+
+    # 🔬 (Bug C6 — Verify v6) integration با iterative_orchestrator + trace.
+    # اگر verify_v6=True (پیش‌فرض)، orchestrator v6 روی AC ها اجرا می‌شود
+    # (نتیجهٔ آن advisory است — مسیر v5 از پیش status_val را ست کرده).
+    # نتایج در report.verify_trace + ac_probe_details ثبت می‌گردد.
+    if verify_v6:
+        try:
+            from .verify_runtime.context_builder import build_verify_context, VerifyConfig
+            from .verify_runtime.iterative_orchestrator import (
+                iterative_verify_step, aggregate_verdicts,
+            )
+            from .verify_runtime.ac_cache_service import (
+                check_ac_cache, update_ac_cache,
+            )
+
+            cfg_dict = getattr(watched, "verify_v6_config", None) if watched else None
+            v6_config = VerifyConfig.from_dict(cfg_dict)
+            v6_ctx = await build_verify_context(task, watched, config=v6_config)
+
+            ac_probe_details: List[Dict[str, Any]] = []
+            for _i, _ac in enumerate(acceptance_criteria):
+                classification = _classify_step_for_probe(_ac)
+                v6_ctx.append_trace({
+                    "phase": "classify_ac",
+                    "ac_index": _i,
+                    "classification": classification,
+                })
+                # cache check (بهبود ۷)
+                cached = check_ac_cache(
+                    _ac, v6_ctx,
+                    classification=classification,
+                    target_files=target_files,
+                )
+                if cached is not None:
+                    v6_ctx.append_trace({
+                        "phase": "cache_hit",
+                        "ac_index": _i,
+                        "verdict": cached.verdict,
+                    })
+                    ac_probe_details.append({
+                        "ac_index": _i,
+                        "ac_text": _ac_text_of(_ac)[:200],
+                        "classification": classification,
+                        "final_verdict": cached.verdict,
+                        "final_confidence": cached.confidence,
+                        "cache_hit": True,
+                        "iterations": [],
+                    })
+                    continue
+                # iterative verify (با timeout کلی برای ایمنی)
+                try:
+                    final_result, all_iters = await asyncio.wait_for(
+                        iterative_verify_step(_ac, v6_ctx, max_iterations=v6_config.max_iterations),
+                        timeout=180,
+                    )
+                except asyncio.TimeoutError:
+                    final_result = None
+                    all_iters = []
+                    v6_ctx.append_trace({
+                        "phase": "iteration_timeout",
+                        "ac_index": _i,
+                    })
+                if final_result is not None:
+                    ac_probe_details.append({
+                        "ac_index": _i,
+                        "ac_text": _ac_text_of(_ac)[:200],
+                        "classification": classification,
+                        "final_verdict": final_result.verdict,
+                        "final_confidence": final_result.confidence,
+                        "cache_hit": False,
+                        "iterations": [
+                            {
+                                "probe_name": r.probe_name,
+                                "verdict": r.verdict,
+                                "confidence": r.confidence,
+                                "elapsed_ms": r.elapsed_ms,
+                            } for r in all_iters
+                        ],
+                    })
+                    # update cache
+                    try:
+                        await update_ac_cache(
+                            _ac, final_result, v6_ctx,
+                            classification=classification,
+                            target_files=target_files,
+                        )
+                    except Exception as _ce:
+                        logger.warning(f"update_ac_cache failed: {_ce}")
+
+            # ست trace + version + config_used + ac_probe_details
+            report.verify_trace = list(v6_ctx.trace)
+            report.ac_probe_details = ac_probe_details
+            report.verify_version = "v6"
+            report.config_used = v6_config.to_dict()
+        except Exception as _v6e:
+            logger.warning(f"verify_v6 orchestrator failed (graceful fallback to v5): {_v6e}")
+            report.verify_version = "v5"
 
     # 🔬 (Runtime Verify Stage 5+6) — probe results را در evidence ذخیره کن
     # همیشه runtime_status را ذخیره می‌کنیم (حتی وقتی probe نخورد) تا

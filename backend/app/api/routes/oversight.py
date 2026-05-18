@@ -5,7 +5,7 @@ API routes برای مرکز نظارت و مدیریت پروژه‌های گی
 """
 
 import logging
-from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi import APIRouter, HTTPException, Query, Depends, Body
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
@@ -278,6 +278,86 @@ async def update_watched(watched_id: str, payload: WatchedUpdate):
     if not result:
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
     return result
+
+
+# 🔬 (Bug C6 — Verify v6 chunk 7) — verify-trace endpoint (AC #10)
+# trace کامل آخرین (یا specific report) verify v6 را برمی‌گرداند.
+@router.get("/tasks/{task_id}/verify-trace")
+async def get_verify_trace(task_id: str, report_id: Optional[str] = None):
+    """trace کامل verify v6 برای یک task.
+
+    اگر report_id داده شود، همان report، در غیر این صورت آخرین report.
+    شامل verify_trace, ac_probe_details, verify_version, config_used.
+    """
+    from app.services.oversight_service import get_oversight_service
+    service = get_oversight_service()
+    reports = [r for r in service.reports if r.task_id == task_id]
+    if not reports:
+        raise HTTPException(status_code=404, detail="report یافت نشد")
+    if report_id:
+        report = next((r for r in reports if r.id == report_id), None)
+        if report is None:
+            raise HTTPException(status_code=404, detail=f"report {report_id} یافت نشد")
+    else:
+        report = sorted(reports, key=lambda r: r.run_at, reverse=True)[0]
+    return {
+        "task_id": task_id,
+        "report_id": report.id,
+        "run_at": report.run_at,
+        "verify_version": getattr(report, "verify_version", "v5"),
+        "verify_trace": list(getattr(report, "verify_trace", []) or []),
+        "ac_probe_details": list(getattr(report, "ac_probe_details", []) or []),
+        "config_used": dict(getattr(report, "config_used", {}) or {}),
+    }
+
+
+# 🔬 (Bug C6 — Verify v6 chunk 7) — verify-v6-config endpoint (AC #10)
+@router.get("/watched/{watched_id}/verify-v6-config")
+async def get_verify_v6_config(watched_id: str):
+    """دریافت VerifyConfig فعلی پروژه (یا defaults اگر None)."""
+    from app.services.oversight_service import get_oversight_service
+    from app.services.verify_runtime.context_builder import VerifyConfig
+    service = get_oversight_service()
+    watched = service._find_watched(watched_id)
+    if watched is None:
+        raise HTTPException(status_code=404, detail="watched project یافت نشد")
+    stored = getattr(watched, "verify_v6_config", None)
+    cfg = VerifyConfig.from_dict(stored)
+    return {
+        "watched_id": watched_id,
+        "is_default": stored is None,
+        "config": cfg.to_dict(),
+    }
+
+
+@router.patch("/watched/{watched_id}/verify-v6-config")
+async def update_verify_v6_config(watched_id: str, payload: Dict[str, Any] = Body(...)):
+    """آپدیت VerifyConfig پروژه. مقادیر out-of-range با clamp اصلاح می‌شوند.
+
+    payload: dict با کلیدهایی از VerifyConfig (max_iterations, weights, …).
+    برای reset به default، payload={} یا config=null بفرستید.
+    """
+    from app.services.oversight_service import get_oversight_service
+    from app.services.verify_runtime.context_builder import VerifyConfig
+    service = get_oversight_service()
+    watched = service._find_watched(watched_id)
+    if watched is None:
+        raise HTTPException(status_code=404, detail="watched project یافت نشد")
+    # validation با clamping
+    cfg = VerifyConfig.from_dict(payload if isinstance(payload, dict) else {})
+    setattr(watched, "verify_v6_config", cfg.to_dict())
+    try:
+        service._persist_watched()  # type: ignore[attr-defined]
+    except Exception:
+        # تلاش با نام دیگر
+        try:
+            service._save_watched_to_disk()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    return {
+        "watched_id": watched_id,
+        "config": cfg.to_dict(),
+    }
 
 
 # 🔬 (Runtime Verify Stage 6) — لیست runهای evidence یک task
