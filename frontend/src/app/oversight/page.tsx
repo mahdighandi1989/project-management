@@ -2624,6 +2624,35 @@ export default function OversightPage() {
         setRegenError(data?.detail || `HTTP ${res.status}`);
         return;
       }
+      // 🆕 (C5 — بند ۹.۲) — اگر title عوض شده و manual_title_override=false،
+      // از کاربر بپرس کدام را نگه دارد
+      const oldTitle = regenTask.title;
+      const newTitle: string = data?.task?.title || oldTitle;
+      const wasManual = !!regenTask.manual_title_override;
+      if (!wasManual && newTitle && newTitle !== oldTitle) {
+        const keep = window.confirm(
+          `🔄 عنوان پیشنهادی جدید بر اساس پرامپت به‌روز:\n\n` +
+            `• قبلی: "${oldTitle}"\n` +
+            `• پیشنهاد جدید: "${newTitle}"\n\n` +
+            `[OK] قبول عنوان جدید\n[Cancel] نگه‌داشتن عنوان قبلی (با قفل manual)`
+        );
+        if (!keep) {
+          // نگه‌داشتن عنوان قبلی + قفل manual
+          try {
+            const patchRes = await fetch(`${API_BASE}/api/oversight/tasks/${regenTask.id}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ title: oldTitle, manual_title_override: true }),
+            });
+            if (patchRes.ok) {
+              const patched = await patchRes.json();
+              setTasks(prev => prev.map(x => (x.id === regenTask.id ? patched : x)));
+              closeRegenModal();
+              return;
+            }
+          } catch {/* fall through to default */}
+        }
+      }
       setTasks(prev => prev.map(x => (x.id === regenTask.id ? data.task : x)));
       closeRegenModal();
     } catch (e: any) {
@@ -2737,6 +2766,54 @@ export default function OversightPage() {
       return true;
     });
   }, [reports, reportStatusFilter, reportWatchedFilter, reportFlaggedOnly, reportSinceFilter]);
+
+  // 🆕 (C5) — reports search + sort + pagination
+  const _reportsTabPrefs = viewPrefs.reports_tab;
+  const processedReports = useMemo(() => {
+    let arr = [...filteredReports];
+    // search
+    const q = normalizeForSearch(_reportsTabPrefs.search_query || '');
+    if (q) {
+      arr = arr.filter((r: any) => {
+        const hay = normalizeForSearch(
+          (r.content || '') + ' ' +
+          (r.error || '') + ' ' +
+          (r.followup_prompt || '') + ' ' +
+          (r.task_id || '') + ' ' +
+          (r.id || '')
+        );
+        return hay.includes(q);
+      });
+    }
+    // sort
+    const sf = _reportsTabPrefs.sort_field || 'run_at';
+    const dir = _reportsTabPrefs.sort_order === 'asc' ? 1 : -1;
+    arr.sort((a: any, b: any) => {
+      const va = a[sf];
+      const vb = b[sf];
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * dir;
+      if (typeof va === 'string' && /\d{4}-\d{2}-\d{2}/.test(va)) {
+        return (new Date(va).getTime() - new Date(vb).getTime()) * dir;
+      }
+      return String(va).localeCompare(String(vb), 'fa') * dir;
+    });
+    return arr;
+  }, [filteredReports, _reportsTabPrefs.search_query, _reportsTabPrefs.sort_field, _reportsTabPrefs.sort_order]);
+  const _reportsPageSize = _reportsTabPrefs.page_size || 100;
+  const _reportsCurrentPage = Math.max(
+    1,
+    Math.min(
+      _reportsTabPrefs.current_page || 1,
+      Math.max(1, Math.ceil(processedReports.length / _reportsPageSize))
+    )
+  );
+  const pageReports = useMemo(() => {
+    const start = (_reportsCurrentPage - 1) * _reportsPageSize;
+    return processedReports.slice(start, start + _reportsPageSize);
+  }, [processedReports, _reportsCurrentPage, _reportsPageSize]);
 
   const markReport = async (
     reportId: string,
@@ -3796,7 +3873,8 @@ export default function OversightPage() {
           />
         ) : (
           <ReportsPanel
-            reports={filteredReports}
+            reports={pageReports}
+            processedReports={processedReports}
             allCount={reports.length}
             watched={watched}
             reportStatusFilter={reportStatusFilter}
@@ -3807,6 +3885,8 @@ export default function OversightPage() {
             setReportSinceFilter={setReportSinceFilter}
             reportFlaggedOnly={reportFlaggedOnly}
             setReportFlaggedOnly={setReportFlaggedOnly}
+            reportsPrefs={_reportsTabPrefs}
+            patchViewPrefs={patchViewPrefs}
             onView={(r) => setViewingReport(r)}
             onMark={markReport}
             fmtDate={fmtDate}
@@ -8795,6 +8875,7 @@ function TasksPanel({
 
 function ReportsPanel({
   reports,
+  processedReports,
   allCount,
   watched,
   reportStatusFilter,
@@ -8805,11 +8886,14 @@ function ReportsPanel({
   setReportSinceFilter,
   reportFlaggedOnly,
   setReportFlaggedOnly,
+  reportsPrefs,
+  patchViewPrefs,
   onView,
   onMark,
   fmtDate,
 }: {
   reports: Report[];
+  processedReports: Report[];
   allCount: number;
   watched: Watched[];
   reportStatusFilter: string;
@@ -8820,10 +8904,23 @@ function ReportsPanel({
   setReportSinceFilter: (s: string) => void;
   reportFlaggedOnly: boolean;
   setReportFlaggedOnly: (v: boolean) => void;
+  reportsPrefs: ViewPrefsTab;
+  patchViewPrefs: (p: any) => void;
   onView: (r: Report) => void;
   onMark: (id: string, updates: { read?: boolean; flagged?: boolean }) => void;
   fmtDate: (d?: string | null) => string;
 }) {
+  // 🆕 (C5) — reports search input local state با debounce 150ms
+  const [searchLocal, setSearchLocal] = useState(reportsPrefs.search_query || '');
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => { setSearchLocal(reportsPrefs.search_query || ''); }, [reportsPrefs.search_query]);
+  const onSearchChange = (v: string) => {
+    setSearchLocal(v);
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(() => {
+      patchViewPrefs({ reports_tab: { search_query: v, current_page: 1 } });
+    }, 150);
+  };
   return (
     <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
@@ -8875,6 +8972,48 @@ function ReportsPanel({
           </label>
         </div>
       </div>
+
+      {/* 🆕 (C5) — search + sort + pagination toolbar */}
+      <div className="mb-3 flex items-center gap-2 flex-wrap p-2 bg-gray-50 dark:bg-gray-800 rounded">
+        <input
+          type="text"
+          value={searchLocal}
+          onChange={(e) => onSearchChange(e.target.value)}
+          placeholder="🔍 جستجو در محتوای گزارش، error، followup…"
+          className="flex-1 min-w-[200px] px-3 py-1.5 border rounded text-sm dark:bg-gray-800 dark:border-gray-600 dark:text-white"
+        />
+        <select
+          value={reportsPrefs.sort_field}
+          onChange={(e) => patchViewPrefs({ reports_tab: { sort_field: e.target.value, current_page: 1 } })}
+          className="px-2 py-1.5 border rounded text-sm dark:bg-gray-800 dark:border-gray-600 dark:text-white"
+        >
+          <option value="run_at">🔀 تاریخ اجرا</option>
+          <option value="created_at">🔀 تاریخ ساخت</option>
+          <option value="status">🔀 وضعیت</option>
+          <option value="task_id">🔀 task_id</option>
+        </select>
+        <button
+          type="button"
+          onClick={() => patchViewPrefs({ reports_tab: { sort_order: reportsPrefs.sort_order === 'asc' ? 'desc' : 'asc' } })}
+          className="px-2 py-1.5 border rounded text-sm dark:bg-gray-800 dark:border-gray-600 dark:text-white"
+        >
+          {reportsPrefs.sort_order === 'asc' ? '⬆' : '⬇'}
+        </button>
+        <span className="text-xs text-gray-500 dark:text-gray-400">
+          نتیجه: <b>{processedReports.length}</b>
+        </span>
+      </div>
+
+      {/* 🆕 (C5) — pagination بالا */}
+      {processedReports.length > reportsPrefs.page_size && (
+        <Pagination
+          currentPage={reportsPrefs.current_page}
+          total={processedReports.length}
+          pageSize={reportsPrefs.page_size}
+          onPageChange={(p) => patchViewPrefs({ reports_tab: { current_page: p } })}
+          onPageSizeChange={(s) => patchViewPrefs({ reports_tab: { page_size: s, current_page: 1 } })}
+        />
+      )}
 
       {reports.length === 0 ? (
         <div className="text-center py-12 text-gray-400">
@@ -8937,6 +9076,16 @@ function ReportsPanel({
             </div>
           ))}
         </div>
+      )}
+      {/* 🆕 (C5) — pagination پایین */}
+      {processedReports.length > reportsPrefs.page_size && reports.length > 0 && (
+        <Pagination
+          currentPage={reportsPrefs.current_page}
+          total={processedReports.length}
+          pageSize={reportsPrefs.page_size}
+          onPageChange={(p) => patchViewPrefs({ reports_tab: { current_page: p } })}
+          onPageSizeChange={(s) => patchViewPrefs({ reports_tab: { page_size: s, current_page: 1 } })}
+        />
       )}
     </div>
   );
