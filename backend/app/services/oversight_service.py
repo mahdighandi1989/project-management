@@ -3109,6 +3109,21 @@ class OversightService:
             # 🆕 (bug 30 — refinement) heading شامل Phase X با هر متن قبلش
             # مثل "# 🎯 پرامپت Phase 1 — ..."
             r'(?im)^\s*#{1,4}\s.*?\b(?:phase|stage)\s+[\d]+\b',
+            # 🆕 (bug 30 v3) — Bug C\d / Bug \d الگو (مثل "# Bug C6", "## Bug 30")
+            r'(?im)^\s*#{1,4}\s*[^\w\n]*\b[Bb]ug\s+[Cc]?[\d]+\b',
+            # 🆕 (bug 30 v3) — فیکس فارسی (مثل "## فیکس ۱", "### فیکس ۲")
+            r'(?im)^\s*#{1,4}\s*[^\w\n]*فیکس\s*[\d۰-۹]+',
+            r'(?im)^\s*فیکس\s+[\d۰-۹]+\s*[:\-—]',
+            # 🆕 (bug 30 v3) — "بهبود ۱", "گپ ۱"، "ستون A", "Chunk N"
+            r'(?im)^\s*#{0,4}\s*[^\w\n]*بهبود\s+[\d۰-۹]+',
+            r'(?im)^\s*#{0,4}\s*[^\w\n]*گپ\s+[\d۰-۹]+',
+            r'(?im)^\s*#{0,4}\s*[^\w\n]*ستون\s+[A-Zا-ی]',
+            r'(?im)^\s*#{0,4}\s*\bChunk\s+[\d]+\b',
+            # 🆕 (bug 30 v3) — markdown heading عمومی به‌عنوان fallback نهایی
+            # هر # یا ## یا ### که با emoji یا متن شروع شود (الویت پایین‌تر)
+            # این موقع‌ای فعال می‌شود که هیچ کدام از patterns بالا کافی نباشد
+            r'(?im)^\s*##\s+[🎯🔬🅰🅱🅲🅳🅴🅵🅶🅷🅸🅹🚀🔧📌💡⭐]+',
+            r'(?im)^\s*#\s+[🎯🔬🅰🅱🅲🅳🅴🅵🅶🅷🅸🅹🚀🔧📌💡⭐]+',
         ]
         # 🆕 (bug 30 v2) — استخراج موقعیت + متن header برای chunking
         _section_starts: List[Tuple[int, str]] = []  # (offset, header_line)
@@ -3132,13 +3147,14 @@ class OversightService:
         # و فرمت compact بخواه تا output در ۱۲۰۰۰ توکن جای کافی داشته باشد.
         _section_hint = ""
         if _is_multi_section:
+            # 🆕 (bug 30 v3) — همهٔ sections را به AI نشان بده (cap 200)
             _detected_preview = "\n".join(
-                f"  - {s[:80]}" for s in _detected_sections[:25]
+                f"  - {s[:80]}" for s in _detected_sections[:200]
             )
             _section_hint = (
                 f"\n\n🚨 **تشخیص خودکار: متن کاربر شامل {_section_count} "
                 f"بخش صریح است.** بخش‌های detected:\n{_detected_preview}\n\n"
-                f"⚠️ **الزامی**: تو **باید دقیقاً {min(_section_count, 30)} "
+                f"⚠️ **الزامی**: تو **باید دقیقاً {min(_section_count, 200)} "
                 f"مرحله** بسازی، هر کدام مربوط به یکی از این بخش‌های صریح. "
                 f"اگر تعداد کمتر برگردانی، یعنی کار را خلاصه کرده‌ای — این "
                 f"اشتباه است.\n\n"
@@ -3153,7 +3169,7 @@ class OversightService:
 1. هر مرحله یک **scope مشخص** و **یک action اصلی** دارد (مثل «اضافه کردن endpoint X»، «اصلاح UI Y»، «نوشتن تست Z»، «integration A با B»).
 2. مراحل را به ترتیب منطقی پیاده‌سازی مرتب کن (foundation → core → integration → UI → tests → audit).
 3. **بدون خلاصه‌سازی و بدون فشرده‌سازی**: اگر کاربر ۸ کار جداگانه را خواسته، **۸ مرحله** بده — نه ۴ مرحلهٔ ادغام‌شده. هدف: **هیچ requirement کاربر گم نشود**.
-4. حداکثر ۳۰ مرحله. اگر کاربر صراحتاً موارد بیشتری شمارش کرده، **همه را** بساز (تا سقف ۳۰). فقط در صورتی که واقعاً بیش از ۳۰ کار مستقل وجود دارد، مهم‌ترین‌ها را اول بگذار و در آخرین مرحله اشاره کن «X موارد دیگر هم در فاز بعدی».
+4. **هیچ سقفی روی تعداد مراحل نیست — حداکثر ۲۰۰ مرحله ولی به این محدودیت نرس مگر واقعاً کاربر بخواهد**. اگر کاربر صراحتاً موارد بیشتری شمارش کرده (مثلاً ۵۰ فاز یا ۸ Bug + ۵ Phase + ۲۰ Stage)، **همه را** بساز. هرگز خلاصه نکن یا بخش‌ها را با هم ادغام نکن. اگر متن کاربر شامل ۴۰ بخش صریح بود، خروجی شامل **دقیقاً ۴۰ مرحله** باشد — نه ۳۰، نه ۳۵.
 5. **`raw_excerpt`**: بخش‌هایی از متن کاربر که به این مرحله مربوط است — **verbatim و کامل**، با URLs و نام‌ها. حداقل ۱۰۰ کاراکتر اگر متن کاربر اجازه دهد.
 6. **`scope`**: حداقل ۲-۳ جمله — چه چیزی شامل این مرحله است، چه چیزی خارج از این مرحله است، چه نکته‌ای حیاتی است. **نه یک جمله سرسری**.
 7. **`key_terms`**: همهٔ نام‌ها (فایل، endpoint، function، URL، library، dataclass، table، …) که کاربر در این بخش گفته. حداقل ۳ آیتم اگر در متن وجود دارد.
@@ -3199,6 +3215,9 @@ class OversightService:
 """
         # 🆕 (bug 30) — برای ایده‌های با چند بخش صریح، max_tokens را بالا ببر
         # تا output truncate نشود. DeepSeek-Chat تا ۱۶۳۸۴ توکن خروجی می‌دهد.
+        # 🆕 (bug 30 v3) — برای متون خیلی بلند (>15 section)، حتی 16k کافی نیست —
+        # ولی نمی‌توان از limit مدل بالاتر رفت. در آن حالت، programmatic
+        # chunking fallback خودکار فعال می‌شود (هر chunk جدا AI call می‌خورد).
         _max_out_tokens = 16000 if _is_multi_section else 12000
 
         async def _run_planner(_prompt: str, _budget: int) -> List[Dict[str, Any]]:
@@ -3234,7 +3253,10 @@ class OversightService:
                     "business_intent": str(s.get("business_intent") or "").strip()[:300],
                     "non_goals": str(s.get("non_goals") or "").strip()[:300],
                 })
-            return out[:30]
+            # 🆕 (bug 30 v3) — cap بالا برده شد به ۲۰۰ (قبلاً ۳۰ بود).
+            # برای متن‌های طولانی با چند Phase + Bug + Stage تو در تو، باید
+            # همه مراحل حفظ شوند.
+            return out[:200]
 
         # 🆕 (bug 30 v2) — Programmatic chunking fallback
         # تابع کمکی: idea را با موقعیت header های detected به chunks تقسیم می‌کند
@@ -3329,7 +3351,7 @@ class OversightService:
                     f"\n\n🚨🚨🚨 **بازنگری اجباری**: تلاش قبلی فقط "
                     f"{len(valid_steps)} مرحله ساخت در حالی که متن دارای "
                     f"{_section_count} بخش صریح شماره‌دار است. **این بار "
-                    f"دقیقاً {min(_section_count, 30)} مرحله بساز** — برای "
+                    f"دقیقاً {min(_section_count, 200)} مرحله بساز** — برای "
                     f"هر بخش یک مرحله. هر چیزی کمتر = خلاصه‌سازی = اشتباه."
                 )
                 retry_prompt = plan_prompt + retry_hint
@@ -3355,7 +3377,8 @@ class OversightService:
                     f"{_section_count}) — switching to programmatic chunking"
                 )
                 _chunks = _split_idea_by_sections()
-                _chunks = _chunks[:30]  # cap سخت
+                # 🆕 (bug 30 v3) — cap بالا برده شد به ۲۰۰
+                _chunks = _chunks[:200]  # cap سخت
                 logger.info(
                     f"_ai_plan_steps: chunking → {len(_chunks)} chunks "
                     f"(parallel AI calls)"
@@ -4048,7 +4071,8 @@ class OversightService:
                 summary = (data.get("summary") or summary)[:1000]
                 cl = data.get("checklist") or []
                 if isinstance(cl, list):
-                    checklist = [str(x)[:200] for x in cl if str(x).strip()][:30]
+                    # 🆕 (bug 30 v3) — cap reminder checklist هم به ۱۰۰ بالا برد
+                    checklist = [str(x)[:200] for x in cl if str(x).strip()][:100]
         except Exception as e:
             logger.warning(f"reminder JSON parse failed: {e}")
 
