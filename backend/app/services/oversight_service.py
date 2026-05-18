@@ -4513,11 +4513,35 @@ class OversightService:
                 # 🆕 (Reminder via Telegram) — datetime extraction
                 _r_at = data.get("reminder_at")
                 if isinstance(_r_at, str) and _r_at.strip() and _r_at.lower() != "null":
-                    # تأیید parseable بودن — اگر خراب بود، None می‌گذاریم
+                    # تأیید parseable بودن — اگر خراب بود، None می‌گذاریم.
+                    # همچنین اگر زمان استخراج‌شده در گذشته بود (AI گاهی
+                    # ساعت را بدون توجه به امروز/فردا می‌گذارد)، یک قاعدهٔ
+                    # نرم اعمال می‌کنیم: اگر <1 دقیقه گذشته → null تا
+                    # caller default 1 ساعت بعد بگذارد؛ اگر کمتر از ۲۴
+                    # ساعت گذشته → +1 روز forward (احتمالاً منظور AI همان
+                    # ساعت روز بعد بوده).
                     try:
-                        from datetime import datetime as _dt_v
-                        _dt_v.fromisoformat(_r_at.replace("Z", "+00:00"))
-                        reminder_at_extracted = _r_at
+                        from datetime import datetime as _dt_v, timedelta as _td_v, timezone as _tz_v
+                        _parsed = _dt_v.fromisoformat(_r_at.replace("Z", "+00:00"))
+                        if _parsed.tzinfo is None:
+                            _parsed = _parsed.replace(tzinfo=_tz_v.utc)
+                        _now_v = _dt_v.now(_tz_v.utc)
+                        _delta = (_parsed - _now_v).total_seconds()
+                        if _delta < -60 and _delta > -86400:
+                            # کمتر از یک روز گذشته — احتمالاً منظور AI همان
+                            # ساعت روز بعد بوده. forward by 1 day.
+                            _parsed = _parsed + _td_v(days=1)
+                            reminder_at_extracted = _parsed.isoformat()
+                            logger.info(
+                                f"reminder_at adjusted +1 day: {_r_at} → {reminder_at_extracted}"
+                            )
+                        elif _delta < -86400:
+                            # خیلی در گذشته — null کن تا default بخورد
+                            logger.debug(
+                                f"reminder_at far in past: {_r_at} — ignored"
+                            )
+                        else:
+                            reminder_at_extracted = _parsed.isoformat()
                     except Exception as _de:
                         logger.debug(f"reminder_at extraction unparseable: {_r_at} ({_de})")
                 _r_rule = data.get("reminder_repeat_rule")

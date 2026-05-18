@@ -2521,10 +2521,20 @@ class NotificationService:
         files = buf.file_items_sorted()
         texts = buf.text_items_sorted()
         total_size_mb = buf.total_size_bytes() / 1024.0 / 1024.0
+        # 🔔 header برای reminder متمایز است
+        _is_rem = getattr(buf, "force_type", None) == "reminder"
+        if _is_rem:
+            _kind = "یادآوری"
+            _emoji = "🔔"
+        elif buf.mode == "task":
+            _kind = "تسک"
+            _emoji = "📦"
+        else:
+            _kind = "پروژه"
+            _emoji = "📦"
         header = (
-            f"📦 *در حال ساخت "
-            + ("تسک" if buf.mode == "task" else "پروژه")
-            + f" ترکیبی* — {buf.total_files()} فایل ({total_size_mb:.2f}MB) + {len(texts)} پیام متنی\n"
+            f"{_emoji} *در حال ساخت {_kind} ترکیبی* — "
+            f"{buf.total_files()} فایل ({total_size_mb:.2f}MB) + {len(texts)} پیام متنی\n"
             "─────────────────"
         )
         lines: List[str] = [header]
@@ -2557,7 +2567,12 @@ class NotificationService:
             lines.append("  _(هنوز آیتمی اضافه نشده)_")
         lines.append("─────────────────")
         if buf.mode == "task" and not buf.watched_id:
-            lines.append("⚠️ پروژهٔ هدف انتخاب نشده — هنگام submit از تو خواسته می‌شود.")
+            # 🔔 (Reminder via Telegram) — reminder ها repo-agnostic هستند،
+            # پس warning پروژه را نشان نده.
+            if getattr(buf, "force_type", None) != "reminder":
+                lines.append("⚠️ پروژهٔ هدف انتخاب نشده — هنگام submit از تو خواسته می‌شود.")
+            else:
+                lines.append("🔔 یادآوری — مستقل از پروژه")
         lines.append("⬇ از دکمه‌های پایین برای ارسال یا لغو استفاده کن.")
         return "\n".join(lines)
 
@@ -2732,7 +2747,9 @@ class NotificationService:
             return await self._compose_submit_project(chat_id_str, buf)
 
         # 🆕 task mode: اگر پروژه انتخاب نشده، picker
-        if not buf.watched_id:
+        # 🔔 (Reminder via Telegram) — برای reminder ها پروژه لازم نیست
+        # (repo-agnostic هستند)، پس این check را skip می‌کنیم.
+        if not buf.watched_id and getattr(buf, "force_type", None) != "reminder":
             # un-mark تا انتخاب پروژه مسدود نشود
             await compose_svc.mark_submitting(chat_id_str, False)
             return await self._compose_pick_project(chat_id_str, buf)
@@ -3313,6 +3330,36 @@ class NotificationService:
 
         # 8) پیام نهایی با PDF + checklist + regen button
         await self._send_task_created_message(new_task, base=base)
+
+        # 🔔 (Reminder via Telegram) — اگر تسک reminder بود، یک پیام
+        # follow-up واضح با زمان firing و قاعدهٔ تکرار ارسال کن تا کاربر
+        # ببیند AI زمان را درست استخراج کرده یا باید snooze کند.
+        if (new_task.get("type") or "").lower() == "reminder":
+            try:
+                _rem_at = new_task.get("reminder_at") or ""
+                _rule = new_task.get("reminder_repeat_rule") or ""
+                _rule_fa = {
+                    "daily": "هر روز",
+                    "weekly": "هر هفته",
+                }.get(_rule, "یک‌بار")
+                _at_fa = "زمان مشخص نشد — پیش‌فرض ۱ ساعت بعد"
+                if _rem_at:
+                    try:
+                        from datetime import datetime as _dt_fa
+                        _dt = _dt_fa.fromisoformat(_rem_at.replace("Z", "+00:00"))
+                        _at_fa = _dt.strftime("%Y-%m-%d %H:%M UTC")
+                    except Exception:
+                        _at_fa = _rem_at[:30]
+                _msg = (
+                    f"🔔 *یادآوری ثبت شد*\n\n"
+                    f"⏰ زمان firing: `{_at_fa}`\n"
+                    f"🔁 تکرار: {_rule_fa}\n\n"
+                    f"اگر زمان درست نیست، در پنل /oversight یا با /index "
+                    f"می‌توانید snooze کنید یا ویرایش نمایید."
+                )
+                await self._telegram().send(_msg, silent=False)
+            except Exception as _re:
+                logger.debug(f"reminder follow-up message failed: {_re}")
 
         # 9) اگر similar matches بود، بعدش پیام informative
         if similar:
