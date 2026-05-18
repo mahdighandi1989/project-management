@@ -47,6 +47,30 @@ from .safety import (
     is_runtime_enabled,
     is_ui_probe_enabled,
 )
+# 🔬 (Bug C6 — Verify v6) export نام‌های جدید
+from .context_builder import (
+    VerifyConfig,
+    VerifyContext,
+    build_verify_context,
+)
+from .code_content_searcher import (
+    extract_identifiers,
+    fetch_file_content,
+    grep_token_in_files,
+    smart_grep_for_ac,
+)
+from .iterative_orchestrator import (
+    ProbeResult,
+    WEIGHTS_BY_PROBE,
+    aggregate_verdicts,
+    iterative_verify_step,
+    _strong_model_judgment,
+)
+from .ac_cache_service import (
+    check_ac_cache,
+    compute_files_checksum,
+    update_ac_cache,
+)
 
 __all__ = [
     "AC_METHODS",
@@ -76,4 +100,20 @@ __all__ = [
     "get_breaker",
     "is_runtime_enabled",
     "is_ui_probe_enabled",
+    # 🔬 verify v6 exports
+    "VerifyConfig",
+    "VerifyContext",
+    "build_verify_context",
+    "extract_identifiers",
+    "fetch_file_content",
+    "grep_token_in_files",
+    "smart_grep_for_ac",
+    "ProbeResult",
+    "WEIGHTS_BY_PROBE",
+    "aggregate_verdicts",
+    "iterative_verify_step",
+    "_strong_model_judgment",
+    "check_ac_cache",
+    "compute_files_checksum",
+    "update_ac_cache",
 ]
