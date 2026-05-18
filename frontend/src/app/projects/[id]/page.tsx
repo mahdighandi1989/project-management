@@ -680,6 +680,13 @@ export default function ProjectDetailPage() {
   const [archivedFields, setArchivedFields] = useState<any[]>([]);
   const [archivedFieldsOpen, setArchivedFieldsOpen] = useState(false);
 
+  // 🆕 (C7v2 Section 6) — toast notification ساده برای feedback پس از load
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const showToast = useCallback((msg: string, ms: number = 4000) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), ms);
+  }, []);
+
   const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
   const [selectedLog, setSelectedLog] = useState<ActivityLog | null>(null);
   const [reports, setReports] = useState<ProjectReport[]>([]);
@@ -927,7 +934,7 @@ export default function ProjectDetailPage() {
   } | null>(null);
   const [oversightExternalCount, setOversightExternalCount] = useState<number>(0);
 
-  // 🔗 (C7 Bridge Phase 3) — fetch تسک از /load-task endpoint
+  // 🔗 (C7 Bridge Phase 3 + C7v2 Section 6) — fetch تسک با toast feedback
   const loadLinkedTask = useCallback(async (taskId: string) => {
     try {
       const res = await fetch(
@@ -944,10 +951,15 @@ export default function ProjectDetailPage() {
       const data = await res.json();
       setLinkedTaskId(taskId);
       setLinkedTaskData(data);
+      // 🆕 (C7v2 Section 6) — toast سبز ۴ ثانیه‌ای
+      const title = data?.task?.title || taskId.slice(0, 12);
+      showToast(
+        `✅ تسک «${title}» متصل شد — هر پیام بعدی شما با کانتکست کامل این تسک به AI ارسال می‌شود`,
+      );
     } catch (e) {
       alert(`خطا در بارگذاری تسک: ${e}`);
     }
-  }, []);
+  }, [showToast]);
 
   // 🔗 (C7 Bridge Phase 3) — fetch لیست تسک‌های پروژه برای panel
   const loadProjectTasksPanel = useCallback(async () => {
@@ -12009,12 +12021,26 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           * ==================================================================== */}
         {activeTab === 'inspector' && (
           <div className="space-y-4">
-            {/* 🔗 (C7 Bridge Phase 3) — کارت اطلاعاتی تسک متصل */}
+            {/* 🆕 (C7v2 Section 6) — Toast notification پس از load */}
+            {toastMessage && (
+              <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-3 bg-green-500 text-white rounded-lg shadow-lg max-w-2xl text-center text-sm animate-in slide-in-from-top-5 fade-in-0">
+                {toastMessage}
+              </div>
+            )}
+            {/* 🔗 (C7 Bridge Phase 3 + C7v2 Section 6) — کارت اطلاعاتی تسک متصل با UX بهبودیافته */}
             {linkedTaskId && linkedTaskData?.task && (
-              <div className="rounded-lg border-2 border-indigo-400 dark:border-indigo-600 bg-indigo-50 dark:bg-indigo-900/20 p-3">
+              <div
+                className="rounded-lg border-2 border-indigo-400 dark:border-indigo-600 bg-indigo-50 dark:bg-indigo-900/20 p-3 animate-in slide-in-from-top-2 fade-in-0 duration-300"
+                title="این تسک از مرکز نظارت به session بازرس ویژه متصل است. system prompt شامل AC، remaining_parts، done_parts، target_files و scan_metadata می‌شود. اگر می‌خواهید chat آزاد باشد، روی «قطع اتصال» کلیک کنید."
+              >
                 <div className="flex items-center justify-between gap-2 mb-2">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="px-2 py-0.5 bg-indigo-600 text-white rounded text-xs">🔗 متصل به تسک</span>
+                    <span
+                      className="px-2 py-0.5 bg-indigo-600 text-white rounded text-xs cursor-help"
+                      title="این تسک از مرکز نظارت به session بازرس ویژه متصل است. system prompt شامل AC، remaining_parts، done_parts، target_files و scan_metadata می‌شود."
+                    >
+                      🔗 متصل به تسک
+                    </span>
                     <span className="font-bold text-indigo-900 dark:text-indigo-100">
                       {linkedTaskData.task.title || 'بدون عنوان'}
                     </span>
@@ -12029,8 +12055,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         url.searchParams.delete('load_task');
                         window.history.replaceState({}, '', url.toString());
                       } catch (e) { /* noop */ }
+                      showToast('🔌 اتصال قطع شد — chat اکنون آزاد است', 3000);
                     }}
-                    title="قطع اتصال تسک از این session — chat آزاد می‌شود"
+                    title="session را آزاد می‌کند. پیام‌های بعدی بدون کانتکست تسک ارسال می‌شوند."
                     className="px-2 py-1 bg-red-500 text-white rounded text-xs hover:bg-red-600"
                   >
                     ❌ قطع اتصال
@@ -12043,6 +12070,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   <span>📋 AC: {(linkedTaskData.acceptance_criteria || []).length}</span>
                   <span>📂 target_files: {(linkedTaskData.target_files || []).length}</span>
                 </div>
+                {/* 🆕 (C7v2 Section 6) — خط راهنمای دائمی برای رفع ابهام */}
+                <p className="mt-2 text-[11px] text-indigo-700 dark:text-indigo-300 italic border-t border-indigo-200 dark:border-indigo-700/50 pt-1.5">
+                  💡 chat اکنون متصل به این تسک است — AC + remaining + history خودکار به مدل ارسال می‌شود
+                </p>
                 {Array.isArray(linkedTaskData.remaining_parts) && linkedTaskData.remaining_parts.length > 0 && (
                   <details className="mt-2 text-xs">
                     <summary className="cursor-pointer text-indigo-700 dark:text-indigo-300">remaining_parts ({linkedTaskData.remaining_parts.length})</summary>
@@ -15114,13 +15145,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     </div>
                   )}
 
-                  {/* راهنما */}
+                  {/* راهنما (C7v2 Section 7 — به‌روزرسانی شده) */}
                   <div className="mt-4 p-3 bg-gray-50 dark:bg-gray-900/30 rounded-lg text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
                     <p className="font-bold text-gray-600 dark:text-gray-300 mb-1">راهنما:</p>
                     <ul className="space-y-1 list-disc pr-4">
-                      <li><strong>📌 دستورات:</strong> قوانین و رفتارهایی که مدل باید دقیقاً رعایت کند</li>
-                      <li><strong>🧠 حافظه:</strong> اطلاعات مهم پروژه مثل معماری، تصمیمات فنی، باگ‌های شناخته‌شده</li>
-                      <li><strong>📚 آموزش:</strong> الگوها و رویکردهای اختصاصی پروژه برای مدل</li>
+                      <li><strong>🧠 حافظه:</strong> واقعیت‌های ثابت پروژه (معماری، تصمیمات فنی) — همیشه در system prompt مدل تزریق می‌شود</li>
+                      <li><strong>📚 آموزش:</strong> الگوها و کانوانشن‌های پروژه — مدل در هر کار به این‌ها مراجعه می‌کند</li>
+                      <li><strong>🔗 اتصال به تسک:</strong> وقتی از مرکز نظارت یک تسک را load می‌کنید، system prompt شامل AC + remaining_parts + history می‌شود</li>
+                      <li><strong>📌 پنل تسک‌های پروژه:</strong> لیست تسک‌های فعال این پروژه از مرکز نظارت — کلیک «ارسال به چت» تا با کانتکست کامل کار کنید</li>
+                      <li><strong>🔄 خودکار:</strong> فیلدهایی با این badge، خودکار از مرکز نظارت سینک شده‌اند — دستی ساخته نشده‌اند</li>
+                      <li><strong>🗄 آرشیو:</strong> فیلدهایی که برای مدت طولانی (&gt;۳۰ روز) استفاده نشده‌اند به آرشیو می‌روند ولی حذف نمی‌شوند</li>
                       <li><strong>🧪 تست زنده:</strong> مدل AI واقعاً فراخوانی شده و تأیید می‌کند فیلد را خوانده</li>
                       <li><strong>🟢 هایلایت سبز:</strong> وقتی مدل در حال استفاده از یک فیلد است، آن فیلد سبز رنگ می‌شود</li>
                       <li><strong>اولویت:</strong> عدد بزرگتر = اولویت بالاتر (اول تزریق می‌شود به پرامپت)</li>
