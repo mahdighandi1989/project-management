@@ -7465,7 +7465,35 @@ AC = «طراحی شیک‌تر باشد»:
 
             for t in pending[:max_runs]:
                 try:
-                    await self.run_task(t.id, model_id=None)
+                    # 🔗 (C7 Bridge Phase 4) — اتصال scheduler به smart-chat
+                    # اگر execution_mode == "auto_via_projects_page" یعنی کاربر
+                    # خواسته که این تسک از طریق inspector smart-chat اجرا شود.
+                    # ping-pong rounds (followup_round > 0) همیشه از طریق
+                    # inspector اجرا می‌شوند چون کانتکست تسک حیاتی است.
+                    _use_inspector = (
+                        t.execution_mode == "auto_via_projects_page"
+                        or (t.followup_round or 0) > 0
+                    )
+                    if _use_inspector:
+                        _inspector_result = await self.execute_task_via_inspector(
+                            t.id,
+                            model_ids=None,
+                            followup_only=((t.followup_round or 0) > 0),
+                        )
+                        if not _inspector_result.get("success"):
+                            # fallback به run_task سنتی
+                            logger.warning(
+                                f"scheduled inspector exec for {t.id} failed: "
+                                f"{_inspector_result.get('error')} — fallback to run_task"
+                            )
+                            await self.run_task(t.id, model_id=None)
+                        else:
+                            logger.info(
+                                f"scheduled inspector exec for {t.id} succeeded "
+                                f"(followup_round={t.followup_round or 0})"
+                            )
+                    else:
+                        await self.run_task(t.id, model_id=None)
                     ran.append(t.id)
                 except Exception as e:
                     logger.warning(f"scheduled run_task {t.id} failed: {e}")

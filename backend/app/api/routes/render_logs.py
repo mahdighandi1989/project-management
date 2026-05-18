@@ -15581,6 +15581,40 @@ _ساخته شده توسط بازرس ویژه (Inspector)_"""
                             f"(done={_done_n}, remaining={_rem_n})"
                         ),
                     })
+
+                    # 🔗 (C7 Bridge Phase 4) — allow_push gate.
+                    # اگر تسک به watched متصل است و watched.allow_push=False،
+                    # یا verdict in (not_done, partial), یک هشدار به کاربر
+                    # برسد که PR ساخته شده ولی verify confidence کافی نیست.
+                    # حذف خودکار PR انجام نمی‌شود (ریسک از دست رفتن کار)؛ فقط
+                    # notify می‌فرستیم تا کاربر دستی بررسی کند.
+                    try:
+                        from ...services.oversight_service import (
+                            get_oversight_service as _get_ovs,
+                        )
+                        _svc = _get_ovs()
+                        _t_obj = next(
+                            (tt for tt in _svc.tasks if tt.id == request.task_id),
+                            None,
+                        )
+                        if _t_obj and _t_obj.watched_id:
+                            _w_obj = _svc._find_watched(_t_obj.watched_id)
+                            if (
+                                _w_obj
+                                and not getattr(_w_obj, "allow_push", False)
+                                and pr_url_final
+                                and _verdict not in ("done",)
+                            ):
+                                yield sse("progress", {
+                                    "step": "allow_push_warning",
+                                    "message": (
+                                        "⚠️ allow_push=false و verify=" + _verdict +
+                                        " — PR ساخته شد ولی توصیه می‌شود قبل از merge "
+                                        "دستی بررسی کنید."
+                                    ),
+                                })
+                    except Exception as _age:
+                        logger.debug(f"allow_push gate check failed: {_age}")
             except Exception as _ve:
                 logger.warning(f"apply-action verify failed: {_ve}")
                 yield sse("verify_complete", {
