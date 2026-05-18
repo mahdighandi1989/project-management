@@ -2049,22 +2049,12 @@ class OversightService:
                             if k == "title" and v and v != _old_title:
                                 _title_changed = True
                     # 🆕 (C5) — اگر title از طریق این endpoint تغییر کرد:
-                    # 1) entry در title_history (source=manual پیش‌فرض)
+                    # 1) entry در title_history (source=manual پیش‌فرض) via _record_title_change
                     # 2) اگر کاربر صریحاً manual_title_override نفرستاد، آن را True کن
                     #    (یعنی این یک manual edit است، AI نباید بعداً override کند)
                     if _title_changed:
                         _src = str(updates.get("_title_change_source") or "manual")
-                        try:
-                            _hist = list(getattr(t, "title_history", None) or [])
-                            _hist.append({
-                                "ts": now_iso(),
-                                "source": _src,
-                                "old_title": _old_title,
-                                "new_title": t.title,
-                            })
-                            t.title_history = _hist[-20:]  # حداکثر 20 آیتم
-                        except Exception:
-                            pass
+                        self._record_title_change(t, _old_title, t.title, _src)
                         if "manual_title_override" not in updates and _src == "manual":
                             t.manual_title_override = True
                     # اگر prompt تغییر کرده، target_files و AC را هم به‌روز کن
@@ -2765,6 +2755,41 @@ class OversightService:
     # 🆕 (C5) — Title management: validator + reassess
     # ====================================================================
 
+    @staticmethod
+    def _record_title_change(
+        task: "OversightTask",
+        old_title: str,
+        new_title: str,
+        source: str,
+        reason: Optional[str] = None,
+    ) -> None:
+        """ثبت یک تغییر عنوان در title_history روی task.
+
+        🆕 (C5 — مرحلهٔ ۶) — تابع متمرکز برای ثبت تاریخچهٔ تغییر عنوان.
+        قبلاً این منطق در ۲ جای جداگانه (update_task و _ai_reassess_title)
+        تکرار شده بود. حالا همگی از این تابع استفاده می‌کنند.
+
+        source: "manual" | "ai_generate" | "verify_reassess" | "regenerate"
+                | "consolidation"
+        """
+        if not new_title or new_title == old_title:
+            return
+        try:
+            entry: Dict[str, Any] = {
+                "ts": now_iso(),
+                "source": str(source or "unknown")[:40],
+                "old_title": str(old_title or "")[:200],
+                "new_title": str(new_title or "")[:200],
+            }
+            if reason:
+                entry["reason"] = str(reason)[:300]
+            _hist = list(getattr(task, "title_history", None) or [])
+            _hist.append(entry)
+            # حداکثر ۲۰ آیتم نگه‌داری (FIFO)
+            task.title_history = _hist[-20:]
+        except Exception as _e:
+            logger.debug(f"_record_title_change failed for {getattr(task, 'id', '?')}: {_e}")
+
     # کلمات generic که اگر تنها token معنادار عنوان باشند، عنوان "نا‌مفهوم" تلقی
     # می‌شود و retry تولید عنوان اتفاق می‌افتد.
     _TITLE_GENERIC_TOKENS = {
@@ -2932,19 +2957,15 @@ class OversightService:
         # validator: اگر AI عنوان بد پیشنهاد داد، نگه نمی‌داریم
         if not self._validate_title_quality(new_title):
             return None
-        # اعمال و ثبت در history
+        # اعمال و ثبت در history via _record_title_change
         async with self._lock:
             _old = task.title
             task.title = new_title[:200]
-            _hist = list(getattr(task, "title_history", None) or [])
-            _hist.append({
-                "ts": now_iso(),
-                "source": triggered_by,
-                "old_title": _old,
-                "new_title": task.title,
-                "reason": str(data.get("reason") or "")[:300],
-            })
-            task.title_history = _hist[-20:]
+            self._record_title_change(
+                task, _old, task.title,
+                source=triggered_by,
+                reason=str(data.get("reason") or "")[:300] or None,
+            )
             task.updated_at = now_iso()
             self._save_tasks()
         return new_title
