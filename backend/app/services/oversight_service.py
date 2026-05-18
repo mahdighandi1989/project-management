@@ -266,6 +266,17 @@ class WatchedProject:
     # {encrypted_blob, expires_at, obtained_at, login_failed_count}
     runtime_storage_state: Optional[Dict[str, Any]] = None
 
+    # 🆕 (C5) — تنظیمات نمایش (pagination, sort, filter, search) برای ۳ تب
+    # ساختار:
+    # {
+    #   "tasks_tab": {page_size, current_page, sort_field, sort_order,
+    #                 filters: {...}, search_query},
+    #   "archive_tab": {...},
+    #   "reports_tab": {...}
+    # }
+    # هر تب مستقل ذخیره می‌شود. cross-device sync.
+    view_preferences: Dict[str, Any] = field(default_factory=dict)
+
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
 
@@ -407,6 +418,17 @@ class OversightTask:
     # backward-compat: تسک‌های قدیمی بدون tags ذخیره شده‌اند، _filter_known_fields
     # هنگام load عبور می‌دهد و این default [] استفاده می‌شود.
     tags: List[str] = field(default_factory=list)
+    # 🆕 (C5) — pin: تسک‌های پین‌شده همیشه بالای لیست. pin در active و archive
+    # مستقل است (تسک معمولاً یا یکی یا دیگری) ولی state ذخیره می‌شود.
+    pinned: bool = False
+    pinned_at: Optional[str] = None
+    # 🆕 (C5) — title management:
+    # title_history: ts, source (manual|ai_generate|verify_reassess|regenerate|consolidation),
+    #               old_title, new_title
+    # manual_title_override: اگر True، AI خودکار عنوان را عوض نمی‌کند
+    #                       (احترام به ویرایش دستی کاربر)
+    title_history: List[Dict[str, Any]] = field(default_factory=list)
+    manual_title_override: bool = False
     merged_into: Optional[str] = None
     merged_from: List[str] = field(default_factory=list)
     merged_from_snapshot: Dict[str, Any] = field(default_factory=dict)
@@ -1985,7 +2007,14 @@ class OversightService:
                         "acceptance_criteria",
                         "verification_status",
                         "archived",  # 🆕 (P3)
+                        # 🆕 (C5) — pin + title management
+                        "pinned",
+                        "manual_title_override",
+                        "tags",
                     }
+                    # 🆕 (C5) — اگر title از updates آمد، title_history را به‌روز کن
+                    _old_title = t.title
+                    _title_changed = False
                     for k, v in updates.items():
                         if k in allowed:
                             setattr(t, k, v)
@@ -1994,6 +2023,33 @@ class OversightService:
                                 t.archived_at = now_iso()
                             elif k == "archived" and not v:
                                 t.archived_at = None
+                            # وقتی pinned true شد، pinned_at ست شود
+                            if k == "pinned" and v:
+                                t.pinned_at = now_iso()
+                            elif k == "pinned" and not v:
+                                t.pinned_at = None
+                            # تشخیص تغییر title برای history
+                            if k == "title" and v and v != _old_title:
+                                _title_changed = True
+                    # 🆕 (C5) — اگر title از طریق این endpoint تغییر کرد:
+                    # 1) entry در title_history (source=manual پیش‌فرض)
+                    # 2) اگر کاربر صریحاً manual_title_override نفرستاد، آن را True کن
+                    #    (یعنی این یک manual edit است، AI نباید بعداً override کند)
+                    if _title_changed:
+                        _src = str(updates.get("_title_change_source") or "manual")
+                        try:
+                            _hist = list(getattr(t, "title_history", None) or [])
+                            _hist.append({
+                                "ts": now_iso(),
+                                "source": _src,
+                                "old_title": _old_title,
+                                "new_title": t.title,
+                            })
+                            t.title_history = _hist[-20:]  # حداکثر 20 آیتم
+                        except Exception:
+                            pass
+                        if "manual_title_override" not in updates and _src == "manual":
+                            t.manual_title_override = True
                     # اگر prompt تغییر کرده، target_files و AC را هم به‌روز کن
                     if "prompt" in updates and updates["prompt"]:
                         if not updates.get("target_files"):
