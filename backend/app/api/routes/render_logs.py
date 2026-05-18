@@ -12,6 +12,7 @@
 """
 
 import json
+import logging
 import os
 import re
 import uuid
@@ -31,6 +32,12 @@ from ...services.render_service import get_render_service, reset_render_service
 from ...models.render_log import RenderLog, RenderService, RenderLogSettings, RenderLogArchive
 
 slog = StructuredLogger(__name__, "RENDER-API")
+
+# 🐛 (C7v2 Section 8 — logger NameError fix) — قبلاً logger در سطح module
+# تعریف نشده بود و helper های جدید (_build_task_context_block, ...) که از
+# logger.warning/info/debug استفاده می‌کنند، در multi-step execution NameError
+# می‌دادند. این تعریف برای دسترسی کل توابع ماژول الزامی است.
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/render", tags=["Render Logs"])
 
@@ -14685,8 +14692,12 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
             async for chunk in event_stream():
                 yield chunk
         except BaseException as e:
+            # 🐛 (C7v2 Section 8) — traceback کامل log شود برای رفع debug
+            # مشکلات multi-step (مثل NameError قبلی). قبلاً فقط آخرین ۵۰۰
+            # کاراکتر می‌رفت که اغلب کافی نبود.
+            _full_tb = traceback.format_exc()
             slog.error(f"[smart-chat] FATAL error in event_stream: {type(e).__name__}: {str(e)[:300]}")
-            slog.error(f"[smart-chat] FATAL traceback: {traceback.format_exc()[-500:]}")
+            slog.error(f"[smart-chat] FATAL traceback (full):\n{_full_tb}")
             try:
                 yield f"event: error\ndata: {json.dumps({'message': f'❌ خطای غیرمنتظره ({type(e).__name__}): {str(e)[:150]}'}, ensure_ascii=False)}\n\n"
                 yield f"event: done\ndata: {json.dumps({'success': False})}\n\n"
