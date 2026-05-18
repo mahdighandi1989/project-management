@@ -3433,9 +3433,11 @@ async def verify_task(
         report.evidence["summary"] = parsed["summary"]
 
     # 🔬 (Bug C6 — Verify v6) integration با iterative_orchestrator + trace.
-    # اگر verify_v6=True (پیش‌فرض)، orchestrator v6 روی AC ها اجرا می‌شود
-    # (نتیجهٔ آن advisory است — مسیر v5 از پیش status_val را ست کرده).
-    # نتایج در report.verify_trace + ac_probe_details ثبت می‌گردد.
+    # اگر verify_v6=True (پیش‌فرض)، orchestrator v6 روی AC ها اجرا می‌شود.
+    # نتایج در report.verify_trace + ac_probe_details ثبت می‌گردد و سپس
+    # یک reconciliation محافظه‌کارانه با thresholds سفت می‌تواند status_val
+    # که از مسیر v5 آمده را upgrade/downgrade کند (وقتی v6 با اعتماد بالا
+    # verdict متفاوتی دارد).
     if verify_v6:
         try:
             from .verify_runtime.context_builder import build_verify_context, VerifyConfig
@@ -3525,6 +3527,139 @@ async def verify_task(
             report.ac_probe_details = ac_probe_details
             report.verify_version = "v6"
             report.config_used = v6_config.to_dict()
+
+            # 🆕 (C6 v6 reconciliation) — v6 verdict ها را با status_val مسیر
+            # v5 تطبیق بده. سیاست محافظه‌کارانه با thresholds سفت:
+            #   - UPGRADE  (not_done/partial → done): v6 done_ratio ≥ 0.8 و
+            #     avg_conf ≥ 0.85 و total ≥ 1
+            #   - DOWNGRADE (done → partial): v6 not_done_ratio ≥ 0.5 و
+            #     avg_conf ≥ 0.85 و total ≥ 2 (داون‌گرید نیاز به شواهد بیشتر دارد)
+            #   - Per-AC sync: هر AC که v6 با conf ≥ 0.85 done گفت، اگر در
+            #     report.remaining_parts بود → به done_parts منتقل شود
+            # نتیجه در report.evidence["v6_reconciliation"] ثبت می‌شود.
+            _v6_concrete = [
+                d for d in ac_probe_details
+                if str(d.get("final_verdict") or "") in ("done", "partial", "not_done")
+            ]
+            _v6_total = len(_v6_concrete)
+            if _v6_total >= 1:
+                _v6_done = sum(1 for d in _v6_concrete if d.get("final_verdict") == "done")
+                _v6_not_done = sum(1 for d in _v6_concrete if d.get("final_verdict") == "not_done")
+                _v6_confs = [
+                    float(d.get("final_confidence") or 0.0) for d in _v6_concrete
+                ]
+                _v6_avg_conf = sum(_v6_confs) / len(_v6_confs) if _v6_confs else 0.0
+                _v6_done_ratio = _v6_done / _v6_total if _v6_total else 0.0
+                _v6_not_done_ratio = _v6_not_done / _v6_total if _v6_total else 0.0
+
+                _reconciliation_actions: List[str] = []
+                _prev_status_val = status_val
+                # نکتهٔ ایمنی: در تسک‌های دارای task_steps_list، چک
+                # all_steps_done در ادامه می‌تواند upgrade شده را برگرداند
+                # (چون step status های فردی از AI parse هنوز ممکن است
+                # not_done باشند). بنابراین aggregate upgrade فقط زمانی
+                # اعمال می‌شود که task_steps_list خالی باشد. مسیر تسک‌های
+                # task_steps همچنان از step_code_verdicts (programmatic
+                # upgrade سنتی) برای reconciliation سطح step بهره می‌برد.
+                _aggregate_reconciliation_allowed = not bool(task_steps_list)
+
+                # UPGRADE
+                if (
+                    _aggregate_reconciliation_allowed
+                    and status_val in (VERIFICATION_NOT_DONE, VERIFICATION_PARTIAL)
+                    and _v6_done_ratio >= 0.8
+                    and _v6_avg_conf >= 0.85
+                ):
+                    status_val = VERIFICATION_DONE
+                    report.status = VERIFICATION_DONE
+                    _reconciliation_actions.append(
+                        f"upgrade {_prev_status_val} → done "
+                        f"(v6: {_v6_done}/{_v6_total} done @ avg_conf={_v6_avg_conf:.2f})"
+                    )
+                    logger.info(
+                        f"verify {task.id}: v6 reconciliation UPGRADED "
+                        f"{_prev_status_val} → done "
+                        f"(done_ratio={_v6_done_ratio:.2f}, avg_conf={_v6_avg_conf:.2f})"
+                    )
+                # DOWNGRADE
+                elif (
+                    _aggregate_reconciliation_allowed
+                    and status_val == VERIFICATION_DONE
+                    and _v6_not_done_ratio >= 0.5
+                    and _v6_avg_conf >= 0.85
+                    and _v6_total >= 2
+                ):
+                    status_val = VERIFICATION_PARTIAL
+                    report.status = VERIFICATION_PARTIAL
+                    _reconciliation_actions.append(
+                        f"downgrade done → partial "
+                        f"(v6: {_v6_not_done}/{_v6_total} not_done @ avg_conf={_v6_avg_conf:.2f})"
+                    )
+                    logger.info(
+                        f"verify {task.id}: v6 reconciliation DOWNGRADED "
+                        f"done → partial "
+                        f"(not_done_ratio={_v6_not_done_ratio:.2f}, avg_conf={_v6_avg_conf:.2f})"
+                    )
+                elif not _aggregate_reconciliation_allowed:
+                    _reconciliation_actions.append(
+                        "aggregate-upgrade-skipped (task_steps present — "
+                        "step_code_verdicts خود کار reconciliation سطح step را انجام می‌دهد)"
+                    )
+
+                # Per-AC sync: انتقال AC های v6-done از remaining → done
+                _moved_to_done: List[str] = []
+                for _det in _v6_concrete:
+                    if _det.get("final_verdict") != "done":
+                        continue
+                    if float(_det.get("final_confidence") or 0.0) < 0.85:
+                        continue
+                    _ac_t = str(_det.get("ac_text") or "").strip()
+                    if len(_ac_t) < 8:
+                        continue
+                    _existing_remaining = list(report.remaining_parts or [])
+                    _new_remaining: List[Any] = []
+                    _matched = False
+                    for _rp in _existing_remaining:
+                        _rp_text = str(_rp).strip()
+                        if _ac_t in _rp_text or (
+                            len(_rp_text) >= 8 and _rp_text in _ac_t
+                        ):
+                            _matched = True
+                            continue
+                        _new_remaining.append(_rp)
+                    if _matched:
+                        report.remaining_parts = _new_remaining
+                        _entry = (
+                            f"✓ {_ac_t[:120]} "
+                            f"(v6: done conf={float(_det.get('final_confidence') or 0.0):.2f})"
+                        )
+                        _existing_done = list(report.done_parts or [])
+                        if _entry not in _existing_done:
+                            _existing_done.append(_entry)
+                            report.done_parts = _existing_done
+                        _moved_to_done.append(_ac_t[:80])
+                if _moved_to_done:
+                    _reconciliation_actions.append(
+                        f"moved {len(_moved_to_done)} AC از remaining → done"
+                    )
+
+                report.evidence["v6_reconciliation"] = {
+                    "v5_status_before": _prev_status_val,
+                    "status_after": status_val,
+                    "v6_total_acs": _v6_total,
+                    "v6_done": _v6_done,
+                    "v6_not_done": _v6_not_done,
+                    "v6_avg_confidence": round(_v6_avg_conf, 3),
+                    "actions": _reconciliation_actions,
+                    "moved_to_done": _moved_to_done[:10],
+                }
+                v6_ctx.append_trace({
+                    "phase": "v6_reconciliation",
+                    "v5_before": _prev_status_val,
+                    "status_after": status_val,
+                    "actions": _reconciliation_actions,
+                })
+                report.verify_trace = list(v6_ctx.trace)
         except Exception as _v6e:
             logger.warning(f"verify_v6 orchestrator failed (graceful fallback to v5): {_v6e}")
             report.verify_version = "v5"
