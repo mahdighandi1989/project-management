@@ -229,6 +229,135 @@ def _ac_text_of(ac: Any) -> str:
     return str(ac).strip() if ac is not None else ""
 
 
+def _jaccard_word_similarity(a: str, b: str) -> float:
+    """🆕 (Verify v7 §D) شباهت Jaccard بر اساس مجموعهٔ کلمات.
+
+    خروجی 0.0..1.0. اگر هر دو خالی → 0.0.
+    """
+    if not a or not b:
+        return 0.0
+    set_a = set(w for w in a.lower().split() if len(w) >= 3)
+    set_b = set(w for w in b.lower().split() if len(w) >= 3)
+    if not set_a or not set_b:
+        return 0.0
+    inter = set_a & set_b
+    union = set_a | set_b
+    return len(inter) / len(union)
+
+
+def _resolve_done_remaining_contradictions_v7(
+    done_parts: List[Any],
+    remaining_parts: List[Any],
+    *,
+    step_code_verdicts: Optional[Dict[int, Dict[str, Any]]] = None,
+    task_steps_list: Optional[List[Dict[str, Any]]] = None,
+    task: Any = None,
+) -> List[Any]:
+    """🆕 (Verify v7 §D) رفع تناقض done ↔ remaining در خروجی AI verifier.
+
+    هر آیتمی که هم در done_parts و هم (مشابهاً) در remaining_parts هست،
+    یک تناقض است. سیاست:
+      - اگر code-aware برای step مرتبط verdict=implemented داده → آیتم
+        از remaining حذف می‌شود (done برنده می‌شود)
+      - اگر probe نامتناسب با task_type باعث false-positive شده →
+        آیتم از remaining حذف می‌شود
+      - در غیر این صورت در remaining می‌ماند
+
+    مقدار آستانهٔ تشخیص تناقض: Jaccard ≥ 0.5 یا substring بزرگ.
+    تمام تصمیم‌ها در logger ثبت می‌شوند.
+    """
+    if not remaining_parts:
+        return list(remaining_parts)
+
+    # مجموعهٔ متن done_parts (lower-case، فقط str)
+    done_texts: List[str] = []
+    for d in (done_parts or []):
+        if isinstance(d, dict):
+            t = str(d.get("text") or d.get("ac") or "")
+        else:
+            t = str(d or "")
+        if t.strip():
+            done_texts.append(t.strip().lower())
+
+    if not done_texts:
+        return list(remaining_parts)
+
+    # اگر step_code_verdicts وجود دارد و verdict implemented است،
+    # تسک‌های مرتبط را به‌عنوان قطعاً done در نظر می‌گیریم
+    code_aware_implemented_texts: List[str] = []
+    if step_code_verdicts and task_steps_list:
+        for s in task_steps_list:
+            sid = s.get("id")
+            try:
+                sid_int = int(sid) if sid is not None else None
+            except Exception:
+                sid_int = None
+            if sid_int is not None:
+                cav = step_code_verdicts.get(sid_int)
+                if cav and cav.get("verdict") == "implemented":
+                    title = (s.get("title") or s.get("scope") or "").strip()
+                    if title:
+                        code_aware_implemented_texts.append(title.lower())
+
+    cleaned_remaining: List[Any] = []
+    removed_log: List[str] = []
+    for r in remaining_parts:
+        if isinstance(r, dict):
+            r_text = str(r.get("text") or r.get("ac") or "")
+        else:
+            r_text = str(r or "")
+        r_lower = r_text.strip().lower()
+        if not r_lower:
+            cleaned_remaining.append(r)
+            continue
+
+        # 1) چک تناقض با done_parts
+        is_in_done = False
+        for d_lower in done_texts:
+            # substring بزرگ (≥30 char)
+            if len(r_lower) >= 30 and r_lower in d_lower:
+                is_in_done = True
+                break
+            if len(d_lower) >= 30 and d_lower in r_lower:
+                is_in_done = True
+                break
+            # Jaccard
+            sim = _jaccard_word_similarity(r_lower, d_lower)
+            if sim >= 0.5:
+                is_in_done = True
+                break
+        if is_in_done:
+            removed_log.append(f"contradict_done: {r_text[:80]}")
+            continue
+
+        # 2) چک code-aware: implemented
+        is_implemented = False
+        for impl_lower in code_aware_implemented_texts:
+            if len(impl_lower) >= 20 and impl_lower in r_lower:
+                is_implemented = True
+                break
+            sim = _jaccard_word_similarity(r_lower, impl_lower)
+            if sim >= 0.5:
+                is_implemented = True
+                break
+        if is_implemented:
+            removed_log.append(f"code_aware_implemented: {r_text[:80]}")
+            continue
+
+        cleaned_remaining.append(r)
+
+    if removed_log:
+        try:
+            logger.info(
+                f"v7 contradiction resolver: removed {len(removed_log)} item(s) "
+                f"from remaining_parts due to done/code-aware match: "
+                f"{'; '.join(removed_log[:5])}"
+            )
+        except Exception:
+            pass
+    return cleaned_remaining
+
+
 def _evaluate_acs_against_files(
     acceptance_criteria: List[Any],
     file_contents: Dict[str, Optional[str]],
@@ -3417,7 +3546,13 @@ async def verify_task(
         run_at=now_iso(),
         status=status_val,
         done_parts=parsed.get("done_parts") or [],
-        remaining_parts=parsed.get("remaining_parts") or [],
+        remaining_parts=_resolve_done_remaining_contradictions_v7(
+            parsed.get("done_parts") or [],
+            parsed.get("remaining_parts") or [],
+            step_code_verdicts=step_code_verdicts,
+            task_steps_list=task_steps_list,
+            task=task,
+        ),
         evidence=parsed.get("evidence") or {},
         next_actions=parsed.get("next_actions") or [],
         confidence_score=float(parsed.get("confidence_score") or 0.0),

@@ -55,6 +55,226 @@ WEIGHTS_BY_PROBE: Dict[str, float] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# 🆕 (Verify v7 — Phase A+B) Task-type-aware probe weighting
+# ---------------------------------------------------------------------------
+#
+# WEIGHTS_BY_PROBE فعلی ثابت است و برای هر نوع تسک یک وزن می‌دهد. اما تسک
+# pure_backend (مثل تغییر SmartChatRequest) با probe ui_interaction روی صفحهٔ
+# UI قابل تست نیست — probe شکست می‌خورد و verdict اشتباه partial می‌شود.
+#
+# Verify v7 یک classifier ساده اضافه می‌کند که از target_files و prompt task
+# نوع تسک را تشخیص می‌دهد، سپس WEIGHTS_BY_TASK_TYPE وزن‌های مناسب را override
+# می‌کند. پیش‌فرض fallback به WEIGHTS_BY_PROBE.
+
+# مقادیر weight برای هر task_type — backward compat با کلیدهای موجود
+WEIGHTS_BY_TASK_TYPE: Dict[str, Dict[str, float]] = {
+    "pure_backend": {
+        "ui_interaction": 0.1,        # تقریباً نادیده — backend در UI دیده نمی‌شود
+        "api_probe": 2.0,
+        "code_aware_basename": 2.5,   # خیلی مهم
+        "content_grep_strong": 3.0,
+        "content_grep_weak": 1.5,
+        "playwright": 0.1,
+        "ai_verifier": 1.0,
+        "vision_frontend": 0.0,
+        "vision_backend": 0.5,
+        "strong_model": 2.5,
+        "test_probe": 1.5,
+    },
+    "pure_frontend": {
+        "ui_interaction": 2.0,
+        "api_probe": 0.3,
+        "code_aware_basename": 1.5,
+        "content_grep_strong": 2.5,
+        "content_grep_weak": 1.5,
+        "playwright": 2.5,
+        "ai_verifier": 1.0,
+        "vision_frontend": 1.5,
+        "vision_backend": 0.0,
+        "strong_model": 2.5,
+        "test_probe": 1.0,
+    },
+    "fullstack": {
+        # متوازن — هیچ probe ای weight 0 ندارد
+        "ui_interaction": 1.5,
+        "api_probe": 1.5,
+        "code_aware_basename": 2.0,
+        "content_grep_strong": 3.0,
+        "content_grep_weak": 1.5,
+        "playwright": 2.0,
+        "ai_verifier": 1.0,
+        "vision_frontend": 1.0,
+        "vision_backend": 0.5,
+        "strong_model": 2.5,
+        "test_probe": 1.5,
+    },
+    "infra": {
+        "ui_interaction": 0.0,
+        "api_probe": 0.5,
+        "code_aware_basename": 3.0,
+        "content_grep_strong": 3.0,
+        "content_grep_weak": 1.5,
+        "playwright": 0.0,
+        "ai_verifier": 1.0,
+        "vision_frontend": 0.0,
+        "vision_backend": 0.0,
+        "strong_model": 2.0,
+        "test_probe": 1.0,
+    },
+    "docs_only": {
+        "ui_interaction": 0.0,
+        "api_probe": 0.0,
+        "code_aware_basename": 3.0,
+        "content_grep_strong": 3.0,
+        "content_grep_weak": 1.5,
+        "playwright": 0.0,
+        "ai_verifier": 0.5,
+        "vision_frontend": 0.0,
+        "vision_backend": 0.0,
+        "strong_model": 1.5,
+        "test_probe": 0.0,
+    },
+    "test_only": {
+        "ui_interaction": 0.3,
+        "api_probe": 0.5,
+        "code_aware_basename": 2.0,
+        "content_grep_strong": 2.5,
+        "content_grep_weak": 1.5,
+        "playwright": 0.5,
+        "ai_verifier": 1.0,
+        "vision_frontend": 0.0,
+        "vision_backend": 0.0,
+        "strong_model": 2.0,
+        "test_probe": 3.0,
+    },
+    # mixed_unknown → از WEIGHTS_BY_PROBE پیش‌فرض استفاده می‌شود
+}
+
+
+def _classify_task_type(task: Any) -> str:
+    """🆕 (Verify v7 §A) تشخیص هوشمند نوع تسک بر اساس target_files + prompt.
+
+    خروجی یکی از: pure_backend, pure_frontend, fullstack, infra,
+                  docs_only, test_only, mixed_unknown
+
+    رویکرد: heuristic سریع بدون فراخوانی AI.
+    """
+    if task is None:
+        return "mixed_unknown"
+
+    target_files = list(getattr(task, "target_files", None) or [])
+    prompt_text = (getattr(task, "prompt", "") or "").lower()
+    title_text = (getattr(task, "title", "") or "").lower()
+
+    # اگر target_files خالی است، از روی prompt حدس بزن
+    if not target_files:
+        # heuristic از روی محتوای prompt
+        has_backend = any(t in prompt_text for t in [
+            "backend/", "endpoint", "fastapi", "api ", "/api/", "sqlalchemy",
+            ".py", "router.post", "router.get", "database", "schema"
+        ])
+        has_frontend = any(t in prompt_text for t in [
+            "frontend/", ".tsx", ".jsx", "react", "component",
+            "next.js", "next.config", "useeffect", "usestate", "tailwind"
+        ])
+        if has_backend and not has_frontend:
+            return "pure_backend"
+        if has_frontend and not has_backend:
+            return "pure_frontend"
+        if has_backend and has_frontend:
+            return "fullstack"
+        return "mixed_unknown"
+
+    # شمارش extension ها
+    backend_count = 0
+    frontend_count = 0
+    infra_count = 0
+    docs_count = 0
+    test_count = 0
+    for fp in target_files:
+        fp_lower = str(fp).lower()
+        # tests first (priority — test_*.py is both backend & test)
+        if (
+            "/test_" in fp_lower
+            or fp_lower.endswith(("_test.py", ".test.tsx", ".test.ts", ".test.jsx", ".test.js", ".spec.ts", ".spec.tsx"))
+            or fp_lower.startswith("tests/")
+            or "/tests/" in fp_lower
+        ):
+            test_count += 1
+            continue
+        # docs
+        if fp_lower.endswith((".md", ".txt", ".rst")):
+            docs_count += 1
+            continue
+        # infra
+        if (
+            fp_lower.endswith((".yml", ".yaml", ".dockerfile", ".toml", ".cfg", ".ini"))
+            or "dockerfile" in fp_lower
+            or ".github/workflows" in fp_lower
+            or fp_lower.endswith(".sh")
+        ):
+            infra_count += 1
+            continue
+        # backend
+        if (
+            fp_lower.endswith(".py")
+            or "/backend/" in fp_lower
+            or fp_lower.startswith("backend/")
+        ):
+            backend_count += 1
+            continue
+        # frontend
+        if (
+            fp_lower.endswith((".tsx", ".ts", ".jsx", ".js", ".css", ".scss", ".vue", ".svelte", ".html"))
+            or "/frontend/" in fp_lower
+            or fp_lower.startswith("frontend/")
+        ):
+            frontend_count += 1
+            continue
+
+    total = backend_count + frontend_count + infra_count + docs_count + test_count
+    if total == 0:
+        return "mixed_unknown"
+
+    # تصمیم با اولویت
+    # 1) اگر docs غالب است (>60%) → docs_only
+    if docs_count / total > 0.6:
+        return "docs_only"
+    # 2) اگر test غالب است (>60%) و backend/frontend کم → test_only
+    if test_count / total > 0.6:
+        return "test_only"
+    # 3) اگر infra غالب است (>60%) → infra
+    if infra_count / total > 0.6:
+        return "infra"
+    # 4) اگر backend و frontend هر دو هستند → fullstack
+    if backend_count > 0 and frontend_count > 0:
+        return "fullstack"
+    # 5) صرفاً backend
+    if backend_count > 0 and frontend_count == 0:
+        return "pure_backend"
+    # 6) صرفاً frontend
+    if frontend_count > 0 and backend_count == 0:
+        return "pure_frontend"
+    return "mixed_unknown"
+
+
+def _get_weights_for_task(task: Any) -> Dict[str, float]:
+    """🆕 (Verify v7 §B) برگرداندن weights مناسب بر اساس نوع تسک.
+
+    اگر task_type در WEIGHTS_BY_TASK_TYPE موجود باشد، آن را برمی‌گرداند
+    (با fallback merge برای probe هایی که در map نیستند، از WEIGHTS_BY_PROBE).
+    در غیر این صورت WEIGHTS_BY_PROBE پیش‌فرض.
+    """
+    task_type = _classify_task_type(task)
+    base = dict(WEIGHTS_BY_PROBE)
+    override = WEIGHTS_BY_TASK_TYPE.get(task_type)
+    if override:
+        base.update(override)
+    return base
+
+
+
 def _get_weight(r: ProbeResult, weights: Optional[Dict[str, float]] = None) -> float:
     """دریافت وزن probe بر اساس نام (یا weights override از config)."""
     w = weights if isinstance(weights, dict) else WEIGHTS_BY_PROBE
@@ -325,16 +545,34 @@ async def iterative_verify_step(
     max_iter = min(max(1, max_iterations), cfg.max_iterations if cfg else 3)
     all_results: List[ProbeResult] = []
 
+    # 🆕 (Verify v7 §A+B) — تشخیص نوع تسک و انتخاب weights مناسب.
+    # اگر کاربر cfg.weights صریح داده باشد، اولویت با آن است؛ در غیر این
+    # صورت از _get_weights_for_task استفاده می‌کنیم.
+    task = getattr(context, "task", None)
+    task_type_v7 = _classify_task_type(task)
+    if cfg and cfg.weights:
+        weights = cfg.weights
+        weights_source = "config_override"
+    else:
+        weights = _get_weights_for_task(task)
+        weights_source = f"task_type:{task_type_v7}"
+    context.append_trace({
+        "phase": "classify_task_type",
+        "task_type": task_type_v7,
+        "weights_source": weights_source,
+        "weights_used": dict(weights),
+    })
+
     # ---- Iteration 1 ----
     iter1_probes = await _run_iteration_1(step, context)
     all_results.extend(iter1_probes)
-    weights = cfg.weights if cfg else None
     agg1 = aggregate_verdicts(iter1_probes, weights=weights)
     context.append_trace({
         "phase": "iteration_1_aggregate",
         "verdict": agg1.verdict,
         "confidence": agg1.confidence,
         "probe_count": len(iter1_probes),
+        "task_type": task_type_v7,
     })
     threshold1 = cfg.iter1_confidence_threshold if cfg else 0.8
     if agg1.confidence >= threshold1:
@@ -342,10 +580,20 @@ async def iterative_verify_step(
             "phase": "finalize",
             "iteration": 1,
             "reason": f"confidence {agg1.confidence:.2f} >= {threshold1}",
+            "task_type": task_type_v7,
         })
+        # 🆕 (Verify v7 §F) — step_summary برای شفافیت
+        _emit_step_summary_v7(
+            context, step, agg1, all_results, weights, task_type_v7,
+            decision_reason=f"iter1 confidence ({agg1.confidence:.2f}) reached threshold ({threshold1})",
+        )
         return agg1, all_results
 
     if max_iter < 2:
+        _emit_step_summary_v7(
+            context, step, agg1, all_results, weights, task_type_v7,
+            decision_reason="max_iter < 2 — returning iter1 result",
+        )
         return agg1, all_results
 
     # ---- Iteration 2 ----
@@ -357,6 +605,7 @@ async def iterative_verify_step(
         "verdict": agg2.verdict,
         "confidence": agg2.confidence,
         "probe_count_new": len(iter2_probes),
+        "task_type": task_type_v7,
     })
     threshold2 = cfg.iter2_confidence_threshold if cfg else 0.7
     if agg2.confidence >= threshold2:
@@ -364,10 +613,19 @@ async def iterative_verify_step(
             "phase": "finalize",
             "iteration": 2,
             "reason": f"confidence {agg2.confidence:.2f} >= {threshold2}",
+            "task_type": task_type_v7,
         })
+        _emit_step_summary_v7(
+            context, step, agg2, all_results, weights, task_type_v7,
+            decision_reason=f"iter2 confidence ({agg2.confidence:.2f}) reached threshold ({threshold2})",
+        )
         return agg2, all_results
 
     if max_iter < 3:
+        _emit_step_summary_v7(
+            context, step, agg2, all_results, weights, task_type_v7,
+            decision_reason="max_iter < 3 — returning iter2 result",
+        )
         return agg2, all_results
 
     # ---- Iteration 3: strong model ----
@@ -379,8 +637,57 @@ async def iterative_verify_step(
         "phase": "iteration_3_strong_model",
         "verdict": agg3.verdict,
         "confidence": agg3.confidence,
+        "task_type": task_type_v7,
     })
+    _emit_step_summary_v7(
+        context, step, agg3, all_results, weights, task_type_v7,
+        decision_reason="iter3 strong_model finalize",
+    )
     return agg3, all_results
+
+
+def _emit_step_summary_v7(
+    context: "VerifyContext",
+    step: Dict[str, Any],
+    final_agg: ProbeResult,
+    all_results: List[ProbeResult],
+    weights: Dict[str, float],
+    task_type: str,
+    *,
+    decision_reason: str,
+) -> None:
+    """🆕 (Verify v7 §F) emit یک خلاصهٔ خواناتر برای هر step در trace.
+
+    شفافیت کامل: چرا verdict آن final شد، کدام probe ها چه وزنی گرفتند،
+    و چه task_type تشخیص داده شد.
+    """
+    step_text = step.get("text", "") if isinstance(step, dict) else str(step)
+    probes_contributed: List[Dict[str, Any]] = []
+    for r in all_results:
+        if not isinstance(r, ProbeResult):
+            continue
+        w = float(weights.get(r.probe_name, 1.0))
+        note = ""
+        if w < 0.3 and r.verdict in ("failed", "not_done"):
+            note = f"low weight ({w}) — probe deprioritized for task_type={task_type}"
+        elif r.error:
+            note = f"error: {r.error[:80]}"
+        probes_contributed.append({
+            "probe": r.probe_name,
+            "verdict": r.verdict,
+            "confidence": r.confidence,
+            "weight_applied": round(w, 2),
+            "note": note,
+        })
+    context.append_trace({
+        "phase": "step_summary",
+        "step_text": str(step_text)[:200],
+        "final_verdict": final_agg.verdict,
+        "final_confidence": final_agg.confidence,
+        "task_type": task_type,
+        "probes_contributed": probes_contributed,
+        "decision_reason": decision_reason,
+    })
 
 
 # ---------------------------------------------------------------------------
