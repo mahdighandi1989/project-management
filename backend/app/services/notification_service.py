@@ -851,6 +851,34 @@ class TelegramChannel(NotificationChannel):
         except Exception as e:
             return {"ok": False, "error": str(e)[:300]}
 
+    async def restore_persistent_keyboard(
+        self, message: str = "🔙 منو", silent: bool = True,
+    ) -> Dict[str, Any]:
+        """🆕 (telegram keyboard persistence fix) — re-attach منوی ثابت پس از
+        عملیات‌هایی که keyboard را remove کرده‌اند (مثل compose submit،
+        compose cancel، یا هر flow ای که با remove_reply_keyboard تمام می‌شود).
+
+        یک پیام کوتاه با reply_markup=PERSISTENT_REPLY_KEYBOARD می‌فرستد تا
+        منو در پایین صفحه به‌صورت دائمی برگردد. silent به‌صورت پیش‌فرض true
+        است تا notification پرسر و صدا نباشد.
+        """
+        if not self.is_configured():
+            return {"ok": False, "error": "not configured"}
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        payload = {
+            "chat_id": self.chat_id,
+            "text": message,
+            "disable_notification": bool(silent),
+            "reply_markup": PERSISTENT_REPLY_KEYBOARD,
+        }
+        try:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json=payload) as r:
+                    return {"ok": r.status == 200}
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:300]}
+
     async def set_webhook(self, webhook_url: str) -> Dict[str, Any]:
         if not self.bot_token:
             return {"ok": False, "error": "TELEGRAM_BOT_TOKEN تنظیم نشده"}
@@ -1976,6 +2004,10 @@ class NotificationService:
                 "✅ همه‌چیز لغو شد." if (had or had_compose) else "هیچ flow فعالی نبود.",
                 silent=True,
             )
+            # 🆕 (keyboard persistence fix) — پس از /cancel، منوی ثابت
+            # را برگردان تا کاربر نیاز نباشد دستی /menu بزند
+            if had_compose:
+                await tg.restore_persistent_keyboard()
             return {"ok": True, "handled": "cancel"}
 
         # 🆕 (Compose Stage 3) — دکمه‌های ReplyKeyboard
@@ -1986,6 +2018,8 @@ class NotificationService:
             if buf is not None:
                 await compose_svc.cancel(chat_id_str)
                 await tg.remove_reply_keyboard("🗑 ساخت تسک ترکیبی لغو شد — همهٔ پیوست‌ها پاک شدند.")
+                # 🆕 (keyboard persistence fix) — restore منوی ثابت
+                await tg.restore_persistent_keyboard()
             else:
                 await tg.send("هیچ compose فعالی نیست.", silent=True)
             return {"ok": True, "handled": "compose_cancelled"}
@@ -2852,6 +2886,8 @@ class NotificationService:
             )
             await compose_svc.cancel(chat_id_str)
             await tg.remove_reply_keyboard("compose پاک شد.")
+            # 🆕 (keyboard persistence fix) — restore منوی ثابت
+            await tg.restore_persistent_keyboard()
             return {"ok": True, "handled": "compose_project_no_creator_state"}
 
         # validate buffer
@@ -3374,6 +3410,15 @@ class NotificationService:
             detail=f"✅ تسک «{(new_task.get('title') or '')[:60]}» ساخته شد",
             result={"task_id": new_task.get("id")},
         )
+
+        # 🆕 (keyboard persistence fix) — پس از پایان موفق compose submit،
+        # منوی ثابت پایین صفحه را برگردان. compose flow با
+        # remove_reply_keyboard آن را حذف کرده بود، و بدون این restore
+        # کاربر مجبور می‌شد دستی /menu بزند.
+        try:
+            await self._telegram().restore_persistent_keyboard()
+        except Exception as _kbe:
+            logger.debug(f"persistent keyboard restore failed: {_kbe}")
 
         return {
             "ok": True,
