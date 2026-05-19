@@ -66,7 +66,30 @@ class Project:
 class SimpleProjectCreator:
     """سازنده ساده پروژه با AI"""
 
-    def __init__(self, workspace: str = "./projects"):
+    def __init__(self, workspace: Optional[str] = None):
+        # 🐛 (creator persistence fix) — قبلاً پیش‌فرض "./projects" بود که
+        # روی Render در /app/projects قرار می‌گرفت — این مسیر ephemeral
+        # است و با هر deploy کاملاً پاک می‌شد. کاربر پروژه‌های ساخته‌شدهٔ
+        # خود را از دست می‌داد. render.yaml یک persistent disk روی
+        # /app/storage mount کرده، پس مسیر پیش‌فرض باید زیر آن باشد.
+        # ENV var SIMPLE_CREATOR_WORKSPACE برای override سفارشی.
+        if workspace is None:
+            workspace = os.environ.get("SIMPLE_CREATOR_WORKSPACE", "")
+            if not workspace:
+                # ترتیب fallback: storage مونت‌شده → relative → /tmp
+                for c in ("./storage/projects", "/app/storage/projects", "./projects", "/tmp/projects"):
+                    try:
+                        p = Path(c)
+                        p.mkdir(parents=True, exist_ok=True)
+                        test = p / ".write_test"
+                        test.write_text("ok", encoding="utf-8")
+                        test.unlink(missing_ok=True)
+                        workspace = c
+                        break
+                    except Exception:
+                        continue
+                if not workspace:
+                    workspace = "/tmp/projects"
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.projects: Dict[str, Project] = {}

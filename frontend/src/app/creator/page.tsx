@@ -371,6 +371,23 @@ export default function CreatorPage() {
       }
       setStructuredPrompt(data);
       setEditablePromptText(data.full_prompt_text || '');
+
+      // 🐛 (vision auto-revert fix) — اگر در این session مدل vision را
+      // موقتاً فعال کرده بودیم (از طریق toggle UI)، حالا که extraction
+      // موفق شد، به حالت قبل برگرد. این کار را قبلاً انجام نمی‌دادیم و
+      // مدل vision فعال می‌ماند. این تنها مسیر شناخته‌شده در creator path
+      // برای temp-activate است؛ بعد از success آن را revert می‌کنیم.
+      if (tempActivatedModel) {
+        try {
+          await fetch(
+            `${API_BASE}/api/oversight/models/${encodeURIComponent(tempActivatedModel)}/temp-revert?trigger=ui-creator-${creatorDraftId}-done`,
+            { method: 'POST' },
+          );
+          setTempActivatedModel(null);
+        } catch (_re) {
+          console.warn('temp-revert failed (non-fatal)', _re);
+        }
+      }
     } catch (e: any) {
       setPreviewError(e.message || 'خطا در ارتباط با سرور');
     } finally {
