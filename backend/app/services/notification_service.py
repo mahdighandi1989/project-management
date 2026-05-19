@@ -4008,6 +4008,8 @@ class NotificationService:
                 )
                 return await self._show_creator_model_picker(chat_id_str)
             # مدل از قبل انتخاب شده — مستقیم به fast-track summary برو
+            # از helper مشترک _show_creator_fast_track_summary استفاده می‌کنیم
+            # تا keyboard و متن دقیقاً مشابه بقیه جاها باشد.
             cdata = existing.get("creator_data", {})
             cdata["idea"] = tmpl["description"]
             cdata["suggested_name"] = f"telegram-{tkey}"
@@ -4018,34 +4020,12 @@ class NotificationService:
             ]
             existing["phase"] = "creator_awaiting_fast_confirm"
             existing["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
-
-            # check GitHub token
-            try:
-                from ..api.routes.simple_projects import _get_github_token_value
-                _gh_token = _get_github_token_value()
-                github_ready = bool(_gh_token and len(_gh_token) > 10)
-            except Exception:
-                github_ready = False
-
-            tech_str = ", ".join(cdata["technologies"]) or "(none)"
-            rows: List[List[Dict[str, str]]] = []
-            if github_ready:
-                rows.append([{"text": "🚀 ساخت + push به GitHub", "callback_data": "creator_quick_create_push"}])
-            rows.append([{"text": "📁 فقط ساخت محلی", "callback_data": "creator_quick_create_local"}])
-            rows.append([{"text": "✏️ ویرایش (نام/نوع/تکنولوژی)", "callback_data": "creator_quick_edit"}])
-            rows.append([{"text": "📝 ویرایش پرامپت", "callback_data": "creator_edit_prompt"}])
-            rows.append([{"text": "🏷 ویرایش نام repo", "callback_data": "creator_edit_repo_name"}])
-            rows.append([{"text": "❌ لغو", "callback_data": "flow:cancel"}])
             await tg.send(
-                f"📋 *قالب «{tmpl['title']}» بارگذاری شد*\n\n"
-                f"  📦 نام پیشنهادی: `{cdata['name']}`\n"
-                f"  📁 نوع: `{cdata['project_type']}`\n"
-                f"  ⚙️ تکنولوژی‌ها: `{tech_str}`\n"
-                f"  💡 توضیحات: {tmpl['description'][:120]}...\n\n"
-                f"یک گزینه را انتخاب کن، یا «✏️ ویرایش» برای تغییر.",
+                f"📋 *قالب «{tmpl['title']}» بارگذاری شد*",
                 silent=True,
-                reply_markup={"inline_keyboard": rows},
             )
+            # نمایش summary با همان helper مشترک
+            await self._show_creator_fast_track_summary(chat_id_str, existing)
             return {"ok": True, "handled": "creator_template_loaded", "template": tkey}
 
         # 🆕 (telegram parity v1) — push دستی پروژهٔ موجود
@@ -4251,6 +4231,29 @@ class NotificationService:
                     silent=True,
                 )
                 return {"ok": True, "handled": "no_model_selected"}
+
+            # 🆕 (telegram parity v1 — bug fix) — اگر کاربر قبل از انتخاب
+            # مدل، /templates زده و یک قالب انتخاب کرده، _pending_template
+            # در cdata کش شده. الان که مدل انتخاب شد، قالب را load کن و به
+            # fast_track summary پرش کن (به‌جای رفتن به creator_awaiting_idea).
+            _pending_tkey = cdata.pop("_pending_template", None)
+            if _pending_tkey and _pending_tkey in self._CREATOR_TEMPLATES:
+                tmpl = self._CREATOR_TEMPLATES[_pending_tkey]
+                cdata["idea"] = tmpl["description"]
+                cdata["suggested_name"] = f"telegram-{_pending_tkey}"
+                cdata["name"] = f"telegram-{_pending_tkey}"
+                cdata["project_type"] = tmpl["project_type"]
+                cdata["technologies"] = [
+                    t.strip() for t in tmpl["technologies"].split(",") if t.strip()
+                ]
+                state["phase"] = "creator_awaiting_fast_confirm"
+                state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+                await tg.send(
+                    f"✅ *{len(sel)} مدل انتخاب شد* — قالب «{tmpl['title']}» اعمال می‌شود",
+                    silent=True,
+                )
+                return await self._show_creator_fast_track_summary(chat_id_str, state)
+
             # transition به phase بعدی: awaiting_idea
             state["phase"] = "creator_awaiting_idea"
             state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
