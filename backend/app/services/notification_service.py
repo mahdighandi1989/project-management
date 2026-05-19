@@ -2056,6 +2056,14 @@ class NotificationService:
         if text in ("/new_project", "/create_project"):
             return await self._start_new_project_flow(chat_id_str)
 
+        # 🆕 ——— /templates — قالب‌های نمونه برای creator ———
+        if text in ("/templates", "/template"):
+            return await self._show_creator_templates(chat_id_str)
+
+        # 🆕 ——— /my_projects — لیست پروژه‌های ساخته‌شدهٔ creator ———
+        if text in ("/my_projects", "/projects"):
+            return await self._list_my_creator_projects(chat_id_str)
+
         # ——— state-aware ———
         state = _chat_state.get(chat_id_str)
         if state and state.get("phase") == "awaiting_idea":
@@ -2088,6 +2096,12 @@ class NotificationService:
         # 🆕 (Creator v2) phase awaiting_custom_name — text کاربر = نام دلخواه
         if state and state.get("phase") == "creator_awaiting_custom_name":
             return await self._receive_creator_custom_name(chat_id_str, state, text)
+        # 🆕 (telegram parity v1) — phase ویرایش نام repo
+        if state and state.get("phase") == "creator_awaiting_repo_name":
+            return await self._receive_creator_repo_name(chat_id_str, state, text)
+        # 🆕 (telegram parity v1) — phase ویرایش پرامپت
+        if state and state.get("phase") == "creator_awaiting_prompt_edit":
+            return await self._receive_creator_prompt_edit(chat_id_str, state, text)
         # 🆕 phase awaiting_type: کاربر باید دکمهٔ inline کلیک کند، نه متن
         if state and state.get("phase") == "creator_awaiting_type":
             tg = self._telegram()
@@ -2116,6 +2130,8 @@ class NotificationService:
                 "• /new\\_project یا /create\\_project — *🚀 ساخت پروژهٔ جدید* (از صفر، با push به GitHub)\n"
                 "• /new\\_task یا /new\\_idea — ثبت تسک جدید با انتخاب پروژه\n"
                 "• /reminder یا /remind — 🔔 ثبت یادآوری (با متن یا صوت/فایل، زمان از متن استخراج می‌شود)\n"
+                "• /templates — 📋 ۶ قالب نمونه برای ساخت سریع پروژه\n"
+                "• /my\\_projects — 📦 لیست پروژه‌های ساخته‌شدهٔ شما (با push و حذف)\n"
                 "• /codex — 📚 شناسنامهٔ پروژه (مشاهده یا ساخت با AI)\n"
                 "• /usage یا /balance — 💰 مصرف توکن AI و موجودی provider ها\n"
                 "• /menu — منوی دسترسی سریع\n"
@@ -3232,6 +3248,9 @@ class NotificationService:
             "callback_data": "creator_quick_create_local",
         }])
         rows.append([{"text": "✏️ ویرایش (نام/نوع/تکنولوژی)", "callback_data": "creator_quick_edit"}])
+        # 🆕 (telegram parity v1) — دو دکمهٔ ویرایش جدید
+        rows.append([{"text": "📝 ویرایش پرامپت", "callback_data": "creator_edit_prompt"}])
+        rows.append([{"text": "🏷 ویرایش نام repo", "callback_data": "creator_edit_repo_name"}])
         rows.append([{"text": "❌ لغو", "callback_data": "flow:cancel"}])
 
         summary_msg = (
@@ -3963,6 +3982,176 @@ class NotificationService:
                 reply_markup=kb,
             )
             return {"ok": True, "handled": "use_suggested_name"}
+
+        # 🆕 (telegram parity v1) — انتخاب template از /templates
+        if data.startswith("creator_template:"):
+            tkey = data.split(":", 1)[1]
+            tmpl = self._CREATOR_TEMPLATES.get(tkey)
+            if not tmpl:
+                await tg.send("⚠️ قالب نامعتبر.", silent=True)
+                return {"ok": True, "handled": "template_invalid"}
+            # ابتدا کاربر باید مدل انتخاب کرده باشد. اگر state قبلی creator
+            # نیست، یک creator state تازه شروع کن
+            existing = _chat_state.get(chat_id_str)
+            if not existing or not existing.get("creator_data", {}).get("model_ids"):
+                # کاربر هنوز مدل انتخاب نکرده — قبل از template به مدل بفرستش
+                # ولی template data را cache کن
+                _chat_state[chat_id_str] = {
+                    "phase": "creator_awaiting_model_choice",
+                    "creator_data": {"model_ids": [], "_pending_template": tkey},
+                    "expires_at": _now_epoch() + _STATE_TTL_SECONDS,
+                }
+                await tg.send(
+                    f"🔖 قالب «{tmpl['title']}» انتخاب شد. "
+                    f"اول مدل AI را انتخاب کن، سپس قالب پر می‌شود.",
+                    silent=True,
+                )
+                return await self._show_creator_model_picker(chat_id_str)
+            # مدل از قبل انتخاب شده — مستقیم به fast-track summary برو
+            cdata = existing.get("creator_data", {})
+            cdata["idea"] = tmpl["description"]
+            cdata["suggested_name"] = f"telegram-{tkey}"
+            cdata["name"] = f"telegram-{tkey}"
+            cdata["project_type"] = tmpl["project_type"]
+            cdata["technologies"] = [
+                t.strip() for t in tmpl["technologies"].split(",") if t.strip()
+            ]
+            existing["phase"] = "creator_awaiting_fast_confirm"
+            existing["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+
+            # check GitHub token
+            try:
+                from ..api.routes.simple_projects import _get_github_token_value
+                _gh_token = _get_github_token_value()
+                github_ready = bool(_gh_token and len(_gh_token) > 10)
+            except Exception:
+                github_ready = False
+
+            tech_str = ", ".join(cdata["technologies"]) or "(none)"
+            rows: List[List[Dict[str, str]]] = []
+            if github_ready:
+                rows.append([{"text": "🚀 ساخت + push به GitHub", "callback_data": "creator_quick_create_push"}])
+            rows.append([{"text": "📁 فقط ساخت محلی", "callback_data": "creator_quick_create_local"}])
+            rows.append([{"text": "✏️ ویرایش (نام/نوع/تکنولوژی)", "callback_data": "creator_quick_edit"}])
+            rows.append([{"text": "📝 ویرایش پرامپت", "callback_data": "creator_edit_prompt"}])
+            rows.append([{"text": "🏷 ویرایش نام repo", "callback_data": "creator_edit_repo_name"}])
+            rows.append([{"text": "❌ لغو", "callback_data": "flow:cancel"}])
+            await tg.send(
+                f"📋 *قالب «{tmpl['title']}» بارگذاری شد*\n\n"
+                f"  📦 نام پیشنهادی: `{cdata['name']}`\n"
+                f"  📁 نوع: `{cdata['project_type']}`\n"
+                f"  ⚙️ تکنولوژی‌ها: `{tech_str}`\n"
+                f"  💡 توضیحات: {tmpl['description'][:120]}...\n\n"
+                f"یک گزینه را انتخاب کن، یا «✏️ ویرایش» برای تغییر.",
+                silent=True,
+                reply_markup={"inline_keyboard": rows},
+            )
+            return {"ok": True, "handled": "creator_template_loaded", "template": tkey}
+
+        # 🆕 (telegram parity v1) — push دستی پروژهٔ موجود
+        if data.startswith("creator_push_project:"):
+            pid = data.split(":", 1)[1]
+            try:
+                from ..api.routes.simple_projects import push_to_github as _push_endpoint, PushToGitHubRequest
+                await tg.send(f"⏳ در حال push پروژه `{pid[:12]}...` به GitHub...", silent=True)
+                push_result = await _push_endpoint(pid, PushToGitHubRequest(private=True))
+                if push_result.get("success"):
+                    url = push_result.get("repo_url") or "(نامشخص)"
+                    await tg.send(
+                        f"✅ پروژه به GitHub push شد\n🔗 {url}\n"
+                        f"📦 {push_result.get('uploaded', 0)} فایل",
+                        silent=False,
+                    )
+                else:
+                    err = push_result.get("primary_error") or push_result.get("error") or "ناشناخته"
+                    await tg.send(f"❌ push ناموفق: {str(err)[:200]}", silent=False)
+            except Exception as pe:
+                await tg.send(f"❌ خطا: {str(pe)[:200]}", silent=False)
+            return {"ok": True, "handled": "creator_manual_push_done", "project_id": pid}
+
+        # 🆕 (telegram parity v1) — حذف پروژهٔ creator
+        if data.startswith("creator_delete_project:"):
+            pid = data.split(":", 1)[1]
+            try:
+                from .simple_creator import get_simple_creator
+                creator = get_simple_creator()
+                if hasattr(creator, "delete_project"):
+                    creator.delete_project(pid)
+                else:
+                    # fallback: remove from dict
+                    if pid in (getattr(creator, "projects", {}) or {}):
+                        del creator.projects[pid]
+                await tg.send(f"🗑 پروژه `{pid[:12]}...` حذف شد.", silent=True)
+            except Exception as de:
+                await tg.send(f"❌ خطا در حذف: {str(de)[:200]}", silent=False)
+            return {"ok": True, "handled": "creator_project_deleted", "project_id": pid}
+
+        # 🆕 (telegram parity v1) — ویرایش نام repo قبل از push
+        if data == "creator_edit_repo_name":
+            state = _chat_state.get(chat_id_str)
+            if not state or state.get("phase") != "creator_awaiting_fast_confirm":
+                await tg.send("⚠️ flow منقضی شده.", silent=True)
+                return {"ok": True, "handled": "edit_repo_name_expired"}
+            state["phase"] = "creator_awaiting_repo_name"
+            state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+            current_name = state.get("creator_data", {}).get("name", "")
+            await tg.send(
+                f"🏷 *ویرایش نام repo*\n\n"
+                f"نام فعلی: `{current_name}`\n\n"
+                f"یک نام جدید بنویس (انگلیسی، 3+ کاراکتر، a-z A-Z 0-9 - _).\n"
+                f"یا `/skip` بزن تا همین نام استفاده شود.",
+                silent=True,
+            )
+            return {"ok": True, "handled": "creator_repo_name_prompt"}
+
+        # 🆕 (telegram parity v1) — ویرایش پرامپت قبل از ساخت
+        if data == "creator_edit_prompt":
+            state = _chat_state.get(chat_id_str)
+            if not state or state.get("phase") != "creator_awaiting_fast_confirm":
+                await tg.send("⚠️ flow منقضی شده.", silent=True)
+                return {"ok": True, "handled": "edit_prompt_expired"}
+            cdata = state.get("creator_data", {})
+            await tg.send(
+                "⏳ در حال تولید پرامپت برای ویرایش...",
+                silent=True,
+            )
+            # تولید پرامپت با idea-to-prompt
+            try:
+                from ..api.routes.simple_projects import (
+                    idea_to_prompt_preview, IdeaToPromptRequest,
+                )
+                req = IdeaToPromptRequest(
+                    idea=cdata.get("idea", "")[:8000],
+                    name=cdata.get("name", "my-project"),
+                    project_type=cdata.get("project_type", "python"),
+                    technologies=cdata.get("technologies") or [],
+                    model_ids=cdata.get("model_ids") or [],
+                    upload_session_ids=None,
+                )
+                preview = await idea_to_prompt_preview(req)
+                full_prompt = (preview or {}).get("full_prompt_text", "") or ""
+                if not full_prompt:
+                    await tg.send("❌ تولید پرامپت ناموفق بود.", silent=False)
+                    return {"ok": True, "handled": "edit_prompt_gen_failed"}
+                cdata["structured_prompt"] = preview
+                state["phase"] = "creator_awaiting_prompt_edit"
+                state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+                # ارسال متن پرامپت در chunks (Telegram message limit ~4096)
+                chunk_size = 3500
+                chunks = [full_prompt[i:i+chunk_size] for i in range(0, len(full_prompt), chunk_size)]
+                await tg.send(
+                    f"📝 *پرامپت تولیدشده — {len(full_prompt)} کاراکتر در {len(chunks)} بخش*\n\n"
+                    f"برای ویرایش، متن جایگزین را در یک پیام reply کن.\n"
+                    f"اگر می‌خواهی همین متن استفاده شود، `/skip` بزن.",
+                    silent=True,
+                )
+                for i, ch in enumerate(chunks, 1):
+                    await tg.send(f"بخش {i}/{len(chunks)}:\n```\n{ch}\n```", silent=True)
+                return {"ok": True, "handled": "creator_prompt_displayed_for_edit", "chunks": len(chunks)}
+            except Exception as ge:
+                logger.warning(f"creator edit-prompt gen failed: {ge}")
+                await tg.send(f"❌ خطا در تولید پرامپت: {str(ge)[:200]}", silent=False)
+                return {"ok": False, "handled": "edit_prompt_error"}
 
         # 🆕 (telegram creator fast-track) — handler های مسیر سریع که پس از
         # voice extraction نمایش داده می‌شوند. هر سه بر state دارای phase
@@ -5923,6 +6112,149 @@ class NotificationService:
     # 🆕 (Creator) /new_project flow — ساخت پروژه از تلگرام
     # -----------------------------------------------------------------------
 
+    # ====================================================================
+    # 🆕 (parity v1) — /templates و /my_projects
+    # ====================================================================
+
+    # ۶ قالب نمونه — همان مجموعه‌ای که در web /creator وجود دارد
+    _CREATOR_TEMPLATES: Dict[str, Dict[str, str]] = {
+        "python": {
+            "title": "🐍 Python CLI",
+            "description": "یک ابزار خط فرمان ساده برای پردازش فایل‌های CSV و تولید گزارش متنی.",
+            "technologies": "pandas, click",
+            "project_type": "python",
+        },
+        "fastapi": {
+            "title": "⚡ FastAPI با JWT",
+            "description": "یک API برای مدیریت کاربران شامل ثبت‌نام، ورود با JWT و CRUD کامل.",
+            "technologies": "PostgreSQL, JWT, SQLAlchemy",
+            "project_type": "fastapi",
+        },
+        "nextjs": {
+            "title": "▲ Next.js بلاگ",
+            "description": "یک وب‌اپ بلاگ مدرن با احراز هویت، صفحات داینامیک و پنل ادمین.",
+            "technologies": "TypeScript, Tailwind, Prisma",
+            "project_type": "nextjs",
+        },
+        "react": {
+            "title": "⚛️ React داشبورد",
+            "description": "یک داشبورد مدیریت تسک با Drag & Drop و فیلترهای پیشرفته.",
+            "technologies": "TypeScript, Tailwind, Zustand",
+            "project_type": "react",
+        },
+        "flask": {
+            "title": "🌶️ Flask لیست کارها",
+            "description": "یک وب‌اپ ساده برای مدیریت لیست کارها با احراز هویت.",
+            "technologies": "SQLite, Jinja2",
+            "project_type": "flask",
+        },
+        "node": {
+            "title": "🟢 Node.js Express",
+            "description": "یک سرور Express برای آپلود فایل و تولید thumbnail تصاویر.",
+            "technologies": "Express, Multer, Sharp",
+            "project_type": "node",
+        },
+    }
+
+    async def _show_creator_templates(self, chat_id_str: str) -> Dict[str, Any]:
+        """📋 نمایش ۶ قالب نمونه به‌صورت inline keyboard."""
+        tg = self._telegram()
+        rows: List[List[Dict[str, str]]] = []
+        for key, tmpl in self._CREATOR_TEMPLATES.items():
+            rows.append([{
+                "text": tmpl["title"],
+                "callback_data": f"creator_template:{key}",
+            }])
+        rows.append([{"text": "❌ لغو", "callback_data": "flow:cancel"}])
+        await tg.send(
+            "📋 *قالب‌های نمونه*\n\n"
+            "یک قالب را انتخاب کن تا ایده + نوع + تکنولوژی‌ها از پیش پر شوند. "
+            "بعد فقط نام پروژه را تأیید می‌کنی و کار تمام است.",
+            silent=True,
+            reply_markup={"inline_keyboard": rows},
+        )
+        return {"ok": True, "handled": "creator_templates_shown", "count": len(rows) - 1}
+
+    async def _list_my_creator_projects(self, chat_id_str: str) -> Dict[str, Any]:
+        """📦 لیست پروژه‌های ساخته‌شدهٔ creator با دکمه‌های push/details."""
+        tg = self._telegram()
+        try:
+            from .simple_creator import get_simple_creator
+            creator = get_simple_creator()
+            projects = list(creator.projects.values()) if hasattr(creator, "projects") else []
+        except Exception as e:
+            await tg.send(f"❌ خطا در بارگذاری پروژه‌ها: {e}", silent=True)
+            return {"ok": False, "handled": "my_projects_load_failed"}
+
+        if not projects:
+            await tg.send(
+                "📦 هنوز پروژه‌ای نساخته‌اید.\n\n"
+                "برای ساخت پروژهٔ جدید، `/new_project` یا `/templates` بزن.",
+                silent=True,
+            )
+            return {"ok": True, "handled": "my_projects_empty"}
+
+        # sort by created_at descending — جدیدترین ابتدا
+        try:
+            projects_sorted = sorted(
+                projects,
+                key=lambda p: getattr(p, "created_at", "") or "",
+                reverse=True,
+            )
+        except Exception:
+            projects_sorted = projects
+
+        # heading
+        await tg.send(
+            f"📦 *پروژه‌های ساخته‌شدهٔ شما ({len(projects_sorted)})*\n\n"
+            f"جدیدترین در بالا — حداکثر ۲۰ نمایش داده می‌شود.",
+            silent=True,
+        )
+
+        # هر پروژه یک پیام جدا با دکمه‌های action
+        for p in projects_sorted[:20]:
+            try:
+                pid = getattr(p, "id", "?")
+                pname = getattr(p, "name", "?")
+                ptype = getattr(p, "project_type", "?")
+                created = (getattr(p, "created_at", "") or "")[:19]
+                files_count = len(getattr(p, "files", None) or [])
+                github_url = getattr(p, "github_url", "") or getattr(p, "github_repo_url", "") or ""
+
+                lines = [
+                    f"📦 *{pname}*",
+                    f"  📁 نوع: `{ptype}`",
+                    f"  📄 فایل: `{files_count}`",
+                ]
+                if created:
+                    lines.append(f"  🕐 ایجاد: `{created}`")
+                if github_url:
+                    lines.append(f"  🔗 GitHub: {github_url}")
+
+                rows: List[List[Dict[str, str]]] = []
+                # دکمهٔ push اگر هنوز push نشده
+                if not github_url:
+                    rows.append([{
+                        "text": "🚀 push به GitHub",
+                        "callback_data": f"creator_push_project:{pid}",
+                    }])
+                else:
+                    rows.append([{"text": "🔗 باز کردن repo", "url": github_url}])
+                rows.append([
+                    {"text": "🗑 حذف", "callback_data": f"creator_delete_project:{pid}"},
+                ])
+
+                await tg.send(
+                    "\n".join(lines),
+                    silent=True,
+                    reply_markup={"inline_keyboard": rows},
+                )
+            except Exception as _pe:
+                logger.debug(f"my_projects: skip project: {_pe}")
+                continue
+
+        return {"ok": True, "handled": "my_projects_listed", "count": len(projects_sorted)}
+
     async def _start_new_project_flow(self, chat_id_str: str) -> Dict[str, Any]:
         """🆕 مرحلهٔ ۰ flow جدید: ابتدا انتخاب مدل (اجباری)."""
         _chat_state[chat_id_str] = {
@@ -6267,6 +6599,104 @@ class NotificationService:
         )
         return {"ok": True, "handled": "custom_name_ok"}
 
+    async def _receive_creator_repo_name(
+        self, chat_id_str: str, state: Dict[str, Any], text: str,
+    ) -> Dict[str, Any]:
+        """🆕 (telegram parity v1) phase awaiting_repo_name — کاربر نام repo را تایپ کرده."""
+        import re as _re_rn
+        tg = self._telegram()
+        cdata = state.setdefault("creator_data", {})
+        text_t = (text or "").strip()
+        if text_t == "/skip":
+            # نگه‌داری نام فعلی
+            current = cdata.get("name", "")
+            await tg.send(f"✓ همان نام `{current}` استفاده می‌شود.", silent=True)
+        else:
+            # validate GitHub repo name pattern
+            if not _re_rn.match(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,99}$", text_t):
+                await tg.send(
+                    "⚠️ نام repo نامعتبر. باید با حرف/عدد شروع شود و فقط "
+                    "a-z A-Z 0-9 _ . - بپذیرد (تا ۱۰۰ کاراکتر).\n"
+                    "دوباره بنویس یا `/skip` بزن.",
+                    silent=True,
+                )
+                return {"ok": True, "handled": "repo_name_invalid"}
+            cdata["name"] = text_t
+            cdata["custom_repo_name"] = text_t
+            await tg.send(f"✓ نام repo ست شد: `{text_t}`", silent=True)
+
+        # برگشت به fast-track summary
+        return await self._show_creator_fast_track_summary(chat_id_str, state)
+
+    async def _receive_creator_prompt_edit(
+        self, chat_id_str: str, state: Dict[str, Any], text: str,
+    ) -> Dict[str, Any]:
+        """🆕 (telegram parity v1) phase awaiting_prompt_edit — کاربر پرامپت ویرایش‌شده فرستاد."""
+        tg = self._telegram()
+        cdata = state.setdefault("creator_data", {})
+        text_t = (text or "").strip()
+        if text_t == "/skip":
+            await tg.send("✓ پرامپت اصلی استفاده می‌شود.", silent=True)
+        else:
+            if len(text_t) < 50:
+                await tg.send(
+                    "⚠️ متن خیلی کوتاه است (حداقل ۵۰ کاراکتر).\n"
+                    "متن کامل پرامپت ویرایش‌شده را بفرست، یا `/skip` بزن.",
+                    silent=True,
+                )
+                return {"ok": True, "handled": "prompt_edit_too_short"}
+            # ذخیره در structured_prompt برای استفاده در creator
+            sp = cdata.get("structured_prompt") or {}
+            if not isinstance(sp, dict):
+                sp = {}
+            sp["full_prompt_text"] = text_t
+            cdata["structured_prompt"] = sp
+            cdata["prompt_edited"] = True
+            await tg.send(f"✓ پرامپت ویرایش شد ({len(text_t)} کاراکتر).", silent=True)
+
+        # برگشت به fast-track summary
+        return await self._show_creator_fast_track_summary(chat_id_str, state)
+
+    async def _show_creator_fast_track_summary(
+        self, chat_id_str: str, state: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """🆕 (telegram parity v1) helper — نمایش (یا re-نمایش) summary fast-track."""
+        tg = self._telegram()
+        cdata = state.get("creator_data", {}) or {}
+        try:
+            from ..api.routes.simple_projects import _get_github_token_value
+            _gh_token = _get_github_token_value()
+            github_ready = bool(_gh_token and len(_gh_token) > 10)
+        except Exception:
+            github_ready = False
+
+        # برگشت phase به fast_confirm
+        state["phase"] = "creator_awaiting_fast_confirm"
+        state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+
+        tech_str = ", ".join(cdata.get("technologies") or []) or "(none)"
+        edited_marker = " (ویرایش‌شده ✏️)" if cdata.get("prompt_edited") else ""
+        rows: List[List[Dict[str, str]]] = []
+        if github_ready:
+            rows.append([{"text": "🚀 ساخت + push به GitHub", "callback_data": "creator_quick_create_push"}])
+        rows.append([{"text": "📁 فقط ساخت محلی", "callback_data": "creator_quick_create_local"}])
+        rows.append([{"text": "✏️ ویرایش (نام/نوع/تکنولوژی)", "callback_data": "creator_quick_edit"}])
+        rows.append([{"text": f"📝 ویرایش پرامپت{edited_marker}", "callback_data": "creator_edit_prompt"}])
+        rows.append([{"text": "🏷 ویرایش نام repo", "callback_data": "creator_edit_repo_name"}])
+        rows.append([{"text": "❌ لغو", "callback_data": "flow:cancel"}])
+
+        await tg.send(
+            f"📋 *خلاصهٔ پروژه*\n\n"
+            f"  📦 نام: `{cdata.get('name', '?')}`\n"
+            f"  📁 نوع: `{cdata.get('project_type', 'python')}`\n"
+            f"  ⚙️ تکنولوژی‌ها: `{tech_str}`\n"
+            f"  📝 پرامپت: {('سفارشی (ویرایش‌شده)' if cdata.get('prompt_edited') else 'استاندارد')}\n\n"
+            f"یک گزینه را انتخاب کن.",
+            silent=True,
+            reply_markup={"inline_keyboard": rows},
+        )
+        return {"ok": True, "handled": "fast_track_summary_shown"}
+
     async def _receive_creator_idea(
         self, chat_id_str: str, state: Dict[str, Any], text: str,
     ) -> Dict[str, Any]:
@@ -6462,7 +6892,16 @@ class NotificationService:
                 return {"ok": True, "handled": "creator_local_only_done", "project_id": project_id}
 
             # push to GitHub (always private)
-            push_result = await push_to_github(project_id, PushToGitHubRequest(private=True))
+            # 🆕 (telegram parity v1) — اگر custom_repo_name در state ست شده،
+            # آن را به push بفرست تا کاربر نام دلخواه repo داشته باشد.
+            _custom_repo = cdata.get("custom_repo_name") or None
+            push_result = await push_to_github(
+                project_id,
+                PushToGitHubRequest(
+                    private=True,
+                    repo_name=_custom_repo if _custom_repo else None,
+                ),
+            )
             if not push_result.get("success"):
                 # failure with detail
                 err = push_result.get("primary_error", "unknown")
