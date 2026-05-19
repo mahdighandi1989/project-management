@@ -3011,11 +3011,67 @@ class NotificationService:
                     "handled": "compose_project_extraction_timeout",
                     "session_ids": session_ids[:3],
                 }
+            except ValueError as _ve_proj:
+                # 🐛 (creator vision fix) — مسیر task این exception را با
+                # blocked_payload می‌گیرد و یک toggle UI به کاربر نشان می‌دهد
+                # تا مدل vision را موقتاً فعال کند. مسیر project قبلاً این را
+                # silently به Exception generic تبدیل می‌کرد و کاربر هیچ
+                # نمی‌دید. الان همان pattern مسیر task را پیاده می‌کنیم.
+                blocked = getattr(_ve_proj, "blocked_payload", None)
+                if blocked:
+                    reason = blocked.get("reason") or "blocked_no_vision_model"
+                    logger.info(
+                        f"compose project: blocked_no_vision (reason={reason}) "
+                        f"→ showing vision toggle UI"
+                    )
+                    if reason == "all_extractions_failed":
+                        failed_files = blocked.get("failed_files") or []
+                        files_list = "\n".join(f"  • {n}" for n in failed_files[:10]) or "  • (نام در دسترس نیست)"
+                        msg = (
+                            "❌ *استخراج هیچ‌یک از فایل‌های پیوست موفق نبود.*\n\n"
+                            f"فایل‌ها:\n{files_list}\n\n"
+                            "از آنجا که متن همراه هم نفرستادید، نمی‌توانم پروژه "
+                            "بسازم.\n\n"
+                            "🔧 *راه‌حل‌ها:*\n"
+                            "  1) از `/models` یک مدل بصری دیگر "
+                            "(مثلاً `gemini-2.5-pro`) را به‌عنوان default "
+                            "extraction انتخاب کنید\n"
+                            "  2) متن ایده را به‌صورت تایپی همراه فایل "
+                            "بفرستید\n"
+                            "  3) یا فایل صوتی را با کیفیت بالاتر دوباره "
+                            "بفرستید"
+                        )
+                        await tg.send(msg, silent=False)
+                    else:
+                        await self._send_compose_vision_toggle(chat_id_str, buf, blocked)
+                    await compose_svc.mark_submitting(chat_id_str, False)
+                    await tg.restore_persistent_keyboard()
+                    return {
+                        "ok": True,
+                        "handled": "compose_project_blocked_no_vision",
+                        "reason": reason,
+                    }
+                # ValueError بدون blocked_payload → fall through به handler generic
+                logger.warning(f"compose project extraction ValueError: {_ve_proj}")
+                augmented_idea = user_text + f"\n\n[خطا در استخراج فایل‌ها: {str(_ve_proj)[:200]}]"
+                attachments_meta = []
             except Exception as e:
                 logger.warning(f"compose project extraction failed: {e}")
-                # ادامه با user_text ساده
-                augmented_idea = user_text + f"\n\n[خطا در استخراج فایل‌ها: {str(e)[:200]}]"
-                attachments_meta = []
+                # 🐛 (creator hang fix) — قبلاً mark_submitting reset نمی‌شد
+                # و buffer قفل می‌ماند. کاربر در retry بعدی به خطای
+                # already_running می‌خورد بدون توضیح.
+                await compose_svc.mark_submitting(chat_id_str, False)
+                await tg.send(
+                    f"⚠️ خطا در استخراج فایل‌های پیوست:\n`{str(e)[:200]}`\n\n"
+                    f"می‌توانی `/cancel` بزنی و دوباره تلاش کنی.",
+                    silent=False,
+                )
+                await tg.restore_persistent_keyboard()
+                return {
+                    "ok": False,
+                    "handled": "compose_project_extraction_error",
+                    "error": str(e)[:300],
+                }
 
         # 2) ذخیره در state و انتقال به phase نام
         cdata["idea"] = augmented_idea
