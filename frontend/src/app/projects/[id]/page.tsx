@@ -676,6 +676,8 @@ export default function ProjectDetailPage() {
   } | null>(null);
   const [projectTasksPanel, setProjectTasksPanel] = useState<any[]>([]);
   const [projectTasksPanelOpen, setProjectTasksPanelOpen] = useState(false);
+  // 🆕 (Addendum v5 §3.4) — flag برای spinner دکمهٔ refresh دستی
+  const [projectTasksPanelRefreshing, setProjectTasksPanelRefreshing] = useState(false);
 
   // 🆕 (C7v2 Section 1) — فیلدهای archived (instruction های قدیمی)
   const [archivedFields, setArchivedFields] = useState<any[]>([]);
@@ -1106,6 +1108,21 @@ export default function ProjectDetailPage() {
       void loadLinkedTask(taskId);
     }
   }, [searchParams, linkedTaskId, loadLinkedTask]);
+
+  // 🆕 (Addendum v5 §3.4) — polling سبک وقتی پنل تسک‌های پروژه باز است.
+  // هر ۳۰ ثانیه refresh می‌کند تا تسک‌های ساخته‌شده از /oversight یا تسک‌های
+  // قدیمی که status‌شان تغییر کرد، اتوماتیک sync شوند. cleanup صحیح در unmount
+  // یا بستن پنل.
+  useEffect(() => {
+    if (!projectTasksPanelOpen) return;
+    if (!projectId) return;
+    const intervalId = setInterval(() => {
+      void loadProjectTasksPanel();
+    }, 30_000);
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [projectTasksPanelOpen, projectId, loadProjectTasksPanel]);
 
   const loadOversightBridge = useCallback(async () => {
     if (!projectId) return;
@@ -3412,6 +3429,28 @@ export default function ProjectDetailPage() {
                   content: data.message + (data.pr_url ? `\n\n🔗 [مشاهده Pull Request](${data.pr_url})` : ''),
                   timestamp: new Date(),
                 }]);
+              } else if (eventType === 'verify_complete') {
+                // 🆕 (Addendum v5 §3.3) — verify v6 پس از apply-action با task_id
+                // اطلاع‌رسانی + refresh panel + refresh linkedTask card (اگر همان task باشد)
+                const verdict = data?.verdict || 'unknown';
+                const doneN = data?.done_parts_count ?? '?';
+                const remN = data?.remaining_parts_count ?? '?';
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `verify_done_${Date.now()}`,
+                  role: 'system' as const,
+                  content: `🔬 verify v6 پس از apply: **${verdict}** (done=${doneN}, remaining=${remN})`,
+                  timestamp: new Date(),
+                }]);
+                // refresh panel و linkedTask
+                (async () => {
+                  try {
+                    await loadProjectTasksPanel();
+                    if (data?.task_id && linkedTaskId && linkedTaskId === data.task_id) {
+                      // همان task متصل است — کارت بالای chat را هم refresh کن
+                      await loadLinkedTask(linkedTaskId);
+                    }
+                  } catch (_e) { /* noop */ }
+                })();
               }
             } catch (e) {}
             eventType = '';
@@ -4605,6 +4644,20 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         oversight_task_id: data.task_id,
       } as any;
       setInspectorChatMessages(prev => [...prev, userMsg, sysMsg]);
+
+      // 🆕 (Addendum v5 §3.1, §3.2) — auto-refresh پنل تسک‌های پروژه
+      // پس از موفقیت ساخت تسک. هر دو مسیر chat عادی و visual_debug از
+      // همین تابع sendToOversight استفاده می‌کنند، پس یک fix هر دو را پوشش می‌دهد.
+      try {
+        await loadProjectTasksPanel();
+        if (!projectTasksPanelOpen) {
+          setProjectTasksPanelOpen(true);
+        }
+        showToast(`✅ تسک جدید در پنل تسک‌های پروژه ثبت شد (${mode === 'chat' ? 'حالت عادی' : 'دیباگ بصری'})`, 4000);
+      } catch (_refErr) {
+        // refresh failure نباید کل flow را شکست بدهد
+        console.warn('panel refresh after sendToOversight failed:', _refErr);
+      }
 
       // 6. پاکسازی فیلدها
       if (mode === 'chat') {
@@ -14716,7 +14769,26 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     </p>
                   </div>
                 </div>
-                <span className={`text-lg transition-transform ${projectTasksPanelOpen ? 'rotate-180' : ''}`}>▼</span>
+                <div className="flex items-center gap-2">
+                  {/* 🆕 (Addendum v5 §3.5) — دکمهٔ refresh دستی */}
+                  {projectTasksPanelOpen && (
+                    <span
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (projectTasksPanelRefreshing) return;
+                        setProjectTasksPanelRefreshing(true);
+                        loadProjectTasksPanel().finally(() => {
+                          setTimeout(() => setProjectTasksPanelRefreshing(false), 400);
+                        });
+                      }}
+                      title="به‌روزرسانی دستی لیست تسک‌ها"
+                      className={`text-sm px-2 py-1 rounded hover:bg-cyan-200 dark:hover:bg-cyan-800/40 cursor-pointer transition-all ${projectTasksPanelRefreshing ? 'animate-spin' : ''}`}
+                    >
+                      🔄
+                    </span>
+                  )}
+                  <span className={`text-lg transition-transform ${projectTasksPanelOpen ? 'rotate-180' : ''}`}>▼</span>
+                </div>
               </button>
               {projectTasksPanelOpen && (
                 <div className="px-3 py-3 max-h-[480px] overflow-y-auto space-y-2">
