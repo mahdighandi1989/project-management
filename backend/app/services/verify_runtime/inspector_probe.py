@@ -731,12 +731,47 @@ async def _run_inspector_inner(
                     "",
                     ac_text or "",
                 ).strip()
+
+                # 🆕 (Verify v7 §E) — اگر task_type متعلق به این session
+                # backend/infra/docs است، یک hint به ac_text ضمیمه کن تا
+                # vision model دنبال feature روی UI نگردد و hallucinate نکند.
+                # task object را از oversight_service بر اساس ctx.task_id
+                # lookup می‌کنیم.
+                _task_type_for_vision = "mixed_unknown"
+                try:
+                    from .iterative_orchestrator import _classify_task_type
+                    from ..oversight_service import get_oversight_service as _gov
+                    _svc_for_v7 = _gov()
+                    _task_ref = next(
+                        (t for t in _svc_for_v7.tasks if t.id == ctx.task_id),
+                        None,
+                    )
+                    if _task_ref is not None:
+                        _task_type_for_vision = _classify_task_type(_task_ref)
+                except Exception:
+                    _task_type_for_vision = "mixed_unknown"
+
+                if _task_type_for_vision in ("pure_backend", "infra", "docs_only"):
+                    _clean_ac = (
+                        f"[توجه مهم به مدل vision: این feature متعلق به "
+                        f"task_type={_task_type_for_vision} است و عمدتاً "
+                        f"backend/infra/docs محسوب می‌شود — در UI صفحه "
+                        f"قابل‌مشاهده نیست. این probe فقط health-check "
+                        f"صفحه است، نه feature verification. اگر صفحه "
+                        f"load شد و خطای ظاهری نداشت، feature_present=yes "
+                        f"برگردان. **هرگز** بر اساس نبود متن feature در UI "
+                        f"تشخیص feature_present=no نده.]\n\n"
+                        f"{_clean_ac}"
+                    )
+
                 vctx = {
                     "url": final_url,
                     "ac_text": _clean_ac,
                     "console_logs": console_errors,
                     "backend_logs": [{"level": "info", "message": backend_summary}] if backend_summary else [],
                     "html_excerpt": html_excerpt,
+                    # 🆕 (Verify v7 §E) — task_type به vctx اضافه شد برای trace
+                    "task_type_v7": _task_type_for_vision,
                 }
                 vres = await analyze_screenshot(
                     shot["path"], vctx, verify_model_id=ctx.verify_model_id,

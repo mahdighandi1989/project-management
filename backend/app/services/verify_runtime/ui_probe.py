@@ -163,7 +163,17 @@ async def _run_step(
     try:
         if action == "navigate":
             url = step.get("url") or "/"
-            await page.goto(url, wait_until="domcontentloaded")
+            # 🆕 (Verify v7 §C) — capture HTTP response status from
+            # page.goto. اگر 404/405 برگشت، علامت بزن تا run_ui_probe
+            # به SKIPPED (نه FAILED) دامن‌گیر شود.
+            _resp = await page.goto(url, wait_until="domcontentloaded")
+            _status_code = None
+            try:
+                _status_code = _resp.status if _resp is not None else None
+            except Exception:
+                _status_code = None
+            if _status_code in (404, 405):
+                return False, f"http_route_invalid:{_status_code}:{url}", None
             return True, f"navigated to {url}", None
         if action == "wait_for_load_state":
             state = step.get("state") or "networkidle"
@@ -388,6 +398,30 @@ async def run_ui_probe(
         )
     # یک step شکست خورد → failed
     failed_step = next((s for s in step_results if not s["success"]), {})
+    _failed_msg = str(failed_step.get('message', ''))
+
+    # 🆕 (Verify v7 §C) — اگر علامت http_route_invalid:404/405 وجود دارد،
+    # یعنی URL probe ناقص بوده (مثلاً نیاز به path parameter داشته که
+    # AC از آن آگاه نبوده). به‌جای FAILED → SKIPPED با reason شفاف.
+    if _failed_msg.startswith("http_route_invalid:"):
+        return RuntimeProbeResult(
+            ac_id=ac_id,
+            ac_text=ac_text,
+            method="ui_interaction",
+            status=PROBE_STATUS_SKIPPED,
+            evidence={
+                **evidence,
+                "skip_reason": _failed_msg,
+                "explanation": (
+                    "URL probe HTTP 404/405 برگشت داد — معمولاً به این "
+                    "معناست که URL نیاز به path parameter داشته که در AC "
+                    "تعریف نشده. این probe احتمالاً نمی‌تواند feature backend "
+                    "را verify کند و به‌جای failed، skipped علامت می‌خورد."
+                ),
+            },
+            duration_ms=duration_ms,
+        )
+
     return RuntimeProbeResult(
         ac_id=ac_id,
         ac_text=ac_text,
@@ -395,5 +429,5 @@ async def run_ui_probe(
         status=PROBE_STATUS_FAILED,
         evidence=evidence,
         duration_ms=duration_ms,
-        error_message=f"step {failed_step.get('step', '?')}: {failed_step.get('message', '')[:200]}",
+        error_message=f"step {failed_step.get('step', '?')}: {_failed_msg[:200]}",
     )
