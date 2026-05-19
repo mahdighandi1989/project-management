@@ -166,6 +166,19 @@ class ComposeService:
                     items_raw = item.pop("items", []) or []
                     buf = ComposeBuffer(**item)
                     buf.items = [ComposeItem(**i) for i in items_raw]
+                    # 🐛 (sticky submitting bug fix) — اگر سرور هنگام submit
+                    # crash کرد، submitting=True روی disk persist می‌شود.
+                    # بعد از restart، هر submit بعدی silently rejected می‌شود
+                    # (line 2770-2772 در notification_service.py: «double-click
+                    # protection»). راه‌حل: روی load همیشه submitting را به
+                    # False reset کن — منطقی هم هست چون هیچ submit واقعی
+                    # نمی‌تواند از قبل از restart فعال باشد.
+                    if getattr(buf, "submitting", False):
+                        logger.warning(
+                            f"compose: cleared stale submitting=True for "
+                            f"chat={buf.chat_id} (likely crashed mid-submit)"
+                        )
+                        buf.submitting = False
                     if not buf.is_expired():
                         self._buffers[buf.chat_id] = buf
                 except Exception as e:

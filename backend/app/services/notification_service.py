@@ -2768,7 +2768,27 @@ class NotificationService:
             return {"ok": True, "handled": "compose_submit_empty"}
 
         if buf.submitting:
-            # double-click protection
+            # 🐛 (sticky submitting bug fix) — قبلاً silently return می‌داد و
+            # کاربر فکر می‌کرد دکمه کار نمی‌کند. حالا یک پیام شفاف نشان می‌دهد
+            # و راه‌حل می‌گوید. سپس برای double-click واقعی، اگر دو کلیک در
+            # ≤۵ ثانیه باشد، silent باقی می‌ماند (وضعیت true real-double-click).
+            import time as _t_submit
+            _now_t = _t_submit.time()
+            _last_attempt = getattr(buf, "_last_submit_attempt_ts", 0.0)
+            if _now_t - _last_attempt < 5.0:
+                # واقعاً double-click — silent
+                return {"ok": True, "handled": "compose_submit_already_running_silent"}
+            # ۵ ثانیه گذشته از آخرین تلاش — احتمالاً قفل پیشین stuck است
+            try:
+                setattr(buf, "_last_submit_attempt_ts", _now_t)
+            except Exception:
+                pass
+            await tg.send(
+                "⚠️ submit قبلی هنوز در حال پردازش است (یا در state قفل گیر کرده).\n"
+                "اگر submit واقعاً در حال اجرا است، چند دقیقه صبر کن.\n"
+                "اگر مدت زیادی منتظری و هیچ پیشرفتی نیست، `/cancel` بزن و دوباره شروع کن.",
+                silent=False,
+            )
             return {"ok": True, "handled": "compose_submit_already_running"}
 
         # 🛡 (audit fix M3) — atomic submit-lock قبل از همهٔ async calls، تا
