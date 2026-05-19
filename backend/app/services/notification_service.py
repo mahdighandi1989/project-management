@@ -3149,44 +3149,105 @@ class NotificationService:
                     "error": str(e)[:300],
                 }
 
-        # 2) ذخیره در state و انتقال به phase نام
+        # 2) ذخیره در state
         cdata["idea"] = augmented_idea
         # auto-suggest name از augmented_idea
         import re as _re
         words = _re.findall(r"[a-zA-Z]+", augmented_idea.lower())[:3]
         suggested = "-".join(words) if words else "telegram-project"
         cdata["suggested_name"] = suggested
+        cdata["name"] = suggested  # پیش‌فرض — کاربر می‌تواند ویرایش کند
 
-        state["phase"] = "creator_awaiting_name_or_skip"
+        # 🆕 (telegram creator fast-track) — auto-detect نوع پروژه و
+        # تکنولوژی‌ها با همان detect-type که web استفاده می‌کند. این
+        # کاربر را از سه مرحلهٔ پرسش (type → tech → confirm) رها می‌کند —
+        # فقط یک پیام summary + دکمه‌های اقدام نشان می‌دهد.
+        detected_type = "python"
+        detected_techs: List[str] = []
+        try:
+            from ..api.routes.simple_projects import _detect_project_type
+            _det = await _detect_project_type(
+                description=augmented_idea[:5000],
+                name=suggested,
+                model_ids=cdata.get("model_ids") or None,
+            )
+            detected_type = _det.get("primary_type") or "python"
+            detected_techs = list(_det.get("technologies") or [])[:10]
+        except Exception as _de:
+            logger.debug(f"creator auto-detect failed (non-fatal): {_de}")
+        cdata["project_type"] = detected_type
+        cdata["technologies"] = detected_techs
+
+        # وضعیت GitHub token — برای تصمیم نمایش دکمهٔ push
+        github_ready = False
+        try:
+            from ..api.routes.simple_projects import _get_github_token_value
+            _gh_token = _get_github_token_value()
+            github_ready = bool(_gh_token and len(_gh_token) > 10)
+        except Exception:
+            github_ready = False
+
+        # 🆕 phase جدید: fast-track — کاربر روی همه چیز در یک پیام تأیید
+        # می‌کند. اگر «✏️ ویرایش» را بزند، به مسیر کلاسیک (name → type →
+        # tech) برمی‌گردد.
+        state["phase"] = "creator_awaiting_fast_confirm"
         state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
         _chat_state[chat_id_str] = state
 
         # 3) finalize compose (sessions حفظ — بعداً اگر لازم به new project ربط داده می‌شوند)
         await compose_svc.finalize_after_submit(chat_id_str)
 
-        # 4) نمایش name picker
+        # 4) نمایش summary + دکمه‌های fast-track
         idea_len = len(augmented_idea)
-        kb = {
-            "inline_keyboard": [
-                [{"text": f"✅ استفاده از: {suggested}", "callback_data": "creator_use_suggested_name"}],
-                [{"text": "✏️ نام دلخواه", "callback_data": "creator_custom_name"}],
-                [{"text": "❌ لغو", "callback_data": "flow:cancel"}],
-            ]
-        }
-        await tg.send(
-            f"💡 *ایدهٔ پروژه از پیوست‌ها استخراج شد*\n\n"
-            f"📋 طول idea: {idea_len:,} کاراکتر\n"
-            f"📎 {buf.total_files()} فایل پیوست بود → متن کامل در idea ادغام شد\n\n"
-            f"📦 *مرحلهٔ بعد: نام پروژه*\n"
-            f"پیشنهاد: `{suggested}`",
-            silent=True,
-            reply_markup=kb,
+        tech_str = ", ".join(detected_techs) if detected_techs else "(تشخیص داده نشد)"
+
+        rows: List[List[Dict[str, str]]] = []
+        if github_ready:
+            rows.append([{
+                "text": "🚀 ساخت + push به GitHub",
+                "callback_data": "creator_quick_create_push",
+            }])
+        rows.append([{
+            "text": "📁 فقط ساخت محلی" if github_ready else "📁 ساخت محلی (GitHub توکن ندارد)",
+            "callback_data": "creator_quick_create_local",
+        }])
+        rows.append([{"text": "✏️ ویرایش (نام/نوع/تکنولوژی)", "callback_data": "creator_quick_edit"}])
+        rows.append([{"text": "❌ لغو", "callback_data": "flow:cancel"}])
+
+        summary_msg = (
+            f"💡 *استخراج ایده از فایل‌ها انجام شد*\n\n"
+            f"📋 طول idea: {idea_len:,} کاراکتر — {buf.total_files()} فایل\n\n"
+            f"🤖 *AI تشخیص داد:*\n"
+            f"  📦 نام پیشنهادی: `{suggested}`\n"
+            f"  📁 نوع: `{detected_type}`\n"
+            f"  ⚙️ تکنولوژی‌ها: `{tech_str}`\n\n"
+            f"اگر همه‌چیز درست است، یک گزینه را انتخاب کن. "
+            f"اگر می‌خواهی چیزی را تغییر دهی، «✏️ ویرایش» بزن."
         )
+        if not github_ready:
+            summary_msg += (
+                f"\n\n⚠️ *توکن GitHub در /settings تنظیم نشده* — فقط محلی ساخته می‌شود."
+            )
+
+        await tg.send(
+            summary_msg,
+            silent=False,
+            reply_markup={"inline_keyboard": rows},
+        )
+        # restore منوی ثابت پایین
+        try:
+            await tg.restore_persistent_keyboard()
+        except Exception:
+            pass
+
         return {
             "ok": True,
-            "handled": "compose_project_idea_resolved",
+            "handled": "compose_project_idea_resolved_fast_track",
             "idea_len": idea_len,
             "files": buf.total_files(),
+            "detected_type": detected_type,
+            "detected_techs_count": len(detected_techs),
+            "github_ready": github_ready,
         }
 
     async def _compose_pick_project(
@@ -3882,6 +3943,59 @@ class NotificationService:
                 reply_markup=kb,
             )
             return {"ok": True, "handled": "use_suggested_name"}
+
+        # 🆕 (telegram creator fast-track) — handler های مسیر سریع که پس از
+        # voice extraction نمایش داده می‌شوند. هر سه بر state دارای phase
+        # creator_awaiting_fast_confirm کار می‌کنند.
+        if data in ("creator_quick_create_push", "creator_quick_create_local"):
+            state = _chat_state.get(chat_id_str)
+            if not state or state.get("phase") != "creator_awaiting_fast_confirm":
+                await tg.send("⚠️ flow منقضی شده. /new\\_project بزن.", silent=True)
+                return {"ok": True, "handled": "fast_track_expired"}
+            cdata = state.get("creator_data", {})
+            _push_after_create = data == "creator_quick_create_push"
+            cdata["push_after_create"] = _push_after_create
+            # phase را پاک کن تا state دوباره به‌کار نرود
+            state["phase"] = "creator_executing"
+            state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+            await tg.send(
+                f"✅ شروع ساخت پروژه با تشخیص خودکار:\n"
+                f"  📦 `{cdata.get('name', '?')}`\n"
+                f"  📁 `{cdata.get('project_type', 'python')}`\n"
+                f"  ⚙️ `{', '.join((cdata.get('technologies') or [])[:5]) or '(none)'}`\n"
+                f"  🚀 push به GitHub: {'بله' if _push_after_create else 'خیر'}",
+                silent=True,
+            )
+            # اجرای creator به‌صورت non-blocking
+            import asyncio as _as_quick
+            _as_quick.create_task(self._execute_creator_v2(chat_id_str, state))
+            return {"ok": True, "handled": "creator_quick_create_started", "push": _push_after_create}
+
+        if data == "creator_quick_edit":
+            state = _chat_state.get(chat_id_str)
+            if not state or state.get("phase") != "creator_awaiting_fast_confirm":
+                await tg.send("⚠️ flow منقضی شده.", silent=True)
+                return {"ok": True, "handled": "fast_edit_expired"}
+            # برگشت به مسیر کلاسیک — phase را به awaiting_name_or_skip ست کن
+            cdata = state.get("creator_data", {})
+            suggested = cdata.get("suggested_name") or cdata.get("name") or "my-project"
+            state["phase"] = "creator_awaiting_name_or_skip"
+            state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+            kb_edit = {
+                "inline_keyboard": [
+                    [{"text": f"✅ استفاده از: {suggested}", "callback_data": "creator_use_suggested_name"}],
+                    [{"text": "✏️ نام دلخواه", "callback_data": "creator_custom_name"}],
+                    [{"text": "❌ لغو", "callback_data": "flow:cancel"}],
+                ]
+            }
+            await tg.send(
+                f"✏️ *حالت ویرایش — مسیر کلاسیک*\n\n"
+                f"اول نام پروژه را تأیید کن یا تغییر بده:\n"
+                f"پیشنهاد: `{suggested}`",
+                silent=True,
+                reply_markup=kb_edit,
+            )
+            return {"ok": True, "handled": "creator_quick_edit_to_classic"}
 
         if data == "creator_custom_name":
             state = _chat_state.get(chat_id_str)
@@ -6309,6 +6423,23 @@ class NotificationService:
             project_id = project.id if hasattr(project, "id") else None
             if not project_id:
                 raise RuntimeError("project.id خالی است")
+
+            # 🆕 (telegram creator fast-track) — اگر کاربر در summary
+            # «📁 فقط محلی» را زد، push را skip کن. در غیر این صورت پیش‌فرض
+            # push می‌شود (سازگار با رفتار قبلی).
+            _push_flag = cdata.get("push_after_create", True)
+            if not _push_flag:
+                # فقط local — موفقیت اعلام شود بدون push
+                await tg.send(
+                    f"✅ *پروژه ساخته شد (محلی)*\n\n"
+                    f"📦 پروژه: `{name}`\n"
+                    f"📁 نوع: `{project_type}`\n"
+                    f"📂 فایل‌ها در workspace creator ذخیره شدند.\n\n"
+                    f"اگر بعداً خواستی push کنی، از کارت پروژه در /creator دکمهٔ push را بزن.\n"
+                    f"#creator_local",
+                    silent=False,
+                )
+                return {"ok": True, "handled": "creator_local_only_done", "project_id": project_id}
 
             # push to GitHub (always private)
             push_result = await push_to_github(project_id, PushToGitHubRequest(private=True))
