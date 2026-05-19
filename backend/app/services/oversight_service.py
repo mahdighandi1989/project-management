@@ -6072,6 +6072,43 @@ AC = «طراحی شیک‌تر باشد»:
         except Exception as _ce:
             logger.debug(f"sync: codex load skipped: {_ce}")
 
+        # 🆕 (C7v3/Addendum v5 §1.6) — منابع جدید memory از Project metadata
+        # (description, technologies, memory_instructions). این به پروژه‌های
+        # جوان کمک می‌کند که حداقل ۱-۲ فیلد memory داشته باشند بدون نیاز به
+        # ساخت دستی codex یا تکمیل user_notes.
+        try:
+            from ..core.database import SessionLocal as _SL_proj
+            from ..models.project import Project as _Proj_meta
+            _pdb = _SL_proj()
+            try:
+                _proj = _pdb.query(_Proj_meta).filter(_Proj_meta.id == project_id).first()
+                if _proj:
+                    _desc = (getattr(_proj, "description", "") or "").strip()
+                    if _desc and len(_desc) >= 20:
+                        memory_candidates.append({
+                            "title": "شرح پروژه",
+                            "content": _desc[:2000],
+                            "evidence_source": "project_description",
+                        })
+                    _tech = (getattr(_proj, "technologies", "") or "").strip()
+                    if _tech and len(_tech) >= 20:
+                        memory_candidates.append({
+                            "title": "تکنولوژی‌های پروژه",
+                            "content": _tech[:2000],
+                            "evidence_source": "project_technologies",
+                        })
+                    _mem_inst = (getattr(_proj, "memory_instructions", "") or "").strip()
+                    if _mem_inst and len(_mem_inst) >= 20:
+                        memory_candidates.append({
+                            "title": "دستورات حافظهٔ پروژه",
+                            "content": _mem_inst[:2000],
+                            "evidence_source": "project_memory_instructions",
+                        })
+            finally:
+                _pdb.close()
+        except Exception as _pme:
+            logger.debug(f"sync: project metadata load skipped: {_pme}")
+
         # ── training candidates ──
         # از key_changes تسک‌های done شده — شمارش تکرار
         done_tasks = [
@@ -6094,12 +6131,30 @@ AC = «طراحی شیک‌تر باشد»:
                                 kc_counter[kc_text] = kc_counter.get(kc_text, 0) + 1
         training_candidates: List[Dict[str, Any]] = []
         for kc_text, count in kc_counter.items():
-            if count >= 3:
+            # 🆕 (C7v3/Addendum v5 §1.5) — آستانهٔ تکرار از ۳ به ۲ کاهش یافت
+            # تا پروژه‌های جوان زودتر training داشته باشند.
+            if count >= 2:
                 training_candidates.append({
                     "title": kc_text[:80],
                     "content": kc_text,
                     "evidence_count": count,
                 })
+
+        # 🆕 (C7v3/Addendum v5 §1.7) — منبع training از action_plan_summary
+        # تسک‌های done. هر summary پایدار (≥۵۰ کاراکتر) به‌عنوان training
+        # candidate با evidence_count=1 اضافه می‌شود. به‌مرور تقویت می‌شود.
+        for t in done_tasks:
+            evidence = getattr(t, "applied_evidence", None) or {}
+            if isinstance(evidence, dict):
+                summary = (evidence.get("action_plan_summary") or "").strip()
+                if summary and len(summary) >= 50:
+                    # عنوان از اولین خط
+                    first_line = summary.splitlines()[0][:80] if summary.splitlines() else summary[:80]
+                    training_candidates.append({
+                        "title": first_line,
+                        "content": summary[:2000],
+                        "evidence_count": 1,
+                    })
 
         # ── ایجاد فیلدهای جدید (skip اگر موجود) ──
         created_mem = 0

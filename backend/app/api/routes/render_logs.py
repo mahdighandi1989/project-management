@@ -9414,6 +9414,79 @@ class TrainingImpactTestRequest(BaseModel):
     model_id: Optional[str] = None
 
 
+@router.post("/inspector/seed-memory-training/{project_id}")
+async def seed_memory_training(project_id: str, db: Session = Depends(get_db)):
+    """🆕 (C7v3/Addendum v5 §1.4) فراخوانی دستی sync + review برای یک inspector project.
+
+    این endpoint برای کاربری که می‌خواهد بدون منتظر ماندن برای scan/verify
+    دوره‌ای، فیلدهای memory/training را بلافاصله پر کند. کاربردی برای
+    bootstrap پروژه‌های تازه.
+
+    عملیات:
+      1) project_id را به watched_id resolve می‌کند
+      2) sync_to_inspector_memory_training صدا زده می‌شود
+      3) review_auto_synced_fields صدا زده می‌شود
+      4) آمار را به همراه فیلدهای جدید برمی‌گرداند
+
+    خطاها:
+      - 404: project پیدا نشد یا به watched متصل نیست
+    """
+    from ...models.project import Project as _Proj_seed
+    from ...services.oversight_service import get_oversight_service
+
+    project = db.query(_Proj_seed).filter(_Proj_seed.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="project not found")
+
+    svc = get_oversight_service()
+    # یافتن watched متناظر (همان منطق resolver)
+    target = (project.github_path or "").lower()
+    if not target and project.extra_data:
+        try:
+            ed = project.extra_data
+            if isinstance(ed, str):
+                ed = json.loads(ed)
+            if isinstance(ed, dict):
+                _o = (ed.get("owner") or "").lower()
+                _r = (ed.get("repo") or "").lower()
+                if _o and _r:
+                    target = f"{_o}/{_r}"
+        except Exception:
+            pass
+
+    watched_id: Optional[str] = None
+    for w in svc.watched:
+        if (w.repo_full_name or "").lower() == target:
+            watched_id = w.id
+            break
+
+    if not watched_id:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "این inspector project به هیچ watched ای در مرکز نظارت متصل نیست. "
+                "ابتدا پروژه را در /oversight به نظارت اضافه کنید."
+            ),
+        )
+
+    sync_result = await svc.sync_to_inspector_memory_training(watched_id)
+    review_result = await svc.review_auto_synced_fields(watched_id)
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "watched_id": watched_id,
+        "sync": sync_result,
+        "review": review_result,
+        "message": (
+            f"✨ سینک کامل شد: {sync_result.get('created_memory_count', 0)} memory جدید + "
+            f"{sync_result.get('created_training_count', 0)} training جدید + "
+            f"{review_result.get('strengthened_count', 0)} تقویت + "
+            f"{review_result.get('archived_count', 0)} archive"
+        ),
+    }
+
+
 @router.post("/inspector/training-impact-test/{project_id}")
 async def training_impact_test(
     project_id: str,

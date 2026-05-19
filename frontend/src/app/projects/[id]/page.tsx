@@ -456,7 +456,8 @@ export default function ProjectDetailPage() {
 
   // 🆕 انتخاب خودکار مدل و همکاری
   const [inspectorAutoSelect, setInspectorAutoSelect] = useState(true); // پیش‌فرض فعال
-  const [inspectorCollaborativeMode, setInspectorCollaborativeMode] = useState(true);
+  // 🆕 (Addendum v5 §2.2) — state inspectorCollaborativeMode حذف شد همراه با
+  // checkbox مربوطه چون هیچ‌جا به backend ارسال نمی‌شد و dead UI بود.
   const [inspectorSmartPrompt, setInspectorSmartPrompt] = useState(true); // 🧠 پرامپت ساختارمند — پیش‌فرض فعال
   const [inspectorActiveTask, setInspectorActiveTask] = useState<{
     id: string;
@@ -675,6 +676,8 @@ export default function ProjectDetailPage() {
   } | null>(null);
   const [projectTasksPanel, setProjectTasksPanel] = useState<any[]>([]);
   const [projectTasksPanelOpen, setProjectTasksPanelOpen] = useState(false);
+  // 🆕 (Addendum v5 §3.4) — flag برای spinner دکمهٔ refresh دستی
+  const [projectTasksPanelRefreshing, setProjectTasksPanelRefreshing] = useState(false);
 
   // 🆕 (C7v2 Section 1) — فیلدهای archived (instruction های قدیمی)
   const [archivedFields, setArchivedFields] = useState<any[]>([]);
@@ -686,6 +689,126 @@ export default function ProjectDetailPage() {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), ms);
   }, []);
+
+  // 🆕 (C7v3/Addendum v5 §1.2) — وضعیت watched مرتبط با این inspector project
+  // و textarea inline برای ویرایش user_notes از داخل inspector page
+  const [linkedWatched, setLinkedWatched] = useState<{
+    watched_id: string;
+    user_notes: string;
+  } | null>(null);
+  const [userNotesDraft, setUserNotesDraft] = useState<string>('');
+  const [userNotesSaving, setUserNotesSaving] = useState(false);
+  const [seedingMemoryTraining, setSeedingMemoryTraining] = useState(false);
+
+  // پیدا کردن watched متناظر این inspector project
+  const loadLinkedWatched = useCallback(async () => {
+    if (!projectId) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/render/inspector/project-tasks/${encodeURIComponent(projectId)}`,
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      const wid = data?.watched_id;
+      if (!wid) {
+        setLinkedWatched(null);
+        return;
+      }
+      // پر کردن user_notes فعلی
+      try {
+        const wres = await fetch(`${API_BASE}/api/oversight/watched`);
+        if (wres.ok) {
+          const wdata = await wres.json();
+          const arr = Array.isArray(wdata) ? wdata : (wdata?.items || []);
+          const w = arr.find((x: any) => x.id === wid);
+          const notes = w?.user_notes || '';
+          setLinkedWatched({ watched_id: wid, user_notes: notes });
+          setUserNotesDraft(notes);
+        }
+      } catch {
+        setLinkedWatched({ watched_id: wid, user_notes: '' });
+      }
+    } catch (e) {
+      console.warn('loadLinkedWatched failed:', e);
+    }
+  }, [projectId]);
+
+  // ذخیره user_notes
+  const saveUserNotes = useCallback(async () => {
+    if (!linkedWatched) return;
+    if (userNotesDraft.trim().length < 30) {
+      alert('user_notes باید حداقل ۳۰ کاراکتر باشد تا برای memory سینک شود');
+      return;
+    }
+    setUserNotesSaving(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/oversight/watched/${encodeURIComponent(linkedWatched.watched_id)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_notes: userNotesDraft }),
+        },
+      );
+      if (res.ok) {
+        setLinkedWatched({ ...linkedWatched, user_notes: userNotesDraft });
+        showToast('✅ user_notes ذخیره شد. حالا روی «✨ سینک خودکار» کلیک کن', 5000);
+      } else {
+        alert(`خطا در ذخیره: HTTP ${res.status}`);
+      }
+    } catch (e) {
+      alert(`خطا در ذخیره: ${e}`);
+    } finally {
+      setUserNotesSaving(false);
+    }
+  }, [linkedWatched, userNotesDraft, showToast]);
+
+  // فراخوانی seed برای سینک دستی memory/training
+  const seedMemoryTraining = useCallback(async () => {
+    if (!projectId) return;
+    setSeedingMemoryTraining(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/render/inspector/seed-memory-training/${encodeURIComponent(projectId)}`,
+        { method: 'POST' },
+      );
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        alert(errData?.detail || `خطا در سینک: HTTP ${res.status}`);
+        return;
+      }
+      const data = await res.json();
+      showToast(data?.message || '✅ سینک کامل شد', 5000);
+      // reload فیلدها
+      await loadPromptFields();
+      await loadArchivedFields();
+    } catch (e) {
+      alert(`خطا در سینک: ${e}`);
+    } finally {
+      setSeedingMemoryTraining(false);
+    }
+  }, [projectId, showToast]);
+
+  // اجرای scan دستی روی watched
+  const triggerScanNow = useCallback(async () => {
+    if (!linkedWatched) {
+      alert('این پروژه به watched متصل نیست');
+      return;
+    }
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/oversight/watched/${encodeURIComponent(linkedWatched.watched_id)}/scan`,
+        { method: 'POST' },
+      );
+      if (res.ok) {
+        showToast('🛰 scan آغاز شد. پس از پایان، memory/training آپدیت می‌شود', 5000);
+      } else {
+        alert(`خطا در آغاز scan: HTTP ${res.status}`);
+      }
+    } catch (e) {
+      alert(`خطا در آغاز scan: ${e}`);
+    }
+  }, [linkedWatched, showToast]);
 
   const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
   const [selectedLog, setSelectedLog] = useState<ActivityLog | null>(null);
@@ -985,6 +1108,21 @@ export default function ProjectDetailPage() {
       void loadLinkedTask(taskId);
     }
   }, [searchParams, linkedTaskId, loadLinkedTask]);
+
+  // 🆕 (Addendum v5 §3.4) — polling سبک وقتی پنل تسک‌های پروژه باز است.
+  // هر ۳۰ ثانیه refresh می‌کند تا تسک‌های ساخته‌شده از /oversight یا تسک‌های
+  // قدیمی که status‌شان تغییر کرد، اتوماتیک sync شوند. cleanup صحیح در unmount
+  // یا بستن پنل.
+  useEffect(() => {
+    if (!projectTasksPanelOpen) return;
+    if (!projectId) return;
+    const intervalId = setInterval(() => {
+      void loadProjectTasksPanel();
+    }, 30_000);
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [projectTasksPanelOpen, projectId, loadProjectTasksPanel]);
 
   const loadOversightBridge = useCallback(async () => {
     if (!projectId) return;
@@ -3291,6 +3429,28 @@ export default function ProjectDetailPage() {
                   content: data.message + (data.pr_url ? `\n\n🔗 [مشاهده Pull Request](${data.pr_url})` : ''),
                   timestamp: new Date(),
                 }]);
+              } else if (eventType === 'verify_complete') {
+                // 🆕 (Addendum v5 §3.3) — verify v6 پس از apply-action با task_id
+                // اطلاع‌رسانی + refresh panel + refresh linkedTask card (اگر همان task باشد)
+                const verdict = data?.verdict || 'unknown';
+                const doneN = data?.done_parts_count ?? '?';
+                const remN = data?.remaining_parts_count ?? '?';
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `verify_done_${Date.now()}`,
+                  role: 'system' as const,
+                  content: `🔬 verify v6 پس از apply: **${verdict}** (done=${doneN}, remaining=${remN})`,
+                  timestamp: new Date(),
+                }]);
+                // refresh panel و linkedTask
+                (async () => {
+                  try {
+                    await loadProjectTasksPanel();
+                    if (data?.task_id && linkedTaskId && linkedTaskId === data.task_id) {
+                      // همان task متصل است — کارت بالای chat را هم refresh کن
+                      await loadLinkedTask(linkedTaskId);
+                    }
+                  } catch (_e) { /* noop */ }
+                })();
               }
             } catch (e) {}
             eventType = '';
@@ -4484,6 +4644,20 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         oversight_task_id: data.task_id,
       } as any;
       setInspectorChatMessages(prev => [...prev, userMsg, sysMsg]);
+
+      // 🆕 (Addendum v5 §3.1, §3.2) — auto-refresh پنل تسک‌های پروژه
+      // پس از موفقیت ساخت تسک. هر دو مسیر chat عادی و visual_debug از
+      // همین تابع sendToOversight استفاده می‌کنند، پس یک fix هر دو را پوشش می‌دهد.
+      try {
+        await loadProjectTasksPanel();
+        if (!projectTasksPanelOpen) {
+          setProjectTasksPanelOpen(true);
+        }
+        showToast(`✅ تسک جدید در پنل تسک‌های پروژه ثبت شد (${mode === 'chat' ? 'حالت عادی' : 'دیباگ بصری'})`, 4000);
+      } catch (_refErr) {
+        // refresh failure نباید کل flow را شکست بدهد
+        console.warn('panel refresh after sendToOversight failed:', _refErr);
+      }
 
       // 6. پاکسازی فیلدها
       if (mode === 'chat') {
@@ -12888,18 +13062,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           </div>
                         </label>
 
-                        <label className="flex items-center gap-2 cursor-pointer hover:bg-white/10 p-1 rounded mt-1">
-                          <input
-                            type="checkbox"
-                            checked={inspectorCollaborativeMode}
-                            onChange={(e) => setInspectorCollaborativeMode(e.target.checked)}
-                            className="w-4 h-4 rounded accent-white"
-                          />
-                          <div>
-                            <span className="text-xs font-medium">🤝 همکاری چند مدل</span>
-                            <p className="text-[10px] opacity-70">مدل‌ها از کار همدیگر آگاه هستند</p>
-                          </div>
-                        </label>
+                        {/* 🆕 (Addendum v5 §2.2) — checkbox «همکاری چند مدل» حذف شد.
+                            state موجود بود ولی به backend ارسال نمی‌شد و هیچ اثری روی
+                            رفتار smart-chat نداشت. حذف از UI برای جلوگیری از گمراه‌شدن
+                            کاربر. اگر در آینده feature واقعی پیاده‌سازی شود، می‌توان
+                            UI را برگرداند. */}
 
                         <label className="flex items-center gap-2 cursor-pointer hover:bg-white/10 p-1 rounded mt-1">
                           <input
@@ -12914,13 +13081,23 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           </div>
                         </label>
 
-                        {/* نشانگر GitHub */}
-                        <div className="flex items-center gap-2 mt-2 p-1">
-                          <span className={`w-2 h-2 rounded-full ${inspectorGithubConnected ? 'bg-green-400' : 'bg-gray-400'}`}></span>
-                          <span className="text-[10px] opacity-70">
-                            {inspectorGithubConnected ? '✓ متصل به GitHub' : 'GitHub غیرمتصل'}
-                          </span>
-                        </div>
+                        {/* 🆕 (Addendum v5 §2.3) — نشانگر GitHub با لینک قابل‌کلیک به /settings */}
+                        {inspectorGithubConnected ? (
+                          <div className="flex items-center gap-2 mt-2 p-1">
+                            <span className="w-2 h-2 rounded-full bg-green-400"></span>
+                            <span className="text-[10px] opacity-70">✓ متصل به GitHub</span>
+                          </div>
+                        ) : (
+                          <a
+                            href="/settings"
+                            target="_blank"
+                            title="برای commit و PR از بازرس ویژه، توکن GitHub لازم است. کلیک کن تا به تنظیمات بروی"
+                            className="flex items-center gap-2 mt-2 p-1.5 rounded bg-yellow-500/20 border border-yellow-500/40 hover:bg-yellow-500/30 transition-colors cursor-pointer"
+                          >
+                            <span className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse"></span>
+                            <span className="text-[10px] text-yellow-100 font-medium">⚠️ GitHub متصل نیست — کلیک برای تنظیم</span>
+                          </a>
+                        )}
                       </div>
 
                       {/* 🔧 فیلتر انواع اکشن‌ها */}
@@ -14592,7 +14769,26 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     </p>
                   </div>
                 </div>
-                <span className={`text-lg transition-transform ${projectTasksPanelOpen ? 'rotate-180' : ''}`}>▼</span>
+                <div className="flex items-center gap-2">
+                  {/* 🆕 (Addendum v5 §3.5) — دکمهٔ refresh دستی */}
+                  {projectTasksPanelOpen && (
+                    <span
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (projectTasksPanelRefreshing) return;
+                        setProjectTasksPanelRefreshing(true);
+                        loadProjectTasksPanel().finally(() => {
+                          setTimeout(() => setProjectTasksPanelRefreshing(false), 400);
+                        });
+                      }}
+                      title="به‌روزرسانی دستی لیست تسک‌ها"
+                      className={`text-sm px-2 py-1 rounded hover:bg-cyan-200 dark:hover:bg-cyan-800/40 cursor-pointer transition-all ${projectTasksPanelRefreshing ? 'animate-spin' : ''}`}
+                    >
+                      🔄
+                    </span>
+                  )}
+                  <span className={`text-lg transition-transform ${projectTasksPanelOpen ? 'rotate-180' : ''}`}>▼</span>
+                </div>
               </button>
               {projectTasksPanelOpen && (
                 <div className="px-3 py-3 max-h-[480px] overflow-y-auto space-y-2">
@@ -14657,7 +14853,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             <div className="mt-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden" dir="rtl">
               {/* هدر پنل - کلیک برای باز/بسته شدن */}
               <button
-                onClick={() => { setPromptFieldsOpen(!promptFieldsOpen); if (!promptFieldsOpen) { if (promptFields.length === 0) loadPromptFields(); if (generalInstructions.length === 0) loadGeneralInstructions(); if (!visualDebugPromptData) loadVisualDebugPrompt(); /* 🆕 C7v2 — fetch archived هم */ loadArchivedFields(); } }}
+                onClick={() => { setPromptFieldsOpen(!promptFieldsOpen); if (!promptFieldsOpen) { if (promptFields.length === 0) loadPromptFields(); if (generalInstructions.length === 0) loadGeneralInstructions(); if (!visualDebugPromptData) loadVisualDebugPrompt(); /* 🆕 C7v2 — fetch archived هم */ loadArchivedFields(); /* 🆕 v5 — fetch linked watched برای help card */ if (!linkedWatched) loadLinkedWatched(); } }}
                 className="w-full flex items-center justify-between px-4 py-3 bg-gradient-to-r from-purple-50 to-indigo-50 dark:from-purple-900/20 dark:to-indigo-900/20 hover:from-purple-100 hover:to-indigo-100 dark:hover:from-purple-900/30 dark:hover:to-indigo-900/30 transition-colors"
               >
                 <div className="flex items-center gap-3">
@@ -14896,6 +15092,95 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           >
                             ذخیره
                           </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 🆕 (Addendum v5 §1.1-1.3) — کارت راهنمای bootstrap برای حافظه/آموزش */}
+                  {(promptFieldActiveCategory === 'memory' || promptFieldActiveCategory === 'training') &&
+                    promptFields.filter(f => f.category === promptFieldActiveCategory).length === 0 && (
+                    <div className="mb-4 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded-xl">
+                      <div className="flex items-start gap-3">
+                        <span className="text-2xl">💡</span>
+                        <div className="flex-1">
+                          <h4 className="text-sm font-bold text-blue-800 dark:text-blue-200 mb-2">
+                            چطور این بخش پر می‌شود؟
+                          </h4>
+                          {promptFieldActiveCategory === 'memory' ? (
+                            <div className="text-xs text-blue-700 dark:text-blue-300 leading-relaxed space-y-1">
+                              <p>حافظهٔ پروژه خودکار از مرکز نظارت سینک می‌شود از سه منبع:</p>
+                              <ol className="list-decimal pr-4 space-y-0.5">
+                                <li>متن <b>یادداشت کاربر</b> (user_notes) — حداقل ۳۰ کاراکتر</li>
+                                <li><b>OversightCodex</b> پروژه (ساخته‌شده با scan)</li>
+                                <li>اطلاعات پایهٔ پروژه: description / technologies / memory_instructions</li>
+                              </ol>
+                              <p className="text-blue-600 dark:text-blue-400 mt-1">پس از scan/verify بعدی، فیلدها ظاهر می‌شوند.</p>
+                            </div>
+                          ) : (
+                            <div className="text-xs text-blue-700 dark:text-blue-300 leading-relaxed space-y-1">
+                              <p>آموزش‌ها از مرکز نظارت سینک می‌شوند از دو منبع:</p>
+                              <ol className="list-decimal pr-4 space-y-0.5">
+                                <li><b>key_changes</b> از تسک‌های done — حداقل ۲ تسک با الگوی مشترک</li>
+                                <li><b>action_plan_summary</b> از تسک‌های done با خلاصهٔ ≥۵۰ کاراکتر</li>
+                              </ol>
+                            </div>
+                          )}
+
+                          {/* Inline user_notes editor — فقط برای memory */}
+                          {promptFieldActiveCategory === 'memory' && linkedWatched && (
+                            <div className="mt-3 pt-3 border-t border-blue-200 dark:border-blue-700">
+                              <label className="block text-[11px] font-medium text-blue-800 dark:text-blue-200 mb-1">
+                                ✏️ یادداشت کاربر برای این پروژه (سریع‌ترین راه برای فعال‌سازی حافظه):
+                              </label>
+                              <textarea
+                                value={userNotesDraft}
+                                onChange={(e) => setUserNotesDraft(e.target.value)}
+                                placeholder="یادداشت کاربر — معماری، تکنولوژی، نکات ثابت پروژه (حداقل ۳۰ کاراکتر)..."
+                                rows={3}
+                                className="w-full text-xs p-2 border border-blue-300 dark:border-blue-600 rounded bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-200 placeholder-gray-400"
+                                dir="rtl"
+                              />
+                              <div className="flex items-center justify-between mt-1 text-[10px] text-blue-600 dark:text-blue-400">
+                                <span>طول: {userNotesDraft.length} / حداقل ۳۰</span>
+                                <button
+                                  onClick={saveUserNotes}
+                                  disabled={userNotesSaving || userNotesDraft.trim().length < 30}
+                                  className="px-2 py-1 bg-blue-500 text-white rounded text-[11px] hover:bg-blue-600 disabled:opacity-40"
+                                >
+                                  {userNotesSaving ? '⏳ ذخیره...' : '💾 ذخیره user_notes'}
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Inline message اگر inspector project به watched متصل نیست */}
+                          {promptFieldActiveCategory === 'memory' && !linkedWatched && (
+                            <div className="mt-3 pt-3 border-t border-blue-200 dark:border-blue-700 text-xs text-amber-700 dark:text-amber-300">
+                              ⚠️ این پروژه به مرکز نظارت متصل نیست — برای فعال‌سازی memory/training، ابتدا پروژه را در <a href="/oversight" target="_blank" className="underline">/oversight</a> به نظارت اضافه کنید
+                            </div>
+                          )}
+
+                          {/* دو دکمهٔ اقدام */}
+                          {linkedWatched && (
+                            <div className="mt-3 flex gap-2 flex-wrap">
+                              <button
+                                onClick={seedMemoryTraining}
+                                disabled={seedingMemoryTraining}
+                                title="بدون منتظر ماندن برای scan/verify، الان sync را اجرا کن"
+                                className="px-3 py-1.5 bg-amber-500 text-white rounded text-xs hover:bg-amber-600 disabled:opacity-40"
+                              >
+                                {seedingMemoryTraining ? '⏳ در حال سینک...' : '✨ سینک خودکار از مرکز نظارت'}
+                              </button>
+                              <button
+                                onClick={triggerScanNow}
+                                title="آغاز یک scan کامل که خودکار memory/training را هم سینک می‌کند"
+                                className="px-3 py-1.5 bg-cyan-500 text-white rounded text-xs hover:bg-cyan-600"
+                              >
+                                🛰 اجرای scan الان
+                              </button>
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
