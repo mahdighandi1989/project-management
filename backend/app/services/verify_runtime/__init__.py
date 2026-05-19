@@ -72,6 +72,16 @@ from .ac_cache_service import (
     update_ac_cache,
 )
 
+# 🧱 (Behavioral Probe Layer) — wrapper/alias class‌ها برای آن‌هایی که interface
+# object-oriented می‌خواهند. منطق جدید نیست، فقط شفافیت معماری.
+from .behavioral_probe_layer import (
+    APIProbe,
+    BehavioralProbeOrchestrator,
+    BehavioralProbeResult,
+    TestProbe,
+    UIProbe,
+)
+
 __all__ = [
     "AC_METHODS",
     "DEFAULT_METHOD",
@@ -116,4 +126,10 @@ __all__ = [
     "check_ac_cache",
     "compute_files_checksum",
     "update_ac_cache",
+    # 🧱 Behavioral Probe Layer
+    "APIProbe",
+    "BehavioralProbeOrchestrator",
+    "BehavioralProbeResult",
+    "TestProbe",
+    "UIProbe",
 ]
