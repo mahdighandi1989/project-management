@@ -32,6 +32,11 @@ class CreateProjectRequest(BaseModel):
     auto_detect_type: bool = False
     # 🆕 پرامپت ساختاریافته از idea-to-prompt — اولویت بر description
     structured_prompt: Optional[Dict[str, Any]] = None
+    # 🆕 (Creator file upload) — اگر کاربر فایل آپلود کرده ولی idea-to-prompt
+    # نزده، اینجا session_id ها پاس داده می‌شوند تا extraction در create
+    # انجام شود. در flow عادی، idea-to-prompt قبلاً extraction را انجام داده
+    # و structured_prompt پرشده — این فیلد در آن حالت اختیاری است.
+    upload_session_ids: Optional[List[str]] = None
 
 
 class IdeaToPromptRequest(BaseModel):
@@ -41,6 +46,11 @@ class IdeaToPromptRequest(BaseModel):
     project_type: str = "auto"
     technologies: Optional[List[str]] = None
     model_ids: List[str]  # اجباری
+    # 🆕 (Creator file upload) — اگر کاربر فایل (صوت/PDF/تصویر/ویدئو) آپلود
+    # کرده، session_id های آن‌ها اینجا پاس داده می‌شوند. backend از
+    # _resolve_attachments_for_idea استفاده می‌کند تا extraction انجام شود
+    # و متن استخراج‌شده با idea ادغام شود قبل از تولید پرامپت.
+    upload_session_ids: Optional[List[str]] = None
 
 
 class DetectTypeRequest(BaseModel):
@@ -180,9 +190,35 @@ async def idea_to_prompt_preview(request: IdeaToPromptRequest):
     async def _gen(prompt: str, model_ids: Optional[List[str]] = None) -> str:
         return await ai_generate(prompt, model_ids=model_ids)
 
+    # 🆕 (Creator file upload) — اگر upload_session_ids آمد، extraction
+    # انجام بده و idea را با محتوای فایل‌ها augment کن. استفاده مجدد از
+    # همان منطق oversight (_resolve_attachments_for_idea).
+    effective_idea = request.idea
+    if request.upload_session_ids:
+        try:
+            from ...services.oversight_service import get_oversight_service
+            ovs = get_oversight_service()
+            effective_idea, _attachments_meta = await ovs._resolve_attachments_for_idea(
+                request.idea, request.upload_session_ids,
+            )
+        except ValueError as ve:
+            # blocked_no_vision_model یا all_extractions_failed — همان
+            # ساختار oversight را با 409 برگردانیم تا UI toggle نشان دهد.
+            blocked = getattr(ve, "blocked_payload", None)
+            if blocked:
+                raise HTTPException(
+                    status_code=409,
+                    detail=blocked,
+                )
+            raise HTTPException(status_code=400, detail=str(ve))
+        except Exception as ae:
+            logger.warning(f"creator idea-to-prompt extraction failed: {ae}")
+            # graceful: ادامه با idea خام
+            effective_idea = request.idea + f"\n\n[خطا در استخراج فایل‌ها: {str(ae)[:200]}]"
+
     try:
         result = await idea_to_strong_prompt_for_creator(
-            idea=request.idea,
+            idea=effective_idea,
             name=request.name,
             project_type=request.project_type,
             technologies=list(request.technologies or []),
