@@ -3,6 +3,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import TaskFilePicker, { type UploadSessionState } from '@/components/TaskFilePicker';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -72,6 +73,23 @@ export default function CreatorPage() {
   const [projectType, setProjectType] = useState('fastapi');
   const [autoDetectType, setAutoDetectType] = useState(false);
   const [technologies, setTechnologies] = useState('');
+
+  // 🆕 (Creator file upload) — wireing TaskFilePicker روی creator page
+  // تا کاربر بتواند فایل‌های صوت/PDF/تصویر/ویدئو/کد آپلود کند و backend
+  // محتوای آن‌ها را با AI extraction به idea ضمیمه کند (همان مسیری که
+  // در /oversight موجود است).
+  const [creatorDraftId] = useState(
+    `creator-draft-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  );
+  const [uploadedSessions, setUploadedSessions] = useState<UploadSessionState[]>([]);
+  // برای vision toggle: اگر backend با 409 blocked_no_vision_model برگشت،
+  // اطلاعات candidate ها را اینجا نگه می‌داریم تا UI toggle نمایش دهد
+  const [visionBlock, setVisionBlock] = useState<{
+    mime_type?: string;
+    missing_files?: Array<{filename: string; mime_type: string}>;
+    candidates?: Array<{id: string; name?: string; provider?: string}>;
+  } | null>(null);
+  const [tempActivatedModel, setTempActivatedModel] = useState<string | null>(null);
 
   // 🆕 انتخاب مدل‌ها (multi-select)
   const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
@@ -303,18 +321,41 @@ export default function CreatorPage() {
 
     setPreviewLoading(true);
     try {
+      // 🆕 (Creator file upload) — session_id های آپلود‌شده‌ای که در وضعیت
+      // قابل‌استفاده هستند را به request بفرست تا backend extraction انجام دهد.
+      const validSessionIds = uploadedSessions
+        .filter((s) => ['completed', 'extracting', 'extracted'].includes(s.status))
+        .sort((a, b) => a.file_order - b.file_order)
+        .map((s) => s.session_id);
       const res = await fetch(`${API_BASE}/api/simple/projects/idea-to-prompt`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          idea: description.trim(),
+          idea: description.trim() || '[ایدهٔ متنی همراه نیست — درخواست داخل فایل‌های پیوست]',
           name: name.trim(),
           project_type: autoDetectType ? 'auto' : projectType,
           technologies: technologies.split(',').map((t) => t.trim()).filter(Boolean),
           model_ids: selectedModelIds,
+          upload_session_ids: validSessionIds.length ? validSessionIds : undefined,
         }),
       });
       const data = await res.json();
+      // 🆕 (Creator vision toggle) — اگر backend 409 با blocked_no_vision_model
+      // برگشت داد، toggle UI نمایش بده تا کاربر مدل vision را موقتاً فعال کند.
+      if (res.status === 409 && data?.detail && typeof data.detail === 'object') {
+        const blocked = data.detail;
+        if (blocked.error === 'blocked_no_vision_model' || blocked.missing_files) {
+          setVisionBlock({
+            mime_type: blocked.mime_type,
+            missing_files: blocked.missing_files || [],
+            candidates: blocked.candidates || [],
+          });
+          setPreviewError(
+            'مدل بصری برای استخراج فایل پیوست لازم است. لطفاً یکی از مدل‌های زیر را فعال کنید.',
+          );
+          return;
+        }
+      }
       if (!res.ok || !data.success) {
         setPreviewError(
           typeof data.detail === 'string' ? data.detail :
@@ -648,6 +689,94 @@ export default function CreatorPage() {
                 <p className="text-xs text-gray-500 mt-1">
                   💡 هر چه دقیق‌تر بنویسید، خروجی AI بهتر می‌شود.
                 </p>
+
+                {/* 🆕 (Creator file upload) — بخش آپلود فایل‌های پیوست
+                    (صوت، PDF، تصویر، ویدئو، کد). محتوای فایل‌ها با AI
+                    extraction (همان مسیر oversight) به ایده ضمیمه می‌شود
+                    قبل از تولید پرامپت. */}
+                <div className="mt-4">
+                  <label className="block text-sm font-medium mb-2 text-blue-300">
+                    📎 فایل‌های پیوست (اختیاری)
+                  </label>
+                  <p className="text-xs text-gray-400 mb-2">
+                    می‌توانید فایل صوتی، PDF، تصویر، ویدئو یا کد آپلود کنید.
+                    محتوای فایل‌ها خودکار با AI استخراج و به توضیحات اضافه می‌شود.
+                    اگر فقط فایل می‌فرستید و متن نمی‌نویسید، AI درخواست شما را
+                    از داخل فایل‌ها برداشت می‌کند.
+                  </p>
+                  <TaskFilePicker
+                    taskDraftId={creatorDraftId}
+                    apiBase={API_BASE}
+                    onSessionsChange={setUploadedSessions}
+                    disabled={previewLoading || creating}
+                  />
+                </div>
+
+                {/* 🆕 (Creator vision toggle) — اگر backend با 409
+                    blocked_no_vision_model برگشت داد، اینجا candidate مدل‌ها
+                    را نمایش می‌دهیم و کاربر می‌تواند موقتاً یکی را فعال کند
+                    و دوباره تلاش کند. */}
+                {visionBlock && (visionBlock.candidates || []).length > 0 && (
+                  <div className="mt-4 p-4 bg-amber-500/10 border border-amber-500/40 rounded-xl">
+                    <div className="flex items-start gap-2 mb-2">
+                      <span className="text-2xl">🔓</span>
+                      <div>
+                        <h4 className="text-sm font-bold text-amber-200">
+                          مدل بصری برای استخراج فایل پیوست لازم است
+                        </h4>
+                        <p className="text-xs text-amber-300/80 mt-1">
+                          {visionBlock.mime_type ? (
+                            <>نوع فایل: <code>{visionBlock.mime_type}</code></>
+                          ) : (
+                            <>فایل‌های پیوست به مدل multimodal نیاز دارند.</>
+                          )}
+                          {' '}یک مدل را موقتاً فعال کنید — پس از استخراج، خودکار به حالت قبل برمی‌گردد.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2 mt-3">
+                      {(visionBlock.candidates || []).slice(0, 4).map((c, i) => (
+                        <button
+                          key={c.id}
+                          onClick={async () => {
+                            try {
+                              const r = await fetch(
+                                `${API_BASE}/api/oversight/models/${encodeURIComponent(c.id)}/temp-activate?trigger=ui-creator-${creatorDraftId}`,
+                                { method: 'POST' },
+                              );
+                              if (r.ok) {
+                                setTempActivatedModel(c.id);
+                                setVisionBlock(null);
+                                setPreviewError(null);
+                                // alert ساده برای feedback؛ کاربر دوباره «تبدیل به پرامپت» می‌زند
+                                alert(`✅ مدل ${c.name || c.id} موقتاً فعال شد. حالا «تبدیل به پرامپت» را دوباره بزنید.`);
+                              } else {
+                                const e = await r.json().catch(() => ({}));
+                                alert(`خطا در فعال‌سازی: ${e?.detail || r.status}`);
+                              }
+                            } catch (e) {
+                              alert(`خطای شبکه: ${e}`);
+                            }
+                          }}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-medium ${
+                            i === 0
+                              ? 'bg-amber-500 text-white hover:bg-amber-600'
+                              : 'bg-amber-500/20 text-amber-200 hover:bg-amber-500/30 border border-amber-500/40'
+                          }`}
+                        >
+                          {i === 0 && '⭐ '}🔓 {c.name || c.id}
+                          {c.provider && <span className="opacity-70 mr-1">({c.provider})</span>}
+                        </button>
+                      ))}
+                      <button
+                        onClick={() => setVisionBlock(null)}
+                        className="px-3 py-1.5 bg-gray-500/20 text-gray-300 rounded-lg text-xs hover:bg-gray-500/30"
+                      >
+                        ❌ لغو
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* نوع پروژه */}
