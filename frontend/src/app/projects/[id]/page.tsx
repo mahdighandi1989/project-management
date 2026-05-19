@@ -687,6 +687,126 @@ export default function ProjectDetailPage() {
     setTimeout(() => setToastMessage(null), ms);
   }, []);
 
+  // 🆕 (C7v3/Addendum v5 §1.2) — وضعیت watched مرتبط با این inspector project
+  // و textarea inline برای ویرایش user_notes از داخل inspector page
+  const [linkedWatched, setLinkedWatched] = useState<{
+    watched_id: string;
+    user_notes: string;
+  } | null>(null);
+  const [userNotesDraft, setUserNotesDraft] = useState<string>('');
+  const [userNotesSaving, setUserNotesSaving] = useState(false);
+  const [seedingMemoryTraining, setSeedingMemoryTraining] = useState(false);
+
+  // پیدا کردن watched متناظر این inspector project
+  const loadLinkedWatched = useCallback(async () => {
+    if (!projectId) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/render/inspector/project-tasks/${encodeURIComponent(projectId)}`,
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      const wid = data?.watched_id;
+      if (!wid) {
+        setLinkedWatched(null);
+        return;
+      }
+      // پر کردن user_notes فعلی
+      try {
+        const wres = await fetch(`${API_BASE}/api/oversight/watched`);
+        if (wres.ok) {
+          const wdata = await wres.json();
+          const arr = Array.isArray(wdata) ? wdata : (wdata?.items || []);
+          const w = arr.find((x: any) => x.id === wid);
+          const notes = w?.user_notes || '';
+          setLinkedWatched({ watched_id: wid, user_notes: notes });
+          setUserNotesDraft(notes);
+        }
+      } catch {
+        setLinkedWatched({ watched_id: wid, user_notes: '' });
+      }
+    } catch (e) {
+      console.warn('loadLinkedWatched failed:', e);
+    }
+  }, [projectId]);
+
+  // ذخیره user_notes
+  const saveUserNotes = useCallback(async () => {
+    if (!linkedWatched) return;
+    if (userNotesDraft.trim().length < 30) {
+      alert('user_notes باید حداقل ۳۰ کاراکتر باشد تا برای memory سینک شود');
+      return;
+    }
+    setUserNotesSaving(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/oversight/watched/${encodeURIComponent(linkedWatched.watched_id)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_notes: userNotesDraft }),
+        },
+      );
+      if (res.ok) {
+        setLinkedWatched({ ...linkedWatched, user_notes: userNotesDraft });
+        showToast('✅ user_notes ذخیره شد. حالا روی «✨ سینک خودکار» کلیک کن', 5000);
+      } else {
+        alert(`خطا در ذخیره: HTTP ${res.status}`);
+      }
+    } catch (e) {
+      alert(`خطا در ذخیره: ${e}`);
+    } finally {
+      setUserNotesSaving(false);
+    }
+  }, [linkedWatched, userNotesDraft, showToast]);
+
+  // فراخوانی seed برای سینک دستی memory/training
+  const seedMemoryTraining = useCallback(async () => {
+    if (!projectId) return;
+    setSeedingMemoryTraining(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/render/inspector/seed-memory-training/${encodeURIComponent(projectId)}`,
+        { method: 'POST' },
+      );
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        alert(errData?.detail || `خطا در سینک: HTTP ${res.status}`);
+        return;
+      }
+      const data = await res.json();
+      showToast(data?.message || '✅ سینک کامل شد', 5000);
+      // reload فیلدها
+      await loadPromptFields();
+      await loadArchivedFields();
+    } catch (e) {
+      alert(`خطا در سینک: ${e}`);
+    } finally {
+      setSeedingMemoryTraining(false);
+    }
+  }, [projectId, showToast]);
+
+  // اجرای scan دستی روی watched
+  const triggerScanNow = useCallback(async () => {
+    if (!linkedWatched) {
+      alert('این پروژه به watched متصل نیست');
+      return;
+    }
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/oversight/watched/${encodeURIComponent(linkedWatched.watched_id)}/scan`,
+        { method: 'POST' },
+      );
+      if (res.ok) {
+        showToast('🛰 scan آغاز شد. پس از پایان، memory/training آپدیت می‌شود', 5000);
+      } else {
+        alert(`خطا در آغاز scan: HTTP ${res.status}`);
+      }
+    } catch (e) {
+      alert(`خطا در آغاز scan: ${e}`);
+    }
+  }, [linkedWatched, showToast]);
+
   const [journalFilter, setJournalFilter] = useState<{type?: string; model?: string; success?: boolean}>({});
   const [selectedLog, setSelectedLog] = useState<ActivityLog | null>(null);
   const [reports, setReports] = useState<ProjectReport[]>([]);
@@ -14657,7 +14777,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             <div className="mt-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden" dir="rtl">
               {/* هدر پنل - کلیک برای باز/بسته شدن */}
               <button
-                onClick={() => { setPromptFieldsOpen(!promptFieldsOpen); if (!promptFieldsOpen) { if (promptFields.length === 0) loadPromptFields(); if (generalInstructions.length === 0) loadGeneralInstructions(); if (!visualDebugPromptData) loadVisualDebugPrompt(); /* 🆕 C7v2 — fetch archived هم */ loadArchivedFields(); } }}
+                onClick={() => { setPromptFieldsOpen(!promptFieldsOpen); if (!promptFieldsOpen) { if (promptFields.length === 0) loadPromptFields(); if (generalInstructions.length === 0) loadGeneralInstructions(); if (!visualDebugPromptData) loadVisualDebugPrompt(); /* 🆕 C7v2 — fetch archived هم */ loadArchivedFields(); /* 🆕 v5 — fetch linked watched برای help card */ if (!linkedWatched) loadLinkedWatched(); } }}
                 className="w-full flex items-center justify-between px-4 py-3 bg-gradient-to-r from-purple-50 to-indigo-50 dark:from-purple-900/20 dark:to-indigo-900/20 hover:from-purple-100 hover:to-indigo-100 dark:hover:from-purple-900/30 dark:hover:to-indigo-900/30 transition-colors"
               >
                 <div className="flex items-center gap-3">
@@ -14896,6 +15016,95 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           >
                             ذخیره
                           </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 🆕 (Addendum v5 §1.1-1.3) — کارت راهنمای bootstrap برای حافظه/آموزش */}
+                  {(promptFieldActiveCategory === 'memory' || promptFieldActiveCategory === 'training') &&
+                    promptFields.filter(f => f.category === promptFieldActiveCategory).length === 0 && (
+                    <div className="mb-4 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded-xl">
+                      <div className="flex items-start gap-3">
+                        <span className="text-2xl">💡</span>
+                        <div className="flex-1">
+                          <h4 className="text-sm font-bold text-blue-800 dark:text-blue-200 mb-2">
+                            چطور این بخش پر می‌شود؟
+                          </h4>
+                          {promptFieldActiveCategory === 'memory' ? (
+                            <div className="text-xs text-blue-700 dark:text-blue-300 leading-relaxed space-y-1">
+                              <p>حافظهٔ پروژه خودکار از مرکز نظارت سینک می‌شود از سه منبع:</p>
+                              <ol className="list-decimal pr-4 space-y-0.5">
+                                <li>متن <b>یادداشت کاربر</b> (user_notes) — حداقل ۳۰ کاراکتر</li>
+                                <li><b>OversightCodex</b> پروژه (ساخته‌شده با scan)</li>
+                                <li>اطلاعات پایهٔ پروژه: description / technologies / memory_instructions</li>
+                              </ol>
+                              <p className="text-blue-600 dark:text-blue-400 mt-1">پس از scan/verify بعدی، فیلدها ظاهر می‌شوند.</p>
+                            </div>
+                          ) : (
+                            <div className="text-xs text-blue-700 dark:text-blue-300 leading-relaxed space-y-1">
+                              <p>آموزش‌ها از مرکز نظارت سینک می‌شوند از دو منبع:</p>
+                              <ol className="list-decimal pr-4 space-y-0.5">
+                                <li><b>key_changes</b> از تسک‌های done — حداقل ۲ تسک با الگوی مشترک</li>
+                                <li><b>action_plan_summary</b> از تسک‌های done با خلاصهٔ ≥۵۰ کاراکتر</li>
+                              </ol>
+                            </div>
+                          )}
+
+                          {/* Inline user_notes editor — فقط برای memory */}
+                          {promptFieldActiveCategory === 'memory' && linkedWatched && (
+                            <div className="mt-3 pt-3 border-t border-blue-200 dark:border-blue-700">
+                              <label className="block text-[11px] font-medium text-blue-800 dark:text-blue-200 mb-1">
+                                ✏️ یادداشت کاربر برای این پروژه (سریع‌ترین راه برای فعال‌سازی حافظه):
+                              </label>
+                              <textarea
+                                value={userNotesDraft}
+                                onChange={(e) => setUserNotesDraft(e.target.value)}
+                                placeholder="یادداشت کاربر — معماری، تکنولوژی، نکات ثابت پروژه (حداقل ۳۰ کاراکتر)..."
+                                rows={3}
+                                className="w-full text-xs p-2 border border-blue-300 dark:border-blue-600 rounded bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-200 placeholder-gray-400"
+                                dir="rtl"
+                              />
+                              <div className="flex items-center justify-between mt-1 text-[10px] text-blue-600 dark:text-blue-400">
+                                <span>طول: {userNotesDraft.length} / حداقل ۳۰</span>
+                                <button
+                                  onClick={saveUserNotes}
+                                  disabled={userNotesSaving || userNotesDraft.trim().length < 30}
+                                  className="px-2 py-1 bg-blue-500 text-white rounded text-[11px] hover:bg-blue-600 disabled:opacity-40"
+                                >
+                                  {userNotesSaving ? '⏳ ذخیره...' : '💾 ذخیره user_notes'}
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Inline message اگر inspector project به watched متصل نیست */}
+                          {promptFieldActiveCategory === 'memory' && !linkedWatched && (
+                            <div className="mt-3 pt-3 border-t border-blue-200 dark:border-blue-700 text-xs text-amber-700 dark:text-amber-300">
+                              ⚠️ این پروژه به مرکز نظارت متصل نیست — برای فعال‌سازی memory/training، ابتدا پروژه را در <a href="/oversight" target="_blank" className="underline">/oversight</a> به نظارت اضافه کنید
+                            </div>
+                          )}
+
+                          {/* دو دکمهٔ اقدام */}
+                          {linkedWatched && (
+                            <div className="mt-3 flex gap-2 flex-wrap">
+                              <button
+                                onClick={seedMemoryTraining}
+                                disabled={seedingMemoryTraining}
+                                title="بدون منتظر ماندن برای scan/verify، الان sync را اجرا کن"
+                                className="px-3 py-1.5 bg-amber-500 text-white rounded text-xs hover:bg-amber-600 disabled:opacity-40"
+                              >
+                                {seedingMemoryTraining ? '⏳ در حال سینک...' : '✨ سینک خودکار از مرکز نظارت'}
+                              </button>
+                              <button
+                                onClick={triggerScanNow}
+                                title="آغاز یک scan کامل که خودکار memory/training را هم سینک می‌کند"
+                                className="px-3 py-1.5 bg-cyan-500 text-white rounded text-xs hover:bg-cyan-600"
+                              >
+                                🛰 اجرای scan الان
+                              </button>
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
