@@ -2965,6 +2965,76 @@ class NotificationService:
             silent=False,
         )
 
+        # 🆕 (creator parity with task flow) — register progress tracker
+        # callback که حین extraction پیام‌های live به تلگرام می‌فرستد. مسیر
+        # task این را دارد، مسیر project نداشت → کاربر فقط silence می‌دید
+        # و فکر می‌کرد bot قفل کرده. حالا با هر segment progress نمایش
+        # داده می‌شود (مشابه ساخت تسک).
+        try:
+            from .oversight_progress import get_progress_tracker
+            _tracker = get_progress_tracker()
+            await _tracker.start(
+                buf.task_draft_id,
+                stage="extracting_files",
+                total=buf.total_files() + 1,
+                detail=f"شروع استخراج {buf.total_files()} فایل پیوست",
+            )
+            # status message برای edit
+            _proj_status_msg_id = None
+            try:
+                import aiohttp as _ah_proj
+                _initial = (
+                    "⏳ *در حال استخراج فایل‌های پیوست برای پروژه*\n"
+                    f"📎 {buf.total_files()} فایل\n"
+                    f"📊 progress: 0/{buf.total_files() + 1}\n\n"
+                    "این پیام با هر گام به‌روز می‌شود."
+                )
+                _url = f"https://api.telegram.org/bot{tg.bot_token}/sendMessage"
+                _payload = {
+                    "chat_id": tg.chat_id, "text": _initial,
+                    "parse_mode": "Markdown", "disable_notification": True,
+                }
+                _to = _ah_proj.ClientTimeout(total=15)
+                async with _ah_proj.ClientSession(timeout=_to) as _s:
+                    async with _s.post(_url, json=_payload) as _r:
+                        _body = await _r.json()
+                        if _body.get("ok"):
+                            _proj_status_msg_id = (_body.get("result") or {}).get("message_id")
+            except Exception as _se:
+                logger.debug(f"creator progress: send initial failed: {_se}")
+
+            if _proj_status_msg_id:
+                async def _proj_on_progress(snap):
+                    try:
+                        pct = int(snap.percent)
+                        bar_len = 12
+                        filled = int(bar_len * pct / 100)
+                        bar = "█" * filled + "░" * (bar_len - filled)
+                        text = (
+                            f"⏳ *در حال استخراج فایل‌های پیوست برای پروژه*\n"
+                            f"📊 `[{bar}]` {pct}%\n"
+                            f"مرحله: *{snap.stage}*\n"
+                            f"{snap.detail or '...'}"
+                        )
+                        if snap.completed:
+                            if snap.error:
+                                text = f"❌ *خطا در استخراج*\n{snap.error[:300]}"
+                            else:
+                                text = (
+                                    f"✅ *استخراج کامل شد*\n"
+                                    f"طول: {snap.elapsed_seconds():.1f}s\n"
+                                    f"{snap.detail or ''}"
+                                )
+                        await tg.edit_message_text(
+                            tg.chat_id, _proj_status_msg_id, text,
+                            parse_mode="Markdown",
+                        )
+                    except Exception as _ce:
+                        logger.debug(f"creator progress callback edit failed: {_ce}")
+                _tracker.register_callback(buf.task_draft_id, _proj_on_progress)
+        except Exception as _te:
+            logger.debug(f"creator progress setup failed: {_te}")
+
         # 1) extraction از طریق _resolve_attachments_for_idea (همان وب)
         # 🐛 (telegram project hang fix) — این مسیر قبلاً بدون timeout بود
         # و در فایل‌های صوتی بزرگ (که _plan_headings یک AI call بدون timeout
@@ -2984,8 +3054,14 @@ class NotificationService:
                     silent=True,
                 )
                 # timeout سخت ۶ دقیقه برای کل extraction
+                # 🆕 (creator parity) — progress_track_id پاس داده می‌شود تا
+                # callback تلگرام که بالا register شد، حین extraction پیام
+                # progress نمایش دهد (مشابه مسیر task)
                 augmented_idea, attachments_meta = await _asyncio_extract.wait_for(
-                    _ov._resolve_attachments_for_idea(user_text, session_ids),
+                    _ov._resolve_attachments_for_idea(
+                        user_text, session_ids,
+                        progress_track_id=buf.task_draft_id,
+                    ),
                     timeout=360,
                 )
             except _asyncio_extract.TimeoutError:
