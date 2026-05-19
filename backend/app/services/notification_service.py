@@ -2966,12 +2966,51 @@ class NotificationService:
         )
 
         # 1) extraction از طریق _resolve_attachments_for_idea (همان وب)
+        # 🐛 (telegram project hang fix) — این مسیر قبلاً بدون timeout بود
+        # و در فایل‌های صوتی بزرگ (که _plan_headings یک AI call بدون timeout
+        # داخلی دارد) بی‌نهایت block می‌شد. حالا با asyncio.wait_for محدود
+        # می‌کنیم + پیام progress حین انتظار.
+        import asyncio as _asyncio_extract
         augmented_idea = user_text
+        attachments_meta = []
         if session_ids:
             try:
-                augmented_idea, attachments_meta = await _ov._resolve_attachments_for_idea(
-                    user_text, session_ids,
+                # یک پیام progress قبل از شروع تا کاربر بداند هنوز زنده است
+                _approx_total_sec = max(60, buf.total_size_bytes() // 50_000)  # heuristic
+                await tg.send(
+                    f"🎤 در حال استخراج {len(session_ids)} فایل پیوست... "
+                    f"(تخمین: تا {_approx_total_sec}s)\n"
+                    f"اگر فایل صوتی یا ویدئویی بزرگ باشد، چند دقیقه طول می‌کشد.",
+                    silent=True,
                 )
+                # timeout سخت ۶ دقیقه برای کل extraction
+                augmented_idea, attachments_meta = await _asyncio_extract.wait_for(
+                    _ov._resolve_attachments_for_idea(user_text, session_ids),
+                    timeout=360,
+                )
+            except _asyncio_extract.TimeoutError:
+                logger.warning(
+                    f"compose project extraction timeout after 360s for "
+                    f"chat={chat_id_str}, sessions={session_ids[:3]}"
+                )
+                await tg.send(
+                    "⌛ *استخراج فایل‌ها بیش از ۶ دقیقه طول کشید — متوقف شد*\n\n"
+                    "این معمولاً به این معناست که فایل صوتی/ویدئویی بزرگ بود "
+                    "یا مدل extraction (vision/STT) پاسخ نداد.\n\n"
+                    "راه‌حل‌ها:\n"
+                    "  1) فایل کوچک‌تری بفرستید (مثلاً صوت زیر ۹۰ ثانیه)\n"
+                    "  2) یا متن را به‌صورت تایپی همراه فایل بفرستید\n"
+                    "  3) یا یک مدل extraction سریع‌تر در /models انتخاب کنید\n\n"
+                    f"برای تلاش دوباره `/cancel` بزن و دوباره شروع کن.",
+                    silent=False,
+                )
+                await compose_svc.mark_submitting(chat_id_str, False)
+                await tg.restore_persistent_keyboard()
+                return {
+                    "ok": False,
+                    "handled": "compose_project_extraction_timeout",
+                    "session_ids": session_ids[:3],
+                }
             except Exception as e:
                 logger.warning(f"compose project extraction failed: {e}")
                 # ادامه با user_text ساده
