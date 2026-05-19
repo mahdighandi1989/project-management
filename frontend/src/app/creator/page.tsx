@@ -747,7 +747,7 @@ export default function CreatorPage() {
                               if (r.ok) {
                                 setTempActivatedModel(c.id);
                                 setVisionBlock(null);
-                                setPreviewError(null);
+                                setPreviewError('');
                                 // alert ساده برای feedback؛ کاربر دوباره «تبدیل به پرامپت» می‌زند
                                 alert(`✅ مدل ${c.name || c.id} موقتاً فعال شد. حالا «تبدیل به پرامپت» را دوباره بزنید.`);
                               } else {
