@@ -790,7 +790,18 @@ async def push_to_github(project_id: str, request: Optional[PushToGitHubRequest]
     payload = request or PushToGitHubRequest()
     desired_repo = payload.repo_name or _normalize_repo_name(project.name)
     desired_repo = _normalize_repo_name(desired_repo)
-    repo_description = payload.description or (project.description or "")[:300]
+    # 🐛 (creator push-to-github fix) — GitHub API description نباید
+    # control characters (\n, \r, \t, ...) داشته باشد، در غیر این صورت
+    # خطای "description control characters are not allowed" برمی‌گرداند.
+    # توضیحات پروژه معمولاً چندخطی است (از پرامپت تولیدی)، باید single-line
+    # شود + sanitize. cap به ۳۰۰ کاراکتر طبق محدودیت GitHub.
+    raw_desc = payload.description or (project.description or "")
+    # حذف control chars (0x00-0x1F + 0x7F)، حفظ newline/tab به‌عنوان space
+    import re as _re_desc
+    sanitized_desc = _re_desc.sub(r"[\x00-\x1F\x7F]+", " ", raw_desc)
+    # collapse spaces
+    sanitized_desc = _re_desc.sub(r"\s+", " ", sanitized_desc).strip()
+    repo_description = sanitized_desc[:300]
 
     headers = {
         "Authorization": f"Bearer {token}",

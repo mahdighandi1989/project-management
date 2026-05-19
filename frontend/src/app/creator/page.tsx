@@ -106,6 +106,12 @@ export default function CreatorPage() {
 
   // 🆕 GitHub push modal
   const [pushTarget, setPushTarget] = useState<Project | null>(null);
+
+  // 🆕 (creator UX) — checkbox برای auto-push به GitHub در زمان ساخت پروژه
+  // به‌جای ساخت محلی و سپس کلیک دستی روی push. اگر githubReady=true
+  // (توکن GitHub تنظیم شده) و این فعال، پس از success ساخت پروژه، خودکار
+  // push انجام می‌شود.
+  const [autoPushToGitHub, setAutoPushToGitHub] = useState<boolean>(false);
   const [pushRepoName, setPushRepoName] = useState('');
   const [pushDescription, setPushDescription] = useState('');
   const [pushPrivate, setPushPrivate] = useState(true);
@@ -429,6 +435,49 @@ export default function CreatorPage() {
         setProgressPct(100);
         setProgress('پروژه با موفقیت ساخته شد!');
         showSuccess(data.message || 'پروژه ساخته شد!');
+
+        // 🆕 (auto-push to GitHub) — اگر کاربر زمان ساخت تیک «push خودکار»
+        // را زده بود و GitHub token تنظیم شده، خودکار repo بساز و push کن.
+        // در غیر این صورت پروژه فقط محلی است و کاربر می‌تواند بعداً
+        // دکمهٔ Push را روی کارت پروژه بزند.
+        const createdProjectId = data.project?.id;
+        if (autoPushToGitHub && githubReady && createdProjectId) {
+          setProgress('در حال push خودکار به GitHub...');
+          try {
+            const pushRes = await fetch(
+              `${API_BASE}/api/simple/projects/${createdProjectId}/push-to-github`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  repo_name: name.trim(),
+                  description: description.trim().slice(0, 250),
+                  private: true,
+                }),
+              },
+            );
+            const pushData = await pushRes.json().catch(() => ({}));
+            if (pushRes.ok && pushData.success) {
+              showSuccess(
+                `🚀 ${pushData.uploaded || 0} فایل به GitHub push شد: ${pushData.repo_url || ''}`,
+              );
+              if (pushData.repo_url) {
+                window.open(pushData.repo_url, '_blank');
+              }
+            } else {
+              showError(
+                `پروژه محلی ساخته شد ولی push خودکار ناموفق: ${pushData.detail || pushData.message || 'unknown'}. ` +
+                `می‌توانید از کارت پروژه دستی push کنید.`,
+              );
+            }
+          } catch (pe: any) {
+            showError(
+              `پروژه محلی ساخته شد ولی push خودکار خطا داد: ${pe?.message || pe}. ` +
+              `می‌توانید از کارت پروژه دستی push کنید.`,
+            );
+          }
+        }
+
         setName('');
         setDescription('');
         setTechnologies('');
@@ -908,24 +957,66 @@ export default function CreatorPage() {
                   )}
 
                   <div>
-                    <label className="block text-sm font-medium mb-1 dark:text-purple-200">
+                    {/* 🐛 (UI fix) — قبلاً label و textarea فقط dark-mode رنگ داشتند
+                        و در light-mode سفید روی سفید نمایش داده می‌شدند. الان
+                        رنگ‌های صریح برای هر دو حالت ست شده. */}
+                    <label className="block text-sm font-medium mb-1 text-purple-800 dark:text-purple-200">
                       📋 متن پرامپت (می‌توانید ویرایش کنید):
                     </label>
                     <textarea
                       value={editablePromptText}
                       onChange={e => setEditablePromptText(e.target.value)}
                       rows={12}
-                      className="w-full p-3 border rounded-lg dark:bg-gray-900 dark:text-white dark:border-gray-700 text-xs font-mono"
+                      className="w-full p-3 border rounded-lg bg-white text-gray-900 border-gray-300 dark:bg-gray-900 dark:text-white dark:border-gray-700 text-xs font-mono"
                     />
                   </div>
 
-                  <div className="flex gap-2 flex-wrap">
+                  {/* 🆕 (creator UX) — checkbox برای push خودکار به GitHub
+                      هنگام ساخت. اگر تیک خاموش، فقط محلی ساخته می‌شود
+                      (کاربر می‌تواند بعداً از کارت پروژه دستی push کند). */}
+                  <label
+                    className={`flex items-start gap-2 p-3 rounded-lg border ${
+                      githubReady
+                        ? 'border-emerald-400/40 bg-emerald-50/60 dark:bg-emerald-900/20 cursor-pointer'
+                        : 'border-amber-400/40 bg-amber-50/60 dark:bg-amber-900/20 opacity-70 cursor-not-allowed'
+                    }`}
+                    title={githubReady ? '' : 'برای فعال‌سازی، توکن GitHub را در /settings تنظیم کنید'}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={autoPushToGitHub && githubReady}
+                      disabled={!githubReady || creating}
+                      onChange={(e) => setAutoPushToGitHub(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 accent-emerald-500"
+                    />
+                    <div className="flex-1 text-xs">
+                      <div className="font-medium text-emerald-800 dark:text-emerald-200">
+                        🚀 پس از ساخت، خودکار به GitHub push کن
+                      </div>
+                      {githubReady ? (
+                        <p className="text-emerald-700 dark:text-emerald-300 mt-1">
+                          repo خصوصی با نام پروژه ساخته می‌شود و همه فایل‌ها push می‌شوند.
+                          اگر خاموش، پروژه فقط محلی است و بعداً می‌توانید دستی push کنید.
+                        </p>
+                      ) : (
+                        <p className="text-amber-700 dark:text-amber-300 mt-1">
+                          ⚠️ توکن GitHub در /settings تنظیم نشده — این گزینه فعلاً غیرفعال است.
+                        </p>
+                      )}
+                    </div>
+                  </label>
+
+                  <div className="flex gap-2 flex-wrap mt-2">
                     <button
                       onClick={createProject}
                       disabled={creating}
                       className="flex-1 py-3 bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded-lg font-bold hover:from-blue-600 hover:to-purple-600 disabled:opacity-50"
                     >
-                      {creating ? '⏳ در حال ساخت...' : '✅ تأیید و ساخت پروژه'}
+                      {creating
+                        ? '⏳ در حال ساخت...'
+                        : (autoPushToGitHub && githubReady
+                          ? '✅ ساخت و push به GitHub'
+                          : '✅ تأیید و ساخت پروژه')}
                     </button>
                     <button
                       onClick={regenerateWithNextModel}
