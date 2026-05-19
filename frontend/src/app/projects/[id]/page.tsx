@@ -456,7 +456,8 @@ export default function ProjectDetailPage() {
 
   // 🆕 انتخاب خودکار مدل و همکاری
   const [inspectorAutoSelect, setInspectorAutoSelect] = useState(true); // پیش‌فرض فعال
-  const [inspectorCollaborativeMode, setInspectorCollaborativeMode] = useState(true);
+  // 🆕 (Addendum v5 §2.2) — state inspectorCollaborativeMode حذف شد همراه با
+  // checkbox مربوطه چون هیچ‌جا به backend ارسال نمی‌شد و dead UI بود.
   const [inspectorSmartPrompt, setInspectorSmartPrompt] = useState(true); // 🧠 پرامپت ساختارمند — پیش‌فرض فعال
   const [inspectorActiveTask, setInspectorActiveTask] = useState<{
     id: string;
@@ -13008,18 +13009,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           </div>
                         </label>
 
-                        <label className="flex items-center gap-2 cursor-pointer hover:bg-white/10 p-1 rounded mt-1">
-                          <input
-                            type="checkbox"
-                            checked={inspectorCollaborativeMode}
-                            onChange={(e) => setInspectorCollaborativeMode(e.target.checked)}
-                            className="w-4 h-4 rounded accent-white"
-                          />
-                          <div>
-                            <span className="text-xs font-medium">🤝 همکاری چند مدل</span>
-                            <p className="text-[10px] opacity-70">مدل‌ها از کار همدیگر آگاه هستند</p>
-                          </div>
-                        </label>
+                        {/* 🆕 (Addendum v5 §2.2) — checkbox «همکاری چند مدل» حذف شد.
+                            state موجود بود ولی به backend ارسال نمی‌شد و هیچ اثری روی
+                            رفتار smart-chat نداشت. حذف از UI برای جلوگیری از گمراه‌شدن
+                            کاربر. اگر در آینده feature واقعی پیاده‌سازی شود، می‌توان
+                            UI را برگرداند. */}
 
                         <label className="flex items-center gap-2 cursor-pointer hover:bg-white/10 p-1 rounded mt-1">
                           <input
@@ -13034,13 +13028,23 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           </div>
                         </label>
 
-                        {/* نشانگر GitHub */}
-                        <div className="flex items-center gap-2 mt-2 p-1">
-                          <span className={`w-2 h-2 rounded-full ${inspectorGithubConnected ? 'bg-green-400' : 'bg-gray-400'}`}></span>
-                          <span className="text-[10px] opacity-70">
-                            {inspectorGithubConnected ? '✓ متصل به GitHub' : 'GitHub غیرمتصل'}
-                          </span>
-                        </div>
+                        {/* 🆕 (Addendum v5 §2.3) — نشانگر GitHub با لینک قابل‌کلیک به /settings */}
+                        {inspectorGithubConnected ? (
+                          <div className="flex items-center gap-2 mt-2 p-1">
+                            <span className="w-2 h-2 rounded-full bg-green-400"></span>
+                            <span className="text-[10px] opacity-70">✓ متصل به GitHub</span>
+                          </div>
+                        ) : (
+                          <a
+                            href="/settings"
+                            target="_blank"
+                            title="برای commit و PR از بازرس ویژه، توکن GitHub لازم است. کلیک کن تا به تنظیمات بروی"
+                            className="flex items-center gap-2 mt-2 p-1.5 rounded bg-yellow-500/20 border border-yellow-500/40 hover:bg-yellow-500/30 transition-colors cursor-pointer"
+                          >
+                            <span className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse"></span>
+                            <span className="text-[10px] text-yellow-100 font-medium">⚠️ GitHub متصل نیست — کلیک برای تنظیم</span>
+                          </a>
+                        )}
                       </div>
 
                       {/* 🔧 فیلتر انواع اکشن‌ها */}
