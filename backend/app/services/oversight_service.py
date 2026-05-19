@@ -4054,6 +4054,12 @@ class OversightService:
             "_multi_pass": True,
             "_step_count": len(steps),
             "deep_files_count": _mp_deep_count,
+            # 🆕 (Telegram raw_idea bug fix #2) — مسیر multi-pass هم raw_idea
+            # را برگرداند تا callers (notification_service compose) از آن
+            # به‌جای fallback "(از فایل پیوست)" استفاده کنند. این idea شامل
+            # placeholder + متن augmented از فایل‌های پیوست است (که
+            # _resolve_attachments_for_idea در idea_to_prompt اضافه کرده).
+            "raw_idea": idea,
             # 🆕 چک‌لیست مراحل برای ذخیره در OversightTask.task_steps
             "task_steps": [
                 {
