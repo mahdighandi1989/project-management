@@ -2474,31 +2474,39 @@ async def run_deep_scan(
                     )
 
                 # ذخیره state فعلی برای scan بعدی
-                watched.prev_scan_state = current_state
+                # 🆕 (v2 audit H1 fix) — در حالت Inspector، scope محدود است
+                # و prev_scan_state را نباید با snapshot ناقص آلوده کنیم،
+                # چون delta detection برای scan دوره‌ای بعدی فکر می‌کند
+                # فایل‌های زیادی حذف/تغییر یافته‌اند.
+                if _output_target_session_id is None:
+                    watched.prev_scan_state = current_state
         except Exception as _e_delta:
             logger.warning(f"scan_v5 delta failed: {_e_delta}")
 
         # ذخیره روی watched برای دسترسی فازهای بعدی + UI
-        try:
-            watched.last_scan_inventory = scan_v5_inventory
-            watched.last_scan_purpose_map = scan_v5_purpose_map
-            watched.last_scan_at_v5 = now_iso()
-            # ذخیره stale + docs + delta درون inventory برای سادگی
-            scan_v5_inventory["_stale"] = scan_v5_stale
-            scan_v5_inventory["_feature_docs"] = scan_v5_feature_docs
-            scan_v5_inventory["_delta"] = scan_v5_delta
-            scan_v5_inventory["_change_impact"] = scan_v5_change_impact
-            scan_v5_inventory["_upstream_impact"] = scan_v5_upstream_impact
-            scan_v5_inventory["_added_ripple"] = scan_v5_added_ripple
-            scan_v5_inventory["_runtime_state"] = scan_v5_runtime_state
-            scan_v5_inventory["_outcome_data"] = scan_v5_outcome_data
-            scan_v5_inventory["_effectiveness_issues"] = scan_v5_effectiveness_issues
-            scan_v5_inventory["_scan_session_id"] = scan_v5_session_id
-            scan_v5_inventory["_coherence"] = scan_v5_coherence
-            scan_v5_inventory["_anti_patterns"] = scan_v5_anti_patterns
-            scan_v5_inventory["_notif_audit"] = scan_v5_notif_audit
-        except Exception:
-            pass
+        # 🆕 (v2 audit H1 fix) — این snapshot ها هم در حالت inspector
+        # نباید کارت پروژه را با scope محدود آلوده کنند.
+        if _output_target_session_id is None:
+            try:
+                watched.last_scan_inventory = scan_v5_inventory
+                watched.last_scan_purpose_map = scan_v5_purpose_map
+                watched.last_scan_at_v5 = now_iso()
+                # ذخیره stale + docs + delta درون inventory برای سادگی
+                scan_v5_inventory["_stale"] = scan_v5_stale
+                scan_v5_inventory["_feature_docs"] = scan_v5_feature_docs
+                scan_v5_inventory["_delta"] = scan_v5_delta
+                scan_v5_inventory["_change_impact"] = scan_v5_change_impact
+                scan_v5_inventory["_upstream_impact"] = scan_v5_upstream_impact
+                scan_v5_inventory["_added_ripple"] = scan_v5_added_ripple
+                scan_v5_inventory["_runtime_state"] = scan_v5_runtime_state
+                scan_v5_inventory["_outcome_data"] = scan_v5_outcome_data
+                scan_v5_inventory["_effectiveness_issues"] = scan_v5_effectiveness_issues
+                scan_v5_inventory["_scan_session_id"] = scan_v5_session_id
+                scan_v5_inventory["_coherence"] = scan_v5_coherence
+                scan_v5_inventory["_anti_patterns"] = scan_v5_anti_patterns
+                scan_v5_inventory["_notif_audit"] = scan_v5_notif_audit
+            except Exception:
+                pass
 
         # 🆕 (Phase 5 — bug 9 fix) — اکنون که همه ماژول‌های Phase 5 اجرا
         # شده و متغیرها populated هستند، Phase 5 findings → standard

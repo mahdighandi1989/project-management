@@ -74,7 +74,8 @@ def _find_proposal_in_session(
 def _find_session_proposals(session_id: int) -> List[Tuple[Dict[str, Any], int]]:
     """همهٔ proposalهای session را برمی‌گرداند (با message_id برای آپدیت).
 
-    دقت: اگر چند scan_complete باشد، همه proposalها برگردانده می‌شوند.
+    🆕 (v2 audit B3) — cap به ۲۰ scan_complete پیام آخر برای avoid کندی
+    در session هایی با چندین scan در طول زمان.
     """
     try:
         from ..core.database import SessionLocal
@@ -88,9 +89,12 @@ def _find_session_proposals(session_id: int) -> List[Tuple[Dict[str, Any], int]]
             db.query(InspectorMessage)
             .filter(InspectorMessage.session_id == int(session_id))
             .filter(InspectorMessage.action_type == "scan_complete")
-            .order_by(InspectorMessage.id.asc())
+            .order_by(InspectorMessage.id.desc())
+            .limit(20)
             .all()
         )
+        # reverse برای حفظ ترتیب chronological
+        msgs = list(reversed(msgs))
         for m in msgs:
             try:
                 ed = json.loads(m.extra_data) if isinstance(m.extra_data, str) else (m.extra_data or {})
@@ -474,6 +478,11 @@ async def run_proposal(
     changes = result_json.get("changes") or []
     # accept patch | modify | create | delete
     valid_changes: List[Dict[str, Any]] = []
+    # 🆕 (v2 audit A2 fix) — empty content protection
+    # قبلاً `if "content" in c` پاس می‌داد content=None یا ""، نتیجه commit
+    # یک فایل صفر بایتی روی GitHub. الان صریح content معنادار می‌خواهیم
+    # (مگر برای delete یا patch).
+    empty_content_rejected: List[str] = []
     for c in changes:
         if not isinstance(c, dict) or not c.get("path"):
             continue
@@ -484,9 +493,19 @@ async def run_proposal(
         elif kind == "delete":
             valid_changes.append(c)
         elif kind in ("modify", "create"):
-            if "content" in c:
-                valid_changes.append(c)
+            content_val = c.get("content")
+            # رد content خالی/None که فایل را به zero-byte truncate می‌کند
+            if not isinstance(content_val, str) or not content_val.strip():
+                empty_content_rejected.append(c.get("path", ""))
+                continue
+            valid_changes.append(c)
     diff_summary = result_json.get("overall_summary", "")[:1000]
+
+    if empty_content_rejected:
+        logger.warning(
+            f"run_proposal: rejected {len(empty_content_rejected)} change(s) with empty content: "
+            f"{empty_content_rejected[:5]}"
+        )
 
     # 🆕 (v2 M3) — رد whole-file برای oversized files
     _oversized_set = set(_oversized_files or [])
@@ -582,6 +601,39 @@ async def run_proposal(
             "syntax_errors": syntax_errors,
             "code": "failed_syntax",
         }
+
+    # 🆕 (v2 audit A2 fix) — اگر بعد از همه فیلترها (oversized rejection +
+    # syntax check + empty content rejection) هیچ change معتبری نماند،
+    # proposal را failed علامت بزن. در غیر این صورت applied_locally با
+    # لیست خالی staged → apply-all چیزی برای commit ندارد ولی proposal
+    # موفق به نظر می‌رسد.
+    if not valid_changes:
+        err = "هیچ change معتبری از مدل دریافت نشد"
+        if empty_content_rejected:
+            err += f" (همه فایل‌ها با content خالی رد شدند: {empty_content_rejected[:3]})"
+        _update_proposal_in_message(message_id, proposal_id, {
+            "execution_status": "failed",
+            "execution_error": err,
+            "executed_at": _now_iso(),
+            "raw_response": (response.content or "")[:2000],
+        })
+        log_scan_message(
+            session_id=session_id,
+            role="assistant",
+            content=(
+                f"❌ پیشنهاد «{proposal.get('title', '')[:80]}» — مدل هیچ change معتبری "
+                f"تولید نکرد:\n{err}\n\nلطفاً «↻ بازاجرا» را بزنید."
+            ),
+            action_type="proposal_failed",
+            model_id=response.model_id if 'response' in locals() else model_id,
+            extra_data={
+                "kind": "proposal_executed",
+                "proposal_id": proposal_id,
+                "status": "failed",
+                "error": err,
+            },
+        )
+        return {"success": False, "error": err, "code": "no_valid_changes"}
 
     _update_proposal_in_message(message_id, proposal_id, {
         "execution_status": "applied_locally",
@@ -771,12 +823,32 @@ async def apply_all_staged(
         proposals=[s[0] for s in staged],
         model_id=model_id,
     )
-    if consistency.get("blocking_issues"):
+    # 🆕 (v2 audit D1 fix) — صریح هم به blocking_issues و هم is_safe_to_apply نگاه کن
+    _has_blockers = bool(consistency.get("blocking_issues"))
+    _safe_flag = consistency.get("is_safe_to_apply")
+    if _has_blockers or _safe_flag is False:
+        # 🆕 (v2 audit D3 fix) — affected_files ممکن است string باشد
+        def _normalize_files(v: Any) -> List[str]:
+            if isinstance(v, list):
+                return [str(x) for x in v]
+            if isinstance(v, str):
+                return [v]
+            return []
+        # اگر فقط is_safe_to_apply=false بود و blocking_issues خالی،
+        # یک placeholder issue بساز
+        blocking = consistency.get("blocking_issues") or []
+        if not blocking and _safe_flag is False:
+            blocking = [{
+                "severity": "error",
+                "kind": "unsafe_to_apply",
+                "description": consistency.get("summary") or "AI reviewer گزارش کرد changes ایمن نیستند",
+                "affected_files": [],
+            }]
         issues_text = "\n".join(
             f"- ❌ **{iss.get('severity', 'error').upper()}** "
             f"({iss.get('kind', '')}): {iss.get('description', '')[:300]}\n"
-            f"  فایل‌ها: {', '.join(iss.get('affected_files', []) or [])}"
-            for iss in consistency["blocking_issues"]
+            f"  فایل‌ها: {', '.join(_normalize_files(iss.get('affected_files')))}"
+            for iss in blocking
         )
         log_scan_message(
             session_id=session_id,
@@ -791,14 +863,14 @@ async def apply_all_staged(
             extra_data={
                 "kind": "apply_all_result",
                 "status": "blocked_consistency",
-                "blocking_issues": consistency["blocking_issues"],
+                "blocking_issues": blocking,
                 "warnings": consistency.get("warnings", []),
             },
         )
         return {
             "success": False,
             "code": "consistency_check_failed",
-            "blocking_issues": consistency["blocking_issues"],
+            "blocking_issues": blocking,
         }
     consistency_warnings = consistency.get("warnings", [])
 
@@ -834,14 +906,47 @@ async def apply_all_staged(
         )
         if not pr_result.get("success"):
             err = pr_result.get("error") or "خطای ناشناخته از GitHub"
+            code = pr_result.get("code", "github_error")
+            # 🆕 (v2 audit E2) — partial commit awareness
+            partial_committed = pr_result.get("files_committed") or pr_result.get("files_committed_before_failure")
+            extra_msg = ""
+            if code == "branch_already_exists":
+                extra_msg = (
+                    "\n\n⚠️ Branch از قبل وجود دارد. این معمولاً نشانهٔ apply ناقص قبلی است. "
+                    "می‌توانید روی GitHub branch قدیمی را پاک کنید و دوباره apply-all را بزنید."
+                )
+            elif code == "file_commit_failed":
+                failed_file = pr_result.get("failed_file", "?")
+                extra_msg = (
+                    f"\n\n⚠️ commit در فایل `{failed_file}` شکست خورد. "
+                    f"branch ناقص پاک شد ({'بله' if pr_result.get('branch_cleanup_attempted') else 'تلاش نشد'})."
+                )
+                if partial_committed:
+                    extra_msg += f"\nفایل‌های قبل از شکست committed شدند: {', '.join(partial_committed[:5])}"
+            elif code == "pr_creation_failed":
+                extra_msg = (
+                    "\n\n⚠️ فایل‌ها commit شدند اما PR ساخته نشد. "
+                    f"می‌توانید PR را روی branch `{pr_result.get('branch', branch_name)}` "
+                    "به‌صورت دستی روی GitHub بسازید."
+                )
             log_scan_message(
                 session_id=session_id,
                 role="assistant",
-                content=f"❌ خطا در اعمال تغییرات به GitHub:\n```\n{err}\n```",
+                content=f"❌ خطا در اعمال تغییرات به GitHub:\n```\n{err}\n```{extra_msg}",
                 action_type="apply_all_failed",
-                extra_data={"kind": "apply_all_result", "status": "failed", "error": err[:500]},
+                extra_data={
+                    "kind": "apply_all_result",
+                    "status": "failed",
+                    "error": err[:500],
+                    "code": code,
+                    "partial_committed": partial_committed,
+                    "branch": pr_result.get("branch", branch_name),
+                },
             )
-            return {"success": False, "error": err}
+            # برای pr_creation_failed، proposalها را نگه‌داریم applied_locally
+            # تا کاربر بتواند PR را دستی باز کند یا apply-all مجدد بزند با
+            # branch جدید (که فایل‌های قبلی override خواهند شد)
+            return {"success": False, "error": err, "code": code, "partial_committed": partial_committed}
     except Exception as e:
         logger.exception(f"apply_all GitHub call failed: {e}")
         log_scan_message(
@@ -994,12 +1099,18 @@ async def _resolve_patches_in_files_map(
                         "error": f"محتوای فعلی {path} برای patch قابل دریافت نیست",
                         "code": "patch_fetch_failed",
                     }
-                new_content = current
+                # 🆕 (v2 audit C1 fix) — CRLF normalization
+                # اگر فایل CRLF دارد ولی AI با LF تولید کرده (یا برعکس)،
+                # `find_str not in current` همیشه True می‌شد. هر دو طرف را
+                # به LF normalize می‌کنیم. در پایان line-ending فایل اصلی
+                # حفظ می‌شود اگر CRLF بود.
+                _had_crlf = "\r\n" in current
+                new_content = current.replace("\r\n", "\n") if _had_crlf else current
                 for sec in sections:
                     if not isinstance(sec, dict):
                         continue
-                    find_str = sec.get("find", "")
-                    repl_str = sec.get("replace", "")
+                    find_str = (sec.get("find") or "").replace("\r\n", "\n")
+                    repl_str = (sec.get("replace") or "").replace("\r\n", "\n")
                     if not find_str:
                         return {
                             "success": False,
@@ -1009,7 +1120,10 @@ async def _resolve_patches_in_files_map(
                     if find_str not in new_content:
                         return {
                             "success": False,
-                            "error": f"patch برای {path}: '{find_str[:80]}...' در فایل پیدا نشد",
+                            "error": (
+                                f"patch برای {path}: '{find_str[:80]}...' در فایل پیدا نشد. "
+                                f"بازاجرا کنید یا scan را با مسیر دقیق‌تر تکرار کنید."
+                            ),
                             "code": "patch_find_failed",
                         }
                     if new_content.count(find_str) > 1:
@@ -1019,6 +1133,9 @@ async def _resolve_patches_in_files_map(
                             "code": "patch_ambiguous",
                         }
                     new_content = new_content.replace(find_str, repl_str, 1)
+                # بازگرداندن line-ending اگر فایل اصلی CRLF بود
+                if _had_crlf:
+                    new_content = new_content.replace("\n", "\r\n")
                 # تبدیل به modify
                 files_map[path] = {
                     **ch,
@@ -1047,8 +1164,15 @@ async def _validate_cross_proposal_consistency(
     if len(staged_files) <= 1:
         return {"blocking_issues": [], "warnings": []}
 
+    # 🆕 (v2 audit D2 fix) — اگر تعداد فایل از cap بیشتر است، صریح به LLM
+    # بگو تا برای فایل‌های نمایش‌داده‌نشده ادعای ناسازگاری نکند.
+    _file_cap = 15
+    _total_files = len(staged_files)
+    _truncated = _total_files > _file_cap
+    _shown_paths: List[str] = []
     changes_blob_parts: List[str] = []
-    for path, ch in list(staged_files.items())[:15]:
+    for path, ch in list(staged_files.items())[:_file_cap]:
+        _shown_paths.append(path)
         content = (ch.get("content") or "")[:8000]
         kind = ch.get("change_kind", "modify")
         summary = ch.get("summary", "")
@@ -1061,11 +1185,23 @@ async def _validate_cross_proposal_consistency(
         f"- {p.get('title', '')[:120]}" for p in proposals[:10]
     )
 
+    _truncation_note = ""
+    if _truncated:
+        _hidden = [p for p in staged_files.keys() if p not in _shown_paths][:20]
+        _truncation_note = (
+            f"\n\n⚠️ **TRUNCATION**: این فقط ۱۵ فایل اول از {_total_files} فایل کل است.\n"
+            f"فایل‌های نمایش‌داده‌نشده:\n"
+            + "\n".join(f"  - {p}" for p in _hidden)
+            + "\n\nبرای فایل‌های نمایش‌داده‌نشده، مشکل ادعا نکن. اگر symbol هایی "
+            "ارجاع داده‌شده که در فایل‌های شناخته‌شده تعریف نشده‌اند، احتمالاً در "
+            "فایل‌های نمایش‌داده‌نشده هستند — این را در `warnings` بگذار نه `blocking_issues`."
+        )
+
     prompt = (
         "تو یک Senior Code Reviewer هستی. این مجموعه تغییرات قرار است "
         "**با هم** در یک PR commit شوند. بررسی کن آیا روی هم سازگار هستند.\n\n"
         f"# پیشنهاد‌ها\n{proposal_titles}\n\n"
-        f"# تغییرات\n{chr(10).join(changes_blob_parts)}\n\n"
+        f"# تغییرات\n{chr(10).join(changes_blob_parts)}{_truncation_note}\n\n"
         "# بررسی کن:\n"
         "1. Rename inconsistency (تابعی rename شده ولی فایل دیگر از نام قدیم استفاده می‌کند)\n"
         "2. API contract break (signature عوض شده ولی caller به‌روز نیست)\n"

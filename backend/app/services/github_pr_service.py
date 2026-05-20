@@ -347,11 +347,27 @@ class GitHubPRService:
         )
 
         # 1. ایجاد branch
+        # 🆕 (v2 audit E1 fix) — اگر branch از قبل وجود دارد، صریح fail کن
+        # تا commits روی branch alien اعمال نشود. caller باید با uuid suffix
+        # branch جدید بسازد.
         branch_result = await self.create_branch(owner, repo, branch_name, token=token)
         if not branch_result.get("success"):
             return branch_result
+        if branch_result.get("already_exists"):
+            return {
+                "success": False,
+                "error": f"Branch '{branch_name}' از قبل روی GitHub وجود دارد. "
+                         f"این معمولاً نشانهٔ یک apply ناقص قبلی است. "
+                         f"لطفاً branch قبلی را پاک کنید یا apply-all را دوباره بزنید (suffix جدید).",
+                "code": "branch_already_exists",
+                "branch": branch_name,
+            }
 
         # 2. Commit فایل‌ها
+        # 🆕 (v2 audit E2 fix) — partial commit tracking: اگر file N شکست
+        # خورد، file های ۱..N-1 روی branch هستند. آن‌ها را در error برگردان
+        # تا caller بتواند branch را پاک کند یا warning صریح بدهد.
+        files_committed: List[str] = []
         for file in files:
             file_result = await self.create_or_update_file(
                 owner=owner,
@@ -363,7 +379,19 @@ class GitHubPRService:
                 token=token
             )
             if not file_result.get("success"):
-                return file_result
+                # تلاش برای cleanup branch ناقص — best-effort
+                try:
+                    await self._delete_branch(owner, repo, branch_name, token=token)
+                except Exception as _de:
+                    slog.warning(f"failed to cleanup partial branch {branch_name}: {_de}")
+                return {
+                    **file_result,
+                    "code": "file_commit_failed",
+                    "failed_file": file["path"],
+                    "files_committed_before_failure": files_committed,
+                    "branch_cleanup_attempted": True,
+                }
+            files_committed.append(file["path"])
 
         # 3. ایجاد PR
         pr_result = await self.create_pull_request(
@@ -374,8 +402,27 @@ class GitHubPRService:
             head_branch=branch_name,
             token=token
         )
+        # اگر PR creation شکست خورد، branch با همه files موجود است.
+        # caller (apply_all) با کد مشخصی می‌فهمد که commit شد ولی PR نشد.
+        if not pr_result.get("success"):
+            return {
+                **pr_result,
+                "code": "pr_creation_failed",
+                "files_committed": files_committed,
+                "branch": branch_name,
+                "note": "فایل‌ها commit شدند اما PR ساخته نشد. می‌توانید PR را دستی روی GitHub بسازید.",
+            }
 
-        return pr_result
+        return {**pr_result, "files_committed": files_committed}
+
+    async def _delete_branch(self, owner: str, repo: str, branch_name: str, token: str = None) -> Dict[str, Any]:
+        """🆕 (v2 audit E2) — حذف branch برای cleanup partial commit failure."""
+        session = await self._get_session()
+        url = f"{self.GITHUB_API}/repos/{owner}/{repo}/git/refs/heads/{branch_name}"
+        async with session.delete(url, headers=self._get_headers(token)) as r:
+            if r.status in (204, 422, 404):
+                return {"success": True, "deleted": branch_name}
+            return {"success": False, "error": await r.text()}
 
     # =====================================
     # GitHub Issues Operations
