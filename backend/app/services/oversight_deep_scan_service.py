@@ -43,6 +43,13 @@ from .oversight_service import (
 from .oversight_strong_prompt import build_strong_prompt
 
 STRUCTURE_DIR = STORAGE_DIR / "structure"
+
+
+# (audit fix I3) — sentinel exception برای skip post-scan side-effects
+# (notification + PDF bundle + scan_v5 archive) در حالت Inspector scan موردی.
+# این subclass از Exception است، پس توسط `except Exception` کلی catch می‌شود.
+class _InspectorSkipPostScan(Exception):
+    pass
 PROGRESS_DIR = STORAGE_DIR / "scan_progress"
 SCAN_RESULTS_DIR = STORAGE_DIR / "scan_results"
 for d in (STRUCTURE_DIR, PROGRESS_DIR, SCAN_RESULTS_DIR):
@@ -1460,6 +1467,17 @@ async def run_deep_scan(
     if watched is None:
         raise ValueError("پروژه یافت نشد")
 
+    # 🆕 (inspector-scan) — parse output_target در ابتدای function تا بتوانیم
+    # در همان فاز ۱ (scan_v5 session creation) هم gate کنیم.
+    # `_output_target_session_id` همان `_inspector_session_id` است که بعداً
+    # هم استفاده می‌شود — نام جدا فقط برای وضوح در gate های اولیه.
+    _output_target_session_id: Optional[int] = None
+    if output_target and output_target.startswith("inspector_session:"):
+        try:
+            _output_target_session_id = int(output_target.split(":", 1)[1])
+        except (ValueError, IndexError):
+            _output_target_session_id = None
+
     # 🆕 Mapping scan_depth → enabled_passes (مهاجرت از Health depth)
     # اگر enabled_passes صریحاً پاس داده شده، آن را استفاده کن
     # وگرنه از watched.scan_depth بخوان
@@ -2136,7 +2154,10 @@ async def run_deep_scan(
         scan_v5_outcome_data: Dict[str, Any] = {}
         scan_v5_effectiveness_issues: List[Dict[str, Any]] = []
         try:
-            if getattr(watched, "inspector_session_enabled", True):
+            # (audit fix I2) — در حالت Inspector scan موردی، scan_v5 session
+            # جدید نسازیم؛ این scan در همان session chat در حال اجراست و یک
+            # session موازی در مرکز نظارت سردرگم‌کننده است.
+            if getattr(watched, "inspector_session_enabled", True) and _output_target_session_id is None:
                 from .scan_v5.scan_inspector_session import (
                     create_scan_session, log_scan_message,
                 )
@@ -2508,13 +2529,9 @@ async def run_deep_scan(
         # 🆕 (inspector-scan) — تشخیص target output
         # اگر output_target نشان‌گر inspector session است، findings به
         # OversightTask تبدیل نمی‌شوند بلکه به proposal payload در همان
-        # session chat لاگ می‌شوند.
-        _inspector_session_id: Optional[int] = None
-        if output_target and output_target.startswith("inspector_session:"):
-            try:
-                _inspector_session_id = int(output_target.split(":", 1)[1])
-            except (ValueError, IndexError):
-                _inspector_session_id = None
+        # session chat لاگ می‌شوند. این از `_output_target_session_id` که
+        # در ابتدای تابع pre-parse شد استفاده می‌کند.
+        _inspector_session_id: Optional[int] = _output_target_session_id
 
         # ساخت تسک با پرامپت قوی غنی‌شده
         created_tasks: List[Dict[str, Any]] = []
@@ -2884,23 +2901,34 @@ async def run_deep_scan(
 
         # 🆕 (P4) ذخیره خلاصهٔ آخرین scan روی خود WatchedProject — برای نمایش
         # دائمی در UI WatchedCard (مستقل از progress JSON که override می‌شود)
-        try:
-            async with service._lock:
-                watched.last_scan_metadata = {
-                    **scan_metadata,
-                    "findings_count": len(unique),
-                    "tasks_created": len(created_tasks),
-                    "duplicates_skipped": len(duplicates_skipped),
-                    "critical_count": critical_count,
-                    "completed_at": now_iso(),
-                    "pass_breakdown": pass_breakdown,
-                }
-                service._save_watched()
-        except Exception as _e:
-            logger.debug(f"failed to save last_scan_metadata: {_e}")
+        # (audit fix I1) — در حالت Inspector scan موردی، metadata نباید
+        # کارت پروژه را آلوده کند. این scan دوره‌ای نیست.
+        if _inspector_session_id is None:
+            try:
+                async with service._lock:
+                    watched.last_scan_metadata = {
+                        **scan_metadata,
+                        "findings_count": len(unique),
+                        "tasks_created": len(created_tasks),
+                        "duplicates_skipped": len(duplicates_skipped),
+                        "critical_count": critical_count,
+                        "completed_at": now_iso(),
+                        "pass_breakdown": pass_breakdown,
+                    }
+                    service._save_watched()
+            except Exception as _e:
+                logger.debug(f"failed to save last_scan_metadata: {_e}")
 
         # 🔔 notification — silent skip اگر env تنظیم نشده باشد
+        # (audit fix I3) — در حالت Inspector scan موردی، Telegram/PDF/notification
+        # نباید fire شود. این scan ad-hoc از chat است نه دوره‌ای.
+        # برای حداقل کردن تغییر indentation در یک بلوک ۲۰۰ خطی، از یک
+        # exit-flag در ابتدای try استفاده می‌کنیم که در طول کل بلوک check
+        # می‌شود. شایان ذکر است که existing except کلی همه را می‌گیرد.
         try:
+            if _inspector_session_id is not None:
+                # raise برای exit از این try (catch می‌شود توسط except پایین)
+                raise _InspectorSkipPostScan()
             from .notification_service import notification_service
             watched_obj = next((w for w in service.watched if w.id == watched_id), None)
             repo_name = watched_obj.repo_full_name if watched_obj else watched_id

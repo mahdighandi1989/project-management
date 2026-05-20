@@ -50,7 +50,8 @@ _JS_STACK_RE = re.compile(
 )
 # نام فایل که کاربر صریحاً در پیام می‌آورد (مثلاً frontend/src/foo.tsx)
 _INLINE_PATH_RE = re.compile(
-    r'(?:^|[\s`"\'(])((?:[\w-]+/){1,}[\w.-]+\.(?:py|tsx?|jsx?|mjs|cjs|css|scss|md|json|ya?ml|sql))',
+    # شامل `./foo/bar.py` و `/foo/bar.py` و `foo/bar.py`
+    r'(?:^|[\s`"\'(])((?:\./|/)?(?:[\w.-]+/){1,}[\w.-]+\.(?:py|tsx?|jsx?|mjs|cjs|css|scss|md|json|ya?ml|sql))',
     re.IGNORECASE,
 )
 
@@ -138,10 +139,14 @@ def _extract_inline_paths(message: str) -> List[str]:
 
 
 def _url_to_route_candidates(url: str) -> List[str]:
-    """تبدیل یک URL/route مثل `/oversight` به مسیرهای محتمل فایل."""
+    """تبدیل یک URL/route مثل `/oversight` به مسیرهای محتمل فایل.
+
+    (audit fix I6) — segment های dynamic (عددی یا UUID مانند) به
+    placeholderهای Next.js مثل `[id]` و `[slug]` نگاشت می‌شوند تا فایل‌های
+    جعلی مانند `frontend/src/app/projects/123/page.tsx` در scope وارد نشوند.
+    """
     if not url:
         return []
-    # path قسمت از URL
     path = url
     if "://" in path:
         try:
@@ -149,17 +154,46 @@ def _url_to_route_candidates(url: str) -> List[str]:
             path = urlparse(url).path
         except Exception:
             pass
-    path = path.strip("/")
+    path = path.strip("/").split("?", 1)[0].split("#", 1)[0]
     if not path:
-        path = "page"  # root → page.tsx
+        # root → page.tsx
+        candidates: List[str] = []
+        for base in _NEXT_ROUTE_BASES:
+            candidates.append(f"{base}/page.tsx")
+            candidates.append(f"{base}/page.jsx")
+        return candidates
 
-    # روت‌های Next.js معمولاً به page.tsx ختم می‌شوند
+    segments = path.split("/")
+
+    # (audit fix I6) — segment dynamic را به `[id]` / `[slug]` تبدیل کن.
+    # Heuristic: عددی صرف، UUID-shape، یا hex hash → احتمالاً id.
+    _uuid_re = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+    _hex_re = re.compile(r"^[0-9a-fA-F]{12,}$")
+    def _is_dynamic(seg: str) -> bool:
+        if not seg:
+            return False
+        if seg.isdigit():
+            return True
+        if _uuid_re.match(seg):
+            return True
+        if _hex_re.match(seg):
+            return True
+        return False
+
+    literal_segments = list(segments)
+    dynamic_segments = [
+        "[id]" if _is_dynamic(s) else s for s in segments
+    ]
+
     candidates: List[str] = []
     for base in _NEXT_ROUTE_BASES:
-        candidates.append(f"{base}/{path}/page.tsx")
-        candidates.append(f"{base}/{path}/page.jsx")
-        candidates.append(f"{base}/{path}.tsx")
-        candidates.append(f"{base}/{path}.jsx")
+        # هم مسیر literal و هم نسخهٔ با [id] را اضافه کن
+        for segs in {tuple(literal_segments), tuple(dynamic_segments)}:
+            joined = "/".join(segs)
+            candidates.append(f"{base}/{joined}/page.tsx")
+            candidates.append(f"{base}/{joined}/page.jsx")
+            candidates.append(f"{base}/{joined}.tsx")
+            candidates.append(f"{base}/{joined}.jsx")
     return candidates
 
 

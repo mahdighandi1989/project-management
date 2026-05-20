@@ -11268,6 +11268,15 @@ class SmartChatRequest(BaseModel):
     frontend_url: Optional[str] = None
     reply_to: Optional[SmartChatReplyContext] = None  # ریپلای به پیام خاص
     previously_read_files: Optional[List[str]] = None  # فایل‌هایی که قبلاً در مکالمه خوانده شدن
+    # 🆕 (inspector-scan, audit C2 fix) — context اضافی برای intent resolver.
+    # کاربر گفت screenshots/console/URL هم در دسترس inspector chat است.
+    # این فیلدها optional اند و فقط برای بهبود تشخیص intent استفاده می‌شوند.
+    console_logs: Optional[List[dict]] = None
+    page_url: Optional[str] = None
+    api_paths: Optional[List[str]] = None
+    linked_task: Optional[dict] = None
+    screenshots: Optional[List[dict]] = None
+    inspector_mode: Optional[str] = None  # "chat" | "visual_debug"
     # 🔗 (Bug C7 — Bridge Phase 2) — اتصال به تسک مرکز نظارت
     # اگر داده شود، system prompt شامل بلوک «🎯 کانتکست تسک متصل» می‌شود با
     # acceptance_criteria + remaining_parts + task_steps + done_parts + scan_metadata.
@@ -13718,8 +13727,13 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         intent = resolve_intent_from_chat_context(
             user_message=request.message,
             backend_logs=request.backend_logs,
+            console_logs=request.console_logs,
             frontend_url=request.frontend_url,
-            mode="chat",
+            page_url=request.page_url,
+            api_paths=request.api_paths,
+            linked_task=request.linked_task,
+            screenshots=request.screenshots,
+            mode=request.inspector_mode or "chat",
         )
 
         if intent.should_scan:

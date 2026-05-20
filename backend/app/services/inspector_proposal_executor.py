@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -277,6 +278,24 @@ async def run_proposal(
         return {"success": False, "error": "proposal یافت نشد", "code": "proposal_not_found"}
     proposal, message_id = found
 
+    # (audit fix M3) — proposal بدون target_files نباید به AI پاس شود؛
+    # AI ممکن است فایل‌های جعلی بسازد.
+    _tf = (proposal.get("target_files") or []) + [
+        t.get("path") for t in (proposal.get("target_locations") or [])
+        if isinstance(t, dict) and t.get("path")
+    ]
+    if not [p for p in _tf if p]:
+        _update_proposal_in_message(message_id, proposal_id, {
+            "execution_status": "failed",
+            "execution_error": "proposal بدون target_files قابل اجرا نیست — مدل scan نتوانست فایل هدف تشخیص دهد",
+            "executed_at": _now_iso(),
+        })
+        return {
+            "success": False,
+            "error": "این پیشنهاد فایل هدف ندارد. لطفاً scan موردی را با مسیر مشخص‌تر در پیام تکرار کنید.",
+            "code": "no_target_files",
+        }
+
     # repo info
     repo = _resolve_repo_for_session(session_id)
     if not repo:
@@ -287,7 +306,7 @@ async def run_proposal(
     try:
         import aiohttp
         from .oversight_deep_scan_service import _fetch_file_content, _gh_get_json, GITHUB_API
-        from ..core.config import get_github_token
+        from .oversight_service import get_github_token
         token = get_github_token()
         headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"} if token else {}
         info = await _gh_get_json_safe(GITHUB_API, repo, headers)
@@ -512,10 +531,13 @@ async def apply_all_staged(
     # 7) فراخوانی github
     try:
         from .github_pr_service import get_github_pr_service
-        from ..core.config import get_github_token
+        from .oversight_service import get_github_token
         token = get_github_token()
         pr_service = get_github_pr_service()
-        branch_name = f"inspector-scan/{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{session_id}"
+        # (audit fix M1) — uuid suffix برای جلوگیری از collision در apply-all
+        # های هم‌زمان روی همان session در همان ثانیه.
+        _branch_suffix = uuid.uuid4().hex[:6]
+        branch_name = f"inspector-scan/{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{session_id}-{_branch_suffix}"
         pr_result = await pr_service.create_pr_with_changes(
             github_path=repo,
             branch_name=branch_name,

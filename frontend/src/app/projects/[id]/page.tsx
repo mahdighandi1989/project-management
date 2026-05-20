@@ -5091,14 +5091,21 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             frontend_url: inspectorFrontendUrl,
             reply_to: replyToPayload,
             previously_read_files: previouslyReadFiles,
-            // 🔗 (C7 Bridge Phase 2) — اگر این session به یک تسک مرکز نظارت
-            // متصل است، task_id را پاس بده تا backend بلوک کانتکست تسک را
-            // به system prompt تزریق کند
             task_id: linkedTaskId || undefined,
-            // 🆕 (anti-stuck-loop) — اگر retry است، شماره را پاس بده
-            // backend بر اساس این system prompt را قوی‌تر می‌کند و در
-            // retry≥2 خودکار به fallback model سوئیچ می‌کند.
             retry_attempt: _isRetry ? (inspectorRetryAttemptRef.current || 1) : undefined,
+            // 🆕 (inspector-scan, audit C2 fix) — context کامل برای intent
+            // resolver تا scan موردی بتواند scope صحیح را تشخیص دهد.
+            console_logs: (importedProjectConsoleLogs || []).slice(-30).map(l => ({
+              level: l.level,
+              message: l.message,
+              source: l.source,
+            })),
+            page_url: inspectorFrontendUrl,
+            linked_task: linkedTaskData ? {
+              target_files: (linkedTaskData as any)?.target_files || [],
+              title: (linkedTaskData as any)?.task?.title || '',
+            } : undefined,
+            inspector_mode: 'chat',
           }),
           signal: inspectorOpAbortRef.current?.signal,
         });
