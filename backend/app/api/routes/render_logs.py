@@ -307,7 +307,17 @@ def _build_general_instructions_list(
 - اگر فایلی در مرحله قبل تغییر یافته و در مرحله فعلی هم باید تغییر کنه → **تمام محتوای مرحله قبل حفظ شود** + تغییرات جدید اضافه شود
 - ❌ هرگز فایل مرحله قبل را دور بینداز و از صفر بنویس
 - ❌ URL‌ها، API baseها، نام event‌ها، نام متغیرها: **دقیقاً مثل مراحل قبلی** — تغییر ندهید
-- ✅ content مرحله فعلی = content مرحله قبل + تغییرات جدید""",
+- ✅ content مرحله فعلی = content مرحله قبل + تغییرات جدید
+
+### 🚨 قانون حیاتی: stack-traced files — هرگز skip نکن
+اگر در پیام کاربر یا backend_logs یک stack trace هست (مثل
+`File "/opt/render/project/src/app/main.py", line 32`):
+- **آن فایل تقریباً قطعاً مشکل دارد** — به‌جز موارد بسیار نادر
+- **هرگز** بدون **نقل‌قول محتوای فعلی** آن فایل نگو «صحیح است» یا «نیازی به تغییر ندارد»
+- اگر محتوای فعلی فایل کد مشکل‌دار (مثل خط ۳۲ که error می‌دهد) را همچنان دارد → **حتماً** در action_plan آن را تغییر بده
+- اگر AI قبلی (مرحله قبل) گفت «این فایل درست است» ولی کد مشکل‌دار همچنان موجود است → اعتماد نکن و فایل را در این مرحله fix کن
+- مثال غلط: «`app/main.py` صحیح است، نیازی به تغییر ندارد» (در حالی که خط ۳۲ همچنان `async with engine.begin()` دارد)
+- مثال درست: «خط ۳۲ `app/main.py` همچنان `engine.begin()` می‌زند، باید به `init_db()` تبدیل شود — این change را در action_plan قرار می‌دهم.»""",
         },
         {
             "id": "sys_exact_intent",
@@ -12643,10 +12653,69 @@ def _normalize_repo_paths(files: Optional[List]) -> Optional[List[str]]:
     return result or None
 
 
+def _check_stack_traced_files_in_action_plan(
+    action_plan: Optional[dict],
+    user_message: str,
+    code_files: List[str],
+    backend_logs: Optional[List[dict]] = None,
+) -> Optional[Dict[str, Any]]:
+    """🆕 (v3 safety-net) — هشدار اگر فایل ذکر شده در stack trace در
+    action_plan نیست.
+
+    این پاسخ به مشکل قابل دیدن کاربر است: AI گفت «main.py صحیح است» در
+    حالی که خط ۳۲ همان فایل علت deploy failure بود. ما نمی‌توانیم AI را
+    مجبور کنیم درست تشخیص دهد، ولی می‌توانیم یک warning صریح در
+    گزارش نهایی نشان دهیم تا کاربر و developer متوجه شوند fix احتمالاً
+    ناقص است.
+
+    Returns:
+        None اگر هیچ stack-traced file وجود ندارد یا همگی در action_plan
+        هستند. در غیر این صورت، dict با لیست missing files.
+    """
+    if not user_message and not backend_logs:
+        return None
+    # ساخت متن کلی از پیام + logs
+    text_parts: List[str] = [user_message or ""]
+    if backend_logs:
+        for entry in backend_logs[-30:]:
+            if isinstance(entry, dict):
+                text_parts.append(
+                    " ".join(str(entry.get(k, "")) for k in ("message", "stack", "stack_trace", "text", "msg"))
+                )
+            elif isinstance(entry, str):
+                text_parts.append(entry)
+    combined_text = "\n".join(text_parts)
+    stack_files = _extract_file_paths_from_text(combined_text, code_files)
+    if not stack_files:
+        return None
+    # کدام فایل‌ها در action_plan هستند؟
+    ap_paths = set()
+    if action_plan and isinstance(action_plan.get("files"), list):
+        for f in action_plan["files"]:
+            if isinstance(f, dict) and f.get("path"):
+                ap_paths.add(f["path"])
+    missing = [f for f in stack_files if f not in ap_paths]
+    if not missing:
+        return None
+    return {
+        "stack_traced_files": stack_files,
+        "missing_from_action_plan": missing,
+        "warning_message": (
+            f"⚠️ {len(missing)} فایل که در stack trace خطا ذکر شده‌اند، در action_plan نیستند: "
+            f"{', '.join(missing)}. "
+            f"AI ممکن است این فایل‌ها را اشتباه «صحیح» تشخیص داده باشد. "
+            f"اگر deploy همچنان شکست می‌خورد، محتوای این فایل‌ها را روی GitHub بررسی کنید."
+        ),
+    }
+
+
 def _validate_action_plan_syntax(
     action_plan: dict,
     original_files: dict = None,
     repo_file_paths: Optional[List[str]] = None,
+    user_message: Optional[str] = None,
+    backend_logs: Optional[List[dict]] = None,
+    code_files: Optional[List[str]] = None,
 ) -> dict:
     """
     اعتبارسنجی سینتکس فایل‌های action_plan قبل از ارسال به فرانت.
@@ -12937,6 +13006,24 @@ def _validate_action_plan_syntax(
     if warnings:
         action_plan["_syntax_warnings"] = warnings
         slog.warning(f"[action_plan validation] {len(warnings)} issues ({len(rejected_files)} rejected): {warnings[:5]}")
+
+    # 🆕 (v3 safety-net) — هشدار stack-trace coverage
+    if user_message or backend_logs:
+        try:
+            _coverage = _check_stack_traced_files_in_action_plan(
+                action_plan,
+                user_message=user_message or "",
+                code_files=code_files or [],
+                backend_logs=backend_logs,
+            )
+            if _coverage:
+                action_plan["_stack_trace_warning"] = _coverage
+                slog.warning(
+                    f"[action_plan] stack-traced files NOT in action_plan: "
+                    f"{_coverage.get('missing_from_action_plan')}"
+                )
+        except Exception as _sc_e:
+            slog.debug(f"stack-trace coverage check failed: {_sc_e}")
 
     return action_plan
 
@@ -14425,7 +14512,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     "model_used": response.model_id,
                     "tokens_used": response.tokens_used,
                     "has_action": q_action_plan is not None,
-                    "action_plan": _validate_action_plan_syntax(q_action_plan, original_files=file_contents, repo_file_paths=_normalize_repo_paths(locals().get("all_files"))) if q_action_plan else None,
+                    "action_plan": _validate_action_plan_syntax(q_action_plan, original_files=file_contents, repo_file_paths=_normalize_repo_paths(locals().get("all_files")), user_message=request.message, backend_logs=request.backend_logs, code_files=locals().get("code_files")) if q_action_plan else None,
                     "files_were_read": has_q_code,
                     "selected_file_paths": q_selected if has_q_code else [],
                 })
@@ -14894,7 +14981,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         "model_used": _err_model_used,
                         "tokens_used": _err_tokens,
                         "has_action": has_code_action,
-                        "action_plan": _validate_action_plan_syntax(action_plan, original_files=file_contents, repo_file_paths=_normalize_repo_paths(locals().get("all_files"))) if action_plan else None,
+                        "action_plan": _validate_action_plan_syntax(action_plan, original_files=file_contents, repo_file_paths=_normalize_repo_paths(locals().get("all_files")), user_message=request.message, backend_logs=request.backend_logs, code_files=locals().get("code_files")) if action_plan else None,
                         "files_were_read": has_err_code_files,
                         "selected_file_paths": selected if has_err_code_files else [],
                         "truncated": _err_is_truncated,
@@ -15685,7 +15772,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         "model_used": _act_model_used,
                         "tokens_used": _act_tokens,
                         "has_action": action_plan is not None,
-                        "action_plan": _validate_action_plan_syntax(action_plan, original_files=file_contents, repo_file_paths=_normalize_repo_paths(locals().get("all_files"))) if action_plan else None,
+                        "action_plan": _validate_action_plan_syntax(action_plan, original_files=file_contents, repo_file_paths=_normalize_repo_paths(locals().get("all_files")), user_message=request.message, backend_logs=request.backend_logs, code_files=locals().get("code_files")) if action_plan else None,
                         "files_were_read": has_code_files,
                         "selected_file_paths": selected if has_code_files else [],
                         "truncated": _act_is_truncated,
@@ -17624,7 +17711,7 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                 "content": response.content, "model_used": primary_model,
                 "tokens_used": getattr(response, 'tokens_used', 0) or 0,
                 "type": "visual_debug", "screenshots_count": len(request.screenshots),
-                "action_plan": _validate_action_plan_syntax(action_plan, original_files=_vd_file_contents, repo_file_paths=_normalize_repo_paths(locals().get("all_files"))) if action_plan else None, "has_action": action_plan is not None,
+                "action_plan": _validate_action_plan_syntax(action_plan, original_files=_vd_file_contents, repo_file_paths=_normalize_repo_paths(locals().get("all_files")), user_message=getattr(request, "message", "") or getattr(request, "user_request", "") or "", backend_logs=getattr(request, "backend_logs", None), code_files=locals().get("code_files")) if action_plan else None, "has_action": action_plan is not None,
                 "truncated": _vd_is_truncated,
             })
         except Exception as e:
@@ -18037,7 +18124,7 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
                 "content": response.content, "model_used": reanalyze_model,
                 "tokens_used": getattr(response, 'tokens_used', 0) or 0,
                 "type": "visual_debug_reanalyze", "vision_model": request.vision_model_id,
-                "action_plan": _validate_action_plan_syntax(action_plan, original_files=_ra_file_contents, repo_file_paths=_normalize_repo_paths(locals().get("all_files"))) if action_plan else None, "has_action": action_plan is not None,
+                "action_plan": _validate_action_plan_syntax(action_plan, original_files=_ra_file_contents, repo_file_paths=_normalize_repo_paths(locals().get("all_files")), user_message=getattr(request, "message", "") or getattr(request, "user_request", "") or "", backend_logs=getattr(request, "backend_logs", None), code_files=locals().get("code_files")) if action_plan else None, "has_action": action_plan is not None,
                 "truncated": _ra_is_truncated,
             })
         except Exception as e:
