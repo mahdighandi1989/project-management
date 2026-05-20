@@ -12295,6 +12295,164 @@ def _auto_convert_modify_to_sections(orig_content: str, new_content: str, file_p
         return None
 
 
+# ─── Python import hallucination detection ─────────────────────────
+# مدل‌های AI خیلی وقت‌ها فایل‌هایی می‌سازند که `from app.X import Y` می‌کنند
+# در حالی که `app/X.py` در پروژه وجود ندارد. این تابع imports را با
+# AST تحلیل می‌کند و در صورت hallucination، خطا برمی‌گرداند.
+def _validate_python_imports(action_plan_files: List[dict], original_files: dict = None) -> Dict[str, List[str]]:
+    """
+    تشخیص import های hallucinated در فایل‌های Python.
+
+    منطق:
+    1. جمع‌آوری تمام ماژول‌های "شناخته‌شده" از action_plan + original_files
+    2. تشخیص top-level package(های) داخلی پروژه (مثلاً 'app', 'backend')
+    3. برای هر فایل Python در action_plan، parse imports و چک کن:
+       - اگر import از یک ماژول داخلی است ولی آن ماژول هیچ‌جا نیست → hallucination
+       - اگر ماژول در action_plan هست ولی نام imported تعریف نشده → hallucination
+    """
+    import ast as _ast
+    errors: Dict[str, List[str]] = {}
+
+    def _path_to_module(p: str) -> Optional[str]:
+        if not p or not p.endswith(".py"):
+            return None
+        m = p[:-3].replace("/", ".").replace("\\", ".")
+        if m.endswith(".__init__"):
+            m = m[:-9]
+        return m
+
+    def _extract_defs(content: str) -> set:
+        """نام‌های top-level که در یک فایل تعریف شده‌اند (func/class/var)."""
+        defs = set()
+        try:
+            tree = _ast.parse(content)
+        except Exception:
+            return defs
+        for node in tree.body:
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                defs.add(node.name)
+            elif isinstance(node, _ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, _ast.Name):
+                        defs.add(target.id)
+                    elif isinstance(target, _ast.Tuple):
+                        for elt in target.elts:
+                            if isinstance(elt, _ast.Name):
+                                defs.add(elt.id)
+            elif isinstance(node, _ast.AnnAssign) and isinstance(node.target, _ast.Name):
+                defs.add(node.target.id)
+            elif isinstance(node, (_ast.Import, _ast.ImportFrom)):
+                for alias in node.names:
+                    defs.add(alias.asname or alias.name.split(".")[0])
+        return defs
+
+    # 1. ساخت map ماژول‌های شناخته‌شده
+    known_modules: Dict[str, set] = {}  # module_path → set of defined names
+
+    for f in action_plan_files:
+        p = f.get("path", "")
+        mod = _path_to_module(p)
+        if mod:
+            known_modules[mod] = _extract_defs(f.get("content", "") or "")
+            # __init__ هم به package parent ست شود
+            if p.endswith("/__init__.py") or p == "__init__.py":
+                pkg = mod  # already without .__init__ suffix
+                known_modules.setdefault(pkg, known_modules[mod])
+
+    if original_files:
+        for p, content in original_files.items():
+            mod = _path_to_module(p)
+            if mod and mod not in known_modules:
+                known_modules[mod] = _extract_defs(content or "")
+
+    # 2. تشخیص top-level packages داخلی
+    project_roots: set = set()
+    for mod in known_modules:
+        root = mod.split(".")[0]
+        project_roots.add(root)
+    # حذف چند نام عمومی که ممکنه false positive بدهند
+    project_roots.discard("test")
+    project_roots.discard("tests")
+
+    # 3. تحلیل imports هر فایل Python در action_plan
+    for f in action_plan_files:
+        p = f.get("path", "")
+        if not p.endswith(".py"):
+            continue
+        content = f.get("content", "") or ""
+        if not content:
+            continue
+        try:
+            tree = _ast.parse(content)
+        except Exception:
+            continue  # syntax errors handled elsewhere
+
+        file_errs: List[str] = []
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.ImportFrom):
+                if node.level and node.level > 0:
+                    # relative import (e.g., `from .config import settings`)
+                    # محاسبهٔ ماژول هدف بر اساس ماژول فعلی
+                    current_mod = _path_to_module(p) or ""
+                    parts = current_mod.split(".")
+                    # level=1 → همان package، level=2 → یک سطح بالاتر و …
+                    if len(parts) < node.level:
+                        continue
+                    base = ".".join(parts[: -node.level]) if node.level <= len(parts) else ""
+                    target_mod = (base + ("." + node.module if node.module else "")).strip(".")
+                else:
+                    target_mod = node.module or ""
+
+                if not target_mod:
+                    continue
+                root = target_mod.split(".")[0]
+                if root not in project_roots:
+                    # احتمالاً stdlib یا third-party — رد شو
+                    continue
+
+                # داخلی است — باید در known_modules باشد
+                if target_mod not in known_modules:
+                    # شاید parent package باشد (مثلاً `from app.routes import auth` که `app/routes/auth.py` موجود است)
+                    has_submodule = any(km.startswith(target_mod + ".") for km in known_modules)
+                    if not has_submodule:
+                        file_errs.append(
+                            f"❌ import hallucinated: `from {target_mod} import ...` "
+                            f"— ماژول `{target_mod}` نه در action_plan هست و نه در فایل‌های خوانده‌شده"
+                        )
+                        continue
+
+                # ماژول هست؛ آیا نام‌های imported تعریف شده‌اند؟
+                defs = known_modules.get(target_mod, set())
+                if defs:  # فقط اگر defs را داریم چک کن
+                    for alias in node.names:
+                        if alias.name == "*":
+                            continue
+                        if alias.name not in defs:
+                            # ممکن است sub-module باشد (e.g., `from app import routes` که routes یک package است)
+                            sub_mod = f"{target_mod}.{alias.name}"
+                            if sub_mod in known_modules or any(km.startswith(sub_mod + ".") for km in known_modules):
+                                continue
+                            file_errs.append(
+                                f"❌ import hallucinated: `{alias.name}` در ماژول `{target_mod}` تعریف نشده "
+                                f"— احتمالاً مدل نام نمادی را اختراع کرده"
+                            )
+            elif isinstance(node, _ast.Import):
+                for alias in node.names:
+                    target_mod = alias.name
+                    root = target_mod.split(".")[0]
+                    if root not in project_roots:
+                        continue
+                    if target_mod not in known_modules and not any(km.startswith(target_mod + ".") for km in known_modules):
+                        file_errs.append(
+                            f"❌ import hallucinated: `import {target_mod}` — ماژول وجود ندارد"
+                        )
+
+        if file_errs:
+            errors[p] = file_errs
+
+    return errors
+
+
 def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None) -> dict:
     """
     اعتبارسنجی سینتکس فایل‌های action_plan قبل از ارسال به فرانت.
@@ -12311,6 +12469,14 @@ def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None)
     warnings = []
     rejected_files = []  # فایل‌هایی که به خاطر خطای بحرانی حذف شدن
     safe_files = []  # فایل‌هایی که سالمن یا فقط هشدار دارن
+
+    # 🆕 (anti-hallucination) — تحلیل import های Python قبل از per-file loop
+    # تا اگر فایلی imports غیرموجود دارد، در همان فایل علامت بحرانی بزنیم.
+    _import_errors_by_file: Dict[str, List[str]] = {}
+    try:
+        _import_errors_by_file = _validate_python_imports(action_plan["files"], original_files)
+    except Exception as _imp_e:
+        slog.warning(f"[action_plan validation] python import analysis failed: {_imp_e}")
 
     for f in action_plan["files"]:
         path = f.get("path", "")
@@ -12537,6 +12703,11 @@ def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None)
                         file_critical.append(
                             f"❌ بازنویسی مخرب: {_destructive_reason} — تبدیل خودکار به modify_sections هم ممکن نبود — این فایل حذف شد"
                         )
+
+        # 🆕 (anti-hallucination) — افزودن خطاهای import به file_critical
+        # تا فایل‌هایی با import های جعلی reject شوند.
+        if path in _import_errors_by_file:
+            file_critical.extend(_import_errors_by_file[path])
 
         # تصمیم‌گیری: حذف یا نگه‌داشتن
         if file_critical:

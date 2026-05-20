@@ -14920,23 +14920,32 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     </span>
                   </label>
 
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
+                  <div className="flex gap-2 items-end">
+                    <textarea
                       value={inspectorChatInput}
                       onChange={(e) => setInspectorChatInput(e.target.value)}
-                      onKeyPress={(e) => e.key === 'Enter' && !inspectorChatLoading && !inspectorOpLock && sendInspectorChat()}
+                      onKeyDown={(e) => {
+                        // Enter → ارسال؛ Shift+Enter یا Ctrl+Enter → خط جدید
+                        if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+                          e.preventDefault();
+                          if (!inspectorChatLoading && !inspectorOpLock && inspectorChatInput.trim()) {
+                            sendInspectorChat();
+                          }
+                        }
+                        // Shift+Enter یا Ctrl+Enter → default textarea behavior (newline)
+                      }}
+                      rows={1}
                       placeholder={
                         inspectorOpLock
                           ? (inspectorOpType === 'investigate' ? '🔒 در حال بررسی... لطفاً صبر کنید' : '🔒 در حال اصلاح... لطفاً صبر کنید')
                           : inspectorAutoSelect
-                            ? "درخواست خود را بنویسید... (مدل‌ها خودکار انتخاب می‌شوند)"
+                            ? "درخواست خود را بنویسید... (Shift/Ctrl+Enter برای خط جدید)"
                             : inspectorSelectedModels.length > 0
-                              ? "پیام خود را بنویسید..."
+                              ? "پیام خود را بنویسید... (Shift/Ctrl+Enter برای خط جدید)"
                               : "ابتدا مدلی انتخاب کنید..."
                       }
                       disabled={(!inspectorAutoSelect && inspectorSelectedModels.length === 0) || inspectorChatLoading || inspectorOpLock}
-                      className={`flex-1 bg-gray-100 dark:bg-gray-700 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50 ${inspectorOpLock ? 'cursor-not-allowed' : ''}`}
+                      className={`flex-1 bg-gray-100 dark:bg-gray-700 rounded-2xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50 resize-none max-h-32 overflow-y-auto ${inspectorOpLock ? 'cursor-not-allowed' : ''}`}
                     />
                     <button
                       onClick={() => sendInspectorChat()}
