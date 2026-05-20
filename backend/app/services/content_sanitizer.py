@@ -281,15 +281,17 @@ def detect_reasoning_contamination(content: str, file_path: str) -> str | None:
             return f"محتوای فایل {file_path} با خروجی reasoning مدل AI آلوده شده: الگوی '{pattern}' شناسایی شد"
 
     # بررسی context-aware برای markdown فارسی (جایگزین الگوی ساده قبلی)
-    # فقط اگر ۳+ خط markdown فارسی باشه → آلودگی reasoning
-    # (۱-۲ خط ممکنه کامنت معمولی باشه)
+    # فقط اگر ۳+ خط markdown فارسی واقعی (##+) باشه → آلودگی reasoning
+    # 🐛 (false positive fix) — قبلاً `#{1,4}` بود که `# اپلیکیشن`
+    # (کامنت پایتون فارسی) را به‌اشتباه heading حساب می‌کرد و فایل‌های
+    # config.py با ۴ کامنت فارسی رد می‌شدن. اکنون فقط `##+` heading واقعی است.
     _ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
     if _ext not in ("md", "txt", ""):  # فایل‌های markdown مجاز هستن
         _md_persian_count = 0
         for _line in content.split("\n"):
             _stripped = _line.strip()
             # خط markdown heading فارسی (## عنوان فارسی)
-            if re.match(r'^#{1,4}\s+[\u0600-\u06FF]', _stripped):
+            if re.match(r'^#{2,4}\s+[\u0600-\u06FF]', _stripped):
                 _md_persian_count += 1
         if _md_persian_count >= 3:
             return (

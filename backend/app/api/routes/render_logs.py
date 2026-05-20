@@ -16115,6 +16115,38 @@ section‌های شکست‌خورده:
             yield sse("done", {"success": False})
             return
 
+        # 🛡️ (atomic-apply fix) — اگر فایلی به دلایل بحرانی (آلودگی، سینتکس،
+        # hallucination، modify_sections شکست) رد شده، ادامهٔ commit برای
+        # فایل‌های باقی‌مانده خطرناک است چون ممکن است به symbols/imports از
+        # فایل‌های رد شده وابسته باشند. مثال واقعی: app/config.py به‌خاطر
+        # contamination رد شد ولی app/main.py با `from app.config import settings`
+        # commit شد → دیپلوی با ImportError شکست می‌خورد.
+        # سیاست جدید: اگر هر فایلی به دلیل بحرانی رد شد، کل apply لغو می‌شود.
+        _critical_drop_keywords = (
+            "آلودگی reasoning",
+            "خطای سینتکس",
+            "modify_sections شکست",
+            "hallucinated",
+            "بازنویسی مخرب",
+            "merge",
+        )
+        _critical_drops = [
+            d for d in dropped_files
+            if any(kw in (d.get("reason") or "") for kw in _critical_drop_keywords)
+        ]
+        if _critical_drops:
+            _crit_msg = (
+                f"🚫 apply لغو شد: {len(_critical_drops)} فایل به دلایل بحرانی رد شدند و کامیت بقیه فایل‌ها "
+                f"وابسته به آن‌ها است (خطر import غیرموجود یا state ناقص). "
+                f"لطفاً از مدل بخواهید فایل‌های رد شده را اصلاح کند و دوباره تلاش کنید.\n"
+                + "\n".join(f"  🚫 {d['path']}: {d['reason']}" for d in _critical_drops)
+            )
+            yield sse("error", {"message": _crit_msg})
+            yield sse("done", {"success": False, "reason": "critical_files_dropped"})
+            slog.error(f"[apply-action] ABORTED due to {len(_critical_drops)} critical file drops: " +
+                       ", ".join(d["path"] for d in _critical_drops))
+            return
+
         # --- Commit فایل‌ها ---
         committed_files = []
         for i, f in enumerate(final_files):
