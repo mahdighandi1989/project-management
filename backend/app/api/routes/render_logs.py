@@ -2604,6 +2604,17 @@ class InspectorChatRequest(BaseModel):
     max_tokens: int = 16384
     temperature: float = 0.7
     stream: bool = False
+    # 🆕 (inspector-scan) — context اضافی برای intent resolver. اگر این
+    # فیلدها در request باشند، scan موردی هوشمندانه‌تر trigger می‌شود.
+    # همگی optional — backward compatible.
+    console_logs: Optional[List[dict]] = None
+    page_url: Optional[str] = None
+    api_paths: Optional[List[str]] = None
+    linked_task: Optional[dict] = None  # {target_files, title, ...}
+    screenshots: Optional[List[dict]] = None
+    mode: Optional[str] = None  # "chat" | "visual_debug"
+    session_id: Optional[int] = None  # اگر فرانت‌اند session فعال را می‌داند
+    enable_selective_scan: bool = True  # برای flag-off اگر نیاز شد
 
 
 class InspectorMultiChatRequest(BaseModel):
@@ -2804,6 +2815,95 @@ async def inspector_chat(
     try:
         from ...services.ai_manager import get_ai_manager
         from ...services.ai_base import Message
+
+        # 🆕 (inspector-scan) — قبل از فراخوانی chat، intent را resolve کن.
+        # اگر کاربر در حال درخواست بررسی/اصلاح است، به‌جای پاسخ یک‌شات سطحی،
+        # یک scan موردی deep در background trigger می‌کنیم و پاسخ مناسب
+        # برمی‌گردانیم. هیچ‌چیز در مرکز نظارت ذخیره نمی‌شود — تنها در همان
+        # session chat لاگ می‌شود.
+        if request.enable_selective_scan:
+            try:
+                from ...services.inspector_intent_resolver import (
+                    resolve_intent_from_chat_context,
+                )
+                from ...services.inspector_scan_bridge import (
+                    trigger_inspector_selective_scan,
+                    get_or_create_active_session_for_project,
+                    is_scan_active_for_session,
+                )
+
+                intent = resolve_intent_from_chat_context(
+                    user_message=request.message,
+                    backend_logs=request.backend_logs,
+                    console_logs=request.console_logs,
+                    frontend_url=request.frontend_url,
+                    page_url=request.page_url,
+                    api_paths=request.api_paths,
+                    linked_task=request.linked_task,
+                    screenshots=request.screenshots,
+                    mode=request.mode or "chat",
+                )
+
+                if intent.should_scan:
+                    session_id = request.session_id or get_or_create_active_session_for_project(
+                        request.project_id
+                    )
+                    if not session_id:
+                        slog.warning(
+                            "selective_scan skipped — could not resolve session",
+                            project_id=request.project_id,
+                        )
+                    elif is_scan_active_for_session(session_id):
+                        return {
+                            "success": True,
+                            "model_id": request.model_id,
+                            "kind": "scan_already_running",
+                            "content": (
+                                "⚠️ یک اسکن موردی دیگر در این session در حال اجراست. "
+                                "لطفاً منتظر بمانید تا کامل شود، یا فقط یک سؤال info-only بپرسید."
+                            ),
+                            "session_id": session_id,
+                        }
+                    else:
+                        scan_result = await trigger_inspector_selective_scan(
+                            session_id=session_id,
+                            project_id=request.project_id,
+                            user_message=request.message,
+                            intent=intent,
+                            model_id=request.model_id,
+                        )
+                        if scan_result.get("success"):
+                            return {
+                                "success": True,
+                                "model_id": request.model_id,
+                                "kind": "scan_initiated",
+                                "scan_id": scan_result["scan_id"],
+                                "session_id": session_id,
+                                "content": (
+                                    "🔍 **در حال اسکن موردی عمیق...**\n\n"
+                                    f"بر اساس پیامتان و context موجود (logs/URL/screenshots) "
+                                    f"تشخیص داده شد که نیاز به بررسی عمیق دارد. "
+                                    f"دلیل: `{intent.reason}` — اطمینان: {int(intent.confidence * 100)}%.\n\n"
+                                    f"تعداد {len(intent.custom_paths)} مسیر را scope کردم. "
+                                    "پیشنهاد‌ها چند دقیقه دیگر در همین چت ظاهر می‌شوند."
+                                ),
+                                "intent": {
+                                    "reason": intent.reason,
+                                    "matched_keywords": intent.matched_keywords,
+                                    "custom_paths": intent.custom_paths[:10],
+                                    "selected_sections": intent.selected_sections,
+                                    "visual_debug": intent.visual_debug,
+                                    "confidence": intent.confidence,
+                                },
+                            }
+                        else:
+                            slog.warning(
+                                "selective_scan trigger failed; fallback to chat",
+                                error=scan_result.get("error"),
+                            )
+            except Exception as _intent_e:
+                slog.warning("selective_scan path raised; fallback to chat",
+                             error=str(_intent_e))
 
         ai_manager = get_ai_manager()
 
@@ -17948,3 +18048,89 @@ async def inspector_telegram_bot_info(bot_token: str = Query(...)):
 
     out["success"] = out["bot_info"] is not None
     return out
+
+
+# ============================================================
+# 🆕 (inspector-scan) Endpointهای اسکن موردی Inspector
+# ============================================================
+
+class InspectorScanProgressResponse(BaseModel):
+    """پاسخ progress برای polling از UI."""
+    pass
+
+
+@router.get("/inspector/selective-scan/{session_id}/progress")
+async def inspector_selective_scan_progress(session_id: int):
+    """progress جاری scan موردی در یک session.
+
+    UI با polling هر ۲ ثانیه این endpoint را می‌خواند. وقتی status=completed،
+    آخرین scan_complete message شامل proposals است که UI با reload messages
+    از مسیر معمول /sessions/{id}/messages می‌خواند.
+    """
+    from ...services.inspector_scan_bridge import read_inspector_scan_progress
+    return read_inspector_scan_progress(session_id)
+
+
+class RunProposalRequest(BaseModel):
+    model_id: Optional[str] = None
+
+
+@router.post("/inspector/session/{session_id}/proposals/{proposal_id}/run")
+async def inspector_run_proposal(
+    session_id: int,
+    proposal_id: str,
+    payload: Optional[RunProposalRequest] = None,
+):
+    """یک proposal از scan موردی را با AI به code-ready تبدیل می‌کند.
+
+    تغییرات locally staged می‌شوند (در InspectorMessage). commit/push بعداً
+    با endpoint apply-all انجام می‌شود.
+    """
+    from ...services.inspector_proposal_executor import run_proposal
+    payload = payload or RunProposalRequest()
+    try:
+        result = await run_proposal(
+            session_id=session_id,
+            proposal_id=proposal_id,
+            model_id=payload.model_id,
+        )
+        if not result.get("success") and result.get("code") == "proposal_not_found":
+            raise HTTPException(status_code=404, detail=result.get("error"))
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        slog.error("run_proposal failed", exception=e, session_id=session_id, proposal_id=proposal_id)
+        raise HTTPException(status_code=500, detail=str(e)[:300])
+
+
+class ApplyAllRequest(BaseModel):
+    commit_message: Optional[str] = None
+    include_unexecuted: bool = False
+    branch_strategy: str = "new_pr"  # "new_pr" | "default_branch_commit"
+    model_id: Optional[str] = None
+
+
+@router.post("/inspector/session/{session_id}/apply-all")
+async def inspector_apply_all(
+    session_id: int,
+    payload: Optional[ApplyAllRequest] = None,
+):
+    """همهٔ proposalهای staged این session را در یک PR/commit به GitHub می‌فرستد.
+
+    اگر include_unexecuted=True، ابتدا proposalهای pending را اجرا می‌کند.
+    """
+    from ...services.inspector_proposal_executor import apply_all_staged
+    payload = payload or ApplyAllRequest()
+    try:
+        result = await apply_all_staged(
+            session_id=session_id,
+            commit_message=payload.commit_message,
+            include_unexecuted=payload.include_unexecuted,
+            branch_strategy=payload.branch_strategy,
+            model_id=payload.model_id,
+        )
+        return result
+    except Exception as e:
+        slog.error("apply_all failed", exception=e, session_id=session_id)
+        raise HTTPException(status_code=500, detail=str(e)[:300])
