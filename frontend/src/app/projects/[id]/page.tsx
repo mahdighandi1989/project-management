@@ -452,6 +452,11 @@ export default function ProjectDetailPage() {
   const [inspectorOpPaused, setInspectorOpPaused] = useState(false);
   const inspectorOpAbortRef = useRef<AbortController | null>(null);
   const inspectorBatchTaskKeyRef = useRef<string | null>(null);
+  // 🆕 (anti-stuck-loop) — شمارش retryهای متوالی برای یک پیام source.
+  // وقتی کاربر «درخواست مجدد اصلاح» می‌زند چون پاسخ قبلی action_plan نداشت،
+  // اینجا افزایش می‌یابد. بعد از ۲ retry ناموفق، UI به مدل دیگری دعوت می‌کند.
+  const inspectorRetryAttemptRef = useRef<number>(0);
+  const [inspectorRetryStuck, setInspectorRetryStuck] = useState<boolean>(false);
   const [inspectorOpType, setInspectorOpType] = useState<'investigate' | 'fix' | null>(null);
 
   // 🆕 انتخاب خودکار مدل و همکاری
@@ -4740,6 +4745,15 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     }
     if (!userMessage) return;
 
+    // 🆕 (anti-stuck-loop) — مدیریت counter retry. اگر retry نیست،
+    // counter را ریست کن. اگر retry است، یکی اضافه کن.
+    if (_isRetry) {
+      inspectorRetryAttemptRef.current = (inspectorRetryAttemptRef.current || 0) + 1;
+    } else {
+      inspectorRetryAttemptRef.current = 0;
+      setInspectorRetryStuck(false);
+    }
+
     // 🆕 در حالت retry: پیام‌های خطای قبلی پاک میشه + پیام سیستمی retry اضافه میشه
     if (_isRetry) {
       setInspectorChatMessages(prev => {
@@ -4955,6 +4969,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             // متصل است، task_id را پاس بده تا backend بلوک کانتکست تسک را
             // به system prompt تزریق کند
             task_id: linkedTaskId || undefined,
+            // 🆕 (anti-stuck-loop) — اگر retry است، شماره را پاس بده
+            // backend بر اساس این system prompt را قوی‌تر می‌کند و در
+            // retry≥2 خودکار به fallback model سوئیچ می‌کند.
+            retry_attempt: _isRetry ? (inspectorRetryAttemptRef.current || 1) : undefined,
           }),
           signal: inspectorOpAbortRef.current?.signal,
         });
@@ -5038,6 +5056,22 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     selected_file_paths: data.selected_file_paths || [],
                     original_message: userMessage,
                   } as any]);
+
+                  // 🆕 (anti-stuck-loop) — اگر این یک action request بود
+                  // ولی action_plan تولید نشد (یا فایل صفر داشت)، و این
+                  // ≥۲مین تلاش پشت سر هم است، علامت‌گذاری stuck تا UI به
+                  // کاربر گزینهٔ تغییر مدل/فرموله‌بندی را پیشنهاد دهد.
+                  const _hasRealPlan = data.action_plan && Array.isArray(data.action_plan.files) && data.action_plan.files.length > 0;
+                  const _wasActionMode = (data.type === 'action' || data.has_action);
+                  if (_wasActionMode && !_hasRealPlan) {
+                    if (inspectorRetryAttemptRef.current >= 2) {
+                      setInspectorRetryStuck(true);
+                    }
+                  } else if (_hasRealPlan) {
+                    // پاسخ موفق — counter ریست
+                    inspectorRetryAttemptRef.current = 0;
+                    setInspectorRetryStuck(false);
+                  }
 
                   // 🔓 آزاد کردن قفل
                   setInspectorOpLock(false);
@@ -14069,25 +14103,36 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           )}
                           {/* نشانگر has_action بدون action_plan معتبر - دکمه درخواست مجدد اصلاح (مستقیم — بدون ساختارمند مجدد) */}
                           {(msg as any).action_type === 'smart_action' && (!(msg as any).action_plan || !(msg as any).action_plan?.files?.length) && (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                // 🔑 مستقیم ارسال با _isRetry=true — بدون enhance مجدد (جلوگیری از حلقه تکرار)
-                                const retryMsg = (msg as any).original_user_description
-                                  || (msg as any).original_prompt
-                                  || (msg as any).original_message
-                                  || '';
-                                const fixPrompt = retryMsg
-                                  ? `لطفاً دوباره بررسی کن و حتماً action_plan با فرمت JSON و فیلد "files" و کد کامل فایل‌ها ارائه بده:\n${retryMsg}`
-                                  : `لطفاً مشکل قبلی را دوباره بررسی کن و حتماً action_plan با فرمت JSON و فیلد "files" و کد کامل فایل‌ها ارائه بده.\n\nپاسخ قبلی شما:\n${msg.content?.slice(0, 500)}`;
-                                setInspectorReplyTo({ id: msg.id, content: msg.content, role: msg.role, model_id: msg.model_id });
-                                sendInspectorChat(fixPrompt, true);
-                              }}
-                              className="text-[10px] bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-1.5 py-0.5 rounded hover:bg-amber-200 dark:hover:bg-amber-800/40 transition-colors"
-                              disabled={inspectorOpLock}
-                            >
-                              🔄 درخواست مجدد اصلاح
-                            </button>
+                            inspectorRetryStuck ? (
+                              // 🆕 (anti-stuck-loop) — بعد از ۲ retry ناموفق پشت سر هم،
+                              // دکمه retry به یک پیام راهنما تبدیل می‌شود تا کاربر در
+                              // حلقهٔ بی‌نتیجه گیر نکند.
+                              <div className="text-[10px] bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 px-2 py-1 rounded border border-red-200 dark:border-red-800 leading-tight">
+                                ⚠️ مدل {(msg as any).model_id || 'انتخاب‌شده'} نتوانست action_plan تولید کند (≥۲ تلاش).
+                                لطفاً مدل دیگری از لیست انتخاب کن یا درخواست را مشخص‌تر بنویس
+                                (مثلاً نام دقیق فایل و خط مشکل).
+                              </div>
+                            ) : (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  // 🔑 مستقیم ارسال با _isRetry=true — بدون enhance مجدد (جلوگیری از حلقه تکرار)
+                                  const retryMsg = (msg as any).original_user_description
+                                    || (msg as any).original_prompt
+                                    || (msg as any).original_message
+                                    || '';
+                                  const fixPrompt = retryMsg
+                                    ? `لطفاً دوباره بررسی کن و حتماً action_plan با فرمت JSON و فیلد "files" و کد کامل فایل‌ها ارائه بده:\n${retryMsg}`
+                                    : `لطفاً مشکل قبلی را دوباره بررسی کن و حتماً action_plan با فرمت JSON و فیلد "files" و کد کامل فایل‌ها ارائه بده.\n\nپاسخ قبلی شما:\n${msg.content?.slice(0, 500)}`;
+                                  setInspectorReplyTo({ id: msg.id, content: msg.content, role: msg.role, model_id: msg.model_id });
+                                  sendInspectorChat(fixPrompt, true);
+                                }}
+                                className="text-[10px] bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-1.5 py-0.5 rounded hover:bg-amber-200 dark:hover:bg-amber-800/40 transition-colors"
+                                disabled={inspectorOpLock}
+                              >
+                                🔄 درخواست مجدد اصلاح{inspectorRetryAttemptRef.current >= 1 ? ` (تلاش ${inspectorRetryAttemptRef.current + 1})` : ''}
+                              </button>
+                            )
                           )}
                           {/* دکمه ریپلای */}
                           <button
