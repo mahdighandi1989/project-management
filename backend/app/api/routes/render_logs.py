@@ -12436,7 +12436,11 @@ def _auto_convert_modify_to_sections(orig_content: str, new_content: str, file_p
 # مدل‌های AI خیلی وقت‌ها فایل‌هایی می‌سازند که `from app.X import Y` می‌کنند
 # در حالی که `app/X.py` در پروژه وجود ندارد. این تابع imports را با
 # AST تحلیل می‌کند و در صورت hallucination، خطا برمی‌گرداند.
-def _validate_python_imports(action_plan_files: List[dict], original_files: dict = None) -> Dict[str, List[str]]:
+def _validate_python_imports(
+    action_plan_files: List[dict],
+    original_files: dict = None,
+    repo_file_paths: Optional[List[str]] = None,
+) -> Dict[str, List[str]]:
     """
     تشخیص import های hallucinated در فایل‌های Python.
 
@@ -12446,9 +12450,27 @@ def _validate_python_imports(action_plan_files: List[dict], original_files: dict
     3. برای هر فایل Python در action_plan، parse imports و چک کن:
        - اگر import از یک ماژول داخلی است ولی آن ماژول هیچ‌جا نیست → hallucination
        - اگر ماژول در action_plan هست ولی نام imported تعریف نشده → hallucination
+
+    🆕 (v3 false-positive fix) — `repo_file_paths` لیست همه فایل‌های repo
+    (مثل خروجی GitHub tree). اگر یک ماژول در action_plan یا original_files
+    نیست ولی فایل آن در repo واقعاً موجود است، false-positive flag نشود.
+    این رفع باگ critical است که `app/main.py` با `from app.middleware import`
+    را reject می‌کرد در حالی که `app/middleware.py` در repo موجود بود.
     """
     import ast as _ast
     errors: Dict[str, List[str]] = {}
+
+    # 🆕 (v3 false-positive fix) — ساخت یک set از ماژول‌های repo برای lookup سریع
+    _repo_modules: set = set()
+    if repo_file_paths:
+        for rp in repo_file_paths:
+            if not rp or not isinstance(rp, str):
+                continue
+            if rp.endswith(".py"):
+                mod = rp[:-3].replace("/", ".").replace("\\", ".")
+                if mod.endswith(".__init__"):
+                    mod = mod[:-9]
+                _repo_modules.add(mod)
 
     def _path_to_module(p: str) -> Optional[str]:
         if not p or not p.endswith(".py"):
@@ -12551,11 +12573,20 @@ def _validate_python_imports(action_plan_files: List[dict], original_files: dict
                 if target_mod not in known_modules:
                     # شاید parent package باشد (مثلاً `from app.routes import auth` که `app/routes/auth.py` موجود است)
                     has_submodule = any(km.startswith(target_mod + ".") for km in known_modules)
-                    if not has_submodule:
+                    # 🆕 (v3 false-positive fix) — قبل از reject، چک کن آیا
+                    # فایل واقعاً در repo (خارج از scope فایل‌های خوانده‌شده) موجود است
+                    exists_in_repo = (
+                        target_mod in _repo_modules
+                        or any(rm.startswith(target_mod + ".") for rm in _repo_modules)
+                    )
+                    if not has_submodule and not exists_in_repo:
                         file_errs.append(
                             f"❌ import hallucinated: `from {target_mod} import ...` "
-                            f"— ماژول `{target_mod}` نه در action_plan هست و نه در فایل‌های خوانده‌شده"
+                            f"— ماژول `{target_mod}` نه در action_plan هست و نه در فایل‌های خوانده‌شده و نه در repo موجود"
                         )
+                        continue
+                    if not has_submodule and exists_in_repo:
+                        # ماژول در repo هست ولی محتوای آن خوانده نشده — defs چک نمی‌کنیم
                         continue
 
                 # ماژول هست؛ آیا نام‌های imported تعریف شده‌اند؟
@@ -12580,6 +12611,9 @@ def _validate_python_imports(action_plan_files: List[dict], original_files: dict
                     if root not in project_roots:
                         continue
                     if target_mod not in known_modules and not any(km.startswith(target_mod + ".") for km in known_modules):
+                        # 🆕 (v3 false-positive fix) — همان منطق ImportFrom
+                        if target_mod in _repo_modules or any(rm.startswith(target_mod + ".") for rm in _repo_modules):
+                            continue
                         file_errs.append(
                             f"❌ import hallucinated: `import {target_mod}` — ماژول وجود ندارد"
                         )
@@ -12590,7 +12624,30 @@ def _validate_python_imports(action_plan_files: List[dict], original_files: dict
     return errors
 
 
-def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None) -> dict:
+def _normalize_repo_paths(files: Optional[List]) -> Optional[List[str]]:
+    """🆕 (v3) helper: لیست فایل‌ها (dict یا str) → لیست مسیرها.
+
+    استفاده در call sites `_validate_action_plan_syntax` که `all_files` می‌تواند
+    dict (با key=path) یا string باشد.
+    """
+    if not files:
+        return None
+    result: List[str] = []
+    for f in files:
+        if isinstance(f, str):
+            result.append(f)
+        elif isinstance(f, dict):
+            p = f.get("path")
+            if p and isinstance(p, str):
+                result.append(p)
+    return result or None
+
+
+def _validate_action_plan_syntax(
+    action_plan: dict,
+    original_files: dict = None,
+    repo_file_paths: Optional[List[str]] = None,
+) -> dict:
     """
     اعتبارسنجی سینتکس فایل‌های action_plan قبل از ارسال به فرانت.
     فایل‌هایی با خطای بحرانی (❌) از action_plan حذف میشن تا commit نشن.
@@ -12598,7 +12655,10 @@ def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None)
 
     پارامترها:
     - action_plan: نتیجه action_plan تولیدشده توسط AI
-    - original_files: دیکشنری {path: content} فایل‌های اصلی خوانده‌شده (برای تشخیص بازنویسی مخرب)
+    - original_files: دیکشنری {path: content} فایل‌های اصلی خوانده‌شده
+    - repo_file_paths: 🆕 (v3) لیست همه فایل‌های repo برای جلوگیری از
+      false-positive در hallucination detection (ماژول‌هایی که در action_plan
+      یا original_files نیستند ولی در repo موجود اند)
     """
     if not action_plan or not action_plan.get("files"):
         return action_plan
@@ -12611,7 +12671,11 @@ def _validate_action_plan_syntax(action_plan: dict, original_files: dict = None)
     # تا اگر فایلی imports غیرموجود دارد، در همان فایل علامت بحرانی بزنیم.
     _import_errors_by_file: Dict[str, List[str]] = {}
     try:
-        _import_errors_by_file = _validate_python_imports(action_plan["files"], original_files)
+        _import_errors_by_file = _validate_python_imports(
+            action_plan["files"],
+            original_files,
+            repo_file_paths=repo_file_paths,
+        )
     except Exception as _imp_e:
         slog.warning(f"[action_plan validation] python import analysis failed: {_imp_e}")
 
@@ -14361,7 +14425,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     "model_used": response.model_id,
                     "tokens_used": response.tokens_used,
                     "has_action": q_action_plan is not None,
-                    "action_plan": _validate_action_plan_syntax(q_action_plan, original_files=file_contents) if q_action_plan else None,
+                    "action_plan": _validate_action_plan_syntax(q_action_plan, original_files=file_contents, repo_file_paths=_normalize_repo_paths(locals().get("all_files"))) if q_action_plan else None,
                     "files_were_read": has_q_code,
                     "selected_file_paths": q_selected if has_q_code else [],
                 })
@@ -14830,7 +14894,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         "model_used": _err_model_used,
                         "tokens_used": _err_tokens,
                         "has_action": has_code_action,
-                        "action_plan": _validate_action_plan_syntax(action_plan, original_files=file_contents) if action_plan else None,
+                        "action_plan": _validate_action_plan_syntax(action_plan, original_files=file_contents, repo_file_paths=_normalize_repo_paths(locals().get("all_files"))) if action_plan else None,
                         "files_were_read": has_err_code_files,
                         "selected_file_paths": selected if has_err_code_files else [],
                         "truncated": _err_is_truncated,
@@ -15621,7 +15685,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         "model_used": _act_model_used,
                         "tokens_used": _act_tokens,
                         "has_action": action_plan is not None,
-                        "action_plan": _validate_action_plan_syntax(action_plan, original_files=file_contents) if action_plan else None,
+                        "action_plan": _validate_action_plan_syntax(action_plan, original_files=file_contents, repo_file_paths=_normalize_repo_paths(locals().get("all_files"))) if action_plan else None,
                         "files_were_read": has_code_files,
                         "selected_file_paths": selected if has_code_files else [],
                         "truncated": _act_is_truncated,
@@ -17560,7 +17624,7 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
                 "content": response.content, "model_used": primary_model,
                 "tokens_used": getattr(response, 'tokens_used', 0) or 0,
                 "type": "visual_debug", "screenshots_count": len(request.screenshots),
-                "action_plan": _validate_action_plan_syntax(action_plan, original_files=_vd_file_contents) if action_plan else None, "has_action": action_plan is not None,
+                "action_plan": _validate_action_plan_syntax(action_plan, original_files=_vd_file_contents, repo_file_paths=_normalize_repo_paths(locals().get("all_files"))) if action_plan else None, "has_action": action_plan is not None,
                 "truncated": _vd_is_truncated,
             })
         except Exception as e:
@@ -17973,7 +18037,7 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
                 "content": response.content, "model_used": reanalyze_model,
                 "tokens_used": getattr(response, 'tokens_used', 0) or 0,
                 "type": "visual_debug_reanalyze", "vision_model": request.vision_model_id,
-                "action_plan": _validate_action_plan_syntax(action_plan, original_files=_ra_file_contents) if action_plan else None, "has_action": action_plan is not None,
+                "action_plan": _validate_action_plan_syntax(action_plan, original_files=_ra_file_contents, repo_file_paths=_normalize_repo_paths(locals().get("all_files"))) if action_plan else None, "has_action": action_plan is not None,
                 "truncated": _ra_is_truncated,
             })
         except Exception as e:
