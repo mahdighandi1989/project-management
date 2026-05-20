@@ -5416,12 +5416,31 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   // 📸 ارسال درخواست دیباگ بصری
   const sendVisualDebug = async () => {
     if (visualDebugScreenshots.length === 0) return;
+    // 🛡 (race-condition fix) — re-entrancy guard. اگر کاربر دکمه را
+    // در حین enhancePrompt (که چند ثانیه طول می‌کشد) دوباره کلیک کند،
+    // باعث ۲-۳ کال همزمان می‌شد که SSE streamهایشان قاطی می‌شد و
+    // یک finally زودتر مدل را revert می‌کرد → step 3 به AIServiceError می‌خورد.
+    if (visualDebugLoading || inspectorOpLock) return;
+
+    // 🛡 (race-condition fix) — این چهار state را فوراً ست کن تا
+    // مودال بسته شود و دکمه disable شود، پیش از هر await.
+    setVisualDebugLoading(true);
+    setVisualDebugModelSelection(false);
+    setInspectorOpLock(true);
+    setInspectorOpType('investigate');
+
     // 🆕 (Inspector → Oversight) اگر تیک ارسال به نظارت فعال است
     if (sendToOversightVisual) {
+      setVisualDebugLoading(false);
+      setInspectorOpLock(false);
+      setInspectorOpType(null);
       await sendToOversight('visual_debug');
       return;
     }
     if (visualDebugSelectedModels.length === 0) {
+      setVisualDebugLoading(false);
+      setInspectorOpLock(false);
+      setInspectorOpType(null);
       alert('لطفاً حداقل یک مدل Vision انتخاب کنید');
       return;
     }
@@ -5468,17 +5487,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       }
     }
 
-    setVisualDebugLoading(true);
-    setVisualDebugModelSelection(false);
-    setInspectorOpLock(true);
-    setInspectorOpType('investigate');
     inspectorOpAbortRef.current = new AbortController();
 
     // 🆕 (inspector temp-activate) — هر مدلی که disabled است را موقتاً
     // فعال کن. پس از پایان درخواست (در finally) به حالت قبل برمی‌گردد.
+    // 🛡 defense-in-depth: مدل‌هایی که از قبل temp-activated هستند را
+    // مجدداً activate نکن و پیام تکراری نشان نده.
     const _toTempActivate = visualDebugSelectedModels.filter(mid => {
       const m = visualDebugVisionModels.find(vm => vm.id === mid);
-      return m && !m.enabled;
+      const alreadyTemp = tempActivatedVisionModels.includes(mid);
+      return m && !m.enabled && !alreadyTemp;
     });
     const _activatedNow: string[] = [];
     if (_toTempActivate.length > 0) {
@@ -5494,6 +5512,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       }
       if (_activatedNow.length > 0) {
         setTempActivatedVisionModels(prev => [...prev, ..._activatedNow]);
+        // 🛡 (state-sync fix) — لیست vision-models را هم به‌روز کن تا
+        // اگر کال دیگری بعداً اجرا شد، مدل را به‌اشتباه disabled نبیند.
+        setVisualDebugVisionModels(prev => prev.map(m =>
+          _activatedNow.includes(m.id) ? { ...m, enabled: true } : m
+        ));
         const names = _activatedNow.map(id => visualDebugVisionModels.find(m => m.id === id)?.name || id).join('، ');
         setInspectorChatMessages(prev => [...prev, {
           id: `vd_temp_act_done_${Date.now()}`,
@@ -5966,6 +5989,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   const sendReanalyze = async (msgId: string, newModelId: string) => {
     const msg = inspectorChatMessages.find(m => m.id === msgId) as any;
     if (!msg) return;
+    // 🛡 (race-condition fix) — جلوگیری از reanalyze موازی روی پیام در حال
+    // اجرا. این کار می‌تواند با sendVisualDebug در حال اجرا تداخل کند و
+    // یک revert زودرس روی مدلِ vision در حال استفاده روی فلوی multi-step
+    // فعال ایجاد کند → step 3 به AIServiceError می‌خورد.
+    if (reanalyzeLoading || inspectorOpLock || visualDebugLoading) return;
 
     setReanalyzeLoading(true);
     setInspectorOpLock(true);
@@ -5973,9 +6001,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     inspectorOpAbortRef.current = new AbortController();
 
     // 🆕 (inspector temp-activate) — اگر مدل بازتحلیل غیرفعال است، موقتاً فعال کن
+    // 🛡 defense-in-depth — مدل‌هایی که از قبل temp-activated هستند را re-activate نکن
     const _raTarget = visualDebugVisionModels.find(m => m.id === newModelId);
+    const _raAlreadyTemp = tempActivatedVisionModels.includes(newModelId);
     let _raTempActivated: string | null = null;
-    if (_raTarget && !_raTarget.enabled) {
+    if (_raTarget && !_raTarget.enabled && !_raAlreadyTemp) {
       setInspectorChatMessages(prev => [...prev, {
         id: `ra_temp_act_${Date.now()}`,
         role: 'system' as const,
@@ -5986,6 +6016,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       if (ok) {
         _raTempActivated = newModelId;
         setTempActivatedVisionModels(prev => [...prev, newModelId]);
+        setVisualDebugVisionModels(prev => prev.map(m =>
+          m.id === newModelId ? { ...m, enabled: true } : m
+        ));
       }
     }
 
@@ -14441,10 +14474,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         <span className="text-[11px] text-gray-400">{visualDebugSelectedModels.length} مدل انتخاب شده</span>
                         <button
                           onClick={sendVisualDebug}
-                          disabled={visualDebugSelectedModels.length === 0}
+                          disabled={visualDebugSelectedModels.length === 0 || visualDebugLoading || inspectorOpLock}
                           className="px-4 py-2 bg-purple-500 text-white text-sm rounded-lg hover:bg-purple-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                         >
-                          🔍 شروع تحلیل هوشمند
+                          {visualDebugLoading ? '⏳ در حال اجرا...' : '🔍 شروع تحلیل هوشمند'}
                         </button>
                       </div>
                     </div>
@@ -14524,12 +14557,14 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         </span>
                         <button
                           onClick={handleReanalyzeConfirm}
-                          disabled={!reanalyzeSelectedModel}
+                          disabled={!reanalyzeSelectedModel || reanalyzeLoading || visualDebugLoading || inspectorOpLock}
                           className="px-4 py-2 bg-purple-500 text-white text-sm rounded-lg hover:bg-purple-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                         >
-                          {reanalyzeSelectedModel === (inspectorChatMessages.find(m => m.id === reanalyzeSourceMsgId) as any)?.model_id
-                            ? '✅ اعمال تغییرات'
-                            : '🔄 شروع بازتحلیل'}
+                          {reanalyzeLoading || visualDebugLoading
+                            ? '⏳ در حال اجرا...'
+                            : (reanalyzeSelectedModel === (inspectorChatMessages.find(m => m.id === reanalyzeSourceMsgId) as any)?.model_id
+                                ? '✅ اعمال تغییرات'
+                                : '🔄 شروع بازتحلیل')}
                         </button>
                       </div>
                     </div>
