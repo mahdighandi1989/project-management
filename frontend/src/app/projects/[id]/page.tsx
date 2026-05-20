@@ -4572,6 +4572,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             previously_read_files: previouslyReadFiles,
             // 🔗 (C7 Bridge Phase 2) — task_id برای کانتکست تسک
             task_id: linkedTaskId || undefined,
+            // 🆕 (v3 regression fix) — در حالت stepwise execution نباید
+            // intent-based selective scan trigger شود. هر step خودش یک
+            // پیام مستقل با action_plan انتظار است؛ scan_initiated چنین
+            // پاسخی نمی‌دهد و مرحله خالی می‌ماند.
+            enable_selective_scan: false,
           }),
         });
 
@@ -6113,6 +6118,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                       backend_logs: inspectorBackendLogs,
                       frontend_url: inspectorFrontendUrl,
                       previously_read_files: previouslyReadFiles,
+                      // 🆕 (v3 regression fix) — disable scan موردی در
+                      // stepwise execution. این flow هر step را با
+                      // action_plan صریح انتظار دارد، نه scan_initiated.
+                      enable_selective_scan: false,
                     }),
                     signal: inspectorOpAbortRef.current?.signal,
                   });
