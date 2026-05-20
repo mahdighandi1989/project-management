@@ -1431,12 +1431,23 @@ async def run_deep_scan(
     model_ids: Optional[List[str]] = None,
     enabled_passes: Optional[List[str]] = None,
     deep_read_count: int = 35,
+    selected_sections: Optional[List[str]] = None,
+    custom_paths: Optional[List[str]] = None,
+    include_dependencies: bool = True,
 ) -> Dict[str, Any]:
     """اجرای کامل deep scan روی یک watched.
 
     🆕 (P1) پارامتر model_ids: اگر None یا یک‌مدلی، رفتار قبلی (single model).
     اگر چندتایی، هر pass با تمام مدل‌ها اجرا می‌شود و findings از همه
     مدل‌ها با _merge_similar_findings ادغام می‌شوند (consensus by similarity).
+
+    🆕 (selective-scan) selected_sections + custom_paths: اگر هیچ‌کدام داده
+    نشوند، اسکن کلی پروژه (رفتار قدیمی). در غیر این صورت، فقط فایل‌های
+    متعلق به section های انتخابی + custom_paths اسکن می‌شوند. اگر
+    include_dependencies=True، بعد از ساختن import graph، فایل‌های
+    upstream/downstream یک‌سطح هم به selection اضافه می‌شوند تا
+    «task های بررسی» همان‌طور که کاربر در voice خواست شامل وابستگی‌ها
+    باشند.
     """
     service = get_oversight_service()
     watched = service._find_watched(watched_id)
@@ -1553,6 +1564,57 @@ async def run_deep_scan(
             all_files.append(p)
             sizes[p] = item.get("size", 0)
 
+        # 🆕 (selective-scan) — اگر selection داده شده، all_files را قبل از
+        # هر کار دیگری فیلتر کن تا تمام pipeline (scoring/reading/scanning)
+        # روی همان زیرمجموعه عمل کند.
+        scan_scope_meta: Optional[Dict[str, Any]] = None
+        if selected_sections or custom_paths:
+            try:
+                from .scan_sections import (
+                    detect_sections as _ss_detect,
+                    filter_files_by_selection as _ss_filter,
+                )
+                _detected_sections = _ss_detect(all_files)
+                _filtered = _ss_filter(
+                    all_files,
+                    selected_sections,
+                    custom_paths,
+                    detected_sections=_detected_sections,
+                )
+                if _filtered:
+                    scan_scope_meta = {
+                        "selected_sections": list(selected_sections or []),
+                        "custom_paths": list(custom_paths or []),
+                        "include_dependencies": include_dependencies,
+                        "before_filter": len(all_files),
+                        "after_filter": len(_filtered),
+                    }
+                    all_files = _filtered
+                    # sizes را هم به همان زیرمجموعه محدود کن
+                    sizes = {p: sizes.get(p, 0) for p in all_files}
+                    write_progress(
+                        watched_id,
+                        phase="phase1_scope_filter",
+                        message=(
+                            f"🎯 اسکن انتخابی: {scan_scope_meta['after_filter']} از "
+                            f"{scan_scope_meta['before_filter']} فایل انتخاب شد"
+                        ),
+                    )
+                else:
+                    # اگر فیلتر چیزی برنگشت، scope را نادیده بگیر و scan کلی کن
+                    # تا کاربر گیر نکنه. لاگ هشدار می‌زنیم.
+                    write_progress(
+                        watched_id,
+                        phase="phase1_scope_empty",
+                        message="⚠️ هیچ فایلی با selection match نشد — برمی‌گردیم به اسکن کلی",
+                    )
+            except Exception as _scope_e:
+                write_progress(
+                    watched_id,
+                    phase="phase1_scope_error",
+                    message=f"⚠️ خطا در فیلتر scope (ادامه با اسکن کلی): {str(_scope_e)[:120]}",
+                )
+
         # دسته‌بندی
         kinds: Dict[str, str] = {p: _classify_file(p) for p in all_files}
 
@@ -1631,6 +1693,42 @@ async def run_deep_scan(
         # حالا گراف Importهای واقعی را روی محتوای deep بسازیم
         write_progress(watched_id, phase="phase2_imports", message="ساخت نقشهٔ Importها")
         imports, imported_by, real_import_counts = _build_import_graph(deep_contents, all_files)
+
+        # 🆕 (selective-scan) — اگر در حال scan انتخابی هستیم و
+        # include_dependencies=True، فایل‌های upstream/downstream یک‌سطح
+        # را به all_files اضافه کن (با ترجیح خواندن آن‌ها).
+        if scan_scope_meta and include_dependencies:
+            try:
+                from .scan_sections import expand_with_dependencies as _ss_expand
+                _expand_result = _ss_expand(
+                    selected_files=list(all_files),
+                    all_files=list(all_files) + [p for p in deep_contents.keys() if p not in all_files],
+                    file_contents=deep_contents,
+                )
+                _expanded = list(_expand_result.get("expanded") or [])
+                # حالا اگر فایل‌های جدید (upstream/downstream) خارج از
+                # all_files فعلی هستند، آن‌ها را هم اضافه کن
+                _new_deps = [p for p in _expanded if p not in set(all_files)]
+                if _new_deps:
+                    all_files = all_files + _new_deps
+                    sizes.update({p: sizes.get(p, 0) for p in _new_deps})
+                    scan_scope_meta["dependencies_added"] = len(_new_deps)
+                    scan_scope_meta["deps_downstream"] = _expand_result.get("deps_added") or []
+                    scan_scope_meta["deps_upstream"] = _expand_result.get("dependents_added") or []
+                    write_progress(
+                        watched_id,
+                        phase="phase2_deps_expanded",
+                        message=(
+                            f"🔗 {len(_new_deps)} فایل وابسته (upstream/downstream) اضافه شد "
+                            f"— scope نهایی: {len(all_files)} فایل"
+                        ),
+                    )
+            except Exception as _dep_e:
+                write_progress(
+                    watched_id,
+                    phase="phase2_deps_error",
+                    message=f"⚠️ خطا در expand وابستگی‌ها: {str(_dep_e)[:120]}",
+                )
 
         # rerank با import_counts واقعی
         ranked = _score_files(all_files, sizes, recent_changed, real_import_counts)
@@ -2553,6 +2651,8 @@ async def run_deep_scan(
             completed_at=now_iso(),
             pass_breakdown=pass_breakdown,
             duplicates_skipped=len(duplicates_skipped),
+            # 🆕 (selective-scan) — scope info را در progress ذخیره کن
+            scope=scan_scope_meta,
             **scan_metadata,
         )
 

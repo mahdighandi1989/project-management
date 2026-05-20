@@ -6388,12 +6388,55 @@ AC = «طراحی شیک‌تر باشد»:
     # Auto scan: detect needs/issues
     # ====================================================================
 
-    async def scan_project(self, watched_id: str, model_id: Optional[str] = None) -> Dict[str, Any]:
+    async def scan_project(
+        self,
+        watched_id: str,
+        model_id: Optional[str] = None,
+        *,
+        selected_sections: Optional[List[str]] = None,
+        custom_paths: Optional[List[str]] = None,
+        include_dependencies: bool = True,
+    ) -> Dict[str, Any]:
+        """اسکن سریع پروژه.
+
+        🆕 (selective-scan) اگر `selected_sections` یا `custom_paths` داده شوند،
+        prompt مدل با محدودیت scope به همان بخش‌ها ساخته می‌شود تا تسک‌ها
+        فقط روی همان zone متمرکز باشند. include_dependencies در quick scan
+        فقط در عنوان scope ذکر می‌شود تا مدل آن را در تحلیل لحاظ کند
+        (در deep scan با gراف import واقعی expand می‌شود).
+        """
         watched = self._find_watched(watched_id)
         if not watched:
             raise ValueError("پروژه یافت نشد")
 
         ctx = await self.build_project_context(watched.repo_full_name)
+
+        # 🆕 (selective-scan) — اگر کاربر selection داده، files_sample را
+        # محدود به همان بخش‌ها کن تا prompt هم محدود شود.
+        scope_meta: Dict[str, Any] = {}
+        if selected_sections or custom_paths:
+            try:
+                from .scan_sections import detect_sections, filter_files_by_selection
+                all_files_for_scope = list(ctx.get("files_sample") or [])
+                detected = detect_sections(all_files_for_scope)
+                filtered = filter_files_by_selection(
+                    all_files_for_scope,
+                    selected_sections,
+                    custom_paths,
+                    detected_sections=detected,
+                )
+                if filtered:
+                    ctx["files_sample"] = filtered[:80]
+                scope_meta = {
+                    "selected_sections": list(selected_sections or []),
+                    "custom_paths": list(custom_paths or []),
+                    "include_dependencies": include_dependencies,
+                    "scoped_files": len(filtered),
+                    "total_files": len(all_files_for_scope),
+                }
+            except Exception as _scope_err:
+                # اگر فیلتر شکست خورد، scope را نادیده بگیر ولی scan را قطع نکن
+                scope_meta = {"error": str(_scope_err)[:200]}
 
         # خلاصهٔ فایل‌های package برای تحلیل dependency
         package_summary = ""
@@ -6403,11 +6446,32 @@ AC = «طراحی شیک‌تر باشد»:
                 parts.append(f"=== {fname} ===\n{content[:1500]}")
             package_summary = "\n\n".join(parts)
 
+        # 🆕 (selective-scan) — اگر scope محدود است، یک بلوک به prompt اضافه کن
+        scope_block = ""
+        if scope_meta and (scope_meta.get("selected_sections") or scope_meta.get("custom_paths")):
+            _ss = scope_meta.get("selected_sections") or []
+            _cp = scope_meta.get("custom_paths") or []
+            _inc = scope_meta.get("include_dependencies", True)
+            scope_block = (
+                "\n# 🎯 محدودهٔ اسکن (Selective Scan)\n"
+                "این یک اسکن **انتخابی** است — فقط روی این بخش‌ها/مسیرها تمرکز کن:\n"
+                + (f"- بخش‌های انتخاب‌شده: {', '.join(_ss)}\n" if _ss else "")
+                + (f"- مسیرهای سفارشی: {', '.join(_cp)}\n" if _cp else "")
+                + (
+                    "- 🔗 task های ساخته‌شده باید شامل **وابستگی‌ها** هم باشند: "
+                    "هم فایل‌های انتخاب‌شده، هم فایل‌هایی که به آن‌ها متکی‌اند "
+                    "(callers/importers)، هم فایل‌هایی که آن‌ها به آن متکی‌اند.\n"
+                    if _inc
+                    else "- task ها فقط روی فایل‌های انتخاب‌شده متمرکز باشند (بدون expand به وابستگی‌ها).\n"
+                )
+                + "- مشکلات یا تسک‌هایی که خارج از این scope هستند، حتی اگر مهم باشند، در این scan ذکر نکن.\n"
+            )
+
         scan_prompt = f"""تو یک Senior Code Auditor و Security Engineer هستی. این پروژه را با دقت بررسی کن و یک فهرست کامل از «نیازها، ایرادات، تناقضات، آسیب‌پذیری‌ها و پیشنهادات بهبود» تهیه کن.
 
 # 🎯 هدف اصلی پروژه (از زبان کاربر)
 {(watched.user_notes or '(کاربر یادداشتی ثبت نکرده است)').strip()}
-
+{scope_block}
 # پروژه
 {watched.repo_full_name}
 
@@ -6597,6 +6661,8 @@ AC = «طراحی شیک‌تر باشد»:
             "created_count": len(created_tasks),
             "tasks": created_tasks,
             "raw_response": response[:4000],
+            # 🆕 (selective-scan) — اطلاعات scope برای نمایش در UI
+            "scope": scope_meta or None,
         }
 
     # ====================================================================

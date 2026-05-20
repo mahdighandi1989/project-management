@@ -198,6 +198,16 @@ class RunTaskRequest(BaseModel):
 class ScanRequest(BaseModel):
     model_id: Optional[str] = None
     model_ids: Optional[List[str]] = None
+    # 🆕 (selective-scan) — وقتی کاربر در WatchedCard تیک «اسکن کلی» را
+    # برداشت و section هایی را انتخاب کرد، اینجا پاس داده می‌شوند.
+    # اگر هر دو None باشند رفتار قدیم (اسکن کل پروژه) اجرا می‌شود —
+    # backward compatible.
+    selected_sections: Optional[List[str]] = None  # e.g. ['frontend', 'backend']
+    custom_paths: Optional[List[str]] = None  # e.g. ['frontend/src/specific']
+    # وقتی selection داریم، task های ساخته‌شده باید فایل‌های وابسته را هم
+    # شامل شوند (مطابق voice کاربر: «هم خود اون صفحه و هم چیزایی که به
+    # این صفحه وابسته از جاهای دیگه»). default True.
+    include_dependencies: bool = True
 
 
 class WatchedUpdateExtra(BaseModel):
@@ -2309,15 +2319,32 @@ async def mark_report(
 
 @router.post("/scan/{watched_id}")
 async def scan_project(watched_id: str, payload: Optional[ScanRequest] = None):
-    """اسکن سریع پروژه برای یافتن نیازها/ایرادات (حالت سادهٔ قبلی)."""
+    """اسکن سریع پروژه برای یافتن نیازها/ایرادات (حالت سادهٔ قبلی).
+
+    🆕 (selective-scan) — اگر payload.selected_sections یا custom_paths
+    داده شوند، scan روی همان زیرمجموعهٔ فایل‌ها متمرکز می‌شود.
+    اگر هیچ‌کدام نباشند، رفتار قدیمی (اسکن کل پروژه) حفظ می‌شود.
+    """
     service = get_oversight_service()
     try:
         chosen_model = None
+        sel_sections = None
+        sel_paths = None
+        include_deps = True
         if payload:
             chosen_model = payload.model_id or (
                 payload.model_ids[0] if payload.model_ids else None
             )
-        return await service.scan_project(watched_id, model_id=chosen_model)
+            sel_sections = payload.selected_sections
+            sel_paths = payload.custom_paths
+            include_deps = payload.include_dependencies
+        return await service.scan_project(
+            watched_id,
+            model_id=chosen_model,
+            selected_sections=sel_sections,
+            custom_paths=sel_paths,
+            include_dependencies=include_deps,
+        )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
@@ -2328,6 +2355,10 @@ class DeepScanRequest(BaseModel):
     model_id: Optional[str] = None
     enabled_passes: Optional[List[str]] = None
     deep_read_count: int = 35
+    # 🆕 (selective-scan) — مشابه ScanRequest
+    selected_sections: Optional[List[str]] = None
+    custom_paths: Optional[List[str]] = None
+    include_dependencies: bool = True
 
 
 @router.post("/scan/{watched_id}/deep")
@@ -2348,6 +2379,10 @@ async def deep_scan_project(watched_id: str, payload: Optional[DeepScanRequest] 
                 model_id=payload.model_id,
                 enabled_passes=payload.enabled_passes,
                 deep_read_count=payload.deep_read_count,
+                # 🆕 (selective-scan) — section/path filter pass-through
+                selected_sections=payload.selected_sections,
+                custom_paths=payload.custom_paths,
+                include_dependencies=payload.include_dependencies,
             )
         except Exception as e:
             from ...services.oversight_deep_scan_service import write_progress as _wp
@@ -2363,6 +2398,75 @@ async def scan_progress(watched_id: str):
     from ...services.oversight_deep_scan_service import read_progress
 
     return read_progress(watched_id)
+
+
+@router.get("/scan/{watched_id}/sections")
+async def scan_sections(watched_id: str):
+    """🆕 (selective-scan) لیست بخش‌های منطقی پروژه برای modal انتخاب در UI.
+
+    UI وقتی کاربر چک‌باکس «اسکن کلی» را برمی‌دارد، این endpoint را صدا
+    می‌زند تا گزینه‌های قابل انتخاب (frontend/backend/tests/docs/…) را
+    با تعداد فایل + ۳ نمونه مسیر نشان دهد.
+
+    اولین تلاش: از structure cache آخرین deep scan استفاده می‌کند
+    (سریع — به GitHub کاری ندارد).
+    اگر structure نباشد، از build_project_context (که tree را از
+    GitHub می‌خواند) استفاده می‌کند.
+    """
+    from ...services.scan_sections import detect_sections
+    from ...services.oversight_deep_scan_service import STRUCTURE_DIR
+    from ...services.oversight_service import _read_json
+
+    service = get_oversight_service()
+    watched = service._find_watched(watched_id)
+    if not watched:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    all_files: List[str] = []
+    source = "none"
+
+    # تلاش ۱: از structure cache آخرین deep scan
+    try:
+        struct = _read_json(STRUCTURE_DIR / f"{watched_id}.json", {}) or {}
+        cached_files = struct.get("files") or []
+        if isinstance(cached_files, list) and cached_files:
+            all_files = [str(f) for f in cached_files if f]
+            source = "deep_scan_cache"
+    except Exception:
+        all_files = []
+
+    # تلاش ۲: از build_project_context (تره را از GitHub می‌گیرد)
+    if not all_files:
+        try:
+            ctx = await service.build_project_context(
+                watched.repo_full_name, max_tree=500
+            )
+            sample = ctx.get("files_sample") or []
+            if sample:
+                all_files = list(sample)
+                source = "github_tree"
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"خطا در خواندن ساختار پروژه: {str(e)[:200]}",
+            )
+
+    if not all_files:
+        return {
+            "watched_id": watched_id,
+            "source": source,
+            "sections": [],
+            "total_files": 0,
+            "message": "ساختار پروژه در دسترس نیست — یک deep scan انجام دهید تا cache ساخته شود.",
+        }
+
+    sections = detect_sections(all_files)
+    return {
+        "watched_id": watched_id,
+        "source": source,
+        "sections": sections,
+        "total_files": len(all_files),
+    }
 
 
 @router.get("/scan/{watched_id}/summaries")
