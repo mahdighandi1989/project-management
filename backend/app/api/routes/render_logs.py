@@ -317,7 +317,32 @@ def _build_general_instructions_list(
 - اگر محتوای فعلی فایل کد مشکل‌دار (مثل خط ۳۲ که error می‌دهد) را همچنان دارد → **حتماً** در action_plan آن را تغییر بده
 - اگر AI قبلی (مرحله قبل) گفت «این فایل درست است» ولی کد مشکل‌دار همچنان موجود است → اعتماد نکن و فایل را در این مرحله fix کن
 - مثال غلط: «`app/main.py` صحیح است، نیازی به تغییر ندارد» (در حالی که خط ۳۲ همچنان `async with engine.begin()` دارد)
-- مثال درست: «خط ۳۲ `app/main.py` همچنان `engine.begin()` می‌زند، باید به `init_db()` تبدیل شود — این change را در action_plan قرار می‌دهم.»""",
+- مثال درست: «خط ۳۲ `app/main.py` همچنان `engine.begin()` می‌زند، باید به `init_db()` تبدیل شود — این change را در action_plan قرار می‌دهم.»
+
+### 🚨 قانون حیاتی: log حقیقت است، توصیف کاربر نه
+- اگر backend_logs یا log در پیام، یک error trace واقعی دارد، **اول
+  log را به دقت بخوان** قبل از پذیرش description کاربر
+- کاربر ممکن است error قبلی session را تکرار کند، یا نام package اشتباه
+  بنویسد. **log منبع حقیقت است**
+- مثال غلط: کاربر می‌گوید «pydantic-core fail شد» ولی log می‌گوید
+  `Failed to build tiktoken` → AI روی pydantic-core کار می‌کند
+- مثال درست: «در پیام کاربر pydantic-core ذکر شده ولی log جدید tiktoken
+  را نشان می‌دهد — مشکل واقعی tiktoken است.»
+
+### 🚨 قانون حیاتی: Python wheel/cp31X compile errors در Render
+اگر log شامل `Read-only file system` در `/usr/local/cargo/` یا
+`Failed to build wheel for ...` در deploy Python:
+- چک کن نسخهٔ Python در log (مثل `python3.14`, `cp314`)
+- **Python 3.13+** و به‌خصوص 3.14 (preview) — اکثر packages هنوز wheel
+  ندارند → از source compile می‌شوند → نیاز به Rust/Cargo دارند →
+  Render فایل‌سیستم read-only است → fail
+- **راه‌حل واحد و درست**: یک فایل `runtime.txt` با محتوای:
+  `python-3.11.10` یا `python-3.12.7` در ریشهٔ پروژه
+- این تنها fix در action_plan کافی است — بقیه (pydantic-core unpin،
+  maturin، Dockerfile Rust install) **بی‌اثر یا مضر** هستند چون
+  Render Native Python runtime از Dockerfile استفاده نمی‌کند
+- **هرگز** پیشنهاد نده «maturin به requirements اضافه کن» چون maturin
+  هم Rust compile نیاز دارد و در همان محیط fail می‌کند""",
         },
         {
             "id": "sys_exact_intent",
@@ -13761,6 +13786,24 @@ async def enhance_prompt_endpoint(request: EnhancePromptRequest, db: Session = D
    - کد تولیدی باید بدون هیچ خطای سینتکس، import و تایپ باشد
    - وابستگی‌ها با نسخه سازگار پین شوند — هرگز نسخه‌ای که مطمئن نیستی وجود داره پین نکن
    - قبل از نوشتن کد، ذهنی مراحل بیلد و دیپلوی رو شبیه‌سازی کن
+   - 🚨 **اگر backend_logs دارای error trace است**:
+     * **اول** نام دقیق package/symbol/خط که شکست خورده را از log جاری
+       استخراج کن — نه از description کاربر
+     * کاربر ممکن است error قبلی را تکرار کند یا اشتباه نام بدهد. **log
+       منبع حقیقت است**
+     * مثال: کاربر می‌گوید «pydantic-core fail شد» ولی log می‌گوید
+       `Failed to build tiktoken` → روی tiktoken کار کن، نه pydantic-core
+   - 🚨 **اگر error مربوط به wheel/compile در Render/Python deploy است**:
+     * چک کن نسخهٔ Python (در log معمولاً `python3.X.Y` آمده)
+     * Python 3.13+، به‌خصوص 3.14, اکثر packages هنوز cp31X wheel ندارند
+     * **اولین راه‌حل**: ایجاد یا ویرایش `runtime.txt` با `python-3.11.10`
+       یا `python-3.12.7` در ریشهٔ پروژه (تنها این یک خط مشکل را حل می‌کند)
+     * **هرگز** پیشنهاد نده «maturin و setuptools-rust به requirements اضافه کن»
+       چون این‌ها هم Rust compile نیاز دارند و در همان محیط read-only شکست
+       می‌خورند
+     * Render Native Python runtime از Dockerfile **استفاده نمی‌کند** —
+       تغییر Dockerfile روی deploy اثری ندارد مگر اینکه پروژه explicit
+       Docker service باشد
 11. **حل کامل و یکجا**: در پرامپت تاکید کن:
    - قبل از هر تغییر، کل زنجیره وابستگی رو ردیابی کن
    - اگر فایل config تغییر میکنه، تمام configهای مرتبط هم بررسی بشن
