@@ -589,6 +589,9 @@ export default function ProjectDetailPage() {
   }>>([]);
   const [visualDebugSelectedModels, setVisualDebugSelectedModels] = useState<string[]>([]);
   const [visualDebugLoading, setVisualDebugLoading] = useState(false);
+  // 🆕 (inspector temp-activate) — مدل‌های Vision که برای این درخواست
+  // موقتاً فعال شدند؛ پس از پایان (success یا error) auto-revert می‌شوند.
+  const [tempActivatedVisionModels, setTempActivatedVisionModels] = useState<string[]>([]);
   // 🆕 (Inspector → Oversight) دو تیک جداگانه برای ارسال به مرکز نظارت
   const [sendToOversightChat, setSendToOversightChat] = useState(false);
   const [sendToOversightVisual, setSendToOversightVisual] = useState(false);
@@ -5369,6 +5372,35 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     }
   };
 
+  // 🆕 (inspector temp-activate) — فعال‌سازی موقت یک مدل غیرفعال
+  const tempActivateInspectorModel = async (modelId: string): Promise<boolean> => {
+    try {
+      const r = await fetch(
+        `${API_BASE}/api/oversight/models/${encodeURIComponent(modelId)}/temp-activate?trigger=inspector-visual-debug`,
+        { method: 'POST' },
+      );
+      if (!r.ok) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  // 🆕 (inspector temp-activate) — برگرداندن مدل‌های موقتاً فعال‌شده
+  const revertTempActivatedInspectorModels = useCallback(async (ids: string[]) => {
+    if (!ids || ids.length === 0) return;
+    await Promise.all(ids.map(async (mid) => {
+      try {
+        await fetch(
+          `${API_BASE}/api/oversight/models/${encodeURIComponent(mid)}/temp-revert?trigger=inspector-visual-debug-done`,
+          { method: 'POST' },
+        );
+      } catch {
+        // best-effort — boot cleanup در صورت شکست stale را پاک می‌کند
+      }
+    }));
+  }, []);
+
   // 📸 شروع دیباگ بصری - نمایش انتخاب مدل
   const startVisualDebugModelSelection = () => {
     // 🆕 (Inspector → Oversight) اگر تیک ارسال به نظارت فعال است،
@@ -5441,6 +5473,36 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     setInspectorOpLock(true);
     setInspectorOpType('investigate');
     inspectorOpAbortRef.current = new AbortController();
+
+    // 🆕 (inspector temp-activate) — هر مدلی که disabled است را موقتاً
+    // فعال کن. پس از پایان درخواست (در finally) به حالت قبل برمی‌گردد.
+    const _toTempActivate = visualDebugSelectedModels.filter(mid => {
+      const m = visualDebugVisionModels.find(vm => vm.id === mid);
+      return m && !m.enabled;
+    });
+    const _activatedNow: string[] = [];
+    if (_toTempActivate.length > 0) {
+      setInspectorChatMessages(prev => [...prev, {
+        id: `vd_temp_act_${Date.now()}`,
+        role: 'system' as const,
+        content: `⚡ ${_toTempActivate.length} مدل بصری غیرفعال موقتاً فعال می‌شود...`,
+        timestamp: new Date(),
+      }]);
+      for (const mid of _toTempActivate) {
+        const ok = await tempActivateInspectorModel(mid);
+        if (ok) _activatedNow.push(mid);
+      }
+      if (_activatedNow.length > 0) {
+        setTempActivatedVisionModels(prev => [...prev, ..._activatedNow]);
+        const names = _activatedNow.map(id => visualDebugVisionModels.find(m => m.id === id)?.name || id).join('، ');
+        setInspectorChatMessages(prev => [...prev, {
+          id: `vd_temp_act_done_${Date.now()}`,
+          role: 'system' as const,
+          content: `✅ موقتاً فعال شد: ${names} (پس از اتمام کار خودکار غیرفعال می‌شود)`,
+          timestamp: new Date(),
+        }]);
+      }
+    }
 
     // 📦 Build screenshot packs - each screenshot with its own logs/URLs/API paths
     const screenshotPacks = visualDebugScreenshots.map((ss, idx) => ({
@@ -5857,6 +5919,20 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       setVisualDebugLoading(false);
       setInspectorOpLock(false);
       setInspectorOpType(null);
+      // 🆕 (inspector temp-activate) — auto-revert مدل‌های موقتاً فعال‌شده
+      if (_activatedNow.length > 0) {
+        await revertTempActivatedInspectorModels(_activatedNow);
+        setTempActivatedVisionModels(prev => prev.filter(id => !_activatedNow.includes(id)));
+        const names = _activatedNow.map(id => visualDebugVisionModels.find(m => m.id === id)?.name || id).join('، ');
+        setInspectorChatMessages(prev => [...prev, {
+          id: `vd_temp_revert_${Date.now()}`,
+          role: 'system' as const,
+          content: `🔒 مدل‌های موقتاً فعال‌شده غیرفعال شدند: ${names}`,
+          timestamp: new Date(),
+        }]);
+        // refresh لیست vision models تا UI وضعیت جدید را نشان دهد
+        try { await loadVisionModels(); } catch {}
+      }
     }
   };
 
@@ -5895,6 +5971,23 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     setInspectorOpLock(true);
     setInspectorOpType('investigate');
     inspectorOpAbortRef.current = new AbortController();
+
+    // 🆕 (inspector temp-activate) — اگر مدل بازتحلیل غیرفعال است، موقتاً فعال کن
+    const _raTarget = visualDebugVisionModels.find(m => m.id === newModelId);
+    let _raTempActivated: string | null = null;
+    if (_raTarget && !_raTarget.enabled) {
+      setInspectorChatMessages(prev => [...prev, {
+        id: `ra_temp_act_${Date.now()}`,
+        role: 'system' as const,
+        content: `⚡ مدل ${_raTarget.name} غیرفعال است — موقتاً فعال می‌شود...`,
+        timestamp: new Date(),
+      }]);
+      const ok = await tempActivateInspectorModel(newModelId);
+      if (ok) {
+        _raTempActivated = newModelId;
+        setTempActivatedVisionModels(prev => [...prev, newModelId]);
+      }
+    }
 
     setInspectorChatMessages(prev => [...prev, {
       id: `ra_start_${Date.now()}`,
@@ -6003,6 +6096,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       setReanalyzeLoading(false);
       setInspectorOpLock(false);
       setInspectorOpType(null);
+      // 🆕 (inspector temp-activate) — revert مدل بازتحلیل اگر temp-activated بود
+      if (_raTempActivated) {
+        await revertTempActivatedInspectorModels([_raTempActivated]);
+        const _id = _raTempActivated;
+        setTempActivatedVisionModels(prev => prev.filter(id => id !== _id));
+        setInspectorChatMessages(prev => [...prev, {
+          id: `ra_temp_revert_${Date.now()}`,
+          role: 'system' as const,
+          content: `🔒 مدل ${_raTarget?.name || _id} به حالت قبل برگشت (غیرفعال).`,
+          timestamp: new Date(),
+        }]);
+        try { await loadVisionModels(); } catch {}
+      }
     }
   };
 
@@ -14293,17 +14399,17 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         ) : visualDebugVisionModels.map(model => (
                           <label
                             key={model.id}
-                            className={`flex items-center gap-2 p-2 rounded-lg transition-colors ${
-                              !model.enabled ? 'opacity-40 cursor-not-allowed' :
+                            className={`flex items-center gap-2 p-2 rounded-lg transition-colors cursor-pointer ${
                               visualDebugSelectedModels.includes(model.id)
-                                ? 'bg-purple-50 dark:bg-purple-900/20 border border-purple-300 dark:border-purple-700 cursor-pointer'
-                                : 'hover:bg-gray-50 dark:hover:bg-gray-750 border border-transparent cursor-pointer'
+                                ? (model.enabled
+                                    ? 'bg-purple-50 dark:bg-purple-900/20 border border-purple-300 dark:border-purple-700'
+                                    : 'bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700')
+                                : 'hover:bg-gray-50 dark:hover:bg-gray-750 border border-transparent'
                             }`}
                           >
                             <input
                               type="checkbox"
                               checked={visualDebugSelectedModels.includes(model.id)}
-                              disabled={!model.enabled}
                               onChange={(e) => {
                                 if (e.target.checked) {
                                   setVisualDebugSelectedModels(prev => [...prev, model.id]);
@@ -14324,7 +14430,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               )}
                             </div>
                             {!model.enabled && (
-                              <span className="text-[10px] text-red-400 flex-shrink-0">غیرفعال</span>
+                              <span className="text-[10px] text-amber-600 flex-shrink-0" title="با کلیک «شروع تحلیل» موقتاً فعال می‌شود و پس از پایان کار خودکار غیرفعال می‌گردد">
+                                ⚡ فعال‌سازی موقت
+                              </span>
                             )}
                           </label>
                         ))}
@@ -14371,18 +14479,18 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           ) : allModels.map(model => (
                             <label
                               key={model.id}
-                              className={`flex items-center gap-2 p-2 rounded-lg transition-colors ${
-                                !model.enabled ? 'opacity-40 cursor-not-allowed' :
+                              className={`flex items-center gap-2 p-2 rounded-lg transition-colors cursor-pointer ${
                                 reanalyzeSelectedModel === model.id
-                                  ? 'bg-purple-50 dark:bg-purple-900/20 border border-purple-300 dark:border-purple-700 cursor-pointer'
-                                  : 'hover:bg-gray-50 dark:hover:bg-gray-750 border border-transparent cursor-pointer'
+                                  ? (model.enabled
+                                      ? 'bg-purple-50 dark:bg-purple-900/20 border border-purple-300 dark:border-purple-700'
+                                      : 'bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700')
+                                  : 'hover:bg-gray-50 dark:hover:bg-gray-750 border border-transparent'
                               }`}
                             >
                               <input
                                 type="radio"
                                 name="reanalyze_model"
                                 checked={reanalyzeSelectedModel === model.id}
-                                disabled={!model.enabled}
                                 onChange={() => setReanalyzeSelectedModel(model.id)}
                                 className="rounded"
                               />
@@ -14397,6 +14505,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                 )}
                                 {model.id !== visionModelId && !(model as any).isVision && (
                                   <span className="text-[9px] bg-gray-100 text-gray-500 px-1 rounded mr-1">بازتحلیل متنی</span>
+                                )}
+                                {!model.enabled && (
+                                  <span className="text-[9px] bg-amber-100 text-amber-700 px-1 rounded mr-1" title="موقتاً فعال می‌شود و پس از پایان به حالت قبل برمی‌گردد">⚡ فعال‌سازی موقت</span>
                                 )}
                               </div>
                             </label>
