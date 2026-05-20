@@ -1435,6 +1435,11 @@ async def run_deep_scan(
     custom_paths: Optional[List[str]] = None,
     include_dependencies: bool = True,
     focus_notes: Optional[str] = None,
+    # 🆕 (inspector-scan) — وقتی این پارامتر `inspector_session:{id}` باشد،
+    # خروجی scan هرگز به OversightTask DB نوشته نمی‌شود. به‌جایش proposals
+    # ساخته‌شده مستقیماً به همان session chat به‌عنوان InspectorMessage لاگ
+    # می‌شوند. None == رفتار قدیمی (مرکز نظارت).
+    output_target: Optional[str] = None,
 ) -> Dict[str, Any]:
     """اجرای کامل deep scan روی یک watched.
 
@@ -2500,8 +2505,21 @@ async def run_deep_scan(
         }
         pass_summaries["file_health_map"] = file_health_map
 
+        # 🆕 (inspector-scan) — تشخیص target output
+        # اگر output_target نشان‌گر inspector session است، findings به
+        # OversightTask تبدیل نمی‌شوند بلکه به proposal payload در همان
+        # session chat لاگ می‌شوند.
+        _inspector_session_id: Optional[int] = None
+        if output_target and output_target.startswith("inspector_session:"):
+            try:
+                _inspector_session_id = int(output_target.split(":", 1)[1])
+            except (ValueError, IndexError):
+                _inspector_session_id = None
+
         # ساخت تسک با پرامپت قوی غنی‌شده
         created_tasks: List[Dict[str, Any]] = []
+        # 🆕 (inspector-scan) — لیست proposal payload ها (وقتی هدف Inspector است)
+        proposal_payloads: List[Dict[str, Any]] = []
         # 🆕 (P2) آمار dedup: کدام task‌های موجود با finding‌های جدید match کردند
         duplicates_skipped: List[str] = []
         execution_mode_default = (watched.default_execution_mode or "manual")
@@ -2587,6 +2605,34 @@ async def run_deep_scan(
                     priority=f.get("priority", "medium"),
                     estimate=(f.get("estimated_complexity") or "medium"),
                 )
+
+                # 🆕 (inspector-scan) — اگر هدف یک session بازرس ویژه است،
+                # به‌جای ساخت OversightTask، یک proposal payload بساز و
+                # continue. **هیچ‌چیزی در DB ذخیره نمی‌شود.**
+                if _inspector_session_id is not None:
+                    proposal_payloads.append({
+                        "proposal_id": str(uuid.uuid4()),
+                        "title": title,
+                        "type": f.get("type", "other"),
+                        "priority": f.get("priority", "medium"),
+                        "description": f.get("description", ""),
+                        "proposed_action": f.get("proposed_action", ""),
+                        "target_files": target_files,
+                        "target_locations": target_locations,
+                        "related_files": merged_related,
+                        "acceptance_criteria": ac,
+                        "validation_commands": vcmds,
+                        "before_after_examples": examples,
+                        "tech_context": (f.get("tech_context") or tech_context_default),
+                        "dependency_summary": (f.get("dependency_summary") or "").strip(),
+                        "risks": (f.get("risks") or "").strip(),
+                        "estimated_complexity": (f.get("estimated_complexity") or "medium"),
+                        "strong_prompt": full_prompt,
+                        "execution_status": "pending",  # pending | applied_locally | committed | failed
+                        "_pass": f.get("_pass", ""),
+                    })
+                    continue
+
                 # 🆕 (P1) ضبط metadata scan که این task را ساخته
                 task_scan_metadata = {
                     "model": model_id or (model_ids[0] if model_ids else "default"),
@@ -2682,8 +2728,62 @@ async def run_deep_scan(
                 logger.warning(f"deep_scan: building task failed: {_e}")
                 continue
 
-        async with service._lock:
-            service._save_tasks()
+        # 🆕 (inspector-scan) — اگر در حالت inspector session هستیم، proposals
+        # را به همان session لاگ کن. _save_tasks فراخوانی نمی‌شود چون هیچ
+        # task جدیدی در service.tasks اضافه نشده.
+        if _inspector_session_id is not None:
+            try:
+                from .scan_v5.scan_inspector_session import log_scan_message
+                _ss = scan_scope_meta or {}
+                summary_text = (
+                    f"✅ اسکن موردی تمام شد — **{len(proposal_payloads)} پیشنهاد** "
+                    f"از {len(unique)} finding استخراج شد. "
+                    f"می‌توانید هر پیشنهاد را جداگانه «اجرا با AI» کنید یا "
+                    f"«اعمال همهٔ تغییرات» را برای commit + push همه با هم بزنید."
+                )
+                _started_at_str = read_progress(watched_id).get("started_at") or now_iso()
+                try:
+                    _duration_ms = int(
+                        (datetime.now(timezone.utc).timestamp()
+                         - datetime.fromisoformat(_started_at_str.replace("Z", "+00:00")).timestamp())
+                        * 1000
+                    )
+                except Exception:
+                    _duration_ms = 0
+                log_scan_message(
+                    session_id=_inspector_session_id,
+                    role="assistant",
+                    content=summary_text,
+                    action_type="scan_complete",
+                    model_id=(model_ids[0] if model_ids else model_id),
+                    extra_data={
+                        "kind": "selective_scan_complete",
+                        "scan_proposals": proposal_payloads,
+                        "scope": {
+                            "selected_sections": _ss.get("selected_sections") or [],
+                            "custom_paths": _ss.get("custom_paths") or [],
+                            "focus_notes": _ss.get("focus_notes"),
+                            "include_dependencies": _ss.get("include_dependencies", True),
+                            "scoped_files": _ss.get("after_filter") or _ss.get("scoped_files") or 0,
+                            "deps_added": _ss.get("dependencies_added") or 0,
+                        },
+                        "summary": {
+                            "total_proposals": len(proposal_payloads),
+                            "findings_count": len(unique),
+                            "passes_run": passes_done,
+                            "scan_duration_ms": _duration_ms,
+                        },
+                    },
+                )
+            except Exception as _log_e:
+                logger.warning(f"inspector-scan: logging proposals failed: {_log_e}")
+            # در حالت inspector، tasks list دست‌نخورده مانده، پس _save_tasks
+            # لازم نیست. ولی scan_results را روی disk بنویس (برای cache
+            # بعدی /sections و progress)، و last_scan_at را به‌روز نکن
+            # (چون این scan موردی است نه دوره‌ای).
+        else:
+            async with service._lock:
+                service._save_tasks()
 
         # ذخیرهٔ نتیجهٔ خام scan
         try:
@@ -2704,17 +2804,19 @@ async def run_deep_scan(
         except Exception:
             pass
 
-        # به‌روزرسانی last_scan_at روی watched
-        watched.last_scan_at = now_iso()
-        try:
-            from datetime import timedelta
-            watched.next_scan_at = (
-                datetime.now(timezone.utc) + timedelta(hours=watched.scan_interval_hours)
-            ).isoformat()
-        except Exception:
-            pass
-        async with service._lock:
-            service._save_watched()
+        # به‌روزرسانی last_scan_at روی watched — فقط در حالت scan معمولی.
+        # اسکن موردی Inspector نباید scheduler دوره‌ای را reset کند.
+        if _inspector_session_id is None:
+            watched.last_scan_at = now_iso()
+            try:
+                from datetime import timedelta
+                watched.next_scan_at = (
+                    datetime.now(timezone.utc) + timedelta(hours=watched.scan_interval_hours)
+                ).isoformat()
+            except Exception:
+                pass
+            async with service._lock:
+                service._save_watched()
 
         # 🆕 (P1) metadata کامل scan برای نمایش در UI و notification
         # 🆕 (P3) per-pass breakdown

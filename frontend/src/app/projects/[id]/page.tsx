@@ -368,6 +368,14 @@ export default function ProjectDetailPage() {
   const [inspectorChatInput, setInspectorChatInput] = useState('');
   const [inspectorChatLoading, setInspectorChatLoading] = useState(false);
   const [inspectorShowModelSelector, setInspectorShowModelSelector] = useState(false);
+  // 🆕 (inspector-scan) — state برای ردیابی scan موردی در حال اجرا
+  // و رندر دکمه‌های proposal/apply-all روی پیام‌های scan_complete.
+  const [activeScanId, setActiveScanId] = useState<string | null>(null);
+  const [activeScanSessionId, setActiveScanSessionId] = useState<number | null>(null);
+  const [scanProgress, setScanProgress] = useState<any>(null);
+  const [runningProposalIds, setRunningProposalIds] = useState<Set<string>>(new Set());
+  const [applyAllInFlight, setApplyAllInFlight] = useState<boolean>(false);
+  const scanPollRef = useRef<NodeJS.Timeout | null>(null);
   // 🔧 فیلتر انواع اکشن‌ها - همه فعال بجز scroll و network-request پرسر و صدا
   const [inspectorActionFilters, setInspectorActionFilters] = useState<Record<string, boolean>>({
     'click': true,
@@ -1332,11 +1340,26 @@ export default function ProjectDetailPage() {
       const data = await res.json();
       if (data.success && Array.isArray(data.messages)) {
         const restored = data.messages.map((m: any) => {
-          // extract network_meta from extra_data if present
+          // extract network_meta + scan-related fields from extra_data
           let networkMeta: any = null;
+          let scanProposals: any[] | null = null;
+          let scanScope: any = null;
+          let scanSummary: any = null;
+          let scanKind: string | null = null;
+          let proposalExecuted: any = null;
+          let applyAllResult: any = null;
           try {
             const ed = typeof m.extra_data === 'string' ? JSON.parse(m.extra_data) : m.extra_data;
-            if (ed && ed.network_meta) networkMeta = ed.network_meta;
+            if (ed) {
+              if (ed.network_meta) networkMeta = ed.network_meta;
+              // 🆕 (inspector-scan)
+              scanKind = ed.kind || null;
+              if (Array.isArray(ed.scan_proposals)) scanProposals = ed.scan_proposals;
+              if (ed.scope) scanScope = ed.scope;
+              if (ed.summary) scanSummary = ed.summary;
+              if (ed.kind === 'proposal_executed') proposalExecuted = ed;
+              if (ed.kind === 'apply_all_result') applyAllResult = ed;
+            }
           } catch (e) { /* parse failed - non-critical */ }
           return {
             id: `restored_${m.id}`,
@@ -1352,6 +1375,12 @@ export default function ProjectDetailPage() {
             error_logs_count: m.error_logs_count,
             checked_logs: m.checked_logs,
             network_meta: networkMeta,
+            scan_kind: scanKind,
+            scan_proposals: scanProposals,
+            scan_scope: scanScope,
+            scan_summary: scanSummary,
+            proposal_executed: proposalExecuted,
+            apply_all_result: applyAllResult,
             ...(m.model_id ? { model_id: m.model_id } : {}),
             ...(m.tokens_used ? { tokens_used: m.tokens_used } : {}),
           };
@@ -1389,6 +1418,103 @@ export default function ProjectDetailPage() {
       return () => clearTimeout(t);
     }
   }, [inspectorSessionId, inspectorChatRestored, activeTab, restoreInspectorChatFromDb]);
+
+  // 🆕 (inspector-scan) — polling progress scan موردی فعال + reload پیام‌ها
+  // وقتی scan کامل شد. UI بدون refresh دستی به‌روز می‌شود.
+  useEffect(() => {
+    if (!activeScanSessionId) {
+      if (scanPollRef.current) {
+        clearInterval(scanPollRef.current);
+        scanPollRef.current = null;
+      }
+      return;
+    }
+    if (scanPollRef.current) clearInterval(scanPollRef.current);
+    scanPollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/render/inspector/selective-scan/${activeScanSessionId}/progress`,
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+        setScanProgress(data);
+        if (data.status === 'completed' || data.status === 'error' || data.status === 'cancelled') {
+          if (scanPollRef.current) {
+            clearInterval(scanPollRef.current);
+            scanPollRef.current = null;
+          }
+          // reload پیام‌های session تا scan_complete (با proposals) و
+          // scan_progress messages که در DB لاگ شده‌اند ظاهر شوند
+          try {
+            await restoreInspectorChatFromDb(true);
+          } catch {}
+          setActiveScanId(null);
+          setActiveScanSessionId(null);
+          setScanProgress(null);
+        }
+      } catch {
+        // ignore network blips؛ polling در iteration بعد retry می‌کند
+      }
+    }, 3000);
+    return () => {
+      if (scanPollRef.current) {
+        clearInterval(scanPollRef.current);
+        scanPollRef.current = null;
+      }
+    };
+  }, [activeScanSessionId, restoreInspectorChatFromDb]);
+
+  // 🆕 (inspector-scan) — helper برای اجرای proposal
+  const runInspectorProposal = useCallback(async (proposalId: string, sessionId: number, modelId?: string) => {
+    setRunningProposalIds(prev => new Set(prev).add(proposalId));
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/render/inspector/session/${sessionId}/proposals/${proposalId}/run`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model_id: modelId || null }),
+        },
+      );
+      const data = await res.json().catch(() => ({}));
+      // پیام نتیجه در session لاگ می‌شود توسط backend، پس فقط reload می‌کنیم
+      await restoreInspectorChatFromDb(true);
+      return data;
+    } finally {
+      setRunningProposalIds(prev => {
+        const next = new Set(prev);
+        next.delete(proposalId);
+        return next;
+      });
+    }
+  }, [restoreInspectorChatFromDb]);
+
+  // 🆕 (inspector-scan) — helper برای اعمال همه تغییرات
+  const applyAllInspectorProposals = useCallback(async (
+    sessionId: number,
+    options?: { commit_message?: string; include_unexecuted?: boolean; model_id?: string },
+  ) => {
+    setApplyAllInFlight(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/render/inspector/session/${sessionId}/apply-all`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            commit_message: options?.commit_message || null,
+            include_unexecuted: options?.include_unexecuted ?? false,
+            model_id: options?.model_id || null,
+          }),
+        },
+      );
+      const data = await res.json().catch(() => ({}));
+      await restoreInspectorChatFromDb(true);
+      return data;
+    } finally {
+      setApplyAllInFlight(false);
+    }
+  }, [restoreInspectorChatFromDb]);
 
   // 🧹 Clear chat (فقط state فرانت — DB دست‌نخورده می‌ماند)
   const clearInspectorChatLocally = useCallback(() => {
@@ -5028,6 +5154,40 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     content: `❌ ${data.message}${data.detail ? '\n\n📊 ' + data.detail : ''}`,
                     timestamp: new Date(),
                   }]);
+                } else if (eventType === 'scan_initiated') {
+                  // 🆕 (inspector-scan) — backend تشخیص داد scan موردی لازم است.
+                  // یک پیام assistant با محتوای scan_initiated اضافه می‌کنیم،
+                  // session_id را ذخیره می‌کنیم، polling progress شروع می‌شود،
+                  // و بعد از completion پیام scan_complete با proposals لاگ می‌شود
+                  // که در پیام‌ها reload می‌شود.
+                  responseReceived = true;
+                  inspectorBatchTaskKeyRef.current = null;
+                  try { sessionStorage.removeItem('inspector_batch_task'); } catch {}
+                  const scanInitId = `scan_init_${Date.now()}`;
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: scanInitId,
+                    role: 'assistant' as const,
+                    content: data.content || '🔍 اسکن موردی شروع شد',
+                    timestamp: new Date(),
+                    isScanInitiated: true,
+                    scanId: data.scan_id,
+                    scanIntent: data.intent,
+                  } as any]);
+                  // اگر session تازه ساخته شد، آن را بگیر تا polling کار کند
+                  if (data.session_id && data.session_id !== inspectorSessionId) {
+                    setInspectorSessionId(data.session_id);
+                  }
+                  // ست کردن state polling — scope: یک بار هر ۳ ثانیه
+                  setActiveScanId(data.scan_id);
+                  setActiveScanSessionId(data.session_id || inspectorSessionId);
+                } else if (eventType === 'scan_already_running') {
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: `scan_busy_${Date.now()}`,
+                    role: 'assistant' as const,
+                    content: data.content || '⚠️ scan قبلی هنوز در حال اجراست',
+                    timestamp: new Date(),
+                  }]);
+                  responseReceived = true;
                 } else if (eventType === 'response') {
                   responseReceived = true;
                   // پاکسازی batch task — کار تمام شد
@@ -13858,6 +14018,136 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                         }`}>
                           {msg.content}
                         </p>
+
+                        {/* 🆕 (inspector-scan) — رندر proposalها در پیام scan_complete */}
+                        {(msg as any).scan_proposals && (msg as any).scan_proposals.length > 0 && (() => {
+                          const proposals = (msg as any).scan_proposals as any[];
+                          const scope = (msg as any).scan_scope || {};
+                          const sessionId = activeScanSessionId || inspectorSessionId;
+                          const totalCommitted = proposals.filter(p => p.execution_status === 'committed_and_pushed').length;
+                          const totalStaged = proposals.filter(p => p.execution_status === 'applied_locally').length;
+                          const totalPending = proposals.filter(p => !p.execution_status || p.execution_status === 'pending').length;
+                          return (
+                            <div className="mt-3 space-y-2 border-t border-amber-200 dark:border-amber-800 pt-3">
+                              <div className="flex items-center gap-2 text-[11px] text-gray-600 dark:text-gray-400 flex-wrap">
+                                <span className="font-bold">📋 پیشنهاد‌ها:</span>
+                                <span className="bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded">جمعاً {proposals.length}</span>
+                                {totalCommitted > 0 && <span className="bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 px-2 py-0.5 rounded">✓ {totalCommitted} commit شد</span>}
+                                {totalStaged > 0 && <span className="bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 px-2 py-0.5 rounded">📝 {totalStaged} staged</span>}
+                                {totalPending > 0 && <span className="bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300 px-2 py-0.5 rounded">⏳ {totalPending} منتظر</span>}
+                                {scope.scoped_files != null && <span>scope: {scope.scoped_files} فایل</span>}
+                                {scope.deps_added > 0 && <span>+ {scope.deps_added} وابسته</span>}
+                              </div>
+
+                              {proposals.map((p: any) => {
+                                const pid = p.proposal_id;
+                                const running = runningProposalIds.has(pid);
+                                const status = p.execution_status || 'pending';
+                                const statusColors: Record<string, string> = {
+                                  pending: 'bg-yellow-50 dark:bg-yellow-900/10 border-yellow-300 dark:border-yellow-700',
+                                  applied_locally: 'bg-blue-50 dark:bg-blue-900/10 border-blue-300 dark:border-blue-700',
+                                  committed_and_pushed: 'bg-green-50 dark:bg-green-900/10 border-green-300 dark:border-green-700',
+                                  failed: 'bg-red-50 dark:bg-red-900/10 border-red-300 dark:border-red-700',
+                                };
+                                const statusEmoji: Record<string, string> = {
+                                  pending: '⏳',
+                                  applied_locally: '📝',
+                                  committed_and_pushed: '✅',
+                                  failed: '❌',
+                                };
+                                return (
+                                  <div key={pid} className={`rounded border ${statusColors[status] || 'border-gray-200'} p-2`}>
+                                    <div className="flex items-start gap-2">
+                                      <div className="flex-1 min-w-0">
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                          <span className="text-[10px] bg-gray-200 dark:bg-gray-700 px-1.5 rounded">
+                                            {statusEmoji[status]} {status}
+                                          </span>
+                                          <span className="text-[10px] bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 px-1.5 rounded">
+                                            {p.type || 'other'}
+                                          </span>
+                                          <span className="text-[10px] bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300 px-1.5 rounded">
+                                            {p.priority || 'medium'}
+                                          </span>
+                                          {(p.target_files || []).length > 0 && (
+                                            <span className="text-[10px] text-gray-500">
+                                              {(p.target_files || []).length} فایل
+                                            </span>
+                                          )}
+                                        </div>
+                                        <div className="font-bold text-xs mt-1 text-gray-800 dark:text-gray-200">{p.title}</div>
+                                        {p.description && (
+                                          <div className="text-[11px] text-gray-600 dark:text-gray-400 mt-1 line-clamp-2">
+                                            {p.description}
+                                          </div>
+                                        )}
+                                        {p.diff_summary && (
+                                          <div className="text-[11px] text-blue-700 dark:text-blue-300 mt-1 italic">
+                                            خلاصهٔ تغییر: {p.diff_summary}
+                                          </div>
+                                        )}
+                                        {p.pr_url && (
+                                          <a href={p.pr_url} target="_blank" rel="noreferrer"
+                                             className="text-[11px] text-green-600 dark:text-green-400 hover:underline mt-1 inline-block">
+                                            🔗 مشاهدهٔ PR
+                                          </a>
+                                        )}
+                                        {p.execution_error && (
+                                          <div className="text-[11px] text-red-600 dark:text-red-400 mt-1 font-mono">
+                                            خطا: {p.execution_error}
+                                          </div>
+                                        )}
+                                      </div>
+                                      {sessionId && status !== 'committed_and_pushed' && status !== 'failed' && (
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            runInspectorProposal(pid, sessionId);
+                                          }}
+                                          disabled={running}
+                                          className="text-[11px] bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 text-white px-2 py-1 rounded whitespace-nowrap flex-shrink-0"
+                                        >
+                                          {running ? '⏳ در حال اجرا...' : (status === 'applied_locally' ? '↻ بازاجرا' : '▶️ اجرا با AI')}
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+
+                              {/* دکمهٔ اعمال همه تغییرات */}
+                              {sessionId && (totalStaged > 0 || totalPending > 0) && (
+                                <div className="pt-2 border-t border-gray-200 dark:border-gray-700 flex items-center gap-2 flex-wrap">
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      const msgInput = window.prompt(
+                                        'پیام commit (اختیاری — اگر خالی بگذارید، به‌صورت خودکار ساخته می‌شود):',
+                                        '',
+                                      );
+                                      if (msgInput === null) return; // cancelled
+                                      const includeUnexecuted = totalPending > 0
+                                        ? window.confirm(`${totalPending} پیشنهاد هنوز اجرا نشده است. آیا قبل از commit آنها را هم اجرا کنم؟`)
+                                        : false;
+                                      applyAllInspectorProposals(sessionId, {
+                                        commit_message: msgInput.trim() || undefined,
+                                        include_unexecuted: includeUnexecuted,
+                                      });
+                                    }}
+                                    disabled={applyAllInFlight || totalStaged === 0 && totalPending === 0}
+                                    className="text-xs bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white px-3 py-1.5 rounded font-bold"
+                                  >
+                                    {applyAllInFlight ? '⏳ در حال commit و push...' : '✨ اعمال همهٔ تغییرات (commit + push)'}
+                                  </button>
+                                  <span className="text-[10px] text-gray-500">
+                                    branch جدید + PR ساخته می‌شود
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
+
                         {/* 📦 نمایش پک‌های دیباگ بصری */}
                         {(msg as any).visual_debug_packs && (msg as any).visual_debug_packs.length > 0 && (
                           <div className="mt-2 space-y-2">
