@@ -14002,6 +14002,101 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     </div>
                   )}
 
+                  {/* 🆕 (v3 UX fix) — Live progress banner برای scan موردی فعال.
+                       polling هر ۳ ثانیه scanProgress را آپدیت می‌کند. */}
+                  {activeScanSessionId && scanProgress && scanProgress.status && scanProgress.status !== 'idle' && (() => {
+                    const elapsed = scanProgress.started_at
+                      ? Math.floor((Date.now() - new Date(scanProgress.started_at).getTime()) / 1000)
+                      : 0;
+                    const elapsedMin = Math.floor(elapsed / 60);
+                    const elapsedSec = elapsed % 60;
+                    const filesProgress = scanProgress.files_total
+                      ? `${scanProgress.files_analyzed || 0}/${scanProgress.files_total}`
+                      : null;
+                    const passesProgress = scanProgress.passes_total
+                      ? `${scanProgress.passes_done || 0}/${scanProgress.passes_total} pass`
+                      : null;
+                    const isStuck = elapsed > 900; // > 15 دقیقه
+                    return (
+                      <div className={`sticky top-0 z-20 mb-3 p-3 rounded-lg shadow-md border-2 ${
+                        isStuck
+                          ? 'bg-orange-50 dark:bg-orange-900/20 border-orange-400 dark:border-orange-700'
+                          : 'bg-indigo-50 dark:bg-indigo-900/20 border-indigo-400 dark:border-indigo-700'
+                      }`}>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1 min-w-0">
+                            <div className="font-bold text-sm flex items-center gap-2 flex-wrap">
+                              <span className={isStuck ? 'text-orange-700 dark:text-orange-300' : 'text-indigo-700 dark:text-indigo-300'}>
+                                {isStuck ? '⚠️' : '🔍'} اسکن موردی در حال اجرا
+                              </span>
+                              <span className="text-[11px] font-mono bg-white/60 dark:bg-black/40 px-2 py-0.5 rounded">
+                                {elapsedMin}m {elapsedSec}s
+                              </span>
+                              {scanProgress.status === 'queued' && (
+                                <span className="text-[11px] bg-yellow-200 dark:bg-yellow-800 px-2 py-0.5 rounded">در صف</span>
+                              )}
+                              {scanProgress.status === 'running' && (
+                                <span className="text-[11px] bg-blue-200 dark:bg-blue-800 px-2 py-0.5 rounded">در حال اجرا</span>
+                              )}
+                            </div>
+                            {scanProgress.phase && (
+                              <div className="text-[11px] text-gray-600 dark:text-gray-400 mt-1 font-mono">
+                                phase: {scanProgress.phase}
+                              </div>
+                            )}
+                            {scanProgress.message && (
+                              <div className="text-xs text-gray-700 dark:text-gray-300 mt-1 leading-relaxed">
+                                {scanProgress.message}
+                              </div>
+                            )}
+                            <div className="flex items-center gap-3 mt-2 text-[11px] text-gray-600 dark:text-gray-400">
+                              {filesProgress && <span>📁 {filesProgress} فایل</span>}
+                              {passesProgress && <span>⚙️ {passesProgress}</span>}
+                              {scanProgress.findings_count != null && scanProgress.findings_count > 0 && (
+                                <span>🔎 {scanProgress.findings_count} finding</span>
+                              )}
+                            </div>
+                            {isStuck && (
+                              <div className="text-[11px] text-orange-700 dark:text-orange-300 mt-2 font-bold">
+                                ⚠️ این scan بیش از ۱۵ دقیقه طول کشیده — احتمالاً مشکل دارد یا
+                                مدل کند است. اگر طولانی‌تر شد، scan را cancel و دوباره با مدل
+                                سریع‌تر امتحان کنید.
+                              </div>
+                            )}
+                          </div>
+                          <button
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              if (!confirm('scan فعلی را لغو می‌کنید؟ proposals که تا الان ساخته شده‌اند از دست می‌روند.')) return;
+                              try {
+                                await fetch(
+                                  `${API_BASE}/api/render/inspector/selective-scan/${activeScanSessionId}/cancel`,
+                                  { method: 'POST' },
+                                ).catch(() => {});
+                              } catch {}
+                              if (scanPollRef.current) {
+                                clearInterval(scanPollRef.current);
+                                scanPollRef.current = null;
+                              }
+                              setActiveScanId(null);
+                              setActiveScanSessionId(null);
+                              setScanProgress(null);
+                              setInspectorChatMessages(prev => [...prev, {
+                                id: `scan_cancelled_${Date.now()}`,
+                                role: 'assistant' as const,
+                                content: '⛔ scan موردی توسط کاربر لغو شد.',
+                                timestamp: new Date(),
+                              }]);
+                            }}
+                            className="text-[11px] bg-red-500 hover:bg-red-600 text-white px-2 py-1 rounded whitespace-nowrap flex-shrink-0"
+                          >
+                            ✕ لغو scan
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {/* پیام‌های چت */}
                   {inspectorChatMessages.map(msg => (
                     <div key={msg.id} className={`group flex gap-2 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
