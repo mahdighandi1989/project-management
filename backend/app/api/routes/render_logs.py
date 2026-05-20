@@ -13702,6 +13702,78 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         from ...models.setting import Setting as _ChatSetting
         token = _ChatSetting.get_value(db, "api_key_github") or ""
 
+    # 🆕 (inspector-scan) — تشخیص intent برای trigger خودکار scan موردی.
+    # اگر کاربر در حال درخواست بررسی/اصلاح است، به‌جای single-shot smart-chat
+    # (که سطحی است)، یک deep selective scan trigger می‌کنیم. خروجی به همان
+    # session لاگ می‌شود و فرانت‌اند با reload messages آن را نمایش می‌دهد.
+    # اگر intent تشخیص نشد → smart-chat معمولی ادامه می‌یابد.
+    try:
+        from ...services.inspector_intent_resolver import resolve_intent_from_chat_context
+        from ...services.inspector_scan_bridge import (
+            trigger_inspector_selective_scan,
+            get_or_create_active_session_for_project,
+            is_scan_active_for_session,
+        )
+
+        intent = resolve_intent_from_chat_context(
+            user_message=request.message,
+            backend_logs=request.backend_logs,
+            frontend_url=request.frontend_url,
+            mode="chat",
+        )
+
+        if intent.should_scan:
+            sess_id = get_or_create_active_session_for_project(request.project_id)
+            if sess_id and not is_scan_active_for_session(sess_id):
+                _scan_res = await trigger_inspector_selective_scan(
+                    session_id=sess_id,
+                    project_id=request.project_id,
+                    user_message=request.message,
+                    intent=intent,
+                    model_id=request.model_ids[0] if request.model_ids else None,
+                )
+                if _scan_res.get("success"):
+                    async def _scan_init_stream():
+                        payload = {
+                            "kind": "scan_initiated",
+                            "scan_id": _scan_res.get("scan_id"),
+                            "session_id": sess_id,
+                            "content": (
+                                "🔍 **در حال اسکن موردی عمیق...**\n\n"
+                                f"بر اساس پیامتان و context (logs/URL) تشخیص داده شد که نیاز به "
+                                f"بررسی عمیق دارد. دلیل: `{intent.reason}` — "
+                                f"اطمینان: {int(intent.confidence * 100)}%.\n\n"
+                                f"تعداد {len(intent.custom_paths)} مسیر را scope کردم. "
+                                "پیشنهاد‌ها چند دقیقه دیگر در همین چت ظاهر می‌شوند."
+                            ),
+                            "intent": {
+                                "reason": intent.reason,
+                                "matched_keywords": intent.matched_keywords[:5],
+                                "custom_paths": intent.custom_paths[:10],
+                                "selected_sections": intent.selected_sections,
+                                "visual_debug": intent.visual_debug,
+                                "confidence": intent.confidence,
+                            },
+                        }
+                        # SSE فرمت با event prefix که frontend smart-chat انتظار دارد
+                        yield f"event: scan_initiated\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+                    return StreamingResponse(_scan_init_stream(), media_type="text/event-stream")
+            elif sess_id and is_scan_active_for_session(sess_id):
+                async def _scan_busy_stream():
+                    payload = {
+                        "kind": "scan_already_running",
+                        "session_id": sess_id,
+                        "content": (
+                            "⚠️ یک اسکن موردی دیگر در این session در حال اجراست. "
+                            "لطفاً منتظر بمانید تا کامل شود."
+                        ),
+                    }
+                    yield f"event: scan_already_running\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                return StreamingResponse(_scan_busy_stream(), media_type="text/event-stream")
+    except Exception as _intent_e:
+        slog.warning(f"[smart-chat] selective-scan path failed; fallback to chat: {_intent_e}")
+
     model_ids = request.model_ids
 
     # ─── انتخاب هوشمند مدل بر اساس آرشیو چت‌ها ───
