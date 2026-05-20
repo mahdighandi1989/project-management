@@ -1385,18 +1385,35 @@ export default function ProjectDetailPage() {
             ...(m.tokens_used ? { tokens_used: m.tokens_used } : {}),
           };
         });
-        // dedup: اگر پیامی با همان db_id در state موجود است، آن را skip کن
+        // 🆕 (v2 audit D3 fix) — merge با OVERWRITE برای پیام‌های restored.
+        // قبلاً dedup-by-db_id آپدیت‌های همان پیام (مثل proposal status
+        // pending → committed) را skip می‌کرد. الان اگر همان db_id دوباره
+        // از DB می‌آید، نسخهٔ جدید جایگزین قدیم می‌شود تا scan_proposals
+        // به‌روزرسانی شود.
         setInspectorChatMessages(prev => {
-          const existingDbIds = new Set(prev.map((p: any) => p.db_id).filter(Boolean));
-          const filtered = restored.filter((r: any) => !existingDbIds.has(r.db_id));
-          // مرتب‌سازی بر اساس timestamp برای حفظ ترتیب چرونولوژیک
-          const merged = [...filtered, ...prev];
-          merged.sort((a: any, b: any) => {
+          const restoredByDbId = new Map<any, any>();
+          restored.forEach((r: any) => {
+            if (r.db_id != null) restoredByDbId.set(r.db_id, r);
+          });
+          // پیام‌های قبلی: اگر db_id در restored باشد، با نسخهٔ جدید
+          // overwrite شود؛ در غیر این صورت دست‌نخورده
+          const merged = prev.map((p: any) => {
+            if (p.db_id != null && restoredByDbId.has(p.db_id)) {
+              const updated = restoredByDbId.get(p.db_id);
+              restoredByDbId.delete(p.db_id);  // mark as consumed
+              return updated;
+            }
+            return p;
+          });
+          // افزودن پیام‌های جدید (که در prev نبودند)
+          const newOnes = Array.from(restoredByDbId.values());
+          const finalArr = [...merged, ...newOnes];
+          finalArr.sort((a: any, b: any) => {
             const ta = a.timestamp instanceof Date ? a.timestamp.getTime() : new Date(a.timestamp).getTime();
             const tb = b.timestamp instanceof Date ? b.timestamp.getTime() : new Date(b.timestamp).getTime();
             return ta - tb;
           });
-          return merged;
+          return finalArr;
         });
         setInspectorChatRestored(true);
       } else {
@@ -1430,12 +1447,36 @@ export default function ProjectDetailPage() {
       return;
     }
     if (scanPollRef.current) clearInterval(scanPollRef.current);
+    // 🆕 (v2 audit B1) — بعد از ۱۰ مرتبهٔ non-ok response (مثلاً
+    // backend restart که _ACTIVE_SCANS را پاک کرد)، polling خاتمه یابد و
+    // پیام خطا به user داده شود. در غیر این صورت silent infinite poll.
+    let consecutiveErrors = 0;
+    const MAX_CONSECUTIVE_ERRORS = 10;  // ~30 ثانیه
     scanPollRef.current = setInterval(async () => {
       try {
         const res = await fetch(
           `${API_BASE}/api/render/inspector/selective-scan/${activeScanSessionId}/progress`,
         );
-        if (!res.ok) return;
+        if (!res.ok) {
+          consecutiveErrors++;
+          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            if (scanPollRef.current) {
+              clearInterval(scanPollRef.current);
+              scanPollRef.current = null;
+            }
+            setInspectorChatMessages(prev => [...prev, {
+              id: `scan_lost_${Date.now()}`,
+              role: 'assistant' as const,
+              content: '⚠️ اتصال به progress scan قطع شده است (احتمالاً backend restart). لطفاً صفحه را refresh کنید.',
+              timestamp: new Date(),
+            }]);
+            setActiveScanId(null);
+            setActiveScanSessionId(null);
+            setScanProgress(null);
+          }
+          return;
+        }
+        consecutiveErrors = 0;  // reset on success
         const data = await res.json();
         setScanProgress(data);
         if (data.status === 'completed' || data.status === 'error' || data.status === 'cancelled') {
@@ -1443,17 +1484,31 @@ export default function ProjectDetailPage() {
             clearInterval(scanPollRef.current);
             scanPollRef.current = null;
           }
-          // reload پیام‌های session تا scan_complete (با proposals) و
-          // scan_progress messages که در DB لاگ شده‌اند ظاهر شوند
+          // 🆕 (v2 audit B2) — restore را قبل از null-out state انجام بده
+          // تا اگر restore fail کرد، state polling حفظ شود و retry بشه
+          let restoreOk = false;
           try {
             await restoreInspectorChatFromDb(true);
-          } catch {}
-          setActiveScanId(null);
-          setActiveScanSessionId(null);
-          setScanProgress(null);
+            restoreOk = true;
+          } catch (re) {
+            // restore شکست خورد — یک پیام خطا اضافه کن ولی state را reset
+            // نکن تا اگر کاربر retry کرد دوباره تلاش شود
+            setInspectorChatMessages(prev => [...prev, {
+              id: `restore_err_${Date.now()}`,
+              role: 'assistant' as const,
+              content: '⚠️ scan کامل شد ولی reload پیام‌ها ناموفق بود. لطفاً refresh کنید.',
+              timestamp: new Date(),
+            }]);
+          }
+          // اگر restore موفق بود یا اگر scan errored بود، state را پاک کن
+          if (restoreOk || data.status !== 'completed') {
+            setActiveScanId(null);
+            setActiveScanSessionId(null);
+            setScanProgress(null);
+          }
         }
       } catch {
-        // ignore network blips؛ polling در iteration بعد retry می‌کند
+        consecutiveErrors++;  // ignore network blips؛ پایش error count
       }
     }, 3000);
     return () => {
@@ -5105,7 +5160,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
               target_files: (linkedTaskData as any)?.target_files || [],
               title: (linkedTaskData as any)?.task?.title || '',
             } : undefined,
-            inspector_mode: 'chat',
+            // 🆕 (v2 audit E3) — mode بر اساس state واقعی فرانت‌اند
+            inspector_mode: visualDebugMode ? 'visual_debug' : 'chat',
           }),
           signal: inspectorOpAbortRef.current?.signal,
         });
@@ -5184,9 +5240,20 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   if (data.session_id && data.session_id !== inspectorSessionId) {
                     setInspectorSessionId(data.session_id);
                   }
-                  // ست کردن state polling — scope: یک بار هر ۳ ثانیه
-                  setActiveScanId(data.scan_id);
-                  setActiveScanSessionId(data.session_id || inspectorSessionId);
+                  // 🆕 (v2 audit A1) — اگر session_id موجود نیست، polling
+                  // کار نخواهد کرد. error صریح به جای loading silent.
+                  const _effSession = data.session_id || inspectorSessionId;
+                  if (!_effSession) {
+                    setInspectorChatMessages(prev => [...prev, {
+                      id: `scan_err_no_session_${Date.now()}`,
+                      role: 'assistant' as const,
+                      content: '❌ اسکن شروع شد ولی session فعال شناسایی نشد. لطفاً صفحه را refresh کنید و دوباره امتحان کنید.',
+                      timestamp: new Date(),
+                    }]);
+                  } else {
+                    setActiveScanId(data.scan_id);
+                    setActiveScanSessionId(_effSession);
+                  }
                 } else if (eventType === 'scan_already_running') {
                   setInspectorChatMessages(prev => [...prev, {
                     id: `scan_busy_${Date.now()}`,
@@ -14129,8 +14196,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                             e.stopPropagation();
                                             runInspectorProposal(pid, sessionId);
                                           }}
-                                          disabled={running}
-                                          className="text-[11px] bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 text-white px-2 py-1 rounded whitespace-nowrap flex-shrink-0"
+                                          /* 🆕 (v2 audit C3) — disable در حین apply-all هم */
+                                          disabled={running || applyAllInFlight}
+                                          className="text-[11px] bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-2 py-1 rounded whitespace-nowrap flex-shrink-0"
                                         >
                                           {running
                                             ? '⏳ در حال اجرا...'

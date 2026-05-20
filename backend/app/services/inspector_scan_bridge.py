@@ -275,17 +275,29 @@ async def trigger_inspector_selective_scan(
                 include_dependencies=intent.include_dependencies,
                 focus_notes=intent.focus_notes,
                 output_target=f"inspector_session:{session_id}",
-                # 🆕 (v2 M2) — semantic search برای vague-intent
                 semantic_keywords=(intent.semantic_keywords or None)
                                   if getattr(intent, "semantic_search_only", False) else None,
             )
             _ACTIVE_SCANS[session_id]["status"] = "completed"
             _ACTIVE_SCANS[session_id]["result"] = result
+        except asyncio.CancelledError:
+            # 🆕 (v2 audit A4) — تشخیص cancel صریح
+            _ACTIVE_SCANS[session_id]["status"] = "cancelled"
+            try:
+                log_scan_message(
+                    session_id=session_id,
+                    role="assistant",
+                    content="⛔ اسکن موردی لغو شد.",
+                    action_type="scan_cancelled",
+                    extra_data={"kind": "selective_scan_cancelled", "scan_id": scan_id},
+                )
+            except Exception:
+                pass
+            raise
         except Exception as e:
             logger.exception(f"inspector scan bg failed: {e}")
             _ACTIVE_SCANS[session_id]["status"] = "error"
             _ACTIVE_SCANS[session_id]["error"] = str(e)[:300]
-            # یک پیام error در session لاگ کن
             try:
                 log_scan_message(
                     session_id=session_id,
@@ -298,10 +310,16 @@ async def trigger_inspector_selective_scan(
                 pass
         finally:
             # نگه‌داری active record برای ۱ ساعت برای progress polling
-            await asyncio.sleep(3600)
+            # (cancellable via task.cancel())
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                pass
             _ACTIVE_SCANS.pop(session_id, None)
 
-    asyncio.create_task(_bg_run())
+    # 🆕 (v2 audit A4) — task handle ذخیره کن تا cancel ممکن باشد
+    _task = asyncio.create_task(_bg_run())
+    _ACTIVE_SCANS[session_id]["task"] = _task
 
     return {
         "success": True,
@@ -362,4 +380,11 @@ def cancel_inspector_scan(session_id: int) -> bool:
     if not info or info.get("status") not in ("queued", "running"):
         return False
     info["status"] = "cancelled"
+    # 🆕 (v2 audit A4) — task را واقعاً cancel کن
+    _task = info.get("task")
+    if _task is not None:
+        try:
+            _task.cancel()
+        except Exception:
+            pass
     return True
