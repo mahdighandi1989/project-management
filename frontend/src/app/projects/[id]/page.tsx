@@ -5745,12 +5745,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           }
 
           const collectedActionFiles: any[] = [];
-          const collectedAnalysis: string[] = [];
+          // 🆕 (multi-step robustness) — هر مرحلهٔ موفق با step_number خودش
+          // ذخیره می‌شود تا گزارش نهایی شیفت نخورد وقتی مرحله‌ای fail می‌کند.
+          const collectedAnalysis: Array<{ step_number: number; description: string; content: string }> = [];
+          const failedSteps: Array<{ step_number: number; description: string; error: string }> = [];
           let commitMessage = '';
           let lastModelUsed = vdStep1ModelUsed;
 
           // مرحله ۱ رو به لیست نتایج اضافه کن
-          collectedAnalysis.push(vdStep1Content.slice(0, 500));
+          collectedAnalysis.push({
+            step_number: 1,
+            description: vdSteps[0]?.description || 'مرحله ۱',
+            content: vdStep1Content.slice(0, 500),
+          });
           if (vdStep1ActionPlan?.files?.length) {
             for (const file of vdStep1ActionPlan.files) {
               collectedActionFiles.push(file);
@@ -5764,6 +5771,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
           for (let i = 0; i < remainingSteps.length; i++) {
             const step = remainingSteps[i];
+            // 🛡 abort check — اگر کاربر cancel کرد، loop را قطع کن
+            if (inspectorOpAbortRef.current?.signal.aborted) {
+              setInspectorChatMessages(prev => [...prev, {
+                id: `vd_ms_abort_${i}_${Date.now()}`,
+                role: 'system' as const,
+                content: `⏹ multi-step توسط کاربر متوقف شد. ${collectedAnalysis.length} مرحله تا اینجا کامل بود.`,
+                timestamp: new Date(),
+              }]);
+              break;
+            }
             setInspectorChatMessages(prev => [...prev, {
               id: `vd_ms_progress_${i}_${Date.now()}`,
               role: 'system' as const,
@@ -5774,7 +5791,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             // ساختن پرامپت مرحله با context مراحل قبلی
             let stepPrompt = `${vdBasePrompt}\n\n## ⚡ مرحله فعلی (${step.step_number} از ${vdSteps.length}):\n${step.description}\n`;
             if (collectedAnalysis.length > 0) {
-              stepPrompt += `\n## 📊 خلاصه مراحل قبلی:\n${collectedAnalysis.map((a, idx) => `مرحله ${idx + 1}: ${a.slice(0, 300)}`).join('\n')}\n`;
+              stepPrompt += `\n## 📊 خلاصه مراحل قبلی:\n${collectedAnalysis.map(a => `مرحله ${a.step_number}: ${a.content.slice(0, 300)}`).join('\n')}\n`;
             }
             if (collectedActionFiles.length > 0) {
               // 🔑 پاس دادن محتوای واقعی فایل‌های تغییر یافته مراحل قبلی
@@ -5808,19 +5825,47 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 .slice(-5)
                 .map(m => ({ role: m.role, content: m.content?.slice(0, 200) }));
 
-              const stepRes = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  project_id: projectId,
-                  model_ids: modelIds,
-                  message: stepPrompt,
-                  chat_history: chatHistory,
-                  backend_logs: inspectorBackendLogs,
-                  frontend_url: inspectorFrontendUrl,
-                  previously_read_files: previouslyReadFiles,
-                }),
-              });
+              // 🆕 (multi-step robustness) — retry روی خطاهای transient
+              // (network/timeout). تا ۲ تلاش با backoff کوتاه. این الگو در
+              // لاگ کاربر مشاهده شد که step 2 با "network error" قطع شد در
+              // حالی که retry یک‌بار آن را حل می‌کرد.
+              let stepRes: Response | null = null;
+              let attemptErr: any = null;
+              for (let attempt = 1; attempt <= 2; attempt++) {
+                if (inspectorOpAbortRef.current?.signal.aborted) throw new Error('aborted');
+                try {
+                  stepRes = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      project_id: projectId,
+                      model_ids: modelIds,
+                      message: stepPrompt,
+                      chat_history: chatHistory,
+                      backend_logs: inspectorBackendLogs,
+                      frontend_url: inspectorFrontendUrl,
+                      previously_read_files: previouslyReadFiles,
+                    }),
+                    signal: inspectorOpAbortRef.current?.signal,
+                  });
+                  if (!stepRes.ok) throw new Error(`HTTP ${stepRes.status}`);
+                  attemptErr = null;
+                  break;
+                } catch (e: any) {
+                  attemptErr = e;
+                  if (e?.name === 'AbortError') throw e;
+                  if (attempt < 2) {
+                    setInspectorChatMessages(prev => [...prev, {
+                      id: `vd_ms_retry_${i}_${attempt}_${Date.now()}`,
+                      role: 'system' as const,
+                      content: `🔁 خطا در مرحله ${step.step_number} (تلاش ${attempt}/2): ${(e?.message || 'unknown').slice(0, 80)} — تلاش مجدد در ۲ ثانیه...`,
+                      timestamp: new Date(),
+                    }]);
+                    await new Promise(r => setTimeout(r, 2000));
+                  }
+                }
+              }
+              if (!stepRes || attemptErr) throw attemptErr || new Error('No response after retries');
 
               const stepReader = stepRes.body?.getReader();
               const stepDecoder = new TextDecoder();
@@ -5864,8 +5909,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 }
               }
 
-              // جمع‌آوری نتایج مرحله
-              collectedAnalysis.push(stepResponseContent.slice(0, 500));
+              // جمع‌آوری نتایج مرحله — با step_number واقعی برای جلوگیری از shift
+              collectedAnalysis.push({
+                step_number: step.step_number,
+                description: step.description,
+                content: stepResponseContent.slice(0, 500),
+              });
               if (stepActionPlan?.files?.length) {
                 for (const file of stepActionPlan.files) {
                   const existingIdx = collectedActionFiles.findIndex((f: any) => f.path === file.path);
@@ -5892,24 +5941,41 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
               } as any]);
 
             } catch (err: any) {
+              const errMsg = err?.name === 'AbortError' ? 'متوقف شد توسط کاربر' : (err?.message || 'خطای ناشناخته');
+              failedSteps.push({
+                step_number: step.step_number,
+                description: step.description,
+                error: errMsg,
+              });
               setInspectorChatMessages(prev => [...prev, {
                 id: `vd_ms_err_${i}_${Date.now()}`,
                 role: 'system' as const,
-                content: `❌ خطا در مرحله ${step.step_number}: ${err?.message || 'خطای ناشناخته'}`,
+                content: `❌ خطا در مرحله ${step.step_number} (پس از retry): ${errMsg}`,
                 timestamp: new Date(),
               }]);
             }
           }
 
-          // 📊 گزارش نهایی ترکیبی
+          // 📊 گزارش نهایی ترکیبی — header صادقانه (موفق/کل)
           const totalFiles = collectedActionFiles.length;
-          let finalContent = `## 📊 گزارش نهایی دیباگ بصری — ${vdSteps.length} مرحله کامل شد\n\n`;
+          const successCount = collectedAnalysis.length;
+          const failCount = failedSteps.length;
+          const headerStatus = failCount === 0
+            ? `${vdSteps.length} مرحله کامل شد ✅`
+            : `${successCount}/${vdSteps.length} مرحله موفق — ${failCount} مرحله شکست خورد ⚠️`;
+          let finalContent = `## 📊 گزارش نهایی دیباگ بصری — ${headerStatus}\n\n`;
           finalContent += `**فایل‌های تغییر یافته: ${totalFiles}**\n`;
           if (collectedActionFiles.length > 0) {
             finalContent += collectedActionFiles.map(f => `- \`${f.path}\` (${f.operation || 'modify'})`).join('\n');
             finalContent += '\n\n';
           }
-          finalContent += collectedAnalysis.map((a, idx) => `**مرحله ${idx + 1}:** ${a.slice(0, 200)}`).join('\n\n');
+          // 🆕 لیبل‌ها از step_number واقعی استفاده می‌کنند (نه idx+1) تا اگر
+          // مرحله‌ای fail شد، گزارش شیفت نخورد.
+          finalContent += collectedAnalysis.map(a => `**مرحله ${a.step_number}:** ${a.content.slice(0, 200)}`).join('\n\n');
+          if (failedSteps.length > 0) {
+            finalContent += `\n\n---\n### ⚠️ مراحل ناموفق (نیاز به retry دستی):\n`;
+            finalContent += failedSteps.map(f => `- **مرحله ${f.step_number}** (${f.description}): ${f.error}`).join('\n');
+          }
 
           const combinedActionPlan = totalFiles > 0 ? {
             files: collectedActionFiles,
