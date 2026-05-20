@@ -18360,6 +18360,19 @@ async def inspector_selective_scan_progress(session_id: int):
     return read_inspector_scan_progress(session_id)
 
 
+@router.post("/inspector/selective-scan/{session_id}/cancel")
+async def inspector_selective_scan_cancel(session_id: int):
+    """🆕 (v3 UX) — لغو scan موردی فعال برای یک session.
+
+    UI این endpoint را وقتی کاربر روی «✕ لغو scan» می‌زند صدا می‌کند.
+    background task با asyncio.CancelledError متوقف می‌شود و یک پیام
+    scan_cancelled در session لاگ می‌شود.
+    """
+    from ...services.inspector_scan_bridge import cancel_inspector_scan
+    cancelled = cancel_inspector_scan(session_id)
+    return {"success": cancelled, "session_id": session_id}
+
+
 class RunProposalRequest(BaseModel):
     model_id: Optional[str] = None
 
