@@ -5091,14 +5091,21 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             frontend_url: inspectorFrontendUrl,
             reply_to: replyToPayload,
             previously_read_files: previouslyReadFiles,
-            // 🔗 (C7 Bridge Phase 2) — اگر این session به یک تسک مرکز نظارت
-            // متصل است، task_id را پاس بده تا backend بلوک کانتکست تسک را
-            // به system prompt تزریق کند
             task_id: linkedTaskId || undefined,
-            // 🆕 (anti-stuck-loop) — اگر retry است، شماره را پاس بده
-            // backend بر اساس این system prompt را قوی‌تر می‌کند و در
-            // retry≥2 خودکار به fallback model سوئیچ می‌کند.
             retry_attempt: _isRetry ? (inspectorRetryAttemptRef.current || 1) : undefined,
+            // 🆕 (inspector-scan, audit C2 fix) — context کامل برای intent
+            // resolver تا scan موردی بتواند scope صحیح را تشخیص دهد.
+            console_logs: (importedProjectConsoleLogs || []).slice(-30).map(l => ({
+              level: l.level,
+              message: l.message,
+              source: l.source,
+            })),
+            page_url: inspectorFrontendUrl,
+            linked_task: linkedTaskData ? {
+              target_files: (linkedTaskData as any)?.target_files || [],
+              title: (linkedTaskData as any)?.task?.title || '',
+            } : undefined,
+            inspector_mode: 'chat',
           }),
           signal: inspectorOpAbortRef.current?.signal,
         });
@@ -14048,13 +14055,18 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                   applied_locally: 'bg-blue-50 dark:bg-blue-900/10 border-blue-300 dark:border-blue-700',
                                   committed_and_pushed: 'bg-green-50 dark:bg-green-900/10 border-green-300 dark:border-green-700',
                                   failed: 'bg-red-50 dark:bg-red-900/10 border-red-300 dark:border-red-700',
+                                  // 🆕 (v2)
+                                  failed_syntax: 'bg-red-50 dark:bg-red-900/10 border-red-400 dark:border-red-700',
                                 };
                                 const statusEmoji: Record<string, string> = {
                                   pending: '⏳',
                                   applied_locally: '📝',
                                   committed_and_pushed: '✅',
                                   failed: '❌',
+                                  // 🆕 (v2)
+                                  failed_syntax: '⚠️',
                                 };
+                                const syntaxErrors = (p as any).syntax_errors as Array<{path: string; error: string}> | undefined;
                                 return (
                                   <div key={pid} className={`rounded border ${statusColors[status] || 'border-gray-200'} p-2`}>
                                     <div className="flex items-start gap-2">
@@ -14095,6 +14107,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                         {p.execution_error && (
                                           <div className="text-[11px] text-red-600 dark:text-red-400 mt-1 font-mono">
                                             خطا: {p.execution_error}
+                                          </div>
+                                        )}
+                                        {/* 🆕 (v2 M4) — syntax errors */}
+                                        {syntaxErrors && syntaxErrors.length > 0 && (
+                                          <div className="mt-1 p-1.5 bg-red-50 dark:bg-red-900/20 rounded border border-red-300 dark:border-red-700">
+                                            <div className="text-[10px] font-bold text-red-700 dark:text-red-300 mb-0.5">
+                                              ⚠️ Syntax errors:
+                                            </div>
+                                            {syntaxErrors.slice(0, 4).map((e, i) => (
+                                              <div key={i} className="text-[10px] text-red-600 dark:text-red-400 font-mono">
+                                                <span className="font-bold">{e.path}</span>: {e.error}
+                                              </div>
+                                            ))}
                                           </div>
                                         )}
                                       </div>

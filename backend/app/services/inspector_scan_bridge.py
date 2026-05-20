@@ -93,6 +93,10 @@ def resolve_watched_id_from_project_id(project_id: str) -> Optional[str]:
 def get_or_create_active_session_for_project(project_id: str) -> Optional[int]:
     """آخرین session فعال (status=active) این project را پیدا یا یک session جدید بساز.
 
+    (audit fix I5) — race condition: دو فراخوانی هم‌زمان می‌توانند پس از
+    check جداگانه هر دو insert کنند. حل: insert را در try/except و در
+    صورت IntegrityError یا duplicate-found، re-query.
+
     Returns: session_id (int) یا None اگر DB در دسترس نباشد.
     """
     try:
@@ -101,8 +105,7 @@ def get_or_create_active_session_for_project(project_id: str) -> Optional[int]:
     except Exception:
         return None
 
-    db = SessionLocal()
-    try:
+    def _find_active(db) -> Optional[int]:
         sess = (
             db.query(InspectorSession)
             .filter(
@@ -112,18 +115,31 @@ def get_or_create_active_session_for_project(project_id: str) -> Optional[int]:
             .order_by(InspectorSession.created_at.desc())
             .first()
         )
-        if sess:
-            return sess.id
-        # ایجاد session جدید
+        return sess.id if sess else None
+
+    db = SessionLocal()
+    try:
+        existing = _find_active(db)
+        if existing is not None:
+            return existing
         new_sess = InspectorSession(
             project_id=project_id,
             status="active",
             title="🔍 جلسه چت بازرس",
         )
         db.add(new_sess)
-        db.commit()
-        db.refresh(new_sess)
-        return new_sess.id
+        try:
+            db.commit()
+            db.refresh(new_sess)
+            return new_sess.id
+        except Exception as commit_err:
+            # احتمالاً concurrent insert — re-query
+            db.rollback()
+            again = _find_active(db)
+            if again is not None:
+                return again
+            logger.warning(f"create_active_session double-failure: {commit_err}")
+            return None
     except Exception as e:
         logger.warning(f"get_or_create_active_session_for_project failed: {e}")
         db.rollback()
@@ -136,6 +152,10 @@ def get_or_create_active_session_for_project(project_id: str) -> Optional[int]:
 # هر scan فعال در یک ditt به key = session_id ذخیره می‌شود. اگر کاربر سعی
 # کند دوباره trigger کند و scan در حال اجرا داریم، 409 برمی‌گردانیم.
 _ACTIVE_SCANS: Dict[int, Dict[str, Any]] = {}
+
+# (audit fix I4) — یک قفل asyncio به ازای هر session برای جلوگیری از race
+# در دو فراخوانی هم‌زمان is_scan_active + claim.
+_SCAN_CLAIM_LOCK = asyncio.Lock()
 
 
 def is_scan_active_for_session(session_id: int) -> bool:
@@ -171,17 +191,12 @@ async def trigger_inspector_selective_scan(
     """
     from .scan_v5.scan_inspector_session import log_scan_message
 
-    # 1) چک concurrency
-    if is_scan_active_for_session(session_id):
-        return {
-            "success": False,
-            "status": "error",
-            "error": "یک اسکن موردی دیگر در این session در حال اجراست — لطفاً منتظر بمانید.",
-            "code": "scan_already_running",
-            "active_scan": _ACTIVE_SCANS.get(session_id),
-        }
+    # (audit fix I4) — claim atomic: check + insert ضمن یک قفل تا دو
+    # request هم‌زمان نتوانند هر دو scan را شروع کنند.
+    scan_id = str(uuid.uuid4())[:12]
+    started_at = datetime.now(timezone.utc).isoformat()
 
-    # 2) resolve watched
+    # 2) resolve watched (می‌تواند بیرون قفل باشد)
     watched_id = resolve_watched_id_from_project_id(project_id)
     if not watched_id:
         return {
@@ -190,8 +205,23 @@ async def trigger_inspector_selective_scan(
             "error": f"پروژه شناسایی نشد (project_id={project_id})",
         }
 
-    scan_id = str(uuid.uuid4())[:12]
-    started_at = datetime.now(timezone.utc).isoformat()
+    async with _SCAN_CLAIM_LOCK:
+        if is_scan_active_for_session(session_id):
+            return {
+                "success": False,
+                "status": "error",
+                "error": "یک اسکن موردی دیگر در این session در حال اجراست — لطفاً منتظر بمانید.",
+                "code": "scan_already_running",
+                "active_scan": dict(_ACTIVE_SCANS.get(session_id) or {}),
+            }
+        # claim
+        _ACTIVE_SCANS[session_id] = {
+            "scan_id": scan_id,
+            "watched_id": watched_id,
+            "session_id": session_id,
+            "status": "queued",
+            "started_at": started_at,
+        }
 
     # 3) لاگ پیام scan_started
     try:
@@ -228,14 +258,8 @@ async def trigger_inspector_selective_scan(
     except Exception as e:
         logger.warning(f"log scan_started failed: {e}")
 
-    # 4) ثبت active scan
-    _ACTIVE_SCANS[session_id] = {
-        "scan_id": scan_id,
-        "watched_id": watched_id,
-        "session_id": session_id,
-        "status": "queued",
-        "started_at": started_at,
-    }
+    # (audit fix I4) — رجیستری active scan ضمن قفل بالا انجام شد، اینجا
+    # duplicate نمی‌خواهیم.
 
     # 5) background task برای اجرای واقعی scan
     async def _bg_run():
@@ -251,6 +275,9 @@ async def trigger_inspector_selective_scan(
                 include_dependencies=intent.include_dependencies,
                 focus_notes=intent.focus_notes,
                 output_target=f"inspector_session:{session_id}",
+                # 🆕 (v2 M2) — semantic search برای vague-intent
+                semantic_keywords=(intent.semantic_keywords or None)
+                                  if getattr(intent, "semantic_search_only", False) else None,
             )
             _ACTIVE_SCANS[session_id]["status"] = "completed"
             _ACTIVE_SCANS[session_id]["result"] = result

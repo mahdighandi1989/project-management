@@ -43,6 +43,13 @@ from .oversight_service import (
 from .oversight_strong_prompt import build_strong_prompt
 
 STRUCTURE_DIR = STORAGE_DIR / "structure"
+
+
+# (audit fix I3) — sentinel exception برای skip post-scan side-effects
+# (notification + PDF bundle + scan_v5 archive) در حالت Inspector scan موردی.
+# این subclass از Exception است، پس توسط `except Exception` کلی catch می‌شود.
+class _InspectorSkipPostScan(Exception):
+    pass
 PROGRESS_DIR = STORAGE_DIR / "scan_progress"
 SCAN_RESULTS_DIR = STORAGE_DIR / "scan_results"
 for d in (STRUCTURE_DIR, PROGRESS_DIR, SCAN_RESULTS_DIR):
@@ -1436,10 +1443,12 @@ async def run_deep_scan(
     include_dependencies: bool = True,
     focus_notes: Optional[str] = None,
     # 🆕 (inspector-scan) — وقتی این پارامتر `inspector_session:{id}` باشد،
-    # خروجی scan هرگز به OversightTask DB نوشته نمی‌شود. به‌جایش proposals
-    # ساخته‌شده مستقیماً به همان session chat به‌عنوان InspectorMessage لاگ
-    # می‌شوند. None == رفتار قدیمی (مرکز نظارت).
+    # خروجی scan هرگز به OversightTask DB نوشته نمی‌شود.
     output_target: Optional[str] = None,
+    # 🆕 (v2 M2) — semantic search روی tree برای vague-intent. اگر این
+    # غیرخالی است و selected_sections/custom_paths هر دو خالی‌اند، scope
+    # به top 30 فایل match-ترین به این keywordها محدود می‌شود.
+    semantic_keywords: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """اجرای کامل deep scan روی یک watched.
 
@@ -1459,6 +1468,17 @@ async def run_deep_scan(
     watched = service._find_watched(watched_id)
     if watched is None:
         raise ValueError("پروژه یافت نشد")
+
+    # 🆕 (inspector-scan) — parse output_target در ابتدای function تا بتوانیم
+    # در همان فاز ۱ (scan_v5 session creation) هم gate کنیم.
+    # `_output_target_session_id` همان `_inspector_session_id` است که بعداً
+    # هم استفاده می‌شود — نام جدا فقط برای وضوح در gate های اولیه.
+    _output_target_session_id: Optional[int] = None
+    if output_target and output_target.startswith("inspector_session:"):
+        try:
+            _output_target_session_id = int(output_target.split(":", 1)[1])
+        except (ValueError, IndexError):
+            _output_target_session_id = None
 
     # 🆕 Mapping scan_depth → enabled_passes (مهاجرت از Health depth)
     # اگر enabled_passes صریحاً پاس داده شده، آن را استفاده کن
@@ -1689,6 +1709,85 @@ async def run_deep_scan(
         )
 
         # ----- فاز ۲ -----
+        # 🆕 (v2 M2) — semantic search روی tree برای vague-intent
+        # اگر `semantic_keywords` داریم و scope صریح نداریم (selected_sections
+        # و custom_paths خالی‌اند)، scope را به top 30 فایل match محدود می‌کنیم.
+        # این منطبق با درخواست کاربر است: «جاهایی که به درخواست من شبیه‌تر هست».
+        if semantic_keywords and not selected_sections and not custom_paths:
+            try:
+                # سرچ سطح ۱: نام و مسیر فایل (وزن ۲)
+                name_score: Dict[str, int] = {}
+                kws_low = [k.lower() for k in semantic_keywords if k]
+                for f in all_files:
+                    f_low = f.lower()
+                    s = sum(2 for kw in kws_low if kw in f_low)
+                    if s > 0:
+                        name_score[f] = s
+                # سرچ سطح ۲: محتوای dep files (وزن ۱)
+                content_score: Dict[str, int] = {}
+                for fname, ctnt in (dep_contents or {}).items():
+                    c_low = (ctnt or "").lower()
+                    s = sum(c_low.count(kw) for kw in kws_low)
+                    if s > 0:
+                        for path in all_files:
+                            if path.split("/")[-1] == fname:
+                                content_score[path] = content_score.get(path, 0) + s
+                # ترکیب
+                combined: Dict[str, int] = {}
+                for path, s in name_score.items():
+                    combined[path] = combined.get(path, 0) + s
+                for path, s in content_score.items():
+                    combined[path] = combined.get(path, 0) + s
+                # یک sweep ranked-baseline برای fallback
+                _baseline_ranked = _score_files(all_files, sizes, recent_changed, {})
+                if combined:
+                    ranked_sem = sorted(combined.items(), key=lambda x: -x[1])[:30]
+                    semantic_scope = [p for p, _ in ranked_sem]
+                    all_files = semantic_scope
+                    sizes = {p: sizes.get(p, 0) for p in all_files}
+                    if scan_scope_meta is None:
+                        scan_scope_meta = {}
+                    scan_scope_meta.update({
+                        "mode": "semantic_search",
+                        "semantic_keywords": semantic_keywords,
+                        "matches_found": len(combined),
+                        "scope_capped_at": len(all_files),
+                        "focus_notes_preview": (focus_notes or "")[:300],
+                    })
+                    write_progress(
+                        watched_id,
+                        phase="phase1_semantic_filter",
+                        message=(
+                            f"🔍 جستجوی معنایی: {len(all_files)} فایل شبیه‌ترین "
+                            f"به پیام انتخاب شد (از {len(combined)} match کل)"
+                        ),
+                    )
+                else:
+                    # هیچ match نبود — fallback به top 30 hub
+                    all_files = [p for p, _ in _baseline_ranked[:30]]
+                    sizes = {p: sizes.get(p, 0) for p in all_files}
+                    if scan_scope_meta is None:
+                        scan_scope_meta = {}
+                    scan_scope_meta.update({
+                        "mode": "semantic_search_no_match",
+                        "semantic_keywords": semantic_keywords,
+                        "fallback": "top_30_hub_files",
+                    })
+                    write_progress(
+                        watched_id,
+                        phase="phase1_semantic_no_match",
+                        message=(
+                            f"⚠️ هیچ semantic match با keywords {semantic_keywords[:3]} "
+                            f"پیدا نشد — به top 30 فایل hub fallback شد"
+                        ),
+                    )
+            except Exception as _sem_e:
+                write_progress(
+                    watched_id,
+                    phase="phase1_semantic_error",
+                    message=f"⚠️ خطا در جستجوی معنایی: {str(_sem_e)[:120]}",
+                )
+
         # ابتدا یک sweep سبک: top-N اولیه را با نوع/حجم/critical path رتبه‌بندی کن
         ranked0 = _score_files(all_files, sizes, recent_changed, {})
         # 🆕 (bug A6b) — در ultra، فیلتر s>0 برداشته می‌شود تا همهٔ فایل‌ها
@@ -2136,7 +2235,10 @@ async def run_deep_scan(
         scan_v5_outcome_data: Dict[str, Any] = {}
         scan_v5_effectiveness_issues: List[Dict[str, Any]] = []
         try:
-            if getattr(watched, "inspector_session_enabled", True):
+            # (audit fix I2) — در حالت Inspector scan موردی، scan_v5 session
+            # جدید نسازیم؛ این scan در همان session chat در حال اجراست و یک
+            # session موازی در مرکز نظارت سردرگم‌کننده است.
+            if getattr(watched, "inspector_session_enabled", True) and _output_target_session_id is None:
                 from .scan_v5.scan_inspector_session import (
                     create_scan_session, log_scan_message,
                 )
@@ -2508,13 +2610,9 @@ async def run_deep_scan(
         # 🆕 (inspector-scan) — تشخیص target output
         # اگر output_target نشان‌گر inspector session است، findings به
         # OversightTask تبدیل نمی‌شوند بلکه به proposal payload در همان
-        # session chat لاگ می‌شوند.
-        _inspector_session_id: Optional[int] = None
-        if output_target and output_target.startswith("inspector_session:"):
-            try:
-                _inspector_session_id = int(output_target.split(":", 1)[1])
-            except (ValueError, IndexError):
-                _inspector_session_id = None
+        # session chat لاگ می‌شوند. این از `_output_target_session_id` که
+        # در ابتدای تابع pre-parse شد استفاده می‌کند.
+        _inspector_session_id: Optional[int] = _output_target_session_id
 
         # ساخت تسک با پرامپت قوی غنی‌شده
         created_tasks: List[Dict[str, Any]] = []
@@ -2884,23 +2982,34 @@ async def run_deep_scan(
 
         # 🆕 (P4) ذخیره خلاصهٔ آخرین scan روی خود WatchedProject — برای نمایش
         # دائمی در UI WatchedCard (مستقل از progress JSON که override می‌شود)
-        try:
-            async with service._lock:
-                watched.last_scan_metadata = {
-                    **scan_metadata,
-                    "findings_count": len(unique),
-                    "tasks_created": len(created_tasks),
-                    "duplicates_skipped": len(duplicates_skipped),
-                    "critical_count": critical_count,
-                    "completed_at": now_iso(),
-                    "pass_breakdown": pass_breakdown,
-                }
-                service._save_watched()
-        except Exception as _e:
-            logger.debug(f"failed to save last_scan_metadata: {_e}")
+        # (audit fix I1) — در حالت Inspector scan موردی، metadata نباید
+        # کارت پروژه را آلوده کند. این scan دوره‌ای نیست.
+        if _inspector_session_id is None:
+            try:
+                async with service._lock:
+                    watched.last_scan_metadata = {
+                        **scan_metadata,
+                        "findings_count": len(unique),
+                        "tasks_created": len(created_tasks),
+                        "duplicates_skipped": len(duplicates_skipped),
+                        "critical_count": critical_count,
+                        "completed_at": now_iso(),
+                        "pass_breakdown": pass_breakdown,
+                    }
+                    service._save_watched()
+            except Exception as _e:
+                logger.debug(f"failed to save last_scan_metadata: {_e}")
 
         # 🔔 notification — silent skip اگر env تنظیم نشده باشد
+        # (audit fix I3) — در حالت Inspector scan موردی، Telegram/PDF/notification
+        # نباید fire شود. این scan ad-hoc از chat است نه دوره‌ای.
+        # برای حداقل کردن تغییر indentation در یک بلوک ۲۰۰ خطی، از یک
+        # exit-flag در ابتدای try استفاده می‌کنیم که در طول کل بلوک check
+        # می‌شود. شایان ذکر است که existing except کلی همه را می‌گیرد.
         try:
+            if _inspector_session_id is not None:
+                # raise برای exit از این try (catch می‌شود توسط except پایین)
+                raise _InspectorSkipPostScan()
             from .notification_service import notification_service
             watched_obj = next((w for w in service.watched if w.id == watched_id), None)
             repo_name = watched_obj.repo_full_name if watched_obj else watched_id
