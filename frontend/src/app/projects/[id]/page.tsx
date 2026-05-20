@@ -374,6 +374,13 @@ export default function ProjectDetailPage() {
   const [activeScanSessionId, setActiveScanSessionId] = useState<number | null>(null);
   const [scanProgress, setScanProgress] = useState<any>(null);
   const [runningProposalIds, setRunningProposalIds] = useState<Set<string>>(new Set());
+  // 🆕 (v3 perf) — تعداد proposal های نمایش‌داده‌شده per-message برای جلوگیری
+  // از rendering crash وقتی scan با ۸۰+ proposal تمام شد.
+  // key = msgId، value = تعداد visible (پیش‌فرض ۲۰)
+  const [proposalVisibleCount, setProposalVisibleCount] = useState<Record<string, number>>({});
+  // 🆕 (v3 perf) — لیست proposal_id هایی که "expanded" هستند (description
+  // و detail های اضافی نمایش داده می‌شوند). by default همه collapsed.
+  const [expandedProposalIds, setExpandedProposalIds] = useState<Set<string>>(new Set());
   const [applyAllInFlight, setApplyAllInFlight] = useState<boolean>(false);
   const scanPollRef = useRef<NodeJS.Timeout | null>(null);
   // 🔧 فیلتر انواع اکشن‌ها - همه فعال بجز scroll و network-request پرسر و صدا
@@ -14314,16 +14321,24 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                 {scope.deps_added > 0 && <span>+ {scope.deps_added} وابسته</span>}
                               </div>
 
-                              {proposals.map((p: any) => {
-                                const pid = p.proposal_id;
-                                const running = runningProposalIds.has(pid);
-                                const status = p.execution_status || 'pending';
-                                const statusColors: Record<string, string> = {
+                              {(() => {
+                                /* 🆕 (v3 perf) — pagination + collapse برای جلوگیری
+                                   از crash با ۸۰+ پیشنهاد. پیش‌فرض ۲۰ تای اول. */
+                                const msgIdKey = msg.id;
+                                const visibleCount = proposalVisibleCount[msgIdKey] ?? 20;
+                                const visibleProposals = proposals.slice(0, visibleCount);
+                                return (
+                                  <>
+                                    {visibleProposals.map((p: any) => {
+                                      const pid = p.proposal_id;
+                                      const running = runningProposalIds.has(pid);
+                                      const status = p.execution_status || 'pending';
+                                      const isExpanded = expandedProposalIds.has(pid);
+                                      const statusColors: Record<string, string> = {
                                   pending: 'bg-yellow-50 dark:bg-yellow-900/10 border-yellow-300 dark:border-yellow-700',
                                   applied_locally: 'bg-blue-50 dark:bg-blue-900/10 border-blue-300 dark:border-blue-700',
                                   committed_and_pushed: 'bg-green-50 dark:bg-green-900/10 border-green-300 dark:border-green-700',
                                   failed: 'bg-red-50 dark:bg-red-900/10 border-red-300 dark:border-red-700',
-                                  // 🆕 (v2)
                                   failed_syntax: 'bg-red-50 dark:bg-red-900/10 border-red-400 dark:border-red-700',
                                 };
                                 const statusEmoji: Record<string, string> = {
@@ -14331,13 +14346,27 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                   applied_locally: '📝',
                                   committed_and_pushed: '✅',
                                   failed: '❌',
-                                  // 🆕 (v2)
                                   failed_syntax: '⚠️',
                                 };
                                 const syntaxErrors = (p as any).syntax_errors as Array<{path: string; error: string}> | undefined;
                                 return (
                                   <div key={pid} className={`rounded border ${statusColors[status] || 'border-gray-200'} p-2`}>
                                     <div className="flex items-start gap-2">
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setExpandedProposalIds(prev => {
+                                            const next = new Set(prev);
+                                            if (next.has(pid)) next.delete(pid);
+                                            else next.add(pid);
+                                            return next;
+                                          });
+                                        }}
+                                        className="text-gray-500 hover:text-gray-700 text-xs flex-shrink-0"
+                                        title={isExpanded ? 'بستن جزئیات' : 'نمایش جزئیات'}
+                                      >
+                                        {isExpanded ? '▼' : '▶'}
+                                      </button>
                                       <div className="flex-1 min-w-0">
                                         <div className="flex items-center gap-2 flex-wrap">
                                           <span className="text-[10px] bg-gray-200 dark:bg-gray-700 px-1.5 rounded">
@@ -14356,9 +14385,17 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                           )}
                                         </div>
                                         <div className="font-bold text-xs mt-1 text-gray-800 dark:text-gray-200">{p.title}</div>
-                                        {p.description && (
-                                          <div className="text-[11px] text-gray-600 dark:text-gray-400 mt-1 line-clamp-2">
-                                            {p.description}
+                                        {/* 🆕 (v3 perf) — description فقط در expanded mode */}
+                                        {isExpanded && p.description && (
+                                          <div className="text-[11px] text-gray-600 dark:text-gray-400 mt-1 whitespace-pre-wrap">
+                                            {String(p.description).slice(0, 1500)}
+                                            {String(p.description).length > 1500 ? '...' : ''}
+                                          </div>
+                                        )}
+                                        {isExpanded && (p.target_files || []).length > 0 && (
+                                          <div className="text-[10px] text-gray-500 mt-1 font-mono">
+                                            📁 {(p.target_files as string[]).slice(0, 8).join(', ')}
+                                            {(p.target_files as string[]).length > 8 ? ' ...' : ''}
                                           </div>
                                         )}
                                         {p.diff_summary && (
@@ -14377,7 +14414,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                             خطا: {p.execution_error}
                                           </div>
                                         )}
-                                        {/* 🆕 (v2 M4) — syntax errors */}
+                                        {/* syntax errors (always visible if failed_syntax) */}
                                         {syntaxErrors && syntaxErrors.length > 0 && (
                                           <div className="mt-1 p-1.5 bg-red-50 dark:bg-red-900/20 rounded border border-red-300 dark:border-red-700">
                                             <div className="text-[10px] font-bold text-red-700 dark:text-red-300 mb-0.5">
@@ -14397,7 +14434,6 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                             e.stopPropagation();
                                             runInspectorProposal(pid, sessionId);
                                           }}
-                                          /* 🆕 (v2 audit C3) — disable در حین apply-all هم */
                                           disabled={running || applyAllInFlight}
                                           className="text-[11px] bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-2 py-1 rounded whitespace-nowrap flex-shrink-0"
                                         >
@@ -14412,6 +14448,26 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                   </div>
                                 );
                               })}
+                                    {/* دکمهٔ نمایش بقیه proposals */}
+                                    {proposals.length > visibleCount && (
+                                      <div className="text-center py-1">
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setProposalVisibleCount(prev => ({
+                                              ...prev,
+                                              [msgIdKey]: visibleCount + 20,
+                                            }));
+                                          }}
+                                          className="text-xs bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 px-3 py-1 rounded"
+                                        >
+                                          نمایش ۲۰ پیشنهاد بعدی ({proposals.length - visibleCount} باقی‌مانده)
+                                        </button>
+                                      </div>
+                                    )}
+                                  </>
+                                );
+                              })()}
 
                               {/* دکمهٔ اعمال همه تغییرات */}
                               {sessionId && (totalStaged > 0 || totalPending > 0) && (
