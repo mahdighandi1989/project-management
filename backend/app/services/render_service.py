@@ -636,6 +636,136 @@ class RenderAPIService:
             slog.error("Failed to get archived logs", exception=e)
             return []
 
+    # ============================================================
+    # 🆕 Render mutation methods (Phase 2 — Inspector independence)
+    # ============================================================
+
+    async def get_env_vars(self, service_id: str) -> Dict[str, Any]:
+        """دریافت لیست متغیرهای محیطی یک سرویس"""
+        slog.start("Fetching env vars", service_id=service_id)
+
+        if not self._load_api_key():
+            return {"success": False, "env_vars": [], "error": "کلید API رندر یافت نشد"}
+
+        try:
+            session = await self._get_session()
+            url = f"{self.BASE_URL}/services/{service_id}/env-vars"
+
+            async with session.get(url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    env_vars = []
+                    for item in data:
+                        ev = item.get("envVar", item)
+                        env_vars.append({"key": ev.get("key"), "value": ev.get("value")})
+                    return {"success": True, "env_vars": env_vars, "error": None}
+                else:
+                    err = await response.text()
+                    slog.error("Failed to get env vars", status=response.status, error=err)
+                    return {"success": False, "env_vars": [], "error": f"HTTP {response.status}: {err}"}
+        except Exception as e:
+            slog.error("Exception fetching env vars", exception=e)
+            return {"success": False, "env_vars": [], "error": str(e)}
+
+    async def set_env_var(self, service_id: str, key: str, value: str) -> Dict[str, Any]:
+        """تنظیم یا به‌روزرسانی یک متغیر محیطی (PUT — idempotent)"""
+        slog.start("Setting env var", service_id=service_id, key=key)
+
+        if not self._load_api_key():
+            return {"success": False, "error": "کلید API رندر یافت نشد"}
+        if not key or not isinstance(key, str):
+            return {"success": False, "error": "کلید env_var نامعتبر است"}
+
+        try:
+            session = await self._get_session()
+            url = f"{self.BASE_URL}/services/{service_id}/env-vars/{key}"
+            payload = {"value": str(value) if value is not None else ""}
+
+            async with session.put(url, json=payload) as response:
+                body = await response.text()
+                if response.status in (200, 201):
+                    slog.success("Env var set", service_id=service_id, key=key)
+                    return {"success": True, "key": key, "error": None}
+                else:
+                    slog.error("Failed to set env var", status=response.status, error=body)
+                    return {"success": False, "error": f"HTTP {response.status}: {body}"}
+        except Exception as e:
+            slog.error("Exception setting env var", exception=e)
+            return {"success": False, "error": str(e)}
+
+    async def set_env_vars_bulk(self, service_id: str, vars_dict: Dict[str, str]) -> Dict[str, Any]:
+        """تنظیم چندین متغیر به‌طور همزمان"""
+        if not vars_dict:
+            return {"success": False, "error": "هیچ متغیری ارائه نشده"}
+
+        results = {}
+        ok_count = 0
+        for k, v in vars_dict.items():
+            r = await self.set_env_var(service_id, k, v)
+            results[k] = r
+            if r.get("success"):
+                ok_count += 1
+
+        return {
+            "success": ok_count == len(vars_dict),
+            "set_count": ok_count,
+            "total": len(vars_dict),
+            "details": results,
+            "error": None if ok_count == len(vars_dict) else f"{len(vars_dict) - ok_count} متغیر ست نشد"
+        }
+
+    async def restart_service(self, service_id: str) -> Dict[str, Any]:
+        """ری‌استارت یک سرویس (بدون دیپلوی مجدد)"""
+        slog.start("Restarting service", service_id=service_id)
+
+        if not self._load_api_key():
+            return {"success": False, "error": "کلید API رندر یافت نشد"}
+
+        try:
+            session = await self._get_session()
+            url = f"{self.BASE_URL}/services/{service_id}/restart"
+
+            async with session.post(url) as response:
+                body = await response.text()
+                if response.status in (200, 202):
+                    slog.success("Service restart triggered", service_id=service_id)
+                    return {"success": True, "service_id": service_id, "error": None}
+                else:
+                    slog.error("Failed to restart service", status=response.status, error=body)
+                    return {"success": False, "error": f"HTTP {response.status}: {body}"}
+        except Exception as e:
+            slog.error("Exception restarting service", exception=e)
+            return {"success": False, "error": str(e)}
+
+    async def trigger_deploy(self, service_id: str, clear_cache: bool = False) -> Dict[str, Any]:
+        """آغاز یک دیپلوی جدید"""
+        slog.start("Triggering deploy", service_id=service_id, clear_cache=clear_cache)
+
+        if not self._load_api_key():
+            return {"success": False, "error": "کلید API رندر یافت نشد"}
+
+        try:
+            session = await self._get_session()
+            url = f"{self.BASE_URL}/services/{service_id}/deploys"
+            payload = {"clearCache": "clear" if clear_cache else "do_not_clear"}
+
+            async with session.post(url, json=payload) as response:
+                body_text = await response.text()
+                if response.status in (200, 201, 202):
+                    try:
+                        data = json.loads(body_text) if body_text else {}
+                    except Exception:
+                        data = {}
+                    deploy_id = data.get("id") if isinstance(data, dict) else None
+                    slog.success("Deploy triggered", service_id=service_id, deploy_id=deploy_id)
+                    return {"success": True, "service_id": service_id, "deploy_id": deploy_id, "error": None}
+                else:
+                    slog.error("Failed to trigger deploy", status=response.status, error=body_text)
+                    return {"success": False, "error": f"HTTP {response.status}: {body_text}"}
+        except Exception as e:
+            slog.error("Exception triggering deploy", exception=e)
+            return {"success": False, "error": str(e)}
+
 
 # Singleton instance
 _render_service: Optional[RenderAPIService] = None

@@ -14951,6 +14951,68 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 # 🆕 تشخیص truncation
                 _act_finish = getattr(response, 'finish_reason', '') or ''
                 _act_is_truncated = _act_finish.lower() in ('length', 'max_tokens')
+
+                # 🆕 (chunked editing fix) — Auto-continuation: اگر پاسخ به‌خاطر
+                # token limit truncate شد، خودکار از مدل بخواه ادامه دهد و
+                # خروجی را merge کن. حداکثر ۳ continuation تا از حلقه بی‌نهایت
+                # جلوگیری شود.
+                _continuation_count = 0
+                _MAX_CONTINUATIONS = 3
+                while _act_is_truncated and content and content.strip() and _continuation_count < _MAX_CONTINUATIONS:
+                    _continuation_count += 1
+                    yield sse("progress", {
+                        "step": "truncated_continuation",
+                        "message": (
+                            f"⏳ پاسخ مدل ناقص بود (truncated). در حال گرفتن "
+                            f"ادامه — تلاش {_continuation_count}/{_MAX_CONTINUATIONS}..."
+                        ),
+                    })
+                    # ساخت یک پرامپت continuation با آخرین ۲۰۰۰ کاراکتر تولیدشده
+                    # تا مدل بداند کجا قطع شد
+                    _last_tail = content[-2000:] if len(content) > 2000 else content
+                    _cont_user = (
+                        "پاسخ قبلی شما به دلیل token limit ناقص قطع شد. "
+                        "از همان جایی که قطع شد ادامه دهید — هیچ توضیح اضافه "
+                        "ندهید، تکرار نکنید، فقط ادامه‌ٔ متن قبلی را تولید کنید "
+                        "تا action_plan کامل شود.\n\n"
+                        f"## ۲۰۰۰ کاراکتر آخر پاسخ شما (محل قطع):\n```\n{_last_tail}\n```\n\n"
+                        "ادامه را اینجا بنویس:"
+                    )
+                    try:
+                        _cont_resp = await ai_manager.generate(
+                            model_id=primary_model,
+                            messages=[
+                                Message(role="system", content=(
+                                    "تو در حال ادامهٔ یک پاسخ قبلی هستی که به دلیل "
+                                    "token limit ناقص قطع شد. فقط ادامه را بنویس "
+                                    "— هیچ مقدمه، توضیح، عذرخواهی، یا تکرار از "
+                                    "محتوای قبلی نباشد. مستقیم از همان نقطه ادامه بده."
+                                )),
+                                Message(role="user", content=_cont_user),
+                            ],
+                            max_tokens=safe_max_tokens,
+                            temperature=0.2,
+                        )
+                        _cont_content = _strip_reasoning_blocks(_cont_resp.content) if _cont_resp.content else ""
+                        if _cont_content and _cont_content.strip():
+                            content = content + _cont_content
+                            _act_tokens = (_act_tokens or 0) + (_cont_resp.tokens_used or 0)
+                            _cont_finish = getattr(_cont_resp, 'finish_reason', '') or ''
+                            _act_is_truncated = _cont_finish.lower() in ('length', 'max_tokens')
+                            yield sse("progress", {
+                                "step": "continuation_success",
+                                "message": (
+                                    f"✅ ادامه دریافت شد ({len(_cont_content):,} کاراکتر). "
+                                    f"وضعیت truncate: {'هنوز ناقص' if _act_is_truncated else 'کامل شد ✓'}"
+                                ),
+                            })
+                        else:
+                            slog.warning(f"[smart-chat] continuation {_continuation_count} returned empty")
+                            break
+                    except Exception as _ce:
+                        slog.warning(f"[smart-chat] continuation {_continuation_count} failed: {_ce}")
+                        break
+
                 if not content or not content.strip():
                     slog.warning(f"[smart-chat] Empty response, model={primary_model}, prompt_len={len(action_prompt)}")
                     _act_sys_msg = f"تو توسعه‌دهنده ارشد پروژه هستی با دسترسی کامل به تمام فایل‌ها. {'مستقیماً مشکل را پیدا کن، کد اصلاح‌شده کامل بنویس و action_plan معتبر JSON ارائه بده.' if has_code_files else 'فایل‌ها در این دور خوانده نشدند — فقط تحلیل ارائه بده.'} ⛔ هرگز نگو «دسترسی ندارم»، «در اختیارم نیست»، «دوباره ارسال کنید». ⛔ فایل موجود از صفر بازننویس نکن. قابلیت‌های موجود حذف نکن. کلمات کاربر دقیق بخوان: «فقط»=ONLY. با لحن صمیمی و حرفه‌ای پاسخ بده."
@@ -17442,3 +17504,206 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
 
     return StreamingResponse(event_stream(), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+
+
+# ============================================================
+# 🆕 Phase 2 — Render mutation endpoints (Inspector independence)
+# ============================================================
+
+class _RenderEnvVarRequest(BaseModel):
+    service_id: str
+    key: str
+    value: str
+
+
+class _RenderEnvVarsBulkRequest(BaseModel):
+    service_id: str
+    vars: Dict[str, str]
+
+
+class _RenderServiceActionRequest(BaseModel):
+    service_id: str
+    clear_cache: Optional[bool] = False
+
+
+@router.get("/inspector/render/env-vars/{service_id}")
+async def inspector_render_get_env_vars(service_id: str):
+    """دریافت لیست متغیرهای محیطی یک سرویس Render."""
+    if not service_id or not service_id.startswith("srv-"):
+        raise HTTPException(status_code=400, detail="service_id نامعتبر است")
+    svc = get_render_service()
+    return await svc.get_env_vars(service_id)
+
+
+@router.post("/inspector/render/env-var")
+async def inspector_render_set_env_var(payload: _RenderEnvVarRequest):
+    """تنظیم/به‌روزرسانی یک متغیر محیطی."""
+    if not payload.service_id.startswith("srv-"):
+        raise HTTPException(status_code=400, detail="service_id نامعتبر است")
+    if not payload.key:
+        raise HTTPException(status_code=400, detail="کلید env_var لازم است")
+    svc = get_render_service()
+    return await svc.set_env_var(payload.service_id, payload.key, payload.value)
+
+
+@router.post("/inspector/render/env-vars/bulk")
+async def inspector_render_set_env_vars_bulk(payload: _RenderEnvVarsBulkRequest):
+    """تنظیم چندین متغیر محیطی به‌طور همزمان."""
+    if not payload.service_id.startswith("srv-"):
+        raise HTTPException(status_code=400, detail="service_id نامعتبر است")
+    if not payload.vars:
+        raise HTTPException(status_code=400, detail="هیچ متغیری ارائه نشده")
+    svc = get_render_service()
+    return await svc.set_env_vars_bulk(payload.service_id, payload.vars)
+
+
+@router.post("/inspector/render/restart")
+async def inspector_render_restart(payload: _RenderServiceActionRequest):
+    """ری‌استارت یک سرویس Render."""
+    if not payload.service_id.startswith("srv-"):
+        raise HTTPException(status_code=400, detail="service_id نامعتبر است")
+    svc = get_render_service()
+    return await svc.restart_service(payload.service_id)
+
+
+@router.post("/inspector/render/deploy")
+async def inspector_render_deploy(payload: _RenderServiceActionRequest):
+    """آغاز دیپلوی جدید برای یک سرویس Render."""
+    if not payload.service_id.startswith("srv-"):
+        raise HTTPException(status_code=400, detail="service_id نامعتبر است")
+    svc = get_render_service()
+    return await svc.trigger_deploy(payload.service_id, clear_cache=bool(payload.clear_cache))
+
+
+# ============================================================
+# 🆕 Phase 3 — Telegram bot setup automation
+# ============================================================
+
+class _TelegramBotSetupRequest(BaseModel):
+    bot_token: str
+    webhook_url: Optional[str] = None
+    set_commands: Optional[bool] = True
+
+
+@router.post("/inspector/setup-telegram-bot")
+async def inspector_setup_telegram_bot(payload: _TelegramBotSetupRequest):
+    """راه‌اندازی خودکار ربات تلگرام: اعتبارسنجی توکن، تنظیم webhook، و دستورها.
+
+    مراحل:
+    1. getMe → اعتبارسنجی توکن و دریافت اطلاعات ربات
+    2. setWebhook (اگر webhook_url داده شده باشد)
+    3. setMyCommands (اگر set_commands=True)
+    """
+    bot_token = (payload.bot_token or "").strip()
+    if not bot_token or ":" not in bot_token:
+        raise HTTPException(status_code=400, detail="توکن ربات نامعتبر است")
+
+    result: Dict[str, Any] = {
+        "success": False,
+        "validated": False,
+        "bot_info": None,
+        "webhook_set": False,
+        "commands_set": False,
+        "errors": [],
+    }
+
+    base = f"https://api.telegram.org/bot{bot_token}"
+
+    try:
+        import aiohttp as _aiohttp
+        timeout = _aiohttp.ClientTimeout(total=15)
+        async with _aiohttp.ClientSession(timeout=timeout) as session:
+            try:
+                async with session.get(f"{base}/getMe") as resp:
+                    data = await resp.json()
+                    if resp.status == 200 and data.get("ok"):
+                        result["validated"] = True
+                        result["bot_info"] = data.get("result", {})
+                    else:
+                        result["errors"].append(f"getMe failed: {data.get('description', 'unknown')}")
+                        return result
+            except Exception as e:
+                result["errors"].append(f"getMe exception: {str(e)[:200]}")
+                return result
+
+            if payload.webhook_url:
+                wh = payload.webhook_url.strip()
+                if not wh.startswith("https://"):
+                    result["errors"].append("webhook_url باید با https:// شروع شود")
+                else:
+                    try:
+                        async with session.post(f"{base}/setWebhook", json={"url": wh, "drop_pending_updates": False}) as resp:
+                            data = await resp.json()
+                            if resp.status == 200 and data.get("ok"):
+                                result["webhook_set"] = True
+                                result["webhook_url"] = wh
+                            else:
+                                result["errors"].append(f"setWebhook failed: {data.get('description', 'unknown')}")
+                    except Exception as e:
+                        result["errors"].append(f"setWebhook exception: {str(e)[:200]}")
+
+            if payload.set_commands:
+                commands = [
+                    {"command": "start", "description": "شروع و راهنما"},
+                    {"command": "help", "description": "راهنما"},
+                    {"command": "menu", "description": "منوی اصلی"},
+                    {"command": "create", "description": "ساخت پروژه جدید"},
+                    {"command": "my_projects", "description": "پروژه‌های من"},
+                    {"command": "status", "description": "وضعیت سیستم"},
+                    {"command": "cancel", "description": "لغو عملیات جاری"},
+                ]
+                try:
+                    async with session.post(f"{base}/setMyCommands", json={"commands": commands}) as resp:
+                        data = await resp.json()
+                        if resp.status == 200 and data.get("ok"):
+                            result["commands_set"] = True
+                            result["commands_count"] = len(commands)
+                        else:
+                            result["errors"].append(f"setMyCommands failed: {data.get('description', 'unknown')}")
+                except Exception as e:
+                    result["errors"].append(f"setMyCommands exception: {str(e)[:200]}")
+    except Exception as e:
+        result["errors"].append(f"global exception: {str(e)[:200]}")
+
+    result["success"] = result["validated"] and (not payload.webhook_url or result["webhook_set"]) and (not payload.set_commands or result["commands_set"])
+    return result
+
+
+@router.get("/inspector/telegram-bot/info")
+async def inspector_telegram_bot_info(bot_token: str = Query(...)):
+    """بازیابی اطلاعات ربات و وضعیت webhook فعلی."""
+    bot_token = (bot_token or "").strip()
+    if not bot_token or ":" not in bot_token:
+        raise HTTPException(status_code=400, detail="توکن ربات نامعتبر است")
+
+    base = f"https://api.telegram.org/bot{bot_token}"
+    out: Dict[str, Any] = {"success": False, "bot_info": None, "webhook_info": None, "errors": []}
+
+    try:
+        import aiohttp as _aiohttp
+        timeout = _aiohttp.ClientTimeout(total=15)
+        async with _aiohttp.ClientSession(timeout=timeout) as session:
+            try:
+                async with session.get(f"{base}/getMe") as resp:
+                    data = await resp.json()
+                    if resp.status == 200 and data.get("ok"):
+                        out["bot_info"] = data.get("result", {})
+                    else:
+                        out["errors"].append(f"getMe: {data.get('description', 'unknown')}")
+            except Exception as e:
+                out["errors"].append(f"getMe exception: {str(e)[:200]}")
+
+            try:
+                async with session.get(f"{base}/getWebhookInfo") as resp:
+                    data = await resp.json()
+                    if resp.status == 200 and data.get("ok"):
+                        out["webhook_info"] = data.get("result", {})
+                    else:
+                        out["errors"].append(f"getWebhookInfo: {data.get('description', 'unknown')}")
+            except Exception as e:
+                out["errors"].append(f"getWebhookInfo exception: {str(e)[:200]}")
+    except Exception as e:
+        out["errors"].append(f"global exception: {str(e)[:200]}")
+
+    out["success"] = out["bot_info"] is not None
+    return out
