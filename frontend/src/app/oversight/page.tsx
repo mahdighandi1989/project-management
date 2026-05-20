@@ -1603,6 +1603,31 @@ export default function OversightPage() {
   // Deep scan progress
   const [deepScanWatchedId, setDeepScanWatchedId] = useState<string | null>(null);
   const [deepScanProgress, setDeepScanProgress] = useState<any>(null);
+
+  // 🆕 (selective-scan) — modal برای انتخاب بخش‌های پروژه قبل از scan.
+  // وقتی کاربر در WatchedCard چک‌باکس «اسکن کلی» را برداشت و دکمه scan را
+  // زد، این modal باز می‌شود. mode = نوع scan ای که بعد از انتخاب اجرا شود.
+  const [sectionPicker, setSectionPicker] = useState<{
+    watched_id: string;
+    mode: 'quick' | 'deep';
+  } | null>(null);
+  const [sectionPickerData, setSectionPickerData] = useState<{
+    loading: boolean;
+    sections: Array<{
+      key: string;
+      label: string;
+      label_en?: string;
+      paths: string[];
+      file_count: number;
+      example_paths: string[];
+    }>;
+    total_files: number;
+    source: string;
+    error?: string;
+  }>({ loading: false, sections: [], total_files: 0, source: '' });
+  const [sectionPickerSelected, setSectionPickerSelected] = useState<Set<string>>(new Set());
+  const [sectionPickerCustomPaths, setSectionPickerCustomPaths] = useState<string>('');
+  const [sectionPickerIncludeDeps, setSectionPickerIncludeDeps] = useState<boolean>(true);
   const deepScanPollRef = useRef<any>(null);
 
   // Codex modal
@@ -1986,8 +2011,19 @@ export default function OversightPage() {
     }
   };
 
-  const scanProject = async (id: string) => {
-    showSuccess('اسکن شروع شد - چند لحظه صبر کنید...');
+  const scanProject = async (
+    id: string,
+    selection?: {
+      selected_sections?: string[];
+      custom_paths?: string[];
+      include_dependencies?: boolean;
+    },
+  ) => {
+    const isSelective = !!(selection && (
+      (selection.selected_sections && selection.selected_sections.length > 0) ||
+      (selection.custom_paths && selection.custom_paths.length > 0)
+    ));
+    showSuccess(isSelective ? '🎯 اسکن انتخابی شروع شد...' : 'اسکن شروع شد - چند لحظه صبر کنید...');
     try {
       const res = await fetch(`${API_BASE}/api/oversight/scan/${id}`, {
         method: 'POST',
@@ -1995,6 +2031,8 @@ export default function OversightPage() {
         body: JSON.stringify({
           model_id: selectedModelIds[0],
           model_ids: selectedModelIds.length > 0 ? selectedModelIds : undefined,
+          // 🆕 (selective-scan) — اگر selection داده شده، forward کن
+          ...(selection || {}),
         }),
       });
       if (res.ok) {
@@ -2476,12 +2514,23 @@ export default function OversightPage() {
   };
 
   // ============================ Deep Scan ============================
-  const startDeepScan = async (watchedId: string) => {
+  const startDeepScan = async (
+    watchedId: string,
+    selection?: {
+      selected_sections?: string[];
+      custom_paths?: string[];
+      include_dependencies?: boolean;
+    },
+  ) => {
     try {
       const res = await fetch(`${API_BASE}/api/oversight/scan/${watchedId}/deep`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model_id: selectedModelIds[0] || undefined }),
+        body: JSON.stringify({
+          model_id: selectedModelIds[0] || undefined,
+          // 🆕 (selective-scan)
+          ...(selection || {}),
+        }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -2523,6 +2572,79 @@ export default function OversightPage() {
     deepScanPollRef.current = null;
     setDeepScanWatchedId(null);
     setDeepScanProgress(null);
+  };
+
+  // ============================ Selective Scan modal ============================
+  // وقتی کاربر در WatchedCard چک‌باکس «اسکن کلی» را برداشت و scan را زد،
+  // این تابع فراخوانی می‌شود: سکشن‌های پروژه را از backend می‌گیرد و
+  // modal را باز می‌کند تا کاربر بخش‌ها را انتخاب کند.
+  const openSectionPicker = async (watchedId: string, mode: 'quick' | 'deep') => {
+    setSectionPicker({ watched_id: watchedId, mode });
+    setSectionPickerSelected(new Set());
+    setSectionPickerCustomPaths('');
+    setSectionPickerIncludeDeps(true);
+    setSectionPickerData({ loading: true, sections: [], total_files: 0, source: '' });
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/scan/${watchedId}/sections`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setSectionPickerData({
+          loading: false,
+          sections: [],
+          total_files: 0,
+          source: '',
+          error: err.detail || `HTTP ${res.status}`,
+        });
+        return;
+      }
+      const data = await res.json();
+      setSectionPickerData({
+        loading: false,
+        sections: Array.isArray(data.sections) ? data.sections : [],
+        total_files: data.total_files || 0,
+        source: data.source || '',
+        error: data.message,
+      });
+    } catch (e: any) {
+      setSectionPickerData({
+        loading: false,
+        sections: [],
+        total_files: 0,
+        source: '',
+        error: e?.message || 'خطای ناشناخته',
+      });
+    }
+  };
+
+  const closeSectionPicker = () => {
+    setSectionPicker(null);
+    setSectionPickerSelected(new Set());
+    setSectionPickerCustomPaths('');
+  };
+
+  const confirmSectionPicker = async () => {
+    if (!sectionPicker) return;
+    const selKeys = Array.from(sectionPickerSelected);
+    const custom = sectionPickerCustomPaths
+      .split(/[\n,]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (selKeys.length === 0 && custom.length === 0) {
+      showError('حداقل یک بخش یا یک مسیر سفارشی انتخاب کنید');
+      return;
+    }
+    const selection = {
+      selected_sections: selKeys,
+      custom_paths: custom,
+      include_dependencies: sectionPickerIncludeDeps,
+    };
+    const { watched_id, mode } = sectionPicker;
+    closeSectionPicker();
+    if (mode === 'quick') {
+      await scanProject(watched_id, selection);
+    } else {
+      await startDeepScan(watched_id, selection);
+    }
   };
 
   // ============================ Codex ============================
@@ -3255,6 +3377,7 @@ export default function OversightPage() {
                   onRemove={() => removeWatched(w.id, w.repo_full_name)}
                   onScan={() => scanProject(w.id)}
                   onDeepScan={() => startDeepScan(w.id)}
+                  onOpenSectionPicker={(mode) => openSectionPicker(w.id, mode)}
                   onWriteIdea={() => {
                     setIdeaWatchedIds([w.id]);
                     setTab('ideas');
@@ -4975,6 +5098,127 @@ export default function OversightPage() {
           </Modal>
         )}
 
+        {/* 🆕 (selective-scan) مودال انتخاب بخش‌های پروژه برای scan انتخابی */}
+        {sectionPicker && (
+          <Modal
+            onClose={closeSectionPicker}
+            title={`🎯 انتخاب بخش‌های پروژه — ${sectionPicker.mode === 'quick' ? 'اسکن سریع' : 'Deep Scan'}`}
+          >
+            <div className="space-y-3" dir="rtl">
+              {sectionPickerData.loading && (
+                <div className="text-center py-6 text-gray-500">
+                  ⏳ در حال شناسایی بخش‌های پروژه...
+                </div>
+              )}
+              {!sectionPickerData.loading && sectionPickerData.error && (
+                <div className="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-200 text-xs rounded">
+                  ⚠️ {sectionPickerData.error}
+                  <br />
+                  <span className="text-[10px] text-amber-700 dark:text-amber-300">
+                    در صورت نیاز یک Deep Scan کلی انجام دهید تا structure cache ساخته شود،
+                    یا با «مسیر سفارشی» در زیر ادامه دهید.
+                  </span>
+                </div>
+              )}
+              {!sectionPickerData.loading && sectionPickerData.sections.length > 0 && (
+                <div className="space-y-1">
+                  <div className="text-[11px] text-gray-500 mb-1">
+                    📊 منبع: {sectionPickerData.source === 'deep_scan_cache' ? 'کش deep scan قبلی' : 'GitHub tree زنده'} —
+                    {' '}{sectionPickerData.total_files} فایل
+                  </div>
+                  {sectionPickerData.sections.map((s) => (
+                    <label
+                      key={s.key}
+                      className={`flex items-start gap-2 p-2 rounded border cursor-pointer transition-colors ${
+                        sectionPickerSelected.has(s.key)
+                          ? 'bg-amber-50 dark:bg-amber-900/20 border-amber-300 dark:border-amber-700'
+                          : 'border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={sectionPickerSelected.has(s.key)}
+                        onChange={(e) => {
+                          setSectionPickerSelected((prev) => {
+                            const next = new Set(prev);
+                            if (e.target.checked) next.add(s.key);
+                            else next.delete(s.key);
+                            return next;
+                          });
+                        }}
+                        className="mt-0.5"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold">{s.label}</span>
+                          <span className="text-[10px] text-gray-400">({s.label_en})</span>
+                          <span className="text-[10px] bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded">
+                            {s.file_count} فایل
+                          </span>
+                        </div>
+                        {s.example_paths && s.example_paths.length > 0 && (
+                          <div className="text-[10px] text-gray-500 mt-1 font-mono truncate">
+                            {s.example_paths.slice(0, 3).join(' • ')}
+                            {s.file_count > 3 ? ' • …' : ''}
+                          </div>
+                        )}
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              )}
+
+              {/* مسیر سفارشی */}
+              <div>
+                <label className="block text-[11px] text-gray-600 dark:text-gray-400 mb-1">
+                  📁 مسیر سفارشی (اختیاری) — هر خط یا با کاما جدا کنید
+                </label>
+                <textarea
+                  value={sectionPickerCustomPaths}
+                  onChange={(e) => setSectionPickerCustomPaths(e.target.value)}
+                  placeholder="مثلاً: frontend/src/app/oversight&#10;backend/app/services/scan_sections.py"
+                  rows={2}
+                  className="w-full px-2 py-1.5 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded font-mono"
+                />
+              </div>
+
+              {/* dependency expand */}
+              <label className="flex items-center gap-2 text-xs cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={sectionPickerIncludeDeps}
+                  onChange={(e) => setSectionPickerIncludeDeps(e.target.checked)}
+                  className="w-3.5 h-3.5"
+                />
+                <span className="text-gray-700 dark:text-gray-300">
+                  🔗 شامل فایل‌های وابسته (upstream/downstream) — توصیه می‌شود
+                </span>
+              </label>
+              <div className="text-[10px] text-gray-500 -mt-1.5">
+                اگر تیک خورده باشد، task های ساخته‌شده هم خود بخش انتخابی و هم فایل‌هایی که
+                به آن متکی‌اند یا که آن به آن‌ها متکی است را پوشش می‌دهند.
+              </div>
+
+              {/* دکمه‌ها */}
+              <div className="flex justify-end gap-2 pt-2 border-t border-gray-200 dark:border-gray-700">
+                <button
+                  onClick={closeSectionPicker}
+                  className="px-4 py-1.5 text-sm bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded hover:bg-gray-300 dark:hover:bg-gray-600"
+                >
+                  انصراف
+                </button>
+                <button
+                  onClick={confirmSectionPicker}
+                  disabled={sectionPickerData.loading}
+                  className="px-4 py-1.5 text-sm bg-amber-500 text-white rounded hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  🎯 شروع اسکن انتخابی
+                </button>
+              </div>
+            </div>
+          </Modal>
+        )}
+
         {/* 🆕 (P4) مودال بازتولید پرامپت */}
         {regenTask && (
           <Modal onClose={closeRegenModal} title="🔄 بازتولید پرامپت">
@@ -5598,6 +5842,7 @@ function WatchedCard({
   onRemove,
   onScan,
   onDeepScan,
+  onOpenSectionPicker,
   onWriteIdea,
   onViewTasks,
   onViewArchive,
@@ -5615,6 +5860,10 @@ function WatchedCard({
   onRemove: () => void;
   onScan: () => void;
   onDeepScan: () => void;
+  // 🆕 (selective-scan) — وقتی scanFullProject تیک‌نخورده است،
+  // دکمه‌های Quick/Deep این callback را با mode مناسب صدا می‌زنند
+  // تا parent modal انتخاب section را باز کند.
+  onOpenSectionPicker: (mode: 'quick' | 'deep') => void;
   onWriteIdea: () => void;
   onViewTasks: () => void;
   onViewArchive: () => void;
@@ -5628,6 +5877,12 @@ function WatchedCard({
   // 🔬 (Runtime Verify) — collapsible section state, closed by default
   const [runtimeOpen, setRuntimeOpen] = useState(false);
   const [runtimeBusy, setRuntimeBusy] = useState(false);
+
+  // 🆕 (selective-scan) — چک‌باکس «اسکن کلی». پیش‌فرض true (مطابق voice
+  // کاربر: «در حالت پیش‌فرض تیک خورده باشه که معمولاً وقتی دکمه رو می‌زنی
+  // اسکن کلی رو انجام بده»). اگر تیک برداشته شود، دکمه‌های Quick/Deep
+  // به‌جای اجرای مستقیم، modal انتخاب بخش‌ها را باز می‌کنند.
+  const [scanFullProject, setScanFullProject] = useState<boolean>(true);
 
   // 🆕 (Phase 5 V4 — bug A1) — Feature Inventory inline modal state
   const [fiOpen, setFiOpen] = useState(false);
@@ -7471,11 +7726,34 @@ function WatchedCard({
         </div>
       )}
 
+      {/* 🆕 (selective-scan) — چک‌باکس «اسکن کلی». پیش‌فرض تیک‌خورده.
+          وقتی تیک برداشته شود، Quick/Deep scan modal انتخاب بخش‌ها را باز می‌کنند. */}
+      <label
+        className="flex items-center gap-2 mb-2 text-xs text-gray-700 dark:text-gray-300 cursor-pointer select-none"
+        title="پیش‌فرض: کل پروژه اسکن می‌شود. تیک را بردارید تا بخش‌های خاص پروژه (فرانت/بک/...) را انتخاب کنید."
+      >
+        <input
+          type="checkbox"
+          checked={scanFullProject}
+          onChange={(e) => setScanFullProject(e.target.checked)}
+          className="w-3.5 h-3.5"
+        />
+        <span>
+          {scanFullProject
+            ? '🌍 اسکن کلی پروژه (پیش‌فرض)'
+            : '🎯 اسکن انتخابی — هنگام کلیک scan انتخاب بخش‌ها را بپرس'}
+        </span>
+      </label>
+
       <div className="flex gap-2 flex-wrap">
         <button
-          onClick={onDeepScan}
-          title="اسکن چندفازی AI (طبق «عمق scan» در تنظیمات بالا) — یافته‌ها به تسک تبدیل می‌شوند + per-file health score"
-          className="px-3 py-1.5 bg-indigo-500 text-white rounded text-sm hover:bg-indigo-600"
+          onClick={() => (scanFullProject ? onDeepScan() : onOpenSectionPicker('deep'))}
+          title={
+            scanFullProject
+              ? 'اسکن چندفازی AI (طبق «عمق scan» در تنظیمات بالا) — یافته‌ها به تسک تبدیل می‌شوند + per-file health score'
+              : '🎯 اسکن انتخابی Deep — قبل از شروع بخش‌های پروژه را انتخاب کنید'
+          }
+          className={`px-3 py-1.5 ${scanFullProject ? 'bg-indigo-500 hover:bg-indigo-600' : 'bg-amber-500 hover:bg-amber-600'} text-white rounded text-sm`}
         >
           🔬 Deep Scan
         </button>
@@ -7525,9 +7803,13 @@ function WatchedCard({
           </button>
         )}
         <button
-          onClick={onScan}
-          title="اسکن تک‌پاس و سریع (~30 ثانیه) — برای کشف کلی نیازها بدون per-file scoring"
-          className="px-3 py-1.5 bg-cyan-500 text-white rounded text-sm hover:bg-cyan-600"
+          onClick={() => (scanFullProject ? onScan() : onOpenSectionPicker('quick'))}
+          title={
+            scanFullProject
+              ? 'اسکن تک‌پاس و سریع (~30 ثانیه) — برای کشف کلی نیازها بدون per-file scoring'
+              : '🎯 اسکن انتخابی سریع — قبل از شروع بخش‌های پروژه را انتخاب کنید'
+          }
+          className={`px-3 py-1.5 ${scanFullProject ? 'bg-cyan-500 hover:bg-cyan-600' : 'bg-amber-500 hover:bg-amber-600'} text-white rounded text-sm`}
         >
           🔎 اسکن سریع
         </button>
