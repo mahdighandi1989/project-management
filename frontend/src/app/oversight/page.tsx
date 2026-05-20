@@ -1628,6 +1628,10 @@ export default function OversightPage() {
   const [sectionPickerSelected, setSectionPickerSelected] = useState<Set<string>>(new Set());
   const [sectionPickerCustomPaths, setSectionPickerCustomPaths] = useState<string>('');
   const [sectionPickerIncludeDeps, setSectionPickerIncludeDeps] = useState<boolean>(true);
+  // 🆕 (focus-notes) — توضیحات نقطه‌ای کاربر برای scope: «در این مسیر
+  // مشکل من X است»، «روی این بخش از فایل تمرکز کن». این متن به prompt
+  // مدل تزریق می‌شود تا اسکن دقیق‌تر باشد.
+  const [sectionPickerFocusNotes, setSectionPickerFocusNotes] = useState<string>('');
   const deepScanPollRef = useRef<any>(null);
 
   // Codex modal
@@ -2017,6 +2021,7 @@ export default function OversightPage() {
       selected_sections?: string[];
       custom_paths?: string[];
       include_dependencies?: boolean;
+      focus_notes?: string;
     },
   ) => {
     const isSelective = !!(selection && (
@@ -2520,6 +2525,7 @@ export default function OversightPage() {
       selected_sections?: string[];
       custom_paths?: string[];
       include_dependencies?: boolean;
+      focus_notes?: string;
     },
   ) => {
     try {
@@ -2583,6 +2589,7 @@ export default function OversightPage() {
     setSectionPickerSelected(new Set());
     setSectionPickerCustomPaths('');
     setSectionPickerIncludeDeps(true);
+    setSectionPickerFocusNotes('');
     setSectionPickerData({ loading: true, sections: [], total_files: 0, source: '' });
     try {
       const res = await fetch(`${API_BASE}/api/oversight/scan/${watchedId}/sections`);
@@ -2621,6 +2628,7 @@ export default function OversightPage() {
     setSectionPickerSelected(new Set());
     setSectionPickerCustomPaths('');
     setSectionPickerIncludeDeps(true);
+    setSectionPickerFocusNotes('');
   };
 
   const confirmSectionPicker = async () => {
@@ -2638,6 +2646,8 @@ export default function OversightPage() {
       selected_sections: selKeys,
       custom_paths: custom,
       include_dependencies: sectionPickerIncludeDeps,
+      // 🆕 (focus-notes) — اگر کاربر یادداشت داده، forward کن
+      focus_notes: sectionPickerFocusNotes.trim() || undefined,
     };
     const { watched_id, mode } = sectionPicker;
     closeSectionPicker();
@@ -5169,6 +5179,12 @@ export default function OversightPage() {
                 </div>
               )}
 
+              {/* helper بالای custom path */}
+              <div className="text-[10px] text-gray-500 dark:text-gray-400 -mb-1 leading-relaxed">
+                💡 می‌توانید فقط مسیر سفارشی بدهید (تیک بخش‌های بالا اختیاری است) —
+                یا فقط بخش‌ها را انتخاب کنید، یا هر دو ترکیبی.
+              </div>
+
               {/* مسیر سفارشی */}
               <div>
                 <label className="block text-[11px] text-gray-600 dark:text-gray-400 mb-1">
@@ -5183,6 +5199,24 @@ export default function OversightPage() {
                 />
               </div>
 
+              {/* 🆕 توضیحات نقطه‌ای — focus notes */}
+              <div>
+                <label className="block text-[11px] text-gray-600 dark:text-gray-400 mb-1">
+                  📝 توضیحات نقطه‌ای (اختیاری) — مشکل/تمرکز دقیق شما در این scope چیست؟
+                </label>
+                <textarea
+                  value={sectionPickerFocusNotes}
+                  onChange={(e) => setSectionPickerFocusNotes(e.target.value)}
+                  placeholder="مثلاً: «در صفحهٔ oversight وقتی scan را می‌زنم state گم می‌شود، فکر می‌کنم مشکل از Provider باشد» — مدل این یادداشت را با اولویت بالا روی scope اعمال می‌کند تا روی همان نقطه تمرکز بیشتری کند."
+                  rows={3}
+                  className="w-full px-2 py-1.5 text-xs bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800 rounded leading-relaxed"
+                />
+                <div className="text-[10px] text-gray-500 mt-1">
+                  این متن مستقیماً به prompt مدل تزریق می‌شود — تا scan فقط فهرست‌برداری کلی نباشد،
+                  بلکه مدل دقیقاً همان جایی که شما اشاره کرده‌اید را موشکافی کند.
+                </div>
+              </div>
+
               {/* dependency expand */}
               <label className="flex items-center gap-2 text-xs cursor-pointer">
                 <input
@@ -5192,12 +5226,15 @@ export default function OversightPage() {
                   className="w-3.5 h-3.5"
                 />
                 <span className="text-gray-700 dark:text-gray-300">
-                  🔗 شامل فایل‌های وابسته (upstream/downstream) — توصیه می‌شود
+                  🔗 شامل فایل‌های وابسته (upstream + downstream) — توصیه می‌شود
                 </span>
               </label>
-              <div className="text-[10px] text-gray-500 -mt-1.5">
-                اگر تیک خورده باشد، task های ساخته‌شده هم خود بخش انتخابی و هم فایل‌هایی که
-                به آن متکی‌اند یا که آن به آن‌ها متکی است را پوشش می‌دهند.
+              <div className="text-[10px] text-gray-500 -mt-1.5 leading-relaxed">
+                اگر تیک خورده باشد، scan هر دو جهت وابستگی را بررسی می‌کند:
+                <br />
+                ↑ <b>upstream</b>: فایل‌هایی که این scope را import می‌کنند (callers/مصرف‌کنندگان)
+                <br />
+                ↓ <b>downstream</b>: فایل‌هایی که این scope به آن‌ها متکی است (imports/dependencies)
               </div>
 
               {/* دکمه‌ها */}

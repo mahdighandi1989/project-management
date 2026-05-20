@@ -208,6 +208,11 @@ class ScanRequest(BaseModel):
     # شامل شوند (مطابق voice کاربر: «هم خود اون صفحه و هم چیزایی که به
     # این صفحه وابسته از جاهای دیگه»). default True.
     include_dependencies: bool = True
+    # 🆕 (focus-notes) — توضیحات نقطه‌ای کاربر دربارهٔ همان scope.
+    # مثلاً «این صفحه وقتی refresh می‌شود token را گم می‌کند، فکر می‌کنم
+    # مشکل تو middleware باشد». این به prompt مدل تزریق می‌شود تا روی
+    # همان نقطه تمرکز بیشتر کند.
+    focus_notes: Optional[str] = None
 
 
 class WatchedUpdateExtra(BaseModel):
@@ -2344,6 +2349,7 @@ async def scan_project(watched_id: str, payload: Optional[ScanRequest] = None):
             selected_sections=sel_sections,
             custom_paths=sel_paths,
             include_dependencies=include_deps,
+            focus_notes=(payload.focus_notes if payload else None),
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -2359,6 +2365,8 @@ class DeepScanRequest(BaseModel):
     selected_sections: Optional[List[str]] = None
     custom_paths: Optional[List[str]] = None
     include_dependencies: bool = True
+    # 🆕 (focus-notes) — توضیحات نقطه‌ای کاربر برای scoping بیشتر prompt
+    focus_notes: Optional[str] = None
 
 
 @router.post("/scan/{watched_id}/deep")
@@ -2383,6 +2391,7 @@ async def deep_scan_project(watched_id: str, payload: Optional[DeepScanRequest] 
                 selected_sections=payload.selected_sections,
                 custom_paths=payload.custom_paths,
                 include_dependencies=payload.include_dependencies,
+                focus_notes=payload.focus_notes,
             )
         except Exception as e:
             from ...services.oversight_deep_scan_service import write_progress as _wp
