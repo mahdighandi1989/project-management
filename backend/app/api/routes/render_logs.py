@@ -11173,6 +11173,13 @@ class SmartChatRequest(BaseModel):
     # acceptance_criteria + remaining_parts + task_steps + done_parts + scan_metadata.
     # backward compatible: None یعنی chat آزاد مثل قبل.
     task_id: Optional[str] = None
+    # 🆕 (anti-stuck-loop) — اگر این retry است (یعنی کاربر روی «درخواست
+    # مجدد اصلاح» کلیک کرد چون پاسخ قبلی action_plan نداشت)، شمارهٔ تلاش
+    # را اینجا بگذار. backend بر اساس این:
+    #   - فایل‌خوانی را skip می‌کند (از previously_read_files استفاده می‌کند)
+    #   - system prompt را قوی‌تر می‌کند که حتماً action_plan تولید شود
+    #   - در retry≥2 خودکار به fallback model سوئیچ می‌کند
+    retry_attempt: Optional[int] = None
 
 
 class ApplyActionRequest(BaseModel):
@@ -13603,6 +13610,22 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
     else:
         primary_model = model_ids[0]
 
+    # 🆕 (anti-stuck-loop) — اگر retry است و مدل قبلی نتوانست action_plan
+    # تولید کند، خودکار به fallback model سوئیچ کن. این از حلقه‌ای که در
+    # آن همان مدل با همان context همان جواب ناقص می‌دهد جلوگیری می‌کند.
+    _is_retry = bool(request.retry_attempt and request.retry_attempt >= 1)
+    if _is_retry and request.retry_attempt and request.retry_attempt >= 2:
+        try:
+            _fb_model = ai_manager.find_fallback_model(primary_model) if 'ai_manager' in dir() else None
+            if not _fb_model:
+                from ...services.ai_manager import get_ai_manager as _gam
+                _fb_model = _gam().find_fallback_model(primary_model)
+            if _fb_model and _fb_model != primary_model:
+                slog.info(f"[smart-chat retry≥2] auto-switching {primary_model} → {_fb_model}")
+                primary_model = _fb_model
+        except Exception as _e:
+            slog.warning(f"[smart-chat retry] fallback model lookup failed: {_e}")
+
     # 🆕 اگر ریپلای به پیام مدل خاصی زده شده، از همون مدل استفاده کن
     reply_model_used = False
     reply_model_status = None  # None | "used" | "not_found" | "no_credit"
@@ -15074,10 +15097,25 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 # 🆕 اجرای AI با heartbeat برای جلوگیری از QUIC timeout
                 # بدون سقف مصنوعی — از ظرفیت واقعی مدل استفاده شود
                 safe_max_tokens = model_max_output
+                # 🆕 (anti-stuck-loop) — اگر retry است، system prompt را قوی‌تر کن
+                # تا مدل اجباراً action_plan تولید کند یا صراحتاً اعلام کند که نمی‌تواند.
+                _base_sys = f"تو توسعه‌دهنده ارشد پروژه هستی با دسترسی کامل به تمام فایل‌های پروژه. مهم‌ترین کارت فهمیدن دقیق منظور کاربر است — حتی وقتی مبهم، کوتاه یا غیرمستقیم صحبت می‌کند. تاریخچه مکالمه را بخوان تا context کامل را بفهمی. {'مستقیماً مشکل را پیدا کن، کد اصلاح‌شده بنویس و action_plan معتبر JSON ارائه بده.' if has_code_files else 'فایل‌ها در این دور خوانده نشدند — فقط تحلیل و تشخیص ارائه بده. هرگز action_plan با محتوای حدسی تولید نکن.'} اگر قبلاً راه‌حلی پیشنهاد شده و جواب نداده، رویکرد متفاوتی بگیر. هرگز از کاربر نخواه کار دستی انجام دهد. 🔴 هرگز محتوای فایلی را حدس نزن — فقط بر اساس فایل‌هایی که واقعاً دیده‌ای کد بنویس. ⛔ هرگز نگو «دسترسی ندارم»، «در اختیارم نیست»، «دوباره ارسال کنید». ⛔ هرگز فایل موجود را از صفر بازننویس — فقط بخش مربوط به درخواست تغییر کن. قابلیت‌های موجود (state, handlers, UI) حذف نکن. 🔴 فایل‌های بزرگ (>200 خط): حتماً از modify_sections استفاده کن — سیستم بازنویسی‌های مخرب رو خودکار حذف میکنه! تعداد خطوط هر فایل در عنوان نوشته شده. کلمات کاربر را دقیق بخوان: «فقط»=ONLY، «نباید»=ممنوع. با لحن صمیمی و حرفه‌ای پاسخ بده."
+                if _is_retry:
+                    _retry_addon = (
+                        f"\n\n🚨 این RETRY شمارهٔ {request.retry_attempt} است. "
+                        "پاسخ قبلی شما action_plan نداشت — کاربر در حلقهٔ بی‌نتیجه گیر کرده. "
+                        "این بار **حتماً** یکی از این دو خروجی را تولید کن:\n"
+                        "  ✅ یک action_plan JSON معتبر با حداقل ۱ فایل modify/modify_sections که مشکل را حل می‌کند\n"
+                        "  ✅ یا اگر واقعاً نمی‌توانی fix را تشخیص دهی، صراحتاً action_plan = "
+                        "`{\"files\":[],\"commit_message\":\"cannot_determine_fix:<دلیل>\"}` بزن "
+                        "تا کاربر بداند و مدل دیگری امتحان کند.\n"
+                        "❌ فقط تحلیل بدون action_plan ممنوع است — این loop را ادامه می‌دهد."
+                    )
+                    _base_sys += _retry_addon
                 gen_task = asyncio.create_task(ai_manager.generate(
                     model_id=primary_model,
                     messages=[
-                        Message(role="system", content=f"تو توسعه‌دهنده ارشد پروژه هستی با دسترسی کامل به تمام فایل‌های پروژه. مهم‌ترین کارت فهمیدن دقیق منظور کاربر است — حتی وقتی مبهم، کوتاه یا غیرمستقیم صحبت می‌کند. تاریخچه مکالمه را بخوان تا context کامل را بفهمی. {'مستقیماً مشکل را پیدا کن، کد اصلاح‌شده بنویس و action_plan معتبر JSON ارائه بده.' if has_code_files else 'فایل‌ها در این دور خوانده نشدند — فقط تحلیل و تشخیص ارائه بده. هرگز action_plan با محتوای حدسی تولید نکن.'} اگر قبلاً راه‌حلی پیشنهاد شده و جواب نداده، رویکرد متفاوتی بگیر. هرگز از کاربر نخواه کار دستی انجام دهد. 🔴 هرگز محتوای فایلی را حدس نزن — فقط بر اساس فایل‌هایی که واقعاً دیده‌ای کد بنویس. ⛔ هرگز نگو «دسترسی ندارم»، «در اختیارم نیست»، «دوباره ارسال کنید». ⛔ هرگز فایل موجود را از صفر بازننویس — فقط بخش مربوط به درخواست تغییر کن. قابلیت‌های موجود (state, handlers, UI) حذف نکن. 🔴 فایل‌های بزرگ (>200 خط): حتماً از modify_sections استفاده کن — سیستم بازنویسی‌های مخرب رو خودکار حذف میکنه! تعداد خطوط هر فایل در عنوان نوشته شده. کلمات کاربر را دقیق بخوان: «فقط»=ONLY، «نباید»=ممنوع. با لحن صمیمی و حرفه‌ای پاسخ بده."),
+                        Message(role="system", content=_base_sys),
                         Message(role="user", content=action_prompt)
                     ],
                     max_tokens=safe_max_tokens,
