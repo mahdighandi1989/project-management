@@ -14132,7 +14132,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                           disabled={running}
                                           className="text-[11px] bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 text-white px-2 py-1 rounded whitespace-nowrap flex-shrink-0"
                                         >
-                                          {running ? '⏳ در حال اجرا...' : (status === 'applied_locally' ? '↻ بازاجرا' : '▶️ اجرا با AI')}
+                                          {running
+                                            ? '⏳ در حال اجرا...'
+                                            : (status === 'applied_locally' || status === 'failed_syntax'
+                                                ? '↻ بازاجرا'
+                                                : '▶️ اجرا با AI')}
                                         </button>
                                       )}
                                     </div>
