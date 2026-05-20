@@ -1564,6 +1564,14 @@ async def run_deep_scan(
             all_files.append(p)
             sizes[p] = item.get("size", 0)
 
+        # 🆕 (selective-scan, audit fix #2) — pre-filter snapshot کل tree.
+        # وقتی scope محدود اعمال می‌شود، resolver وابستگی‌ها (در فاز ۲)
+        # باید کل repo را ببیند تا فایل‌های off-scope وابسته را پیدا کند.
+        # اگر این snapshot را نگه نداریم، expand_with_dependencies روی
+        # همان scope محدود کار می‌کند و عملاً هیچ dep جدیدی پیدا نمی‌شود.
+        unfiltered_all_files: List[str] = list(all_files)
+        unfiltered_sizes: Dict[str, int] = dict(sizes)
+
         # 🆕 (selective-scan) — اگر selection داده شده، all_files را قبل از
         # هر کار دیگری فیلتر کن تا تمام pipeline (scoring/reading/scanning)
         # روی همان زیرمجموعه عمل کند.
@@ -1637,15 +1645,28 @@ async def run_deep_scan(
         stacks = _detect_stack(all_files, dep_contents)
 
         # ذخیرهٔ structure
+        # (audit fix #7) — اگر در حال selective scan هستیم، structure را
+        # روی full repo بنویس نه scope محدود؛ وگرنه دفعهٔ بعد که endpoint
+        # `/scan/{id}/sections` از این cache می‌خواند، فقط بخشی از repo
+        # را می‌بیند و picker UI ناقص نشان داده می‌شود.
+        if scan_scope_meta:
+            _struct_files = unfiltered_all_files[:2000]
+            _struct_kinds = {p: _classify_file(p) for p in _struct_files}
+            _struct_count = len(unfiltered_all_files)
+        else:
+            _struct_files = all_files[:2000]
+            _struct_kinds = kinds
+            _struct_count = len(all_files)
         structure = {
             "watched_id": watched_id,
             "repo": repo,
             "branch": branch,
             "scanned_at": now_iso(),
-            "files_count": len(all_files),
+            "files_count": _struct_count,
             "stacks": stacks,
-            "kinds": kinds,
-            "files": all_files[:2000],  # حداکثر ۲۰۰۰ مسیر
+            "kinds": _struct_kinds,
+            "files": _struct_files,
+            "last_scope": scan_scope_meta,  # برای debug/visibility
         }
         try:
             _write_json(STRUCTURE_DIR / f"{watched_id}.json", structure)
@@ -1696,22 +1717,54 @@ async def run_deep_scan(
 
         # 🆕 (selective-scan) — اگر در حال scan انتخابی هستیم و
         # include_dependencies=True، فایل‌های upstream/downstream یک‌سطح
-        # را به all_files اضافه کن (با ترجیح خواندن آن‌ها).
+        # را به all_files اضافه کن.
+        #
+        # (audit fix #2 + #6) — resolver باید `unfiltered_all_files` را
+        # ببیند (نه scope filtered)، وگرنه هیچ dependency خارج از scope
+        # شناسایی نمی‌شود. علاوه بر این، برای detect upstream یک نمونه از
+        # فایل‌های off-scope (پایتون/جاوااسکریپت) هم خوانده می‌شود — وگرنه
+        # فقط dependents از داخل scope پیدا می‌شدند که عملاً همیشه خالی است.
         if scan_scope_meta and include_dependencies:
             try:
                 from .scan_sections import expand_with_dependencies as _ss_expand
+
+                # یک sweep سبک upstream-detection: تا ۸۰ فایل code که
+                # داخل scope نیستند ولی ممکن است selected ها را import کنند.
+                _off_scope_candidates = [
+                    p for p in unfiltered_all_files
+                    if p not in set(all_files)
+                    and p.lower().endswith((".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"))
+                ][:80]
+                _off_scope_contents: Dict[str, str] = {}
+                for _osp in _off_scope_candidates:
+                    if _osp in deep_contents:
+                        continue
+                    try:
+                        _c = await _fetch_file_content(session, repo, _osp, headers, branch, 40000)
+                        if _c:
+                            _off_scope_contents[_osp] = _c
+                    except Exception:
+                        continue
+
+                _merged_contents: Dict[str, str] = dict(deep_contents)
+                _merged_contents.update(_off_scope_contents)
+
                 _expand_result = _ss_expand(
                     selected_files=list(all_files),
-                    all_files=list(all_files) + [p for p in deep_contents.keys() if p not in all_files],
-                    file_contents=deep_contents,
+                    all_files=unfiltered_all_files,  # ← کل repo، نه scope
+                    file_contents=_merged_contents,
                 )
                 _expanded = list(_expand_result.get("expanded") or [])
-                # حالا اگر فایل‌های جدید (upstream/downstream) خارج از
-                # all_files فعلی هستند، آن‌ها را هم اضافه کن
                 _new_deps = [p for p in _expanded if p not in set(all_files)]
                 if _new_deps:
                     all_files = all_files + _new_deps
-                    sizes.update({p: sizes.get(p, 0) for p in _new_deps})
+                    sizes.update({p: unfiltered_sizes.get(p, 0) for p in _new_deps})
+                    # محتویاتی که در sweep اضافی خواندیم را به deep_contents
+                    # هم اضافه کن تا passes آن‌ها را ببینند (ولی هزینهٔ
+                    # خواندن دوباره را ندهند)
+                    for _np in _new_deps:
+                        if _np in _off_scope_contents and _np not in deep_contents:
+                            deep_contents[_np] = _off_scope_contents[_np]
                     scan_scope_meta["dependencies_added"] = len(_new_deps)
                     scan_scope_meta["deps_downstream"] = _expand_result.get("deps_added") or []
                     scan_scope_meta["deps_upstream"] = _expand_result.get("dependents_added") or []
