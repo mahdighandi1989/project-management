@@ -11291,6 +11291,13 @@ class SmartChatRequest(BaseModel):
     linked_task: Optional[dict] = None
     screenshots: Optional[List[dict]] = None
     inspector_mode: Optional[str] = None  # "chat" | "visual_debug"
+    # 🆕 (v3 regression fix) — flag برای skip کردن intent detection.
+    # وقتی frontend در حالت stepwise execution است، هر step را پشت سرهم
+    # به smart-chat می‌فرستد. اگر intent detection این پیام‌ها را
+    # scan_initiated کند، executeMultiStep response را نمی‌فهمد و
+    # هیچ action_plan ای تولید نمی‌شود. این flag از این conflict جلوگیری
+    # می‌کند. default True (رفتار v3 معمولی).
+    enable_selective_scan: bool = True
     # 🔗 (Bug C7 — Bridge Phase 2) — اتصال به تسک مرکز نظارت
     # اگر داده شود، system prompt شامل بلوک «🎯 کانتکست تسک متصل» می‌شود با
     # acceptance_criteria + remaining_parts + task_steps + done_parts + scan_metadata.
@@ -13589,13 +13596,16 @@ async def enhance_prompt_endpoint(request: EnhancePromptRequest, db: Session = D
 9. **تجزیه درخواست پیچیده**: اگر درخواست شامل چند کار مستقل یا فایل‌های مختلف هست:
    - آخر پرامپت ساختارمند، یک بخش `## مراحل اجرا:` اضافه کن
    - هر مرحله یک خط با فرمت `[STEP N] توضیح مرحله` باشه
+   - **هر توضیح مرحله باید کوتاه (≤ ۲۰ کلمه) و فقط task-specific باشد** —
+     قوانین سازگاری/anti-rewrite در base prompt هست و در هر step description
+     **تکرار نشود** (executeMultiStep خودش این rules را به stepPrompt اضافه می‌کند)
    - مراحل باید مستقل و قابل اجرای جداگانه باشن
    - اگه درخواست ساده هست و نیاز به تجزیه نداره (فقط ۱ کار)، بخش مراحل نذار
    - ⚠️ اگر کاربر صراحتاً گفته «فقط مرحله اول» یا «فقط مرحله X» یا تعداد مراحل مشخص کرده → حتماً رعایت کن و فقط همان تعداد مرحله بساز
-   - ⚠️ در پرامپت هر مرحله حتماً این قوانین سازگاری را تزریق کن:
-     * «تمام نام‌گذاری‌ها (event names, function names, CSS classes, variable names) باید در تمام مراحل یکسان باشند»
-     * «هر مرحله باید روی نتیجه مراحل قبلی بسازد — نه اینکه فایل‌ها را از صفر بنویسد»
-     * «هرگز فایلی را که در مرحله قبل تغییر داده شد از صفر بازننویس — فقط تغییرات جدید مرحله فعلی اضافه شود»
+   - 🚫 قوانین سازگاری (نام‌گذاری یکسان، ساخت روی مراحل قبلی، عدم بازنویسی)
+     فقط **یک بار** در ابتدای base prompt بنویس، نه در هر step description.
+     مثال خوب: `[STEP 1] افزودن فیلد API_V1_PREFIX به Settings در app/config.py`
+     مثال بد: `[STEP 1] افزودن فیلد ... — تمام نام‌گذاری‌ها باید یکسان ... این مرحله باید روی ... هرگز فایلی را که در مرحله قبل ...`
 10. **ایمنی دیپلوی**: در پرامپت تاکید کن:
    - کد تولیدی باید بدون هیچ خطای سینتکس، import و تایپ باشد
    - وابستگی‌ها با نسخه سازگار پین شوند — هرگز نسخه‌ای که مطمئن نیستی وجود داره پین نکن
@@ -13730,7 +13740,20 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
     # (که سطحی است)، یک deep selective scan trigger می‌کنیم. خروجی به همان
     # session لاگ می‌شود و فرانت‌اند با reload messages آن را نمایش می‌دهد.
     # اگر intent تشخیص نشد → smart-chat معمولی ادامه می‌یابد.
+    # 🆕 (v3 regression fix) — اگر frontend درخواست کرده intent disable
+    # باشد (مثلاً stepwise execution در حال اجراست)، intent path کاملاً
+    # skip می‌شود. بدون این، executeMultiStep response های scan_initiated
+    # را نمی‌فهمد و هیچ action_plan ای تولید نمی‌شود → 0 file changed.
+    _selective_scan_disabled = not getattr(request, "enable_selective_scan", True)
+    if _selective_scan_disabled:
+        slog.info("[smart-chat] selective-scan intent path disabled by request flag — direct to chat")
+    # یک sentinel exception برای exit تمیز از intent path. توسط except کلی
+    # outer گرفته می‌شود و fallback به smart-chat معمولی انجام می‌گیرد.
+    class _SkipIntentPath(Exception):
+        pass
     try:
+        if _selective_scan_disabled:
+            raise _SkipIntentPath()
         from ...services.inspector_intent_resolver import resolve_intent_from_chat_context
         from ...services.inspector_scan_bridge import (
             trigger_inspector_selective_scan,
