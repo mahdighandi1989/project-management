@@ -282,6 +282,51 @@ async def trigger_inspector_selective_scan(
             )
             _ACTIVE_SCANS[session_id]["status"] = "completed"
             _ACTIVE_SCANS[session_id]["result"] = result
+
+            # 🆕 (v3 resilience) — guarantee یک پیام scan_complete حتماً
+            # در DB لاگ می‌شود حتی اگر run_deep_scan خود به دلیلی log
+            # ضعیف کرد. اگر result حاوی proposals_count==0 است یا
+            # result اصلاً موجود نیست، یک پیام informational ساده log کن.
+            try:
+                # چک می‌کنیم آیا scan_complete پیام در DB موجود است
+                from ..core.database import SessionLocal
+                from ..models.inspector_session import InspectorMessage as _IM
+                _db = SessionLocal()
+                try:
+                    _has_complete = (
+                        _db.query(_IM)
+                        .filter(_IM.session_id == int(session_id))
+                        .filter(_IM.action_type == "scan_complete")
+                        .order_by(_IM.id.desc())
+                        .first()
+                    )
+                finally:
+                    _db.close()
+                if not _has_complete:
+                    # log یک پیام fallback
+                    _proposals_count = (
+                        (result or {}).get("proposals_count", 0)
+                        if isinstance(result, dict) else 0
+                    )
+                    log_scan_message(
+                        session_id=session_id,
+                        role="assistant",
+                        content=(
+                            f"✅ اسکن موردی تمام شد — {_proposals_count} پیشنهاد "
+                            "(ولی پیام scan_complete اصلی لاگ نشد — احتمالاً "
+                            "extra_data بزرگ بود و در DB رد شد). "
+                            "برای دیدن proposals لطفاً صفحه را refresh کنید "
+                            "یا scan را با مدل سریع‌تر تکرار کنید."
+                        ),
+                        action_type="scan_complete_fallback",
+                        extra_data={
+                            "kind": "selective_scan_complete_fallback",
+                            "scan_id": scan_id,
+                            "proposals_count": _proposals_count,
+                        },
+                    )
+            except Exception as _hc_e:
+                logger.warning(f"scan_complete check/fallback failed: {_hc_e}")
         except asyncio.CancelledError:
             # 🆕 (v2 audit A4) — تشخیص cancel صریح
             _ACTIVE_SCANS[session_id]["status"] = "cancelled"

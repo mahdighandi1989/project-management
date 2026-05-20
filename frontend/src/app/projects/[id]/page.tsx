@@ -13521,6 +13521,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                       </div>
                     </div>
                     <div className="flex items-center gap-1">
+                      {/* 🆕 (v3) — دکمه manual refresh: گاهی scan_complete پیام
+                          ساعت‌ها بعد لاگ می‌شود ولی polling ما را گول می‌زند.
+                          این دکمه force-reloads messages از DB. */}
+                      {inspectorSessionId && (
+                        <button
+                          onClick={() => restoreInspectorChatFromDb(true)}
+                          className="p-2 bg-white/20 rounded-lg hover:bg-white/30 transition text-sm"
+                          title="بارگذاری مجدد پیام‌های session از DB (مفید اگر scan تمام شد ولی پیام نیامد)"
+                          disabled={inspectorChatRestoring}
+                        >
+                          {inspectorChatRestoring ? '⏳' : '🔄'}
+                        </button>
+                      )}
                       {/* دکمه آرشیو سشن */}
                       {inspectorSessionId && inspectorChatMessages.length > 0 && (
                         <button

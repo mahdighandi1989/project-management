@@ -174,6 +174,11 @@ def log_scan_message(
     """ثبت یک پیام در scan session.
 
     role: "system" | "assistant" | "action" | "user"
+
+    🆕 (v3 resilience) — اگر extra_data بسیار بزرگ شد (>500KB JSON)،
+    سعی می‌کنیم با truncate کردن content فایل‌های داخل scan_proposals
+    حجم را کم کنیم. اگر باز هم insert شکست خورد، حداقل پیام بدون
+    extra_data لاگ می‌شود تا کاربر بفهمد scan تمام شد.
     """
     if session_id is None:
         return
@@ -183,6 +188,39 @@ def log_scan_message(
     except Exception:
         return
 
+    # 🆕 (v3 resilience) — تلاش برای serialize با bounds
+    def _serialize_safe(ed: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not ed:
+            return None
+        try:
+            s = json.dumps(ed, ensure_ascii=False)
+        except Exception as ser_e:
+            logger.warning(f"scan_inspector: extra_data serialize failed: {ser_e}")
+            return None
+        # اگر خیلی بزرگ، بنده strong_prompt ها را truncate کن
+        if len(s) > 500_000:
+            try:
+                trimmed = dict(ed)
+                if isinstance(trimmed.get("scan_proposals"), list):
+                    new_props = []
+                    for p in trimmed["scan_proposals"]:
+                        if isinstance(p, dict):
+                            p_copy = dict(p)
+                            # strong_prompt معمولاً بزرگ‌ترین بخش است
+                            if isinstance(p_copy.get("strong_prompt"), str) and len(p_copy["strong_prompt"]) > 5000:
+                                p_copy["strong_prompt"] = p_copy["strong_prompt"][:5000] + "\n\n[... truncated ...]"
+                            if isinstance(p_copy.get("description"), str) and len(p_copy["description"]) > 3000:
+                                p_copy["description"] = p_copy["description"][:3000] + "\n\n[... truncated ...]"
+                            new_props.append(p_copy)
+                        else:
+                            new_props.append(p)
+                    trimmed["scan_proposals"] = new_props
+                s = json.dumps(trimmed, ensure_ascii=False)
+                logger.info(f"scan_inspector: extra_data trimmed from large to {len(s)} bytes")
+            except Exception:
+                pass
+        return s
+
     db = SessionLocal()
     try:
         msg = InspectorMessage(
@@ -191,13 +229,35 @@ def log_scan_message(
             content=str(content)[:50000],
             action_type=action_type,
             model_id=model_id,
-            extra_data=json.dumps(extra_data, ensure_ascii=False) if extra_data else None,
+            extra_data=_serialize_safe(extra_data),
         )
         db.add(msg)
         db.commit()
     except Exception as e:
-        logger.debug(f"scan_inspector: log_message failed: {e}")
+        logger.warning(f"scan_inspector: log_message failed (will retry without extra_data): {e}")
         db.rollback()
+        # 🆕 (v3 resilience) — fallback: حداقل پیام بدون extra_data لاگ شود
+        # تا کاربر بفهمد scan تمام شد، حتی اگر proposals data از دست رفت
+        try:
+            db2 = SessionLocal()
+            try:
+                msg2 = InspectorMessage(
+                    session_id=int(session_id),
+                    role=role,
+                    content=(
+                        str(content)[:50000]
+                        + "\n\n⚠️ [extra_data ذخیره نشد به دلیل خطای DB — proposals/scan_proposals data lost]"
+                    )[:50000],
+                    action_type=action_type,
+                    model_id=model_id,
+                    extra_data=None,
+                )
+                db2.add(msg2)
+                db2.commit()
+            finally:
+                db2.close()
+        except Exception as e2:
+            logger.error(f"scan_inspector: fallback log also failed: {e2}")
     finally:
         db.close()
 
