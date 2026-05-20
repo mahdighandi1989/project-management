@@ -6396,6 +6396,7 @@ AC = «طراحی شیک‌تر باشد»:
         selected_sections: Optional[List[str]] = None,
         custom_paths: Optional[List[str]] = None,
         include_dependencies: bool = True,
+        focus_notes: Optional[str] = None,
     ) -> Dict[str, Any]:
         """اسکن سریع پروژه.
 
@@ -6441,6 +6442,7 @@ AC = «طراحی شیک‌تر باشد»:
                         "include_dependencies": include_dependencies,
                         "scoped_files": len(filtered),
                         "total_files": len(all_files_for_scope),
+                        "focus_notes": (focus_notes or "").strip() or None,
                     }
                 else:
                     # (audit fix #4) — اگر selection هیچ فایلی match نکرد،
@@ -6472,6 +6474,7 @@ AC = «طراحی شیک‌تر باشد»:
             _ss = scope_meta.get("selected_sections") or []
             _cp = scope_meta.get("custom_paths") or []
             _inc = scope_meta.get("include_dependencies", True)
+            _fn = scope_meta.get("focus_notes") or ""
             scope_block = (
                 "\n# 🎯 محدودهٔ اسکن (Selective Scan)\n"
                 "این یک اسکن **انتخابی** است — فقط روی این بخش‌ها/مسیرها تمرکز کن:\n"
@@ -6485,6 +6488,14 @@ AC = «طراحی شیک‌تر باشد»:
                     else "- task ها فقط روی فایل‌های انتخاب‌شده متمرکز باشند (بدون expand به وابستگی‌ها).\n"
                 )
                 + "- مشکلات یا تسک‌هایی که خارج از این scope هستند، حتی اگر مهم باشند، در این scan ذکر نکن.\n"
+                + (
+                    f"\n## ⚠️ توضیحات نقطه‌ای کاربر (از این بسیار جدی استفاده کن)\n"
+                    f"کاربر دربارهٔ همین scope این یادداشت را داده — به این مشخصاً جواب بده، "
+                    f"task ها را حول این موارد بساز، حتی اگر باگ هایی هم بیرون از این یادداشت دیدی، "
+                    f"اولویت با این موارد است:\n\n{_fn.strip()}\n"
+                    if _fn
+                    else ""
+                )
             )
 
         scan_prompt = f"""تو یک Senior Code Auditor و Security Engineer هستی. این پروژه را با دقت بررسی کن و یک فهرست کامل از «نیازها، ایرادات، تناقضات، آسیب‌پذیری‌ها و پیشنهادات بهبود» تهیه کن.

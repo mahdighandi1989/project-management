@@ -1434,6 +1434,7 @@ async def run_deep_scan(
     selected_sections: Optional[List[str]] = None,
     custom_paths: Optional[List[str]] = None,
     include_dependencies: bool = True,
+    focus_notes: Optional[str] = None,
 ) -> Dict[str, Any]:
     """اجرای کامل deep scan روی یک watched.
 
@@ -1596,6 +1597,7 @@ async def run_deep_scan(
                         "include_dependencies": include_dependencies,
                         "before_filter": len(all_files),
                         "after_filter": len(_filtered),
+                        "focus_notes": (focus_notes or "").strip() or None,
                     }
                     all_files = _filtered
                     # sizes را هم به همان زیرمجموعه محدود کن
@@ -1905,6 +1907,41 @@ async def run_deep_scan(
                 message=f"در حال {pass_label}",
                 passes_done=passes_done,
             )
+            # 🆕 (selective-scan + focus-notes) — اگر scope محدود است یا
+            # کاربر یادداشت نقطه‌ای داده، یک بلوک به پایان pass prompt اضافه
+            # کن. این بخش به هر pass بدون استثنا تزریق می‌شود تا همه
+            # phaseها متمرکز بمانند.
+            _extra_block = ""
+            if scan_scope_meta:
+                _ss = scan_scope_meta.get("selected_sections") or []
+                _cp = scan_scope_meta.get("custom_paths") or []
+                _inc = scan_scope_meta.get("include_dependencies", True)
+                _fn = scan_scope_meta.get("focus_notes") or ""
+                _extra_block = (
+                    "\n\n# 🎯 محدودهٔ اسکن (Selective Scan — اولویت قطعی)\n"
+                    "این یک اسکن انتخابی است. روی همین scope تمرکز کن و "
+                    "task هایی خارج از این محدوده پیشنهاد نده.\n"
+                    + (f"- بخش‌های انتخاب‌شده: {', '.join(_ss)}\n" if _ss else "")
+                    + (f"- مسیرهای سفارشی: {', '.join(_cp)}\n" if _cp else "")
+                    + (
+                        "- 🔗 وابستگی‌ها هم پوشش داده شوند: upstream "
+                        "(فایل‌هایی که این‌ها را import می‌کنند) + downstream "
+                        "(فایل‌هایی که این‌ها import می‌کنند). در فایل‌های فوق "
+                        "هر دو دسته اضافه شده‌اند.\n"
+                        if _inc
+                        else "- فقط فایل‌های انتخاب‌شده (بدون expand به وابستگی‌ها).\n"
+                    )
+                )
+                if _fn:
+                    _extra_block += (
+                        "\n## ⚠️ توضیحات نقطه‌ای کاربر (HIGHEST PRIORITY)\n"
+                        "کاربر دربارهٔ همین scope این یادداشت را داده. "
+                        "این مهم‌ترین راهنماست — task هایت را حول این محورها "
+                        "بساز، حتی اگر مشکلات دیگری هم در همان scope دیدی، "
+                        "اولویت با این موارد است:\n\n"
+                        + _fn.strip()
+                        + "\n"
+                    )
             prompt = _build_pass_prompt(
                 pass_id,
                 repo=repo,
@@ -1914,6 +1951,7 @@ async def run_deep_scan(
                 deep_files_blob=deep_files_blob,
                 package_files_blob=package_files_blob,
                 import_graph_summary=import_graph_summary,
+                extra=_extra_block,
             )
             try:
                 # 🆕 (P1) consensus mode: اگر model_ids چندتایی، هر pass با همه
