@@ -527,13 +527,22 @@ async def run_proposal(
                 except ImportError:
                     pass
             elif low.endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")):
-                # heuristic balance check (نه کامل ولی catches gross errors)
-                if content.count("{") != content.count("}"):
-                    raise SyntaxError(f"unbalanced braces in {path}")
-                if content.count("(") != content.count(")"):
-                    raise SyntaxError(f"unbalanced parens in {path}")
-                if content.count("[") != content.count("]"):
-                    raise SyntaxError(f"unbalanced brackets in {path}")
+                # 🆕 (v2 audit) — balance check برای TS/JS با false-positive
+                # بالا روی regex/template literal/string ها. به همین دلیل
+                # فقط در صورت اختلاف **شدید** (> 3) trigger می‌شود تا
+                # gross errors گرفته شود ولی فایل‌های سالم با regex های
+                # نامتوازن داخل string ها blocked نشوند.
+                # برای دقت واقعی، باید parser واقعی (node --check / tsc)
+                # استفاده شود که در runtime container دسترسی نداریم.
+                _diff_brace = abs(content.count("{") - content.count("}"))
+                _diff_paren = abs(content.count("(") - content.count(")"))
+                _diff_bracket = abs(content.count("[") - content.count("]"))
+                if _diff_brace > 3:
+                    raise SyntaxError(f"unbalanced braces (diff={_diff_brace}) in {path}")
+                if _diff_paren > 3:
+                    raise SyntaxError(f"unbalanced parens (diff={_diff_paren}) in {path}")
+                if _diff_bracket > 3:
+                    raise SyntaxError(f"unbalanced brackets (diff={_diff_bracket}) in {path}")
         except SyntaxError as se:
             syntax_errors.append({"path": path, "error": str(se)[:300]})
         except (json.JSONDecodeError, ValueError) as ve:
@@ -706,6 +715,31 @@ async def apply_all_staged(
         _token_for_patch = _ggt()
     except Exception:
         _token_for_patch = ""
+
+    # 🆕 (v2 audit) — اگر patch داریم ولی token خالی است، fast-fail با
+    # پیام واضح. در غیر این صورت `_fetch_file_content` با headers خالی
+    # روی repo خصوصی None برمی‌گرداند و کاربر پیام مبهم patch_fetch_failed
+    # می‌گیرد.
+    _has_patches = any(ch.get("change_kind") == "patch" for ch in files_map.values())
+    if _has_patches and not _token_for_patch:
+        log_scan_message(
+            session_id=session_id,
+            role="assistant",
+            content=(
+                "⛔ **GitHub token موجود نیست** — برای patch resolution نیاز است.\n\n"
+                "برخی از proposalها در حالت patch (برای فایل‌های بزرگ) ساخته شدند که "
+                "نیاز به fetch محتوای فعلی از GitHub دارند. لطفاً GITHUB_TOKEN را در "
+                "settings تنظیم کنید."
+            ),
+            action_type="apply_all_failed",
+            extra_data={
+                "kind": "apply_all_result",
+                "status": "missing_github_token",
+                "code": "missing_github_token",
+            },
+        )
+        return {"success": False, "code": "missing_github_token", "error": "GitHub token موجود نیست"}
+
     _patch_resolution = await _resolve_patches_in_files_map(
         files_map=files_map,
         repo=repo,
