@@ -98,6 +98,122 @@ def _extract_focus_keywords(text: str) -> List[str]:
             out.append(t)
     return out[:12]
 
+
+# 🆕 (v3 chat-history) — تشخیص اینکه آیا پیام جدید ادامهٔ context قبلی
+# است یا یک سؤال/درخواست مستقل. اگر continuation، خلاصه‌ای از context
+# قبلی به focus_notes می‌رود تا scan با اشراف به history کار کند.
+# اگر مستقل، فقط user_message استفاده می‌شود تا scan روی context بی‌ربط
+# منحرف نشود.
+
+# نشانگرهای ارجاعی صریح (کلیدواژه‌هایی که نشان می‌دهند پیام فعلی به
+# چیزی در گذشته اشاره می‌کند)
+_CONTINUATION_MARKERS_FA = (
+    "هم", "دیگه", "اون", "اون رو", "اون یکی", "بعدی", "این یکی",
+    "همچنین", "همینطور", "همون", "همانطور", "ادامه بده", "ادامه‌ش",
+    "و این", "و فایل", "و اون", "بقیه", "بقیه‌ش", "بقیه‌اش",
+    "قبلی", "قبل", "بالا گفت", "بالا گفتم", "گفته بودم",
+)
+_CONTINUATION_MARKERS_EN = (
+    "also", "too", "next one", "the other", "as well", "previously",
+    "earlier", "above", "continue", "rest", "remaining", "that file",
+    "those files", "the same", "and the",
+)
+
+
+def _is_likely_continuation(user_message: str, chat_history: List[Dict[str, Any]]) -> bool:
+    """heuristic: آیا پیام جدید به context قبلی ارجاع دارد؟"""
+    if not chat_history or not user_message:
+        return False
+    msg_low = user_message.lower()
+    # نشانگر ارجاعی صریح
+    for m in _CONTINUATION_MARKERS_FA:
+        if m in user_message:
+            return True
+    for m in _CONTINUATION_MARKERS_EN:
+        if m in msg_low:
+            return True
+    # heuristic keyword overlap: اگر >=۲ کلیدواژه مشترک با ۳ پیام آخر
+    # (پس از فیلتر stopwords)، احتمالاً ادامهٔ همان موضوع است
+    msg_keywords = set(_extract_focus_keywords(user_message))
+    if not msg_keywords:
+        return False
+    recent_text = " ".join(
+        (m.get("content") or "")[:1500]
+        for m in chat_history[-6:]  # ۶ پیام آخر (۳ user + ۳ assistant معمولاً)
+        if m.get("role") in ("user", "assistant")
+    )
+    hist_keywords = set(_extract_focus_keywords(recent_text))
+    return len(msg_keywords & hist_keywords) >= 2
+
+
+# 🆕 (v3 chat-history) — regex برای فایل‌های bare (بدون /) که در پیام
+# assistant ذکر می‌شوند. این نسبت به `_INLINE_PATH_RE` lenient تر است
+# چون می‌خواهیم فایل‌های ساده مثل `auth.ts`, `db.py` را هم گیر بیاوریم.
+# روی پیام user این lenient regex خطرناک است (false positive) ولی روی
+# پیام assistant معمولاً assistant فایل واقعی را ذکر می‌کند.
+_BARE_FILENAME_RE = re.compile(
+    r"(?:^|[\s`\"'(\[])"
+    r"([A-Za-z_][\w-]{0,40}\.(?:py|tsx?|jsx?|mjs|cjs|css|scss|json|ya?ml|sql|md))"
+    r"(?=[\s`\"',.;:\)\]]|$)",
+    re.IGNORECASE,
+)
+
+
+def _extract_paths_from_prior_assistant_msgs(chat_history: List[Dict[str, Any]]) -> List[str]:
+    """فایل‌هایی که در پیام‌های assistant قبلی session ذکر شده‌اند.
+
+    وقتی کاربر می‌گوید «اون فایل قبلی رو هم درست کن» و انکر صریحی ندارد،
+    این فایل‌ها به عنوان scope ضمنی استفاده می‌شوند.
+
+    استخراج هم برای:
+    - مسیرهای کامل (مثل `frontend/src/foo.tsx`) از طریق `_INLINE_PATH_RE`
+    - filename های bare (مثل `auth.ts`) از طریق `_BARE_FILENAME_RE`
+    """
+    if not chat_history:
+        return []
+    paths: List[str] = []
+    seen = set()
+    # ۵ پیام آخر assistant را بررسی کن
+    assistant_msgs = [m for m in chat_history if m.get("role") == "assistant"][-5:]
+    for m in assistant_msgs:
+        content = m.get("content") or ""
+        # مسیرهای کامل
+        for match in _INLINE_PATH_RE.findall(content):
+            p = match if not isinstance(match, tuple) else match[0]
+            p = p.strip()
+            if p and p not in seen:
+                seen.add(p)
+                paths.append(p)
+        # filename های bare — فقط در صورتی که مسیر کامل match نشد یا کمتر بود
+        for match in _BARE_FILENAME_RE.findall(content):
+            p = match.strip() if isinstance(match, str) else (match[0] if match else "")
+            if p and p not in seen:
+                seen.add(p)
+                paths.append(p)
+    return paths[:10]
+
+
+def _summarize_recent_chat(chat_history: List[Dict[str, Any]], limit: int = 3) -> str:
+    """خلاصه‌ای از آخرین پیام‌های user + assistant برای focus_notes context."""
+    if not chat_history:
+        return ""
+    # فقط user و assistant، حداکثر `limit` جفت آخر
+    relevant = [m for m in chat_history if m.get("role") in ("user", "assistant")]
+    if not relevant:
+        return ""
+    tail = relevant[-(limit * 2):]
+    lines: List[str] = []
+    for m in tail:
+        role = m.get("role", "user")
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        # truncate per-message
+        snippet = content[:400] + ("…" if len(content) > 400 else "")
+        prefix = "👤 کاربر" if role == "user" else "🤖 مدل"
+        lines.append(f"{prefix}: {snippet}")
+    return "\n".join(lines)
+
 # ─── الگوهای استخراج فایل از stack trace / متن ─────────────────────
 # Python tracebacks
 _PY_STACK_RE = re.compile(r'File\s+"([^"]+\.py)"', re.IGNORECASE)
@@ -144,6 +260,10 @@ class ResolvedScanIntent:
     # من شبیه‌تر هست».
     semantic_search_only: bool = False
     semantic_keywords: List[str] = field(default_factory=list)
+    # 🆕 (v3 chat-history) — آیا این پیام ادامهٔ context قبلی session است؟
+    # اگر True، scan هم به context قبلی توجه دارد. اگر False، فقط درخواست
+    # فعلی استفاده می‌شود تا context بی‌ربط منحرف‌کننده نباشد.
+    is_continuation: bool = False
 
 
 def _has_trigger_keyword(text: str) -> List[str]:
@@ -288,6 +408,7 @@ def resolve_intent_from_chat_context(
     linked_task: Optional[Dict[str, Any]] = None,
     screenshots: Optional[List[Dict[str, Any]]] = None,
     mode: str = "chat",  # "chat" | "visual_debug"
+    chat_history: Optional[List[Dict[str, Any]]] = None,  # 🆕 [{role, content}]
 ) -> ResolvedScanIntent:
     """تشخیص intent + استخراج پارامترهای scan.
 
@@ -300,6 +421,22 @@ def resolve_intent_from_chat_context(
     # 🆕 (v2 M1) — focus_notes را زودتر بسازیم تا در مسیر vague-fallback
     # هم در دسترس باشد. قبلاً تنها در بخش پایانی ساخته می‌شد.
     _focus_parts: List[str] = [user_message]
+
+    # 🆕 (v3 chat-history) — اگر پیام جدید ادامهٔ context قبلی است،
+    # خلاصه‌ای از ۳ پیام آخر را به focus_notes اضافه کن. در غیر این صورت
+    # عمداً context قبلی را نادیده بگیر تا scan روی موضوع جدید متمرکز
+    # باشد بدون آلودگی.
+    _is_continuation = _is_likely_continuation(user_message, chat_history or [])
+    if _is_continuation:
+        _hist_summary = _summarize_recent_chat(chat_history or [], limit=3)
+        if _hist_summary:
+            _focus_parts.append(
+                f"\n[📜 context پیشین این session (ادامهٔ همان موضوع):]\n"
+                f"{_hist_summary}\n"
+                f"⚠️ scan باید این context را برای فهم درخواست در نظر بگیرد، "
+                f"ولی فقط روی درخواست **اخیر** کاربر متمرکز شود."
+            )
+
     _early_log_summary = _summarize_logs(backend_logs or [], limit=3)
     if _early_log_summary:
         _focus_parts.append(f"\n[خلاصهٔ backend logs اخیر:]\n{_early_log_summary}")
@@ -371,8 +508,21 @@ def resolve_intent_from_chat_context(
             secs.add("backend")
         if frontend_url or page_url or console_logs:
             secs.add("frontend")
+        # 🆕 (v3 chat-history) — اگر continuation است، chat history خودش
+        # یک anchor است. از scan قبلی فایل‌ها قابل استخراج هستند.
+        # paths از scan_complete های قبلی برداشت کنیم.
+        if not secs and _is_continuation and chat_history:
+            try:
+                prior_paths = _extract_paths_from_prior_assistant_msgs(chat_history)
+                if prior_paths:
+                    custom_paths.extend(prior_paths)
+            except Exception:
+                pass
         if secs:
             selected_sections = sorted(secs)
+        elif custom_paths:
+            # ممکن است continuation فایل‌های قبلی را برگرداند
+            pass
         elif matched and any(_is_strong_keyword(k) for k in matched):
             # 🆕 (v2 M1) — کاربر کلیدواژهٔ قوی استفاده کرده ولی هیچ
             # URL/log/فایل صریحی نداده. به جای no_anchor، با semantic
@@ -402,6 +552,7 @@ def resolve_intent_from_chat_context(
                 extracted_files_from_logs=[],
                 semantic_search_only=True,
                 semantic_keywords=_sem_kws,
+                is_continuation=_is_continuation,
             )
         else:
             # هیچ سرنخی برای scope وجود ندارد — should_scan را خاموش کن
@@ -436,4 +587,5 @@ def resolve_intent_from_chat_context(
         confidence=conf,
         matched_keywords=matched,
         extracted_files_from_logs=files_from_be + files_from_fe,
+        is_continuation=_is_continuation,
     )

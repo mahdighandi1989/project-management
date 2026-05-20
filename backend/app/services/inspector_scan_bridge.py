@@ -252,6 +252,8 @@ async def trigger_inspector_selective_scan(
                     "include_dependencies": intent.include_dependencies,
                     "visual_debug": intent.visual_debug,
                     "confidence": intent.confidence,
+                    # 🆕 (v3 chat-history) — flag for UI
+                    "is_continuation": getattr(intent, "is_continuation", False),
                 },
             },
         )
