@@ -59,7 +59,14 @@ _SECTION_PATTERNS: List[Tuple[str, str, str, List[str]]] = [
 
 
 def _normalize_path(p: str) -> str:
-    return p.replace("\\", "/").strip().lstrip("./").rstrip("/")
+    # ⚠️ زمانی `.lstrip("./")` بود — ولی `lstrip` با مجموعه‌کاراکتر کار
+    # می‌کند نه prefix، پس `.github/...` به `github/...` تبدیل می‌شد
+    # (نقطهٔ ابتدا حذف می‌شد). این برای dotfile های ریشه (`.env`,
+    # `.gitignore`, `.github/`) فاجعه است.
+    s = p.replace("\\", "/").strip().rstrip("/")
+    if s.startswith("./"):
+        s = s[2:]
+    return s
 
 
 def detect_sections(all_files: List[str]) -> List[Dict[str, object]]:
@@ -191,7 +198,17 @@ def filter_files_by_selection(
 
 _PY_IMPORT_RE = re.compile(r"^\s*(?:from\s+([\w\.]+)\s+import|import\s+([\w\.]+))", re.MULTILINE)
 _JS_IMPORT_RE = re.compile(
-    r"""(?:^|[\s;])(?:import\s+(?:[\w*\s,{}]+\s+from\s+)?|require\s*\()['"]([^'"]+)['"]""",
+    # پشتیبانی از:
+    #   import X from 'path'
+    #   import 'path'
+    #   require('path')
+    #   export { x } from 'path'       ← (audit fix #5) barrel re-exports
+    #   export * from 'path'
+    r"""(?:^|[\s;])(?:"""
+    r"""import\s+(?:[\w*\s,{}]+\s+from\s+)?"""
+    r"""|export\s+(?:\*|\{[^}]*\})\s+from\s+"""
+    r"""|require\s*\("""
+    r""")['"]([^'"]+)['"]""",
     re.MULTILINE,
 )
 

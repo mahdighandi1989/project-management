@@ -6409,12 +6409,20 @@ AC = «طراحی شیک‌تر باشد»:
         if not watched:
             raise ValueError("پروژه یافت نشد")
 
-        ctx = await self.build_project_context(watched.repo_full_name)
+        # (audit fix #4) — وقتی scope داریم، نیاز به تره بزرگ‌تر داریم تا
+        # سکشن‌های انتخابی واقعاً فایل match کنند. (پیش‌فرض ۸۰ بسیار کم بود
+        # و انتخاب کاربر اغلب صفر فایل match می‌کرد، در حالی که endpoint
+        # /sections از ۵۰۰ استفاده می‌کند → ناهمگنی.)
+        _need_full_tree = bool(selected_sections or custom_paths)
+        ctx = await self.build_project_context(
+            watched.repo_full_name,
+            max_tree=500 if _need_full_tree else 80,
+        )
 
         # 🆕 (selective-scan) — اگر کاربر selection داده، files_sample را
         # محدود به همان بخش‌ها کن تا prompt هم محدود شود.
         scope_meta: Dict[str, Any] = {}
-        if selected_sections or custom_paths:
+        if _need_full_tree:
             try:
                 from .scan_sections import detect_sections, filter_files_by_selection
                 all_files_for_scope = list(ctx.get("files_sample") or [])
@@ -6427,13 +6435,25 @@ AC = «طراحی شیک‌تر باشد»:
                 )
                 if filtered:
                     ctx["files_sample"] = filtered[:80]
-                scope_meta = {
-                    "selected_sections": list(selected_sections or []),
-                    "custom_paths": list(custom_paths or []),
-                    "include_dependencies": include_dependencies,
-                    "scoped_files": len(filtered),
-                    "total_files": len(all_files_for_scope),
-                }
+                    scope_meta = {
+                        "selected_sections": list(selected_sections or []),
+                        "custom_paths": list(custom_paths or []),
+                        "include_dependencies": include_dependencies,
+                        "scoped_files": len(filtered),
+                        "total_files": len(all_files_for_scope),
+                    }
+                else:
+                    # (audit fix #4) — اگر selection هیچ فایلی match نکرد،
+                    # silent fallback به اسکن کلی خطرناک است (prompt
+                    # scope_block اضافه می‌کند ولی فایل‌ها همان full
+                    # sample اند). خطای صریح بده تا کاربر متوجه شود.
+                    raise ValueError(
+                        "هیچ فایلی با selection match نشد. مسیر/section های انتخابی را بررسی کنید "
+                        f"(checked {len(all_files_for_scope)} files in tree). "
+                        f"sections={selected_sections}, custom_paths={custom_paths}"
+                    )
+            except ValueError:
+                raise
             except Exception as _scope_err:
                 # اگر فیلتر شکست خورد، scope را نادیده بگیر ولی scan را قطع نکن
                 scope_meta = {"error": str(_scope_err)[:200]}

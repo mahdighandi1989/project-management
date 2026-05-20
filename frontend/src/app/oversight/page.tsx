@@ -2620,6 +2620,7 @@ export default function OversightPage() {
     setSectionPicker(null);
     setSectionPickerSelected(new Set());
     setSectionPickerCustomPaths('');
+    setSectionPickerIncludeDeps(true);
   };
 
   const confirmSectionPicker = async () => {
