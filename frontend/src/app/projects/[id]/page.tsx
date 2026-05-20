@@ -4505,6 +4505,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
     const collectedActionFiles: any[] = [];
     const collectedAnalysis: string[] = [];
+    // 🆕 (v3 safety-net) — فایل‌هایی که در stack trace ذکر شده‌اند ولی AI
+    // در action_plan قرار نداده — این یعنی فکس احتمالاً ناقص است
+    const collectedStackTraceWarnings: string[] = [];
     let commitMessage = '';
     let allFilesWereRead = true;
     let lastModelUsed = '';
@@ -4643,6 +4646,16 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           if (stepActionPlan.commit_message) commitMessage = stepActionPlan.commit_message;
         }
 
+        // 🆕 (v3 safety-net) — جمع‌آوری stack-trace warning ها از هر مرحله
+        const stepStackWarning = (stepActionPlan as any)?._stack_trace_warning;
+        if (stepStackWarning?.missing_from_action_plan?.length) {
+          for (const missingFile of stepStackWarning.missing_from_action_plan) {
+            if (!collectedStackTraceWarnings.includes(missingFile)) {
+              collectedStackTraceWarnings.push(missingFile);
+            }
+          }
+        }
+
         // نمایش نتیجه مرحله
         setInspectorChatMessages(prev => [...prev, {
           id: `ms_result_${i}_${Date.now()}`,
@@ -4674,6 +4687,18 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     if (collectedActionFiles.length > 0) {
       finalContent += collectedActionFiles.map(f => `- \`${f.path}\` (${f.operation || 'modify'})`).join('\n');
       finalContent += '\n\n';
+    }
+    // 🆕 (v3 safety-net) — هشدار بزرگ اگر AI فایل‌های stack-traced را skip کرده
+    const ctfNotInActionPlan = collectedStackTraceWarnings.filter(
+      f => !collectedActionFiles.some(af => af.path === f)
+    );
+    if (ctfNotInActionPlan.length > 0) {
+      finalContent += `\n\n## ⚠️ هشدار جدی — fix احتمالاً ناقص است\n\n`;
+      finalContent += `فایل‌های زیر در **stack trace خطا** ذکر شده‌اند ولی AI آن‌ها را در action_plan قرار نداده:\n\n`;
+      finalContent += ctfNotInActionPlan.map(f => `- 🚨 \`${f}\``).join('\n');
+      finalContent += `\n\nAI ممکن است این فایل‌ها را اشتباه «صحیح» تشخیص داده باشد. `;
+      finalContent += `اگر deploy همچنان شکست خورد، محتوای فعلی این فایل‌ها را روی GitHub چک کنید — `;
+      finalContent += `احتمالاً همان خط مشکل‌دار همچنان موجود است.\n\n`;
     }
     finalContent += collectedAnalysis.map((a, idx) => `**مرحله ${idx + 1}:** ${a.slice(0, 200)}`).join('\n\n');
 
