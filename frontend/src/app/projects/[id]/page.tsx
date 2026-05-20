@@ -13521,17 +13521,76 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                       </div>
                     </div>
                     <div className="flex items-center gap-1">
-                      {/* 🆕 (v3) — دکمه manual refresh: گاهی scan_complete پیام
-                          ساعت‌ها بعد لاگ می‌شود ولی polling ما را گول می‌زند.
-                          این دکمه force-reloads messages از DB. */}
+                      {/* 🆕 (v3) — دکمه manual refresh */}
                       {inspectorSessionId && (
                         <button
                           onClick={() => restoreInspectorChatFromDb(true)}
                           className="p-2 bg-white/20 rounded-lg hover:bg-white/30 transition text-sm"
-                          title="بارگذاری مجدد پیام‌های session از DB (مفید اگر scan تمام شد ولی پیام نیامد)"
+                          title="بارگذاری مجدد پیام‌های session از DB"
                           disabled={inspectorChatRestoring}
                         >
                           {inspectorChatRestoring ? '⏳' : '🔄'}
+                        </button>
+                      )}
+                      {/* 🆕 (v3 diagnostic) — دکمه تشخیص: وقتی scan تمام شد
+                          ولی پیامی نیامد، این دکمه دقیقاً می‌گوید چه شد. */}
+                      {inspectorSessionId && (
+                        <button
+                          onClick={async () => {
+                            try {
+                              const res = await fetch(
+                                `${API_BASE}/api/render/inspector/selective-scan/${inspectorSessionId}/debug`,
+                              );
+                              const data = await res.json();
+                              // ساخت گزارش کاربرپسند
+                              const lines: string[] = [];
+                              lines.push('## 🔍 وضعیت تشخیصی scan');
+                              const ass = data.active_scan_state || {};
+                              lines.push(`- **وضعیت scan**: ${ass.status || 'idle'}`);
+                              if (ass.started_at) lines.push(`- شروع: ${ass.started_at}`);
+                              if (ass.phase) lines.push(`- آخرین phase: ${ass.phase}`);
+                              if (ass.message) lines.push(`- پیام: ${ass.message}`);
+                              if (ass.error) lines.push(`- ❌ خطا: ${ass.error}`);
+                              lines.push(`\n## 📊 وضعیت DB`);
+                              lines.push(`- مجموع پیام‌ها: ${data.total_messages ?? 'N/A'}`);
+                              ['scan_complete', 'scan_complete_fallback', 'scan_error', 'scan_cancelled'].forEach(at => {
+                                const m = data[`latest_${at}`];
+                                if (m) {
+                                  lines.push(`- ✅ آخرین \`${at}\`: id=${m.id}, زمان=${m.timestamp}`);
+                                  lines.push(`  - "${(m.content_preview || '').slice(0, 100)}..."`);
+                                } else {
+                                  lines.push(`- ❌ هیچ \`${at}\` در DB نیست`);
+                                }
+                              });
+                              if (data.recent_messages?.length) {
+                                lines.push(`\n## 📜 ۱۰ پیام آخر در DB`);
+                                data.recent_messages.forEach((m: any) => {
+                                  lines.push(
+                                    `- id=${m.id} role=${m.role} action=${m.action_type || '—'} ` +
+                                    `extra=${m.extra_data_size}b at ${m.timestamp}\n  "${(m.content_preview || '').slice(0, 80)}..."`,
+                                  );
+                                });
+                              }
+                              if (data.db_error) lines.push(`\n⚠️ DB error: ${data.db_error}`);
+                              setInspectorChatMessages(prev => [...prev, {
+                                id: `scan_debug_${Date.now()}`,
+                                role: 'system' as const,
+                                content: lines.join('\n'),
+                                timestamp: new Date(),
+                              }]);
+                            } catch (e: any) {
+                              setInspectorChatMessages(prev => [...prev, {
+                                id: `scan_debug_err_${Date.now()}`,
+                                role: 'system' as const,
+                                content: `❌ خطا در دریافت debug info: ${e?.message || 'unknown'}`,
+                                timestamp: new Date(),
+                              }]);
+                            }
+                          }}
+                          className="p-2 bg-white/20 rounded-lg hover:bg-white/30 transition text-sm"
+                          title="نمایش وضعیت تشخیصی scan (وقتی scan تمام شد ولی پیامی نیامد)"
+                        >
+                          🩺
                         </button>
                       )}
                       {/* دکمه آرشیو سشن */}

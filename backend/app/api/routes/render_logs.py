@@ -18373,6 +18373,74 @@ async def inspector_selective_scan_cancel(session_id: int):
     return {"success": cancelled, "session_id": session_id}
 
 
+@router.get("/inspector/selective-scan/{session_id}/debug")
+async def inspector_selective_scan_debug(session_id: int):
+    """🆕 (v3 diagnostic) — نمایش وضعیت دقیق scan + آخرین messages.
+
+    این endpoint برای debug است وقتی scan تمام می‌شود ولی هیچ پیامی
+    در chat ظاهر نمی‌شود. شامل:
+    - وضعیت _ACTIVE_SCANS[session_id]
+    - تعداد کل messages در session
+    - آخرین ۱۰ پیام (id, role, action_type, timestamp, content[:200])
+    - آیا scan_complete (یا scan_complete_fallback) موجود است
+    """
+    from ...services.inspector_scan_bridge import _ACTIVE_SCANS, read_inspector_scan_progress
+    info = read_inspector_scan_progress(session_id)
+    active_raw = _ACTIVE_SCANS.get(session_id)
+    out = {
+        "session_id": session_id,
+        "active_scan_state": info,
+        "active_scan_raw_keys": list(active_raw.keys()) if active_raw else [],
+    }
+    # خواندن messages
+    try:
+        from ...core.database import SessionLocal
+        from ...models.inspector_session import InspectorMessage
+        db = SessionLocal()
+        try:
+            total = db.query(InspectorMessage).filter(InspectorMessage.session_id == int(session_id)).count()
+            recent = (
+                db.query(InspectorMessage)
+                .filter(InspectorMessage.session_id == int(session_id))
+                .order_by(InspectorMessage.id.desc())
+                .limit(10)
+                .all()
+            )
+            out["total_messages"] = total
+            out["recent_messages"] = [
+                {
+                    "id": m.id,
+                    "role": m.role,
+                    "action_type": m.action_type,
+                    "timestamp": m.timestamp.isoformat() if m.timestamp else None,
+                    "content_preview": (m.content or "")[:200],
+                    "has_extra_data": bool(m.extra_data),
+                    "extra_data_size": len(m.extra_data) if m.extra_data else 0,
+                }
+                for m in recent
+            ]
+            # چک خاص: آیا scan_complete یا fallback لاگ شده؟
+            for at in ("scan_complete", "scan_complete_fallback", "scan_error", "scan_cancelled"):
+                m = (
+                    db.query(InspectorMessage)
+                    .filter(InspectorMessage.session_id == int(session_id))
+                    .filter(InspectorMessage.action_type == at)
+                    .order_by(InspectorMessage.id.desc())
+                    .first()
+                )
+                if m:
+                    out[f"latest_{at}"] = {
+                        "id": m.id,
+                        "timestamp": m.timestamp.isoformat() if m.timestamp else None,
+                        "content_preview": (m.content or "")[:300],
+                    }
+        finally:
+            db.close()
+    except Exception as e:
+        out["db_error"] = str(e)[:300]
+    return out
+
+
 class RunProposalRequest(BaseModel):
     model_id: Optional[str] = None
 
